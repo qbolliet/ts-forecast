@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "ts-forecast"
+version = "0.1.0"
+description = "Utilities for forecasting on time series and panel data"
+authors = ["Quentin Bolliet <bolliet.quentin@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+numpy = "^2.3.1"
+pandas = "^2.3.1"
+scikit-learn = "^1.7.0"
+joblib = "^1.5.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
