@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 from typing import Any, List, Optional, Union
+import warnings
 
 # Sklearn
 from sklearn.utils import indexable
@@ -12,6 +13,7 @@ from sklearn.model_selection._split import _BaseKFold
 # TODO
 # - Changer le naming de "_resolve_test_indices" et des variables liées pour mieux signifier que l'output est des POSITIONS associées aux indices
 # - Revoir la structure des méthodes de OutOfSampleSplit. En particulier, j'ai l'impression qu'il y a des méthodes spécifiques aux groupes pour "_iter_test_indices" mais pas pour "_get_train_indices", faire la structure la plus claire et la plus propre
+# - Faire apparaître dans "_resolve_test_indices" que cela ne fonctionne que pour les séries temporelles et pas les données de panel. Dans ce cadre, est-il utile de le passer résultat de cette fonction en argument de "_iter_group_test_indices". Par ailleurs, ne vaut-il pas mieux traiter les deux types de données dans "_resolve_test_indices" et alléger le code de "_iter_group_test_indices"
 
 # Méthode auxiliaire de résulution des indices de test à partir de la liste en entrée
 def _resolve_test_indices(test_indices: Optional[Union[List[Any], np.ndarray]], X: Union[pd.Series, pd.DataFrame]) -> Optional[np.ndarray]:
@@ -193,30 +195,45 @@ class OutOfSampleSplit(_BaseKFold):
     # Méthode auxiliaire d'identification des indices de test au sein de chaque groupe.
     def _iter_group_test_indices(self, X, resolved_test_indices, groups):
         """Generate test indices for group-aware splits."""
+        # Calcul du nombre d'observations
+        n_samples = _num_samples(X)
+        # Identification des groupes uniques
         unique_groups = np.unique(groups)
+        # Si la taille du test n'est pas spécifiée, utilise 1 par défaut
         test_size = self.test_size if self.test_size is not None else 1
         
-        # Handle time-based test indices for panel data
+        # /!\ On fait l'hypothèse que le panel est un pd.DataFrame avec un multi-index (entity x date)
         if isinstance(self.test_indices[0], (str, pd.Timestamp)) and hasattr(X, 'index') and hasattr(X.index, 'get_level_values'):
-            # Panel data with time-based test indices
+            # Parcours des indices de test
             for test_time in self.test_indices:
+                # Initialisation des indices de test des groupes
                 group_test_indices = []
-                
+                # Parcours des groupes
                 for group in unique_groups:
+                    # Tentative de résolution de l'indice de test pour chaque groupe
                     try:
                         if hasattr(X.index, 'get_loc'):
+                            # Extraction de la position correspondante
                             group_test_idx = X.index.get_loc((group, test_time))
-                            group_test_end = min(group_test_idx + test_size, _num_samples(X))
+                            # Calcul de la position de fin du test 
+                            # TODO n_samples est trop lâche il faut s'assurer que ne vaut pas plus que le dernier indice du groupe +1
+                            # TODO il faut aussi vérifier que le jeu de données est trié par groupe puis date de sorte à ce que les observations d'un même groupe soient regroupées et que les dates soient ordonnées par ordre croissant
+                            group_test_end = min(group_test_idx + test_size, n_samples)
+                            # Ajout des indices de test
                             group_test_indices.extend(range(group_test_idx, group_test_end))
+                    # On ignore la période de test si on ne la trouve pas dans les données
                     except KeyError:
+                        warnings.warn(f"Cannot find test period '{test_time}' for entity '{group}'")
                         continue
-                
+                # Conversion en np.array
                 if group_test_indices:
                     yield np.array(group_test_indices)
         else:
-            # Handle direct numeric indices
+            # On utilise directement les positions
             for test_start in sorted(resolved_test_indices):
-                test_end = min(test_start + test_size, _num_samples(X))
+                # Détermination de la période de test
+                # /!\ n_samples est encore trop optimiste cf commentaire précédent
+                test_end = min(test_start + test_size, n_samples)
                 yield np.arange(test_start, test_end)
     
     def _iter_default_test_indices(self, X, groups):
