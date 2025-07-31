@@ -10,14 +10,31 @@ from sklearn.utils import indexable
 from sklearn.utils.validation import _num_samples
 from sklearn.model_selection._split import _BaseKFold
 
-# TODO
-# - Changer le naming de "_resolve_test_indices" et des variables liées pour mieux signifier que l'output est des POSITIONS associées aux indices
-# - Revoir la structure des méthodes de OutOfSampleSplit. En particulier, j'ai l'impression qu'il y a des méthodes spécifiques aux groupes pour "_iter_test_indices" mais pas pour "_get_train_indices", faire la structure la plus claire et la plus propre
-# - Faire apparaître dans "_resolve_test_indices" que cela ne fonctionne que pour les séries temporelles et pas les données de panel. Dans ce cadre, est-il utile de le passer résultat de cette fonction en argument de "_iter_group_test_indices". Par ailleurs, ne vaut-il pas mieux traiter les deux types de données dans "_resolve_test_indices" et alléger le code de "_iter_group_test_indices"
+# COMPLETED IMPROVEMENTS:
+# ✓ Renamed "_resolve_test_indices" to "_resolve_test_positions" and updated related variables to indicate output is positions
+# ✓ Restructured OutOfSampleSplit methods with consistent group-specific methods for both test and train indices  
+# ✓ Enhanced "_resolve_test_positions" to handle both time series and panel data with clear documentation
+# ✓ Fixed loose condition in "_iter_group_test_indices" to ensure group_test_end doesn't exceed group boundaries
+# ✓ Implemented data sorting verification/sorting for groups and dates in both time series and panel data
 
-# Méthode auxiliaire de résulution des indices de test à partir de la liste en entrée
-def _resolve_test_indices(test_indices: Optional[Union[List[Any], np.ndarray]], X: Union[pd.Series, pd.DataFrame]) -> Optional[np.ndarray]:
-    """Resolve test_indices to numeric positions."""
+# Méthode auxiliaire de résolution des indices de test à partir de la liste en entrée en positions numériques
+def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]], X: Union[pd.Series, pd.DataFrame]) -> Optional[np.ndarray]:
+    """Resolve test_indices to numeric positions.
+    
+    This function works for both time series and panel data:
+    - Time series: resolves date/string indices to numeric positions
+    - Panel data: resolves tuple indices (group, date) to numeric positions
+    
+    Args:
+        test_indices: List of indices to resolve (can be dates, strings, tuples, or integers)
+        X: Input data with index to match against
+        
+    Returns:
+        Array of numeric positions corresponding to the test_indices, or None if no indices provided
+        
+    Raises:
+        ValueError: If indices cannot be resolved or are not found in the data
+    """
 
     # Si aucun indice n'est renseigné, ne renvoie rien
     if test_indices is None:
@@ -36,25 +53,109 @@ def _resolve_test_indices(test_indices: Optional[Union[List[Any], np.ndarray]], 
         # Si contient des strings ou des dates (gestion du cas des séries temporelles) ou contient des tuples (cas des données de panel), recherche les positions correspondantes
         elif isinstance(test_indices[0], (str, pd.Timestamp)) or hasattr(test_indices[0], 'date') or isinstance(test_indices[0], tuple):
             try:
+                # Vérification que X est bien une Série ou un DataFrame
+                if not hasattr(X, 'index'):
+                    raise ValueError("Cannot use string/date/tuple indices without pandas index")
+                
+                # Détection du type de données : panel (MultiIndex) vs série temporelle (Index simple)
+                is_panel_data = hasattr(X.index, 'nlevels') and X.index.nlevels > 1
+                
                 # Initialisation des positions
                 positions = []
                 # Parcours des indices
                 for idx in test_indices:
-                    # Vérification que X est bien une Série ou un DataFrame
-                    if hasattr(X, 'index'):
+                    # Gestion spécifique pour les données de panel avec MultiIndex
+                    if is_panel_data and isinstance(idx, tuple):
                         # Vérification que l'indice recherché est présent
                         if idx in X.index:
                             # Ajout de la position de l'indice
                             positions.append(X.index.get_loc(idx))
                         else:
-                            raise ValueError(f"Index {idx} not found in data")
+                            raise ValueError(f"Panel index {idx} not found in data")
+                    # Gestion pour les séries temporelles avec Index simple
+                    elif not is_panel_data and not isinstance(idx, tuple):
+                        # Vérification que l'indice recherché est présent
+                        if idx in X.index:
+                            # Ajout de la position de l'indice
+                            positions.append(X.index.get_loc(idx))
+                        else:
+                            raise ValueError(f"Time series index {idx} not found in data")
                     else:
-                        raise ValueError("Cannot use string/date indices without pandas index")
+                        raise ValueError(f"Index type mismatch: {'panel' if is_panel_data else 'time series'} data expects {'tuple' if is_panel_data else 'scalar'} indices, got {type(idx)}")
+                
                 return np.array(positions)
             except Exception as e:
                 raise ValueError(f"Error resolving test_indices: {e}")
     
     return np.array([test_indices]) if np.isscalar(test_indices) else np.array(test_indices)
+
+# Méthode auxiliaire de vérification et tri des données par groupe et date
+def _verify_and_sort_data(X, groups=None):
+    """Verify that data is sorted by group and then by date, and sort if necessary.
+    
+    Args:
+        X: Input data (pandas Series or DataFrame)
+        groups: Group labels (None for time series, array-like for panel data)
+        
+    Returns:
+        Tuple (X_sorted, groups_sorted, sort_indices) where sort_indices maps original to sorted positions
+        
+    Raises:
+        ValueError: If data structure is incompatible with sorting requirements
+    """
+    
+    if groups is None:
+        # Série temporelle : vérification que l'index est trié par date
+        if hasattr(X, 'index'):
+            if not X.index.is_monotonic_increasing:
+                warnings.warn("Time series data is not sorted by date. Sorting automatically.")
+                sort_indices = X.index.argsort()
+                X_sorted = X.iloc[sort_indices] if hasattr(X, 'iloc') else X[sort_indices]
+                return X_sorted, None, sort_indices
+            else:
+                # Données déjà triées
+                return X, None, np.arange(len(X))
+        else:
+            # Pas d'index pandas, on assume que les données sont correctement ordonnées
+            return X, None, np.arange(len(X))
+    else:
+        # Données de panel : vérification que les données sont triées par groupe puis par date
+        if not hasattr(X, 'index') or not hasattr(X.index, 'nlevels') or X.index.nlevels < 2:
+            raise ValueError("Panel data requires MultiIndex with at least 2 levels (group, date)")
+        
+        # Vérification du tri par groupe puis par date
+        is_sorted = True
+        previous_group = None
+        previous_date = None
+        
+        for idx in X.index:
+            current_group, current_date = idx[0], idx[1]
+            
+            if previous_group is not None:
+                # Vérification que les groupes sont regroupés
+                if current_group < previous_group:
+                    is_sorted = False
+                    break
+                # Vérification que les dates sont croissantes au sein d'un groupe
+                elif current_group == previous_group and current_date < previous_date:
+                    is_sorted = False
+                    break
+            
+            previous_group, previous_date = current_group, current_date
+        
+        if not is_sorted:
+            warnings.warn("Panel data is not sorted by group then by date. Sorting automatically.")
+            # Tri par groupe puis par date
+            sort_indices = X.index.to_frame().sort_values([X.index.names[0], X.index.names[1]]).index
+            sort_positions = [X.index.get_loc(idx) for idx in sort_indices]
+            
+            X_sorted = X.iloc[sort_positions] if hasattr(X, 'iloc') else X[sort_positions]
+            groups_sorted = groups[sort_positions] if groups is not None else None
+            
+            return X_sorted, groups_sorted, np.array(sort_positions)
+        else:
+            # Données déjà triées
+            return X, groups, np.arange(len(X))
 
 # Classe de base de pour crossval out of sample
 class OutOfSampleSplit(_BaseKFold):
@@ -87,75 +188,93 @@ class OutOfSampleSplit(_BaseKFold):
         # Validation des arguments
         (X,) = indexable(X)
         
+        # Vérification et tri des données si nécessaire
+        X_sorted, groups_sorted, sort_mapping = _verify_and_sort_data(X, groups)
+        
         # Parcours des indices de test
-        for test_indices in self._iter_test_indices(X, y, groups):
+        for test_indices in self._iter_test_indices(X_sorted, y, groups_sorted):
             # Calcul des indices d'entraînement en utilisant 'gap' et 'max_train_size'
-            train_indices = self._get_train_indices(X, test_indices, groups)
+            train_indices = self._get_train_indices(X_sorted, test_indices, groups_sorted)
+            
+            # Remap des indices vers l'ordre original si les données ont été triées
+            if not np.array_equal(sort_mapping, np.arange(len(X))):
+                # Création du mapping inverse
+                inverse_mapping = np.argsort(sort_mapping)
+                train_indices = inverse_mapping[train_indices]
+                test_indices = inverse_mapping[test_indices]
+            
             yield (train_indices, test_indices)
     
     # Méthode auxiliaire d'extraction des indices d'entraînement correspondant aux indices de test
     def _get_train_indices(self, X, test_indices, groups):
         """Calculate train indices considering gap and max_train_size."""
        
-        # Si les groupes ne sont pas spécifiés, on applique une logique de série temporelle, où l'on recherche un seul groupe d'indices d'entraînement
+        # Si les groupes ne sont pas spécifiés, on applique une logique de série temporelle
         if groups is None:
-            # Extraction de l'indice de test minimal
-            min_test_idx = min(test_indices)
-            # Calcul de la position de l'indice de la fin de période d'entraînement
-            train_end = min_test_idx - self.gap
-            
-            # Si la fin de la période de test d'existe pas, retourne un array vide
-            if train_end <= 0:
-                return np.array([])
-            
-            # On fait l'hypothèse que les indices sont ordonnés
-            # /!\ Peut on la vérifier automatiquement ?
-            if self.max_train_size and self.max_train_size < train_end:
-                # Détermination du premier indice de la période d'entraînement
-                train_start = train_end - self.max_train_size
-                return np.arange(train_start, train_end)
-            else:
-                # Si la longueur de la période d'entraînement n'est pas spécifiée, par défaut on sélectionne toutes les observations depuis la première
-                return np.arange(0, train_end)
-        # Si les groupes sont spécifiés, on applique une logique de panel où l'on recherche un ensemble d'indices d'entraînement pour chaque groupe
+            return self._get_timeseries_train_indices(test_indices)
+        # Si les groupes sont spécifiés, on applique une logique de panel
         else:
-            # Détermination des groupes
-            unique_groups = np.unique(groups)
-            # Initialisation de la liste des indices d'entraînement
-            train_indices = []
-            # Parcours des groupes
-            # /!\ On peut peut-être faire l'hypothèse que "test_indices" est un tableau en deux dimensions, ordonné comme "unique_groups" et utiliser moins de isin pour réidentifier les indices
-            for group in unique_groups:
-                # Identification des indices du groupe 
-                group_mask = groups == group
-                group_indices = np.where(group_mask)[0] # /!\ Je ne suis pas sur qu'une liste d'indices soit retourné par cette ligne
-                # Identification des indices de test du groupe
-                group_test_indices = test_indices[np.isin(test_indices, group_indices)]
-                
-                # Vérification que des indices de test ont été effectivement trouvés
-                if len(group_test_indices) > 0:
-                    # Minimum des indices de test
-                    min_test_idx = min(group_test_indices)
-                    # Premier indice du groupe
-                    group_start = min(group_indices)
-                    # Calcul de la fin de la période d'entraînement
-                    train_end = min_test_idx - self.gap
-                    
-                    # Vérification que l'indice de la fin de la période d'entraînement est bien supérieur au premier indice du groupe, sinon retourne un array vide
-                    if train_end > group_start:
-                        # On fait l'hypothèse que les indices sont ordonnés
-                        # /!\ Peut on la vérifier automatiquement ?
-                        if self.max_train_size and self.max_train_size < (train_end - group_start):
-                            # Calcul du début de la période d'entraînement
-                            train_start = train_end - self.max_train_size
-                            train_indices.extend(range(train_start, train_end))
-                        else:
-                            # Si la période d'entraînement n'est pas spécifiée, on considère tous les indices du groupe
-                            train_indices.extend(range(group_start, train_end))
-                else :
-                    raise ValueError(f"Cannot find test indices for the group : {group}")
+            return self._get_group_train_indices(test_indices, groups)
+    
+    # Méthode auxiliaire d'extraction des indices d'entraînement pour les séries temporelles
+    def _get_timeseries_train_indices(self, test_indices):
+        """Calculate train indices for time series data."""
+        # Extraction de l'indice de test minimal
+        min_test_idx = min(test_indices)
+        # Calcul de la position de l'indice de la fin de période d'entraînement
+        train_end = min_test_idx - self.gap
+        
+        # Si la fin de la période de test n'existe pas, retourne un array vide
+        if train_end <= 0:
+            return np.array([])
+        
+        # On fait l'hypothèse que les indices sont ordonnés
+        if self.max_train_size and self.max_train_size < train_end:
+            # Détermination du premier indice de la période d'entraînement
+            train_start = train_end - self.max_train_size
+            return np.arange(train_start, train_end)
+        else:
+            # Si la longueur de la période d'entraînement n'est pas spécifiée, par défaut on sélectionne toutes les observations depuis la première
+            return np.arange(0, train_end)
+    
+    # Méthode auxiliaire d'extraction des indices d'entraînement pour les données de panel
+    def _get_group_train_indices(self, test_indices, groups):
+        """Calculate train indices for panel data with groups."""
+        # Détermination des groupes
+        unique_groups = np.unique(groups)
+        # Initialisation de la liste des indices d'entraînement
+        train_indices = []
+        
+        # Parcours des groupes
+        for group in unique_groups:
+            # Identification des indices du groupe 
+            group_mask = groups == group
+            group_indices = np.where(group_mask)[0]
+            # Identification des indices de test du groupe
+            group_test_indices = test_indices[np.isin(test_indices, group_indices)]
             
-            return np.array(train_indices)
+            # Vérification que des indices de test ont été effectivement trouvés
+            if len(group_test_indices) > 0:
+                # Minimum des indices de test
+                min_test_idx = min(group_test_indices)
+                # Premier indice du groupe
+                group_start = min(group_indices)
+                # Calcul de la fin de la période d'entraînement
+                train_end = min_test_idx - self.gap
+                
+                # Vérification que l'indice de la fin de la période d'entraînement est bien supérieur au premier indice du groupe
+                if train_end > group_start:
+                    if self.max_train_size and self.max_train_size < (train_end - group_start):
+                        # Calcul du début de la période d'entraînement
+                        train_start = train_end - self.max_train_size
+                        train_indices.extend(range(train_start, train_end))
+                    else:
+                        # Si la période d'entraînement n'est pas spécifiée, on considère tous les indices du groupe
+                        train_indices.extend(range(group_start, train_end))
+            else:
+                raise ValueError(f"Cannot find test indices for the group : {group}")
+        
+        return np.array(train_indices)
     
     # Méthode auxiliaire d'identification des indices de test
     def _iter_test_indices(self, X, y=None, groups=None):
@@ -165,35 +284,39 @@ class OutOfSampleSplit(_BaseKFold):
         n_samples = _num_samples(X)
         
         # Conversion des indices de test en positions
-        resolved_test_indices = _resolve_test_indices(self.test_indices, X)
+        resolved_test_positions = _resolve_test_positions(self.test_indices, X)
         
         # Si des positions sont identifiées, on les utilise pour déterminer 
-        if resolved_test_indices is not None:
+        if resolved_test_positions is not None:
             # Si la taille du test n'est pas spécifiée, utilise 1 par défaut
             test_size = self.test_size if self.test_size is not None else 1
             
-            # Validation des indices de test
-            if np.any(resolved_test_indices >= n_samples):
+            # Validation des positions de test
+            if np.any(resolved_test_positions >= n_samples):
                 raise ValueError("test_indices contains indices beyond data length")
-            if np.any(resolved_test_indices < 0):
+            if np.any(resolved_test_positions < 0):
                 raise ValueError("test_indices contains negative indices")
             
             # Si aucun groupe n'est spécifié, on applique la logique des séries temporelles
             if groups is None:
-                # Simple time series splits
-                for test_start in sorted(resolved_test_indices):
-                    # Calcul de la fin de la période de test
-                    test_end = min(test_start + test_size, n_samples)
-                    yield np.arange(test_start, test_end)
+                yield from self._iter_timeseries_test_indices(resolved_test_positions, test_size, n_samples)
             # Sinon on applique la logique de panel
             else:
-                yield from self._iter_group_test_indices(X, resolved_test_indices, groups)
+                yield from self._iter_group_test_indices(X, resolved_test_positions, groups)
         # Sinon, reproduit le comportement par défaut de sklearn en utilisant n_splits et en créant des segments de test equidistants
         else:
             yield from self._iter_default_test_indices(X, groups)
     
+    # Méthode auxiliaire d'identification des indices de test pour les séries temporelles
+    def _iter_timeseries_test_indices(self, resolved_test_positions, test_size, n_samples):
+        """Generate test indices for time series data."""
+        for test_start_pos in sorted(resolved_test_positions):
+            # Calcul de la fin de la période de test
+            test_end_pos = min(test_start_pos + test_size, n_samples)
+            yield np.arange(test_start_pos, test_end_pos)
+    
     # Méthode auxiliaire d'identification des indices de test au sein de chaque groupe.
-    def _iter_group_test_indices(self, X, resolved_test_indices, groups):
+    def _iter_group_test_indices(self, X, resolved_test_positions, groups):
         """Generate test indices for group-aware splits."""
         # Calcul du nombre d'observations
         n_samples = _num_samples(X)
@@ -215,10 +338,19 @@ class OutOfSampleSplit(_BaseKFold):
                         if hasattr(X.index, 'get_loc'):
                             # Extraction de la position correspondante
                             group_test_idx = X.index.get_loc((group, test_time))
-                            # Calcul de la position de fin du test 
-                            # TODO n_samples est trop lâche il faut s'assurer que ne vaut pas plus que le dernier indice du groupe +1
-                            # TODO il faut aussi vérifier que le jeu de données est trié par groupe puis date de sorte à ce que les observations d'un même groupe soient regroupées et que les dates soient ordonnées par ordre croissant
-                            group_test_end = min(group_test_idx + test_size, n_samples)
+                            
+                            # Détermination des limites du groupe pour éviter de dépasser
+                            group_mask = [idx[0] == group for idx in X.index] if hasattr(X.index, '__iter__') else []
+                            group_positions = [i for i, mask in enumerate(group_mask) if mask]
+                            
+                            if group_positions:
+                                group_end_pos = max(group_positions) + 1  # +1 pour la limite exclusive
+                                # Calcul de la position de fin du test en respectant les limites du groupe
+                                group_test_end = min(group_test_idx + test_size, group_end_pos, n_samples)
+                            else:
+                                # Fallback si on ne peut pas déterminer les limites du groupe
+                                group_test_end = min(group_test_idx + test_size, n_samples)
+                            
                             # Ajout des indices de test
                             group_test_indices.extend(range(group_test_idx, group_test_end))
                     # On ignore la période de test si on ne la trouve pas dans les données
@@ -230,11 +362,28 @@ class OutOfSampleSplit(_BaseKFold):
                     yield np.array(group_test_indices)
         else:
             # On utilise directement les positions
-            for test_start in sorted(resolved_test_indices):
-                # Détermination de la période de test
-                # /!\ n_samples est encore trop optimiste cf commentaire précédent
-                test_end = min(test_start + test_size, n_samples)
-                yield np.arange(test_start, test_end)
+            # Détermination des groupes uniques
+            unique_groups = np.unique(groups)
+            
+            for test_start_pos in sorted(resolved_test_positions):
+                # Identifier à quel groupe appartient cette position
+                current_group = None
+                for group in unique_groups:
+                    group_mask = groups == group
+                    group_positions = np.where(group_mask)[0]
+                    if test_start_pos in group_positions:
+                        current_group = group
+                        group_end_pos = max(group_positions) + 1  # +1 pour la limite exclusive
+                        break
+                
+                if current_group is not None:
+                    # Calcul de la position de fin du test en respectant les limites du groupe
+                    test_end_pos = min(test_start_pos + test_size, group_end_pos, n_samples)
+                else:
+                    # Fallback si on ne peut pas identifier le groupe
+                    test_end_pos = min(test_start_pos + test_size, n_samples)
+                
+                yield np.arange(test_start_pos, test_end_pos)
     
     def _iter_default_test_indices(self, X, groups):
         """Generate default test indices using n_splits."""
@@ -283,17 +432,99 @@ class OutOfSampleSplit(_BaseKFold):
                         yield np.array(test_indices)
 
 
+# Classe de base pour la validation croisée in-sample
 class InSampleSplit(_BaseKFold):
-    """Base class for in-sample cross-validation splits."""
+    """Base class for in-sample cross-validation splits.
     
+    In-sample cross-validation includes the test period in the training data,
+    which is useful for evaluating model performance on historical data where
+    future information might leak into the training set.
+    
+    This class supports both time series and panel data:
+    - Time series: Single entity with temporal ordering
+    - Panel data: Multiple entities with temporal ordering within each entity
+    
+    Args:
+        n_splits (int, optional): Number of splits for cross-validation. Defaults to 5.
+        test_indices (list, optional): Specific indices to use as test periods.
+            Can be dates, strings, tuples (for panel data), or integers. Defaults to None.
+        max_train_size (int, optional): Maximum size of training set. If None,
+            uses all available data up to the test period. Defaults to None.
+        test_size (int, optional): Size of each test set. If None, uses 1 for
+            specific test_indices or calculated size for default splits. Defaults to None.
+    
+    Examples:
+        >>> # Time series in-sample split
+        >>> splitter = InSampleSplit(n_splits=3, test_size=5)
+        >>> for train_idx, test_idx in splitter.split(X):
+        ...     # Training includes test period
+        ...     pass
+        
+        >>> # Panel data with specific test periods
+        >>> test_periods = [('entity1', '2023-01-01'), ('entity2', '2023-01-01')]
+        >>> splitter = InSampleSplit(test_indices=test_periods, test_size=3)
+        >>> for train_idx, test_idx in splitter.split(X, groups=groups):
+        ...     pass
+    """
+    
+    # Initialisation de la classe
     def __init__(self, n_splits=5, *, test_indices=None, max_train_size=None, test_size=None):
+        """Initialize InSampleSplit.
+        
+        Args:
+            n_splits (int, optional): Number of splits. Defaults to 5.
+            test_indices (list, optional): Specific test indices. Defaults to None.
+            max_train_size (int, optional): Maximum training size. Defaults to None.
+            test_size (int, optional): Test set size. Defaults to None.
+        """
+        # Initialisation de la classe parent
         super().__init__(n_splits, shuffle=False, random_state=None)
+        # Initialisation des attributs spécifiques
         self.test_indices = test_indices
         self.max_train_size = max_train_size
         self.test_size = test_size
 
+    # Méthode principale de séparation des données
     def split(self, X, y=None, groups=None):
-        """Generate indices to split data into training and test set."""
+        """Generate indices to split data into training and test sets for in-sample validation.
+        
+        In in-sample validation, the training set includes the test period, which allows
+        the model to learn from future information relative to the test period.
+        
+        Args:
+            X (array-like): Input features. Can be pandas DataFrame/Series with DatetimeIndex
+                for time series or MultiIndex for panel data.
+            y (array-like, optional): Target values. Must have same index as X if provided.
+                Defaults to None.
+            groups (array-like, optional): Group labels for panel data. Each element
+                should correspond to the group of the corresponding sample. Defaults to None.
+        
+        Yields:
+            tuple: (train_indices, test_indices) where:
+                - train_indices: Array of indices for training set (includes test period)
+                - test_indices: Array of indices for test set
+        
+        Raises:
+            ValueError: If X and y have different indices when both are provided.
+            
+        Examples:
+            >>> # Time series example
+            >>> dates = pd.date_range('2020-01-01', periods=100, freq='D')
+            >>> X = pd.DataFrame({'feature': range(100)}, index=dates)
+            >>> splitter = InSampleSplit(test_size=10)
+            >>> for train_idx, test_idx in splitter.split(X):
+            ...     X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            
+            >>> # Panel data example  
+            >>> entities = ['A', 'B'] * 50
+            >>> dates = pd.date_range('2020-01-01', periods=50, freq='D')
+            >>> idx = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+            >>> X = pd.DataFrame({'feature': range(100)}, index=idx)
+            >>> groups = [ent for ent in entities for _ in dates]
+            >>> for train_idx, test_idx in splitter.split(X, groups=groups):
+            ...     pass
+        """
+        # Validation des indices de X et y
         if y is not None:
             if hasattr(X, 'index') and hasattr(y, 'index'):
                 if not X.index.equals(y.index):
@@ -301,120 +532,191 @@ class InSampleSplit(_BaseKFold):
         
         return self._split(X, y, groups)
     
+    # Méthode auxiliaire de séparation des données d'entraînement et de test
     def _split(self, X, y=None, groups=None):
-        """Generate indices to split data into training and test set."""
+        """Internal method to generate train/test splits with data sorting verification.
+        
+        Args:
+            X (array-like): Input features
+            y (array-like, optional): Target values. Defaults to None.
+            groups (array-like, optional): Group labels. Defaults to None.
+            
+        Yields:
+            tuple: (train_indices, test_indices) mapped back to original data order
+        """
+        # Validation des arguments
         (X,) = indexable(X)
         
-        for test_indices in self._iter_test_indices(X, y, groups):
-            # For in-sample, train includes test period
-            train_indices = self._get_train_indices(X, test_indices, groups)
+        # Vérification et tri des données si nécessaire
+        X_sorted, groups_sorted, sort_mapping = _verify_and_sort_data(X, groups)
+        
+        # Génération des indices de test et calcul des indices d'entraînement correspondants
+        for test_indices in self._iter_test_indices(X_sorted, y, groups_sorted):
+            # Pour la validation in-sample, l'entraînement inclut la période de test
+            train_indices = self._get_train_indices(X_sorted, test_indices, groups_sorted)
+            
+            # Remappage des indices vers l'ordre original si les données ont été triées
+            if not np.array_equal(sort_mapping, np.arange(len(X))):
+                # Création du mapping inverse pour retrouver l'ordre original
+                inverse_mapping = np.argsort(sort_mapping)
+                train_indices = inverse_mapping[train_indices]
+                test_indices = inverse_mapping[test_indices]
+            
             yield (train_indices, test_indices)
     
+    # Méthode auxiliaire d'extraction des indices d'entraînement incluant la période de test
     def _get_train_indices(self, X, test_indices, groups):
-        """Calculate train indices including test period for in-sample validation."""
-        if groups is None:
-            # Simple time series logic
-            max_test_idx = max(test_indices)
-            train_end = max_test_idx + 1  # Include test period
-            min_train_size = len(test_indices)  # At minimum test size
+        """Calculate training indices including test period for in-sample validation.
+        
+        For in-sample validation, the training set extends up to and includes the test period,
+        allowing the model to learn from future information relative to the test period.
+        
+        Args:
+            X (array-like): Input features
+            test_indices (array): Indices of test samples
+            groups (array-like, optional): Group labels for panel data
             
+        Returns:
+            np.ndarray: Array of training indices that include the test period
+        """
+        # Logique pour les séries temporelles (pas de groupes)
+        if groups is None:
+            # Logique simple pour séries temporelles
+            max_test_idx = max(test_indices)
+            train_end = max_test_idx + 1  # Inclusion de la période de test
+            min_train_size = len(test_indices)  # Taille minimale = taille du test
+            
+            # Gestion de la taille maximale d'entraînement
             if self.max_train_size is not None:
                 actual_train_size = max(self.max_train_size, min_train_size)
                 train_start = max(0, train_end - actual_train_size)
                 return np.arange(train_start, train_end)
             else:
+                # Si aucune limite, utilise toutes les données depuis le début
                 return np.arange(0, train_end)
         else:
-            # Group-aware logic (for panel data)
+            # Logique pour les données de panel (avec groupes)
             unique_groups = np.unique(groups)
             train_indices = []
             
+            # Traitement groupe par groupe
             for group in unique_groups:
+                # Identification des indices du groupe
                 group_mask = groups == group
                 group_indices = np.where(group_mask)[0]
+                # Identification des indices de test du groupe
                 group_test_indices = test_indices[np.isin(test_indices, group_indices)]
                 
+                # Traitement seulement si des indices de test existent pour ce groupe
                 if len(group_test_indices) > 0:
                     max_test_idx = max(group_test_indices)
                     group_start = min(group_indices)
-                    train_end = max_test_idx + 1  # Include test period
+                    train_end = max_test_idx + 1  # Inclusion de la période de test
                     
+                    # Gestion de la taille maximale d'entraînement pour ce groupe
                     if self.max_train_size is not None:
                         min_train_size = len(group_test_indices)
                         actual_train_size = max(self.max_train_size, min_train_size)
                         train_start = max(group_start, train_end - actual_train_size)
                         train_indices.extend(range(train_start, train_end))
                     else:
+                        # Si aucune limite, utilise toutes les données du groupe
                         train_indices.extend(range(group_start, train_end))
             
             return np.array(train_indices)
     
+    # Méthode auxiliaire de génération des indices de test pour la validation in-sample
     def _iter_test_indices(self, X, y=None, groups=None):
-        """Generate test indices for in-sample splits."""
+        """Generate test indices for in-sample cross-validation splits.
+        
+        For in-sample validation, test indices are typically chosen from a specific period
+        or the end of the available data, depending on the configuration.
+        
+        Args:
+            X (array-like): Input features
+            y (array-like, optional): Target values. Defaults to None.
+            groups (array-like, optional): Group labels for panel data. Defaults to None.
+            
+        Yields:
+            np.ndarray: Array of test indices for each split
+            
+        Raises:
+            ValueError: If test_indices contain invalid positions
+        """
+        # Validation des arguments
         (X,) = indexable(X)
         n_samples = _num_samples(X)
         
-        # Resolve test_indices
-        resolved_test_indices = _resolve_test_indices(self.test_indices, X)
+        # Résolution des indices de test en positions numériques
+        resolved_test_positions = _resolve_test_positions(self.test_indices, X)
         
-        if resolved_test_indices is not None:
+        # Traitement avec des indices de test spécifiés
+        if resolved_test_positions is not None:
             test_size = self.test_size if self.test_size is not None else 1
             
-            # Validation
-            if np.any(resolved_test_indices >= n_samples):
+            # Validation des positions de test
+            if np.any(resolved_test_positions >= n_samples):
                 raise ValueError("test_indices contains indices beyond data length")
-            if np.any(resolved_test_indices < 0):
+            if np.any(resolved_test_positions < 0):
                 raise ValueError("test_indices contains negative indices")
             
+            # Logique pour les séries temporelles (pas de groupes)
             if groups is None:
-                # For in-sample, use first test index as boundary
-                first_test_idx = min(resolved_test_indices)
-                test_end = min(first_test_idx + test_size, n_samples)
-                yield np.arange(first_test_idx, test_end)
+                # Pour la validation in-sample, utilise le premier indice de test comme limite
+                first_test_pos = min(resolved_test_positions)
+                test_end = min(first_test_pos + test_size, n_samples)
+                yield np.arange(first_test_pos, test_end)
             else:
-                # Group-aware in-sample (use first test time)
+                # Logique pour les données de panel (avec groupes)
+                # Gestion des indices temporels pour données de panel
                 if isinstance(self.test_indices[0], (str, pd.Timestamp)) and hasattr(X, 'index') and hasattr(X.index, 'get_level_values'):
                     first_test_time = self.test_indices[0]
                     unique_groups = np.unique(groups)
                     test_indices = []
                     
+                    # Collecte des indices de test pour tous les groupes à la première période de test
                     for group in unique_groups:
                         try:
                             group_test_idx = X.index.get_loc((group, first_test_time))
                             group_test_end = min(group_test_idx + test_size, n_samples)
                             test_indices.extend(range(group_test_idx, group_test_end))
                         except KeyError:
+                            # Ignore les groupes sans données pour cette période
                             continue
                     
                     if test_indices:
                         yield np.array(test_indices)
                 else:
-                    # Handle direct numeric indices
-                    first_test_idx = min(resolved_test_indices)
-                    test_end = min(first_test_idx + test_size, n_samples)
-                    yield np.arange(first_test_idx, test_end)
+                    # Gestion des indices numériques directs
+                    first_test_pos = min(resolved_test_positions)
+                    test_end = min(first_test_pos + test_size, n_samples)
+                    yield np.arange(first_test_pos, test_end)
         else:
-            # Default in-sample: use last portion of data
+            # Comportement par défaut : utilise la dernière portion des données
             if groups is None:
+                # Série temporelle par défaut : dernière portion
                 test_size = self.test_size if self.test_size is not None else n_samples // (self.n_splits + 1)
                 test_start = max(0, n_samples - test_size)
                 yield np.arange(test_start, n_samples)
             else:
-                # Group-aware default in-sample
+                # Panel par défaut : dernière période temporelle pour tous les groupes
                 unique_groups = np.unique(groups)
                 test_size = self.test_size if self.test_size is not None else 1
                 
+                # Extraction des points temporels à partir du MultiIndex
                 if hasattr(X, 'index') and hasattr(X.index, 'get_level_values'):
                     time_points = X.index.get_level_values(1).unique()
                     last_time = time_points[-1]
                     
                     test_indices = []
+                    # Collecte des indices pour la dernière période de chaque groupe
                     for group in unique_groups:
                         try:
                             group_test_idx = X.index.get_loc((group, last_time))
                             group_test_end = min(group_test_idx + test_size, n_samples)
                             test_indices.extend(range(group_test_idx, group_test_end))
                         except KeyError:
+                            # Ignore les groupes sans données pour la dernière période
                             continue
                     
                     if test_indices:
