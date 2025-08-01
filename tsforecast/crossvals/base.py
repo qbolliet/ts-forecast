@@ -10,12 +10,6 @@ from sklearn.utils import indexable
 from sklearn.utils.validation import _num_samples
 from sklearn.model_selection._split import _BaseKFold
 
-# COMPLETED IMPROVEMENTS:
-# ✓ Renamed "_resolve_test_indices" to "_resolve_test_positions" and updated related variables to indicate output is positions
-# ✓ Restructured OutOfSampleSplit methods with consistent group-specific methods for both test and train indices  
-# ✓ Enhanced "_resolve_test_positions" to handle both time series and panel data with clear documentation
-# ✓ Fixed loose condition in "_iter_group_test_indices" to ensure group_test_end doesn't exceed group boundaries
-# ✓ Implemented data sorting verification/sorting for groups and dates in both time series and panel data
 
 # Méthode auxiliaire de résolution des indices de test à partir de la liste en entrée en positions numériques
 def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]], X: Union[pd.Series, pd.DataFrame]) -> Optional[np.ndarray]:
@@ -310,10 +304,10 @@ class OutOfSampleSplit(_BaseKFold):
     # Méthode auxiliaire d'identification des indices de test pour les séries temporelles
     def _iter_timeseries_test_indices(self, resolved_test_positions, test_size, n_samples):
         """Generate test indices for time series data."""
-        for test_start_pos in sorted(resolved_test_positions):
+        for test_start in sorted(resolved_test_positions):
             # Calcul de la fin de la période de test
-            test_end_pos = min(test_start_pos + test_size, n_samples)
-            yield np.arange(test_start_pos, test_end_pos)
+            test_end = min(test_start + test_size, n_samples)
+            yield np.arange(test_start, test_end)
     
     # Méthode auxiliaire d'identification des indices de test au sein de chaque groupe.
     def _iter_group_test_indices(self, X, resolved_test_positions, groups):
@@ -336,7 +330,7 @@ class OutOfSampleSplit(_BaseKFold):
                     # Tentative de résolution de l'indice de test pour chaque groupe
                     try:
                         if hasattr(X.index, 'get_loc'):
-                            # Extraction de la position correspondante
+                            # Extraction de la position correspondant au début de la période de test pour le groupe
                             group_test_idx = X.index.get_loc((group, test_time))
                             
                             # Détermination des limites du groupe pour éviter de dépasser
@@ -344,9 +338,9 @@ class OutOfSampleSplit(_BaseKFold):
                             group_positions = [i for i, mask in enumerate(group_mask) if mask]
                             
                             if group_positions:
-                                group_end_pos = max(group_positions) + 1  # +1 pour la limite exclusive
+                                group_end = max(group_positions) + 1  # +1 pour la limite exclusive
                                 # Calcul de la position de fin du test en respectant les limites du groupe
-                                group_test_end = min(group_test_idx + test_size, group_end_pos, n_samples)
+                                group_test_end = min(group_test_idx + test_size, group_end, n_samples)
                             else:
                                 # Fallback si on ne peut pas déterminer les limites du groupe
                                 group_test_end = min(group_test_idx + test_size, n_samples)
@@ -364,70 +358,115 @@ class OutOfSampleSplit(_BaseKFold):
             # On utilise directement les positions
             # Détermination des groupes uniques
             unique_groups = np.unique(groups)
-            
-            for test_start_pos in sorted(resolved_test_positions):
-                # Identifier à quel groupe appartient cette position
+            # Parcours des positions de test
+            for test_start in sorted(resolved_test_positions):
+                # Identification du groupe auqeul appartient cette position
                 current_group = None
+                # Parcours des groupes
                 for group in unique_groups:
+                    # Détermination des limites du groupe pour ne pas dépasser
                     group_mask = groups == group
                     group_positions = np.where(group_mask)[0]
-                    if test_start_pos in group_positions:
+                    # Si la position de début de la période de test appartient au groupe, le groupe est identifié et sa dernière position retenue
+                    if test_start in group_positions:
+                        # Identification du groupe
                         current_group = group
-                        group_end_pos = max(group_positions) + 1  # +1 pour la limite exclusive
+                        # Identification de la dernière position du groupe
+                        group_end = max(group_positions) + 1  # +1 pour la limite exclusive
+                        # Interruption de la recherche
                         break
                 
+                # Calcul de la position de fin de période de test
                 if current_group is not None:
                     # Calcul de la position de fin du test en respectant les limites du groupe
-                    test_end_pos = min(test_start_pos + test_size, group_end_pos, n_samples)
+                    test_end = min(test_start + test_size, group_end, n_samples)
                 else:
                     # Fallback si on ne peut pas identifier le groupe
-                    test_end_pos = min(test_start_pos + test_size, n_samples)
+                    test_end = min(test_start + test_size, n_samples)
                 
-                yield np.arange(test_start_pos, test_end_pos)
+                yield np.arange(test_start, test_end)
     
+    # Méthode auxiliaire d'identification des indices de test en utilisant n_split comme par défaut dans TimeSeriesSplit de sklearn et en utilisant la dernière portion des données
     def _iter_default_test_indices(self, X, groups):
         """Generate default test indices using n_splits."""
+        # Comportement par défaut : utilise la dernière portion des données
+        # Calcul du nombre d'observations
         n_samples = _num_samples(X)
         
+        # Distinction des cas de série temporelle et de panel
         if groups is None:
-            # Simple time series default
+            # Cas des séries-temporelles
+            # Calcul du nombre de segments (équivaut au nombre de séparations + 1)
             n_folds = self.n_splits + 1
+            # Si la longueur de la période de test n'est pas spécifiée
             test_size = self.test_size if self.test_size is not None else n_samples // n_folds
-            
+
+            # Vérification que le nombre de segments est valide
             if n_folds > n_samples:
                 raise ValueError(f"Cannot have number of folds={n_folds} greater than the number of samples={n_samples}")
-            if n_samples - self.gap - (test_size * self.n_splits) <= 0:
-                raise ValueError(f"Too many splits={self.n_splits} for number of samples={n_samples} with test_size={test_size} and gap={self.gap}")
+            # Vérification que le nombre de séprations est cohérent avec le nombre d'observations
+            if n_samples - (test_size * self.n_splits) <= 0: # On peut ajouter -self.gap si on veut s'assurer des données d'entraînement
+                raise ValueError(f"Too many splits={self.n_splits} for number of samples={n_samples} with test_size={test_size}")
             
+            # Calcul des débuts de période de test (ce sont à chaque fois les dates les plus récentes qui sont considérées)
             test_starts = range(n_samples - self.n_splits * test_size, n_samples, test_size)
+            # Parcours des débuts de periode de test
             for test_start in test_starts:
+                # Ajout de la fin de période de test
                 yield np.arange(test_start, test_start + test_size)
         else:
-            # Group-aware default (panel data)
+            # Cas des données de panel avec des groupes
+            # Identification des différents groupes uniques
             unique_groups = np.unique(groups)
+            # La taille de la période de test vaut 1 par défaut si elle n'est pas spécifiée
             test_size = self.test_size if self.test_size is not None else 1
             
-            # Find time points (assuming sorted data)
+            # Recherche des indices de test (on fait l'hypothèse de données regroupées par entitées et triées par date par ordre croissant)
+            # /!\ On fait l'hypothèse que le panel est un pd.DataFrame avec un multi-index (entity x date)
             if hasattr(X, 'index') and hasattr(X.index, 'get_level_values'):
+                # Recherche des dates
                 time_points = X.index.get_level_values(1).unique()
+                # Calcul du nombre de dates différentes
                 n_time_points = len(time_points)
                 
-                if self.n_splits >= n_time_points:
-                    raise ValueError(f"Cannot have n_splits={self.n_splits} >= n_time_points={n_time_points}")
-                
+                # Vérification que le nombre de séparations est cohérent avec le nombre de dates
+                if n_time_points - (test_size * self.n_splits) <= 0: # On peut ajouter - self.gap si on veut s'assurer des données d'entraînement
+                    raise ValueError(f"Too many splits={self.n_splits} for number of time points={n_time_points} with test_size={test_size}")
+            
+                # Parcours des séparations
                 for i in range(self.n_splits):
-                    test_time_idx = n_time_points - self.n_splits + i
+                    # Identification de la date de début de la période de test
+                    # Identification de l'indice de la date (ce sont à chaque fois les dates les plus récentes qui sont considérées)
+                    test_time_idx = n_time_points - self.n_splits * test_size + i * test_size
+                    # Extarction de la date
                     test_time = time_points[test_time_idx]
                     
+                    # Initialisation des indices de test
                     test_indices = []
+
+                    # Parcours des groupes
                     for group in unique_groups:
+                        # Extraction des indices de début et de fin de la période de test
                         try:
+                            # Extraction de la position correspondant au début de la période de test pour le groupe
                             group_test_idx = X.index.get_loc((group, test_time))
-                            group_test_end = min(group_test_idx + test_size, n_samples)
+
+                            # Détermination des limites du groupe pour éviter de dépasser
+                            group_mask = [idx[0] == group for idx in X.index] if hasattr(X.index, '__iter__') else []
+                            group_positions = [i for i, mask in enumerate(group_mask) if mask]
+                            # Identification de la dernière position du groupe
+                            group_end = max(group_positions) + 1  # +1 pour la limite exclusive
+
+                            # Identification de l'indice de fin de période de test
+                            group_test_end = min(group_test_idx + test_size, group_end)
+                            # Ajout aux indices de test
                             test_indices.extend(range(group_test_idx, group_test_end))
+                        # On ignore la période de test si on ne la trouve pas dans les données
                         except KeyError:
+                            warnings.warn(f"Cannot find test period '{test_time}' for entity '{group}'")
                             continue
                     
+                    # Conversion en np.array
                     if test_indices:
                         yield np.array(test_indices)
 
@@ -582,13 +621,17 @@ class InSampleSplit(_BaseKFold):
         # Logique pour les séries temporelles (pas de groupes)
         if groups is None:
             # Logique simple pour séries temporelles
+            # Identification du dernier indice de test
             max_test_idx = max(test_indices)
+            # La période de test étant incluse dans la période d'entraînement, sa fin est postérieure
             train_end = max_test_idx + 1  # Inclusion de la période de test
             min_train_size = len(test_indices)  # Taille minimale = taille du test
             
             # Gestion de la taille maximale d'entraînement
             if self.max_train_size is not None:
+                # La période de test étant incluse dans la période d'entrainement, sa longueur vaut au moins celle-ci
                 actual_train_size = max(self.max_train_size, min_train_size)
+                # Calcul du début de la période d'entraînement
                 train_start = max(0, train_end - actual_train_size)
                 return np.arange(train_start, train_end)
             else:
@@ -596,10 +639,12 @@ class InSampleSplit(_BaseKFold):
                 return np.arange(0, train_end)
         else:
             # Logique pour les données de panel (avec groupes)
+            # Identification des groupes distincts
             unique_groups = np.unique(groups)
+            # Initialisation des indices d'entraînement
             train_indices = []
             
-            # Traitement groupe par groupe
+            # Parcours des groupes
             for group in unique_groups:
                 # Identification des indices du groupe
                 group_mask = groups == group
@@ -609,14 +654,19 @@ class InSampleSplit(_BaseKFold):
                 
                 # Traitement seulement si des indices de test existent pour ce groupe
                 if len(group_test_indices) > 0:
+                    # Identification du dernier indice de test
                     max_test_idx = max(group_test_indices)
+                    # Identification du premier indice du groupe
                     group_start = min(group_indices)
+                    # La période de test étant incluse dans la période d'entraînement, sa fin est postérieure
                     train_end = max_test_idx + 1  # Inclusion de la période de test
                     
                     # Gestion de la taille maximale d'entraînement pour ce groupe
                     if self.max_train_size is not None:
+                        # La période de test étant incluse dans la période d'entrainement, sa longueur vaut au moins celle-ci
                         min_train_size = len(group_test_indices)
                         actual_train_size = max(self.max_train_size, min_train_size)
+                        # Calcul du début de la période d'entraînement
                         train_start = max(group_start, train_end - actual_train_size)
                         train_indices.extend(range(train_start, train_end))
                     else:
@@ -645,6 +695,7 @@ class InSampleSplit(_BaseKFold):
         """
         # Validation des arguments
         (X,) = indexable(X)
+        # Nombre d'observations de l'échantillon
         n_samples = _num_samples(X)
         
         # Résolution des indices de test en positions numériques
@@ -652,6 +703,7 @@ class InSampleSplit(_BaseKFold):
         
         # Traitement avec des indices de test spécifiés
         if resolved_test_positions is not None:
+            # La période de test vaut 1 par défaut si elle n'est pas spécifiée
             test_size = self.test_size if self.test_size is not None else 1
             
             # Validation des positions de test
@@ -662,62 +714,159 @@ class InSampleSplit(_BaseKFold):
             
             # Logique pour les séries temporelles (pas de groupes)
             if groups is None:
-                # Pour la validation in-sample, utilise le premier indice de test comme limite
-                first_test_pos = min(resolved_test_positions)
-                test_end = min(first_test_pos + test_size, n_samples)
-                yield np.arange(first_test_pos, test_end)
+                # Parcours des indices de test
+                for test_start in sorted(resolved_test_positions):
+                    # Calcul de la fin de la période de test
+                    test_end = min(test_start + test_size, n_samples)
+                    yield np.arange(test_start, test_end)
             else:
                 # Logique pour les données de panel (avec groupes)
                 # Gestion des indices temporels pour données de panel
                 if isinstance(self.test_indices[0], (str, pd.Timestamp)) and hasattr(X, 'index') and hasattr(X.index, 'get_level_values'):
-                    first_test_time = self.test_indices[0]
+                    # Identification des indices du groupe
                     unique_groups = np.unique(groups)
-                    test_indices = []
-                    
-                    # Collecte des indices de test pour tous les groupes à la première période de test
-                    for group in unique_groups:
-                        try:
-                            group_test_idx = X.index.get_loc((group, first_test_time))
-                            group_test_end = min(group_test_idx + test_size, n_samples)
-                            test_indices.extend(range(group_test_idx, group_test_end))
-                        except KeyError:
-                            # Ignore les groupes sans données pour cette période
-                            continue
-                    
-                    if test_indices:
-                        yield np.array(test_indices)
+                    # Parcours des indices de test
+                    for test_time in self.test_indices:
+                        # Initialisation des indices de test des groupes
+                        group_test_indices = []
+                        
+                        # Collecte des indices de test pour tous les groupe
+                        for group in unique_groups:
+                            # Identification des index dans le jeu de données
+                            try:
+                                # Identification de l'indice
+                                group_test_idx = X.index.get_loc((group, test_time))
+                                # Détermination des limites du groupe pour éviter de dépasser
+                                group_mask = [idx[0] == group for idx in X.index] if hasattr(X.index, '__iter__') else []
+                                group_positions = [i for i, mask in enumerate(group_mask) if mask]
+                                
+                                if group_positions:
+                                    group_end = max(group_positions) + 1  # +1 pour la limite exclusive
+                                    # Calcul de la position de fin du test en respectant les limites du groupe
+                                    group_test_end = min(group_test_idx + test_size, group_end, n_samples)
+                                else:
+                                    # Fallback si on ne peut pas déterminer les limites du groupe
+                                    group_test_end = min(group_test_idx + test_size, n_samples)
+
+                                # Ajout des indices de test
+                                group_test_indices.extend(range(group_test_idx, group_test_end))
+                            # On ignore la période de test si on ne la trouve pas dans les données
+                            except KeyError:
+                                warnings.warn(f"Cannot find test period '{test_time}' for entity '{group}'")
+                                continue
+                        
+                        # Conversion en np.array
+                        if group_test_indices:
+                            yield np.array(group_test_indices)
                 else:
-                    # Gestion des indices numériques directs
-                    first_test_pos = min(resolved_test_positions)
-                    test_end = min(first_test_pos + test_size, n_samples)
-                    yield np.arange(first_test_pos, test_end)
+                    # On utilise directement les positions
+                    # Détermination des groupes uniques
+                    unique_groups = np.unique(groups)
+                    # Parcours des positions de test
+                    for test_start in sorted(resolved_test_positions):
+                        # Identification du groupe auqeul appartient cette position
+                        current_group = None
+                        # Parcours des groupes
+                        for group in unique_groups:
+                            # Détermination des limites du groupe pour ne pas dépasser
+                            group_mask = groups == group
+                            group_positions = np.where(group_mask)[0]
+                            # Si la position de début de la période de test appartient au groupe, le groupe est identifié et sa dernière position retenue
+                            if test_start in group_positions:
+                                # Identification du groupe
+                                current_group = group
+                                # Identification de la dernière position du groupe
+                                group_end = max(group_positions) + 1  # +1 pour la limite exclusive
+                                # Interruption de la recherche
+                                break
+                        
+                        # Calcul de la position de fin de période de test
+                        if current_group is not None:
+                            # Calcul de la position de fin du test en respectant les limites du groupe
+                            test_end = min(test_start + test_size, group_end, n_samples)
+                        else:
+                            # Fallback si on ne peut pas identifier le groupe
+                            test_end = min(test_start + test_size, n_samples)
+                        
+                        yield np.arange(test_start, test_end)
         else:
             # Comportement par défaut : utilise la dernière portion des données
+            # Calcul du nombre d'observations
+            n_samples = _num_samples(X)
+            
+            # Distinction des cas de série temporelle et de panel
             if groups is None:
-                # Série temporelle par défaut : dernière portion
-                test_size = self.test_size if self.test_size is not None else n_samples // (self.n_splits + 1)
-                test_start = max(0, n_samples - test_size)
-                yield np.arange(test_start, n_samples)
+                # Cas des séries-temporelles
+                # Calcul du nombre de segments (équivaut au nombre de séparations + 1)
+                n_folds = self.n_splits + 1
+                # Si la longueur de la période de test n'est pas spécifiée
+                test_size = self.test_size if self.test_size is not None else n_samples // n_folds
+
+                # Vérification que le nombre de segments est valide
+                if n_folds > n_samples:
+                    raise ValueError(f"Cannot have number of folds={n_folds} greater than the number of samples={n_samples}")
+                # Vérification que le nombre de séprations est cohérent avec le nombre d'observations
+                if n_samples - (test_size * self.n_splits) <= 0: # On peut ajouter -self.gap si on veut s'assurer des données d'entraînement
+                    raise ValueError(f"Too many splits={self.n_splits} for number of samples={n_samples} with test_size={test_size}")
+                
+                # Calcul des débuts de période de test (ce sont à chaque fois les dates les plus récentes qui sont considérées)
+                test_starts = range(n_samples - self.n_splits * test_size, n_samples, test_size)
+                # Parcours des débuts de periode de test
+                for test_start in test_starts:
+                    # Ajout de la fin de période de test
+                    yield np.arange(test_start, test_start + test_size)
             else:
-                # Panel par défaut : dernière période temporelle pour tous les groupes
+                # Cas des données de panel avec des groupes
+                # Identification des différents groupes uniques
                 unique_groups = np.unique(groups)
+                # La taille de la période de test vaut 1 par défaut si elle n'est pas spécifiée
                 test_size = self.test_size if self.test_size is not None else 1
                 
-                # Extraction des points temporels à partir du MultiIndex
+                # Recherche des indices de test (on fait l'hypothèse de données regroupées par entitées et triées par date par ordre croissant)
+                # /!\ On fait l'hypothèse que le panel est un pd.DataFrame avec un multi-index (entity x date)
                 if hasattr(X, 'index') and hasattr(X.index, 'get_level_values'):
+                    # Recherche des dates
                     time_points = X.index.get_level_values(1).unique()
-                    last_time = time_points[-1]
+                    # Calcul du nombre de dates différentes
+                    n_time_points = len(time_points)
                     
-                    test_indices = []
-                    # Collecte des indices pour la dernière période de chaque groupe
-                    for group in unique_groups:
-                        try:
-                            group_test_idx = X.index.get_loc((group, last_time))
-                            group_test_end = min(group_test_idx + test_size, n_samples)
-                            test_indices.extend(range(group_test_idx, group_test_end))
-                        except KeyError:
-                            # Ignore les groupes sans données pour la dernière période
-                            continue
-                    
-                    if test_indices:
-                        yield np.array(test_indices)
+                    # Vérification que le nombre de séparations est cohérent avec le nombre de dates
+                    if n_time_points - (test_size * self.n_splits) <= 0: # On peut ajouter - self.gap si on veut s'assurer des données d'entraînement
+                        raise ValueError(f"Too many splits={self.n_splits} for number of time points={n_time_points} with test_size={test_size}")
+                
+                    # Parcours des séparations
+                    for i in range(self.n_splits):
+                        # Identification de la date de début de la période de test
+                        # Identification de l'indice de la date (ce sont à chaque fois les dates les plus récentes qui sont considérées)
+                        test_time_idx = n_time_points - self.n_splits * test_size + i * test_size
+                        # Extarction de la date
+                        test_time = time_points[test_time_idx]
+                        
+                        # Initialisation des indices de test
+                        test_indices = []
+
+                        # Parcours des groupes
+                        for group in unique_groups:
+                            # Extraction des indices de début et de fin de la période de test
+                            try:
+                                # Extraction de la position correspondant au début de la période de test pour le groupe
+                                group_test_idx = X.index.get_loc((group, test_time))
+
+                                # Détermination des limites du groupe pour éviter de dépasser
+                                group_mask = [idx[0] == group for idx in X.index] if hasattr(X.index, '__iter__') else []
+                                group_positions = [i for i, mask in enumerate(group_mask) if mask]
+                                # Identification de la dernière position du groupe
+                                group_end = max(group_positions) + 1  # +1 pour la limite exclusive
+
+                                # Identification de l'indice de fin de période de test
+                                group_test_end = min(group_test_idx + test_size, group_end)
+                                # Ajout aux indices de test
+                                test_indices.extend(range(group_test_idx, group_test_end))
+                            # On ignore la période de test si on ne la trouve pas dans les données
+                            except KeyError:
+                                warnings.warn(f"Cannot find test period '{test_time}' for entity '{group}'")
+                                continue
+                        
+                        # Conversion en np.array
+                        if test_indices:
+                            yield np.array(test_indices)

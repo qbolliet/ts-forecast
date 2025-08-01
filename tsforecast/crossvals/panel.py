@@ -12,29 +12,6 @@ from sklearn.utils import indexable
 from sklearn.utils.validation import _num_samples
 
 
-# Fonction auxiliaire d'extraction de la structure du panel
-def _get_panel_structure(X):
-    """Extract panel structure from data.
-    
-    Args:
-        X (pd.DataFrame or pd.Series): Panel data with MultiIndex (entity, time)
-        
-    Returns:
-        pd.Index: Unique entities in the panel
-        
-    Raises:
-        ValueError: If data doesn't have required MultiIndex structure
-    """
-    if not hasattr(X, 'index'):
-        raise ValueError("Panel data requires pandas DataFrame/Series with MultiIndex")
-    
-    if not hasattr(X.index, 'get_level_values'):
-        raise ValueError("Panel data requires MultiIndex (entity, time)")
-    
-    # Extraction des entités uniques du premier niveau
-    entities = X.index.get_level_values(0).unique()
-    return entities
-
 # Fonction auxiliaire d'extraction des groupes depuis les données de panel
 def _extract_groups_from_panel(X):
     """Extract entity groups from panel data structure efficiently.
@@ -191,7 +168,7 @@ class PanelInSampleSplit(InSampleSplit):
 
 
 
-# Classes additionnelles pour la validation croisée par entité
+# Classe de validation croisée out-of-sample par entité
 class PanelOutOfSampleSplitPerEntity(PanelOutOfSampleSplit):
     """Panel out-of-sample split that yields train/test indices separately for each entity.
     
@@ -242,10 +219,7 @@ class PanelOutOfSampleSplitPerEntity(PanelOutOfSampleSplit):
         unique_groups = np.unique(groups)
         
         # Génération des splits avec regroupement par entité
-        for train_indices, test_indices in super().split(X, y, groups):
-            # Dictionnaire pour stocker les indices par entité
-            entity_splits = {}
-            
+        for train_indices, test_indices in super().split(X, y, groups):            
             # Traitement entité par entité
             for group in unique_groups:
                 # Identification des indices de cette entité
@@ -258,9 +232,7 @@ class PanelOutOfSampleSplitPerEntity(PanelOutOfSampleSplit):
                 
                 # Inclusion seulement si l'entité a des données de test
                 if len(entity_test) > 0:
-                    entity_splits[group] = (entity_train, entity_test)
-            
-            yield entity_splits
+                    yield (entity_train, entity_test)
 
 
 # Classe de validation croisée in-sample par entité
@@ -316,10 +288,7 @@ class PanelInSampleSplitPerEntity(PanelInSampleSplit):
         unique_groups = np.unique(groups)
         
         # Génération des splits avec regroupement par entité
-        for train_indices, test_indices in super().split(X, y, groups):
-            # Dictionnaire pour stocker les indices par entité
-            entity_splits = {}
-            
+        for train_indices, test_indices in super().split(X, y, groups):            
             # Traitement entité par entité
             for group in unique_groups:
                 # Identification des indices de cette entité
@@ -332,6 +301,4 @@ class PanelInSampleSplitPerEntity(PanelInSampleSplit):
                 
                 # Inclusion seulement si l'entité a des données de test
                 if len(entity_test) > 0:
-                    entity_splits[group] = (entity_train, entity_test)
-            
-            yield entity_splits
+                    yield (entity_train, entity_test)
