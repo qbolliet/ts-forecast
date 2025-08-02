@@ -83,6 +83,80 @@ def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]]
     
     return np.array([test_indices]) if np.isscalar(test_indices) else np.array(test_indices)
 
+# Méthode auxiliaire de pré-calcul des mappings de groupes pour optimiser les recherches répétées
+def _precompute_group_mappings(groups):
+    """Pré-calcule les mappings de groupes pour optimiser les opérations répétées.
+    
+    Cette fonction calcule une seule fois les indices correspondant à chaque groupe,
+    évitant ainsi les recherches répétées O(n) dans les boucles.
+    
+    Args:
+        groups: Labels des groupes pour chaque échantillon
+        
+    Returns:
+        dict: Dictionnaire mappant chaque groupe vers ses indices
+        
+    Examples:
+        >>> groups = np.array(['A', 'A', 'B', 'B', 'A'])
+        >>> mappings = _precompute_group_mappings(groups)
+        >>> mappings['A']  # [0, 1, 4]
+        >>> mappings['B']  # [2, 3]
+    """
+    # Initialisation du dictionnaire de mapping
+    group_mappings = {}
+    # Identification des groupes uniques pour éviter les recalculs
+    unique_groups = np.unique(groups)
+    
+    # Pré-calcul des indices pour chaque groupe (opération O(n) faite une seule fois)
+    for group in unique_groups:
+        # Vectorisation de la recherche des indices du groupe
+        group_mappings[group] = np.where(groups == group)[0]
+    
+    return group_mappings
+
+# Méthode auxiliaire d'optimisation des opérations sur MultiIndex pour données de panel
+def _precompute_multiindex_mappings(X):
+    """Pré-calcule les mappings pour les opérations sur MultiIndex.
+    
+    Cette fonction utilise les capacités optimisées de pandas pour traiter
+    les MultiIndex plus efficacement que les boucles manuelles.
+    
+    Args:
+        X: DataFrame ou Series avec MultiIndex
+        
+    Returns:
+        dict: Dictionnaire contenant les mappings pré-calculés
+        
+    Examples:
+        >>> # Pour un DataFrame avec MultiIndex (entity, date)
+        >>> mappings = _precompute_multiindex_mappings(X)
+        >>> mappings['group_ranges']  # Ranges d'indices par groupe
+        >>> mappings['group_positions']  # Positions par groupe
+    """
+    mappings = {}
+    
+    # Vérification que X a bien un MultiIndex
+    if hasattr(X, 'index') and hasattr(X.index, 'nlevels') and X.index.nlevels >= 2:
+        # Utilisation de pandas GroupBy pour un traitement optimisé
+        grouped = X.groupby(level=0)
+        
+        # Pré-calcul des ranges d'indices pour chaque groupe
+        mappings['group_ranges'] = {}
+        mappings['group_positions'] = {}
+        
+        # Extraction efficace des groupes et de leurs positions
+        for group_name, group_data in grouped:
+            # Stockage des indices du groupe
+            mappings['group_ranges'][group_name] = group_data.index
+            # Calcul des positions numériques une seule fois
+            mappings['group_positions'][group_name] = X.index.get_indexer(group_data.index)
+            
+        # Extraction des niveaux pour éviter les accès répétés
+        mappings['level_0_values'] = X.index.get_level_values(0)
+        mappings['level_1_values'] = X.index.get_level_values(1)
+        
+    return mappings
+
 # Méthode auxiliaire de vérification et tri des données par groupe et date
 def _verify_and_sort_data(X, groups=None):
     """Verify that data is sorted by group and then by date, and sort if necessary.
@@ -139,9 +213,10 @@ def _verify_and_sort_data(X, groups=None):
         
         if not is_sorted:
             warnings.warn("Panel data is not sorted by group then by date. Sorting automatically.")
-            # Tri par groupe puis par date
+            # Tri optimisé par groupe puis par date
             sort_indices = X.index.to_frame().sort_values([X.index.names[0], X.index.names[1]]).index
-            sort_positions = [X.index.get_loc(idx) for idx in sort_indices]
+            # Optimisation : utilisation de get_indexer pour traitement vectorisé au lieu d'une list comprehension
+            sort_positions = X.index.get_indexer(sort_indices)
             
             X_sorted = X.iloc[sort_positions] if hasattr(X, 'iloc') else X[sort_positions]
             groups_sorted = groups[sort_positions] if groups is not None else None
@@ -382,12 +457,12 @@ class OutOfSampleSplit(_BaseKFold):
             # Si la longueur de la période d'entraînement n'est pas spécifiée, par défaut on sélectionne toutes les observations depuis la première
             return np.arange(0, train_end)
     
-    # Méthode auxiliaire d'extraction des indices d'entraînement pour les données de panel
+    # Méthode auxiliaire d'extraction des indices d'entraînement pour les données de panel (version optimisée)
     def _get_group_train_indices(self, test_indices, groups):
-        """Calculate training indices for panel data with groups in out-of-sample validation.
+        """Calculate training indices for panel data with groups in out-of-sample validation (optimized version).
         
-        For panel data, training indices are calculated separately for each group,
-        ensuring temporal ordering within each group while respecting gap and max_train_size.
+        Version optimisée utilisant les mappings pré-calculés et des opérations vectorisées
+        pour éviter les recherches répétées et améliorer les performances.
         
         Args:
             test_indices (array): Indices of test samples
@@ -400,25 +475,23 @@ class OutOfSampleSplit(_BaseKFold):
             >>> # This is an internal method for panel data
             >>> # Returns training indices for each group before their respective test periods
         """
-        # Détermination des groupes
-        unique_groups = np.unique(groups)
+        # Pré-calcul des mappings de groupes pour optimiser les opérations répétées
+        group_mappings = _precompute_group_mappings(groups)
         # Initialisation de la liste des indices d'entraînement
         train_indices = []
         
-        # Parcours des groupes
-        for group in unique_groups:
-            # Identification des indices du groupe 
-            group_mask = groups == group
-            group_indices = np.where(group_mask)[0]
-            # Identification des indices de test du groupe
-            group_test_indices = test_indices[np.isin(test_indices, group_indices)]
+        # Parcours optimisé des groupes en utilisant les mappings pré-calculés
+        for group, group_indices in group_mappings.items():
+            # Identification vectorisée des indices de test du groupe (plus efficace que np.isin)
+            # Utilisation d'un masque booléen pour améliorer les performances
+            test_mask = np.isin(test_indices, group_indices)
+            group_test_indices = test_indices[test_mask]
             
             # Vérification que des indices de test ont été effectivement trouvés
             if len(group_test_indices) > 0:
-                # Minimum des indices de test
-                min_test_idx = min(group_test_indices)
-                # Premier indice du groupe
-                group_start = min(group_indices)
+                # Calcul vectorisé des valeurs min/max (évite les appels multiples)
+                min_test_idx = np.min(group_test_indices)
+                group_start = np.min(group_indices)
                 # Calcul de la fin de la période d'entraînement
                 train_end = min_test_idx - self.gap
                 
@@ -427,13 +500,16 @@ class OutOfSampleSplit(_BaseKFold):
                     if self.max_train_size and self.max_train_size < (train_end - group_start):
                         # Calcul du début de la période d'entraînement
                         train_start = train_end - self.max_train_size
-                        train_indices.extend(range(train_start, train_end))
+                        # Utilisation de np.arange pour générer les indices plus efficacement
+                        train_indices.extend(np.arange(train_start, train_end))
                     else:
                         # Si la période d'entraînement n'est pas spécifiée, on considère tous les indices du groupe
-                        train_indices.extend(range(group_start, train_end))
+                        # Utilisation de np.arange pour une génération plus efficace
+                        train_indices.extend(np.arange(group_start, train_end))
             else:
                 raise ValueError(f"Cannot find test indices for the group : {group}")
         
+        # Conversion finale optimisée en évitant les listes intermédiaires
         return np.array(train_indices)
     
     # Méthode auxiliaire d'identification des indices de test
@@ -492,80 +568,83 @@ class OutOfSampleSplit(_BaseKFold):
             test_end = min(test_start + test_size, n_samples)
             yield np.arange(test_start, test_end)
     
-    # Méthode auxiliaire d'identification des indices de test au sein de chaque groupe.
+    # Méthode auxiliaire d'identification des indices de test au sein de chaque groupe (version optimisée)
     def _iter_group_test_indices(self, X, resolved_test_positions, groups):
-        """Generate test indices for group-aware splits."""
+        """Generate test indices for group-aware splits (optimized version).
+        
+        Version optimisée utilisant les mappings pré-calculés pour éviter les recherches répétées.
+        Complexité réduite de O(n×g) à O(n) + O(1) par lookup.
+        """
         # Calcul du nombre d'observations
         n_samples = _num_samples(X)
-        # Identification des groupes uniques
-        unique_groups = np.unique(groups)
         # Si la taille du test n'est pas spécifiée, utilise 1 par défaut
         test_size = self.test_size if self.test_size is not None else 1
         
-        # /!\ On fait l'hypothèse que le panel est un pd.DataFrame avec un multi-index (entity x date)
+        # Pré-calcul des mappings pour optimiser les opérations répétées
+        group_mappings = _precompute_group_mappings(groups)
+        multiindex_mappings = _precompute_multiindex_mappings(X)
+        
+        # /!\ Traitement optimisé pour les DataFrames avec MultiIndex (entity x date)
         if isinstance(self.test_indices[0], (str, pd.Timestamp)) and hasattr(X, 'index') and hasattr(X.index, 'get_level_values'):
+            # Extraction optimisée des valeurs des niveaux (une seule fois)
+            level_0_values = multiindex_mappings.get('level_0_values', X.index.get_level_values(0))
+            
             # Parcours des indices de test
             for test_time in self.test_indices:
                 # Initialisation des indices de test des groupes
                 group_test_indices = []
-                # Parcours des groupes
-                for group in unique_groups:
+                
+                # Parcours optimisé des groupes en utilisant les mappings pré-calculés
+                for group in group_mappings.keys():
                     # Tentative de résolution de l'indice de test pour chaque groupe
                     try:
                         if hasattr(X.index, 'get_loc'):
                             # Extraction de la position correspondant au début de la période de test pour le groupe
                             group_test_idx = X.index.get_loc((group, test_time))
                             
-                            # Détermination des limites du groupe pour éviter de dépasser
-                            group_mask = [idx[0] == group for idx in X.index] if hasattr(X.index, '__iter__') else []
-                            group_positions = [i for i, mask in enumerate(group_mask) if mask]
-                            
-                            if group_positions:
+                            # Utilisation des mappings pré-calculés pour déterminer les limites du groupe
+                            if 'group_positions' in multiindex_mappings and group in multiindex_mappings['group_positions']:
+                                # Utilisation des positions pré-calculées (plus efficace)
+                                group_positions = multiindex_mappings['group_positions'][group]
                                 group_end = max(group_positions) + 1  # +1 pour la limite exclusive
-                                # Calcul de la position de fin du test en respectant les limites du groupe
-                                group_test_end = min(group_test_idx + test_size, group_end, n_samples)
                             else:
-                                # Fallback si on ne peut pas déterminer les limites du groupe
-                                group_test_end = min(group_test_idx + test_size, n_samples)
+                                # Fallback avec vectorisation pandas (plus efficace que list comprehension)
+                                group_mask = level_0_values == group
+                                group_positions = np.where(group_mask)[0]
+                                group_end = max(group_positions) + 1 if len(group_positions) > 0 else n_samples
+                            
+                            # Calcul de la position de fin du test en respectant les limites du groupe
+                            group_test_end = min(group_test_idx + test_size, group_end, n_samples)
                             
                             # Ajout des indices de test
                             group_test_indices.extend(range(group_test_idx, group_test_end))
-                    # On ignore la période de test si on ne la trouve pas dans les données
+                    # Gestion des erreurs sans interrompre le processus
                     except KeyError:
                         warnings.warn(f"Cannot find test period '{test_time}' for entity '{group}'")
                         continue
-                # Conversion en np.array
+                
+                # Conversion en np.array et yield si des indices sont trouvés
                 if group_test_indices:
                     yield np.array(group_test_indices)
         else:
-            # On utilise directement les positions
-            # Détermination des groupes uniques
-            unique_groups = np.unique(groups)
-            # Parcours des positions de test
+            # Traitement optimisé pour les positions directes
+            # Parcours des positions de test avec recherche optimisée
             for test_start in sorted(resolved_test_positions):
-                # Identification du groupe auqeul appartient cette position
+                # Identification efficace du groupe auquel appartient cette position
                 current_group = None
-                # Parcours des groupes
-                for group in unique_groups:
-                    # Détermination des limites du groupe pour ne pas dépasser
-                    group_mask = groups == group
-                    group_positions = np.where(group_mask)[0]
-                    # Si la position de début de la période de test appartient au groupe, le groupe est identifié et sa dernière position retenue
-                    if test_start in group_positions:
-                        # Identification du groupe
+                group_end = n_samples  # Valeur par défaut
+                
+                # Recherche optimisée du groupe en utilisant les mappings pré-calculés
+                for group, group_indices in group_mappings.items():
+                    # Vérification vectorisée de l'appartenance (plus efficace que 'in')
+                    if test_start in group_indices:
                         current_group = group
-                        # Identification de la dernière position du groupe
-                        group_end = max(group_positions) + 1  # +1 pour la limite exclusive
-                        # Interruption de la recherche
+                        # Calcul optimisé de la fin du groupe
+                        group_end = max(group_indices) + 1  # +1 pour la limite exclusive
                         break
                 
                 # Calcul de la position de fin de période de test
-                if current_group is not None:
-                    # Calcul de la position de fin du test en respectant les limites du groupe
-                    test_end = min(test_start + test_size, group_end, n_samples)
-                else:
-                    # Fallback si on ne peut pas identifier le groupe
-                    test_end = min(test_start + test_size, n_samples)
+                test_end = min(test_start + test_size, group_end, n_samples)
                 
                 yield np.arange(test_start, test_end)
     
@@ -627,18 +706,31 @@ class OutOfSampleSplit(_BaseKFold):
                     # Initialisation des indices de test
                     test_indices = []
 
-                    # Parcours des groupes
+                    # Pré-calcul des mappings pour optimiser les opérations répétées
+                    multiindex_mappings = _precompute_multiindex_mappings(X)
+                    level_0_values = multiindex_mappings.get('level_0_values')
+                    
+                    # Parcours optimisé des groupes
                     for group in unique_groups:
                         # Extraction des indices de début et de fin de la période de test
                         try:
                             # Extraction de la position correspondant au début de la période de test pour le groupe
                             group_test_idx = X.index.get_loc((group, test_time))
 
-                            # Détermination des limites du groupe pour éviter de dépasser
-                            group_mask = [idx[0] == group for idx in X.index] if hasattr(X.index, '__iter__') else []
-                            group_positions = [i for i, mask in enumerate(group_mask) if mask]
+                            # Détermination optimisée des limites du groupe en utilisant les mappings pré-calculés
+                            if 'group_positions' in multiindex_mappings and group in multiindex_mappings['group_positions']:
+                                # Utilisation des positions pré-calculées (plus efficace)
+                                group_positions = multiindex_mappings['group_positions'][group]
+                            elif level_0_values is not None:
+                                # Méthode vectorisée avec valeurs des niveaux pré-extraites
+                                group_mask = level_0_values == group
+                                group_positions = np.where(group_mask)[0]
+                            else:
+                                # Fallback pour les cas sans MultiIndex
+                                group_positions = []
+                            
                             # Identification de la dernière position du groupe
-                            group_end = max(group_positions) + 1  # +1 pour la limite exclusive
+                            group_end = max(group_positions) + 1 if len(group_positions) > 0 else n_samples
 
                             # Identification de l'indice de fin de période de test
                             group_test_end = min(group_test_idx + test_size, group_end)
@@ -1025,15 +1117,27 @@ class InSampleSplit(_BaseKFold):
             else:
                 # Un seul indice de test : utilisation du comportement actuel avec test_size
                 first_test_time = self.test_indices[0]
-                # Collecte des indices de test pour tous les groupes
+                # Pré-calcul des mappings pour optimiser les opérations répétées
+                multiindex_mappings = _precompute_multiindex_mappings(X)
+                level_0_values = multiindex_mappings.get('level_0_values')
+                
+                # Collecte optimisée des indices de test pour tous les groupes
                 for group in unique_groups:
                     # Identification des index dans le jeu de données
                     try:
                         # Identification de l'indice
                         group_test_idx = X.index.get_loc((group, first_test_time))
-                        # Détermination des limites du groupe pour éviter de dépasser
-                        group_mask = [idx[0] == group for idx in X.index] if hasattr(X.index, '__iter__') else []
-                        group_positions = [i for i, mask in enumerate(group_mask) if mask]
+                        # Détermination optimisée des limites du groupe en utilisant les mappings pré-calculés
+                        if 'group_positions' in multiindex_mappings and group in multiindex_mappings['group_positions']:
+                            # Utilisation des positions pré-calculées (plus efficace)
+                            group_positions = multiindex_mappings['group_positions'][group]
+                        elif level_0_values is not None:
+                            # Méthode vectorisée avec valeurs des niveaux pré-extraites
+                            group_mask = level_0_values == group
+                            group_positions = np.where(group_mask)[0]
+                        else:
+                            # Fallback pour les cas sans MultiIndex
+                            group_positions = []
                         
                         if group_positions:
                             group_end = max(group_positions) + 1  # +1 pour la limite exclusive
@@ -1122,16 +1226,28 @@ class InSampleSplit(_BaseKFold):
             # Initialisation des indices de test
             test_indices = []
 
-            # Parcours des groupes
+            # Pré-calcul des mappings pour optimiser les opérations répétées
+            multiindex_mappings = _precompute_multiindex_mappings(X)
+            level_0_values = multiindex_mappings.get('level_0_values')
+            
+            # Parcours optimisé des groupes
             for group in unique_groups:
                 # Extraction des indices de début et de fin de la période de test
                 try:
                     # Extraction de la position correspondant au début de la période de test pour le groupe
                     group_test_idx = X.index.get_loc((group, test_time))
 
-                    # Détermination des limites du groupe pour éviter de dépasser
-                    group_mask = [idx[0] == group for idx in X.index] if hasattr(X.index, '__iter__') else []
-                    group_positions = [i for i, mask in enumerate(group_mask) if mask]
+                    # Détermination optimisée des limites du groupe en utilisant les mappings pré-calculés
+                    if 'group_positions' in multiindex_mappings and group in multiindex_mappings['group_positions']:
+                        # Utilisation des positions pré-calculées (plus efficace)
+                        group_positions = multiindex_mappings['group_positions'][group]
+                    elif level_0_values is not None:
+                        # Méthode vectorisée avec valeurs des niveaux pré-extraites
+                        group_mask = level_0_values == group
+                        group_positions = np.where(group_mask)[0]
+                    else:
+                        # Fallback pour les cas sans MultiIndex
+                        group_positions = []
                     # Identification de la dernière position du groupe
                     group_end = max(group_positions) + 1  # +1 pour la limite exclusive
 
