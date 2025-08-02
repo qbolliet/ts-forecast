@@ -11,3 +11,19 @@ Ce package poursuit les objectifs suivants :
 - Calculer des intervalles de confiance par bootstrap de manière efficace
 - Permettre l'utilisation de méthodes d'interprétabilité
 - L'agrégation sera traitée dans un package différent
+
+
+## Test
+
+### Run all tests
+
+python tests/run_tests.py --mode all
+
+### Run fast tests only (excluding performance tests)
+python tests/run_tests.py --mode fast
+
+### Run with coverage report
+python tests/run_tests.py --mode coverage
+
+### Run specific test module
+python tests/run_tests.py --module test_base_classes
