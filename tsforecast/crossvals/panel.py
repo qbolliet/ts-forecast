@@ -190,11 +190,10 @@ class PanelOutOfSampleSplitPerEntity(PanelOutOfSampleSplit):
         
         >>> # Split per entity
         >>> splitter = PanelOutOfSampleSplitPerEntity(test_size=5, gap=1)
-        >>> for entity_splits in splitter.split(X):
-        ...     for entity, (train_idx, test_idx) in entity_splits.items():
-        ...         entity_train = X.iloc[train_idx]
-        ...         entity_test = X.iloc[test_idx]
-        ...         # Process each entity separately
+        >>> for train_idx, test_idx in splitter.split(X):
+        ...     entity_train = X.iloc[train_idx]
+        ...     entity_test = X.iloc[test_idx]
+        ...     # Process each entity separately
     """
     
     # Méthode de séparation des données avec indices groupés par entité
@@ -208,8 +207,8 @@ class PanelOutOfSampleSplitPerEntity(PanelOutOfSampleSplit):
                 Defaults to None.
                 
         Yields:
-            dict: Dictionary mapping entity -> (train_indices, test_indices)
-                Only includes entities that have test data in the current split.
+            tuple: (train_indices, test_indices) for each entity that has test data
+                in the current split. Entities are processed sequentially.
         """
         # Extraction des groupes si non fournis
         if groups is None:
@@ -258,11 +257,10 @@ class PanelInSampleSplitPerEntity(PanelInSampleSplit):
         >>> # In-sample split per entity
         >>> test_dates = ['2020-02-01']
         >>> splitter = PanelInSampleSplitPerEntity(test_indices=test_dates, test_size=5)
-        >>> for entity_splits in splitter.split(X):
-        ...     for entity, (train_idx, test_idx) in entity_splits.items():
-        ...         # Training includes test period for historical analysis
-        ...         entity_train = X.iloc[train_idx]  # Includes test period
-        ...         entity_test = X.iloc[test_idx]
+        >>> for train_idx, test_idx in splitter.split(X):
+        ...     # Training includes test period for historical analysis
+        ...     entity_train = X.iloc[train_idx]  # Includes test period
+        ...     entity_test = X.iloc[test_idx]
     """
     
     # Méthode de séparation des données avec indices groupés par entité (in-sample)
@@ -276,9 +274,9 @@ class PanelInSampleSplitPerEntity(PanelInSampleSplit):
                 Defaults to None.
                 
         Yields:
-            dict: Dictionary mapping entity -> (train_indices, test_indices)
-                Training indices include the test period for in-sample validation.
-                Only includes entities that have test data in the current split.
+            tuple: (train_indices, test_indices) for each entity that has test data
+                in the current split. Training indices include the test period for
+                in-sample validation. Entities are processed sequentially.
         """
         # Extraction des groupes si non fournis
         if groups is None:
