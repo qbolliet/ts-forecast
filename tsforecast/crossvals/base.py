@@ -15,19 +15,39 @@ from sklearn.model_selection._split import _BaseKFold
 def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]], X: Union[pd.Series, pd.DataFrame]) -> Optional[np.ndarray]:
     """Resolve test_indices to numeric positions.
     
-    This function works for both time series and panel data:
-    - Time series: resolves date/string indices to numeric positions
-    - Panel data: resolves tuple indices (group, date) to numeric positions
+    This function works for both time series and panel data by converting various
+    index formats to numeric positions that can be used for array indexing.
     
     Args:
-        test_indices: List of indices to resolve (can be dates, strings, tuples, or integers)
-        X: Input data with index to match against
+        test_indices: List of indices to resolve. Can be dates, strings, tuples
+            (for panel data), or integers. If None, returns None.
+        X: Input data with index to match against. Must be a pandas Series or
+            DataFrame with appropriate index structure.
         
     Returns:
-        Array of numeric positions corresponding to the test_indices, or None if no indices provided
+        Array of numeric positions corresponding to the test_indices, or None
+        if no indices provided.
         
     Raises:
-        ValueError: If indices cannot be resolved or are not found in the data
+        ValueError: If indices cannot be resolved, are not found in the data,
+            or there is a type mismatch between index types and data structure.
+            
+    Examples:
+        >>> # Time series example
+        >>> dates = pd.date_range('2020-01-01', periods=10, freq='D')
+        >>> X = pd.Series(range(10), index=dates)
+        >>> test_dates = ['2020-01-05', '2020-01-08']
+        >>> positions = _resolve_test_positions(test_dates, X)
+        >>> print(positions)  # [4, 7]
+        
+        >>> # Panel data example
+        >>> entities = ['A', 'B']
+        >>> dates = pd.date_range('2020-01-01', periods=5, freq='D')
+        >>> idx = pd.MultiIndex.from_product([entities, dates])
+        >>> X = pd.DataFrame({'value': range(10)}, index=idx)
+        >>> test_tuples = [('A', '2020-01-03'), ('B', '2020-01-04')]
+        >>> positions = _resolve_test_positions(test_tuples, X)
+        >>> print(positions)  # [2, 8]
     """
 
     # Si aucun indice n'est renseigné, ne renvoie rien
@@ -85,22 +105,33 @@ def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]]
 
 # Méthode auxiliaire de pré-calcul des mappings de groupes pour optimiser les recherches répétées
 def _precompute_group_mappings(groups):
-    """Pré-calcule les mappings de groupes pour optimiser les opérations répétées.
+    """Precompute group mappings to optimize repeated operations.
     
-    Cette fonction calcule une seule fois les indices correspondant à chaque groupe,
-    évitant ainsi les recherches répétées O(n) dans les boucles.
+    This function calculates the indices corresponding to each group once,
+    avoiding repeated O(n) searches in loops and improving performance
+    for group-based operations.
     
     Args:
-        groups: Labels des groupes pour chaque échantillon
+        groups: Group labels for each sample. Can be array-like containing
+            group identifiers.
         
     Returns:
-        dict: Dictionnaire mappant chaque groupe vers ses indices
+        dict: Dictionary mapping each unique group to its corresponding indices
+            as numpy arrays.
         
     Examples:
+        >>> import numpy as np
         >>> groups = np.array(['A', 'A', 'B', 'B', 'A'])
         >>> mappings = _precompute_group_mappings(groups)
-        >>> mappings['A']  # [0, 1, 4]
-        >>> mappings['B']  # [2, 3]
+        >>> mappings['A']
+        array([0, 1, 4])
+        >>> mappings['B']
+        array([2, 3])
+        
+        >>> # Usage in cross-validation
+        >>> groups = np.array(['entity1', 'entity1', 'entity2', 'entity2'])
+        >>> mappings = _precompute_group_mappings(groups)
+        >>> entity1_indices = mappings['entity1']  # Fast lookup
     """
     # Initialisation du dictionnaire de mapping
     group_mappings = {}
@@ -116,22 +147,34 @@ def _precompute_group_mappings(groups):
 
 # Méthode auxiliaire d'optimisation des opérations sur MultiIndex pour données de panel
 def _precompute_multiindex_mappings(X):
-    """Pré-calcule les mappings pour les opérations sur MultiIndex.
+    """Precompute mappings for efficient MultiIndex operations.
     
-    Cette fonction utilise les capacités optimisées de pandas pour traiter
-    les MultiIndex plus efficacement que les boucles manuelles.
+    This function extracts and caches MultiIndex information to optimize
+    repeated operations on panel data, avoiding redundant index parsing.
     
     Args:
-        X: DataFrame ou Series avec MultiIndex
+        X: DataFrame or Series with MultiIndex. Should have at least 2 levels
+            where the first level represents groups and subsequent levels
+            represent time or other dimensions.
         
     Returns:
-        dict: Dictionnaire contenant les mappings pré-calculés
+        dict: Dictionary containing precomputed mappings with keys:
+            - 'group_ranges': Index ranges for each group
+            - 'group_positions': Numeric positions for each group
+            - 'level_0_values': Values from the first index level
+            - 'level_1_values': Values from the second index level
         
     Examples:
-        >>> # Pour un DataFrame avec MultiIndex (entity, date)
+        >>> import pandas as pd
+        >>> entities = ['A', 'B']
+        >>> dates = pd.date_range('2020-01-01', periods=3, freq='D')
+        >>> idx = pd.MultiIndex.from_product([entities, dates],
+        ...                                 names=['entity', 'date'])
+        >>> X = pd.DataFrame({'value': range(6)}, index=idx)
         >>> mappings = _precompute_multiindex_mappings(X)
-        >>> mappings['group_ranges']  # Ranges d'indices par groupe
-        >>> mappings['group_positions']  # Positions par groupe
+        >>> mappings['group_ranges']['A']  # Index range for entity A
+        >>> mappings['group_positions']['A']  # Numeric positions for entity A
+        >>> mappings['level_0_values']  # All entity values
     """
     mappings = {}
     
@@ -161,15 +204,43 @@ def _precompute_multiindex_mappings(X):
 def _verify_and_sort_data(X, groups=None):
     """Verify that data is sorted by group and then by date, and sort if necessary.
     
+    This function ensures data is properly sorted for time-aware cross-validation.
+    For time series data, it sorts by date. For panel data, it sorts by group
+    first, then by date within each group.
+    
     Args:
-        X: Input data (pandas Series or DataFrame)
-        groups: Group labels (None for time series, array-like for panel data)
+        X: Input data as pandas Series or DataFrame. Should have appropriate
+            index structure (DatetimeIndex for time series, MultiIndex for panel).
+        groups: Group labels for panel data. None for time series data,
+            array-like for panel data. Each element should correspond to the
+            group of the corresponding sample.
         
     Returns:
-        Tuple (X_sorted, groups_sorted, sort_indices) where sort_indices maps original to sorted positions
+        tuple: A 3-tuple containing:
+            - X_sorted: Sorted version of input data
+            - groups_sorted: Sorted group labels (None for time series)
+            - sort_indices: Array mapping original positions to sorted positions
         
     Raises:
         ValueError: If data structure is incompatible with sorting requirements
+            or if panel data doesn't have the required MultiIndex structure.
+            
+    Examples:
+        >>> # Time series example
+        >>> dates = pd.date_range('2020-01-01', periods=5, freq='D')
+        >>> X = pd.Series([1, 2, 3, 4, 5], index=dates[::-1])  # Reverse order
+        >>> X_sorted, groups_sorted, sort_indices = _verify_and_sort_data(X)
+        >>> # Data will be sorted by date
+        
+        >>> # Panel data example
+        >>> entities = ['B', 'A', 'B', 'A']  # Mixed order
+        >>> dates = ['2020-01-02', '2020-01-01', '2020-01-01', '2020-01-02']
+        >>> idx = list(zip(entities, dates))
+        >>> X = pd.DataFrame({'value': [1, 2, 3, 4]}, 
+        ...                  index=pd.MultiIndex.from_tuples(idx))
+        >>> groups = np.array(entities)
+        >>> X_sorted, groups_sorted, sort_indices = _verify_and_sort_data(X, groups)
+        >>> # Data will be sorted by entity, then by date within entity
     """
     
     if groups is None:
@@ -364,16 +435,18 @@ class OutOfSampleSplit(_BaseKFold):
         including data validation, sorting, and index remapping.
         
         Args:
-            X (array-like): Input features
-            y (array-like, optional): Target values. Defaults to None.
-            groups (array-like, optional): Group labels. Defaults to None.
+            X: Input features array, DataFrame, or Series.
+            y: Target values with same structure as X. Not used in splitting
+                logic but validated for index consistency.
+            groups: Group labels for panel data. None for time series data.
             
         Yields:
-            tuple: (train_indices, test_indices) mapped back to original data order
+            Tuple of (train_indices, test_indices) mapped back to original
+            data order if sorting was performed.
             
-        Examples:
-            >>> # This is an internal method, typically called by split()
-            >>> # See split() method for usage examples
+        Note:
+            This is an internal method, typically called by split().
+            See split() method for usage examples.
         """
         # Validation des arguments
         (X,) = indexable(X)
@@ -397,22 +470,24 @@ class OutOfSampleSplit(_BaseKFold):
     
     # Méthode auxiliaire d'extraction des indices d'entraînement correspondant aux indices de test
     def _get_train_indices(self, X, test_indices, groups):
-        """Calculate training indices for out-of-sample validation considering gap and max_train_size.
+        """Calculate training indices for out-of-sample validation.
         
         For out-of-sample validation, training data comes strictly before the test period,
-        with an optional gap between them to avoid data leakage.
+        with an optional gap between them to avoid data leakage. Handles both time series
+        and panel data structures.
         
         Args:
-            X (array-like): Input features
-            test_indices (array): Indices of test samples
-            groups (array-like, optional): Group labels for panel data
+            X: Input features array or DataFrame.
+            test_indices: Array of test sample indices.
+            groups: Group labels for panel data. None for time series data.
             
         Returns:
-            np.ndarray: Array of training indices that come before the test period
+            Array of training indices that come before the test period, respecting
+            the gap parameter and max_train_size constraint.
             
-        Examples:
-            >>> # This is an internal method, typically called by _split()
-            >>> # Training indices will be before test_indices with gap consideration
+        Note:
+            This is an internal method typically called by _split(). Training indices
+            will always be before test_indices with gap consideration.
         """
        
         # Si les groupes ne sont pas spécifiés, on applique une logique de série temporelle
@@ -430,14 +505,16 @@ class OutOfSampleSplit(_BaseKFold):
         with an optional gap and maximum training size limit.
         
         Args:
-            test_indices (array): Indices of test samples
+            test_indices: Array of test sample indices.
             
         Returns:
-            np.ndarray: Array of training indices before the test period
+            Array of training indices before the test period, from either the
+            beginning of data or max_train_size positions before the test period.
             
-        Examples:
-            >>> # This is an internal method for time series data
-            >>> # Returns indices from 0 to min(test_indices) - gap - 1
+        Note:
+            Returns indices from 0 to min(test_indices) - gap - 1, or from
+            (min(test_indices) - gap - max_train_size) to (min(test_indices) - gap - 1)
+            if max_train_size is specified.
         """
         # Extraction de l'indice de test minimal
         min_test_idx = min(test_indices)
@@ -459,21 +536,26 @@ class OutOfSampleSplit(_BaseKFold):
     
     # Méthode auxiliaire d'extraction des indices d'entraînement pour les données de panel (version optimisée)
     def _get_group_train_indices(self, test_indices, groups):
-        """Calculate training indices for panel data with groups in out-of-sample validation (optimized version).
+        """Calculate training indices for panel data with groups in out-of-sample validation.
         
-        Version optimisée utilisant les mappings pré-calculés et des opérations vectorisées
-        pour éviter les recherches répétées et améliorer les performances.
+        Optimized version using precomputed mappings and vectorized operations
+        to avoid repeated searches and improve performance for panel data.
         
         Args:
-            test_indices (array): Indices of test samples
-            groups (array): Group labels for each sample
+            test_indices: Array of test sample indices.
+            groups: Array of group labels for each sample.
             
         Returns:
-            np.ndarray: Array of training indices for all groups combined
+            Array of training indices for all groups combined, where each group's
+            training data comes before its respective test periods.
             
-        Examples:
-            >>> # This is an internal method for panel data
-            >>> # Returns training indices for each group before their respective test periods
+        Raises:
+            ValueError: If no test indices are found for any group.
+            
+        Note:
+            This method processes each group separately, finding training indices
+            that come before the group's test period while respecting gap and
+            max_train_size constraints.
         """
         # Pré-calcul des mappings de groupes pour optimiser les opérations répétées
         group_mappings = _precompute_group_mappings(groups)
@@ -562,7 +644,20 @@ class OutOfSampleSplit(_BaseKFold):
     
     # Méthode auxiliaire d'identification des indices de test pour les séries temporelles
     def _iter_timeseries_test_indices(self, resolved_test_positions, test_size, n_samples):
-        """Generate test indices for time series data."""
+        """Generate test indices for time series data.
+        
+        Creates test periods of specified size starting from resolved test positions,
+        ensuring they don't exceed the data boundaries.
+        
+        Args:
+            resolved_test_positions: Array of resolved test start positions.
+            test_size: Size of each test period.
+            n_samples: Total number of samples in the dataset.
+            
+        Yields:
+            Array of test indices for each test period, with each period having
+            up to test_size consecutive indices.
+        """
         for test_start in sorted(resolved_test_positions):
             # Calcul de la fin de la période de test
             test_end = min(test_start + test_size, n_samples)
@@ -570,10 +665,26 @@ class OutOfSampleSplit(_BaseKFold):
     
     # Méthode auxiliaire d'identification des indices de test au sein de chaque groupe (version optimisée)
     def _iter_group_test_indices(self, X, resolved_test_positions, groups):
-        """Generate test indices for group-aware splits (optimized version).
+        """Generate test indices for group-aware splits.
         
-        Version optimisée utilisant les mappings pré-calculés pour éviter les recherches répétées.
-        Complexité réduite de O(n×g) à O(n) + O(1) par lookup.
+        Creates test periods for panel data, handling both temporal indices
+        (dates/strings) and direct position indices. Uses precomputed mappings
+        for efficient group operations.
+        
+        Args:
+            X: Input features DataFrame or Series, typically with MultiIndex
+                for panel data.
+            resolved_test_positions: Array of resolved test positions.
+            groups: Array of group labels for each sample.
+            
+        Yields:
+            Array of test indices for each test period across all groups,
+            respecting group boundaries and test_size constraints.
+            
+        Note:
+            For temporal indices, attempts to find the specified time period
+            for each group. Issues warnings for missing periods but continues
+            processing other groups.
         """
         # Calcul du nombre d'observations
         n_samples = _num_samples(X)
@@ -630,15 +741,13 @@ class OutOfSampleSplit(_BaseKFold):
             # Traitement optimisé pour les positions directes
             # Parcours des positions de test avec recherche optimisée
             for test_start in sorted(resolved_test_positions):
-                # Identification efficace du groupe auquel appartient cette position
-                current_group = None
+                # Identification du groupe auquel appartient cette position
                 group_end = n_samples  # Valeur par défaut
                 
                 # Recherche optimisée du groupe en utilisant les mappings pré-calculés
                 for group, group_indices in group_mappings.items():
                     # Vérification vectorisée de l'appartenance (plus efficace que 'in')
                     if test_start in group_indices:
-                        current_group = group
                         # Calcul optimisé de la fin du groupe
                         group_end = max(group_indices) + 1  # +1 pour la limite exclusive
                         break
@@ -650,7 +759,23 @@ class OutOfSampleSplit(_BaseKFold):
     
     # Méthode auxiliaire d'identification des indices de test en utilisant n_split comme par défaut dans TimeSeriesSplit de sklearn et en utilisant la dernière portion des données
     def _iter_default_test_indices(self, X, groups):
-        """Generate default test indices using n_splits."""
+        """Generate default test indices using n_splits.
+        
+        Creates evenly spaced test periods from the end of the data when no
+        specific test_indices are provided. Handles both time series and panel data.
+        
+        Args:
+            X: Input features array, DataFrame, or Series.
+            groups: Group labels for panel data. None for time series data.
+            
+        Yields:
+            Array of test indices for each split, with test periods taken from
+            the most recent portions of the data.
+            
+        Raises:
+            ValueError: If the number of splits is too large for the available
+                data or if there are insufficient time points for panel data.
+        """
         # Comportement par défaut : utilise la dernière portion des données
         # Calcul du nombre d'observations
         n_samples = _num_samples(X)
@@ -783,13 +908,29 @@ class InSampleSplit(_BaseKFold):
     
     # Initialisation de la classe
     def __init__(self, n_splits=5, *, test_indices=None, max_train_size=None, test_size=None):
-        """Initialize InSampleSplit.
+        """Initialize InSampleSplit cross-validator for in-sample validation.
         
         Args:
-            n_splits (int, optional): Number of splits. Defaults to 5.
-            test_indices (list, optional): Specific test indices. Defaults to None.
-            max_train_size (int, optional): Maximum training size. Defaults to None.
-            test_size (int, optional): Test set size. Defaults to None.
+            n_splits: Number of splits for cross-validation. Only used when
+                test_indices is None for calculating default test_size.
+            test_indices: Specific indices to use as test periods. Can be dates,
+                strings, tuples (for panel data), or integers. If None, uses
+                default behavior with last portion of data.
+            max_train_size: Maximum size of training set. If None, uses all
+                available data up to and including the test period.
+            test_size: Size of each test set. If None, calculated based on
+                n_splits for default behavior or uses 1 for specific test_indices.
+                
+        Examples:
+            >>> # Basic initialization for time series
+            >>> splitter = InSampleSplit(test_size=10)
+            
+            >>> # With specific test dates for panel data
+            >>> test_dates = ['2023-01-15', '2023-02-15']
+            >>> splitter = InSampleSplit(test_indices=test_dates, test_size=5)
+            
+            >>> # With maximum training size constraint
+            >>> splitter = InSampleSplit(test_size=5, max_train_size=100)
         """
         # Initialisation de la classe parent
         super().__init__(n_splits, shuffle=False, random_state=None)
@@ -804,17 +945,17 @@ class InSampleSplit(_BaseKFold):
         
         In in-sample validation, the training set includes the test period, which allows
         the model to learn from future information relative to the test period.
+        This is useful for evaluating model performance on historical data.
         
         Args:
-            X (array-like): Input features. Can be pandas DataFrame/Series with DatetimeIndex
-                for time series or MultiIndex for panel data.
-            y (array-like, optional): Target values. Must have same index as X if provided.
-                Defaults to None.
-            groups (array-like, optional): Group labels for panel data. Each element
-                should correspond to the group of the corresponding sample. Defaults to None.
+            X: Input features. Can be pandas DataFrame/Series with DatetimeIndex
+                for time series or MultiIndex for panel data, or array-like data.
+            y: Target values. Must have same index as X if provided.
+            groups: Group labels for panel data. Each element should correspond
+                to the group of the corresponding sample. None for time series data.
         
         Yields:
-            tuple: (train_indices, test_indices) where:
+            Tuple of (train_indices, test_indices) where:
                 - train_indices: Array of indices for training set (includes test period)
                 - test_indices: Array of indices for test set
         
@@ -822,21 +963,26 @@ class InSampleSplit(_BaseKFold):
             ValueError: If X and y have different indices when both are provided.
             
         Examples:
+            >>> import pandas as pd
+            >>> import numpy as np
+            >>> 
             >>> # Time series example
             >>> dates = pd.date_range('2020-01-01', periods=100, freq='D')
             >>> X = pd.DataFrame({'feature': range(100)}, index=dates)
             >>> splitter = InSampleSplit(test_size=10)
             >>> for train_idx, test_idx in splitter.split(X):
             ...     X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            ...     print(f"Training includes test period: {len(train_idx)} samples")
             
-            >>> # Panel data example  
-            >>> entities = ['A', 'B'] * 50
+            >>> # Panel data example
+            >>> entities = ['A', 'B']
             >>> dates = pd.date_range('2020-01-01', periods=50, freq='D')
-            >>> idx = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+            >>> idx = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
             >>> X = pd.DataFrame({'feature': range(100)}, index=idx)
-            >>> groups = [ent for ent in entities for _ in dates]
+            >>> groups = np.repeat(entities, 50)
+            >>> splitter = InSampleSplit(test_size=5)
             >>> for train_idx, test_idx in splitter.split(X, groups=groups):
-            ...     pass
+            ...     print(f"Train: {len(train_idx)}, Test: {len(test_idx)}")
         """
         # Validation des indices de X et y
         if y is not None:
@@ -850,13 +996,18 @@ class InSampleSplit(_BaseKFold):
     def _split(self, X, y=None, groups=None):
         """Internal method to generate train/test splits with data sorting verification.
         
+        Handles the core logic for creating in-sample splits, including data
+        validation, sorting, and index remapping back to original order.
+        
         Args:
-            X (array-like): Input features
-            y (array-like, optional): Target values. Defaults to None.
-            groups (array-like, optional): Group labels. Defaults to None.
+            X: Input features array, DataFrame, or Series.
+            y: Target values with same structure as X. Not used in splitting
+                logic but validated for index consistency.
+            groups: Group labels for panel data. None for time series data.
             
         Yields:
-            tuple: (train_indices, test_indices) mapped back to original data order
+            Tuple of (train_indices, test_indices) mapped back to original
+            data order if sorting was performed.
         """
         # Validation des arguments
         (X,) = indexable(X)
@@ -886,12 +1037,13 @@ class InSampleSplit(_BaseKFold):
         allowing the model to learn from future information relative to the test period.
         
         Args:
-            X (array-like): Input features
-            test_indices (array): Indices of test samples
-            groups (array-like, optional): Group labels for panel data
+            X: Input features array or DataFrame.
+            test_indices: Array of test sample indices.
+            groups: Group labels for panel data. None for time series data.
             
         Returns:
-            np.ndarray: Array of training indices that include the test period
+            Array of training indices that include the test period, respecting
+            max_train_size constraints while ensuring test period is included.
         """
         # Si les groupes ne sont pas spécifiés, on applique une logique de série temporelle
         if groups is None:
@@ -905,13 +1057,15 @@ class InSampleSplit(_BaseKFold):
         """Calculate training indices for time series data in in-sample validation.
         
         For time series in-sample validation, training data includes all observations
-        up to and including the test period.
+        up to and including the test period, with optional max_train_size constraint.
         
         Args:
-            test_indices (array): Indices of test samples
+            test_indices: Array of test sample indices.
             
         Returns:
-            np.ndarray: Array of training indices including the test period
+            Array of training indices including the test period, from either the
+            beginning of data or from (max_test_idx + 1 - max_train_size) to
+            (max_test_idx + 1) if max_train_size is specified.
         """
         # Identification du dernier indice de test
         max_test_idx = max(test_indices)
@@ -927,7 +1081,7 @@ class InSampleSplit(_BaseKFold):
             train_start = max(0, train_end - actual_train_size)
             return np.arange(train_start, train_end)
         else:
-            # Si aucune limite, utilise toutes les données depuis le début
+            # Si aucune limite, utilise toutes les données depuis le début jusqu'à la date de fin d'entraînement
             return np.arange(0, train_end)
     
     # Méthode auxiliaire d'extraction des indices d'entraînement pour les données de panel
@@ -935,27 +1089,31 @@ class InSampleSplit(_BaseKFold):
         """Calculate training indices for panel data with groups in in-sample validation.
         
         For panel data in-sample validation, training indices are calculated separately
-        for each group, including the test period for each group.
+        for each group, including the test period for each group. Uses precomputed
+        mappings for efficient group operations.
         
         Args:
-            test_indices (array): Indices of test samples
-            groups (array): Group labels for each sample
+            test_indices: Array of test sample indices.
+            groups: Array of group labels for each sample.
             
         Returns:
-            np.ndarray: Array of training indices for all groups combined
+            Array of training indices for all groups combined, where each group's
+            training data includes its respective test periods.
+            
+        Raises:
+            ValueError: If no test indices are found for any group.
         """
-        # Identification des groupes distincts
-        unique_groups = np.unique(groups)
-        # Initialisation des indices d'entraînement
+        # Pré-calcul des mappings de groupes pour optimiser les opérations répétées
+        group_mappings = _precompute_group_mappings(groups)
+        # Initialisation de la liste des indices d'entraînement
         train_indices = []
         
-        # Parcours des groupes
-        for group in unique_groups:
-            # Identification des indices du groupe
-            group_mask = groups == group
-            group_indices = np.where(group_mask)[0]
-            # Identification des indices de test du groupe
-            group_test_indices = test_indices[np.isin(test_indices, group_indices)]
+        # Parcours optimisé des groupes en utilisant les mappings pré-calculés
+        for group, group_indices in group_mappings.items():
+            # Identification vectorisée des indices de test du groupe (plus efficace que np.isin)
+            # Utilisation d'un masque booléen pour améliorer les performances
+            test_mask = np.isin(test_indices, group_indices)
+            group_test_indices = test_indices[test_mask]
             
             # Traitement seulement si des indices de test existent pour ce groupe
             if len(group_test_indices) > 0:
@@ -975,8 +1133,10 @@ class InSampleSplit(_BaseKFold):
                     train_start = max(group_start, train_end - actual_train_size)
                     train_indices.extend(range(train_start, train_end))
                 else:
-                    # Si aucune limite, utilise toutes les données du groupe
+                    # Si aucune limite, utilise toutes les données du groupe avant la fin du test
                     train_indices.extend(range(group_start, train_end))
+            else:
+                raise ValueError(f"Cannot find test indices for the group : {group}")
         
         return np.array(train_indices)
     
@@ -984,24 +1144,25 @@ class InSampleSplit(_BaseKFold):
     def _iter_test_indices(self, X, y=None, groups=None):
         """Generate test indices for in-sample cross-validation splits.
         
-        For in-sample validation, all test indices are returned at once rather than 
-        iterating through multiple splits. This is the key difference from out-of-sample validation.
-        
-        Behavior with test_indices:
-        - Multiple test_indices: All specified indices are included in test set, test_size is ignored
-        - Single test_index: Uses test_size parameter to define test period size
-        - No test_indices: Uses default behavior with test_size
+        For in-sample validation, creates a single test set rather than iterating
+        through multiple splits. This is the key difference from out-of-sample validation.
         
         Args:
-            X (array-like): Input features
-            y (array-like, optional): Target values. Defaults to None.
-            groups (array-like, optional): Group labels for panel data. Defaults to None.
+            X: Input features array, DataFrame, or Series.
+            y: Target values. Not used in splitting logic but validated
+                for index consistency if provided.
+            groups: Group labels for panel data. None for time series data.
             
         Yields:
-            np.ndarray: Array of all test indices for the single in-sample split
+            Array of test indices for the single in-sample split. Behavior depends
+            on test_indices parameter:
+            - Multiple test_indices: All specified indices included, test_size ignored
+            - Single test_index: Uses test_size parameter to define period size
+            - No test_indices: Uses default behavior with calculated test_size
             
         Raises:
-            ValueError: If test_indices contain invalid positions
+            ValueError: If test_indices contain positions beyond data length
+                or negative indices.
         """
         # Validation des arguments
         (X,) = indexable(X)
@@ -1043,17 +1204,19 @@ class InSampleSplit(_BaseKFold):
     def _iter_timeseries_test_indices(self, resolved_test_positions, test_size, n_samples):
         """Generate test indices for time series data in in-sample validation.
         
-        For time series in-sample validation:
-        - If multiple test_indices provided: includes all of them, ignoring test_size
-        - If single test_index provided: uses test_size parameter
+        For time series in-sample validation, the behavior depends on the number
+        of test indices provided. Multiple indices are all included; single index
+        uses test_size parameter.
         
         Args:
-            resolved_test_positions (array): Resolved test positions
-            test_size (int): Size of test set (ignored if multiple test indices)
-            n_samples (int): Total number of samples
+            resolved_test_positions: Array of resolved test positions.
+            test_size: Size of test set (ignored if multiple test indices provided).
+            n_samples: Total number of samples in the dataset.
             
         Yields:
-            np.ndarray: Array of test indices
+            Array of test indices. If multiple test positions are provided, yields
+            all valid positions. If single position, yields consecutive indices
+            up to test_size.
         """
         # Vérification du nombre d'indices de test fournis
         if len(resolved_test_positions) > 1:
@@ -1075,17 +1238,23 @@ class InSampleSplit(_BaseKFold):
     def _iter_group_test_indices(self, X, resolved_test_positions, groups):
         """Generate test indices for group-aware splits in in-sample validation.
         
-        For panel data in-sample validation:
-        - If multiple test_indices provided: includes all of them across groups, ignoring test_size
-        - If single test_index provided: uses test_size parameter
+        For panel data in-sample validation, handles temporal indices and direct
+        positions. Behavior depends on number of test indices: multiple indices
+        are all included, single index uses test_size parameter.
         
         Args:
-            X (array-like): Input features
-            resolved_test_positions (array): Resolved test positions  
-            groups (array): Group labels
+            X: Input features DataFrame or Series, typically with MultiIndex.
+            resolved_test_positions: Array of resolved test positions.
+            groups: Array of group labels for each sample.
             
         Yields:
-            np.ndarray: Array of test indices for all groups
+            Array of test indices for all groups. For multiple test indices,
+            includes all valid positions across groups. For single index,
+            creates test periods of test_size within each group.
+            
+        Note:
+            Issues warnings for missing periods but continues processing.
+            Returns sorted unique indices to avoid duplicates.
         """
         # Calcul du nombre d'observations
         n_samples = _num_samples(X)
@@ -1115,7 +1284,7 @@ class InSampleSplit(_BaseKFold):
                             warnings.warn(f"Cannot find test period '{test_time}' for entity '{group}'")
                             continue
             else:
-                # Un seul indice de test : utilisation du comportement actuel avec test_size
+                # Un seul indice de test : utilisation du comportement avec test_size
                 first_test_time = self.test_indices[0]
                 # Pré-calcul des mappings pour optimiser les opérations répétées
                 multiindex_mappings = _precompute_multiindex_mappings(X)
@@ -1179,14 +1348,16 @@ class InSampleSplit(_BaseKFold):
     def _iter_default_timeseries_test_indices(self, X, n_samples):
         """Generate default test indices for time series in in-sample validation.
         
-        Uses the last portion of the data for testing.
+        Uses the last portion of the data for testing when no specific test_indices
+        are provided. Test size is calculated based on n_splits or uses provided test_size.
         
         Args:
-            X (array-like): Input features
-            n_samples (int): Total number of samples
+            X: Input features array, DataFrame, or Series.
+            n_samples: Total number of samples in the dataset.
             
         Yields:
-            np.ndarray: Array of test indices
+            Array of test indices from the end of the time series, with size
+            determined by test_size parameter or calculated from n_splits.
         """
         # Cas des séries-temporelles - utilisation de la dernière portion
         test_size = self.test_size if self.test_size is not None else n_samples // (self.n_splits + 1)
@@ -1197,14 +1368,21 @@ class InSampleSplit(_BaseKFold):
     def _iter_default_group_test_indices(self, X, groups):
         """Generate default test indices for panel data in in-sample validation.
         
-        Uses the last time period available for all groups.
+        Uses the last time period available for all groups when no specific
+        test_indices are provided. Assumes MultiIndex structure with entity-date format.
         
         Args:
-            X (array-like): Input features  
-            groups (array): Group labels
+            X: Input features DataFrame with MultiIndex, typically with
+                (entity, date) structure.
+            groups: Array of group labels for each sample.
             
         Yields:
-            np.ndarray: Array of test indices for all groups
+            Array of test indices for all groups from the last available
+            time period, with size controlled by test_size parameter.
+            
+        Note:
+            Issues warnings for groups where the test period cannot be found
+            but continues processing other groups.
         """
         # Cas des données de panel avec des groupes
         # Identification des différents groupes uniques
