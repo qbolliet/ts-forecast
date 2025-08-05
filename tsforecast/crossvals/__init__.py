@@ -32,7 +32,7 @@ from .base import OutOfSampleSplit, InSampleSplit
 from .time_series import TSOutOfSampleSplit, TSInSampleSplit
 
 # Import des classes pour les données de panel
-from .panel import PanelOutOfSampleSplit, PanelInSampleSplit
+from .panel import PanelOutOfSampleSplit, PanelInSampleSplit, PanelOutOfSampleSplitPerEntity, PanelInSampleSplitPerEntity
 
 __all__ = [
     # Base
@@ -41,7 +41,10 @@ __all__ = [
     # Séries temporelles
     "TSOutOfSampleSplit", 
     "TSInSampleSplit",
-    # Panel
+    # Panel - global
     "PanelOutOfSampleSplit",
     "PanelInSampleSplit",
+    # Panel - Par entité
+    "PanelOutOfSampleSplitPerEntity",
+    "PanelInSampleSplitPerEntity"
 ]
