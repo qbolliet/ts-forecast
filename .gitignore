@@ -182,4 +182,5 @@ outputs/*
 !outputs/.gitkeep
 
 # Claude
+.claude/
 CLAUDE.md
