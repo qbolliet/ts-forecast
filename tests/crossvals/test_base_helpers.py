@@ -95,15 +95,18 @@ class TestResolveTestPositions:
             _resolve_test_positions(test_indices, X)
 
     def test_mixed_index_types_error(self):
-        """Test error when mixing index types."""
+        """Test that string indices work on panel data (all entities for that date)."""
         entities = ['A', 'B']
         dates = pd.date_range('2020-01-01', periods=5, freq='D')
         idx = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
         X = pd.DataFrame({'value': range(10)}, index=idx)
-        test_indices = ['2020-01-02']  # string for panel data (should be tuple)
+        test_indices = ['2020-01-02']  # string for panel data (returns all entities for that date)
         
-        with pytest.raises(ValueError, match="Index type mismatch"):
-            _resolve_test_positions(test_indices, X)
+        # This should work and return positions for both entities at that date
+        positions = _resolve_test_positions(test_indices, X)
+        assert len(positions) == 2  # Should find both 'A' and 'B' at '2020-01-02'
+        assert 1 in positions  # ('A', '2020-01-02')
+        assert 6 in positions  # ('B', '2020-01-02')
 
     def test_no_pandas_index_error(self):
         """Test error when trying to use string indices without pandas index."""

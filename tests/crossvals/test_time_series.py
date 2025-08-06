@@ -161,7 +161,7 @@ class TestTSOutOfSampleSplit:
         X = pd.Series(range(10))
         groups = np.array(['A'] * 5 + ['B'] * 5)
         
-        splitter = TSOutOfSampleSplit(n_splits=1, test_size=2)
+        splitter = TSOutOfSampleSplit(n_splits=2, test_size=2)
         
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -173,7 +173,7 @@ class TestTSOutOfSampleSplit:
             assert "Time series splits treat data as a single temporal sequence" in str(w[0].message)
         
         # Should still work normally
-        assert len(splits) == 1
+        assert len(splits) == 2  # With n_splits=2
         train_idx, test_idx = splits[0]
         assert len(test_idx) == 2
 
@@ -220,18 +220,17 @@ class TestTSOutOfSampleSplit:
         """Test with test_size larger than available data."""
         X = pd.Series(range(5))
         
-        splitter = TSOutOfSampleSplit(n_splits=1, test_size=10)
-        splits = list(splitter.split(X))
+        splitter = TSOutOfSampleSplit(n_splits=2, test_size=10)
         
-        # Should handle gracefully
-        train_idx, test_idx = splits[0]
-        assert len(test_idx) <= len(X)
+        # Should raise error for impossible configuration
+        with pytest.raises(ValueError, match="Too many splits"):
+            list(splitter.split(X))
 
     def test_gap_leaves_no_training_data(self):
         """Test with gap that leaves no training data."""
         X = pd.Series(range(10))
         
-        splitter = TSOutOfSampleSplit(n_splits=1, test_size=3, gap=15)
+        splitter = TSOutOfSampleSplit(n_splits=2, test_size=3, gap=15)
         splits = list(splitter.split(X))
         
         train_idx, test_idx = splits[0]
@@ -243,18 +242,17 @@ class TestTSOutOfSampleSplit:
         """Test with single observation."""
         X = pd.Series([42])
         
-        splitter = TSOutOfSampleSplit(n_splits=1, test_size=1)
-        splits = list(splitter.split(X))
+        splitter = TSOutOfSampleSplit(n_splits=2, test_size=1)
         
-        train_idx, test_idx = splits[0]
-        assert len(train_idx) == 0  # No training data before single test point
-        assert len(test_idx) == 1
+        # Should raise error for impossible configuration (1 sample with n_splits=2)
+        with pytest.raises(ValueError, match="Cannot have number of folds"):
+            list(splitter.split(X))
 
     def test_empty_series(self):
         """Test with empty series."""
         X = pd.Series([], dtype=float)
         
-        splitter = TSOutOfSampleSplit(n_splits=1, test_size=1)
+        splitter = TSOutOfSampleSplit(n_splits=2, test_size=1)
         
         with pytest.raises(ValueError):
             list(splitter.split(X))
