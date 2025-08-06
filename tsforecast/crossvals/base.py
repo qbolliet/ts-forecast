@@ -21,6 +21,9 @@ def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]]
     Args:
         test_indices: List of indices to resolve. Can be dates, strings, tuples
             (for panel data), or integers. If None, returns None.
+            For panel data: 
+            - Tuples (entity, date) for specific entity-date combinations
+            - Dates/strings for all entities at those dates
         X: Input data with index to match against. Must be a pandas Series or
             DataFrame with appropriate index structure.
         
@@ -40,7 +43,7 @@ def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]]
         >>> positions = _resolve_test_positions(test_dates, X)
         >>> print(positions)  # [4, 7]
         
-        >>> # Panel data example
+        >>> # Panel data example with tuples (specific entity-date)
         >>> entities = ['A', 'B']
         >>> dates = pd.date_range('2020-01-01', periods=5, freq='D')
         >>> idx = pd.MultiIndex.from_product([entities, dates])
@@ -48,6 +51,11 @@ def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]]
         >>> test_tuples = [('A', '2020-01-03'), ('B', '2020-01-04')]
         >>> positions = _resolve_test_positions(test_tuples, X)
         >>> print(positions)  # [2, 8]
+        
+        >>> # Panel data example with dates only (all entities at those dates)
+        >>> test_dates = ['2020-01-03', '2020-01-04']
+        >>> positions = _resolve_test_positions(test_dates, X)
+        >>> print(positions)  # [2, 7, 3, 8] (A and B for each date)
     """
 
     # Si aucun indice n'est renseigné, ne renvoie rien
@@ -76,16 +84,28 @@ def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]]
                 
                 # Initialisation des positions
                 positions = []
+                
                 # Parcours des indices
                 for idx in test_indices:
                     # Gestion spécifique pour les données de panel avec MultiIndex
-                    if is_panel_data and isinstance(idx, tuple):
-                        # Vérification que l'indice recherché est présent
-                        if idx in X.index:
-                            # Ajout de la position de l'indice
-                            positions.append(X.index.get_loc(idx))
+                    if is_panel_data:
+                        if isinstance(idx, tuple):
+                            # Cas classique : tuple (entity, date) pour une position spécifique
+                            if idx in X.index:
+                                positions.append(X.index.get_loc(idx))
+                            else:
+                                raise ValueError(f"Panel index {idx} not found in data")
                         else:
-                            raise ValueError(f"Panel index {idx} not found in data")
+                            # Cas où le test_indice est une date seule pour toutes les entités
+                            # Recherche de toutes les positions où la date (niveau 1) correspond, pour totes les entités
+                            date_level_values = X.index.get_level_values(1)  # Niveau des dates
+                            matching_positions = np.where(date_level_values == idx)[0]
+                            
+                            if len(matching_positions) == 0:
+                                raise ValueError(f"Date {idx} not found in panel data")
+                            
+                            positions.extend(matching_positions.tolist())
+                    
                     # Gestion pour les séries temporelles avec Index simple
                     elif not is_panel_data and not isinstance(idx, tuple):
                         # Vérification que l'indice recherché est présent
@@ -95,13 +115,14 @@ def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]]
                         else:
                             raise ValueError(f"Time series index {idx} not found in data")
                     else:
-                        raise ValueError(f"Index type mismatch: {'panel' if is_panel_data else 'time series'} data expects {'tuple' if is_panel_data else 'scalar'} indices, got {type(idx)}")
+                        raise ValueError(f"Index type mismatch: time series data cannot use tuple indices")
                 
                 return np.array(positions)
             except Exception as e:
                 raise ValueError(f"Error resolving test_indices: {e}")
     
     return np.array([test_indices]) if np.isscalar(test_indices) else np.array(test_indices)
+
 
 # Méthode auxiliaire de pré-calcul des mappings de groupes pour optimiser les recherches répétées
 def _precompute_group_mappings(groups):
@@ -285,8 +306,8 @@ def _verify_and_sort_data(X, groups=None):
         if not is_sorted:
             warnings.warn("Panel data is not sorted by group then by date. Sorting automatically.")
             # Tri optimisé par groupe puis par date
-            sort_indices = X.index.to_frame().sort_values([X.index.names[0], X.index.names[1]]).index
-            # Optimisation : utilisation de get_indexer pour traitement vectorisé au lieu d'une list comprehension
+            sort_indices = X.index.to_frame(name=['entity_col', 'date_col']).sort_values(['entity_col', 'date_col']).index
+            # Extraction des positions
             sort_positions = X.index.get_indexer(sort_indices)
             
             X_sorted = X.iloc[sort_positions] if hasattr(X, 'iloc') else X[sort_positions]
@@ -1308,13 +1329,11 @@ class InSampleSplit(_BaseKFold):
                             # Fallback pour les cas sans MultiIndex
                             group_positions = []
                         
-                        if group_positions:
-                            group_end = max(group_positions) + 1  # +1 pour la limite exclusive
-                            # Calcul de la position de fin du test en respectant les limites du groupe
-                            group_test_end = min(group_test_idx + test_size, group_end, n_samples)
-                        else:
-                            # Fallback si on ne peut pas déterminer les limites du groupe
-                            group_test_end = min(group_test_idx + test_size, n_samples)
+                        # Identification de la dernière position du groupe
+                        group_end = max(group_positions) + 1 if len(group_positions) > 0 else n_samples
+
+                        # Identification de l'indice de fin de période de test
+                        group_test_end = min(group_test_idx + test_size, group_end)
 
                         # Ajout des indices de test
                         test_indices.extend(range(group_test_idx, group_test_end))
@@ -1395,8 +1414,6 @@ class InSampleSplit(_BaseKFold):
         if hasattr(X, 'index') and hasattr(X.index, 'get_level_values'):
             # Recherche des dates
             time_points = X.index.get_level_values(1).unique()
-            # Calcul du nombre de dates différentes
-            n_time_points = len(time_points)
             
             # Utilisation de la dernière date disponible pour validation in-sample
             test_time = time_points[-1]
