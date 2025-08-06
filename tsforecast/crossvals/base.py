@@ -283,27 +283,18 @@ def _verify_and_sort_data(X, groups=None):
         if not hasattr(X, 'index') or not hasattr(X.index, 'nlevels') or X.index.nlevels < 2:
             raise ValueError("Panel data requires MultiIndex with at least 2 levels (group, date)")
         
-        # Vérification du tri par groupe puis par date
-        is_sorted = True
-        previous_group = None
-        previous_date = None
+        # Extraction vectorisée des niveaux
+        entities = X.index.get_level_values(0)  # Niveau des entités
+        dates = X.index.get_level_values(1)     # Niveau des dates
         
-        for idx in X.index:
-            current_group, current_date = idx[0], idx[1]
-            
-            if previous_group is not None:
-                # Vérification que les groupes sont regroupés
-                if current_group < previous_group:
-                    is_sorted = False
-                    break
-                # Vérification que les dates sont croissantes au sein d'un groupe
-                elif current_group == previous_group and current_date < previous_date:
-                    is_sorted = False
-                    break
-            
-            previous_group, previous_date = current_group, current_date
+        # Vérification du regroupement des entités (pas de discontinuités)
+        is_grouped = _check_entities_grouped(entities)
         
-        if not is_sorted:
+        # Vérification que les dates sont triées dans chaque groupe d'entité
+        dates_sorted_in_groups = _check_dates_sorted_within_groups(entities, dates)
+        
+        
+        if not (is_grouped and dates_sorted_in_groups):
             warnings.warn("Panel data is not sorted by group then by date. Sorting automatically.")
             # Tri optimisé par groupe puis par date
             sort_indices = X.index.to_frame(name=['entity_col', 'date_col']).sort_values(['entity_col', 'date_col']).index
@@ -317,6 +308,59 @@ def _verify_and_sort_data(X, groups=None):
         else:
             # Données déjà triées
             return X, groups, np.arange(len(X))
+
+# Vérification que les entités sont groupées
+def _check_entities_grouped(entities: pd.Index) -> bool:
+    """
+    Check if entities are grouped (adjacent, no discontinuities) using vectorized operations.
+    
+    Args:
+        entities: Index of entity values
+        
+    Returns:
+        bool: True if entities are properly grouped, False otherwise
+    """
+    # Conversion en codes catégoriels pour comparaisons efficaces
+    entity_codes = pd.Categorical(entities).codes
+    unique_entities = np.unique(entity_codes)
+    
+    # Vérification vectorisée : pour chaque entité, ses positions doivent être consécutives
+    for entity_code in unique_entities:
+        # Extraction des positions
+        entity_positions = np.where(entity_codes == entity_code)[0]
+        if len(entity_positions) > 1:
+            # Vérification que les positions sont consécutives
+            position_diffs = np.diff(entity_positions)
+            if not np.all(position_diffs == 1):
+                return False
+    
+    return True
+
+# Vérification que les dates sont triées au sein de chaque groupe
+def _check_dates_sorted_within_groups(entities: pd.Index, dates: pd.Index) -> bool:
+    """
+    Check if dates are sorted within each entity group using vectorized operations.
+    
+    Args:
+        entities: Index of entity values  
+        dates: Index of date values
+        
+    Returns:
+        bool: True if dates are sorted within each group, False otherwise
+    """
+    # Utilisation de groupby pour vérification vectorisée
+    try:
+        grouped_dates = pd.Series(dates.values, index=entities).groupby(level=0)
+        
+        # Vérification que chaque groupe est monotone croissant
+        for _, group_dates in grouped_dates:
+            if not pd.Series(group_dates.values).is_monotonic_increasing:
+                return False
+        
+        return True
+    except Exception:
+        # Fallback en cas d'erreur avec la méthode vectorisée
+        return False
 
 # Classe de base de pour crossval out of sample
 class OutOfSampleSplit(_BaseKFold):
