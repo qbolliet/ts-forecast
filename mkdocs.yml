@@ -1,0 +1,100 @@
+site_name: Time series forecast
+site_url: https://qbolliet.github.io/ts-forecast/
+repo_url: https://github.com/qbolliet/ts-forecast
+site_dir: site
+docs_dir: docs
+theme:
+  name: material
+  pygments_style: 'lovelace'
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  features:
+    - content.tabs.link
+    - content.code.annotate
+    - content.code.copy
+    - navigation.sections
+    #- navigation.expand
+    - navigation.path
+  palette:
+   # Palette toggle for light mode
+    - scheme: default
+      toggle:
+        icon: material/brightness-7 
+        name: Switch to dark mode
+
+    # Palette toggle for dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+# extra_css:
+#   - assets/stylesheets/extra.css
+
+markdown_extensions:
+  - tables
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - markdown.extensions.sane_lists
+  - pymdownx.arithmatex:
+      generic: true
+
+plugins:
+  - search
+  - autorefs
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src, docs/snippets]
+          import:
+          - https://docs.python.org/3/objects.inv
+          - https://mkdocstrings.github.io/objects.inv
+          - https://mkdocstrings.github.io/autorefs/objects.inv
+          - https://mkdocstrings.github.io/griffe/objects.inv
+          - https://python-markdown.github.io/objects.inv
+          options:
+            docstring_options:
+              ignore_init_summary: true
+            show_root_heading: true 
+            merge_init_into_class: false 
+            docstring_style: google
+            docstring_section_style: table
+            heading_level: 1
+            filters: ["!^_"]
+            inherited_members: true
+            parameter_headings: true
+            preload_modules: [mkdocstrings]
+            relative_crossrefs: true
+            scoped_crossrefs: true
+            separate_signature: true
+            show_bases: false
+            show_inheritance_diagram: true
+            show_root_full_path: false
+            show_signature_annotations: true
+            show_source: true
+            show_symbol_type_heading: false
+            show_symbol_type_toc: true
+            signature_crossrefs: true
+            summary: true
+            unwrap_annotated: true
+
+extra_javascript:
+  - https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.4/MathJax.js?config=TeX-AMS-MML_HTMLorMML
+
+nav:
+- Package description: index.md
+- API Documentation:
+  - crossvals:
+    - PanelOutOfSampleSplit: api/crossvals/PanelOutOfSampleSplit.md
+    - PanelInSampleSplit: api/crossvals/PanelInSampleSplit.md
+    - PanelOutOfSampleSplitPerEntity: api/crossvals/PanelOutOfSampleSplitPerEntity.md
+    - PanelInSampleSplitPerEntity: api/crossvals/PanelInSampleSplitPerEntity.md
+    - OutOfSampleSplit: api/crossvals/OutOfSampleSplit.md
+    - InSampleSplit: api/crossvals/InSampleSplit.md
+    - TSOutOfSampleSplit: api/crossvals/TSOutOfSampleSplit.md
+    - TSInSampleSplit: api/crossvals/TSInSampleSplit.md

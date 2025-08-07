@@ -172,3 +172,15 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# data
+data/*
+!data/.gitkeep
+
+# outputs
+outputs/*
+!outputs/.gitkeep
+
+# Claude
+.claude/
+CLAUDE.md
