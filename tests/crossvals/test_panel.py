@@ -3,12 +3,13 @@
 This module tests the panel data specific cross-validation classes
 including basic panel splits and per-entity splits.
 """
-
+# Importation des modules
+# Modules de base
 import numpy as np
 import pandas as pd
 import pytest
 import warnings
-
+# Fonctions et classes de panel à tester
 from tsforecast.crossvals.panel import (
     _extract_groups_from_panel,
     PanelOutOfSampleSplit,

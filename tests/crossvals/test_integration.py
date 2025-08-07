@@ -3,12 +3,13 @@
 This module tests the integration between different components and
 real-world usage scenarios.
 """
-
+# Importation des modules
+# Modules de base
 import numpy as np
 import pandas as pd
 import pytest
 import warnings
-
+# Validations croisées à tester
 from tsforecast.crossvals import (
     OutOfSampleSplit,
     InSampleSplit,

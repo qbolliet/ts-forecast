@@ -2,9 +2,11 @@
 
 This module provides common fixtures and configuration for all tests.
 """
-
+# Importation des modules
+# Modules de base
 import numpy as np
 import pandas as pd
+# Tests
 import pytest
 
 

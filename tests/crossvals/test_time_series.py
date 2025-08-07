@@ -3,12 +3,13 @@
 This module tests the TSOutOfSampleSplit and TSInSampleSplit classes
 specialized for time series data.
 """
-
+# Importation des modules
+# Modules de base
 import numpy as np
 import pandas as pd
 import pytest
 import warnings
-
+# Importation des classes de séries temporelles à tester
 from tsforecast.crossvals.time_series import TSOutOfSampleSplit, TSInSampleSplit
 
 

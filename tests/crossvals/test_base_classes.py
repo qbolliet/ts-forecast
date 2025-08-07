@@ -3,12 +3,12 @@
 This module tests the core OutOfSampleSplit and InSampleSplit classes
 that provide the foundation for all cross-validation functionality.
 """
-
+# Importation des modules
 import numpy as np
 import pandas as pd
 import pytest
 import warnings
-
+# Importation des classes de base
 from tsforecast.crossvals.base import OutOfSampleSplit, InSampleSplit
 
 

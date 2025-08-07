@@ -2,12 +2,13 @@
 
 This module tests the utility functions used across the crossvals package.
 """
-
+# Importation des modules
 import numpy as np
 import pandas as pd
 import pytest
 import warnings
 
+# Importation des fonctions auxiliaires
 from tsforecast.crossvals.base import (
     _resolve_test_positions,
     _precompute_group_mappings,
