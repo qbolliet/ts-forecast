@@ -25,7 +25,7 @@ Examples:
     ...     # Perform validation across entities
 """
 
-# Importtation des classes de base
+# Importation des classes de base
 from .base import OutOfSampleSplit, InSampleSplit
 
 # Importation des classes pour les séries temporelles

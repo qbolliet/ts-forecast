@@ -3,13 +3,14 @@
 This module provides functions to detect and validate frequencies in time series
 and panel data.
 """
-
+# Importation des modules
+# Modules de base
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, Union, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
-
+# Classe de détection de la fréquence de séries temporelles et de panel
 class FrequencyDetector:
     """Detect frequency of time series data.
     
@@ -20,13 +21,14 @@ class FrequencyDetector:
         frequency_mapping (Dict[str, str]): Mapping between detected and standard frequencies
         min_observations (int): Minimum observations required for frequency detection
     """
-    
-    def __init__(self, min_observations: int = 10):
+    # Initialisation
+    def __init__(self, min_observations: int = 2):
         """Initialize the FrequencyDetector.
         
         Args:
             min_observations: Minimum number of observations required to detect frequency
         """
+        # Nombre d'observations minimal pour déterminer la fréquence d'une série
         self.min_observations = min_observations
         
         # Mapping des fréquences pandas vers des noms standardisés
