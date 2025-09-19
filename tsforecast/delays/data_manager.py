@@ -81,23 +81,27 @@ class ReleaseDataManager:
                                     new_data: pd.DataFrame,
                                     existing_data: pd.DataFrame,
                                     download_date: Union[str, datetime],
-                                    reference_point: Optional[str] = None) -> Dict[str, Any]:
+                                    reference_point: Optional[str] = None,
+                                    detection_mode: str = 'new_only') -> Dict[str, Any]:
         """Compare two datasets and calculate publication delay information.
 
-        This method identifies new observations in new_data that were not
-        present in existing_data, then calculates publication delays.
+        This method identifies new or changed observations in new_data compared
+        to existing_data, then calculates publication delays.
 
         Args:
             new_data: Dataset containing new downloaded data
             existing_data: Dataset of already stored data
             download_date: Download date of new data
             reference_point: Reference point for delay calculation ('start' or 'end')
+            detection_mode: Type of changes to detect:
+                - 'new_only': Only null → non-null changes (default)
+                - 'all_changes': Both null → non-null and value changes
 
         Returns:
             Dictionary containing comparison and calculation statistics
 
         Raises:
-            ValueError: If data does not respect expected format
+            ValueError: If data does not respect expected format or invalid detection_mode
         """
         # Validation des paramètres d'entrée
         new_data = self._validate_input_data(new_data)
@@ -105,8 +109,12 @@ class ReleaseDataManager:
         download_date = self._parse_download_date(download_date)
         reference_point = reference_point or self.default_reference_point_
 
+        # Validation du mode de détection
+        if detection_mode not in ['new_only', 'all_changes']:
+            raise ValueError("detection_mode must be 'new_only' or 'all_changes'")
+
         # Identification des nouvelles observations
-        new_observations = self._identify_new_observations(new_data, existing_data)
+        new_observations = self._identify_new_observations(new_data, existing_data, detection_mode)
 
         # Vérification que des nouvelles observations existent
         if new_observations.empty:
@@ -196,141 +204,132 @@ class ReleaseDataManager:
     # Méthode auxiliaire d'identification des nouvelles observations
     def _identify_new_observations(self,
                                   new_data: pd.DataFrame,
-                                  existing_data: pd.DataFrame) -> pd.DataFrame:
-        """Identify new observations in new_data compared to existing_data.
+                                  existing_data: pd.DataFrame,
+                                  detection_mode: str = 'new_only') -> pd.DataFrame:
+        """Identify new or changed observations.
+
+        This method uses pandas vectorized operations instead of loops for
+        significantly better performance on large datasets.
 
         Args:
-            new_data: New data
-            existing_data: Existing data
+            new_data: New data DataFrame
+            existing_data: Existing data DataFrame
+            detection_mode: 'new_only' or 'all_changes'
 
         Returns:
-            DataFrame containing only new observations
+            DataFrame containing only new or changed observations
         """
-        # Définition des colonnes pour l'identification unique des observations
+        # Définition des colonnes d'identification et de données
         id_cols = self.panel_cols_ + [self.time_col_]
+        data_cols = [col for col in new_data.columns if col not in id_cols]
 
-        # Colonnes de données (indicateurs)
-        data_cols = [col for col in new_data.columns
-                    if col not in id_cols]
+        # Vérification que les deux DataFrames ont les mêmes colonnes de données
+        existing_data_cols = [col for col in existing_data.columns if col not in id_cols]
+        common_data_cols = list(set(data_cols).intersection(set(existing_data_cols)))
 
-        # Initialisation de la liste des nouvelles observations
-        new_observations = []
+        if not common_data_cols:
+            # Aucune colonne commune, toutes les observations sont nouvelles
+            return self._format_observations_output(new_data, data_cols)
 
-        # Groupement pour optimiser la comparaison
-        if self.panel_cols_:
-            # Données panel : comparaison par groupe
-            for panel_values, new_group in new_data.groupby(self.panel_cols_):
-                # Recherche du groupe correspondant dans les données existantes
-                mask = np.ones(len(existing_data), dtype=bool)
-                for i, col in enumerate(self.panel_cols_):
-                    if isinstance(panel_values, tuple):
-                        mask &= (existing_data[col] == panel_values[i])
-                    else:
-                        mask &= (existing_data[col] == panel_values)
+        # Création d'index multi-niveaux pour l'alignement
+        new_indexed = new_data.set_index(id_cols)[common_data_cols]
+        existing_indexed = existing_data.set_index(id_cols)[common_data_cols]
 
-                existing_group = existing_data[mask]
+        # Alignement des DataFrames sur l'index commun
+        aligned_new, aligned_existing = new_indexed.align(existing_indexed, fill_value=np.nan)
 
-                # Identification des nouvelles observations pour ce groupe
-                group_new_obs = self._compare_group_data(
-                    new_group, existing_group, data_cols, panel_values
-                )
-                new_observations.extend(group_new_obs)
-        else:
-            # Série temporelle simple
-            group_new_obs = self._compare_group_data(
-                new_data, existing_data, data_cols, None
+        # Création des masques booléens pour les valeurs nulles
+        new_isnull = aligned_new.isnull()
+        existing_isnull = aligned_existing.isnull()
+
+        if detection_mode == 'new_only':
+            # Détection uniquement des valeurs null → non-null
+            # Condition: valeur existante était null ET nouvelle valeur n'est pas null
+            changes_mask = existing_isnull & ~new_isnull
+        else:  # 'all_changes'
+            # Détection de tous les changements (null → non-null ET valeur → nouvelle valeur)
+            # Condition: (ancien null ET nouveau non-null) OU (valeurs différentes)
+            changes_mask = (existing_isnull & ~new_isnull) | (
+                ~new_isnull & ~existing_isnull & (aligned_new != aligned_existing)
             )
-            new_observations.extend(group_new_obs)
 
-        # Conversion en DataFrame
-        if new_observations:
-            return pd.DataFrame(new_observations)
-        else:
-            return pd.DataFrame(columns=new_data.columns)
+        # Identification des observations avec des changements
+        changed_observations = []
 
-    # Méthode auxiliaire de comparaison des données pour chaque groupe
-    # /!\ Je vérifie ici l'égalité des anciennes et nouvelles valeurs. En faisant cela je capte également les révisions. J'aimerais ajouter un argument qui permette de signifier si je souhaite identifier toutes les modifications entre anciennes et nouvelles données ou seulement les remplacements des null / nan par des valeurs non nulles.             
-    def _compare_group_data(self,
-                           new_group: pd.DataFrame,
-                           existing_group: pd.DataFrame,
-                           data_cols: List[str],
-                           panel_values: Optional[Union[str, Tuple]]) -> List[Dict]:
-        """Compare les données d'un groupe et identifie les nouvelles observations.
-
-        Args:
-            new_group: Nouvelles données du groupe
-            existing_group: Données existantes du groupe
-            data_cols: Liste des colonnes de données à comparer
-            panel_values: Valeurs des colonnes panel pour ce groupe
-
-        Returns:
-            Liste des nouvelles observations sous forme de dictionnaires
-        """
-        # Initialisation de la liste des nouvelles observations
-        new_observations = []
-
-        # Parcours des lignes du nouveau groupe
-        for _, new_row in new_group.iterrows():
-            observation_date = new_row[self.time_col_]
-
-            # Recherche de l'observation correspondante dans les données existantes
-            existing_match = existing_group[
-                existing_group[self.time_col_] == observation_date
-            ]
-
-            # Vérification pour chaque indicateur
-            for col in data_cols:
-                new_value = new_row[col]
-
-                # Si la valeur est NaN, on l'ignore
-                if pd.isna(new_value):
-                    continue
-
-                # Vérification si cette observation est nouvelle
-                is_new_observation = False
-
-                if existing_match.empty:
-                    # Aucune observation à cette date dans les données existantes
-                    is_new_observation = True
+        # Parcours des lignes avec changements
+        for idx, row_changes in changes_mask.iterrows():
+            if row_changes.any():  # S'il y a au moins un changement dans cette ligne
+                # Récupération des valeurs d'index (panel + time)
+                if isinstance(idx, tuple):
+                    index_values = dict(zip(id_cols, idx))
                 else:
-                    existing_value = existing_match[col].iloc[0]
-                    if pd.isna(existing_value) and not pd.isna(new_value):
-                        # La valeur était manquante et est maintenant disponible
-                        is_new_observation = True
-                # Caractérisation de la nouvelle observation
-                if is_new_observation:
+                    index_values = {id_cols[0]: idx}
+
+                # Parcours des colonnes avec changements
+                for col in row_changes[row_changes].index:
+                    new_value = aligned_new.loc[idx, col]
+
+                    # Ignore les valeurs NaN dans les nouvelles données
+                    if pd.isna(new_value):
+                        continue
+
+                    # Création de l'observation
                     obs_dict = {
-                        'observation_date': observation_date,
+                        **index_values,
                         'indicator_name': col,
                         'value': new_value
                     }
+                    changed_observations.append(obs_dict)
 
-                    # Ajout des colonnes panel si présentes
-                    if self.panel_cols_ and panel_values is not None:
-                        if isinstance(panel_values, tuple):
-                            for i, panel_col in enumerate(self.panel_cols_):
-                                obs_dict[panel_col] = panel_values[i]
-                        else:
-                            obs_dict[self.panel_cols_[0]] = panel_values
+        # Conversion en DataFrame
+        if changed_observations:
+            return pd.DataFrame(changed_observations)
+        else:
+            # Retour d'un DataFrame vide avec les bonnes colonnes
+            empty_cols = id_cols + ['indicator_name', 'value']
+            return pd.DataFrame(columns=empty_cols)
 
-                    new_observations.append(obs_dict)
+    # Méthode auxiliaire pour formater la sortie des observations
+    def _format_observations_output(self, data: pd.DataFrame, data_cols: List[str]) -> pd.DataFrame:
+        """Format observations data into required output format.
 
-        return new_observations
+        Args:
+            data: Input DataFrame
+            data_cols: List of data columns to process
+
+        Returns:
+            Formatted DataFrame with observations
+        """
+        id_cols = self.panel_cols_ + [self.time_col_]
+        observations = []
+
+        # Parcours des lignes et colonnes pour créer les observations
+        for _, row in data.iterrows():
+            for col in data_cols:
+                if not pd.isna(row[col]):
+                    obs_dict = {
+                        **{id_col: row[id_col] for id_col in id_cols},
+                        'indicator_name': col,
+                        'value': row[col]
+                    }
+                    observations.append(obs_dict)
+
+        return pd.DataFrame(observations) if observations else pd.DataFrame(columns=id_cols + ['indicator_name', 'value'])
 
     # Méthode de calcul des délais de publication
     def _calculate_release_delays(self,
                                  new_observations: pd.DataFrame,
                                  download_date: datetime,
                                  reference_point: str) -> List[Dict[str, Any]]:
-        """Calcule les délais de publication pour les nouvelles observations.
+        """Calculate publication delays for new observations.
 
         Args:
-            new_observations: DataFrame des nouvelles observations
-            download_date: Date de téléchargement
-            reference_point: Point de référence ('start' ou 'end')
+            new_observations: DataFrame of new observations
+            download_date: Download date
+            reference_point: Reference point ('start' or 'end')
 
         Returns:
-            Liste des enregistrements de délais calculés
+            List of calculated delay records
         """
         # Initialisation de la liste des délais
         delay_records = []
@@ -344,7 +343,7 @@ class ReleaseDataManager:
 
                 # Détermination de la période (début et fin)
                 period_info = self._determine_period_boundaries(
-                    observation_date, indicator_name
+                    observation_date, indicator_name, new_observations
                 )
 
                 # Calcul du délai selon le point de référence
@@ -391,18 +390,20 @@ class ReleaseDataManager:
     # Détermination des dates de début et de fin de la période à laquelle se réfère une observation
     def _determine_period_boundaries(self,
                                    observation_date: datetime,
-                                   indicator_name: str) -> Dict[str, Any]:
+                                   indicator_name: str,
+                                   df : pd.DataFrame) -> Dict[str, Any]:
         """Determine period boundaries for a given observation.
 
         Args:
             observation_date: Date of observation
             indicator_name: Name of indicator
+            df: DataFrames containing the indicator
 
         Returns:
             Dictionary containing period information
         """
-        # Tentative de détection de la fréquence
-        frequency = self._detect_frequency_from_name(indicator_name)
+        # Tentative de détection de la fréquence avec le FrequencyDetector
+        frequency = FrequencyDetector().detect_frequency(df[indicator_name])
 
         if not frequency:
             # Fréquence par défaut si non détectée
@@ -449,30 +450,6 @@ class ReleaseDataManager:
             'period_end': period_end,
             'frequency': frequency
         }
-
-    def _detect_frequency_from_name(self, indicator_name: str) -> Optional[str]:
-        """Detect frequency from indicator name using simple heuristics.
-
-        Args:
-            indicator_name: Name of the indicator
-
-        Returns:
-            Frequency of the indicator or None if not detected
-        """
-        # Heuristiques simples basées sur le nom de l'indicateur
-        name_lower = indicator_name.lower()
-
-        if any(keyword in name_lower for keyword in ['daily', 'jour', 'day']):
-            return 'daily'
-        elif any(keyword in name_lower for keyword in ['weekly', 'semaine', 'week']):
-            return 'weekly'
-        elif any(keyword in name_lower for keyword in ['quarterly', 'trimestre', 'quarter', 'q1', 'q2', 'q3', 'q4']):
-            return 'quarterly'
-        elif any(keyword in name_lower for keyword in ['annual', 'yearly', 'annuel', 'year']):
-            return 'annual'
-        else:
-            # Par défaut, supposer mensuel
-            return 'monthly'
 
     # Méthode d'extraction des délais de publication
     def get_delay_records(self) -> List[Dict[str, Any]]:
