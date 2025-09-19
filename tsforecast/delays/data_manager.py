@@ -297,7 +297,7 @@ class ReleaseDataManager:
                     if pd.isna(existing_value) and not pd.isna(new_value):
                         # La valeur était manquante et est maintenant disponible
                         is_new_observation = True
-
+                # Caractérisation de la nouvelle observation
                 if is_new_observation:
                     obs_dict = {
                         'observation_date': observation_date,
@@ -317,6 +317,7 @@ class ReleaseDataManager:
 
         return new_observations
 
+    # Méthode de calcul des délais de publication
     def _calculate_release_delays(self,
                                  new_observations: pd.DataFrame,
                                  download_date: datetime,
@@ -331,8 +332,10 @@ class ReleaseDataManager:
         Returns:
             Liste des enregistrements de délais calculés
         """
+        # Initialisation de la liste des délais
         delay_records = []
 
+        # Parcours des nouvelles observations
         for _, obs in new_observations.iterrows():
             try:
                 # Détection de la fréquence de l'indicateur
@@ -385,6 +388,7 @@ class ReleaseDataManager:
 
         return delay_records
 
+    # Détermination des dates de début et de fin de la période à laquelle se réfère une observation
     def _determine_period_boundaries(self,
                                    observation_date: datetime,
                                    indicator_name: str) -> Dict[str, Any]:
@@ -470,6 +474,7 @@ class ReleaseDataManager:
             # Par défaut, supposer mensuel
             return 'monthly'
 
+    # Méthode d'extraction des délais de publication
     def get_delay_records(self) -> List[Dict[str, Any]]:
         """Get all stored delay records.
 
@@ -478,10 +483,12 @@ class ReleaseDataManager:
         """
         return self.delay_records_.copy()
 
+    # Méthode de réinitialisation des délais de publication
     def clear_delay_records(self) -> None:
         """Clear all stored delay records."""
         self.delay_records_.clear()
 
+    # Méthode résumant les délais de publication stockés
     def get_delays_summary(self,
                           indicator_name: Optional[str] = None,
                           entity_id: Optional[str] = None) -> Dict[str, Any]:
