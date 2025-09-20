@@ -14,6 +14,9 @@ import warnings
 from ..frequency.detector import FrequencyDetector
 
 # /!\ Voir si on a besoin de "time_col" et "panels_cols" ou si on peut utiliser les index (cohérent avec le comportement des crossvals)
+# /!\ Vérifier s'il n'y a pas de duplicat pour les id_cols dans validate_input_data
+# Ajouter un logger et supprimer l'output de compare_and_calculate_delays
+# Vérifier le format des délais de publication
 
 # Classe de création des données de publication sur la base de comparaison de jeux de données
 class ReleaseDataManager:
@@ -300,7 +303,9 @@ class ReleaseDataManager:
         Returns:
             Formatted DataFrame with observations
         """
+        # Colonnes permettant d'identifier une observation de manière certaine
         id_cols = self.panel_cols_ + [self.time_col_]
+        # Initialisation de la liste des observations
         observations = []
 
         # Parcours des lignes et colonnes pour créer les observations

@@ -3,14 +3,15 @@
 This module provides tools for analyzing publication delays from DataFrames
 and calculating median delays by indicator or entity.
 """
-
+# Importation des modules
+# Modules de base
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, Union, Tuple, List, Any
 from datetime import datetime, timedelta
 import warnings
 
-
+# Classe calculant le délai de publication médian à partir d'une collection de délai
 class ReleaseDelayCalculator:
     """Median delay calculator from stored data.
 
@@ -51,6 +52,7 @@ class ReleaseDelayCalculator:
         >>> {('France', 'GDP'): 42.0, ('Germany', 'GDP'): 38.0, ...}
     """
 
+    # Initialisation
     def __init__(self,
                  delay_data: Optional[pd.DataFrame] = None,
                  default_reference_point: str = 'end',
@@ -64,6 +66,7 @@ class ReleaseDelayCalculator:
             min_observations: Minimum number of observations required
             cache_results: Activate results cache
         """
+        # Initialisation des arguments
         self.delay_data_ = delay_data if delay_data is not None else pd.DataFrame()
         self.default_reference_point_ = default_reference_point
         self.min_observations_ = min_observations
@@ -74,9 +77,11 @@ class ReleaseDelayCalculator:
         if default_reference_point not in ['start', 'end']:
             raise ValueError("default_reference_point must be 'start' or 'end'")
 
+        # Validation du minimum d'observations
         if min_observations < 1:
             raise ValueError("min_observations must be at least 1")
 
+    # Méthode de calcul du délai de publication médian pour chaque indicateur et chaque individu
     def calculate_median_delays(self,
                                reference_point: Optional[str] = None,
                                group_by_entity: bool = False,
@@ -102,6 +107,7 @@ class ReleaseDelayCalculator:
         Raises:
             ValueError: If no data matches criteria
         """
+        # Extraction de la référence (début ou fin de période)
         reference_point = reference_point or self.default_reference_point_
 
         # Génération de la clé de cache
@@ -132,6 +138,7 @@ class ReleaseDelayCalculator:
 
         return median_delays
 
+    # Méthode de calcul de statistiques sur les délais de publication
     def calculate_comprehensive_stats(self,
                                     reference_point: Optional[str] = None,
                                     group_by_entity: bool = False,
@@ -177,8 +184,10 @@ class ReleaseDelayCalculator:
         else:
             grouping_cols = ['indicator_name']
 
+        # Initialisation du dictionnaire de statistiques
         stats_dict = {}
 
+        # Parcours des valeurs pour chaque individu
         for group_values, group_data in delay_data.groupby(grouping_cols):
             if len(group_data) < self.min_observations_:
                 continue
