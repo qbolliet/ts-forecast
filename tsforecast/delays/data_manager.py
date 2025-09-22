@@ -13,6 +13,199 @@ import warnings
 # Module de détection de la fréquence des séries
 from ..frequency.detector import FrequencyDetector
 
+# /!\ Faire un prompt pour intégrer un logger à cette fonction : comment mettre du logging optionnel + implémentation
+# Fonction de comparaison et d'inférence des délais de publication
+def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: pd.DataFrame, download_date: Union[str, datetime], detection_mode: str = 'new_only', reference_point: str = 'start', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None, frequency_detector: Optional[FrequencyDetector] = None) :
+    # Validation des arguments
+    # Validation des jeux de données
+    new_data = _validate_input_data(data=new_data, time_col=time_col, panel_cols=panel_cols)
+    existing_data = _validate_input_data(data=existing_data, time_col=time_col, panel_cols=panel_cols)
+    # Validation de la date de téléchargement
+    download_date = _parse_download_date(download_date=download_date)
+    # Validation du point de référence
+    if reference_point not in ['start', 'end']:
+        raise ValueError("reference_point must be 'start' or 'end'")
+    # Validation du mode de détection
+    if detection_mode not in ['new_only', 'all_changes']:
+        raise ValueError("detection_mode must be 'new_only' or 'all_changes'")
+
+    # Identification des nouvelles observations
+    new_observations = _identify_new_observations(new_data=new_data, existing_data=existing_data, detection_mode=detection_mode)
+
+    return new_observations
+
+
+# Fonction auxiliaire de validation des jeux de données en entrée
+def _validate_input_data(data: pd.DataFrame, time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None) -> pd.DataFrame:
+    """Validate and prepare input data for analysis.
+    
+    Args:
+        data: Input pandas DataFrame to validate
+        time_col: Name of the time column (optional)
+        panel_cols: List of panel column names (optional)
+        
+    Returns:
+        Validated and sorted DataFrame
+        
+    Raises:
+        ValueError: If validation fails or invalid parameter combination
+    """
+    
+    # Vérification que le jeu de données est un pandas DataFrame
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError("Data must be a pandas DataFrame")
+    
+    # Vérification de la cohérence des paramètres : panel_cols ne peut pas être spécifié sans time_col
+    if panel_cols is not None and time_col is None:
+        raise ValueError("Cannot specify panel_cols without time_col")
+
+    # Vérification de la présence de la colonne temporelle si spécifiée
+    if (time_col is not None) & (time_col not in data.columns):
+        raise ValueError(f"Time column '{time_col}' not found")
+
+    # Vérification des colonnes panel si spécifiées
+    if panel_cols:
+        # Calcul des colonnes manquantes
+        missing_panel_cols = set(panel_cols) - set(data.columns)
+        if missing_panel_cols:
+            raise ValueError(f"Missing panel columns: {missing_panel_cols}")
+
+    # Copie du jeu de données
+    data_prepro = data.copy()
+    
+    # Conversion de la colonne temporelle si spécifiée
+    if time_col is not None:
+        data_prepro[time_col] = pd.to_datetime(data_prepro[time_col])
+    
+    # Vérification de l'absence de duplicats et création de l'index
+    if time_col is not None and panel_cols is not None:
+        # Cas 1: time_col et panel_cols spécifiés
+        duplicate_subset = panel_cols + [time_col]
+        if data_prepro.duplicated(subset=duplicate_subset).any():
+            raise ValueError(f"Duplicate rows found based on columns: {duplicate_subset}")
+        # Ajout de l'index
+        data_prepro.set_index(panel_cols + [time_col], inplace=True)
+    elif time_col is not None:
+        # Cas 2: seul time_col spécifié
+        if data_prepro.duplicated(subset=[time_col]).any():
+            raise ValueError(f"Duplicate rows found based on time column: {time_col}")
+        # Ajout de l'index
+        data_prepro.set_index([time_col], inplace=True)
+    else:
+        # Cas 3: ni time_col ni panel_cols spécifiés - vérification selon l'index
+        if data_prepro.index.duplicated().any():
+            raise ValueError("Duplicate rows found based on index")
+
+    # Tri des données
+    data_prepro.sort_index(inplace=True)
+
+    return data_prepro
+
+# /!\ Voir si n'est util qu'ici où s'il est préférable de faire une fonction plus générique de parsing de date dans utils
+# Méthode auxiliaire de conversion et de validation de la date de téléchargement
+def _parse_download_date(download_date: Union[str, datetime]) -> datetime:
+    """Parse and validate download date.
+
+    Args:
+        download_date: Date as string or datetime
+
+    Returns:
+        Validated download date
+
+    Raises:
+        ValueError: If date cannot be parsed
+    """
+    if isinstance(download_date, str):
+        try:
+            return pd.to_datetime(download_date).to_pydatetime()
+        except:
+            raise ValueError(f"Invalid date format: {download_date}")
+    elif isinstance(download_date, datetime):
+        return download_date
+    else:
+        raise ValueError("download_date must be a string or datetime")
+
+
+# Méthode auxiliaire d'identification des nouvelles observations
+def _identify_new_observations(new_data: pd.DataFrame, existing_data: pd.DataFrame, detection_mode: str = 'new_only') -> pd.DataFrame:
+    """Identify new or changed observations.
+
+    Args:
+        new_data: New data DataFrame
+        existing_data: Existing data DataFrame
+        detection_mode: 'new_only' or 'all_changes'
+
+    Returns:
+        DataFrame containing only new or changed observations
+    """
+    # Vérification que les deux DataFrames ont des colonnes en commun
+    common_columns = list(set(new_data.columns).intersection(set(existing_data.columns)))
+
+    # Aucune colonne commune, toutes les observations sont nouvelles
+    # if not common_data_cols:
+    #     return self._format_observations_output(new_data, data_cols)
+
+    # Restriction aux colonnes communes
+    new_common_data = new_data[common_columns]
+    existing_common_data = existing_data[common_columns]
+
+    # Alignement des DataFrames sur l'index commun
+    aligned_new, aligned_existing = new_common_data.align(existing_common_data, fill_value=np.nan)
+
+    # Création des masques booléens pour les valeurs nulles
+    new_isnull = aligned_new.isnull()
+    existing_isnull = aligned_existing.isnull()
+
+    # Détection des changements
+    if detection_mode == 'new_only':
+        # Détection uniquement des valeurs null → non-null
+        # Condition: valeur existante était null ET nouvelle valeur n'est pas null
+        changes_mask = existing_isnull & ~new_isnull
+    else:  # 'all_changes'
+        # Détection de tous les changements (null → non-null ET valeur → nouvelle valeur)
+        # Condition: (ancien null ET nouveau non-null) OU (valeurs différentes)
+        changes_mask = (existing_isnull & ~new_isnull) | (
+            ~new_isnull & ~existing_isnull & (aligned_new != aligned_existing)
+        )
+
+    return changes_mask
+    # # Identification des observations avec des changements
+    # changed_observations = []
+
+    # # Parcours des lignes avec changements
+    # for idx, row_changes in changes_mask.iterrows():
+    #     if row_changes.any():  # S'il y a au moins un changement dans cette ligne
+    #         # Récupération des valeurs d'index (panel + time)
+    #         if isinstance(idx, tuple):
+    #             index_values = dict(zip(id_cols, idx))
+    #         else:
+    #             index_values = {id_cols[0]: idx}
+
+    #         # Parcours des colonnes avec changements
+    #         for col in row_changes[row_changes].index:
+    #             new_value = aligned_new.loc[idx, col]
+
+    #             # Ignore les valeurs NaN dans les nouvelles données
+    #             if pd.isna(new_value):
+    #                 continue
+
+    #             # Création de l'observation
+    #             obs_dict = {
+    #                 **index_values,
+    #                 'indicator_name': col,
+    #                 'value': new_value
+    #             }
+    #             changed_observations.append(obs_dict)
+
+    # # Conversion en DataFrame
+    # if changed_observations:
+    #     return pd.DataFrame(changed_observations)
+    # else:
+    #     # Retour d'un DataFrame vide avec les bonnes colonnes
+    #     empty_cols = id_cols + ['indicator_name', 'value']
+    #     return pd.DataFrame(columns=empty_cols)
+
+
 # /!\ Voir si on a besoin de "time_col" et "panels_cols" ou si on peut utiliser les index (cohérent avec le comportement des crossvals)
 # /!\ Vérifier s'il n'y a pas de duplicat pour les id_cols dans validate_input_data
 # Ajouter un logger et supprimer l'output de compare_and_calculate_delays
