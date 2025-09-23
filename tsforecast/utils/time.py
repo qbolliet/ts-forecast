@@ -3,7 +3,7 @@
 # Modules de base
 import pandas as pd
 from typing import Literal
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 # Fonctions de conversion entre timeseries et string
 def timeseries_to_string(ts: pd.Series, format: str = "%Y-%m-%d") -> pd.Series:
@@ -71,7 +71,7 @@ def string_to_timeseries(ts: pd.Series, format: str = None) -> pd.Series:
     return pd.Series(ts.values, index=datetime_index, name=ts.name)
 
 # Fonction identifiant la date de début d'une période à partir d'une date et d'une fréquence
-def get_period_start(date: pd.Timestamp, frequency: Literal['daily', 'weekly', 'monthly', 'quarterly', 'annual']) -> pd.Timestamp:
+def get_period_start(date: Union[pd.Timestamp, datetime], frequency: Literal['daily', 'weekly', 'monthly', 'quarterly', 'annual']) -> pd.Timestamp:
     """Get the start date of the period containing the given date.
     
     Args:
@@ -98,7 +98,7 @@ def get_period_start(date: pd.Timestamp, frequency: Literal['daily', 'weekly', '
         raise ValueError(f"Unnexpected value for 'frequency' : {frequency}. Should be in ['daily', 'weekly', 'monthly', 'quarterly', 'annual']")
 
 # Fonction identifiant la date de début d'une période à partir d'une date et d'une fréquence
-def get_period_end(date: pd.Timestamp, frequency: Literal['daily', 'weekly', 'monthly', 'quarterly', 'annual']) -> pd.Timestamp:
+def get_period_end(date: Union[pd.Timestamp, datetime], frequency: Literal['daily', 'weekly', 'monthly', 'quarterly', 'annual']) -> pd.Timestamp:
     """Get the end date of the period containing the given date.
     
     Args:
@@ -134,3 +134,13 @@ def get_period_end(date: pd.Timestamp, frequency: Literal['daily', 'weekly', 'mo
         return pd.Timestamp(year=date.year, month=12, day=31, hour=23, minute=59, second=59)
     else:
         raise ValueError(f"Unnexpected value for 'frequency' : {frequency}. Should be in ['daily', 'weekly', 'monthly', 'quarterly', 'annual']")
+
+
+# Fonction 
+def get_period_boundaries(date, frequency) :
+    # Calcul de début de la période
+    period_start = get_period_start(data=date, frequency=frequency)
+    # Calcul de la fin de la période
+    period_end = get_period_end(data=date, frequency=frequency)
+    
+    return period_start, period_end

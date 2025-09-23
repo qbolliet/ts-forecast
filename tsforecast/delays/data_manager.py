@@ -168,7 +168,12 @@ def _identify_new_observations(new_data: pd.DataFrame, existing_data: pd.DataFra
             ~new_isnull & ~existing_isnull & (aligned_new != aligned_existing)
         )
 
-    return changes_mask
+    # Mise en forme du jeu de données
+    df_changes = pd.melt(changes_mask, var_name="column", value_name="has_changes", ignore_index=False)
+    # Filtre sur les changements
+    df_changes = df_changes.loc[df_changes["has_changes"]]
+
+    return df_changes
     # # Identification des observations avec des changements
     # changed_observations = []
 

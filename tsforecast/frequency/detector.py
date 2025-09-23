@@ -10,6 +10,12 @@ import numpy as np
 from typing import Dict, Optional, Union, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
+# Références utiles
+# - Inférence de la fréquence :https://pandas.pydata.org/docs/reference/api/pandas.infer_freq.html 
+# - dateoffsets : https://pandas.pydata.org/docs/user_guide/timeseries.html#dateoffset-objects dans la section "daetoffset objects"
+# - Conversion en une fréquence : https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.asfreq.html
+# + revoir les types tolérés (datetime, timestamp etc .... pour être cohérent avec la gestion des dates en pandas)
+
 # Classe de détection de la fréquence de séries temporelles et de panel
 class FrequencyDetector:
     """Detect frequency of time series data.
