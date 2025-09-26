@@ -1,172 +1,146 @@
 """Frequency detection utilities for time series data.
 
-This module provides functions to detect and validate frequencies in time series
-and panel data.
+This module provides the FrequencyDetector class to detect and validate frequencies
+in time series and panel data, with primary reliance on pandas.infer_freq.
 """
 # Importation des modules
-# Modules de base
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, Union, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
-# Références utiles
-# - Inférence de la fréquence :https://pandas.pydata.org/docs/reference/api/pandas.infer_freq.html 
-# - dateoffsets : https://pandas.pydata.org/docs/user_guide/timeseries.html#dateoffset-objects dans la section "daetoffset objects"
-# - Conversion en une fréquence : https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.asfreq.html
-# + revoir les types tolérés (datetime, timestamp etc .... pour être cohérent avec la gestion des dates en pandas)
+# Import des utilitaires de fréquence
+from .utils import normalize_frequency, to_user_friendly, get_base_frequency
 
-# Classe de détection de la fréquence de séries temporelles et de panel
+
 class FrequencyDetector:
     """Detect frequency of time series data.
-    
+
     This class provides methods to detect the frequency of individual series
-    and validate frequency consistency across datasets.
-    
+    and validate frequency consistency across datasets, with primary reliance
+    on pandas.infer_freq and extensions for missing frequencies.
+
     Attributes:
-        frequency_mapping (Dict[str, str]): Mapping between detected and standard frequencies
         min_observations (int): Minimum observations required for frequency detection
+
+    Examples:
+        >>> detector = FrequencyDetector()
+        >>> dates = pd.date_range('2023-01-01', periods=12, freq='M')
+        >>> series = pd.Series(range(12), index=dates)
+        >>> detector.detect_frequency(series)
+        'monthly'
     """
-    # Initialisation
+
     def __init__(self, min_observations: int = 2):
         """Initialize the FrequencyDetector.
-        
+
         Args:
             min_observations: Minimum number of observations required to detect frequency
         """
-        # Nombre d'observations minimal pour déterminer la fréquence d'une série
         self.min_observations = min_observations
-        
-        # Mapping des fréquences pandas vers des noms standardisés
-        self.frequency_mapping = {
-            'D': 'daily',
-            'B': 'business_daily', 
-            'W': 'weekly',
-            'M': 'monthly',
-            'MS': 'monthly',
-            'Q': 'quarterly',
-            'QS': 'quarterly',
-            'A': 'annual',
-            'AS': 'annual',
-            'Y': 'annual',
-            'YS': 'annual'
-        }
-        
-        # Mapping inverse pour les conversions
-        self.standard_to_pandas = {
-            'daily': 'D',
-            'business_daily': 'B',
-            'weekly': 'W',
-            'monthly': 'M',
-            'quarterly': 'Q',
-            'annual': 'A'
-        }
-    
-    def detect_frequency(self, 
-                        series: pd.Series, 
-                        index_col: Optional[str] = None) -> Optional[str]:
+
+    def detect_frequency(self, series: pd.Series) -> Optional[str]:
         """Detect the frequency of a time series.
-        
+
+        This method primarily uses pandas.infer_freq with extensions for frequencies
+        not natively supported (like quarterly). It automatically drops NaN values
+        before detection.
+
         Args:
-            series: Time series data
-            index_col: Name of the index column if series is part of a DataFrame
-            
+            series: Time series data with datetime index
+
         Returns:
-            Detected frequency as a string, or None if detection fails
-            
+            Detected frequency as user-friendly string, or None if detection fails
+
         Raises:
-            ValueError: If series has insufficient non-null observations
+            ValueError: If series has insufficient non-null observations or invalid index
+
+        Examples:
+            >>> import pandas as pd
+            >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
+            >>> series = pd.Series([1, 2, np.nan, 4, 5], index=dates)
+            >>> detector = FrequencyDetector()
+            >>> detector.detect_frequency(series)
+            'daily'
         """
         # Suppression des valeurs manquantes pour la détection
         clean_series = series.dropna()
-        
+
         if len(clean_series) < self.min_observations:
             raise ValueError(
                 f"Series has only {len(clean_series)} non-null observations, "
                 f"minimum required is {self.min_observations}"
             )
-        
-        # Récupération de l'index temporel
-        if isinstance(clean_series.index, pd.DatetimeIndex):
-            time_index = clean_series.index
-        elif index_col and hasattr(clean_series, index_col):
-            time_index = pd.to_datetime(clean_series[index_col])
-        else:
+
+        # Vérification que l'index est de type datetime
+        if not isinstance(clean_series.index, pd.DatetimeIndex):
             # Tentative de conversion de l'index en datetime
             try:
                 time_index = pd.to_datetime(clean_series.index)
-            except:
-                return None
-        
-        # Tri de l'index temporel
-        time_index = time_index.sort_values()
-        
-        # Calcul des différences entre observations consécutives
-        time_diffs = pd.Series(time_index).diff().dropna()
-        
-        # Identification de la fréquence modale (la plus fréquente)
-        mode_diff = time_diffs.mode()
-        
-        if len(mode_diff) == 0:
-            return None
-            
-        # Conversion de la différence modale en fréquence pandas
+            except (ValueError, TypeError):
+                raise ValueError("Series index cannot be converted to datetime")
+        else:
+            time_index = clean_series.index
+
+        # Tri de l'index temporel pour assurer la cohérence
+        if not time_index.is_monotonic_increasing:
+            time_index = time_index.sort_values()
+
+        # Utilisation principale de pandas.infer_freq
         try:
             inferred_freq = pd.infer_freq(time_index)
             if inferred_freq:
-                # Extraction du code de fréquence principal
-                freq_code = ''.join(filter(str.isalpha, inferred_freq))
-                return self.frequency_mapping.get(freq_code, inferred_freq)
-        except:
+                # Conversion vers le format convivial
+                return to_user_friendly(inferred_freq)
+        except Exception:
+            # En cas d'erreur avec infer_freq, continuer avec la détection manuelle
             pass
-        
-        # Détection manuelle basée sur les différences si infer_freq échoue
-        modal_days = mode_diff[0].days
-        
-        if modal_days == 1:
-            return 'daily'
-        elif modal_days == 7:
-            return 'weekly'
-        elif 28 <= modal_days <= 31:
-            return 'monthly'
-        elif 89 <= modal_days <= 92:
-            return 'quarterly'
-        elif 365 <= modal_days <= 366:
-            return 'annual'
-        
+
+        # Extension pour les fréquences non supportées par infer_freq
+        extended_freq = self._extend_infer_freq(time_index)
+        if extended_freq:
+            return extended_freq
+
         return None
-    
-    def detect_dataset_frequency(self, 
+
+    def detect_dataset_frequency(self,
                                df: pd.DataFrame,
                                time_col: Optional[str] = None,
                                panel_cols: Optional[List[str]] = None) -> Dict[str, str]:
         """Detect frequencies for all series in a dataset.
-        
+
         Args:
             df: DataFrame containing time series data
-            time_col: Name of the time column
+            time_col: Name of the time column (if None, uses index)
             panel_cols: List of columns identifying panel dimensions
-            
+
         Returns:
             Dictionary mapping column names (or (panel_id, column) tuples) to frequencies
-            
-        Raises:
-            ValueError: If frequencies are inconsistent across the dataset
+
+        Examples:
+            >>> import pandas as pd
+            >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
+            >>> df = pd.DataFrame({'value1': [1, 2, 3, 4, 5], 'value2': [10, 20, 30, 40, 50]}, index=dates)
+            >>> detector = FrequencyDetector()
+            >>> freq_map = detector.detect_dataset_frequency(df)
+            >>> freq_map
+            {'value1': 'daily', 'value2': 'daily'}
         """
         frequency_map = {}
-        
+
+        # Préparation de l'index temporel si spécifié
+        if time_col is not None and time_col in df.columns:
+            df = df.set_index(time_col)
+
         # Détermination si les données sont en panel
         is_panel = panel_cols is not None and len(panel_cols) > 0
-        
+
         if is_panel:
             # Traitement des données panel
             for panel_values, group_df in df.groupby(panel_cols):
                 # Création de l'identifiant du panel
-                if len(panel_cols) == 1:
-                    panel_id = panel_values
-                else:
-                    panel_id = tuple(panel_values)
-                
+                panel_id = panel_values if len(panel_cols) == 1 else tuple(panel_values)
+
                 # Détection de la fréquence pour chaque colonne du groupe
                 for col in df.columns:
                     if col not in panel_cols and col != time_col:
@@ -187,201 +161,128 @@ class FrequencyDetector:
                             frequency_map[col] = freq
                     except ValueError:
                         continue
-        
+
         return frequency_map
-    
-    def validate_frequency_consistency(self, 
+
+    def validate_frequency_consistency(self,
                                      frequency_map: Dict[str, str],
                                      strict: bool = True) -> Tuple[bool, Optional[str]]:
         """Validate that all series have consistent frequencies.
-        
+
         Args:
             frequency_map: Dictionary of detected frequencies
             strict: If True, all frequencies must be identical
-            
+
         Returns:
             Tuple of (is_consistent, common_frequency)
+
+        Examples:
+            >>> detector = FrequencyDetector()
+            >>> freq_map = {'series1': 'daily', 'series2': 'daily'}
+            >>> is_consistent, common_freq = detector.validate_frequency_consistency(freq_map)
+            >>> is_consistent, common_freq
+            (True, 'daily')
         """
         if not frequency_map:
             return False, None
-        
+
         unique_frequencies = set(frequency_map.values())
-        
+
         if len(unique_frequencies) == 1:
             return True, list(unique_frequencies)[0]
-        
+
         if strict:
             return False, None
-        
+
         # En mode non-strict, retourner la fréquence la plus commune
         freq_counts = {}
         for freq in frequency_map.values():
             freq_counts[freq] = freq_counts.get(freq, 0) + 1
-        
+
         most_common = max(freq_counts, key=freq_counts.get)
         return True, most_common
 
+    def _extend_infer_freq(self, time_index: pd.DatetimeIndex) -> Optional[str]:
+        """Extend frequency detection for frequencies not supported by pandas.infer_freq.
 
-class FrequencyConverter:
-    """Handle conversions between different time frequencies.
-    
-    This class manages the relationships between different time frequencies
-    and provides methods to convert between them.
-    
-    Attributes:
-        conversion_factors (Dict[Tuple[str, str], int]): Conversion factors between frequencies
-        frequency_order (Dict[str, int]): Ordering of frequencies from highest to lowest
-    """
-    
-    def __init__(self):
-        """Initialize the FrequencyConverter with standard conversion factors."""
-        # Facteurs de conversion entre fréquences
-        # Format: (from_freq, to_freq): factor
-        self.conversion_factors = {
-            ('daily', 'weekly'): 7,
-            ('daily', 'monthly'): 30,  # Approximation
-            ('daily', 'quarterly'): 91,  # Approximation  
-            ('daily', 'annual'): 365,
-            ('weekly', 'monthly'): 4,  # Approximation
-            ('weekly', 'quarterly'): 13,
-            ('weekly', 'annual'): 52,
-            ('monthly', 'quarterly'): 3,
-            ('monthly', 'annual'): 12,
-            ('quarterly', 'annual'): 4,
-        }
-        
-        # Ajout des conversions inverses
-        inverse_conversions = {}
-        for (from_freq, to_freq), factor in self.conversion_factors.items():
-            inverse_conversions[(to_freq, from_freq)] = 1 / factor
-        self.conversion_factors.update(inverse_conversions)
-        
-        # Ordre des fréquences (du plus granulaire au moins granulaire)
-        self.frequency_order = {
-            'daily': 1,
-            'business_daily': 1.5,
-            'weekly': 2,
-            'monthly': 3,
-            'quarterly': 4,
-            'annual': 5
-        }
-    
-    def get_conversion_factor(self, from_freq: str, to_freq: str) -> float:
-        """Get the conversion factor between two frequencies.
-        
+        This method provides custom detection for frequencies like quarterly that
+        pandas.infer_freq doesn't always detect reliably.
+
         Args:
-            from_freq: Source frequency
-            to_freq: Target frequency
-            
+            time_index: Sorted datetime index
+
         Returns:
-            Conversion factor as a float
-            
-        Raises:
-            ValueError: If conversion is not possible
+            Extended frequency detection result or None
         """
-        if from_freq == to_freq:
-            return 1.0
-        
-        key = (from_freq, to_freq)
-        if key in self.conversion_factors:
-            return self.conversion_factors[key]
-        
-        # Tentative de conversion en passant par une fréquence intermédiaire
-        for intermediate_freq in self.frequency_order.keys():
-            if (from_freq, intermediate_freq) in self.conversion_factors and \
-               (intermediate_freq, to_freq) in self.conversion_factors:
-                return (self.conversion_factors[(from_freq, intermediate_freq)] * 
-                       self.conversion_factors[(intermediate_freq, to_freq)])
-        
-        raise ValueError(f"No conversion available from {from_freq} to {to_freq}")
-    
-    def is_higher_frequency(self, freq1: str, freq2: str) -> bool:
-        """Check if freq1 is a higher frequency than freq2.
-        
+        if len(time_index) < self.min_observations:
+            return None
+
+        # Calcul des différences entre observations consécutives
+        time_diffs = pd.Series(time_index).diff().dropna()
+
+        if len(time_diffs) == 0:
+            return None
+
+        # Identification de la différence modale (la plus fréquente)
+        mode_diff = time_diffs.mode()
+
+        if len(mode_diff) == 0:
+            return None
+
+        modal_days = mode_diff[0].days
+
+        # Détection basée sur le nombre de jours modal
+        if modal_days == 1:
+            return 'daily'
+        elif modal_days == 7:
+            return 'weekly'
+        elif 28 <= modal_days <= 31:
+            return 'monthly'
+        elif 89 <= modal_days <= 92:
+            # Détection spéciale pour les fréquences trimestrielles
+            return self._detect_quarterly_frequency(time_index)
+        elif 365 <= modal_days <= 366:
+            return 'annual'
+
+        return None
+
+    def _detect_quarterly_frequency(self, time_index: pd.DatetimeIndex) -> Optional[str]:
+        """Detect quarterly frequency with reference point.
+
         Args:
-            freq1: First frequency
-            freq2: Second frequency
-            
+            time_index: Sorted datetime index
+
         Returns:
-            True if freq1 is higher frequency than freq2
+            Quarterly frequency with reference point or None
         """
-        return self.frequency_order.get(freq1, 0) < self.frequency_order.get(freq2, 0)
-    
-    def get_period_offset(self, 
-                         date: pd.Timestamp, 
-                         from_freq: str, 
-                         to_freq: str) -> int:
-        """Calculate period offset when changing frequencies.
-        
-        This method calculates how many periods to adjust when converting
-        from one frequency to another at a specific date.
-        
-        Args:
-            date: Reference date
-            from_freq: Source frequency  
-            to_freq: Target frequency
-            
-        Returns:
-            Number of periods to offset
-        """
-        if from_freq == to_freq:
-            return 0
-            
-        # Conversion de la date vers le début de la période cible
-        if to_freq == 'quarterly':
-            target_period_start = pd.Timestamp(year=date.year, 
-                                             month=((date.quarter - 1) * 3) + 1, 
-                                             day=1)
-        elif to_freq == 'monthly':
-            target_period_start = pd.Timestamp(year=date.year, 
-                                             month=date.month, 
-                                             day=1)
-        elif to_freq == 'annual':
-            target_period_start = pd.Timestamp(year=date.year, month=1, day=1)
-        else:
-            target_period_start = date
-        
-        # Calcul du décalage en périodes source
-        if from_freq == 'monthly' and to_freq == 'quarterly':
-            # Nombre de mois depuis le début du trimestre
-            months_offset = date.month - target_period_start.month
-            return months_offset
-        elif from_freq == 'daily' and to_freq == 'monthly':
-            # Nombre de jours depuis le début du mois
-            days_offset = date.day - 1
-            return days_offset
-        elif from_freq == 'daily' and to_freq == 'quarterly':
-            # Nombre de jours depuis le début du trimestre
-            days_offset = (date - target_period_start).days
-            return days_offset
-        
-        return 0
-    
-    def align_to_frequency(self, 
-                          dates: pd.DatetimeIndex, 
-                          target_freq: str) -> pd.DatetimeIndex:
-        """Align dates to a target frequency.
-        
-        Args:
-            dates: DatetimeIndex to align
-            target_freq: Target frequency
-            
-        Returns:
-            Aligned DatetimeIndex
-        """
-        freq_map = {
-            'daily': 'D',
-            'weekly': 'W',
-            'monthly': 'MS',  # Month start
-            'quarterly': 'QS',  # Quarter start
-            'annual': 'AS'  # Year start
-        }
-        
-        if target_freq not in freq_map:
-            return dates
-            
-        # Création d'un index régulier à la fréquence cible
-        start = dates.min()
-        end = dates.max()
-        
-        return pd.date_range(start=start, end=end, freq=freq_map[target_freq])
+        if len(time_index) < 2:
+            return None
+
+        # Vérification des mois pour déterminer le point de référence
+        months = time_index.month
+        days = time_index.day
+
+        # Si tous les mois correspondent au début de trimestre et jour = 1
+        if all(month in [1, 4, 7, 10] for month in months) and all(day == 1 for day in days):
+            return 'quarterly_start'
+
+        # Si tous les mois correspondent à la fin de trimestre et jour = dernier du mois
+        if all(month in [3, 6, 9, 12] for month in months):
+            # Vérification du dernier jour du mois
+            last_days = []
+            for date in time_index:
+                if date.month == 12:
+                    last_day = 31
+                elif date.month in [4, 6, 9, 11]:
+                    last_day = 30
+                elif date.month == 2:
+                    last_day = 29 if date.year % 4 == 0 else 28
+                else:
+                    last_day = 31
+                last_days.append(last_day)
+
+            if all(date.day == last_day for date, last_day in zip(time_index, last_days)):
+                return 'quarterly_end'
+
+        # Par défaut, retourner quarterly sans référence spécifique
+        return 'quarterly'
