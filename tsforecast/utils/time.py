@@ -6,24 +6,7 @@ from typing import Literal, Union
 from datetime import datetime, timedelta
 
 # Import des utilitaires de fréquence
-try:
-    from ..frequency.utils import normalize_frequency, get_base_frequency, get_reference_point, FrequencyType
-except ImportError:
-    # Fallback si les modules de fréquence ne sont pas disponibles
-    FrequencyType = Union[str, pd.DateOffset]
-
-    def normalize_frequency(freq):
-        return str(freq)
-
-    def get_base_frequency(freq):
-        return str(freq).split('_')[0]
-
-    def get_reference_point(freq):
-        if '_start' in str(freq):
-            return 'start'
-        elif '_end' in str(freq):
-            return 'end'
-        return None
+from ..frequency.utils import get_base_frequency, FrequencyType
 
 # Fonctions de conversion entre timeseries et string
 def timeseries_to_string(ts: pd.Series, format: str = "%Y-%m-%d") -> pd.Series:
@@ -91,128 +74,134 @@ def string_to_timeseries(ts: pd.Series, format: str = None) -> pd.Series:
     return pd.Series(ts.values, index=datetime_index, name=ts.name)
 
 # Fonction identifiant la date de début d'une période à partir d'une date et d'une fréquence
-def get_period_start(date: Union[pd.Timestamp, datetime], frequency: FrequencyType) -> pd.Timestamp:
+def get_period_start(date: Union[pd.Timestamp, datetime], frequency: FrequencyType) -> datetime:
     """Get the start date of the period containing the given date.
 
     Args:
         date: Reference date
-        frequency: Period frequency (supports pandas codes, DateOffsets, and user-friendly names)
+        frequency: Period frequency (pandas codes or user-friendly names)
 
     Returns:
-        Start date of the period
+        Start date of the period as datetime object
 
     Examples:
         >>> import pandas as pd
+        >>> from datetime import datetime
         >>> get_period_start(pd.Timestamp('2023-06-15'), 'monthly')
-        Timestamp('2023-06-01 00:00:00')
-        >>> get_period_start(pd.Timestamp('2023-06-15'), 'quarterly_start')
-        Timestamp('2023-04-01 00:00:00')
+        datetime.datetime(2023, 6, 1, 0, 0)
+        >>> get_period_start(datetime(2023, 6, 15), 'quarterly')
+        datetime.datetime(2023, 4, 1, 0, 0)
     """
-    # Normalisation de la fréquence et extraction des informations
-    base_freq = get_base_frequency(frequency)
-    reference = get_reference_point(frequency)
+    # Conversion en datetime si nécessaire
+    if isinstance(date, pd.Timestamp):
+        date = date.to_pydatetime()
 
-    # Distinction suivant la fréquence de base
-    if base_freq == 'daily':
-        return pd.Timestamp(date.normalize())
+    # Normalisation de la fréquence
+    base_freq = get_base_frequency(frequency)
+
+    # Distinction suivant la fréquence de base avec logique canonique
+    if base_freq == 'daily' or base_freq == 'business_daily':
+        # Début du jour (minuit)
+        return datetime(date.year, date.month, date.day)
     elif base_freq == 'weekly':
-        # Début de la semaine (lundi par défaut, dimanche si weekly_end)
-        if reference == 'end':
-            # Pour weekly_end, le début est le dimanche précédent
-            days_to_subtract = (date.weekday() + 1) % 7
-            return pd.Timestamp(date - timedelta(days=days_to_subtract))
-        else:
-            # Pour weekly ou weekly_start, le début est le lundi
-            return pd.Timestamp(date - timedelta(days=date.weekday()))
+        # Début de la semaine (toujours lundi)
+        return datetime(date.year, date.month, date.day) - timedelta(days=date.weekday())
     elif base_freq == 'monthly':
-        return pd.Timestamp(year=date.year, month=date.month, day=1)
+        # Premier jour du mois
+        return datetime(date.year, date.month, 1)
     elif base_freq == 'quarterly':
-        quarter_month = ((date.quarter - 1) * 3) + 1
-        return pd.Timestamp(year=date.year, month=quarter_month, day=1)
+        # Premier jour du trimestre (Q1=Jan, Q2=Apr, Q3=Jul, Q4=Oct)
+        quarter = (date.month - 1) // 3 + 1
+        quarter_start_month = (quarter - 1) * 3 + 1
+        return datetime(date.year, quarter_start_month, 1)
     elif base_freq == 'annual':
-        return pd.Timestamp(year=date.year, month=1, day=1)
+        # Premier jour de l'année
+        return datetime(date.year, 1, 1)
     else:
         raise ValueError(f"Unsupported frequency: {frequency}. Base frequency '{base_freq}' is not recognized.")
 
 # Fonction identifiant la date de début d'une période à partir d'une date et d'une fréquence
-def get_period_end(date: Union[pd.Timestamp, datetime], frequency: FrequencyType) -> pd.Timestamp:
+def get_period_end(date: Union[pd.Timestamp, datetime], frequency: FrequencyType) -> datetime:
     """Get the end date of the period containing the given date.
 
     Args:
         date: Reference date
-        frequency: Period frequency (supports pandas codes, DateOffsets, and user-friendly names)
+        frequency: Period frequency (pandas codes or user-friendly names)
 
     Returns:
-        First date outside the period (exclusive boundary)
+        First date outside the period (exclusive boundary) as datetime object
 
     Examples:
         >>> import pandas as pd
+        >>> from datetime import datetime
         >>> get_period_end(pd.Timestamp('2023-06-15'), 'monthly')
-        Timestamp('2023-07-01 00:00:00')
-        >>> get_period_end(pd.Timestamp('2023-06-15'), 'quarterly_start')
-        Timestamp('2023-07-01 00:00:00')
+        datetime.datetime(2023, 7, 1, 0, 0)
+        >>> get_period_end(datetime(2023, 6, 15), 'quarterly')
+        datetime.datetime(2023, 7, 1, 0, 0)
     """
-    # Normalisation de la fréquence et extraction des informations
-    base_freq = get_base_frequency(frequency)
-    reference = get_reference_point(frequency)
+    # Conversion en datetime si nécessaire
+    if isinstance(date, pd.Timestamp):
+        date = date.to_pydatetime()
 
-    # Distinction suivant la fréquence de base
-    if base_freq == 'daily':
-        return pd.Timestamp(date.normalize() + timedelta(days=1))
+    # Normalisation de la fréquence
+    base_freq = get_base_frequency(frequency)
+
+    # Distinction suivant la fréquence de base avec logique canonique
+    if base_freq == 'daily' or base_freq == 'business_daily':
+        # Jour suivant (minuit)
+        return datetime(date.year, date.month, date.day) + timedelta(days=1)
     elif base_freq == 'weekly':
-        # Calcul de la fin de semaine selon le point de référence
-        if reference == 'end':
-            # Pour weekly_end, la fin est le lundi suivant le dimanche
-            days_to_subtract = (date.weekday() + 1) % 7
-            week_start = pd.Timestamp(date - timedelta(days=days_to_subtract))
-            return week_start + timedelta(days=7)
-        else:
-            # Pour weekly ou weekly_start, la fin est le lundi suivant
-            week_start = pd.Timestamp(date - timedelta(days=date.weekday()))
-            return week_start + timedelta(days=7)
+        # Lundi de la semaine suivante
+        week_start = datetime(date.year, date.month, date.day) - timedelta(days=date.weekday())
+        return week_start + timedelta(days=7)
     elif base_freq == 'monthly':
         # Premier jour du mois suivant
         if date.month == 12:
-            return pd.Timestamp(year=date.year + 1, month=1, day=1)
+            return datetime(date.year + 1, 1, 1)
         else:
-            return pd.Timestamp(year=date.year, month=date.month + 1, day=1)
+            return datetime(date.year, date.month + 1, 1)
     elif base_freq == 'quarterly':
         # Premier jour du trimestre suivant
-        quarter_end_month = date.quarter * 3
-        if quarter_end_month == 12:
-            return pd.Timestamp(year=date.year + 1, month=1, day=1)
+        quarter = (date.month - 1) // 3 + 1
+        if quarter == 4:
+            # Q4 -> Q1 de l'année suivante
+            return datetime(date.year + 1, 1, 1)
         else:
-            return pd.Timestamp(year=date.year, month=quarter_end_month + 1, day=1)
+            # Trimestre suivant dans la même année
+            next_quarter_month = quarter * 3 + 1
+            return datetime(date.year, next_quarter_month, 1)
     elif base_freq == 'annual':
-        return pd.Timestamp(year=date.year + 1, month=1, day=1)
+        # Premier jour de l'année suivante
+        return datetime(date.year + 1, 1, 1)
     else:
         raise ValueError(f"Unsupported frequency: {frequency}. Base frequency '{base_freq}' is not recognized.")
 
 
 # Fonction retournant les bornes d'une période
-def get_period_boundaries(date: Union[pd.Timestamp, datetime], frequency: FrequencyType) -> tuple[pd.Timestamp, pd.Timestamp]:
+def get_period_boundaries(date: Union[pd.Timestamp, datetime], frequency: FrequencyType) -> tuple[datetime, datetime]:
     """Get the start and end boundaries of the period containing the given date.
 
     Args:
         date: Reference date
-        frequency: Period frequency (supports pandas codes, DateOffsets, and user-friendly names)
+        frequency: Period frequency (pandas codes or user-friendly names)
 
     Returns:
         Tuple containing (start_date, end_date) where start_date is included
-        in the period [start_date, end_date) and end_date is excluded from it
+        in the period [start_date, end_date) and end_date is excluded from it.
+        Both dates are datetime objects.
 
     Examples:
         >>> import pandas as pd
         >>> from datetime import datetime
         >>> date = pd.Timestamp('2023-06-15')
         >>> get_period_boundaries(date, 'monthly')
-        (Timestamp('2023-06-01 00:00:00'), Timestamp('2023-07-01 00:00:00'))
+        (datetime.datetime(2023, 6, 1, 0, 0), datetime.datetime(2023, 7, 1, 0, 0))
 
-        >>> get_period_boundaries(date, 'weekly_start')
-        (Timestamp('2023-06-12 00:00:00'), Timestamp('2023-06-19 00:00:00'))
+        >>> get_period_boundaries(date, 'weekly')
+        (datetime.datetime(2023, 6, 12, 0, 0), datetime.datetime(2023, 6, 19, 0, 0))
 
         >>> get_period_boundaries(date, 'Q')  # Pandas quarterly frequency
-        (Timestamp('2023-04-01 00:00:00'), Timestamp('2023-07-01 00:00:00'))
+        (datetime.datetime(2023, 4, 1, 0, 0), datetime.datetime(2023, 7, 1, 0, 0))
     """
     # Calcul de début de la période
     period_start = get_period_start(date=date, frequency=frequency)

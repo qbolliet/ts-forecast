@@ -4,15 +4,16 @@ This module provides the FrequencyDetector class to detect and validate frequenc
 in time series and panel data, with primary reliance on pandas.infer_freq.
 """
 # Importation des modules
+# Module de base
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, Union, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
 # Import des utilitaires de fréquence
-from .utils import normalize_frequency, to_user_friendly, get_base_frequency
+from .utils import normalize_frequency, to_literal
 
-
+# Classe de détection de la fréquence d'une série temporelle
 class FrequencyDetector:
     """Detect frequency of time series data.
 
@@ -30,7 +31,7 @@ class FrequencyDetector:
         >>> detector.detect_frequency(series)
         'monthly'
     """
-
+    # Initialisation
     def __init__(self, min_observations: int = 2):
         """Initialize the FrequencyDetector.
 
@@ -39,7 +40,8 @@ class FrequencyDetector:
         """
         self.min_observations = min_observations
 
-    def detect_frequency(self, series: pd.Series) -> Optional[str]:
+    # Méthode de détection d'une série temporelle
+    def detect_frequency(self, series: pd.Series, literal: bool=False) -> Optional[str]:
         """Detect the frequency of a time series.
 
         This method primarily uses pandas.infer_freq with extensions for frequencies
@@ -48,6 +50,7 @@ class FrequencyDetector:
 
         Args:
             series: Time series data with datetime index
+            literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
             Detected frequency as user-friendly string, or None if detection fails
@@ -66,6 +69,7 @@ class FrequencyDetector:
         # Suppression des valeurs manquantes pour la détection
         clean_series = series.dropna()
 
+        # Vérification que le nombre d'observations dans le série est supérieur au minimum requis
         if len(clean_series) < self.min_observations:
             raise ValueError(
                 f"Series has only {len(clean_series)} non-null observations, "
@@ -89,20 +93,26 @@ class FrequencyDetector:
         # Utilisation principale de pandas.infer_freq
         try:
             inferred_freq = pd.infer_freq(time_index)
-            if inferred_freq:
-                # Conversion vers le format convivial
-                return to_user_friendly(inferred_freq)
+            if inferred_freq & literal:
+                # Conversion vers le format littéral
+                return to_literal(inferred_freq)
+            elif inferred_freq :
+                return inferred_freq
         except Exception:
             # En cas d'erreur avec infer_freq, continuer avec la détection manuelle
             pass
 
         # Extension pour les fréquences non supportées par infer_freq
         extended_freq = self._extend_infer_freq(time_index)
-        if extended_freq:
+        if extended_freq & literal:
+            # Conversion vers le format littéral
+            return to_literal(extended_freq)
+        elif extended_freq :
             return extended_freq
 
         return None
 
+    # Méthode de détection de la fréquence d'un jeu de données
     def detect_dataset_frequency(self,
                                df: pd.DataFrame,
                                time_col: Optional[str] = None,
@@ -247,42 +257,28 @@ class FrequencyDetector:
         return None
 
     def _detect_quarterly_frequency(self, time_index: pd.DatetimeIndex) -> Optional[str]:
-        """Detect quarterly frequency with reference point.
+        """Detect quarterly frequency.
 
         Args:
             time_index: Sorted datetime index
 
         Returns:
-            Quarterly frequency with reference point or None
+            'quarterly' if quarterly frequency is detected, None otherwise
         """
         if len(time_index) < 2:
             return None
 
-        # Vérification des mois pour déterminer le point de référence
+        # Vérification des mois pour déterminer si c'est trimestriel
         months = time_index.month
-        days = time_index.day
 
-        # Si tous les mois correspondent au début de trimestre et jour = 1
-        if all(month in [1, 4, 7, 10] for month in months) and all(day == 1 for day in days):
-            return 'quarterly_start'
+        # Vérification si les mois correspondent à des débuts ou fins de trimestre
+        quarter_start_months = {1, 4, 7, 10}
+        quarter_end_months = {3, 6, 9, 12}
 
-        # Si tous les mois correspondent à la fin de trimestre et jour = dernier du mois
-        if all(month in [3, 6, 9, 12] for month in months):
-            # Vérification du dernier jour du mois
-            last_days = []
-            for date in time_index:
-                if date.month == 12:
-                    last_day = 31
-                elif date.month in [4, 6, 9, 11]:
-                    last_day = 30
-                elif date.month == 2:
-                    last_day = 29 if date.year % 4 == 0 else 28
-                else:
-                    last_day = 31
-                last_days.append(last_day)
+        # Si tous les mois sont des débuts ou fins de trimestre
+        if (all(month in quarter_start_months for month in months) or
+            all(month in quarter_end_months for month in months) or
+            all(month in quarter_start_months.union(quarter_end_months) for month in months)):
+            return 'quarterly'
 
-            if all(date.day == last_day for date, last_day in zip(time_index, last_days)):
-                return 'quarterly_end'
-
-        # Par défaut, retourner quarterly sans référence spécifique
-        return 'quarterly'
+        return None
