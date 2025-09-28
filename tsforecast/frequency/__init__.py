@@ -12,16 +12,14 @@ from .converter import FrequencyConverter
 from .utils import (
     FrequencyNormalizer,
     normalize_frequency,
-    to_user_friendly,
+    to_literal,
     to_pandas_freq,
     to_dateoffset,
-    get_base_frequency,
-    get_reference_point,
     is_higher_frequency,
     validate_frequency
 )
 
-# Types exportés
+# Types exportÃ©s
 from .utils import FrequencyType, UserFrequencyType
 from .converter import AggregationMethod, InterpolationMethod
 
@@ -33,11 +31,9 @@ __all__ = [
 
     # Fonctions utilitaires
     'normalize_frequency',
-    'to_user_friendly',
+    'to_literal',
     'to_pandas_freq',
     'to_dateoffset',
-    'get_base_frequency',
-    'get_reference_point',
     'is_higher_frequency',
     'validate_frequency',
 

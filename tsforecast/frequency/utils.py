@@ -4,21 +4,18 @@ This module provides centralized functions to handle different frequency represe
 including pandas frequency codes, DateOffsets, and user-friendly frequency names.
 """
 # Importation des modules
+# Modules de base
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
-from typing import Union, Optional, Dict, Literal, Tuple
-import re
-
+from typing import Union, Literal
 
 # Types supportés pour les fréquences
-FrequencyType = Union[str, pd.DateOffset]
+FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'Y']
 UserFrequencyType = Literal[
-    'daily', 'weekly', 'monthly', 'quarterly', 'annual',
-    'daily_start', 'weekly_start', 'monthly_start', 'quarterly_start', 'annual_start',
-    'daily_end', 'weekly_end', 'monthly_end', 'quarterly_end', 'annual_end'
+    'daily', 'weekly', 'monthly', 'quarterly', 'annual', 'business_daily'
 ]
 
-
+# Classe de normalisation des fréquences
 class FrequencyNormalizer:
     """Centralized frequency normalization and conversion utility.
 
@@ -37,58 +34,66 @@ class FrequencyNormalizer:
         'D'
     """
 
+    # Initialisation
     def __init__(self):
         """Initialize frequency mappings."""
-        # Mapping des fréquences pandas vers des noms conviviaux
-        self._pandas_to_friendly = {
+        # Mapping des fréquences pandas vers des noms littéraux
+        self._pandas_to_literal = {
+            'ns': 'nanosecond',
+            'us': 'microsecond',
+            'ms': 'millisecond',
+            's': 'second',
+            'min': 'minute',
+            'h': 'hourly',
             'D': 'daily',
             'B': 'business_daily',
             'W': 'weekly',
-            'W-SUN': 'weekly_end',
-            'W-MON': 'weekly_start',
-            'M': 'monthly_end',
-            'MS': 'monthly_start',
-            'Q': 'quarterly_end',
-            'QS': 'quarterly_start',
-            'A': 'annual_end',
-            'AS': 'annual_start',
-            'Y': 'annual_end',
-            'YS': 'annual_start'
+            'SM': 'semi_monthly',
+            'M': 'monthly',
+            'Q': 'quarterly',
+            'Y': 'annual'
         }
 
         # Mapping inverse pour les conversions
-        self._friendly_to_pandas = {
+        self._literal_to_pandas = {
+            'nanosecond' : 'ns',
+            'microsecond': 'us',
+            'millisecond': 'ms',
+            'second': 's',
+            'minute': 'min',
+            'hourly': 'h',
             'daily': 'D',
             'business_daily': 'B',
             'weekly': 'W',
-            'weekly_start': 'W-MON',
-            'weekly_end': 'W-SUN',
+            'semi_monthly': 'SM',
             'monthly': 'M',
-            'monthly_start': 'MS',
-            'monthly_end': 'M',
             'quarterly': 'Q',
-            'quarterly_start': 'QS',
-            'quarterly_end': 'Q',
-            'annual': 'A',
-            'annual_start': 'AS',
-            'annual_end': 'A'
+            'annual': 'Y'
         }
 
         # Ordre des fréquences pour les comparaisons (du plus granulaire au moins granulaire)
         self._frequency_order = {
-            'daily': 1,
-            'business_daily': 1.5,
-            'weekly': 2,
-            'monthly': 3,
-            'quarterly': 4,
-            'annual': 5
+            'nanosecond' : 1,
+            'microsecond': 2,
+            'millisecond': 3,
+            'second': 4,
+            'minute': 5,
+            'hourly': 6,
+            'daily': 7,
+            'business_daily': 7.5,
+            'weekly': 8,
+            'semi_monthly': 8.5,
+            'monthly': 9,
+            'quarterly': 10,
+            'annual': 11
         }
 
-    def normalize_frequency(self, frequency: FrequencyType) -> str:
+    # Méthode de normalisation des fréquences dans leur expression pandas
+    def normalize_frequency(self, frequency: Union[FrequencyType, UserFrequencyType]) -> FrequencyType:
         """Normalize any frequency representation to pandas frequency code.
 
         Args:
-            frequency: Frequency in any supported format
+            frequency: Frequency string (pandas code or litteral name)
 
         Returns:
             Pandas frequency code string
@@ -98,57 +103,50 @@ class FrequencyNormalizer:
 
         Examples:
             >>> normalizer = FrequencyNormalizer()
-            >>> normalizer.normalize_frequency('monthly_start')
-            'MS'
-            >>> normalizer.normalize_frequency(pd.DateOffset(months=1))
+            >>> normalizer.normalize_frequency('monthly')
             'M'
+            >>> normalizer.normalize_frequency('D')
+            'D'
         """
-        if frequency is None:
-            raise ValueError("Frequency cannot be None")
+        # Vérification que la fréquence est du type spécifié
+        if not isinstance(frequency, str):
+            raise ValueError(f"Frequency must be a string, got {type(frequency)}")
 
-        # Gestion des DateOffset
-        if isinstance(frequency, pd.DateOffset):
-            return self._dateoffset_to_pandas_freq(frequency)
+        # Retourne un code pandas inchangé
+        if frequency in self._pandas_to_literal:
+            return frequency
 
-        # Gestion des chaînes de caractères
-        if isinstance(frequency, str):
-            # Si c'est déjà un code pandas valide
-            if frequency in self._pandas_to_friendly:
-                return frequency
+        # Conversion du nom littéral en pandas
+        if frequency in self._literal_to_pandas:
+            return self._friendly_to_pandas[frequency]
 
-            # Si c'est un nom convivial
-            if frequency in self._friendly_to_pandas:
-                return self._friendly_to_pandas[frequency]
+        # Renvoie une erreur si le code est inconnu
+        raise ValueError(f"Unsupported frequency: {frequency}. Supported frequencies: {list(self._literal_to_pandas.keys())} or pandas codes: {list(self._pandas_to_literal.keys())}")
 
-            # Tentative d'inférence avec pandas
-            try:
-                offset = to_offset(frequency)
-                return self._dateoffset_to_pandas_freq(offset)
-            except ValueError:
-                pass
-
-        raise ValueError(f"Unsupported frequency format: {frequency}")
-
-    def to_user_friendly(self, frequency: FrequencyType) -> str:
-        """Convert frequency to user-friendly name.
+    # Méthode de conversion de la fréquence dans son expression littérale
+    def to_literal(self, frequency: FrequencyType) -> UserFrequencyType:
+        """Convert frequency to literal name.
 
         Args:
             frequency: Frequency in any supported format
 
         Returns:
-            User-friendly frequency name
+            Literal frequency name
 
         Examples:
             >>> normalizer = FrequencyNormalizer()
-            >>> normalizer.to_user_friendly('MS')
-            'monthly_start'
+            >>> normalizer.to_user_friendly('M')
+            'monthly'
             >>> normalizer.to_user_friendly('Q')
-            'quarterly_end'
+            'quarterly'
         """
+        # Normalisation de la fréquence
         pandas_freq = self.normalize_frequency(frequency)
-        return self._pandas_to_friendly.get(pandas_freq, pandas_freq)
+        # COnversion dans son nom littéral
+        return self._pandas_to_literal.get(pandas_freq, pandas_freq)
 
-    def to_pandas_freq(self, frequency: FrequencyType) -> str:
+    # Conversion d'une fréquence dans son expression pandas
+    def to_pandas_freq(self, frequency: Union[FrequencyType, UserFrequencyType]) -> FrequencyType:
         """Convert frequency to pandas frequency code.
 
         Args:
@@ -159,16 +157,17 @@ class FrequencyNormalizer:
 
         Examples:
             >>> normalizer = FrequencyNormalizer()
-            >>> normalizer.to_pandas_freq('monthly_start')
-            'MS'
+            >>> normalizer.to_pandas_freq('monthly')
+            'M'
         """
         return self.normalize_frequency(frequency)
 
+    # Conversion d'une fréquence en DateOffset
     def to_dateoffset(self, frequency: FrequencyType) -> pd.DateOffset:
         """Convert frequency to pandas DateOffset object.
 
         Args:
-            frequency: Frequency in any supported format
+            frequency: Frequency string
 
         Returns:
             Pandas DateOffset object
@@ -179,60 +178,12 @@ class FrequencyNormalizer:
             >>> isinstance(offset, pd.DateOffset)
             True
         """
+        # Normalisation de la fréquence
         pandas_freq = self.normalize_frequency(frequency)
+        # Conversion en OffSet
         return to_offset(pandas_freq)
 
-    def get_base_frequency(self, frequency: FrequencyType) -> str:
-        """Extract base frequency without reference point.
-
-        Args:
-            frequency: Frequency in any supported format
-
-        Returns:
-            Base frequency name (daily, weekly, monthly, quarterly, annual)
-
-        Examples:
-            >>> normalizer = FrequencyNormalizer()
-            >>> normalizer.get_base_frequency('monthly_start')
-            'monthly'
-            >>> normalizer.get_base_frequency('Q')
-            'quarterly'
-        """
-        friendly = self.to_user_friendly(frequency)
-
-        # Extraction de la fréquence de base
-        base_freq = friendly.split('_')[0]
-        if base_freq == 'business':
-            return 'business_daily'
-        return base_freq
-
-    def get_reference_point(self, frequency: FrequencyType) -> Optional[str]:
-        """Extract reference point from frequency.
-
-        Args:
-            frequency: Frequency in any supported format
-
-        Returns:
-            Reference point ('start', 'end') or None if not specified
-
-        Examples:
-            >>> normalizer = FrequencyNormalizer()
-            >>> normalizer.get_reference_point('monthly_start')
-            'start'
-            >>> normalizer.get_reference_point('Q')
-            'end'
-        """
-        friendly = self.to_user_friendly(frequency)
-
-        if '_start' in friendly:
-            return 'start'
-        elif '_end' in friendly:
-            return 'end'
-        elif friendly in ['monthly', 'quarterly', 'annual']:
-            # Par défaut, les fréquences sans référence explicite sont "end"
-            return 'end'
-        return None
-
+    # Méthode déterminant si une fréquence est plus élevée d'une autre
     def is_higher_frequency(self, freq1: FrequencyType, freq2: FrequencyType) -> bool:
         """Check if freq1 is a higher frequency than freq2.
 
@@ -250,14 +201,15 @@ class FrequencyNormalizer:
             >>> normalizer.is_higher_frequency('quarterly', 'weekly')
             False
         """
-        base1 = self.get_base_frequency(freq1)
-        base2 = self.get_base_frequency(freq2)
+        literal_freq1 = self.to_literal(freq1)
+        literal_freq2 = self.to_literal(freq2)
 
-        order1 = self._frequency_order.get(base1, 0)
-        order2 = self._frequency_order.get(base2, 0)
+        order1 = self._frequency_order.get(literal_freq1, 0)
+        order2 = self._frequency_order.get(literal_freq2, 0)
 
         return order1 < order2
 
+    # Méthode de vérification que deux expressions de fréquences sont compatibles
     def are_compatible_frequencies(self, freq1: FrequencyType, freq2: FrequencyType) -> bool:
         """Check if two frequencies are compatible for conversion.
 
@@ -276,44 +228,14 @@ class FrequencyNormalizer:
             True
         """
         try:
+            # Tentative de normalisation de chaque fréquence
             self.normalize_frequency(freq1)
             self.normalize_frequency(freq2)
             return True
         except ValueError:
             return False
 
-    def _dateoffset_to_pandas_freq(self, offset: pd.DateOffset) -> str:
-        """Convert DateOffset to pandas frequency string.
-
-        Args:
-            offset: Pandas DateOffset object
-
-        Returns:
-            Pandas frequency string
-        """
-        # Utilisation de la méthode pandas pour récupérer le code de fréquence
-        freq_str = offset.freqstr
-
-        # Normalisation des codes de fréquence courants
-        if freq_str == '1D':
-            return 'D'
-        elif freq_str == '1W':
-            return 'W'
-        elif freq_str == '1M':
-            return 'M'
-        elif freq_str == '1MS':
-            return 'MS'
-        elif freq_str == '1Q':
-            return 'Q'
-        elif freq_str == '1QS':
-            return 'QS'
-        elif freq_str in ['1A', '1Y']:
-            return 'A'
-        elif freq_str in ['1AS', '1YS']:
-            return 'AS'
-
-        return freq_str
-
+    # Méthode de vérification qu'une fréquence est supportée
     def validate_frequency(self, frequency: FrequencyType) -> bool:
         """Validate if a frequency is supported.
 
@@ -331,6 +253,7 @@ class FrequencyNormalizer:
             False
         """
         try:
+            # Tentative de normalisation de la fréquence
             self.normalize_frequency(frequency)
             return True
         except ValueError:
@@ -341,34 +264,32 @@ class FrequencyNormalizer:
 _normalizer = FrequencyNormalizer()
 
 # Fonctions de commodité pour accès direct
+# Normalisation de la fréquence
 def normalize_frequency(frequency: FrequencyType) -> str:
     """Normalize frequency to pandas frequency code."""
     return _normalizer.normalize_frequency(frequency)
 
-def to_user_friendly(frequency: FrequencyType) -> str:
+# Conversion d'une fréquence dans son expression littérale
+def to_literal(frequency: FrequencyType) -> str:
     """Convert frequency to user-friendly name."""
-    return _normalizer.to_user_friendly(frequency)
+    return _normalizer.to_literal(frequency)
 
+# Conversion d'une fréquence dans son expression pandas
 def to_pandas_freq(frequency: FrequencyType) -> str:
     """Convert frequency to pandas frequency code."""
     return _normalizer.to_pandas_freq(frequency)
 
+# Conversion d'une fréquence en DateOffset
 def to_dateoffset(frequency: FrequencyType) -> pd.DateOffset:
     """Convert frequency to pandas DateOffset."""
     return _normalizer.to_dateoffset(frequency)
 
-def get_base_frequency(frequency: FrequencyType) -> str:
-    """Get base frequency without reference point."""
-    return _normalizer.get_base_frequency(frequency)
-
-def get_reference_point(frequency: FrequencyType) -> Optional[str]:
-    """Get reference point from frequency."""
-    return _normalizer.get_reference_point(frequency)
-
+# Détermination de la plus haute fréquence
 def is_higher_frequency(freq1: FrequencyType, freq2: FrequencyType) -> bool:
     """Check if freq1 is higher frequency than freq2."""
     return _normalizer.is_higher_frequency(freq1, freq2)
 
+# Vérification de la validité d'une fréquence
 def validate_frequency(frequency: FrequencyType) -> bool:
     """Validate if frequency is supported."""
     return _normalizer.validate_frequency(frequency)
