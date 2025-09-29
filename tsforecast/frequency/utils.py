@@ -118,7 +118,7 @@ class FrequencyNormalizer:
 
         # Conversion du nom littéral en pandas
         if frequency in self._literal_to_pandas:
-            return self._friendly_to_pandas[frequency]
+            return self._literal_to_pandas[frequency]
 
         # Renvoie une erreur si le code est inconnu
         raise ValueError(f"Unsupported frequency: {frequency}. Supported frequencies: {list(self._literal_to_pandas.keys())} or pandas codes: {list(self._pandas_to_literal.keys())}")
