@@ -10,7 +10,7 @@ from typing import Union, Optional, Literal, Dict, Any
 from pandas.tseries.frequencies import to_offset
 
 # Import des utilitaires de fréquence
-from .utils import normalize_frequency, to_pandas_freq, get_base_frequency, is_higher_frequency
+from .utils import normalize_frequency, is_higher_frequency
 
 
 # Types pour les méthodes d'agrégation et d'interpolation
@@ -18,6 +18,7 @@ AggregationMethod = Literal['mean', 'sum', 'first', 'last', 'min', 'max', 'media
 InterpolationMethod = Literal['linear', 'time', 'index', 'values', 'nearest', 'zero', 'slinear', 'quadratic', 'cubic']
 
 
+# Classe de conversion d'une fréquence dans une autre
 class FrequencyConverter:
     """Handle conversions between different time frequencies.
 
@@ -32,11 +33,12 @@ class FrequencyConverter:
         >>> len(monthly)
         1
     """
-
+    # Initialisation
     def __init__(self):
         """Initialize the FrequencyConverter."""
         pass
-
+    
+    # Méthode de conversion d'une fréquence en une autre
     def convert_frequency(self,
                          data: Union[pd.Series, pd.DataFrame],
                          target_freq: str,
@@ -78,7 +80,7 @@ class FrequencyConverter:
             raise ValueError("Cannot detect current frequency of the data")
 
         # Normalisation de la fréquence cible
-        target_freq_normalized = to_pandas_freq(target_freq)
+        target_freq_normalized = normalize_frequency(target_freq)
 
         # Si les fréquences sont identiques, retourner les données telles quelles
         if normalize_frequency(current_freq) == target_freq_normalized:
@@ -113,8 +115,8 @@ class FrequencyConverter:
             >>> len(monthly)
             1
         """
-        target_freq_pandas = to_pandas_freq(target_freq)
-        resampled = data.resample(target_freq_pandas)
+        target_base_freq = normalize_frequency(target_freq)
+        resampled = data.resample(target_base_freq)
 
         # Application de la méthode d'agrégation
         if method == 'mean':
@@ -163,10 +165,10 @@ class FrequencyConverter:
             >>> len(daily) > len(monthly_series)
             True
         """
-        target_freq_pandas = to_pandas_freq(target_freq)
+        target_base_freq = normalize_frequency(target_freq)
 
         # Utilisation d'asfreq pour créer la nouvelle fréquence
-        upsampled = data.asfreq(target_freq_pandas)
+        upsampled = data.asfreq(target_base_freq)
 
         # Application du remplissage si spécifié
         if fill_method == 'ffill':
@@ -309,6 +311,7 @@ class FrequencyConverter:
         """
         return is_higher_frequency(target_freq, current_freq)
 
+    # Méthode auxiliaire d'augmentation de la fréquence par interpolation
     def _upsample(self,
                  data: Union[pd.Series, pd.DataFrame],
                  target_freq: str,
@@ -327,6 +330,7 @@ class FrequencyConverter:
         """
         return self.interpolate_to_higher_frequency(data, target_freq, method, fill_method)
 
+    # Méthode auxiliaire de diminution de la fréquence par agrégation
     def _downsample(self,
                    data: Union[pd.Series, pd.DataFrame],
                    target_freq: str,
