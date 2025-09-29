@@ -7,7 +7,7 @@ including pandas frequency codes, DateOffsets, and user-friendly frequency names
 # Modules de base
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
-from typing import Union, Literal
+from typing import Union, Literal, Optional, Dict, List
 
 # Types supportés pour les fréquences
 FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'Y']
@@ -73,19 +73,19 @@ class FrequencyNormalizer:
 
         # Ordre des fréquences pour les comparaisons (du plus granulaire au moins granulaire)
         self._frequency_order = {
-            'nanosecond' : 1,
-            'microsecond': 2,
-            'millisecond': 3,
-            'second': 4,
-            'minute': 5,
-            'hourly': 6,
-            'daily': 7,
-            'business_daily': 7.5,
-            'weekly': 8,
-            'semi_monthly': 8.5,
-            'monthly': 9,
-            'quarterly': 10,
-            'annual': 11
+            'ns' : 1,
+            'us': 2,
+            'ms': 3,
+            's': 4,
+            'min': 5,
+            'h': 6,
+            'D': 7,
+            'B': 7.5,
+            'W': 8,
+            'SM': 8.5,
+            'M': 9,
+            'Q': 10,
+            'Y': 11
         }
 
     # Méthode de normalisation des fréquences dans leur expression pandas
@@ -293,3 +293,16 @@ def is_higher_frequency(freq1: FrequencyType, freq2: FrequencyType) -> bool:
 def validate_frequency(frequency: FrequencyType) -> bool:
     """Validate if frequency is supported."""
     return _normalizer.validate_frequency(frequency)
+
+# Extraction de l'ordre des fréquences
+def get_frequency_order(frequency: Union[FrequencyType, UserFrequencyType]) -> float:
+    """Get the order of a frequency for comparison.
+
+    Args:
+        frequency: Frequency to get order for
+
+    Returns:
+        Frequency order (higher number = lower frequency/granularity)
+    """
+    base_freq = normalize_frequency(frequency)
+    return _normalizer._frequency_order.get(base_freq, 0)

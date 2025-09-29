@@ -93,7 +93,7 @@ class FrequencyDetector:
         # Utilisation principale de pandas.infer_freq
         try:
             inferred_freq = pd.infer_freq(time_index)
-            if inferred_freq & literal:
+            if inferred_freq and literal:
                 # Conversion vers le format littéral
                 return to_literal(inferred_freq)
             elif inferred_freq:
@@ -104,7 +104,7 @@ class FrequencyDetector:
 
         # Extension pour les fréquences non supportées par infer_freq
         extended_freq = self._extend_infer_freq(time_index, literal)
-        if extended_freq & literal:
+        if extended_freq and literal:
             # Conversion vers le format littéral
             return to_literal(extended_freq)
         elif extended_freq :
@@ -239,6 +239,7 @@ class FrequencyDetector:
 
         Args:
             time_index: Sorted datetime index
+            literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
             Extended frequency detection result in pandas format or None
@@ -272,14 +273,22 @@ class FrequencyDetector:
         if modal_seconds < 86400:  # Moins d'un jour
             return self._detect_intraday_frequency(modal_seconds=modal_seconds, literal=literal)
         else :
-            
-            return self._detect_day_frequency(time_index=time_index, literal=literal)
+            # Conversion en jours pour les fréquences >= journalières
+            modal_days = modal_diff.days
+            return self._detect_day_frequency(time_index=time_index, modal_days=modal_days, literal=literal)
 
     # Méthode auxiliaire de détection des basses fréquences en jours
-    def _detect_day_frequency(self, time_index: pd.DatetimeIndex, literal: bool = False) -> Optional[Union[FrequencyType, UserFrequencyType]] :
-        # Conversion en jours pour les fréquences >= journalières
-        modal_days = modal_diff.days
+    def _detect_day_frequency(self, time_index: pd.DatetimeIndex, modal_days: float, literal: bool = False) -> Optional[Union[FrequencyType, UserFrequencyType]] :
+        """Detect day-level frequencies (daily, weekly, monthly, quarterly, annual).
 
+        Args:
+            time_index: Sorted datetime index
+            modal_days: Modal time difference in days between consecutive observations
+            literal: Boolean indicating whether to return explicit literal frequency expression
+
+        Returns:
+            Detected frequency or None if no match found
+        """
         # Détection basée sur le nombre de jours modal
         if modal_days == 1:
             # Distinction entre jours calendaires et jours ouvrés
@@ -304,6 +313,7 @@ class FrequencyDetector:
 
         Args:
             modal_seconds: Modal time difference in seconds
+            literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
             Pandas frequency code for intraday frequency or None
@@ -343,6 +353,7 @@ class FrequencyDetector:
 
         Args:
             time_index: Sorted datetime index
+            literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
             'D' for calendar daily or 'B' for business daily
@@ -371,6 +382,7 @@ class FrequencyDetector:
 
         Args:
             time_index: Sorted datetime index
+            literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
             'SM' if semi-monthly frequency is detected, None otherwise
@@ -395,4 +407,48 @@ class FrequencyDetector:
         
         return None
 
+# Instance globale pour faciliter l'utilisation
+_detector = FrequencyDetector()
 
+# Fonctions de commodité pour la détection de fréquence
+# Fonction de détection de la fréquence d'une série
+def detect_frequency(series: pd.Series, literal: bool = False) -> Optional[Union[FrequencyType, UserFrequencyType]]:
+    """Detect the frequency of a time series using FrequencyDetector.
+
+    Args:
+        series: Time series data with datetime index
+        literal: Boolean indicating whether to return explicit literal frequency expression
+
+    Returns:
+        Detected frequency as user-friendly string, or None if detection fails
+    """
+    return _detector.detect_frequency(series, literal)
+
+# Fonction de détection de la fréquence d'un jeu de données
+def detect_dataset_frequency(df: pd.DataFrame,
+                           time_col: Optional[str] = None,
+                           panel_cols: Optional[List[str]] = None,
+                           literal: bool = False,
+                           check_consistency: bool = False,
+                           strict: bool = True) -> Union[Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]], FrequencyType, UserFrequencyType]:
+    """Detect frequencies for all series in a dataset using FrequencyDetector.
+
+    Args:
+        df: DataFrame containing time series data
+        time_col: Name of the time column (if None, uses index)
+        panel_cols: List of columns identifying panel dimensions
+        literal: Boolean indicating whether to return explicit literal frequency expression
+        check_consistency: If True, check the frequency consistency across columns 
+        strict: If True, all frequencies must be identical
+
+    Returns:
+        Dictionary mapping column names (or (panel_id, column) tuples) to frequencies or consistent frequency
+    """
+    # Détection des fréquences
+    frequency_map = _detector.detect_dataset_frequency(df, time_col, panel_cols, literal)
+    # Vérification de la consistence des fréquences si demandé
+    if check_consistency :
+        _, frequency = _detector.validate_frequency_consistency(frequency_map=frequency_map, strict=strict)
+        return frequency
+    else :
+        return frequency_map
