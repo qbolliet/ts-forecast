@@ -10,8 +10,8 @@ from typing import Union, Optional, Literal, Dict, Any
 from pandas.tseries.frequencies import to_offset
 
 # Import des utilitaires de fréquence
-from .utils import normalize_frequency, is_higher_frequency
-
+from .utils import normalize_frequency, is_higher_frequency, get_frequency_order
+from .detector import detect_frequency
 
 # Types pour les méthodes d'agrégation et d'interpolation
 AggregationMethod = Literal['mean', 'sum', 'first', 'last', 'min', 'max', 'median', 'std', 'count']
@@ -75,7 +75,7 @@ class FrequencyConverter:
         self._validate_conversion_params(data, target_freq, method)
 
         # Détection de la fréquence actuelle
-        current_freq = self._detect_current_frequency(data)
+        current_freq = detect_frequency(data.iloc[:, 0] if isinstance(data, pd.DataFrame) else data)
         if not current_freq:
             raise ValueError("Cannot detect current frequency of the data")
 
@@ -87,7 +87,7 @@ class FrequencyConverter:
             return data
 
         # Détermination de la direction de conversion
-        if self._is_upsampling(current_freq, target_freq):
+        if is_higher_frequency(target_freq, current_freq):
             return self._upsample(data, target_freq_normalized, method, fill_method)
         else:
             return self._downsample(data, target_freq_normalized, method)
@@ -229,7 +229,7 @@ class FrequencyConverter:
         # Détection des fréquences actuelles
         current_freqs = []
         for dataset in datasets:
-            freq = self._detect_current_frequency(dataset)
+            freq = detect_frequency(dataset.iloc[:, 0] if isinstance(dataset, pd.DataFrame) else dataset)
             if freq:
                 current_freqs.append(freq)
 
@@ -241,8 +241,7 @@ class FrequencyConverter:
             # Utilisation de la fréquence la plus basse (moins granulaire)
             freq_orders = {}
             for freq in set(current_freqs):
-                base_freq = get_base_frequency(freq)
-                freq_orders[freq] = self._get_frequency_order(base_freq)
+                freq_orders[freq] = get_frequency_order(freq)
 
             target_freq = max(freq_orders.keys(), key=lambda x: freq_orders[x])
 
@@ -282,34 +281,7 @@ class FrequencyConverter:
         except ValueError as e:
             raise ValueError(f"Invalid target frequency: {e}")
 
-    def _detect_current_frequency(self, data: Union[pd.Series, pd.DataFrame]) -> Optional[str]:
-        """Detect the current frequency of the data.
 
-        Args:
-            data: Input data
-
-        Returns:
-            Detected frequency or None
-        """
-        try:
-            inferred_freq = pd.infer_freq(data.index)
-            if inferred_freq:
-                return inferred_freq
-        except Exception:
-            pass
-        return None
-
-    def _is_upsampling(self, current_freq: str, target_freq: str) -> bool:
-        """Determine if conversion is upsampling (to higher frequency).
-
-        Args:
-            current_freq: Current frequency
-            target_freq: Target frequency
-
-        Returns:
-            True if upsampling, False if downsampling
-        """
-        return is_higher_frequency(target_freq, current_freq)
 
     # Méthode auxiliaire d'augmentation de la fréquence par interpolation
     def _upsample(self,
@@ -347,21 +319,3 @@ class FrequencyConverter:
         """
         return self.aggregate_to_lower_frequency(data, target_freq, method)
 
-    def _get_frequency_order(self, base_freq: str) -> int:
-        """Get the order of a frequency for comparison.
-
-        Args:
-            base_freq: Base frequency name
-
-        Returns:
-            Frequency order (higher number = lower frequency)
-        """
-        frequency_order = {
-            'daily': 1,
-            'business_daily': 1.5,
-            'weekly': 2,
-            'monthly': 3,
-            'quarterly': 4,
-            'annual': 5
-        }
-        return frequency_order.get(base_freq, 0)
