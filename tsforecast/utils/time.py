@@ -6,7 +6,7 @@ from typing import Literal, Union
 from datetime import datetime, timedelta
 
 # Import des utilitaires de fréquence
-from ..frequency.utils import get_base_frequency, FrequencyType
+from ..frequency.utils import normalize_frequency, FrequencyType, UserFrequencyType
 
 # Fonctions de conversion entre timeseries et string
 def timeseries_to_string(ts: pd.Series, format: str = "%Y-%m-%d") -> pd.Series:
@@ -74,7 +74,7 @@ def string_to_timeseries(ts: pd.Series, format: str = None) -> pd.Series:
     return pd.Series(ts.values, index=datetime_index, name=ts.name)
 
 # Fonction identifiant la date de début d'une période à partir d'une date et d'une fréquence
-def get_period_start(date: Union[pd.Timestamp, datetime], frequency: FrequencyType) -> datetime:
+def get_period_start(date: Union[pd.Timestamp, datetime], frequency: Union[FrequencyType, UserFrequencyType]) -> datetime:
     """Get the start date of the period containing the given date.
 
     Args:
@@ -84,6 +84,9 @@ def get_period_start(date: Union[pd.Timestamp, datetime], frequency: FrequencyTy
     Returns:
         Start date of the period as datetime object
 
+    Raises:
+        ValueError: If frequency is not supported
+
     Examples:
         >>> import pandas as pd
         >>> from datetime import datetime
@@ -91,37 +94,90 @@ def get_period_start(date: Union[pd.Timestamp, datetime], frequency: FrequencyTy
         datetime.datetime(2023, 6, 1, 0, 0)
         >>> get_period_start(datetime(2023, 6, 15), 'quarterly')
         datetime.datetime(2023, 4, 1, 0, 0)
+        >>> get_period_start(datetime(2023, 6, 15, 14, 35, 22), 'hourly')
+        datetime.datetime(2023, 6, 15, 14, 0, 0)
     """
     # Conversion en datetime si nécessaire
     if isinstance(date, pd.Timestamp):
         date = date.to_pydatetime()
 
     # Normalisation de la fréquence
-    base_freq = get_base_frequency(frequency)
+    base_freq = normalize_frequency(frequency)
 
-    # Distinction suivant la fréquence de base avec logique canonique
-    if base_freq == 'daily' or base_freq == 'business_daily':
+    # Fréquences infra-secondes
+    if base_freq == 'ns':
+        # Nanoseconde : retourne la date telle quelle (précision datetime limitée)
+        return date
+    elif base_freq == 'us':
+        # Microseconde : début de la microseconde courante
+        return datetime(
+            date.year, date.month, date.day,
+            date.hour, date.minute, date.second,
+            date.microsecond
+        )
+    elif base_freq == 'ms':
+        # Milliseconde : début de la milliseconde courante
+        millisecond = (date.microsecond // 1000) * 1000
+        return datetime(
+            date.year, date.month, date.day,
+            date.hour, date.minute, date.second,
+            millisecond
+        )
+    
+    # Fréquences infra-journalières
+    elif base_freq == 's':
+        # Début de la seconde
+        return datetime(
+            date.year, date.month, date.day,
+            date.hour, date.minute, date.second
+        )
+    elif base_freq == 'min':
+        # Début de la minute
+        return datetime(
+            date.year, date.month, date.day,
+            date.hour, date.minute
+        )
+    elif base_freq == 'h':
+        # Début de l'heure
+        return datetime(
+            date.year, date.month, date.day,
+            date.hour
+        )
+    
+    # Fréquences journalières et supérieures
+    elif base_freq == 'D' or base_freq == 'B':
         # Début du jour (minuit)
         return datetime(date.year, date.month, date.day)
-    elif base_freq == 'weekly':
+    elif base_freq == 'W':
         # Début de la semaine (toujours lundi)
         return datetime(date.year, date.month, date.day) - timedelta(days=date.weekday())
-    elif base_freq == 'monthly':
+    elif base_freq == 'SM':
+        # Semi-mensuel : 1-15 et 16-fin du mois
+        if date.day <= 15:
+            # Première quinzaine : début le 1er
+            return datetime(date.year, date.month, 1)
+        else:
+            # Deuxième quinzaine : début le 16
+            return datetime(date.year, date.month, 16)
+    elif base_freq == 'M':
         # Premier jour du mois
         return datetime(date.year, date.month, 1)
-    elif base_freq == 'quarterly':
+    elif base_freq == 'Q':
         # Premier jour du trimestre (Q1=Jan, Q2=Apr, Q3=Jul, Q4=Oct)
         quarter = (date.month - 1) // 3 + 1
         quarter_start_month = (quarter - 1) * 3 + 1
         return datetime(date.year, quarter_start_month, 1)
-    elif base_freq == 'annual':
+    elif base_freq == 'Y':
         # Premier jour de l'année
         return datetime(date.year, 1, 1)
     else:
-        raise ValueError(f"Unsupported frequency: {frequency}. Base frequency '{base_freq}' is not recognized.")
+        raise ValueError(
+            f"Unsupported frequency: {frequency}. "
+            f"Base frequency '{base_freq}' is not recognized."
+        )
 
 # Fonction identifiant la date de début d'une période à partir d'une date et d'une fréquence
-def get_period_end(date: Union[pd.Timestamp, datetime], frequency: FrequencyType) -> datetime:
+def get_period_end(date: Union[pd.Timestamp, datetime], frequency: Union[FrequencyType, UserFrequencyType]) -> datetime:
     """Get the end date of the period containing the given date.
 
     Args:
@@ -131,6 +187,9 @@ def get_period_end(date: Union[pd.Timestamp, datetime], frequency: FrequencyType
     Returns:
         First date outside the period (exclusive boundary) as datetime object
 
+    Raises:
+        ValueError: If frequency is not supported
+
     Examples:
         >>> import pandas as pd
         >>> from datetime import datetime
@@ -138,29 +197,65 @@ def get_period_end(date: Union[pd.Timestamp, datetime], frequency: FrequencyType
         datetime.datetime(2023, 7, 1, 0, 0)
         >>> get_period_end(datetime(2023, 6, 15), 'quarterly')
         datetime.datetime(2023, 7, 1, 0, 0)
+        >>> get_period_end(datetime(2023, 6, 15, 14, 35, 22), 'hourly')
+        datetime.datetime(2023, 6, 15, 15, 0, 0)
     """
     # Conversion en datetime si nécessaire
     if isinstance(date, pd.Timestamp):
         date = date.to_pydatetime()
 
     # Normalisation de la fréquence
-    base_freq = get_base_frequency(frequency)
+    base_freq = normalize_frequency(frequency)
 
-    # Distinction suivant la fréquence de base avec logique canonique
-    if base_freq == 'daily' or base_freq == 'business_daily':
+    # Fréquences infra-secondes
+    if base_freq == 'ns':
+        # Nanoseconde : ajoute une nanoseconde (limitation de datetime)
+        # En pratique, datetime a une précision en microsecondes
+        return date + timedelta(microseconds=0.001)
+    elif base_freq == 'us':
+        # Microseconde suivante
+        return date + timedelta(microseconds=1)
+    elif base_freq == 'ms':
+        # Milliseconde suivante
+        return date + timedelta(milliseconds=1)
+    
+    # Fréquences infra-journalières
+    elif base_freq == 's':
+        # Seconde suivante
+        return date.replace(microsecond=0) + timedelta(seconds=1)
+    elif base_freq == 'min':
+        # Minute suivante
+        return date.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    elif base_freq == 'h':
+        # Heure suivante
+        return date.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    
+    # Fréquences journalières et supérieures
+    elif base_freq == 'D' or base_freq == 'B':
         # Jour suivant (minuit)
         return datetime(date.year, date.month, date.day) + timedelta(days=1)
-    elif base_freq == 'weekly':
+    elif base_freq == 'W':
         # Lundi de la semaine suivante
         week_start = datetime(date.year, date.month, date.day) - timedelta(days=date.weekday())
         return week_start + timedelta(days=7)
-    elif base_freq == 'monthly':
+    elif base_freq == 'SM':
+        # Semi-mensuel : fin de la période dépend de la quinzaine
+        if date.day <= 15:
+            # Première quinzaine : fin le 16
+            return datetime(date.year, date.month, 16)
+        else:
+            # Deuxième quinzaine : fin le 1er du mois suivant
+            if date.month == 12:
+                return datetime(date.year + 1, 1, 1)
+            else:
+                return datetime(date.year, date.month + 1, 1)
+    elif base_freq == 'M':
         # Premier jour du mois suivant
         if date.month == 12:
             return datetime(date.year + 1, 1, 1)
         else:
             return datetime(date.year, date.month + 1, 1)
-    elif base_freq == 'quarterly':
+    elif base_freq == 'Q':
         # Premier jour du trimestre suivant
         quarter = (date.month - 1) // 3 + 1
         if quarter == 4:
@@ -170,15 +265,18 @@ def get_period_end(date: Union[pd.Timestamp, datetime], frequency: FrequencyType
             # Trimestre suivant dans la même année
             next_quarter_month = quarter * 3 + 1
             return datetime(date.year, next_quarter_month, 1)
-    elif base_freq == 'annual':
+    elif base_freq == 'Y':
         # Premier jour de l'année suivante
         return datetime(date.year + 1, 1, 1)
     else:
-        raise ValueError(f"Unsupported frequency: {frequency}. Base frequency '{base_freq}' is not recognized.")
+        raise ValueError(
+            f"Unsupported frequency: {frequency}. "
+            f"Base frequency '{base_freq}' is not recognized."
+        )
 
 
 # Fonction retournant les bornes d'une période
-def get_period_boundaries(date: Union[pd.Timestamp, datetime], frequency: FrequencyType) -> tuple[datetime, datetime]:
+def get_period_boundaries(date: Union[pd.Timestamp, datetime], frequency: Union[FrequencyType, UserFrequencyType]) -> tuple[datetime, datetime]:
     """Get the start and end boundaries of the period containing the given date.
 
     Args:
