@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 import warnings
 # Module de détection de la fréquence des séries
 from ..frequency.detector import FrequencyDetector
+# Module de validation des données temporelles
+from ..utils.validation import validate_temporal_data
 
 # /!\ Faire un prompt pour intégrer un logger à cette fonction : comment mettre du logging optionnel + implémentation
 # Fonction de comparaison et d'inférence des délais de publication
@@ -38,68 +40,32 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: pd.DataFram
 # Fonction auxiliaire de validation des jeux de données en entrée
 def _validate_input_data(data: pd.DataFrame, time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None) -> pd.DataFrame:
     """Validate and prepare input data for analysis.
-    
+
+    This function uses the validate_temporal_data() function to validate and prepare
+    time series or panel data structures.
+
     Args:
         data: Input pandas DataFrame to validate
         time_col: Name of the time column (optional)
         panel_cols: List of panel column names (optional)
-        
+
     Returns:
         Validated and sorted DataFrame
-        
+
     Raises:
         ValueError: If validation fails or invalid parameter combination
     """
-    
-    # Vérification que le jeu de données est un pandas DataFrame
-    if not isinstance(data, pd.DataFrame):
-        raise ValueError("Data must be a pandas DataFrame")
-    
-    # Vérification de la cohérence des paramètres : panel_cols ne peut pas être spécifié sans time_col
-    if panel_cols is not None and time_col is None:
-        raise ValueError("Cannot specify panel_cols without time_col")
+    # Utilisation de validate_temporal_data pour valider les données
+    data_validated = validate_temporal_data(
+        data=data,
+        time_col=time_col,
+        panel_cols=panel_cols,
+        strict=True,
+        sort_data=True,
+        return_metadata=False  # Pas besoin de métadonnées pour la reversion ici
+    )
 
-    # Vérification de la présence de la colonne temporelle si spécifiée
-    if (time_col is not None) & (time_col not in data.columns):
-        raise ValueError(f"Time column '{time_col}' not found")
-
-    # Vérification des colonnes panel si spécifiées
-    if panel_cols:
-        # Calcul des colonnes manquantes
-        missing_panel_cols = set(panel_cols) - set(data.columns)
-        if missing_panel_cols:
-            raise ValueError(f"Missing panel columns: {missing_panel_cols}")
-
-    # Copie du jeu de données
-    data_prepro = data.copy()
-    
-    # Conversion de la colonne temporelle si spécifiée
-    if time_col is not None:
-        data_prepro[time_col] = pd.to_datetime(data_prepro[time_col])
-    
-    # Vérification de l'absence de duplicats et création de l'index
-    if time_col is not None and panel_cols is not None:
-        # Cas 1: time_col et panel_cols spécifiés
-        duplicate_subset = panel_cols + [time_col]
-        if data_prepro.duplicated(subset=duplicate_subset).any():
-            raise ValueError(f"Duplicate rows found based on columns: {duplicate_subset}")
-        # Ajout de l'index
-        data_prepro.set_index(panel_cols + [time_col], inplace=True)
-    elif time_col is not None:
-        # Cas 2: seul time_col spécifié
-        if data_prepro.duplicated(subset=[time_col]).any():
-            raise ValueError(f"Duplicate rows found based on time column: {time_col}")
-        # Ajout de l'index
-        data_prepro.set_index([time_col], inplace=True)
-    else:
-        # Cas 3: ni time_col ni panel_cols spécifiés - vérification selon l'index
-        if data_prepro.index.duplicated().any():
-            raise ValueError("Duplicate rows found based on index")
-
-    # Tri des données
-    data_prepro.sort_index(inplace=True)
-
-    return data_prepro
+    return data_validated
 
 # /!\ Voir si n'est util qu'ici où s'il est préférable de faire une fonction plus générique de parsing de date dans utils
 # Méthode auxiliaire de conversion et de validation de la date de téléchargement

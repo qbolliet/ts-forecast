@@ -1,330 +1,383 @@
-"""Time series and panel data validation utilities.
+"""Temporal data validation utilities.
 
-This module provides sklearn-compatible transformers for validating and preparing
-time series and panel data structures.
+This module provides functions for validating and preparing time series
+and panel data structures, including validation of datetime indexes,
+uniqueness checks, and proper index configuration.
 """
 # Importation des modules
 # Modules de base
 import pandas as pd
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any, Tuple
 import warnings
-# Sklearn
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.utils.validation import check_is_fitted
 
-# Modules de package
-from .base_transformers import ReversibleTransformerMixin
+# Fonction de validation 
+def validate_temporal_data(
+    data: Union[pd.Series, pd.DataFrame],
+    time_col: Optional[str] = None,
+    panel_cols: Optional[List[str]] = None,
+    strict: bool = True,
+    sort_data: bool = True,
+    return_metadata: bool = False
+) -> Union[pd.DataFrame, pd.Series, Tuple[Union[pd.DataFrame, pd.Series], Dict[str, Any]]]:
+    """Validate and prepare time series or panel data.
 
+    This function validates temporal data structures (time series or panel data)
+    and optionally converts time and panel columns into a proper index. It supports
+    both simple time series and panel data with flexible validation modes.
 
-class TimeSeriesValidator(BaseEstimator, TransformerMixin, ReversibleTransformerMixin):
-    """Validate and prepare time series or panel data with reversible index transformations.
-
-    This transformer validates temporal data structures and optionally converts
-    time and panel columns into a proper index. It supports both simple time series
-    and panel data, and can reverse the transformation to restore the original structure.
-
-    Parameters:
-        time_col: Name of the time column (if None, uses index)
-        panel_cols: List of panel identifier columns (optional)
+    Args:
+        data: Time series or panel data to validate (Series or DataFrame)
+        time_col: Name of the time column (if None, uses index for validation)
+        panel_cols: List of panel identifier column names (optional)
         strict: If True, raises errors on validation failures; if False, attempts corrections
         sort_data: If True, sorts data by index after validation
+        return_metadata: If True, returns (data, metadata) tuple for later structure restoration
 
-    Attributes:
-        original_index_ (pd.Index): Original index before transformation
-        original_structure_ (Dict): Dictionary containing original structure metadata
-        had_explicit_time_col_ (bool): Whether time_col was in columns before transform
-        had_explicit_panel_cols_ (bool): Whether panel_cols were in columns before transform
-        index_was_replaced_ (bool): Whether the original index was replaced during transform
-        time_col_ (str): Validated time column name
-        panel_cols_ (List[str]): Validated panel column names
+    Returns:
+        Validated data (Series or DataFrame), or tuple (validated_data, metadata) if
+        return_metadata=True. Metadata contains information needed to restore original structure.
+
+    Raises:
+        ValueError: If validation fails and strict=True, or if parameters are invalid
 
     Examples:
         >>> import pandas as pd
-        >>> from tsforecast.utils.validation import TimeSeriesValidator
+        >>> from tsforecast.utils.validation import validate_temporal_data
         >>>
-        >>> # Example 1: Simple time series with index
+        >>> # Example 1: Simple time series with datetime index
         >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
-        >>> data = pd.DataFrame({'value': [1, 2, 3, 4, 5]}, index=dates)
-        >>> validator = TimeSeriesValidator()
-        >>> validated = validator.fit_transform(data)
+        >>> series = pd.Series([1, 2, 3, 4, 5], index=dates)
+        >>> validated = validate_temporal_data(series)
         >>>
-        >>> # Example 2: Panel data with time_col and panel_cols
-        >>> data = pd.DataFrame({
-        ...     'date': pd.date_range('2023-01-01', periods=6, freq='D'),
-        ...     'country': ['US', 'US', 'US', 'FR', 'FR', 'FR'],
-        ...     'value': [10, 20, 30, 40, 50, 60]
+        >>> # Example 2: DataFrame with time_col
+        >>> df = pd.DataFrame({
+        ...     'date': pd.date_range('2023-01-01', periods=5, freq='D'),
+        ...     'value': [10, 20, 30, 40, 50]
         ... })
-        >>> validator = TimeSeriesValidator(time_col='date', panel_cols=['country'])
-        >>> validated = validator.fit_transform(data)
-        >>> # Index is now MultiIndex with (country, date)
+        >>> validated = validate_temporal_data(df, time_col='date')
         >>>
-        >>> # Example 3: Reverse transformation
-        >>> original = validator.inverse_transform(validated)
-        >>> # Original structure restored
+        >>> # Example 3: Panel data with time_col and panel_cols
+        >>> panel_df = pd.DataFrame({
+        ...     'date': pd.date_range('2023-01-01', periods=6, freq='D').tolist() * 2,
+        ...     'country': ['US']*6 + ['FR']*6,
+        ...     'value': range(12)
+        ... })
+        >>> validated = validate_temporal_data(panel_df, time_col='date', panel_cols=['country'])
+        >>>
+        >>> # Example 4: With metadata for later restoration
+        >>> validated, metadata = validate_temporal_data(df, time_col='date', return_metadata=True)
+        >>> # ... processing ...
+        >>> from tsforecast.utils.validation import restore_original_structure
+        >>> original = restore_original_structure(validated, metadata)
     """
+    # Validation des paramètres d'entrée
+    if not isinstance(data, (pd.Series, pd.DataFrame)):
+        raise ValueError("Input data must be a pandas Series or DataFrame")
 
-    # Initialisation
-    def __init__(self,
-                 time_col: Optional[str] = None,
-                 panel_cols: Optional[List[str]] = None,
-                 strict: bool = True,
-                 sort_data: bool = True):
-        """Initialize the time series validator.
+    # Vérification de la cohérence des paramètres
+    if panel_cols and time_col is None:
+        raise ValueError("Cannot specify panel_cols without time_col")
 
-        Args:
-            time_col: Name of the time column in data (None for index-based validation)
-            panel_cols: List of panel identifier column names
-            strict: Whether to raise errors (True) or attempt corrections (False)
-            sort_data: Whether to sort data by index after validation
-        """
-        self.time_col = time_col
-        self.panel_cols = panel_cols or []
-        self.strict = strict
-        self.sort_data = sort_data
+    # Conversion Series en DataFrame pour traitement uniforme
+    is_series_input = isinstance(data, pd.Series)
+    data_work = data.to_frame() if is_series_input else data.copy()
 
-    # Méthode fit
-    def fit(self, X: Union[pd.Series, pd.DataFrame], y: Optional[pd.Series] = None) -> 'TimeSeriesValidator':
-        """Fit the validator (stores metadata but no actual fitting needed).
+    # Construction des métadonnées si demandé
+    if return_metadata:
+        metadata = _build_metadata(data_work, time_col, panel_cols)
+    else:
+        metadata = None
 
-        Args:
-            X: Input data to validate
-            y: Target variable (ignored, for sklearn compatibility)
+    # Détermination du mode de validation
+    if time_col is None and not panel_cols:
+        # Mode 1: Validation basée sur l'index
+        data_validated = _validate_index_based(data_work, strict)
+    else:
+        # Mode 2: Validation basée sur les colonnes
+        data_validated = _validate_column_based(data_work, time_col, panel_cols, strict)
 
-        Returns:
-            Self for method chaining
-        """
-        # Validation que l'entrée est pandas Series ou DataFrame
-        if not isinstance(X, (pd.Series, pd.DataFrame)):
-            raise ValueError("Input must be a pandas Series or DataFrame")
+    # Tri des données si demandé
+    if sort_data:
+        data_validated = data_validated.sort_index()
 
-        # Stockage du type d'entrée
-        self.input_type_ = 'series' if isinstance(X, pd.Series) else 'dataframe'
+    # Retour au format Series si l'entrée était une Series
+    if is_series_input:
+        data_validated = data_validated.iloc[:, 0]
 
-        # Marqueur indiquant que le transformer est ajusté
-        self.is_fitted_ = True
+    # Retour avec ou sans métadonnées
+    if return_metadata:
+        return data_validated, metadata
+    else:
+        return data_validated
 
-        return self
 
-    # Méthode transform
-    def transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
-        """Validate and transform data to proper time series format.
+def restore_original_structure(
+    data: Union[pd.Series, pd.DataFrame],
+    metadata: Dict[str, Any]
+) -> Union[pd.Series, pd.DataFrame]:
+    """Restore original data structure from validation metadata.
 
-        Args:
-            X: Input data to validate and transform
+    This function reverses the index transformations applied by validate_temporal_data(),
+    restoring the original structure of the data including column positions and index names.
 
-        Returns:
-            Validated and transformed data with proper datetime index
+    Args:
+        data: Validated data with modified index
+        metadata: Metadata dictionary returned by validate_temporal_data()
 
-        Raises:
-            ValueError: If validation fails and strict=True
-        """
-        # Vérification que le transformer est ajusté
-        check_is_fitted(self, 'is_fitted_')
+    Returns:
+        Data with original structure restored
 
-        # Validation que l'entrée est du bon type
-        if not isinstance(X, (pd.Series, pd.DataFrame)):
-            raise ValueError("Input must be a pandas Series or DataFrame")
+    Examples:
+        >>> import pandas as pd
+        >>> from tsforecast.utils.validation import validate_temporal_data, restore_original_structure
+        >>>
+        >>> df = pd.DataFrame({
+        ...     'date': pd.date_range('2023-01-01', periods=5, freq='D'),
+        ...     'value': [10, 20, 30, 40, 50]
+        ... })
+        >>> validated, metadata = validate_temporal_data(df, time_col='date', return_metadata=True)
+        >>> # After processing
+        >>> original = restore_original_structure(validated, metadata)
+    """
+    # Conversion Series en DataFrame pour traitement uniforme
+    is_series = isinstance(data, pd.Series)
+    data_work = data.to_frame() if is_series else data.copy()
 
-        # Conversion Series en DataFrame pour traitement uniforme
-        X_work = X.to_frame() if isinstance(X, pd.Series) else X.copy()
+    # Si l'index a été modifié (colonnes converties en index), le restaurer
+    if metadata.get('index_was_replaced', False):
+        # Restauration de l'index en colonnes
+        data_work = data_work.reset_index()
 
-        # Stockage de la structure originale
-        self.original_index_ = X_work.index.copy()
-        self.original_structure_ = {
-            'index_name': X_work.index.name,
-            'index_names': X_work.index.names if isinstance(X_work.index, pd.MultiIndex) else None,
-            'columns': X_work.columns.tolist(),
-            'index_type': type(X_work.index).__name__
-        }
+    # Restauration de l'index original
+    if 'original_index' in metadata:
+        # Vérification de la compatibilité des tailles
+        if len(data_work) == len(metadata['original_index']):
+            data_work.index = metadata['original_index']
 
-        # Détermination du mode de validation
-        if self.time_col is None and not self.panel_cols:
-            # Mode 1: Validation basée sur l'index
-            X_validated = self._validate_index_based(X_work)
-            self.index_was_replaced_ = False
-            self.had_explicit_time_col_ = False
-            self.had_explicit_panel_cols_ = False
-        else:
-            # Mode 2: Validation basée sur les colonnes
-            X_validated = self._validate_column_based(X_work)
-            self.index_was_replaced_ = True
-            self.had_explicit_time_col_ = self.time_col is not None and self.time_col in X_work.columns
-            self.had_explicit_panel_cols_ = bool(self.panel_cols) and all(col in X_work.columns for col in self.panel_cols)
+            # Restauration du nom de l'index si applicable
+            if metadata.get('index_name'):
+                data_work.index.name = metadata['index_name']
+            elif metadata.get('index_names'):
+                data_work.index.names = metadata['index_names']
 
-        # Tri des données si demandé
-        if self.sort_data:
-            X_validated = X_validated.sort_index()
+    # Retour au format Series si l'entrée était une Series
+    if is_series:
+        return data_work.iloc[:, 0]
 
-        # Retour au format Series si l'entrée était une Series
-        if isinstance(X, pd.Series):
-            return X_validated.iloc[:, 0]
+    return data_work
 
-        return X_validated
 
-    # Méthode de validation basée sur l'index
-    def _validate_index_based(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Validate data using index as time reference.
+# Fonctions auxiliaires internes
 
-        Args:
-            X: Input DataFrame
+def _validate_index_based(data: pd.DataFrame, strict: bool) -> pd.DataFrame:
+    """Validate data using index as time reference.
 
-        Returns:
-            Validated DataFrame
+    Args:
+        data: Input DataFrame
+        strict: Whether to raise errors or attempt corrections
 
-        Raises:
-            ValueError: If index validation fails
-        """
-        # Cas 1: Index simple
-        if not isinstance(X.index, pd.MultiIndex):
-            # Vérification et conversion en DatetimeIndex
-            if not isinstance(X.index, pd.DatetimeIndex):
-                try:
-                    X.index = pd.to_datetime(X.index)
-                except Exception as e:
-                    if self.strict:
-                        raise ValueError(f"Index cannot be converted to datetime: {e}")
-                    else:
-                        warnings.warn(f"Index conversion to datetime failed: {e}")
-                        return X
+    Returns:
+        Validated DataFrame
 
-            # Vérification de l'unicité
-            if X.index.duplicated().any():
-                if self.strict:
-                    raise ValueError("Index contains duplicate values")
-                else:
-                    warnings.warn("Index contains duplicates. Keeping first occurrence.")
-                    X = X[~X.index.duplicated(keep='first')]
-
-        # Cas 2: MultiIndex
-        else:
-            # Vérification que le dernier niveau est datetime
-            last_level_idx = -1
-            last_level = X.index.get_level_values(last_level_idx)
-
-            if not isinstance(last_level, pd.DatetimeIndex):
-                try:
-                    # Conversion du dernier niveau en datetime
-                    new_levels = list(X.index.levels)
-                    new_levels[last_level_idx] = pd.to_datetime(new_levels[last_level_idx])
-
-                    # Reconstruction du MultiIndex avec le niveau converti
-                    new_codes = X.index.codes
-                    X.index = pd.MultiIndex(levels=new_levels, codes=new_codes, names=X.index.names)
-                except Exception as e:
-                    if self.strict:
-                        raise ValueError(f"Last level of MultiIndex cannot be converted to datetime: {e}")
-                    else:
-                        warnings.warn(f"MultiIndex last level conversion failed: {e}")
-                        return X
-
-            # Vérification de l'unicité de la combinaison des niveaux
-            if X.index.duplicated().any():
-                if self.strict:
-                    raise ValueError("MultiIndex contains duplicate combinations")
-                else:
-                    warnings.warn("MultiIndex contains duplicates. Keeping first occurrence.")
-                    X = X[~X.index.duplicated(keep='first')]
-
-        return X
-
-    # Méthode de validation basée sur les colonnes
-    def _validate_column_based(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Validate data using time_col and panel_cols, then set as index.
-
-        Args:
-            X: Input DataFrame
-
-        Returns:
-            Validated DataFrame with new index
-
-        Raises:
-            ValueError: If column validation fails
-        """
-        # Vérification de la cohérence des paramètres
-        if self.panel_cols and self.time_col is None:
-            raise ValueError("Cannot specify panel_cols without time_col")
-
-        # Vérification de la présence de time_col
-        if self.time_col and self.time_col not in X.columns:
-            raise ValueError(f"Time column '{self.time_col}' not found in data")
-
-        # Vérification de la présence des panel_cols
-        if self.panel_cols:
-            missing_cols = set(self.panel_cols) - set(X.columns)
-            if missing_cols:
-                raise ValueError(f"Panel columns not found: {missing_cols}")
-
-        # Conversion de la colonne temporelle
-        if self.time_col:
-            try:
-                X[self.time_col] = pd.to_datetime(X[self.time_col])
-            except Exception as e:
-                raise ValueError(f"Cannot convert time column '{self.time_col}' to datetime: {e}")
-
-        # Création des colonnes d'index
-        index_cols = []
-        if self.panel_cols:
-            index_cols.extend(self.panel_cols)
-        if self.time_col:
-            index_cols.append(self.time_col)
-
-        # Vérification de l'unicité de la combinaison
-        if X.duplicated(subset=index_cols).any():
-            if self.strict:
-                raise ValueError(f"Duplicate rows found for combination of columns: {index_cols}")
+    Raises:
+        ValueError: If index validation fails and strict=True
+    """
+    # Cas 1: Index simple
+    if not isinstance(data.index, pd.MultiIndex):
+        # Vérification et conversion en DatetimeIndex
+        if not _check_datetime_convertible(data.index):
+            if strict:
+                raise ValueError("Index cannot be converted to datetime")
             else:
-                warnings.warn(f"Duplicates found for {index_cols}. Keeping first occurrence.")
-                X = X.drop_duplicates(subset=index_cols, keep='first')
+                warnings.warn("Index conversion to datetime failed")
+                return data
 
-        # Stockage des colonnes qui vont devenir index
-        self.time_col_ = self.time_col
-        self.panel_cols_ = self.panel_cols.copy() if self.panel_cols else []
+        # Conversion si nécessaire
+        if not isinstance(data.index, pd.DatetimeIndex):
+            try:
+                data.index = pd.to_datetime(data.index)
+            except Exception as e:
+                if strict:
+                    raise ValueError(f"Failed to convert index to datetime: {e}")
+                else:
+                    warnings.warn(f"Index conversion failed: {e}")
+                    return data
 
-        # Définition du nouvel index
-        X = X.set_index(index_cols)
+        # Vérification de l'unicité
+        if not _check_uniqueness(data.index):
+            if strict:
+                raise ValueError("Index contains duplicate values")
+            else:
+                warnings.warn("Index contains duplicates. Keeping first occurrence.")
+                data = data[~data.index.duplicated(keep='first')]
 
-        # Message d'avertissement sur le remplacement de l'index
-        warnings.warn(
-            f"Index replaced with {index_cols}. Original index stored for inverse transformation.",
-            UserWarning
-        )
+    # Cas 2: MultiIndex
+    else:
+        # Vérification que le dernier niveau est datetime
+        last_level = data.index.get_level_values(-1)
 
-        return X
+        if not isinstance(last_level, pd.DatetimeIndex):
+            if not _check_datetime_convertible(last_level):
+                if strict:
+                    raise ValueError("Last level of MultiIndex cannot be converted to datetime")
+                else:
+                    warnings.warn("MultiIndex last level conversion failed")
+                    return data
 
-    # Méthode inverse_transform
-    def inverse_transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
-        """Reverse transformation to restore original data structure.
+            # Tentative de conversion
+            try:
+                new_levels = list(data.index.levels)
+                new_levels[-1] = pd.to_datetime(new_levels[-1])
+                new_codes = data.index.codes
+                data.index = pd.MultiIndex(levels=new_levels, codes=new_codes, names=data.index.names)
+            except Exception as e:
+                if strict:
+                    raise ValueError(f"Failed to convert MultiIndex last level: {e}")
+                else:
+                    warnings.warn(f"MultiIndex conversion failed: {e}")
+                    return data
 
-        Args:
-            X: Transformed data
+        # Vérification de l'unicité
+        if not _check_uniqueness(data.index):
+            if strict:
+                raise ValueError("MultiIndex contains duplicate combinations")
+            else:
+                warnings.warn("MultiIndex contains duplicates. Keeping first occurrence.")
+                data = data[~data.index.duplicated(keep='first')]
 
-        Returns:
-            Data with original structure restored
-        """
-        # Vérification que le transformer est ajusté
-        check_is_fitted(self, 'is_fitted_')
+    return data
 
-        # Conversion Series en DataFrame pour traitement uniforme
-        X_work = X.to_frame() if isinstance(X, pd.Series) else X.copy()
 
-        # Si l'index n'a pas été remplacé, retourner tel quel avec l'index original
-        if not self.index_was_replaced_:
-            X_work.index = self.original_index_
-            return X_work.iloc[:, 0] if isinstance(X, pd.Series) else X_work
+def _validate_column_based(
+    data: pd.DataFrame,
+    time_col: Optional[str],
+    panel_cols: Optional[List[str]],
+    strict: bool
+) -> pd.DataFrame:
+    """Validate data using time_col and panel_cols, then set as index.
 
-        # Restauration de l'index en colonnes si nécessaire
-        if self.had_explicit_time_col_ or self.had_explicit_panel_cols_:
-            X_work = X_work.reset_index()
+    Args:
+        data: Input DataFrame
+        time_col: Time column name
+        panel_cols: Panel identifier columns
+        strict: Whether to raise errors or attempt corrections
 
-        # Restauration de l'index original
-        X_work.index = self.original_index_
+    Returns:
+        Validated DataFrame with new index
 
-        # Restauration du nom de l'index si applicable
-        if self.original_structure_.get('index_name'):
-            X_work.index.name = self.original_structure_['index_name']
+    Raises:
+        ValueError: If validation fails and strict=True
+    """
+    # Vérification de la présence de time_col
+    if time_col and time_col not in data.columns:
+        raise ValueError(f"Time column '{time_col}' not found in data")
 
-        # Retour au format Series si l'entrée était une Series
-        if isinstance(X, pd.Series):
-            return X_work.iloc[:, 0]
+    # Vérification de la présence des panel_cols
+    if panel_cols:
+        missing_cols = set(panel_cols) - set(data.columns)
+        if missing_cols:
+            raise ValueError(f"Panel columns not found in data: {missing_cols}")
 
-        return X_work
+    # Conversion de la colonne temporelle
+    if time_col:
+        if not _check_datetime_convertible(data[time_col]):
+            raise ValueError(f"Column '{time_col}' cannot be converted to datetime")
+
+        try:
+            data[time_col] = pd.to_datetime(data[time_col])
+        except Exception as e:
+            raise ValueError(f"Failed to convert time column '{time_col}' to datetime: {e}")
+
+    # Création des colonnes d'index
+    index_cols = []
+    if panel_cols:
+        index_cols.extend(panel_cols)
+    if time_col:
+        index_cols.append(time_col)
+
+    # Vérification de l'unicité
+    if data.duplicated(subset=index_cols).any():
+        if strict:
+            raise ValueError(f"Duplicate rows found for combination of columns: {index_cols}")
+        else:
+            warnings.warn(f"Duplicates found for {index_cols}. Keeping first occurrence.")
+            data = data.drop_duplicates(subset=index_cols, keep='first')
+
+    # Définition du nouvel index
+    data = data.set_index(index_cols)
+
+    # Message d'avertissement sur le remplacement de l'index
+    warnings.warn(
+        f"Index replaced with {index_cols}. Use return_metadata=True and restore_original_structure() to revert.",
+        UserWarning
+    )
+
+    return data
+
+
+def _build_metadata(
+    data: pd.DataFrame,
+    time_col: Optional[str],
+    panel_cols: Optional[List[str]]
+) -> Dict[str, Any]:
+    """Build metadata dictionary for later structure restoration.
+
+    Args:
+        data: Input DataFrame
+        time_col: Time column name
+        panel_cols: Panel identifier columns
+
+    Returns:
+        Dictionary containing original structure information
+    """
+    metadata = {
+        'original_index': data.index.copy(),
+        'original_columns': data.columns.tolist(),
+        'index_type': type(data.index).__name__,
+        'had_time_col_in_columns': time_col is not None and time_col in data.columns,
+        'had_panel_cols_in_columns': bool(panel_cols) and all(col in data.columns for col in panel_cols),
+        'index_was_replaced': time_col is not None or bool(panel_cols),
+        'time_col': time_col,
+        'panel_cols': panel_cols.copy() if panel_cols else None
+    }
+
+    # Stockage des noms d'index
+    if isinstance(data.index, pd.MultiIndex):
+        metadata['index_names'] = data.index.names
+    else:
+        metadata['index_name'] = data.index.name
+
+    return metadata
+
+
+def _check_datetime_convertible(index_or_series: Union[pd.Index, pd.Series]) -> bool:
+    """Check if an index or series can be converted to datetime.
+
+    Args:
+        index_or_series: Index or Series to check
+
+    Returns:
+        True if convertible to datetime, False otherwise
+    """
+    # Déjà un DatetimeIndex
+    if isinstance(index_or_series, pd.DatetimeIndex):
+        return True
+
+    # Tentative de conversion
+    try:
+        pd.to_datetime(index_or_series)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def _check_uniqueness(index: pd.Index) -> bool:
+    """Check if an index contains only unique values.
+
+    Args:
+        index: Index to check
+
+    Returns:
+        True if all values are unique, False otherwise
+    """
+    return not index.duplicated().any()
