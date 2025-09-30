@@ -11,7 +11,7 @@ from typing import Dict, Optional, Union, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
 # Import des utilitaires de fréquence
-from .utils import normalize_frequency, to_literal, FrequencyType, UserFrequencyType
+from .utils import to_literal, get_frequency_order, FrequencyType, UserFrequencyType
 
 # Classe de détection de la fréquence d'une série temporelle
 class FrequencyDetector:
@@ -413,17 +413,71 @@ _detector = FrequencyDetector()
 
 # Fonctions de commodité pour la détection de fréquence
 # Fonction de détection de la fréquence d'une série
-def detect_frequency(series: pd.Series, literal: bool = False) -> Optional[Union[FrequencyType, UserFrequencyType]]:
-    """Detect the frequency of a time series using FrequencyDetector.
+def detect_frequency(data: Union[pd.Series, pd.DataFrame],
+                    time_col: Optional[str] = None,
+                    panel_cols: Optional[List[str]] = None,
+                    literal: bool = False,
+                    check_consistency: bool = False,
+                    consistency_mode: str = 'modal',
+                    strict: bool = True) -> Optional[Union[FrequencyType, UserFrequencyType, Dict]]:
+    """Detect the frequency of time series data using FrequencyDetector.
+
+    This function handles both Series and DataFrame inputs. For DataFrames, it can
+    detect frequencies for all columns and optionally return a consistent frequency.
 
     Args:
-        series: Time series data with datetime index
+        data: Time series data (Series or DataFrame) with datetime index
+        time_col: Name of the time column (if None, uses index). Only for DataFrame.
+        panel_cols: List of columns identifying panel dimensions. Only for DataFrame.
         literal: Boolean indicating whether to return explicit literal frequency expression
+        check_consistency: If True, check frequency consistency across columns (DataFrame only)
+        consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
+            - 'modal': Returns the most common frequency (default)
+            - 'highest': Returns the highest frequency (most granular)
+        strict: If True, all frequencies must be identical (used with check_consistency)
 
     Returns:
-        Detected frequency as user-friendly string, or None if detection fails
+        For Series: Detected frequency as string, or None if detection fails
+        For DataFrame without check_consistency: Dictionary mapping columns to frequencies
+        For DataFrame with check_consistency: Single consistent frequency or None
+
+    Examples:
+        >>> import pandas as pd
+        >>> # Series detection
+        >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
+        >>> series = pd.Series([1, 2, 3, 4, 5], index=dates)
+        >>> detect_frequency(series)
+        'D'
+        >>>
+        >>> # DataFrame detection with consistency check (modal)
+        >>> df = pd.DataFrame({'a': series, 'b': series})
+        >>> detect_frequency(df, check_consistency=True, consistency_mode='modal')
+        'D'
+        >>>
+        >>> # DataFrame detection with highest frequency
+        >>> detect_frequency(df, check_consistency=True, consistency_mode='highest')
+        'D'
     """
-    return _detector.detect_frequency(series, literal)
+    # Cas 1: Entrée Series
+    if isinstance(data, pd.Series):
+        if time_col is not None or panel_cols:
+            raise ValueError("time_col and panel_cols parameters are only valid for DataFrame inputs")
+        return _detector.detect_frequency(data, literal)
+
+    # Cas 2: Entrée DataFrame
+    elif isinstance(data, pd.DataFrame):
+        return detect_dataset_frequency(
+            df=data,
+            time_col=time_col,
+            panel_cols=panel_cols,
+            literal=literal,
+            check_consistency=check_consistency,
+            consistency_mode=consistency_mode,
+            strict=strict
+        )
+
+    else:
+        raise ValueError("Input must be a pandas Series or DataFrame")
 
 # Fonction de détection de la fréquence d'un jeu de données
 def detect_dataset_frequency(df: pd.DataFrame,
@@ -431,6 +485,7 @@ def detect_dataset_frequency(df: pd.DataFrame,
                            panel_cols: Optional[List[str]] = None,
                            literal: bool = False,
                            check_consistency: bool = False,
+                           consistency_mode: str = 'modal',
                            strict: bool = True) -> Union[Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]], FrequencyType, UserFrequencyType]:
     """Detect frequencies for all series in a dataset using FrequencyDetector.
 
@@ -439,7 +494,10 @@ def detect_dataset_frequency(df: pd.DataFrame,
         time_col: Name of the time column (if None, uses index)
         panel_cols: List of columns identifying panel dimensions
         literal: Boolean indicating whether to return explicit literal frequency expression
-        check_consistency: If True, check the frequency consistency across columns 
+        check_consistency: If True, check the frequency consistency across columns
+        consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
+            - 'modal': Returns the most common frequency (default)
+            - 'highest': Returns the highest frequency (most granular)
         strict: If True, all frequencies must be identical
 
     Returns:
@@ -449,7 +507,49 @@ def detect_dataset_frequency(df: pd.DataFrame,
     frequency_map = _detector.detect_dataset_frequency(df, time_col, panel_cols, literal)
     # Vérification de la consistence des fréquences si demandé
     if check_consistency :
-        _, frequency = _detector.validate_frequency_consistency(frequency_map=frequency_map, strict=strict)
+        if consistency_mode == 'modal':
+            # Mode modal: fréquence la plus commune
+            _, frequency = _detector.validate_frequency_consistency(frequency_map=frequency_map, strict=strict)
+        elif consistency_mode == 'highest':
+            # Mode highest: fréquence la plus haute (plus granulaire)
+            frequency = _get_highest_frequency(frequency_map)
+        else:
+            raise ValueError(f"Invalid consistency_mode: {consistency_mode}. Must be 'modal' or 'highest'")
         return frequency
     else :
         return frequency_map
+
+
+# Fonction auxiliaire d'extraction de la fréquence la plus haute d'un dictionnaire de fréquences
+def _get_highest_frequency(frequency_map: Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]) -> Optional[Union[FrequencyType, UserFrequencyType]]:
+    """Get the highest (most granular) frequency from a frequency map.
+
+    Args:
+        frequency_map: Dictionary mapping columns to frequencies
+
+    Returns:
+        Highest frequency or None if map is empty
+
+    Examples:
+        >>> freq_map = {'col1': 'D', 'col2': 'M', 'col3': 'D'}
+        >>> _get_highest_frequency(freq_map)
+        'D'
+    """
+    # Vérification que le dictionnaire n'est pas vide
+    if not frequency_map:
+        return None
+
+    # Extraction des fréquences uniques
+    unique_frequencies = set(frequency_map.values())
+
+    # Si une seule fréquence, la retourner
+    if len(unique_frequencies) == 1:
+        return list(unique_frequencies)[0]
+
+    # Calcul de l'ordre de chaque fréquence et sélection de la plus haute (ordre le plus bas)
+    freq_orders = {freq: get_frequency_order(freq) for freq in unique_frequencies}
+
+    # Retour de la fréquence avec l'ordre le plus bas (plus granulaire)
+    highest_freq = min(freq_orders.keys(), key=lambda x: freq_orders[x])
+
+    return highest_freq
