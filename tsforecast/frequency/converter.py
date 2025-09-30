@@ -10,7 +10,7 @@ from typing import Union, Optional, Literal, Dict, Any
 from pandas.tseries.frequencies import to_offset
 
 # Import des utilitaires de fréquence
-from .utils import normalize_frequency, is_higher_frequency, get_frequency_order
+from .utils import normalize_frequency, is_higher_frequency, get_frequency_order, FrequencyType, UserFrequencyType
 from .detector import detect_frequency
 
 # Types pour les méthodes d'agrégation et d'interpolation
@@ -75,7 +75,11 @@ class FrequencyConverter:
         self._validate_conversion_params(data, target_freq, method)
 
         # Détection de la fréquence actuelle
-        current_freq = detect_frequency(data.iloc[:, 0] if isinstance(data, pd.DataFrame) else data)
+        current_freq = detect_frequency(df=data, time_col=None,
+                           panel_cols= None,
+                           literal=False,
+                           check_consistency=True,
+                           strict=False)
         if not current_freq:
             raise ValueError("Cannot detect current frequency of the data")
 
@@ -229,7 +233,11 @@ class FrequencyConverter:
         # Détection des fréquences actuelles
         current_freqs = []
         for dataset in datasets:
-            freq = detect_frequency(dataset.iloc[:, 0] if isinstance(dataset, pd.DataFrame) else dataset)
+            freq = detect_frequency(df=dataset, time_col=None,
+                           panel_cols= None,
+                           literal=False,
+                           check_consistency=True,
+                           strict=False)
             if freq:
                 current_freqs.append(freq)
 
@@ -253,9 +261,10 @@ class FrequencyConverter:
 
         return tuple(aligned_datasets)
 
+    # Méthode auxiliaire de validation des paramètres
     def _validate_conversion_params(self,
                                   data: Union[pd.Series, pd.DataFrame],
-                                  target_freq: str,
+                                  target_freq: Union[FrequencyType, UserFrequencyType],
                                   method: str) -> None:
         """Validate conversion parameters.
 
@@ -267,26 +276,28 @@ class FrequencyConverter:
         Raises:
             ValueError: If parameters are invalid
         """
+        # Vérification que les données sont des pandas.Series ou pandas.DataFrame
         if not isinstance(data, (pd.Series, pd.DataFrame)):
             raise ValueError("Data must be a pandas Series or DataFrame")
 
+        # Vérification que l'index est un DateTimeIndex
         if not isinstance(data.index, pd.DatetimeIndex):
             raise ValueError("Data index must be a DatetimeIndex")
 
+        # Vérification que la fréquence cible est spécifiée
         if not target_freq:
             raise ValueError("Target frequency cannot be empty")
 
+        # Vérification que la fréquence cible est valide
         try:
             normalize_frequency(target_freq)
         except ValueError as e:
             raise ValueError(f"Invalid target frequency: {e}")
 
-
-
     # Méthode auxiliaire d'augmentation de la fréquence par interpolation
     def _upsample(self,
                  data: Union[pd.Series, pd.DataFrame],
-                 target_freq: str,
+                 target_freq: Union[FrequencyType, UserFrequencyType],
                  method: str,
                  fill_method: Optional[str]) -> Union[pd.Series, pd.DataFrame]:
         """Perform upsampling using asfreq and interpolation.
@@ -305,7 +316,7 @@ class FrequencyConverter:
     # Méthode auxiliaire de diminution de la fréquence par agrégation
     def _downsample(self,
                    data: Union[pd.Series, pd.DataFrame],
-                   target_freq: str,
+                   target_freq: Union[FrequencyType, UserFrequencyType],
                    method: str) -> Union[pd.Series, pd.DataFrame]:
         """Perform downsampling using resample and aggregation.
 

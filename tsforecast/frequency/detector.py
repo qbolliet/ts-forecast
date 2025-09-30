@@ -107,7 +107,7 @@ class FrequencyDetector:
         if extended_freq and literal:
             # Conversion vers le format littéral
             return to_literal(extended_freq)
-        elif extended_freq :
+        elif extended_freq:
             return extended_freq
 
         return None
@@ -272,7 +272,7 @@ class FrequencyDetector:
         # Détection des fréquences infra-journalières
         if modal_seconds < 86400:  # Moins d'un jour
             return self._detect_intraday_frequency(modal_seconds=modal_seconds, literal=literal)
-        else :
+        else:
             # Conversion en jours pour les fréquences >= journalières
             modal_days = modal_diff.days
             return self._detect_day_frequency(time_index=time_index, modal_days=modal_days, literal=literal)
@@ -406,6 +406,7 @@ class FrequencyDetector:
             return to_literal('SM') if literal else 'SM'
         
         return None
+
 
 # Instance globale pour faciliter l'utilisation
 _detector = FrequencyDetector()
