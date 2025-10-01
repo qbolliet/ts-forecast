@@ -10,8 +10,6 @@ import pandas as pd
 from typing import Optional, List, Union, Dict, Any, Tuple
 import warnings
 
-# PROMPT :
-# In the "restore_original_structure" function of the @tsforecast/utils/validation.py file, I want to rollback the sorting of the data if they have been sorted in the "validate_temporal_data" this can be down using the initial order stored in the metadata as a key to sort the values after the reset_index
 
 # Fonction de validation 
 def validate_temporal_data(
@@ -87,7 +85,7 @@ def validate_temporal_data(
 
     # Construction des métadonnées si demandé
     if return_metadata:
-        metadata = _build_metadata(data_work, time_col, panel_cols)
+        metadata = _build_metadata(data_work, time_col, panel_cols, sort_data)
     else:
         metadata = None
 
@@ -146,13 +144,23 @@ def restore_original_structure(
     is_series = isinstance(data, pd.Series)
     data_work = data.to_frame() if is_series else data.copy()
 
+    # Restauration de l'ordre original si les données ont été triées
+    # Cette étape doit être faite AVANT reset_index pour pouvoir utiliser l'index actuel
+    if metadata.get('was_sorted', False) and 'original_index' in metadata:
+        # Vérification de la compatibilité des tailles
+        if len(data_work) == len(metadata['original_index']):
+            # Utilisation de reindex pour restaurer l'ordre exact des lignes
+            # reindex() utilise l'index actuel (trié) pour retrouver l'ordre de original_index
+            data_work = data_work.reindex(metadata['original_index'])
+
     # Si l'index a été modifié (colonnes converties en index), le restaurer
     if metadata.get('index_was_replaced', False):
         # Restauration de l'index en colonnes
         data_work = data_work.reset_index()
 
-    # Restauration de l'index original
-    if 'original_index' in metadata:
+    # Restauration de l'index original si les données n'ont pas été triées
+    # (car si triées, reindex() a déjà restauré l'index)
+    if not metadata.get('was_sorted', False) and 'original_index' in metadata:
         # Vérification de la compatibilité des tailles
         if len(data_work) == len(metadata['original_index']):
             data_work.index = metadata['original_index']
@@ -321,7 +329,8 @@ def _validate_column_based(
 def _build_metadata(
     data: pd.DataFrame,
     time_col: Optional[str],
-    panel_cols: Optional[List[str]]
+    panel_cols: Optional[List[str]],
+    sort_data: bool
 ) -> Dict[str, Any]:
     """Build metadata dictionary for later structure restoration.
 
@@ -329,6 +338,7 @@ def _build_metadata(
         data: Input DataFrame
         time_col: Time column name
         panel_cols: Panel identifier columns
+        sort_data: Whether data will be sorted
 
     Returns:
         Dictionary containing original structure information
@@ -342,7 +352,8 @@ def _build_metadata(
         'had_panel_cols_in_columns': bool(panel_cols) and all(col in data.columns for col in panel_cols),
         'index_was_replaced': time_col is not None or bool(panel_cols),
         'time_col': time_col,
-        'panel_cols': panel_cols.copy() if panel_cols else None
+        'panel_cols': panel_cols.copy() if panel_cols else None,
+        'was_sorted': sort_data
     }
 
     # Stockage des noms d'index
