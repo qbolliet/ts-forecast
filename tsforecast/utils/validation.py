@@ -10,6 +10,9 @@ import pandas as pd
 from typing import Optional, List, Union, Dict, Any, Tuple
 import warnings
 
+# PROMPT :
+# In the "restore_original_structure" function of the @tsforecast/utils/validation.py file, I want to rollback the sorting of the data if they have been sorted in the "validate_temporal_data" this can be down using the initial order stored in the metadata as a key to sort the values after the reset_index
+
 # Fonction de validation 
 def validate_temporal_data(
     data: Union[pd.Series, pd.DataFrame],
@@ -110,7 +113,7 @@ def validate_temporal_data(
     else:
         return data_validated
 
-
+# Méthode de restauration de la structure originale du jeu de données (i.e. avant validation)
 def restore_original_structure(
     data: Union[pd.Series, pd.DataFrame],
     metadata: Dict[str, Any]
@@ -167,8 +170,8 @@ def restore_original_structure(
     return data_work
 
 
-# Fonctions auxiliaires internes
-
+# Fonctions auxiliaires
+# Fonction de validation sur l'index
 def _validate_index_based(data: pd.DataFrame, strict: bool) -> pd.DataFrame:
     """Validate data using index as time reference.
 
@@ -247,7 +250,7 @@ def _validate_index_based(data: pd.DataFrame, strict: bool) -> pd.DataFrame:
 
     return data
 
-
+# Méthode de validation sur la base de colonnes de dates et d'entités
 def _validate_column_based(
     data: pd.DataFrame,
     time_col: Optional[str],
@@ -314,7 +317,7 @@ def _validate_column_based(
 
     return data
 
-
+# Fonction auxiliaire de construction des méta-données associées à la transformation
 def _build_metadata(
     data: pd.DataFrame,
     time_col: Optional[str],
@@ -330,6 +333,7 @@ def _build_metadata(
     Returns:
         Dictionary containing original structure information
     """
+    # Construction du dictionnaire de méta-données
     metadata = {
         'original_index': data.index.copy(),
         'original_columns': data.columns.tolist(),
@@ -349,7 +353,7 @@ def _build_metadata(
 
     return metadata
 
-
+# Fonction de vérification que l'index est convertible en datetime
 def _check_datetime_convertible(index_or_series: Union[pd.Index, pd.Series]) -> bool:
     """Check if an index or series can be converted to datetime.
 
@@ -370,7 +374,7 @@ def _check_datetime_convertible(index_or_series: Union[pd.Index, pd.Series]) -> 
     except (ValueError, TypeError):
         return False
 
-
+# Fonction de vérification de l'unicité des index
 def _check_uniqueness(index: pd.Index) -> bool:
     """Check if an index contains only unique values.
 

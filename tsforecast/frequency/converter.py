@@ -12,11 +12,21 @@ from pandas.tseries.frequencies import to_offset
 # Import des utilitaires de fréquence
 from .utils import normalize_frequency, is_higher_frequency, get_frequency_order, FrequencyType, UserFrequencyType
 from .detector import detect_frequency
+from ..utils import validate_temporal_data
 
 # Types pour les méthodes d'agrégation et d'interpolation
 AggregationMethod = Literal['mean', 'sum', 'first', 'last', 'min', 'max', 'median', 'std', 'count']
 InterpolationMethod = Literal['linear', 'time', 'index', 'values', 'nearest', 'zero', 'slinear', 'quadratic', 'cubic']
 
+# PROMPT
+# I have two questions related to the FrequencyConverter in the @tsforecast/frequency/converter.py file :
+# - In the "_apply_grouped_conversions" method, will we have a problem with the replacement logic at the end of the method where each column is replaced by the resampled one. I am afraid that the incoherent indexes will induce errors. Moreover the different columns may be expressed in different frequency.
+# - The dataframe returned by the "_validate_conversion_params" has the panel_cols (if specified) as index and the time is the last level of the index of the returnd DataFrame. I am afraid this multi-index is not supported by the resample and as_freq method. In fact I want to apply these resampling logics to each entity of the panel can you take that into account ?
+
+# PROMPT
+# I want to create a package that follows state of art principles in python package development. I have some questions regarding the work I have already done :
+# - I am not sure about the way I implemented the validation of temporal data. There is a general logic in the @tsforecast/utils/validation.py file that is great and used for example in the "_validate_conversion_params" method of the FrequencyConverter in the @tsforecast/frequency/converter.py file but it also implies some gymnastics with the panel columns in the upsampling and downsampling logics. An analog validation logics is also implemented in the @tsforecast/crosscals/base.py file with the "_check_dates_sorted_within_groups", "_check_entities_grouped", "_verify_and_sort_data" functions. Does it make sense to have these multiple validation logics that are independant even if they have some behaviours in common ? Is it also logical to have them spread between different files ?
+# - I have created some commodity functions in the @tsforecast/frequency/utils.py file and in the @tsforecast/frequency/detector.py file. Is it a good pratice to implement these ? Does they suggest that I should rather have created a function with helper functions instead of a class ?
 
 # Classe de conversion d'une fréquence dans une autre
 class FrequencyConverter:
@@ -44,6 +54,7 @@ class FrequencyConverter:
                          target_freq: Union[str, Dict[str, str]],
                          method: Union[AggregationMethod, InterpolationMethod] = 'mean',
                          fill_method: Optional[str] = None,
+                         time_col: Optional[str]=None,
                          panel_cols: Optional[List[str]] = None) -> Union[pd.Series, pd.DataFrame]:
         """Convert data to target frequency using pandas built-in methods.
 
@@ -59,6 +70,7 @@ class FrequencyConverter:
                 - Dict[str, str]: Map each column to its target frequency
             method: Aggregation method for downsampling or interpolation method for upsampling
             fill_method: Fill method for missing values ('ffill', 'bfill', None)
+            time_col: Identifier of time columns to exclude from conversion
             panel_cols: List of panel identifier columns to exclude from conversion
 
         Returns:
@@ -83,9 +95,9 @@ class FrequencyConverter:
             >>> mixed_freq = converter.convert_frequency(daily_df, {'a': 'monthly', 'b': 'weekly'}, method='mean')
         """
         # Validation des paramètres d'entrée
-        self._validate_conversion_params(data, target_freq, method, panel_cols)
+        data = self._validate_conversion_params(data=data, target_freq=target_freq, method=method, panel_cols=panel_cols)
 
-        # Cas 1: Traitement des Series (comportement inchangé)
+        # Cas 1: Traitement des Series
         if isinstance(data, pd.Series):
             # Détection de la fréquence actuelle
             current_freq = detect_frequency(data=data, literal=False)
@@ -103,26 +115,27 @@ class FrequencyConverter:
 
             # Détermination de la direction de conversion
             if is_higher_frequency(target_freq, current_freq):
-                return self._upsample(data, target_freq_normalized, method, fill_method)
+                return self._upsample(data=data, target_freq=target_freq_normalized, method=method, fill_method=fill_method)
             else:
-                return self._downsample(data, target_freq_normalized, method)
+                return self._downsample(data=data, target_freq=target_freq_normalized, method=method)
 
         # Cas 2: Traitement des DataFrames
         elif isinstance(data, pd.DataFrame):
             # Construction du frequency_map complet
-            frequency_map = self._build_frequency_map(data, target_freq, panel_cols)
+            frequency_map = self._build_frequency_map(data=data, target_freq=target_freq)
 
             # Groupement des conversions identiques pour optimisation
-            grouped_conversions = self._group_conversions_by_operation(frequency_map, method)
+            grouped_conversions = self._group_conversions_by_operation(frequency_map=frequency_map, method=method)
 
             # Application des conversions groupées
-            result = self._apply_grouped_conversions(data, grouped_conversions, method, fill_method, panel_cols)
+            result = self._apply_grouped_conversions(data=data, grouped_conversions=grouped_conversions, method=method, fill_method=fill_method)
 
             return result
 
         else:
             raise ValueError("Data must be a pandas Series or DataFrame")
 
+    # Méthode d'agrégation à une fréquence plus faible
     def aggregate_to_lower_frequency(self,
                                    data: Union[pd.Series, pd.DataFrame],
                                    target_freq: str,
@@ -146,7 +159,9 @@ class FrequencyConverter:
             >>> len(monthly)
             1
         """
+        # Normalisation de la fréquence
         target_base_freq = normalize_frequency(target_freq)
+        # Resampling à la bonne fréquence
         resampled = data.resample(target_base_freq)
 
         # Application de la méthode d'agrégation
@@ -171,6 +186,7 @@ class FrequencyConverter:
         else:
             raise ValueError(f"Unsupported aggregation method: {method}")
 
+    # Méthode d'interpolation à une fréquence plus élevée
     def interpolate_to_higher_frequency(self,
                                       data: Union[pd.Series, pd.DataFrame],
                                       target_freq: str,
@@ -196,9 +212,10 @@ class FrequencyConverter:
             >>> len(daily) > len(monthly_series)
             True
         """
+        # Normalisation de la fréquence
         target_base_freq = normalize_frequency(target_freq)
 
-        # Utilisation d'asfreq pour créer la nouvelle fréquence
+        # Utilisation de 'asfreq' pour créer la nouvelle fréquence
         upsampled = data.asfreq(target_base_freq)
 
         # Application du remplissage si spécifié
@@ -292,31 +309,24 @@ class FrequencyConverter:
     def _validate_conversion_params(self,
                                   data: Union[pd.Series, pd.DataFrame],
                                   target_freq: Union[str, Dict[str, str]],
-                                  method: str,
-                                  panel_cols: Optional[List[str]] = None) -> None:
+                                  time_col: Optional[str]=None,
+                                  panel_cols: Optional[List[str]] = None) -> pd.DataFrame:
         """Validate conversion parameters.
 
         Args:
             data: Input data
             target_freq: Target frequency (str or dict)
-            method: Conversion method
+            time_col: Time identifier column
             panel_cols: Panel identifier columns
 
+        Returns:
+            Validated data
+        
         Raises:
             ValueError: If parameters are invalid
         """
-        # Vérification que les données sont des pandas.Series ou pandas.DataFrame
-        if not isinstance(data, (pd.Series, pd.DataFrame)):
-            raise ValueError("Data must be a pandas Series or DataFrame")
-
-        # Vérification que l'index est un DateTimeIndex (ou MultiIndex avec dernier niveau DatetimeIndex)
-        if isinstance(data.index, pd.MultiIndex):
-            # Pour MultiIndex, vérifier que le dernier niveau est datetime
-            last_level = data.index.get_level_values(-1)
-            if not isinstance(last_level, pd.DatetimeIndex):
-                raise ValueError("Last level of MultiIndex must be a DatetimeIndex")
-        elif not isinstance(data.index, pd.DatetimeIndex):
-            raise ValueError("Data index must be a DatetimeIndex")
+        # Vérification du jeu de données
+        data = validate_temporal_data(data=data, time_col=time_col, panel_cols=panel_cols, strict=True, sort_data=True, return_metadata=False)
 
         # Vérification que la fréquence cible est spécifiée
         if not target_freq:
@@ -355,41 +365,29 @@ class FrequencyConverter:
 
         # Validation des panel_cols si spécifiés
         if panel_cols:
-            if isinstance(data, pd.Series):
-                raise ValueError("panel_cols is only valid for DataFrame inputs")
-
-            missing_panel_cols = set(panel_cols) - set(data.columns)
-            if missing_panel_cols:
-                raise ValueError(f"Panel columns not found in data: {missing_panel_cols}")
-
             # Vérification que les panel_cols ne sont pas dans target_freq si dict
             if isinstance(target_freq, dict):
                 overlap = set(panel_cols) & set(target_freq.keys())
                 if overlap:
                     raise ValueError(f"Panel columns cannot be in target_freq: {overlap}")
+        
+        return data
 
-    # Méthode auxiliaire de construction du frequency_map complet
+    # Méthode auxiliaire de construction d'un mapping associant à chaque colonne la 
     def _build_frequency_map(self,
                             data: pd.DataFrame,
-                            target_freq: Union[str, Dict[str, str]],
-                            panel_cols: Optional[List[str]] = None) -> Dict[str, Tuple[str, str]]:
+                            target_freq: Union[str, Dict[str, str]]) -> Dict[str, Tuple[str, str]]:
         """Build complete frequency map for DataFrame conversion.
 
         Args:
             data: Input DataFrame
             target_freq: Target frequency (str or dict)
-            panel_cols: Panel identifier columns to exclude
 
         Returns:
             Dictionary mapping column names to (source_freq, target_freq) tuples
         """
-        # Détection des colonnes à convertir (excluant panel_cols)
-        data_cols = list(data.columns)
-        if panel_cols:
-            data_cols = [col for col in data_cols if col not in panel_cols]
-
         # Détection des fréquences actuelles pour chaque colonne
-        current_frequencies = self._detect_column_frequencies(data, data_cols)
+        current_frequencies = self._detect_column_frequencies(data=data, columns=list(data.columns))
 
         # Construction du frequency_map
         frequency_map = {}
@@ -397,14 +395,18 @@ class FrequencyConverter:
         if isinstance(target_freq, str):
             # Même fréquence cible pour toutes les colonnes
             target_freq_normalized = normalize_frequency(target_freq)
-            for col in data_cols:
+            for col in list(data.columns):
+                # Extraction de la fréquence de la colonne
                 current_freq = current_frequencies.get(col)
+                # Création de l'association pour la colonne
                 if current_freq:
                     frequency_map[col] = (current_freq, target_freq_normalized)
         else:
             # Fréquences cibles spécifiques par colonne
             for col, target in target_freq.items():
+                # Extraction de la fréquence de la colonne
                 current_freq = current_frequencies.get(col)
+                # Création de l'association pour la colonne
                 if current_freq:
                     target_freq_normalized = normalize_frequency(target)
                     frequency_map[col] = (current_freq, target_freq_normalized)
@@ -424,11 +426,14 @@ class FrequencyConverter:
         Returns:
             Dictionary mapping column names to detected frequencies
         """
+        # Initialisation du dictionnaire résultat
         frequencies = {}
-
+        # Parcours des colonnes
         for col in columns:
             try:
+                # Détection de la fréquence
                 freq = detect_frequency(data=data[col], literal=False)
+                # Association à la colonne
                 if freq:
                     frequencies[col] = freq
             except Exception:
@@ -450,10 +455,12 @@ class FrequencyConverter:
         Returns:
             Dictionary mapping (source_freq, target_freq, method) to list of columns
         """
+        # Initialisation du dictionnaire associant une transformation à un ensemble de colonnes
         grouped = {}
 
+        # Parcours du mapping
         for col, (source_freq, target_freq) in frequency_map.items():
-            # Ignorer les colonnes dont la fréquence ne change pas
+            # Ignore les colonnes dont la fréquence ne change pas
             if source_freq == target_freq:
                 continue
 
@@ -463,6 +470,7 @@ class FrequencyConverter:
             # Ajout de la colonne au groupe
             if key not in grouped:
                 grouped[key] = []
+            # Ajout de la colonne à la clé
             grouped[key].append(col)
 
         return grouped
@@ -472,8 +480,7 @@ class FrequencyConverter:
                                   data: pd.DataFrame,
                                   grouped_conversions: Dict[Tuple[str, str, str], List[str]],
                                   method: str,
-                                  fill_method: Optional[str],
-                                  panel_cols: Optional[List[str]] = None) -> pd.DataFrame:
+                                  fill_method: Optional[str]) -> pd.DataFrame:
         """Apply grouped conversions efficiently.
 
         Args:
@@ -481,7 +488,6 @@ class FrequencyConverter:
             grouped_conversions: Dictionary of grouped conversions
             method: Conversion method
             fill_method: Fill method for missing values
-            panel_cols: Panel identifier columns to preserve
 
         Returns:
             DataFrame with all conversions applied
@@ -497,21 +503,15 @@ class FrequencyConverter:
             # Détermination de la direction de conversion
             if is_higher_frequency(target_freq, source_freq):
                 # Upsampling
-                converted = self._upsample(subset, target_freq, conv_method, fill_method)
+                converted = self._upsample(data=subset, target_freq=target_freq, method=conv_method, fill_method=fill_method)
             else:
                 # Downsampling
-                converted = self._downsample(subset, target_freq, conv_method)
+                converted = self._downsample(data=subset, target_freq=target_freq, method=conv_method)
 
+            # /!\ Est ce qu'on ne va pas avoir des problèmes d'indices non convergents en faisant ainsi ?
             # Mise à jour du résultat avec les colonnes converties
             for col in columns:
                 result[col] = converted[col]
-
-        # Préservation des panel_cols si spécifiés
-        if panel_cols:
-            # Les panel_cols doivent rester inchangés
-            for col in panel_cols:
-                if col in data.columns:
-                    result[col] = data[col]
 
         return result
 
