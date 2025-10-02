@@ -18,15 +18,6 @@ from ..utils import validate_temporal_data
 AggregationMethod = Literal['mean', 'sum', 'first', 'last', 'min', 'max', 'median', 'std', 'count']
 InterpolationMethod = Literal['linear', 'time', 'index', 'values', 'nearest', 'zero', 'slinear', 'quadratic', 'cubic']
 
-# PROMPT
-# I have two questions related to the FrequencyConverter in the @tsforecast/frequency/converter.py file :
-# - In the "_apply_grouped_conversions" method, will we have a problem with the replacement logic at the end of the method where each column is replaced by the resampled one. I am afraid that the incoherent indexes will induce errors. Moreover the different columns may be expressed in different frequency.
-# - The dataframe returned by the "_validate_conversion_params" has the panel_cols (if specified) as index and the time is the last level of the index of the returnd DataFrame. I am afraid this multi-index is not supported by the resample and as_freq method. In fact I want to apply these resampling logics to each entity of the panel can you take that into account ?
-
-# PROMPT
-# I want to create a package that follows state of art principles in python package development. I have some questions regarding the work I have already done :
-# - I am not sure about the way I implemented the validation of temporal data. There is a general logic in the @tsforecast/utils/validation.py file that is great and used for example in the "_validate_conversion_params" method of the FrequencyConverter in the @tsforecast/frequency/converter.py file but it also implies some gymnastics with the panel columns in the upsampling and downsampling logics. An analog validation logics is also implemented in the @tsforecast/crosscals/base.py file with the "_check_dates_sorted_within_groups", "_check_entities_grouped", "_verify_and_sort_data" functions. Does it make sense to have these multiple validation logics that are independant even if they have some behaviours in common ? Is it also logical to have them spread between different files ?
-# - I have created some commodity functions in the @tsforecast/frequency/utils.py file and in the @tsforecast/frequency/detector.py file. Is it a good pratice to implement these ? Does they suggest that I should rather have created a function with helper functions instead of a class ?
 
 # Classe de conversion d'une fréquence dans une autre
 class FrequencyConverter:
@@ -54,6 +45,7 @@ class FrequencyConverter:
                          target_freq: Union[str, Dict[str, str]],
                          method: Union[AggregationMethod, InterpolationMethod] = 'mean',
                          fill_method: Optional[str] = None,
+                         alignment_method: Literal['ffill', 'bfill', 'nearest', 'none'] = 'ffill',
                          time_col: Optional[str]=None,
                          panel_cols: Optional[List[str]] = None) -> Union[pd.Series, pd.DataFrame]:
         """Convert data to target frequency using pandas built-in methods.
@@ -70,6 +62,7 @@ class FrequencyConverter:
                 - Dict[str, str]: Map each column to its target frequency
             method: Aggregation method for downsampling or interpolation method for upsampling
             fill_method: Fill method for missing values ('ffill', 'bfill', None)
+            alignment_method: Method to align indexes when mixing frequencies ('ffill', 'bfill', 'nearest', 'none')
             time_col: Identifier of time columns to exclude from conversion
             panel_cols: List of panel identifier columns to exclude from conversion
 
@@ -128,7 +121,7 @@ class FrequencyConverter:
             grouped_conversions = self._group_conversions_by_operation(frequency_map=frequency_map, method=method)
 
             # Application des conversions groupées
-            result = self._apply_grouped_conversions(data=data, grouped_conversions=grouped_conversions, method=method, fill_method=fill_method)
+            result = self._apply_grouped_conversions(data=data, grouped_conversions=grouped_conversions, method=method, fill_method=fill_method, alignment_method=alignment_method)
 
             return result
 
@@ -480,20 +473,27 @@ class FrequencyConverter:
                                   data: pd.DataFrame,
                                   grouped_conversions: Dict[Tuple[str, str, str], List[str]],
                                   method: str,
-                                  fill_method: Optional[str]) -> pd.DataFrame:
-        """Apply grouped conversions efficiently.
+                                  fill_method: Optional[str],
+                                  alignment_method: str) -> pd.DataFrame:
+        """Apply grouped conversions efficiently with proper index alignment.
 
         Args:
             data: Input DataFrame
             grouped_conversions: Dictionary of grouped conversions
             method: Conversion method
             fill_method: Fill method for missing values
+            alignment_method: Method to align indexes when mixing frequencies
 
         Returns:
-            DataFrame with all conversions applied
+            DataFrame with all conversions applied and properly aligned
         """
-        # Initialisation du résultat avec les données originales
-        result = data.copy()
+        # Dictionnaire pour stocker les colonnes converties
+        converted_columns = {}
+
+        # Ensemble des colonnes qui seront converties
+        columns_to_convert = set()
+        for columns_list in grouped_conversions.values():
+            columns_to_convert.update(columns_list)
 
         # Traitement de chaque groupe de conversions
         for (source_freq, target_freq, conv_method), columns in grouped_conversions.items():
@@ -508,10 +508,168 @@ class FrequencyConverter:
                 # Downsampling
                 converted = self._downsample(data=subset, target_freq=target_freq, method=conv_method)
 
-            # /!\ Est ce qu'on ne va pas avoir des problèmes d'indices non convergents en faisant ainsi ?
-            # Mise à jour du résultat avec les colonnes converties
+            # Stockage des colonnes converties
             for col in columns:
-                result[col] = converted[col]
+                if isinstance(converted, pd.Series):
+                    converted_columns[col] = converted
+                else:
+                    converted_columns[col] = converted[col]
+
+        # Vérification si toutes les colonnes ont la même fréquence cible
+        unique_target_freqs = set()
+        for (source_freq, target_freq, conv_method) in grouped_conversions.keys():
+            unique_target_freqs.add(target_freq)
+
+        # Si une seule fréquence cible, pas besoin d'alignement complexe
+        if len(unique_target_freqs) == 1:
+            # Reconstruction simple du DataFrame
+            result = pd.DataFrame(index=list(converted_columns.values())[0].index)
+            for col, conv_series in converted_columns.items():
+                result[col] = conv_series
+            return result
+
+        # Sinon, utilisation de la méthode d'alignement pour les fréquences mixtes
+        else:
+            # Création d'un DataFrame de base avec les colonnes non converties
+            non_converted_cols = [col for col in data.columns if col not in columns_to_convert]
+            if non_converted_cols:
+                base_data = data[non_converted_cols].copy()
+            else:
+                base_data = pd.DataFrame(index=data.index)
+
+            # Alignement des colonnes converties
+            result = self._align_mixed_frequency_columns(
+                base_data=base_data,
+                converted_columns=converted_columns,
+                alignment_method=alignment_method
+            )
+
+            return result
+
+    # Méthode auxiliaire de détection du MultiIndex pour les données de panel
+    def _is_panel_data(self, data: Union[pd.Series, pd.DataFrame]) -> bool:
+        """Check if data has MultiIndex structure for panel data.
+
+        Args:
+            data: Input data
+
+        Returns:
+            True if data has MultiIndex with 2+ levels
+        """
+        return isinstance(data.index, pd.MultiIndex) and data.index.nlevels >= 2
+
+    # Méthode auxiliaire d'application du resampling pour les données de panel
+    def _apply_panel_resample(self,
+                             data: Union[pd.Series, pd.DataFrame],
+                             target_freq: str,
+                             method: str,
+                             operation: Literal['upsample', 'downsample'],
+                             fill_method: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
+        """Apply resampling to panel data by grouping on panel levels.
+
+        Args:
+            data: Panel data with MultiIndex (panel_levels + time_level)
+            target_freq: Target frequency
+            method: Conversion method
+            operation: Type of operation ('upsample' or 'downsample')
+            fill_method: Fill method for missing values (upsampling only)
+
+        Returns:
+            Resampled panel data
+        """
+        # Identification des niveaux de panel (tous sauf le dernier qui est le temps)
+        panel_levels = list(range(data.index.nlevels - 1))
+
+        # Groupement par entités de panel
+        grouped = data.groupby(level=panel_levels, group_keys=False)
+
+        # Application du resampling à chaque groupe
+        if operation == 'downsample':
+            # Application de l'agrégation
+            if isinstance(data, pd.Series):
+                resampled = grouped.apply(lambda x: x.droplevel(panel_levels).resample(target_freq).agg(method))
+            else:
+                resampled = grouped.apply(lambda x: x.droplevel(panel_levels).resample(target_freq).agg(method))
+        else:  # upsample
+            def upsample_group(x):
+                # Suppression des niveaux de panel pour le resampling
+                x_dropped = x.droplevel(panel_levels)
+                # Application de asfreq
+                upsampled = x_dropped.asfreq(target_freq)
+                # Application du fill_method si spécifié
+                if fill_method == 'ffill':
+                    upsampled = upsampled.fillna(method='ffill')
+                elif fill_method == 'bfill':
+                    upsampled = upsampled.fillna(method='bfill')
+                # Interpolation
+                if method in ['linear', 'time', 'index', 'values', 'nearest', 'zero', 'slinear', 'quadratic', 'cubic']:
+                    upsampled = upsampled.interpolate(method=method)
+                return upsampled
+
+            resampled = grouped.apply(upsample_group)
+
+        return resampled
+
+    # Méthode auxiliaire d'alignement des indexes de différentes fréquences
+    def _align_mixed_frequency_columns(self,
+                                      base_data: pd.DataFrame,
+                                      converted_columns: Dict[str, pd.DataFrame],
+                                      alignment_method: str) -> pd.DataFrame:
+        """Align columns with different frequencies using specified method.
+
+        Args:
+            base_data: Original DataFrame with base index
+            converted_columns: Dictionary mapping column names to converted Series/DataFrames
+            alignment_method: Method to use for alignment ('ffill', 'bfill', 'nearest', 'none')
+
+        Returns:
+            DataFrame with aligned columns
+        """
+        if not converted_columns:
+            return base_data
+
+        # Collecte de tous les indexes uniques
+        all_indexes = [base_data.index]
+        for conv_data in converted_columns.values():
+            if isinstance(conv_data, pd.Series):
+                all_indexes.append(conv_data.index)
+            else:
+                all_indexes.append(conv_data.index)
+
+        # Création d'un index unifié (union de tous les indexes)
+        unified_index = all_indexes[0]
+        for idx in all_indexes[1:]:
+            unified_index = unified_index.union(idx)
+
+        # Tri de l'index unifié
+        if isinstance(unified_index, pd.MultiIndex):
+            unified_index = unified_index.sort_values()
+        else:
+            unified_index = unified_index.sort_values()
+
+        # Réindexation de toutes les colonnes sur l'index unifié
+        result = pd.DataFrame(index=unified_index)
+
+        # Copie des colonnes non converties
+        for col in base_data.columns:
+            if col not in converted_columns:
+                result[col] = base_data[col].reindex(unified_index)
+
+        # Ajout des colonnes converties avec alignement
+        for col, conv_data in converted_columns.items():
+            if isinstance(conv_data, pd.Series):
+                result[col] = conv_data.reindex(unified_index)
+            else:
+                result[col] = conv_data[col].reindex(unified_index)
+
+            # Application de la méthode d'alignement
+            if alignment_method == 'ffill':
+                result[col] = result[col].fillna(method='ffill')
+            elif alignment_method == 'bfill':
+                result[col] = result[col].fillna(method='bfill')
+            elif alignment_method == 'nearest':
+                result[col] = result[col].interpolate(method='nearest')
+            # 'none' ne fait rien, garde les NaN
 
         return result
 
@@ -532,7 +690,11 @@ class FrequencyConverter:
         Returns:
             Upsampled data
         """
-        return self.interpolate_to_higher_frequency(data, target_freq, method, fill_method)
+        # Vérification si les données sont de type panel (MultiIndex)
+        if self._is_panel_data(data):
+            return self._apply_panel_resample(data, target_freq, method, 'upsample', fill_method)
+        else:
+            return self.interpolate_to_higher_frequency(data, target_freq, method, fill_method)
 
     # Méthode auxiliaire de diminution de la fréquence par agrégation
     def _downsample(self,
@@ -549,5 +711,9 @@ class FrequencyConverter:
         Returns:
             Downsampled data
         """
-        return self.aggregate_to_lower_frequency(data, target_freq, method)
+        # Vérification si les données sont de type panel (MultiIndex)
+        if self._is_panel_data(data):
+            return self._apply_panel_resample(data, target_freq, method, 'downsample')
+        else:
+            return self.aggregate_to_lower_frequency(data, target_freq, method)
 
