@@ -178,7 +178,6 @@ def restore_original_structure(
 
     return data_work
 
-# /!\ Pour ces deux fonctions, le cas avec le multiIndex ne fonctionne que lorsque les entités sont sur un seul niveau, j'aimerais généraliser cela 
 # Fonctions de validation spécialisées pour les données de panel
 # Fonction de vérification que les observations du panel sont groupées par entité
 def validate_entities_grouped(
@@ -236,8 +235,15 @@ def validate_entities_grouped(
 
     # Cas 1: Données avec MultiIndex (données de panel)
     if isinstance(data.index, pd.MultiIndex):
-        # Extraction du niveau 0 (entités)
-        entities = data.index.get_level_values(0)
+        # Extraction de tous les niveaux sauf le dernier (qui représente le temps)
+        # Si un seul niveau d'entité (nlevels=2), extraction directe du niveau 0
+        # Si plusieurs niveaux d'entité (nlevels>2), création de tuples pour chaque combinaison
+        if data.index.nlevels == 2:
+            entities = data.index.get_level_values(0)
+        else:
+            # Extraction de tous les niveaux sauf le dernier et création de tuples
+            entity_levels = [data.index.get_level_values(i) for i in range(data.index.nlevels - 1)]
+            entities = pd.Series(list(zip(*entity_levels)))
     # Cas 2: Données avec panel_cols spécifiés
     elif panel_cols is not None:
         if isinstance(data, pd.Series):
@@ -331,8 +337,16 @@ def validate_sorted_within_groups(
 
     # Cas 1: Données avec MultiIndex (données de panel)
     if isinstance(data.index, pd.MultiIndex):
-        # Extraction du niveau 0 (entités) et du dernier niveau (dates)
-        entities = data.index.get_level_values(0)
+        # Extraction de tous les niveaux sauf le dernier (qui représente le temps)
+        # Si un seul niveau d'entité (nlevels=2), extraction directe du niveau 0
+        # Si plusieurs niveaux d'entité (nlevels>2), création de tuples pour chaque combinaison
+        if data.index.nlevels == 2:
+            entities = data.index.get_level_values(0)
+        else:
+            # Extraction de tous les niveaux sauf le dernier et création de tuples
+            entity_levels = [data.index.get_level_values(i) for i in range(data.index.nlevels - 1)]
+            entities = pd.Series(list(zip(*entity_levels)))
+        # Extraction du dernier niveau (dates/temps)
         dates = data.index.get_level_values(-1)
     # Cas 2: Données avec panel_cols et time_col spécifiés
     elif panel_cols is not None and time_col is not None:
