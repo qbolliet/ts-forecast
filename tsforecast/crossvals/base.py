@@ -10,6 +10,9 @@ from sklearn.utils import indexable
 from sklearn.utils.validation import _num_samples
 from sklearn.model_selection._split import _BaseKFold
 
+# Import des utilitaires de validation
+from ..utils.validation import validate_entities_grouped, validate_sorted_within_groups
+
 
 # Méthode auxiliaire de résolution des indices de test à partir de la liste en entrée en positions numériques
 def _resolve_test_positions(test_indices: Optional[Union[List[Any], np.ndarray]], X: Union[pd.Series, pd.DataFrame]) -> Optional[np.ndarray]:
@@ -282,85 +285,28 @@ def _verify_and_sort_data(X, groups=None):
         # Données de panel : vérification que les données sont triées par groupe puis par date
         if not hasattr(X, 'index') or not hasattr(X.index, 'nlevels') or X.index.nlevels < 2:
             raise ValueError("Panel data requires MultiIndex with at least 2 levels (group, date)")
-        
-        # Extraction vectorisée des niveaux
-        entities = X.index.get_level_values(0)  # Niveau des entités
-        dates = X.index.get_level_values(1)     # Niveau des dates
-        
+
         # Vérification du regroupement des entités (pas de discontinuités)
-        is_grouped = _check_entities_grouped(entities)
-        
+        is_grouped = validate_entities_grouped(X)
+
         # Vérification que les dates sont triées dans chaque groupe d'entité
-        dates_sorted_in_groups = _check_dates_sorted_within_groups(entities, dates)
-        
-        
+        dates_sorted_in_groups = validate_sorted_within_groups(X)
+
+
         if not (is_grouped and dates_sorted_in_groups):
             warnings.warn("Panel data is not sorted by group then by date. Sorting automatically.")
             # Tri optimisé par groupe puis par date
             sort_indices = X.index.to_frame(name=['entity_col', 'date_col']).sort_values(['entity_col', 'date_col']).index
             # Extraction des positions
             sort_positions = X.index.get_indexer(sort_indices)
-            
+
             X_sorted = X.iloc[sort_positions] if hasattr(X, 'iloc') else X[sort_positions]
             groups_sorted = groups[sort_positions] if groups is not None else None
-            
+
             return X_sorted, groups_sorted, np.array(sort_positions)
         else:
             # Données déjà triées
             return X, groups, np.arange(len(X))
-
-# Vérification que les entités sont groupées
-def _check_entities_grouped(entities: pd.Index) -> bool:
-    """
-    Check if entities are grouped (adjacent, no discontinuities) using vectorized operations.
-    
-    Args:
-        entities: Index of entity values
-        
-    Returns:
-        bool: True if entities are properly grouped, False otherwise
-    """
-    # Conversion en codes catégoriels pour comparaisons efficaces
-    entity_codes = pd.Categorical(entities).codes
-    unique_entities = np.unique(entity_codes)
-    
-    # Vérification vectorisée : pour chaque entité, ses positions doivent être consécutives
-    for entity_code in unique_entities:
-        # Extraction des positions
-        entity_positions = np.where(entity_codes == entity_code)[0]
-        if len(entity_positions) > 1:
-            # Vérification que les positions sont consécutives
-            position_diffs = np.diff(entity_positions)
-            if not np.all(position_diffs == 1):
-                return False
-    
-    return True
-
-# Vérification que les dates sont triées au sein de chaque groupe
-def _check_dates_sorted_within_groups(entities: pd.Index, dates: pd.Index) -> bool:
-    """
-    Check if dates are sorted within each entity group using vectorized operations.
-    
-    Args:
-        entities: Index of entity values  
-        dates: Index of date values
-        
-    Returns:
-        bool: True if dates are sorted within each group, False otherwise
-    """
-    # Utilisation de groupby pour vérification vectorisée
-    try:
-        grouped_dates = pd.Series(dates.values, index=entities).groupby(level=0)
-        
-        # Vérification que chaque groupe est monotone croissant
-        for _, group_dates in grouped_dates:
-            if not pd.Series(group_dates.values).is_monotonic_increasing:
-                return False
-        
-        return True
-    except Exception:
-        # Fallback en cas d'erreur avec la méthode vectorisée
-        return False
 
 # Classe de base de pour crossval out of sample
 class OutOfSampleSplit(_BaseKFold):

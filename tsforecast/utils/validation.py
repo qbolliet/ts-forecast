@@ -6,6 +6,7 @@ uniqueness checks, and proper index configuration.
 """
 # Importation des modules
 # Modules de base
+import numpy as np
 import pandas as pd
 from typing import Optional, List, Union, Dict, Any, Tuple
 import warnings
@@ -176,6 +177,206 @@ def restore_original_structure(
         return data_work.iloc[:, 0]
 
     return data_work
+
+# /!\ Pour ces deux fonctions, le cas avec le multiIndex ne fonctionne que lorsque les entités sont sur un seul niveau, j'aimerais généraliser cela 
+# Fonctions de validation spécialisées pour les données de panel
+# Fonction de vérification que les observations du panel sont groupées par entité
+def validate_entities_grouped(
+    data: Union[pd.Series, pd.DataFrame],
+    panel_cols: Optional[List[str]] = None
+) -> bool:
+    """Check if panel entities are grouped (contiguous, no discontinuities).
+
+    For panel data, entities should appear in contiguous blocks without interleaving.
+    This function validates that each entity's observations are adjacent in the data,
+    which is important for efficient time-aware operations and cross-validation.
+
+    Args:
+        data: Input data (Series or DataFrame). Should have MultiIndex for panel data
+            or be a DataFrame with panel_cols specified.
+        panel_cols: List of panel identifier column names. If None, assumes MultiIndex
+            with entities at level 0. For MultiIndex data, this parameter is ignored.
+
+    Returns:
+        True if entities are properly grouped (all observations for each entity are
+        contiguous), False otherwise.
+
+    Raises:
+        ValueError: If data structure is incompatible with panel data validation
+            (e.g., not a MultiIndex and no panel_cols specified).
+
+    Examples:
+        >>> import pandas as pd
+        >>> import numpy as np
+        >>> from tsforecast.utils.validation import validate_entities_grouped
+        >>>
+        >>> # Example 1: Valid grouping with MultiIndex
+        >>> entities = ['A', 'A', 'A', 'B', 'B', 'B']
+        >>> dates = pd.date_range('2020-01-01', periods=6, freq='D')
+        >>> idx = pd.MultiIndex.from_arrays([entities, dates], names=['entity', 'date'])
+        >>> data = pd.DataFrame({'value': range(6)}, index=idx)
+        >>> validate_entities_grouped(data)
+        True
+        >>>
+        >>> # Example 2: Invalid grouping (interleaved entities)
+        >>> entities_bad = ['A', 'B', 'A', 'B', 'A', 'B']
+        >>> idx_bad = pd.MultiIndex.from_arrays([entities_bad, dates], names=['entity', 'date'])
+        >>> data_bad = pd.DataFrame({'value': range(6)}, index=idx_bad)
+        >>> validate_entities_grouped(data_bad)
+        False
+        >>>
+        >>> # Example 3: Series with MultiIndex
+        >>> series = pd.Series(range(6), index=idx)
+        >>> validate_entities_grouped(series)
+        True
+    """
+    # Vérification que les données sont bien de type Series ou DataFrame
+    if not isinstance(data, (pd.Series, pd.DataFrame)):
+        raise ValueError("Input data must be a pandas Series or DataFrame")
+
+    # Cas 1: Données avec MultiIndex (données de panel)
+    if isinstance(data.index, pd.MultiIndex):
+        # Extraction du niveau 0 (entités)
+        entities = data.index.get_level_values(0)
+    # Cas 2: Données avec panel_cols spécifiés
+    elif panel_cols is not None:
+        if isinstance(data, pd.Series):
+            raise ValueError("Cannot use panel_cols with Series input. Use MultiIndex instead.")
+        if not all(col in data.columns for col in panel_cols):
+            missing = set(panel_cols) - set(data.columns)
+            raise ValueError(f"Panel columns not found in data: {missing}")
+        # Si un seul panel_col, extraction directe
+        if len(panel_cols) == 1:
+            entities = data[panel_cols[0]]
+        else:
+            # Pour plusieurs panel_cols, création d'un tuple pour chaque ligne
+            entities = pd.Series(list(zip(*[data[col] for col in panel_cols])))
+    else:
+        raise ValueError("Data must have MultiIndex or panel_cols must be specified for panel data validation")
+
+    # Conversion en codes catégoriels pour comparaisons efficaces
+    entity_codes = pd.Categorical(entities).codes
+    unique_entities = np.unique(entity_codes)
+
+    # Vérification vectorisée : pour chaque entité, ses positions doivent être consécutives
+    for entity_code in unique_entities:
+        # Extraction des positions de l'entité
+        entity_positions = np.where(entity_codes == entity_code)[0]
+        if len(entity_positions) > 1:
+            # Vérification que les positions sont consécutives
+            position_diffs = np.diff(entity_positions)
+            if not np.all(position_diffs == 1):
+                return False
+
+    return True
+
+# Fonction de vérification que les données du panel sont ordonnées au sein de chaque entité
+def validate_sorted_within_groups(
+    data: Union[pd.Series, pd.DataFrame],
+    panel_cols: Optional[List[str]] = None,
+    time_col: Optional[str] = None
+) -> bool:
+    """Check if data is sorted by time within each panel group.
+
+    For panel data, time values should be monotonically increasing within each
+    entity group. This function validates that temporal ordering is preserved
+    within each panel entity, which is critical for time-aware operations.
+
+    Args:
+        data: Input data (Series or DataFrame). Should have DatetimeIndex for time series
+            or MultiIndex with time at the last level for panel data.
+        panel_cols: List of panel identifier column names. If None, assumes MultiIndex
+            with entities at level 0. For MultiIndex data, this parameter is ignored.
+        time_col: Name of the time column. If None, uses the last level of MultiIndex
+            for panel data or the index for time series data.
+
+    Returns:
+        True if dates are sorted within each group (monotonically increasing),
+        False otherwise.
+
+    Raises:
+        ValueError: If data structure is incompatible with validation requirements
+            or if time column cannot be identified.
+
+    Examples:
+        >>> import pandas as pd
+        >>> from tsforecast.utils.validation import validate_sorted_within_groups
+        >>>
+        >>> # Example 1: Valid sorting with MultiIndex
+        >>> entities = ['A', 'A', 'A', 'B', 'B', 'B']
+        >>> dates = pd.to_datetime(['2020-01-01', '2020-01-02', '2020-01-03',
+        ...                         '2020-01-01', '2020-01-02', '2020-01-03'])
+        >>> idx = pd.MultiIndex.from_arrays([entities, dates], names=['entity', 'date'])
+        >>> data = pd.DataFrame({'value': range(6)}, index=idx)
+        >>> validate_sorted_within_groups(data)
+        True
+        >>>
+        >>> # Example 2: Invalid sorting (dates not sorted within entity B)
+        >>> dates_bad = pd.to_datetime(['2020-01-01', '2020-01-02', '2020-01-03',
+        ...                             '2020-01-03', '2020-01-01', '2020-01-02'])
+        >>> idx_bad = pd.MultiIndex.from_arrays([entities, dates_bad], names=['entity', 'date'])
+        >>> data_bad = pd.DataFrame({'value': range(6)}, index=idx_bad)
+        >>> validate_sorted_within_groups(data_bad)
+        False
+        >>>
+        >>> # Example 3: Time series (single entity) - always returns True for monotonic index
+        >>> dates_ts = pd.date_range('2020-01-01', periods=5, freq='D')
+        >>> series_ts = pd.Series(range(5), index=dates_ts)
+        >>> validate_sorted_within_groups(series_ts)
+        True
+    """
+    # Vérification que les données sont bien de type Series ou DataFrame
+    if not isinstance(data, (pd.Series, pd.DataFrame)):
+        raise ValueError("Input data must be a pandas Series or DataFrame")
+
+    # Cas 1: Données avec MultiIndex (données de panel)
+    if isinstance(data.index, pd.MultiIndex):
+        # Extraction du niveau 0 (entités) et du dernier niveau (dates)
+        entities = data.index.get_level_values(0)
+        dates = data.index.get_level_values(-1)
+    # Cas 2: Données avec panel_cols et time_col spécifiés
+    elif panel_cols is not None and time_col is not None:
+        if isinstance(data, pd.Series):
+            raise ValueError("Cannot use panel_cols and time_col with Series input. Use MultiIndex instead.")
+        if not all(col in data.columns for col in panel_cols):
+            missing = set(panel_cols) - set(data.columns)
+            raise ValueError(f"Panel columns not found in data: {missing}")
+        if time_col not in data.columns:
+            raise ValueError(f"Time column '{time_col}' not found in data")
+
+        # Extraction des entités
+        if len(panel_cols) == 1:
+            entities = data[panel_cols[0]]
+        else:
+            # Pour plusieurs panel_cols, création d'un tuple pour chaque ligne
+            entities = pd.Series(list(zip(*[data[col] for col in panel_cols])))
+
+        # Extraction des dates
+        dates = data[time_col]
+    # Cas 3: Données de série temporelle simple (pas de panel)
+    elif panel_cols is None and time_col is None:
+        # Pour une série temporelle simple, vérification directe de l'index
+        if isinstance(data.index, pd.DatetimeIndex):
+            return data.index.is_monotonic_increasing
+        else:
+            # Si ce n'est pas un DatetimeIndex, on ne peut pas valider
+            raise ValueError("Time series data must have DatetimeIndex for temporal validation")
+    else:
+        raise ValueError("For panel data, both panel_cols and time_col must be specified, or data must have MultiIndex")
+
+    # Utilisation de groupby pour vérification vectorisée
+    try:
+        grouped_dates = pd.Series(dates.values, index=entities).groupby(level=0)
+
+        # Vérification que chaque groupe est monotone croissant
+        for _, group_dates in grouped_dates:
+            if not pd.Series(group_dates.values).is_monotonic_increasing:
+                return False
+
+        return True
+    except Exception:
+        # Fallback en cas d'erreur avec la méthode vectorisée
+        return False
 
 
 # Fonctions auxiliaires
