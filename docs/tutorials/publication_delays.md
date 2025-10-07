@@ -145,24 +145,19 @@ data_shifted = transformer.fit_transform(data)
 
 ### 3.1 Données brutes avant transformation
 
-![Données brutes](../assets/raw_data_timeline.png)
-
 Supposons trois séries avec des délais différents :
 - Série A (bleu foncé) : délai de 5 jours
-- Série B (bleu moyen) : délai de 10 jours  
-- Série C (bleu clair) : délai de 15 jours
+- Série B (bleu clair) : délai de 15 jours
 
 ### 3.2 Après application du mode `mask`
-
-![Mode mask](../assets/after_mask_mode.png)
 
 Les observations trop récentes sont masquées (remplacées par NaN). L'alignement temporel est préservé mais certaines cellules deviennent vides.
 
 ### 3.3 Après application du mode `shift`
 
-![Mode shift](../assets/after_shift_mode.png)
-
 Les séries sont décalées vers le futur. Aucune observation n'est perdue, mais les valeurs ne correspondent plus à leur date de référence originale.
+
+![Comparaison des approches](../assets/approach_comparison.png)
 
 ## 4. Gestion des fréquences temporelles
 
