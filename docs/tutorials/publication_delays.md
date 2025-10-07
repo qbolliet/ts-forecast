@@ -170,8 +170,6 @@ Les séries sont décalées vers le futur. Aucune observation n'est perdue, mais
 
 Les délais sont généralement exprimés en jours calendaires, mais les données peuvent avoir différentes fréquences (mensuelle, trimestrielle, etc.).
 
-![Conversion de fréquence](../assets/frequency_conversion.png)
-
 **Règles de conversion** :
 
 | Fréquence cible | Méthode de conversion |
