@@ -56,7 +56,7 @@ class FrequencyNormalizer:
 
         # Mapping inverse pour les conversions
         self._literal_to_pandas = {
-            'nanosecond' : 'ns',
+            'nanosecond': 'ns',
             'microsecond': 'us',
             'millisecond': 'ms',
             'second': 's',

@@ -213,7 +213,7 @@ class FrequencyDetector:
         if len(unique_frequencies) == 1:
             return True, list(unique_frequencies)[0]
 
-        # Dans le cas où les fréquences 
+        # Dans le cas où les fréquences ne sont pas unique et que la validation est stricte
         if strict:
             return False, None
 
