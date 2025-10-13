@@ -40,9 +40,9 @@ class FrequencyDetector:
         """
         self.min_observations = min_observations
 
-    # Méthode de détection d'une série temporelle
-    def detect_frequency(self, series: pd.Series, literal: bool=False) -> Optional[Union[FrequencyType, UserFrequencyType]]:
-        """Detect the frequency of a time series.
+    # Méthode de détection d'une série temporelle simple
+    def detect_time_series_frequency(self, series: pd.Series, literal: bool=False) -> Optional[Union[FrequencyType, UserFrequencyType]]:
+        """Detect the frequency of a single time series with DatetimeIndex.
 
         This method primarily uses pandas.infer_freq with extensions for frequencies
         not natively supported (like quarterly). It automatically drops NaN values
@@ -63,7 +63,7 @@ class FrequencyDetector:
             >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
             >>> series = pd.Series([1, 2, np.nan, 4, 5], index=dates)
             >>> detector = FrequencyDetector()
-            >>> detector.detect_frequency(series)
+            >>> detector.detect_time_series_frequency(series)
             'daily'
         """
         # Suppression des valeurs manquantes pour la détection
@@ -112,6 +112,87 @@ class FrequencyDetector:
 
         return None
 
+    # Méthode de détection de la fréquence d'une série (simple ou avec MultiIndex)
+    def detect_frequency(self, series: pd.Series, literal: bool=False) -> Optional[Union[FrequencyType, UserFrequencyType, Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]]]:
+        """Detect the frequency of a series (simple or with MultiIndex for panel data).
+
+        This method handles both simple time series and panel data with MultiIndex.
+        For MultiIndex, it groups by all levels except the last (assumed to be the date)
+        and detects frequency for each panel group.
+
+        Args:
+            series: Time series data with DatetimeIndex or MultiIndex
+            literal: Boolean indicating whether to return explicit literal frequency expression
+
+        Returns:
+            - For simple series: Detected frequency as string, or None if detection fails
+            - For MultiIndex series: Dictionary mapping panel_id to frequencies
+
+        Raises:
+            ValueError: If series has insufficient non-null observations or invalid index
+
+        Examples:
+            >>> import pandas as pd
+            >>> # Simple time series
+            >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
+            >>> series = pd.Series([1, 2, 3, 4, 5], index=dates)
+            >>> detector = FrequencyDetector()
+            >>> detector.detect_frequency(series)
+            'D'
+
+            >>> # Panel data with MultiIndex
+            >>> idx = pd.MultiIndex.from_arrays([
+            ...     ['A', 'A', 'A', 'B', 'B', 'B'],
+            ...     pd.date_range('2023-01-01', periods=3, freq='D').tolist() * 2
+            ... ], names=['panel_id', 'date'])
+            >>> series = pd.Series([1, 2, 3, 4, 5, 6], index=idx)
+            >>> detector.detect_frequency(series)
+            {'A': 'D', 'B': 'D'}
+        """
+        # Vérification si l'index est un MultiIndex
+        if isinstance(series.index, pd.MultiIndex):
+            # Extraction du nombre de niveaux
+            n_levels = series.index.nlevels
+
+            # Vérification qu'il y a au moins 2 niveaux (panel_id + date)
+            if n_levels < 2:
+                raise ValueError(
+                    f"MultiIndex must have at least 2 levels (panel_id and date), "
+                    f"but has only {n_levels}"
+                )
+
+            # Extraction des noms des niveaux de panel (tous sauf le dernier)
+            panel_levels = list(range(n_levels - 1))
+
+            # Initialisation du dictionnaire de résultats
+            frequency_map = {}
+
+            # Groupby sur les niveaux de panel
+            for panel_values, group_series in series.groupby(level=panel_levels):
+                # Création de l'identifiant du panel
+                panel_id = panel_values if len(panel_levels) == 1 else tuple(panel_values)
+                # Extraction de l'index temporel (dernier niveau)
+                time_index = group_series.index.get_level_values(-1)
+
+                # Création d'une série temporelle simple avec l'index temporel
+                temp_series = pd.Series(group_series.values, index=time_index)
+
+                # Détection de la fréquence pour ce groupe
+                try:
+                    freq = self.detect_time_series_frequency(temp_series, literal)
+                    if freq:
+                        frequency_map[panel_id] = freq
+                except ValueError:
+                    # Pas assez d'observations pour ce groupe, on l'ignore
+                    continue
+
+            # Retour du dictionnaire (peut être vide si aucun groupe n'a assez d'observations)
+            return frequency_map if frequency_map else None
+
+        else:
+            # Cas d'une série temporelle simple
+            return self.detect_time_series_frequency(series, literal)
+
     # Méthode de détection de la fréquence d'un jeu de données
     def detect_dataset_frequency(self,
                                df: pd.DataFrame,
@@ -120,10 +201,14 @@ class FrequencyDetector:
                                literal: bool = False) -> Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]:
         """Detect frequencies for all series in a dataset.
 
+        This method handles both simple DataFrames and panel data. Panel structure can be
+        specified either via panel_cols or detected automatically from a MultiIndex.
+
         Args:
             df: DataFrame containing time series data
             time_col: Name of the time column (if None, uses index)
-            panel_cols: List of columns identifying panel dimensions
+            panel_cols: List of columns identifying panel dimensions. If None and index is
+                MultiIndex with at least 2 levels, automatically extracts panel structure
             literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
@@ -131,12 +216,23 @@ class FrequencyDetector:
 
         Examples:
             >>> import pandas as pd
+            >>> # Simple DataFrame
             >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
             >>> df = pd.DataFrame({'value1': [1, 2, 3, 4, 5], 'value2': [10, 20, 30, 40, 50]}, index=dates)
             >>> detector = FrequencyDetector()
             >>> freq_map = detector.detect_dataset_frequency(df)
             >>> freq_map
-            {'value1': 'daily', 'value2': 'daily'}
+            {'value1': 'D', 'value2': 'D'}
+
+            >>> # DataFrame with MultiIndex (automatic panel detection)
+            >>> idx = pd.MultiIndex.from_arrays([
+            ...     ['A', 'A', 'B', 'B'],
+            ...     pd.date_range('2023-01-01', periods=2, freq='D').tolist() * 2
+            ... ], names=['panel_id', 'date'])
+            >>> df = pd.DataFrame({'value': [1, 2, 3, 4]}, index=idx)
+            >>> freq_map = detector.detect_dataset_frequency(df)
+            >>> freq_map
+            {('A', 'value'): 'D', ('B', 'value'): 'D'}
         """
         # Initialisation du dictionnaire résultat
         frequency_map = {}
@@ -145,37 +241,90 @@ class FrequencyDetector:
         if time_col is not None and time_col in df.columns:
             df = df.set_index(time_col)
 
+        # Détection automatique de la structure panel si l'index est un MultiIndex
+        panel_in_index = False
+        if panel_cols is None and isinstance(df.index, pd.MultiIndex):
+            # Vérification qu'il y a au moins 2 niveaux (panel_id + date)
+            if df.index.nlevels >= 2:
+                # Extraction des noms des niveaux de panel (tous sauf le dernier)
+                panel_cols = df.index.names[:-1]
+                # Conversion en liste si c'est un seul élément
+                if not isinstance(panel_cols, list):
+                    panel_cols = list(panel_cols)
+                panel_in_index = True
+        # Sinon, vérification si panel_cols sont dans l'index
+        elif panel_cols is not None and isinstance(df.index, pd.MultiIndex):
+            # Vérification que tous les panel_cols sont des niveaux d'index
+            if all(col in df.index.names for col in panel_cols):
+                panel_in_index = True
+
         # Détermination si les données sont en panel
         is_panel = panel_cols is not None and len(panel_cols) > 0
 
         if is_panel:
             # Traitement des données panel
-            for panel_values, group_df in df.groupby(panel_cols):
-                # Création de l'identifiant du panel
-                panel_id = panel_values if len(panel_cols) == 1 else tuple(panel_values)
+            if panel_in_index:
+                # Groupby par niveaux d'index
+                for panel_values, group_df in df.groupby(level=panel_cols):
+                    # Création de l'identifiant du panel
+                    panel_id = panel_values if len(panel_cols) == 1 else tuple(panel_values)
 
-                # Détection de la fréquence pour chaque colonne du groupe
-                for col in df.columns:
-                    if col not in panel_cols and col != time_col:
-                        # Détection de la fréquence
-                        try:
-                            freq = self.detect_frequency(group_df[col], literal)
-                            # Ajout de la fréquence au dictionnaire résultat
-                            if freq:
-                                frequency_map[(panel_id, col)] = freq
-                        except ValueError:
-                            # Pas assez d'observations pour cette série
-                            continue
+                    # Détection de la fréquence pour chaque colonne du groupe
+                    for col in df.columns:
+                        if col != time_col:
+                            # Extraction de la série avec reset de l'index pour n'avoir que la date
+                            # Après groupby, l'index contient encore tous les niveaux, on doit extraire le dernier (date)
+                            series_with_multiindex = group_df[col]
+                            # Extraction du dernier niveau d'index (la date)
+                            time_index = series_with_multiindex.index.get_level_values(-1)
+                            # Création d'une série simple avec uniquement l'index temporel
+                            simple_series = pd.Series(series_with_multiindex.values, index=time_index)
+
+                            # Détection de la fréquence
+                            try:
+                                freq = self.detect_time_series_frequency(simple_series, literal)
+                                # Ajout de la fréquence au dictionnaire résultat
+                                if freq:
+                                    frequency_map[(panel_id, col)] = freq
+                            except ValueError:
+                                # Pas assez d'observations pour cette série
+                                continue
+            else:
+                # Groupby par colonnes
+                for panel_values, group_df in df.groupby(panel_cols):
+                    # Création de l'identifiant du panel
+                    panel_id = panel_values if len(panel_cols) == 1 else tuple(panel_values)
+
+                    # Détection de la fréquence pour chaque colonne du groupe
+                    for col in df.columns:
+                        if col not in panel_cols and col != time_col:
+                            # Détection de la fréquence
+                            try:
+                                freq = self.detect_time_series_frequency(group_df[col], literal)
+                                # Ajout de la fréquence au dictionnaire résultat
+                                if freq:
+                                    frequency_map[(panel_id, col)] = freq
+                            except ValueError:
+                                # Pas assez d'observations pour cette série
+                                continue
         else:
-            # Traitement des séries temporelles simples
+            # Traitement des séries temporelles (simples ou avec MultiIndex dans les colonnes)
             for col in df.columns:
                 if col != time_col:
-                    # Détection de la fréquence
+                    # Détection de la fréquence (peut retourner un dict si la colonne a un MultiIndex)
                     try:
-                        freq = self.detect_frequency(df[col], literal)
-                        # Ajout de la fréquence au dictionnaire résultat
-                        if freq:
-                            frequency_map[col] = freq
+                        freq_result = self.detect_frequency(df[col], literal)
+
+                        # Si le résultat est un dictionnaire (colonne avec MultiIndex)
+                        if isinstance(freq_result, dict):
+                            # Fusion des résultats dans le frequency_map
+                            for panel_id, freq in freq_result.items():
+                                # Clé combinée (panel_id, col)
+                                combined_key = (panel_id, col) if not isinstance(panel_id, tuple) else (*panel_id, col)
+                                frequency_map[combined_key] = freq
+                        # Sinon, ajout direct de la fréquence
+                        elif freq_result:
+                            frequency_map[col] = freq_result
                     except ValueError:
                         # Pas assez d'observations pour cette série
                         continue
@@ -422,47 +571,76 @@ def detect_frequency(data: Union[pd.Series, pd.DataFrame],
                     strict: bool = True) -> Optional[Union[FrequencyType, UserFrequencyType, Dict]]:
     """Detect the frequency of time series data using FrequencyDetector.
 
-    This function handles both Series and DataFrame inputs. For DataFrames, it can
+    This function handles both Series and DataFrame inputs. For Series with MultiIndex,
+    it returns a dictionary mapping panel IDs to frequencies. For DataFrames, it can
     detect frequencies for all columns and optionally return a consistent frequency.
 
     Args:
-        data: Time series data (Series or DataFrame) with datetime index
+        data: Time series data (Series or DataFrame) with datetime index or MultiIndex
         time_col: Name of the time column (if None, uses index). Only for DataFrame.
         panel_cols: List of columns identifying panel dimensions. Only for DataFrame.
         literal: Boolean indicating whether to return explicit literal frequency expression
-        check_consistency: If True, check frequency consistency across columns (DataFrame only)
+        check_consistency: If True, check frequency consistency across panel groups or columns
         consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
             - 'modal': Returns the most common frequency (default)
             - 'highest': Returns the highest frequency (most granular)
         strict: If True, all frequencies must be identical (used with check_consistency)
 
     Returns:
-        For Series: Detected frequency as string, or None if detection fails
+        For Series without MultiIndex: Detected frequency as string, or None if detection fails
+        For Series with MultiIndex: Dictionary mapping panel_id to frequencies, or single frequency if check_consistency=True
         For DataFrame without check_consistency: Dictionary mapping columns to frequencies
         For DataFrame with check_consistency: Single consistent frequency or None
 
     Examples:
         >>> import pandas as pd
-        >>> # Series detection
+        >>> # Simple series detection
         >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
         >>> series = pd.Series([1, 2, 3, 4, 5], index=dates)
         >>> detect_frequency(series)
         'D'
-        >>>
+
+        >>> # Series with MultiIndex (panel data)
+        >>> idx = pd.MultiIndex.from_arrays([
+        ...     ['A', 'A', 'A', 'B', 'B', 'B'],
+        ...     pd.date_range('2023-01-01', periods=3, freq='D').tolist() * 2
+        ... ], names=['panel_id', 'date'])
+        >>> series = pd.Series([1, 2, 3, 4, 5, 6], index=idx)
+        >>> detect_frequency(series)
+        {'A': 'D', 'B': 'D'}
+
+        >>> # Series with MultiIndex and consistency check
+        >>> detect_frequency(series, check_consistency=True)
+        'D'
+
         >>> # DataFrame detection with consistency check (modal)
         >>> df = pd.DataFrame({'a': series, 'b': series})
         >>> detect_frequency(df, check_consistency=True, consistency_mode='modal')
-        'D'
-        >>>
-        >>> # DataFrame detection with highest frequency
-        >>> detect_frequency(df, check_consistency=True, consistency_mode='highest')
         'D'
     """
     # Cas 1: Entrée Series
     if isinstance(data, pd.Series):
         if time_col is not None or panel_cols:
             raise ValueError("time_col and panel_cols parameters are only valid for DataFrame inputs")
-        return _detector.detect_frequency(data, literal)
+
+        # Détection de la fréquence (peut retourner un dict pour MultiIndex)
+        freq_result = _detector.detect_frequency(data, literal)
+
+        # Si check_consistency demandé et résultat est un dict (MultiIndex détecté)
+        if check_consistency and isinstance(freq_result, dict):
+            # Application de la logique de validation de consistance
+            if consistency_mode == 'modal':
+                # Mode modal: fréquence la plus commune
+                _, frequency = _detector.validate_frequency_consistency(frequency_map=freq_result, strict=strict)
+                return frequency
+            elif consistency_mode == 'highest':
+                # Mode highest: fréquence la plus haute (plus granulaire)
+                return _get_highest_frequency(freq_result)
+            else:
+                raise ValueError(f"Invalid consistency_mode: {consistency_mode}. Must be 'modal' or 'highest'")
+
+        # Sinon, retour direct du résultat
+        return freq_result
 
     # Cas 2: Entrée DataFrame
     elif isinstance(data, pd.DataFrame):
@@ -546,8 +724,24 @@ def _get_highest_frequency(frequency_map: Dict[Union[str, tuple], Union[Frequenc
     if len(unique_frequencies) == 1:
         return list(unique_frequencies)[0]
 
+    # Normalisation des fréquences avec ancrages (ex: 'W-SUN' -> 'W', 'Q-DEC' -> 'Q')
     # Calcul de l'ordre de chaque fréquence et sélection de la plus haute (ordre le plus bas)
-    freq_orders = {freq: get_frequency_order(freq) for freq in unique_frequencies}
+    freq_orders = {}
+    for freq in unique_frequencies:
+        # Extraction de la partie base de la fréquence (avant le tiret s'il existe)
+        base_freq = freq.split('-')[0] if '-' in freq else freq
+        try:
+            freq_orders[freq] = get_frequency_order(base_freq)
+        except ValueError:
+            # Si la normalisation échoue, essayer avec la fréquence complète
+            try:
+                freq_orders[freq] = get_frequency_order(freq)
+            except ValueError:
+                # Si toujours échec, ignorer cette fréquence
+                continue
+
+    if not freq_orders:
+        return None
 
     # Retour de la fréquence avec l'ordre le plus bas (plus granulaire)
     highest_freq = min(freq_orders.keys(), key=lambda x: freq_orders[x])
