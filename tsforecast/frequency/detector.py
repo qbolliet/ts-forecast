@@ -114,13 +114,13 @@ class FrequencyDetector:
 
     # Méthode auxiliaire pour extraire la série temporelles (en dernière dimension par convention) d'un multi-index
     def _extract_time_series_from_multiindex(self, series: pd.Series) -> pd.Series:
-        """Extrait une série temporelle simple à partir d'une série avec MultiIndex.
+        """Extract a simple time series from a series with MultiIndex.
 
         Args:
-            series: Série avec MultiIndex dont le dernier niveau est la date
+            series: Series with MultiIndex where the last level is the date
 
         Returns:
-            Série temporelle simple avec uniquement l'index temporel
+            Simple time series with only the time index
         """
         # Extraction de l'index temporel (dernier niveau)
         time_index = series.index.get_level_values(-1)
@@ -129,14 +129,14 @@ class FrequencyDetector:
 
     # Méthode auxiliaire de création d'un identifiant de panel normalisé
     def _create_panel_id(self, panel_values: Union[str, tuple], n_levels: int) -> Union[str, tuple]:
-        """Crée un identifiant de panel normalisé.
+        """Create a normalized panel identifier.
 
         Args:
-            panel_values: Valeurs du panel (peut être une string ou un tuple)
-            n_levels: Nombre de niveaux de panel
+            panel_values: Panel values (can be a string or a tuple)
+            n_levels: Number of panel levels
 
         Returns:
-            Identifiant normalisé (string si 1 niveau, tuple sinon)
+            Normalized identifier (string if 1 level, tuple otherwise)
         """
         if n_levels == 1:
             # Si panel_values est déjà un tuple avec un seul élément, extraction de la valeur
@@ -147,14 +147,14 @@ class FrequencyDetector:
 
     # Méthode auxiliaire d'extraction de la fréquence d'une colonne
     def _detect_column_frequency(self, series: pd.Series, literal: bool) -> Optional[Union[FrequencyType, UserFrequencyType]]:
-        """Détecte la fréquence d'une colonne (avec gestion automatique du MultiIndex).
+        """Detect the frequency of a column (with automatic MultiIndex handling).
 
         Args:
-            series: Série dont on veut détecter la fréquence
+            series: Series for which to detect the frequency
             literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
-            Fréquence détectée ou None si échec/observations insuffisantes
+            Detected frequency or None if failed/insufficient observations
         """
         try:
             # Si la série a un MultiIndex, extraire la série temporelle simple
@@ -237,16 +237,16 @@ class FrequencyDetector:
 
     # Méthode auxiliaire de détection de la structure de panel
     def _detect_panel_structure(self, df: pd.DataFrame, panel_cols: Optional[List[str]]) -> Tuple[Optional[List[str]], bool]:
-        """Détecte la structure panel du DataFrame (colonnes ou index).
+        """Detect the panel structure of the DataFrame (columns or index).
 
         Args:
-            df: DataFrame à analyser
-            panel_cols: Liste des colonnes de panel spécifiées (peut être None)
+            df: DataFrame to analyze
+            panel_cols: List of specified panel columns (can be None)
 
         Returns:
-            Tuple (panel_cols_final, panel_in_index) où:
-                - panel_cols_final: Liste des colonnes de panel détectées (None si pas de panel)
-                - panel_in_index: True si le panel est dans l'index, False si dans les colonnes
+            Tuple (panel_cols_final, panel_in_index) where:
+                - panel_cols_final: List of detected panel columns (None if no panel)
+                - panel_in_index: True if panel is in the index, False if in columns
         """
         # Initialisation de l'indicateur que le panel est en index
         panel_in_index = False
@@ -273,17 +273,17 @@ class FrequencyDetector:
     # Méthode de détection des fréquences d'un jeu de données de panel
     def _detect_panel_frequencies(self, df: pd.DataFrame, panel_cols: List[str], panel_in_index: bool,
                                   time_col: Optional[str], literal: bool) -> Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]:
-        """Détecte les fréquences pour un DataFrame en panel.
+        """Detect frequencies for a panel DataFrame.
 
         Args:
-            df: DataFrame avec structure panel
-            panel_cols: Liste des colonnes de panel
-            panel_in_index: True si le panel est dans l'index
-            time_col: Nom de la colonne temporelle (ou None si dans l'index)
+            df: DataFrame with panel structure
+            panel_cols: List of panel columns
+            panel_in_index: True if panel is in the index
+            time_col: Name of the time column (or None if in the index)
             literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
-            Dictionnaire mapping (panel_id, column) vers fréquences
+            Dictionary mapping (panel_id, column) to frequencies
         """
         # Initialisation du dictionnaire des fréquences
         frequency_map = {}
@@ -324,15 +324,15 @@ class FrequencyDetector:
     # Méthode auxiliaire de détection des fréquences pour les jeux de données qui sont des séries temporelles
     def _detect_time_series_frequencies(self, df: pd.DataFrame, time_col: Optional[str],
                                    literal: bool) -> Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]:
-        """Détecte les fréquences pour un DataFrame simple (non-panel).
+        """Detect frequencies for a simple DataFrame (non-panel).
 
         Args:
             df: DataFrame
-            time_col: Nom de la colonne temporelle (ou None si dans l'index)
+            time_col: Name of the time column (or None if in the index)
             literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
-            Dictionnaire mapping column (ou panel_id, column) vers fréquences
+            Dictionary mapping column (or panel_id, column) to frequencies
         """
         # Initialisation du dictionnaire des fréquences
         frequency_map = {}
@@ -509,7 +509,7 @@ class FrequencyDetector:
             return self._detect_day_frequency(time_index=time_index, modal_days=modal_days, literal=literal)
 
     # Méthode auxiliaire de détection des basses fréquences en jours
-    def _detect_day_frequency(self, time_index: pd.DatetimeIndex, modal_days: float, literal: bool = False) -> Optional[Union[FrequencyType, UserFrequencyType]] :
+    def _detect_day_frequency(self, time_index: pd.DatetimeIndex, modal_days: float, literal: bool = False) -> Optional[Union[FrequencyType, UserFrequencyType]]:
         """Detect day-level frequencies (daily, weekly, monthly, quarterly, annual).
 
         Args:
@@ -550,7 +550,7 @@ class FrequencyDetector:
             Pandas frequency code for intraday frequency or None
 
         Notes:
-            Détecte les fréquences horaires ('h'), par minute ('min'), et par seconde ('s').
+            Detects hourly ('h'), minute ('min'), and second ('s') frequencies.
         """
         # Tolérance de 5% pour gérer les petites variations
         tolerance = 0.05
@@ -590,7 +590,7 @@ class FrequencyDetector:
             'D' for calendar daily or 'B' for business daily
 
         Notes:
-            Vérifie si les dates tombent uniquement sur des jours ouvrés (lundi-vendredi).
+            Checks if dates fall only on business days (Monday-Friday).
         """
         # Vérification des jours de la semaine (0=lundi, 6=dimanche)
         weekdays = time_index.dayofweek
@@ -619,8 +619,8 @@ class FrequencyDetector:
             'SM' if semi-monthly frequency is detected, None otherwise
 
         Notes:
-            Vérifie si les dates correspondent à des occurrences bi-mensuelles
-            (typiquement 1er et 15 du mois, ou début et milieu de mois).
+            Checks if dates correspond to bi-monthly occurrences
+            (typically 1st and 15th of the month, or beginning and middle of the month).
         """    
         # Extraction des jours du mois
         days = time_index.day
