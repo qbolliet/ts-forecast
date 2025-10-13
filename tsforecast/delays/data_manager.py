@@ -7,13 +7,15 @@ and managing publication delay information using pandas DataFrames.
 # Modules de base
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, Union, Tuple, List, Any
+from typing import Dict, Optional, Union, Tuple, List, Any, Literal
 from datetime import datetime, timedelta
 import warnings
 # Module de détection de la fréquence des séries
 from ..frequency.detector import detect_frequency
 # Module de validation des données temporelles
 from ..utils.validation import validate_temporal_data
+# Module de manipulation temporelle
+from ..utils.time import get_period_boundaries
 
 # /!\ Faire un prompt pour intégrer un logger à cette fonction : comment mettre du logging optionnel + implémentation
 # Fonction de comparaison et d'inférence des délais de publication
@@ -195,7 +197,7 @@ def _calculate_release_delays(new_observations: pd.DataFrame,
         level=publication_delays.index.nlevels-2, 
         drop=False, 
         inplace=True, 
-        names=[e for e in range(publication_delays.index.nlevels) if e!= publication_delays.index.nlevels-2 else "observation_date"]
+        names=[e for e in range(publication_delays.index.nlevels) if e!= publication_delays.index.nlevels-2 else "observation_date"],
     )
 
     # Ajout d'informations d'intérêt
@@ -203,27 +205,60 @@ def _calculate_release_delays(new_observations: pd.DataFrame,
     publication_delays["download_date"] = download_date
 
     # Fréquence
-    # Détection de la fréquence
+    # Détection de la fréquence pour chaque indicateur dans new_data
+    frequency_map = detect_frequency(new_data, literal=True)
 
     # Conversion du dictionnaire en DataFrame ou création de la série
+    if isinstance(frequency_map, dict):
+        # Si c'est un dictionnaire (cas panel data ou multi-colonnes)
+        freq_df = pd.Series(frequency_map, name="frequency").to_frame()
+        # Si les clés sont des tuples (panel_id, column), décomposer
+        if freq_df.index.nlevels == 1 and isinstance(freq_df.index[0], tuple):
+            freq_df.index = pd.MultiIndex.from_tuples(freq_df.index)
+    else:
+        # Si c'est une fréquence unique
+        freq_df = pd.Series(frequency_map, index=publication_delays.index, name="frequency").to_frame()
 
     # Ajout de la fréquence au jeu de données
+    publication_delays = publication_delays.join(freq_df, on=publication_delays.index.names)
 
     # Dates de début et de fin de la période sur laquelle porte l'observation
+    # Calcul des bornes de période en fonction de la fréquence
+    period_start, period_end = get_period_boundaries(date=, frequency=)
+
     # Date de début de période
+    publication_delays["period_start"] = period_start
 
     # Date de fin de période
-
-
+    publication_delays["period_end"] = period_end
 
     # Point de référence
     publication_delays["reference_point"] = reference_point
+
     # Délai de publication
     # Le délai de publication est toujours arrondi à l'entier supérieur
+    # Calcul du délai selon le point de référence
+    if reference_point == "start":
+        reference_dates = publication_delays["period_start"]
+    else:  # "end"
+        reference_dates = publication_delays["period_end"]
 
+    # Calcul des délais en timedelta
+    delays_timedelta = download_date - reference_dates
 
-    # Unité
-    # Timedelta n'a que pour attributs "days", "seconds", "microseconds", qui sont les 
+    # Conversion selon l'unité spécifiée
+    # Timedelta n'a que pour attributs "days", "seconds", "microseconds"
+    if unit in ["D", "day"]:
+        publication_delays["release_delay"] = np.ceil(delays_timedelta.dt.total_seconds() / 86400)
+        publication_delays["unit"] = "days"
+    elif unit in ["s", "second"]:
+        publication_delays["release_delay"] = np.ceil(delays_timedelta.dt.total_seconds())
+        publication_delays["unit"] = "seconds"
+    elif unit in ["us", "microsecond"]:
+        publication_delays["release_delay"] = np.ceil(delays_timedelta.dt.total_seconds() * 1_000_000)
+        publication_delays["unit"] = "microseconds"
+    else:
+        raise ValueError(f"Unit must be one of 'us', 's', 'D', 'microsecond', 'second', 'day', got {unit}") 
 
 
     return publication_delays
