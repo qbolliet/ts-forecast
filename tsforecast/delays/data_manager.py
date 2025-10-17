@@ -19,7 +19,7 @@ from ..utils.time import get_period_boundaries
 
 # /!\ Faire un prompt pour intégrer un logger à cette fonction : comment mettre du logging optionnel + implémentation
 # Fonction de comparaison et d'inférence des délais de publication
-def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: pd.DataFrame, download_date: Union[str, datetime], detection_mode: str = 'new_only', reference_point: str = 'start', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None, frequency_detector: Optional[FrequencyDetector] = None) :
+def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: pd.DataFrame, download_date: Union[str, datetime], detection_mode: str = 'new_only', reference_point: str = 'start', delay_unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day'] = 'day', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None, frequency_detector: Optional[FrequencyDetector] = None) :
     # Validation des arguments
     # Validation des jeux de données
     new_data = _validate_input_data(data=new_data, time_col=time_col, panel_cols=panel_cols)
@@ -34,9 +34,20 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: pd.DataFram
         raise ValueError("detection_mode must be 'new_only' or 'all_changes'")
 
     # Identification des nouvelles observations
-    new_observations = _identify_new_observations(new_data=new_data, existing_data=existing_data, detection_mode=detection_mode)
+    new_observations = _identify_new_observations(
+        new_data=new_data, 
+        existing_data=existing_data, 
+        detection_mode=detection_mode
+    )
 
     # Fonction de calcul des délais associés aux observations nouvellement publiées
+    new_observations = _calculate_release_delays(
+        new_observations=new_observations,
+        new_data=new_data,
+        download_date=download_date,
+        reference_point=reference_point,
+        unit=delay_unit
+    )
 
     return new_observations
 
@@ -224,13 +235,10 @@ def _calculate_release_delays(new_observations: pd.DataFrame,
 
     # Dates de début et de fin de la période sur laquelle porte l'observation
     # Calcul des bornes de période en fonction de la fréquence
-    period_start, period_end = get_period_boundaries(date=, frequency=)
-
-    # Date de début de période
-    publication_delays["period_start"] = period_start
-
-    # Date de fin de période
-    publication_delays["period_end"] = period_end
+    publication_delays[["period_start", "period_end"]] = publication_delays[["observation_date", "frequency"]].apply(
+        lambda row: pd.Series(get_period_boundaries(date=row["observation_date"], frequency=row["frequency"]), index=["period_start", "period_end"]),
+        axis=1
+    )
 
     # Point de référence
     publication_delays["reference_point"] = reference_point
@@ -266,74 +274,7 @@ def _calculate_release_delays(new_observations: pd.DataFrame,
 
 
 
-def _calculate_release_delays_old(new_observations: pd.DataFrame,
-                                download_date: datetime,
-                                reference_point: str) -> List[Dict[str, Any]]:
-    """Calculate publication delays for new observations.
 
-    Args:
-        new_observations: DataFrame of new observations
-        download_date: Download date
-        reference_point: Reference point ('start' or 'end')
-
-    Returns:
-        List of calculated delay records
-    """
-    # Initialisation de la liste des délais
-    delay_records = []
-
-    # Parcours des nouvelles observations
-    for _, obs in new_observations.iterrows():
-        try:
-            # Détection de la fréquence de l'indicateur
-            indicator_name = obs['indicator_name']
-            observation_date = obs['observation_date']
-
-            # Détermination de la période (début et fin)
-            period_info = self._determine_period_boundaries(
-                observation_date, indicator_name, new_observations
-            )
-
-            # Calcul du délai selon le point de référence
-            if reference_point == 'start':
-                reference_date = period_info['period_start']
-            else:  # 'end'
-                reference_date = period_info['period_end']
-
-            release_delay_days = (download_date - reference_date).days
-
-            # Création de l'enregistrement
-            delay_record = {
-                'indicator_name': indicator_name,
-                'observation_date': observation_date,
-                'period_start': period_info['period_start'],
-                'period_end': period_info['period_end'],
-                'download_date': download_date,
-                'release_delay_days': float(release_delay_days),
-                'is_period_start_reference': (reference_point == 'start'),
-                'data_frequency': period_info.get('frequency'),
-                'metadata': {
-                    'calculation_method': 'automatic',
-                    'reference_point': reference_point,
-                    'original_value': float(obs['value']) if not pd.isna(obs['value']) else None
-                }
-            }
-
-            # Ajout de l'entité si données panel
-            if self.panel_cols_:
-                entity_parts = []
-                for col in self.panel_cols_:
-                    if col in obs:
-                        entity_parts.append(str(obs[col]))
-                delay_record['entity_id'] = '|'.join(entity_parts) if entity_parts else None
-
-            delay_records.append(delay_record)
-
-        except Exception as e:
-            warnings.warn(f"Error calculating delay for {obs.get('indicator_name', 'unknown')}: {str(e)}")
-            continue
-
-    return delay_records
 
 # /!\ Voir si on a besoin de "time_col" et "panels_cols" ou si on peut utiliser les index (cohérent avec le comportement des crossvals)
 # /!\ Vérifier s'il n'y a pas de duplicat pour les id_cols dans validate_input_data
