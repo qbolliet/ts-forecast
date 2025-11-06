@@ -9,6 +9,9 @@ import pandas as pd
 from pandas.tseries.frequencies import to_offset
 from typing import Union, Literal, Optional, Dict, List
 
+# Import de la classe parente
+from ..common.base import TemporalNormalizer
+
 # Types supportés pour les fréquences
 FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'Y']
 UserFrequencyType = Literal[
@@ -16,7 +19,7 @@ UserFrequencyType = Literal[
 ]
 
 # Classe de normalisation des fréquences
-class FrequencyNormalizer:
+class FrequencyNormalizer(TemporalNormalizer):
     """Centralized frequency normalization and conversion utility.
 
     This class handles conversions between different frequency representations:
@@ -54,22 +57,8 @@ class FrequencyNormalizer:
             'Y': 'annual'
         }
 
-        # Mapping inverse pour les conversions
-        self._literal_to_pandas = {
-            'nanosecond': 'ns',
-            'microsecond': 'us',
-            'millisecond': 'ms',
-            'second': 's',
-            'minute': 'min',
-            'hourly': 'h',
-            'daily': 'D',
-            'business_daily': 'B',
-            'weekly': 'W',
-            'semi_monthly': 'SM',
-            'monthly': 'M',
-            'quarterly': 'Q',
-            'annual': 'Y'
-        }
+        # Mapping inverse pour les conversions (utilisation de la méthode héritée)
+        self._literal_to_pandas = self._build_reverse_mapping(self._pandas_to_literal)
 
         # Ordre des fréquences pour les comparaisons (du plus granulaire au moins granulaire)
         self._frequency_order = {
@@ -87,6 +76,69 @@ class FrequencyNormalizer:
             'Q': 10,
             'Y': 11
         }
+
+    # Implémentation des méthodes abstraites de TemporalNormalizer
+    def normalize(self, value: str) -> str:
+        """Normalize any frequency representation to pandas frequency code.
+
+        Implementation of TemporalNormalizer.normalize() for frequencies.
+
+        Args:
+            value: Frequency string (pandas code or literal name)
+
+        Returns:
+            Pandas frequency code string
+
+        Raises:
+            ValueError: If frequency format is not supported
+        """
+        return self.normalize_frequency(value)
+
+    # Méthode de conversion en nom littéraire
+    def to_literal(self, frequency: FrequencyType) -> UserFrequencyType:
+        """Convert frequency to literal name.
+
+        Implementation of TemporalNormalizer.to_literal() for frequencies.
+
+        Args:
+            frequency: Frequency in any supported format
+
+        Returns:
+            Literal frequency name
+
+        Examples:
+            >>> normalizer = FrequencyNormalizer()
+            >>> normalizer.to_literal('M')
+            'monthly'
+            >>> normalizer.to_literal('Q')
+            'quarterly'
+        """
+        # Normalisation de la fréquence
+        pandas_freq = self.normalize_frequency(frequency)
+        # Conversion dans son nom littéral
+        return self._pandas_to_literal.get(pandas_freq, pandas_freq)
+
+    # Méthode de validation de la fréquence
+    # /!\
+    def validate(self, value: str) -> bool:
+        """Validate if a frequency is supported.
+
+        Implementation of TemporalNormalizer.validate() for frequencies.
+
+        Args:
+            value: Frequency to validate
+
+        Returns:
+            True if frequency is valid and supported
+
+        Examples:
+            >>> normalizer = FrequencyNormalizer()
+            >>> normalizer.validate('daily')
+            True
+            >>> normalizer.validate('invalid_freq')
+            False
+        """
+        return self.validate_frequency(value)
 
     # Méthode de normalisation des fréquences dans leur expression pandas
     def normalize_frequency(self, frequency: Union[FrequencyType, UserFrequencyType]) -> FrequencyType:
@@ -122,28 +174,6 @@ class FrequencyNormalizer:
 
         # Renvoie une erreur si le code est inconnu
         raise ValueError(f"Unsupported frequency: {frequency}. Supported frequencies: {list(self._literal_to_pandas.keys())} or pandas codes: {list(self._pandas_to_literal.keys())}")
-
-    # Méthode de conversion de la fréquence dans son expression littérale
-    def to_literal(self, frequency: FrequencyType) -> UserFrequencyType:
-        """Convert frequency to literal name.
-
-        Args:
-            frequency: Frequency in any supported format
-
-        Returns:
-            Literal frequency name
-
-        Examples:
-            >>> normalizer = FrequencyNormalizer()
-            >>> normalizer.to_user_friendly('M')
-            'monthly'
-            >>> normalizer.to_user_friendly('Q')
-            'quarterly'
-        """
-        # Normalisation de la fréquence
-        pandas_freq = self.normalize_frequency(frequency)
-        # COnversion dans son nom littéral
-        return self._pandas_to_literal.get(pandas_freq, pandas_freq)
 
     # Conversion d'une fréquence dans son expression pandas
     def to_pandas_freq(self, frequency: Union[FrequencyType, UserFrequencyType]) -> FrequencyType:
