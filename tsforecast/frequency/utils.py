@@ -117,16 +117,30 @@ class FrequencyNormalizer(TemporalNormalizer):
         pandas_freq = self.normalize_frequency(frequency)
         # Conversion dans son nom littéral
         return self._pandas_to_literal.get(pandas_freq, pandas_freq)
-
-    # Méthode de validation de la fréquence
-    # /!\
-    def validate(self, value: str) -> bool:
-        """Validate if a frequency is supported.
-
-        Implementation of TemporalNormalizer.validate() for frequencies.
+    
+    # Conversion d'une fréquence dans son expression code
+    def to_code(self, frequency: Union[FrequencyType, UserFrequencyType]) -> FrequencyType:
+        """Convert frequency to frequency code.
 
         Args:
-            value: Frequency to validate
+            frequency: Frequency in any supported format
+
+        Returns:
+            Frequency code
+
+        Examples:
+            >>> normalizer = FrequencyNormalizer()
+            >>> normalizer.to_code('daily')
+            'D'
+        """
+        return self.normalize_frequency(frequency)
+
+    # Méthode de validation de la fréquence
+    def validate(self, value: FrequencyType) -> bool:
+        """Validate if a frequency is supported.
+
+        Args:
+            frequency: Frequency to validate
 
         Returns:
             True if frequency is valid and supported
@@ -138,7 +152,12 @@ class FrequencyNormalizer(TemporalNormalizer):
             >>> normalizer.validate('invalid_freq')
             False
         """
-        return self.validate_frequency(value)
+        try:
+            # Tentative de normalisation de la fréquence
+            self.normalize_frequency(value)
+            return True
+        except ValueError:
+            return False
 
     # Méthode de normalisation des fréquences dans leur expression pandas
     def normalize_frequency(self, frequency: Union[FrequencyType, UserFrequencyType]) -> FrequencyType:
@@ -265,30 +284,6 @@ class FrequencyNormalizer(TemporalNormalizer):
         except ValueError:
             return False
 
-    # Méthode de vérification qu'une fréquence est supportée
-    def validate_frequency(self, frequency: FrequencyType) -> bool:
-        """Validate if a frequency is supported.
-
-        Args:
-            frequency: Frequency to validate
-
-        Returns:
-            True if frequency is valid and supported
-
-        Examples:
-            >>> normalizer = FrequencyNormalizer()
-            >>> normalizer.validate_frequency('daily')
-            True
-            >>> normalizer.validate_frequency('invalid_freq')
-            False
-        """
-        try:
-            # Tentative de normalisation de la fréquence
-            self.normalize_frequency(frequency)
-            return True
-        except ValueError:
-            return False
-
 
 # Instance globale pour faciliter l'utilisation
 _normalizer = FrequencyNormalizer()
@@ -340,6 +335,26 @@ def to_literal(frequency: FrequencyType) -> str:
         'daily'
     """
     return _normalizer.to_literal(frequency)
+
+# Conversion d'une durée dans son expression code
+def to_code(frequency: Union[FrequencyType, UserFrequencyType]) -> str:
+    """Convert frequency to frequency code.
+
+    Args:
+        frequency: Frequency in any supported format (code or literal name).
+
+    Returns:
+        Frequency code string.
+
+    Examples:
+        >>> to_code('hour')
+        'h'
+        >>> to_code('quarter')
+        'Q'
+        >>> to_code('D')
+        'D'
+    """
+    return _normalizer.to_code(frequency)
 
 # Conversion d'une fréquence dans son expression pandas
 def to_pandas_freq(frequency: FrequencyType) -> str:
@@ -423,7 +438,7 @@ def validate_frequency(frequency: FrequencyType) -> bool:
         >>> validate_frequency('invalid_freq')
         False
     """
-    return _normalizer.validate_frequency(frequency)
+    return _normalizer.validate(frequency)
 
 # Extraction de l'ordre des fréquences
 def get_frequency_order(frequency: Union[FrequencyType, UserFrequencyType]) -> float:

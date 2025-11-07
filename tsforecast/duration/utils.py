@@ -76,7 +76,7 @@ class DurationNormalizer(TemporalNormalizer):
             'Y': 11
         }
 
-    # Implémentation des méthodes abstraites de TemporalNormalizer
+    # Méthode de normalisation de la durée
     def normalize(self, value: str) -> str:
         """Normalize any duration representation to duration code.
 
@@ -100,6 +100,7 @@ class DurationNormalizer(TemporalNormalizer):
         """
         return self.normalize_duration(value)
 
+    # Méthode de conversion en expression littéraire
     def to_literal(self, duration: DurationType) -> UserDurationType:
         """Convert duration to literal name.
 
@@ -123,13 +124,12 @@ class DurationNormalizer(TemporalNormalizer):
         # Conversion dans son nom littéral
         return self._code_to_literal.get(duration_code, duration_code)
 
-    def validate(self, value: str) -> bool:
+    # Méthode de validation du support de la durée
+    def validate(self, value: Union[DurationType, UserDurationType]) -> bool:
         """Validate if a duration is supported.
 
-        Implementation of TemporalNormalizer.validate() for durations.
-
         Args:
-            value: Duration to validate
+            duration: Duration to validate
 
         Returns:
             True if duration is valid and supported
@@ -138,10 +138,15 @@ class DurationNormalizer(TemporalNormalizer):
             >>> normalizer = DurationNormalizer()
             >>> normalizer.validate('day')
             True
-            >>> normalizer.validate('invalid_duration')
+            >>> normalizer.validate('invalid_dur')
             False
         """
-        return self.validate_duration(value)
+        try:
+            # Tentative de normalisation de la durée
+            self.normalize_duration(value)
+            return True
+        except ValueError:
+            return False
 
     # Méthode de normalisation des durées dans leur expression code
     def normalize_duration(self, duration: Union[DurationType, UserDurationType]) -> DurationType:
@@ -217,9 +222,11 @@ class DurationNormalizer(TemporalNormalizer):
             >>> normalizer.is_longer_duration('week', 'quarter')
             False
         """
+        # Conversion en code
         code1 = self.to_code(dur1)
         code2 = self.to_code(dur2)
 
+        # Extraction de l'ordre associé à chaque durée
         order1 = self._duration_order.get(code1, 0)
         order2 = self._duration_order.get(code2, 0)
 
@@ -250,30 +257,7 @@ class DurationNormalizer(TemporalNormalizer):
             return True
         except ValueError:
             return False
-
-    # Méthode de vérification qu'une durée est supportée
-    def validate_duration(self, duration: DurationType) -> bool:
-        """Validate if a duration is supported.
-
-        Args:
-            duration: Duration to validate
-
-        Returns:
-            True if duration is valid and supported
-
-        Examples:
-            >>> normalizer = DurationNormalizer()
-            >>> normalizer.validate_duration('day')
-            True
-            >>> normalizer.validate_duration('invalid_dur')
-            False
-        """
-        try:
-            # Tentative de normalisation de la durée
-            self.normalize_duration(duration)
-            return True
-        except ValueError:
-            return False
+        
 
 
 # Classe de conversion entre durées
@@ -526,7 +510,7 @@ def validate_duration(duration: Union[DurationType, UserDurationType]) -> bool:
         >>> validate_duration('invalid_dur')
         False
     """
-    return _normalizer.validate_duration(duration)
+    return _normalizer.validate(duration)
 
 
 # Conversion entre durées

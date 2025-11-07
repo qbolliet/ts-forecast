@@ -8,7 +8,7 @@ temporal types.
 from abc import ABC, abstractmethod
 from typing import Dict, Union
 
-
+# Classe abstraite de normalisation 
 class TemporalNormalizer(ABC):
     """Abstract base class for normalizing temporal expressions.
 
@@ -41,6 +41,7 @@ class TemporalNormalizer(ABC):
         ...             return False
     """
 
+    # Méthode de normalisation de la représentation de la valeur temporelle
     @abstractmethod
     def normalize(self, value: str) -> str:
         """Normalize any representation to standard format.
@@ -56,6 +57,7 @@ class TemporalNormalizer(ABC):
         """
         pass
 
+    # Méthode de conversion de la valeur temporelle dans son expression littéraire
     @abstractmethod
     def to_literal(self, value: str) -> str:
         """Convert value to user-friendly literal name.
@@ -71,6 +73,7 @@ class TemporalNormalizer(ABC):
         """
         pass
 
+    # Méthode de validation du support par la classe de la valeur temporelle
     @abstractmethod
     def validate(self, value: str) -> bool:
         """Validate if a value is supported.
@@ -83,6 +86,7 @@ class TemporalNormalizer(ABC):
         """
         pass
 
+    # Méthode auxiliaire de construction du mapping inverse entre les codes temporels et leur expression littéraire
     @staticmethod
     def _build_reverse_mapping(mapping: Dict[str, str]) -> Dict[str, str]:
         """Build reverse mapping from a given dictionary.
