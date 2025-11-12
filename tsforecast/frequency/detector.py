@@ -11,7 +11,7 @@ from typing import Dict, Optional, Union, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
 # Import des utilitaires de fréquence
-from .utils import to_literal, get_frequency_order, FrequencyType, UserFrequencyType
+from ..utils.frequency import to_literal, get_frequency_order, FrequencyType, UserFrequencyType
 
 # Classe de détection de la fréquence d'une série temporelle
 class FrequencyDetector:

@@ -11,7 +11,7 @@ from typing import List, Optional, Union, Literal
 from datetime import datetime
 
 # Modules du package
-from ..frequency.utils import normalize_frequency, is_higher_frequency, to_pandas_freq
+from ..utils.frequency import normalize_frequency, is_higher_frequency, to_pandas_freq
 from ..utils.time import get_period_boundaries
 
 # Fonction de calcul du délai applicable

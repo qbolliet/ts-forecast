@@ -6,7 +6,7 @@ from typing import Literal, Union
 from datetime import datetime, timedelta
 
 # Import des utilitaires de fréquence
-from ..frequency.utils import normalize_frequency, FrequencyType, UserFrequencyType
+from .frequency import normalize_frequency, FrequencyType, UserFrequencyType
 
 # Fonctions de conversion entre timeseries et string
 def timeseries_to_string(ts: pd.Series, format: str = "%Y-%m-%d") -> pd.Series:
