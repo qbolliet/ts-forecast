@@ -9,10 +9,14 @@ import numpy as np
 from typing import Union, Optional, Literal, Dict, Any, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
+# Import de la classe parente
+from ..abc.converter import TemporalConverter
+
 # Import des utilitaires de fréquence
-from .utils import normalize_frequency, is_higher_frequency, get_frequency_order, FrequencyType, UserFrequencyType
-from .detector import detect_frequency
-from ..utils import validate_temporal_data
+from .normalizer import FrequencyType, UserFrequencyType
+from .utils import normalize_frequency, is_higher_frequency, get_frequency_order
+from ...frequency.detector import detect_frequency
+from .. import validate_temporal_data
 
 # Types pour les méthodes d'agrégation et d'interpolation
 AggregationMethod = Literal['mean', 'sum', 'first', 'last', 'min', 'max', 'median', 'std', 'count']
@@ -20,7 +24,7 @@ InterpolationMethod = Literal['linear', 'time', 'index', 'values', 'nearest', 'z
 
 
 # Classe de conversion d'une fréquence dans une autre
-class FrequencyConverter:
+class FrequencyConverter(TemporalConverter):
     """Handle conversions between different time frequencies.
 
     This class manages frequency conversions using pandas built-in functionality,
@@ -38,7 +42,40 @@ class FrequencyConverter:
     def __init__(self):
         """Initialize the FrequencyConverter."""
         pass
-    
+
+    # Implémentation de la méthode abstraite convert de TemporalConverter
+    def convert(self,
+                value: Union[pd.Series, pd.DataFrame],
+                from_unit: str,
+                to_unit: str,
+                **kwargs) -> Union[pd.Series, pd.DataFrame]:
+        """Convert data from one frequency to another.
+
+        Implementation of TemporalConverter.convert() for frequencies.
+
+        Args:
+            value: Time series data to convert (Series or DataFrame)
+            from_unit: Source frequency (not used, frequency is auto-detected)
+            to_unit: Target frequency
+            **kwargs: Additional conversion parameters (method, fill_method, etc.)
+
+        Returns:
+            Converted time series data
+
+        Raises:
+            ValueError: If conversion parameters are invalid
+
+        Examples:
+            >>> converter = FrequencyConverter()
+            >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
+            >>> series = pd.Series([1, 2, 3, 4, 5], index=dates)
+            >>> monthly = converter.convert(series, 'daily', 'monthly', method='mean')
+            >>> len(monthly)
+            1
+        """
+        # Redirection vers convert_frequency qui contient toute la logique
+        return self.convert_frequency(data=value, target_freq=to_unit, **kwargs)
+
     # Méthode de conversion d'une fréquence en une autre
     def convert_frequency(self,
                          data: Union[pd.Series, pd.DataFrame],
@@ -127,6 +164,51 @@ class FrequencyConverter:
 
         else:
             raise ValueError("Data must be a pandas Series or DataFrame")
+            
+    # Implémentation de la méthode abstraite get_conversion_factor de TemporalConverter
+    def get_conversion_factor(self, from_unit: str, to_unit: str) -> float:
+        """Get approximate conversion factor between two frequencies.
+
+        Implementation of TemporalConverter.get_conversion_factor() for frequencies.
+
+        Note: Frequency conversion factors are approximate and depend on the
+        specific time periods involved. This method provides rough estimates.
+
+        Args:
+            from_unit: Source frequency
+            to_unit: Target frequency
+
+        Returns:
+            Approximate conversion factor
+
+        Raises:
+            ValueError: If frequencies are not supported
+
+        Examples:
+            >>> converter = FrequencyConverter()
+            >>> converter.get_conversion_factor('daily', 'monthly')
+            30.0
+            >>> converter.get_conversion_factor('monthly', 'quarterly')
+            3.0
+        """
+        # Normalisation des fréquences
+        from_freq = normalize_frequency(from_unit)
+        to_freq = normalize_frequency(to_unit)
+
+        # Obtention des ordres pour calcul approximatif
+        from_order = get_frequency_order(from_freq)
+        to_order = get_frequency_order(to_freq)
+
+        # Facteurs approximatifs basés sur les ordres
+        # (cette méthode est approximative car les fréquences ne se convertissent pas linéairement)
+        if from_order == to_order:
+            return 1.0
+        elif from_order < to_order:
+            # Upsampling: from plus granulaire vers moins granulaire
+            return float(to_order - from_order)
+        else:
+            # Downsampling: from moins granulaire vers plus granulaire
+            return 1.0 / float(from_order - to_order)
 
     # Méthode d'agrégation à une fréquence plus faible
     def aggregate_to_lower_frequency(self,
@@ -239,6 +321,7 @@ class FrequencyConverter:
         else:
             return upsampled
 
+    # Méthode d'alignement des fréquences du plusieurs jeux de données
     def align_frequencies(self,
                         *datasets: Union[pd.Series, pd.DataFrame],
                         target_freq: Optional[str] = None,
