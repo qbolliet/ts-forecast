@@ -7,7 +7,14 @@ including pandas frequency codes, DateOffsets, and user-friendly frequency names
 from .normalizer import (
     FrequencyNormalizer,
     FrequencyType,
-    UserFrequencyType,
+    UserFrequencyType
+)
+from .converter import (
+    FrequencyConverter, 
+    AggregationMethod, 
+    InterpolationMethod
+)
+from .utils import (
     normalize_frequency,
     to_literal,
     to_code,
@@ -15,7 +22,8 @@ from .normalizer import (
     to_dateoffset,
     is_higher_frequency,
     validate_frequency,
-    get_frequency_order
+    get_frequency_order,
+    convert_frequency
 )
 
 # Toutes les fonctions sont maintenant définies et exportées depuis normalizer.py
@@ -24,6 +32,9 @@ __all__ = [
     'FrequencyNormalizer',
     'FrequencyType',
     'UserFrequencyType',
+    'FrequencyConverter',
+    'AggregationMethod',
+    'InterpolationMethod',
     'normalize_frequency',
     'to_literal',
     'to_code',
@@ -31,5 +42,6 @@ __all__ = [
     'to_dateoffset',
     'is_higher_frequency',
     'validate_frequency',
-    'get_frequency_order'
+    'get_frequency_order',
+    'convert_frequency'
 ]

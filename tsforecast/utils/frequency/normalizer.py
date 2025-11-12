@@ -9,7 +9,7 @@ from pandas.tseries.frequencies import to_offset
 from typing import Union, Literal
 
 # Import de la classe parente
-from ...common.base import TemporalNormalizer
+from ..abc.normalizer import TemporalNormalizer
 
 # Types supportés pour les fréquences
 FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'Y']
