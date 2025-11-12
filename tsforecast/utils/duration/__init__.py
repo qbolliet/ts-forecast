@@ -5,7 +5,8 @@ with support for duration codes, literal names, and flexible conversion with opt
 """
 
 # Import des classes principales
-from .utils import DurationNormalizer, DurationConverter
+from .normalizer import DurationNormalizer
+from .converter import DurationConverter
 
 # Import des fonctions utilitaires de normalisation
 from .utils import (
@@ -18,7 +19,8 @@ from .utils import (
 )
 
 # Types exportés
-from .utils import DurationType, UserDurationType, RoundingType
+from .normalizer import DurationType, UserDurationType
+from .converter import RoundingType
 
 __all__ = [
     # Classes principales
