@@ -1,12 +1,12 @@
 """Base classes for temporal data normalization.
 
 This module provides abstract base classes for normalizing temporal expressions
-like frequencies and durations, with common functionality shared across different
+like frequencies, durations, and period positions. Common functionality is shared across different
 temporal types.
 """
 # Importation des modules
 from abc import ABC, abstractmethod
-from typing import Dict, Union
+from typing import Dict
 
 # Classe abstraite de normalisation 
 class TemporalNormalizer(ABC):
