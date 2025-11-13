@@ -84,7 +84,12 @@ class TemporalNormalizer(ABC):
         Returns:
             True if value is valid and supported, False otherwise
         """
-        pass
+        try:
+            # Tentative de normalisation de la position
+            self.normalize(value)
+            return True
+        except ValueError:
+            return False
 
     # Méthode auxiliaire de construction du mapping inverse entre les codes temporels et leur expression littéraire
     @staticmethod
