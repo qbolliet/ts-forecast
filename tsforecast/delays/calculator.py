@@ -13,6 +13,42 @@ from datetime import datetime
 # Modules du package
 from ..utils.frequency import normalize_frequency, is_higher_frequency, to_pandas_freq
 from ..utils.time import get_period_boundaries
+from ..utils.duration import to_code as duration_to_code, convert_duration
+
+# Fonction auxiliaire de validation des colonnes
+def _validate_columns(df: pd.DataFrame) -> None:
+    """Validate that all required columns are present in the DataFrame.
+
+    Args:
+        df: DataFrame to validate
+
+    Raises:
+        ValueError: If any required column is missing
+
+    Examples:
+        >>> _validate_columns(publication_delays_df)
+        # Raises ValueError if columns are missing
+    """
+    # Colonnes requises pour le calcul des délais
+    required_columns = [
+        'observation_date',
+        'download_date',
+        'frequency',
+        'period_start',
+        'period_end',
+        'reference_point',
+        'release_delay',
+        'unit'
+    ]
+
+    # Vérification de la présence de toutes les colonnes
+    missing_columns = [col for col in required_columns if col not in df.columns]
+
+    if missing_columns:
+        raise ValueError(
+            f"Missing required columns in publication_delays DataFrame: {missing_columns}. "
+            f"Required columns are: {required_columns}"
+        )
 
 # Fonction de calcul du délai applicable
 def calculate_applicable_delay(
@@ -28,9 +64,21 @@ def calculate_applicable_delay(
 
     This function recalculates publication delays by converting to a target
     frequency and reference point, then aggregates delays according to the
-    specified method. When converting to a higher frequency (e.g., quarterly
-    to monthly), the reference is always the first sub-period (e.g., first
-    month of the quarter).
+    specified method.
+
+    **Important behavior for higher frequency conversions:**
+
+    When converting to a higher frequency (e.g., quarterly to monthly), the
+    sub-period used as reference depends on the original reference_point:
+
+    - If original reference_point='start': Uses the first sub-period that
+      coincides with the start of the original period (e.g., January for Q1)
+    - If original reference_point='end': Uses the last sub-period that
+      coincides with the end of the original period (e.g., March for Q1)
+
+    This ensures consistency: if a quarterly series references the end of
+    the quarter, the monthly conversion will reference the end of the last
+    month of that quarter.
 
     Args:
         publication_delays: DataFrame returned by compare_and_detect_delays()
@@ -83,6 +131,9 @@ def calculate_applicable_delay(
         ...     aggregation_method='mean'
         ... )
     """
+    # Validation des colonnes requises dans le DataFrame
+    _validate_columns(publication_delays)
+
     # Validation des arguments
     if target_reference_point not in ['start', 'end']:
         raise ValueError("target_reference_point must be 'start' or 'end'")
@@ -181,12 +232,60 @@ def _convert_to_target_frequency_and_reference(
 def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> pd.Series:
     """Calculate delay with converted frequency and reference point for a single row.
 
+    This function performs a three-step conversion process:
+
+    1. **Reconstruction of download date**: Converts the relative delay
+       (e.g., "45 days after period end") into an absolute download date
+       by adding the delay to the original reference date.
+
+    2. **Determination of target period**: Calculates the period boundaries
+       at the target frequency. The logic differs based on frequency conversion:
+
+       - **Higher frequency** (e.g., quarterly → monthly): Selects the sub-period
+         that coincides with the original reference point:
+         * If reference_point='start': First sub-period (e.g., January for Q1)
+         * If reference_point='end': Last sub-period (e.g., March for Q1)
+
+       - **Equal/lower frequency** (e.g., monthly → quarterly): Uses the period
+         containing the observation_date at the target frequency.
+
+    3. **Calculation of converted delay**: Computes the delay between the
+       download date and the new reference date (start or end of target period),
+       then converts back to the original time unit using ceiling rounding.
+
     Args:
-        row: Row from delays DataFrame
-        target_reference_point: Target reference point
+        row: Row from delays DataFrame containing:
+            - period_start, period_end: Original period boundaries
+            - reference_point: Original reference ('start' or 'end')
+            - release_delay: Numeric delay value
+            - unit: Time unit ('days', 'seconds', 'microseconds')
+            - target_frequency_normalized: Target frequency
+            - current_frequency_normalized: Current frequency
+        target_reference_point: Target reference point ('start' or 'end')
 
     Returns:
-        Updated row with converted delay
+        Updated row with:
+            - converted_delay: Delay value in original unit
+            - target_period_start: Start of target period
+            - target_period_end: End of target period
+            - target_reference_point: Target reference point used
+
+    Examples:
+        >>> # Q1 2024 data (Jan 1 - Mar 31), published 45 days after quarter end
+        >>> # Convert to monthly with 'start' reference
+        >>> row = pd.Series({
+        ...     'period_start': pd.Timestamp('2024-01-01'),
+        ...     'period_end': pd.Timestamp('2024-03-31'),
+        ...     'reference_point': 'end',
+        ...     'release_delay': 45,
+        ...     'unit': 'days',
+        ...     'target_frequency_normalized': 'M',
+        ...     'current_frequency_normalized': 'Q'
+        ... })
+        >>> result = _calculate_converted_delay(row, 'start')
+        # Download date: Mar 31 + 45 days = May 15
+        # Target period: March 2024 (Mar 1 - Mar 31) because reference_point='end'
+        # Converted delay: May 15 - Mar 1 = 75 days
     """
     # Reconstruction de la date de téléchargement originale
     # download_date = reference_date + release_delay
@@ -194,17 +293,16 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
         original_reference_date = row['period_start']
     else:
         original_reference_date = row['period_end']
-    
-    # Conversion du délai en timedelta selon l'unité
-    if row['unit'] == 'days':
-        delay_timedelta = pd.Timedelta(days=row['release_delay'])
-    elif row['unit'] == 'seconds':
-        delay_timedelta = pd.Timedelta(seconds=row['release_delay'])
-    elif row['unit'] == 'microseconds':
-        delay_timedelta = pd.Timedelta(microseconds=row['release_delay'])
-    else:
-        raise ValueError(f"Unknown unit: {row['unit']}")
-    
+
+    # Conversion du délai en secondes pour créer un timedelta en utilisant la fonction utilitaire
+    delay_seconds = convert_duration(
+        value=row['release_delay'],
+        from_duration=row['unit'],
+        to_duration='s',
+        rounding=None
+    )
+    delay_timedelta = pd.Timedelta(seconds=delay_seconds)
+
     # Calcul de la date de téléchargement
     download_date = original_reference_date + delay_timedelta
     
@@ -216,10 +314,18 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
     
     # Détermination de la période de référence pour la fréquence cible
     if is_higher_frequency(target_freq_normalized, current_freq_normalized):
-        # Fréquence plus élevée : on prend le début de la première sous-période
-        # Par exemple, pour Q1 2024 converti en mensuel, on prend janvier 2024
+        # Fréquence plus élevée : on choisit la sous-période selon le point de référence original
+        # Si reference_point='start' : on prend la première sous-période (ex: janvier pour Q1)
+        # Si reference_point='end' : on prend la dernière sous-période (ex: mars pour Q1)
+        if row['reference_point'] == 'start':
+            # Première sous-période : on utilise period_start
+            reference_date_for_subperiod = row['period_start']
+        else:
+            # Dernière sous-période : on utilise period_end
+            reference_date_for_subperiod = row['period_end']
+
         target_period_start, target_period_end = get_period_boundaries(
-            date=row['period_start'],
+            date=reference_date_for_subperiod,
             frequency=target_freq_normalized
         )
     else:
@@ -237,14 +343,15 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
     
     # Calcul du nouveau délai
     new_delay_timedelta = download_date - new_reference_date
-    
-    # Conversion dans l'unité d'origine
-    if row['unit'] == 'days':
-        row['converted_delay'] = np.ceil(new_delay_timedelta.total_seconds() / 86400)
-    elif row['unit'] == 'seconds':
-        row['converted_delay'] = np.ceil(new_delay_timedelta.total_seconds())
-    elif row['unit'] == 'microseconds':
-        row['converted_delay'] = np.ceil(new_delay_timedelta.total_seconds() * 1_000_000)
+
+    # Conversion du nouveau délai dans l'unité d'origine en utilisant la fonction utilitaire
+    new_delay_seconds = new_delay_timedelta.total_seconds()
+    row['converted_delay'] = convert_duration(
+        value=new_delay_seconds,
+        from_duration='s',
+        to_duration=row['unit'],
+        rounding='ceil'
+    )
     
     # Ajout des informations sur la nouvelle période de référence
     row['target_period_start'] = target_period_start
@@ -254,9 +361,8 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
     return row
 
 # Fonction auxiliaire de conversion de l'unité du délai
-# /!\ A revoir avec la gestion temporelle
 def _convert_delay_unit(delays: pd.DataFrame, target_unit: str) -> pd.DataFrame:
-    """Convert delay values to target unit.
+    """Convert delay values to target unit using convert_duration utility.
 
     Args:
         delays: DataFrame with delays
@@ -265,51 +371,33 @@ def _convert_delay_unit(delays: pd.DataFrame, target_unit: str) -> pd.DataFrame:
     Returns:
         DataFrame with converted delays
     """
-    # Normalisation de l'unité cible
-    unit_map = {
-        'us': 'microseconds',
-        'microsecond': 'microseconds',
-        's': 'seconds',
-        'second': 'seconds',
-        'D': 'days',
-        'day': 'days'
-    }
-    
-    if target_unit not in unit_map:
-        raise ValueError(f"Invalid target_unit: {target_unit}")
-    
-    target_unit_normalized = unit_map[target_unit]
-    
-    # Fonction de conversion
+    # Normalisation de l'unité cible avec la fonction utilitaire to_code
+    # qui gère déjà tous les formats possibles
+    target_unit_code = duration_to_code(target_unit)
+
+    # Fonction de conversion utilisant la fonction utilitaire convert_duration
     def convert_value(row):
         value = row['converted_delay']
         current_unit = row['unit']
-        
-        # Pas de conversion nécessaire
-        if current_unit == target_unit_normalized:
+
+        # Extraction du code de l'unité courante
+        current_unit_code = duration_to_code(current_unit)
+
+        # Pas de conversion nécessaire si les unités sont identiques
+        if current_unit_code == target_unit_code:
             return value
-        
-        # Conversion en secondes d'abord
-        if current_unit == 'microseconds':
-            seconds = value / 1_000_000
-        elif current_unit == 'seconds':
-            seconds = value
-        elif current_unit == 'days':
-            seconds = value * 86400
-        else:
-            raise ValueError(f"Unknown unit: {current_unit}")
-        
-        # Conversion vers l'unité cible
-        if target_unit_normalized == 'microseconds':
-            return np.ceil(seconds * 1_000_000)
-        elif target_unit_normalized == 'seconds':
-            return np.ceil(seconds)
-        elif target_unit_normalized == 'days':
-            return np.ceil(seconds / 86400)
-    
+
+        # Conversion avec la fonction utilitaire convert_duration
+        return convert_duration(
+            value=value,
+            from_duration=current_unit_code,
+            to_duration=target_unit_code,
+            rounding='ceil'
+        )
+
     delays['converted_delay'] = delays.apply(convert_value, axis=1)
-    delays['unit'] = target_unit_normalized
-    
+    delays['unit'] = target_unit_code
+
     return delays
 
 # Fonction auxiliaire d'aggrégation des délais
