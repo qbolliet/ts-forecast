@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Les **délais de publication** (ou *release delays*) des variables utilisées pour construire un modèle de prévision sur séries temporelles constituent un écueil majeur dont il faut tenir compte pour simuler justement la performance prédictive de modèles en production. En pratique, les données économiques, financières ou opérationnelles ne sont en effet pas disponibles instantanément : elles sont publiées avec un retard qui peut aller de quelques jours à plusieurs mois. Ignorer ces délais lors de l'entraînement et de l'évaluation des modèles conduit à une surestimation systématique des performances.
+Les **délais de publication** (ou *release delays*) des variables utilisées pour construire un modèle de prévision sur séries temporelles constituent un écueil dont il faut tenir compte pour simuler justement la performance prédictive de modèles en production. En pratique, les données économiques, financières ou opérationnelles ne sont en effet pas disponibles instantanément : elles sont publiées avec un retard qui peut aller de quelques jours à plusieurs mois. Ignorer ces délais lors de l'entraînement et de l'évaluation des modèles conduit à une surestimation systématique des performances.
 
 Ce tutoriel présente deux approches complémentaires pour gérer ces délais : la **conservation de l'acquis** et le **décalage des séries**.
 
@@ -28,7 +28,7 @@ Au moment de faire une prévision à la date $t$, nous disposons uniquement des 
 
 ![Impact du délai de publication](../assets/release_delay_impact.png)
 
-**Conséquence critique** : Si nous entraînons un modèle sur des données sans tenir compte des délais, nous créons un **data leakage temporel** en utilisant des informations qui ne seraient pas disponibles en production.
+**Conséquence** : Si nous entraînons un modèle sur des données sans tenir compte des délais, nous créons un **data leakage temporel** en utilisant des informations qui ne seraient pas disponibles en production.
 
 ## 2. Deux approches pour gérer les délais
 
@@ -49,10 +49,10 @@ Il existe deux stratégies principales pour gérer les délais de publication, c
 
 **Algorithme** :
 ```
-Pour chaque série i avec délai d_i :
+Pour chaque série x_i avec délai d_i :
     Pour chaque date t dans les données :
         Si t > date_prédiction - d_i :
-            Masquer y_i(t)  # Remplacer par NaN
+            Masquer x_i(t)  # Remplacer par NaN
 ```
 
 **Exemple pratique** :
@@ -105,9 +105,9 @@ data_masked = transformer.fit_transform(data)
 
 **Algorithme** :
 ```
-Pour chaque série i avec délai d_i :
+Pour chaque série x_i avec délai d_i :
     Shifter la série de d_i périodes vers le futur
-    # y_i(t+d_i) ← y_i(t)
+    # x_i(t+d_i) ← x_i(t)
 ```
 
 **Exemple pratique** :
@@ -392,42 +392,7 @@ X_test_real = transformer.fit_transform(X_test)
 score = model.score(X_test_real, y_test)
 ```
 
-### ❌ Erreur 2 : Utiliser le mode `shift` pour la validation
-
-```python
-# INCORRECT : Le shift fausse l'évaluation
-transformer = ReleaseDelayTransformer(mode='shift')  # ⚠️
-X_test_shifted = transformer.fit_transform(X_test)
-# Les prédictions sembleront meilleures qu'elles ne le sont vraiment
-```
-
-✅ **Correction** :
-```python
-# CORRECT : Utiliser mask pour l'évaluation
-transformer = ReleaseDelayTransformer(mode='mask')
-X_test_masked = transformer.fit_transform(X_test)
-```
-
-### ❌ Erreur 3 : Appliquer les délais à l'ensemble d'entraînement
-
-```python
-# INCORRECT : Applique les délais partout
-transformer.fit_transform(X_train)  # ⚠️ Perte d'information inutile
-transformer.transform(X_test)
-```
-
-✅ **Correction** :
-```python
-# CORRECT : Délais uniquement sur le test (ou selon le contexte)
-# En entraînement : on utilise toutes les données disponibles
-model.fit(X_train, y_train)
-
-# En test : on simule les contraintes de production
-X_test_delayed = transformer.fit_transform(X_test)
-y_pred = model.predict(X_test_delayed)
-```
-
-### ❌ Erreur 4 : Confusion entre délai et horizon
+### ❌ Erreur 2 : Confusion entre délai et horizon
 
 ```python
 # INCORRECT : Confond délai de publication et horizon de prévision
