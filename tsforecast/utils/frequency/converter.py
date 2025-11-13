@@ -15,7 +15,6 @@ from ..abc.converter import TemporalConverter
 # Import des utilitaires de fréquence
 from .normalizer import FrequencyType, UserFrequencyType
 from .utils import normalize_frequency, is_higher_frequency, get_frequency_order
-from ...frequency.detector import detect_frequency
 from .. import validate_temporal_data
 
 # Types pour les méthodes d'agrégation et d'interpolation
@@ -129,6 +128,9 @@ class FrequencyConverter(TemporalConverter):
 
         # Cas 1: Traitement des Series
         if isinstance(data, pd.Series):
+            # Import local pour éviter l'import circulaire
+            from ...frequency.detector import detect_frequency
+
             # Détection de la fréquence actuelle
             current_freq = detect_frequency(data=data, literal=False)
             if not current_freq:
@@ -350,6 +352,9 @@ class FrequencyConverter(TemporalConverter):
         if not datasets:
             return tuple()
 
+        # Import local pour éviter l'import circulaire
+        from ...frequency.detector import detect_frequency
+
         # Détection des fréquences actuelles
         current_freqs = []
         for dataset in datasets:
@@ -502,6 +507,9 @@ class FrequencyConverter(TemporalConverter):
         Returns:
             Dictionary mapping column names to detected frequencies
         """
+        # Import local pour éviter l'import circulaire
+        from ...frequency.detector import detect_frequency
+
         # Initialisation du dictionnaire résultat
         frequencies = {}
         # Parcours des colonnes

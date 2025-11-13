@@ -5,11 +5,9 @@ import pandas as pd
 
 # Importation des modules du package
 from .normalizer import FrequencyNormalizer, FrequencyType, UserFrequencyType
-from .converter import FrequencyConverter
 
 # Instance globale pour faciliter l'utilisation
 _normalizer = FrequencyNormalizer()
-_converter = FrequencyConverter()
 
 # Fonctions de commodité pour accès direct
 # Fonction de normalisation de la fréquence
@@ -195,4 +193,8 @@ def convert_frequency(
         >>> len(monthly)
         1
     """
-    return _converter.convert(value, to_unit, **kwargs)
+    # Import local pour éviter l'import circulaire
+    from .converter import FrequencyConverter
+
+    converter = FrequencyConverter()
+    return converter.convert(value, to_unit, **kwargs)
