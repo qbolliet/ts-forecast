@@ -145,23 +145,16 @@ def restore_original_structure(
     is_series = isinstance(data, pd.Series)
     data_work = data.to_frame() if is_series else data.copy()
 
-    # Restauration de l'ordre original si les données ont été triées
-    # Cette étape doit être faite AVANT reset_index pour pouvoir utiliser l'index actuel
-    if metadata.get('was_sorted', False) and 'original_index' in metadata:
-        # Vérification de la compatibilité des tailles
-        if len(data_work) == len(metadata['original_index']):
-            # Utilisation de reindex pour restaurer l'ordre exact des lignes
-            # reindex() utilise l'index actuel (trié) pour retrouver l'ordre de original_index
-            data_work = data_work.reindex(metadata['original_index'])
-
-    # Si l'index a été modifié (colonnes converties en index), le restaurer
+    # ÉTAPE 1: Si l'index a été modifié (colonnes converties en index), restaurer en colonnes D'ABORD
+    # Cette étape doit être faite EN PREMIER pour éviter les incompatibilités de types d'index
+    # (par exemple DatetimeIndex vs RangeIndex) lors de reindex()
     if metadata.get('index_was_replaced', False):
-        # Restauration de l'index en colonnes
+        # Restauration de l'index en colonnes (time_col et panel_cols redeviennent des colonnes)
         data_work = data_work.reset_index()
 
-    # Restauration de l'index original si les données n'ont pas été triées
-    # (car si triées, reindex() a déjà restauré l'index)
-    if not metadata.get('was_sorted', False) and 'original_index' in metadata:
+    # ÉTAPE 2: Restauration de l'index original
+    # Maintenant que les colonnes sont restaurées, on peut réassigner l'index original
+    if 'original_index' in metadata:
         # Vérification de la compatibilité des tailles
         if len(data_work) == len(metadata['original_index']):
             data_work.index = metadata['original_index']
