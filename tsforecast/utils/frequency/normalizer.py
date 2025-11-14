@@ -4,6 +4,7 @@ This module provides the FrequencyNormalizer class to handle different frequency
 representations including pandas frequency codes, DateOffsets, and user-friendly names.
 """
 # Importation des modules
+import re
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
 from typing import Union, Literal
@@ -104,7 +105,7 @@ class FrequencyNormalizer(TemporalNormalizer):
         # Retourne un code pandas inchangé
         if value in self._pandas_to_literal:
             return value
-
+        
         # Conversion du nom littéral en pandas
         if value in self._literal_to_pandas:
             return self._literal_to_pandas[value]

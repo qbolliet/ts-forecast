@@ -4,6 +4,7 @@ This module provides the FrequencyConverter class to handle conversions between
 different time frequencies using pandas built-in functionality (asfreq and resample).
 """
 # Importation des modules
+import re
 import pandas as pd
 import numpy as np
 from typing import Union, Optional, Literal, Dict, Any, Tuple, List
@@ -124,7 +125,7 @@ class FrequencyConverter(TemporalConverter):
             >>> mixed_freq = converter.convert_frequency(daily_df, {'a': 'monthly', 'b': 'weekly'}, method='mean')
         """
         # Validation des paramètres d'entrée
-        data = self._validate_conversion_params(data=data, target_freq=target_freq, method=method, panel_cols=panel_cols)
+        data = self._validate_conversion_params(data=data, target_freq=target_freq, time_col=time_col, panel_cols=panel_cols)
 
         # Cas 1: Traitement des Series
         if isinstance(data, pd.Series):
@@ -135,6 +136,16 @@ class FrequencyConverter(TemporalConverter):
             current_freq = detect_frequency(data=data, literal=False)
             if not current_freq:
                 raise ValueError("Cannot detect current frequency of the data")
+
+            # Retraitement de la fréquence détectée
+            current_freq = current_freq.split('-')[0]
+
+            # Extraction de la position si renseignée
+            if re.search(r'[SE]$', current_freq) and (len(current_freq) == 2):
+                position = current_freq[-1]
+                current_freq = current_freq[:-1]
+            else:
+                position = ''
 
             # Normalisation de la fréquence cible (doit être str pour Series)
             if isinstance(target_freq, dict):
@@ -147,9 +158,9 @@ class FrequencyConverter(TemporalConverter):
 
             # Détermination de la direction de conversion
             if is_higher_frequency(target_freq, current_freq):
-                return self._upsample(data=data, target_freq=target_freq_normalized, method=method, fill_method=fill_method)
+                return self._upsample(data=data, target_freq=target_freq_normalized + position, method=method, fill_method=fill_method)
             else:
-                return self._downsample(data=data, target_freq=target_freq_normalized, method=method)
+                return self._downsample(data=data, target_freq=target_freq_normalized + position, method=method)
 
         # Cas 2: Traitement des DataFrames
         elif isinstance(data, pd.DataFrame):
@@ -358,7 +369,7 @@ class FrequencyConverter(TemporalConverter):
         # Détection des fréquences actuelles
         current_freqs = []
         for dataset in datasets:
-            freq = detect_frequency(df=dataset, time_col=None,
+            freq = detect_frequency(data=dataset, time_col=None,
                            panel_cols= None,
                            literal=False,
                            check_consistency=True,
