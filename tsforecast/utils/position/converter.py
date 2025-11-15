@@ -4,6 +4,7 @@ This module provides the PeriodPositionConverter class to handle conversions
 between start and end period positions for time series data.
 """
 # Importation des modules
+import re
 import pandas as pd
 from typing import Union, Any
 from pandas.tseries.frequencies import to_offset
@@ -13,6 +14,9 @@ from ..abc.converter import TemporalConverter
 
 # Import du normalizer et des types
 from .normalizer import PeriodPositionNormalizer, PositionType, UserPositionType
+
+# Import des utilitaires de validation
+from ..validation import validate_entities_grouped, validate_sorted_within_groups
 
 
 # Classe de conversion entre positions de période
@@ -79,17 +83,28 @@ class PeriodPositionConverter(TemporalConverter):
         if from_code == to_code:
             return value
 
-        # Inférence de la fréquence si non fournie
-        if freq is None:
-            freq = self._infer_frequency(value)
-            if freq is None:
-                raise ValueError("Cannot infer frequency from data. Please provide 'freq' parameter.")
-
         # Conversion selon le type de valeur
         if isinstance(value, pd.DatetimeIndex):
+            # Inférence de la fréquence si non fournie (pour DatetimeIndex simple)
+            if freq is None:
+                freq = self._infer_frequency(value)
+                if freq is None:
+                    raise ValueError("Cannot infer frequency from data. Please provide 'freq' parameter.")
             return self._convert_datetime_index(value, from_code, to_code, freq)
         elif isinstance(value, (pd.Series, pd.DataFrame)):
-            return self._convert_time_series(value, from_code, to_code, freq)
+            # Routage selon le type d'index
+            if isinstance(value.index, pd.MultiIndex):
+                # Pour les panels, l'inférence se fait par groupe dans _convert_panel()
+                return self._convert_panel(value, from_code, to_code, freq)
+            elif isinstance(value.index, pd.DatetimeIndex):
+                # Inférence de la fréquence si non fournie (pour séries temporelles simples)
+                if freq is None:
+                    freq = self._infer_frequency(value)
+                    if freq is None:
+                        raise ValueError("Cannot infer frequency from data. Please provide 'freq' parameter.")
+                return self._convert_time_series(value, from_code, to_code, freq)
+            else:
+                raise ValueError(f"Data must have DatetimeIndex or MultiIndex with datetime at last level")
         else:
             raise ValueError(f"Unsupported value type for conversion: {type(value)}")
 
@@ -192,14 +207,24 @@ class PeriodPositionConverter(TemporalConverter):
         # Décomposition de la fréquence pour obtenir la base fréquence
         base_freq, _ = self._normalizer.decompose_offset(freq)
 
+        # Nettoyage de base_freq pour to_period() : extraction de la lettre de base
+        # to_period() n'accepte que les fréquences de base (D, W, M, Q, Y, etc.)
+        # sans les ancres (YS-JAN, QS-OCT, etc.)
+        base_freq_match = re.match(r'^([DWMQY])', base_freq.upper())
+        if base_freq_match:
+            period_freq = base_freq_match.group(1)
+        else:
+            # Si pas de match, utiliser tel quel et laisser pandas gérer l'erreur
+            period_freq = base_freq
+
         # Conversion en PeriodIndex puis retour en DatetimeIndex
         if from_pos == 'S' and to_pos == 'E':
             # Conversion de start à end : utiliser to_period puis to_timestamp avec 'end'
-            period_index = index.to_period(base_freq)
+            period_index = index.to_period(period_freq)
             return period_index.to_timestamp(how='end')
         elif from_pos == 'E' and to_pos == 'S':
             # Conversion de end à start : utiliser to_period puis to_timestamp avec 'start'
-            period_index = index.to_period(base_freq)
+            period_index = index.to_period(period_freq)
             return period_index.to_timestamp(how='start')
         else:
             # Cas identique, retourner tel quel
@@ -242,6 +267,143 @@ class PeriodPositionConverter(TemporalConverter):
             return pd.Series(data.values, index=new_index, name=data.name)
         else:
             return pd.DataFrame(data.values, index=new_index, columns=data.columns)
+
+    # Méthode auxiliaire de conversion d'un panel (Series ou DataFrame avec MultiIndex)
+    def _convert_panel(
+        self,
+        data: Union[pd.Series, pd.DataFrame],
+        from_pos: PositionType,
+        to_pos: PositionType,
+        freq: str = None
+    ) -> Union[pd.Series, pd.DataFrame]:
+        """Convert panel data (MultiIndex) from one position to another.
+
+        For panel data with mixed frequencies, each entity can have its own
+        frequency. The conversion is applied separately to each entity group.
+
+        Args:
+            data: Panel data with MultiIndex (time at last level)
+            from_pos: Source position code
+            to_pos: Target position code
+            freq: Optional frequency string. If None, frequency is inferred
+                  separately for each entity group.
+
+        Returns:
+            Panel data with converted time index at last level
+
+        Raises:
+            ValueError: If validation fails or structure is invalid
+
+        Examples:
+            >>> converter = PeriodPositionConverter()
+            >>> entities = ['A', 'A', 'A', 'B', 'B', 'B']
+            >>> dates = pd.date_range('2023-01-01', periods=6, freq='MS')
+            >>> idx = pd.MultiIndex.from_arrays([entities, dates])
+            >>> series = pd.Series(range(6), index=idx)
+            >>> end_series = converter._convert_panel(series, 'S', 'E')
+        """
+        # Vérification que l'index est bien un MultiIndex
+        if not isinstance(data.index, pd.MultiIndex):
+            raise ValueError("Panel data must have a MultiIndex")
+
+        # Vérification que le dernier niveau est datetime
+        last_level = data.index.get_level_values(-1)
+        if not isinstance(last_level, pd.DatetimeIndex):
+            raise ValueError(
+                "Last level of MultiIndex must be DatetimeIndex for position conversion. "
+                f"Got {type(last_level).__name__} instead."
+            )
+
+        # Validation de la structure du panel : entités groupées
+        if not validate_entities_grouped(data):
+            raise ValueError(
+                "Panel entities must be grouped (contiguous blocks). "
+                "Each entity's observations must be adjacent in the data. "
+                "Please sort your data by entity then by time."
+            )
+
+        # Validation du tri des dates au sein de chaque groupe
+        if not validate_sorted_within_groups(data):
+            raise ValueError(
+                "Dates must be sorted within each entity group. "
+                "Please ensure time values are monotonically increasing within each entity."
+            )
+
+        # Extraction des niveaux d'entités (tous sauf le dernier)
+        n_levels = data.index.nlevels
+        entity_levels_indices = list(range(n_levels - 1))
+
+        # Groupement par entités pour traitement séparé (support fréquences mixtes)
+        # On groupe par tous les niveaux sauf le dernier (le temps)
+        if n_levels == 2:
+            # Un seul niveau d'entité
+            groupby_levels = 0
+        else:
+            # Plusieurs niveaux d'entité
+            groupby_levels = entity_levels_indices
+
+        # Liste pour stocker les segments convertis
+        converted_segments = []
+
+        # Conversion de chaque groupe séparément (pour gérer les fréquences mixtes)
+        for group_keys, group_data in data.groupby(level=groupby_levels, sort=False):
+            # Extraction des dates du groupe
+            group_dates = group_data.index.get_level_values(-1)
+
+            # Inférence de la fréquence pour ce groupe si non fournie
+            group_freq = freq
+            if group_freq is None:
+                group_freq = self._infer_frequency(group_dates)
+                if group_freq is None:
+                    # Tentative avec les données du groupe
+                    group_freq = self._infer_frequency(group_data)
+                if group_freq is None:
+                    raise ValueError(
+                        f"Cannot infer frequency for entity {group_keys}. "
+                        "Please provide 'freq' parameter or ensure data has regular frequency."
+                    )
+
+            # Conversion des dates du groupe
+            converted_dates = self._convert_datetime_index(group_dates, from_pos, to_pos, group_freq)
+
+            # Reconstruction du MultiIndex pour ce groupe
+            if n_levels == 2:
+                # Un seul niveau d'entité : création simple
+                new_group_index = pd.MultiIndex.from_arrays(
+                    [pd.Index([group_keys] * len(converted_dates)), converted_dates],
+                    names=data.index.names
+                )
+            else:
+                # Plusieurs niveaux d'entité : reconstruction de tous les niveaux
+                entity_arrays = [
+                    group_data.index.get_level_values(i) for i in entity_levels_indices
+                ]
+                entity_arrays.append(converted_dates)
+                new_group_index = pd.MultiIndex.from_arrays(
+                    entity_arrays,
+                    names=data.index.names
+                )
+
+            # Création du segment converti
+            if isinstance(data, pd.Series):
+                converted_segment = pd.Series(
+                    group_data.values,
+                    index=new_group_index,
+                    name=data.name
+                )
+            else:
+                converted_segment = pd.DataFrame(
+                    group_data.values,
+                    index=new_group_index,
+                    columns=data.columns
+                )
+
+            converted_segments.append(converted_segment)
+
+        # Concaténation de tous les segments
+        result = pd.concat(converted_segments)
+
+        return result
 
     # Méthode de conversion d'un offset pandas complet
     def convert_offset(
