@@ -18,6 +18,9 @@ from .normalizer import FrequencyType, UserFrequencyType
 from .utils import normalize_frequency, is_higher_frequency, get_frequency_order
 from .. import validate_temporal_data
 
+# Import de l'utilitaire de gestion des positions
+from ..position.normalizer import PeriodPositionNormalizer
+
 # Types pour les méthodes d'agrégation et d'interpolation
 AggregationMethod = Literal['mean', 'sum', 'first', 'last', 'min', 'max', 'median', 'std', 'count']
 InterpolationMethod = Literal['linear', 'time', 'index', 'values', 'nearest', 'zero', 'slinear', 'quadratic', 'cubic']
@@ -41,7 +44,8 @@ class FrequencyConverter(TemporalConverter):
     # Initialisation
     def __init__(self):
         """Initialize the FrequencyConverter."""
-        pass
+        # Initialisation du normalisateur de positions pour gérer les positions S/E
+        self._position_normalizer = PeriodPositionNormalizer()
 
     # Implémentation de la méthode abstraite convert de TemporalConverter
     def convert(self,
@@ -84,7 +88,8 @@ class FrequencyConverter(TemporalConverter):
                          fill_method: Optional[str] = None,
                          alignment_method: Literal['ffill', 'bfill', 'nearest', 'none'] = 'ffill',
                          time_col: Optional[str]=None,
-                         panel_cols: Optional[List[str]] = None) -> Union[pd.Series, pd.DataFrame]:
+                         panel_cols: Optional[List[str]] = None,
+                         target_position: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
         """Convert data to target frequency using pandas built-in methods.
 
         This is the main conversion method that automatically determines whether
@@ -102,6 +107,8 @@ class FrequencyConverter(TemporalConverter):
             alignment_method: Method to align indexes when mixing frequencies ('ffill', 'bfill', 'nearest', 'none')
             time_col: Identifier of time columns to exclude from conversion
             panel_cols: List of panel identifier columns to exclude from conversion
+            target_position: Optional position for target frequency ('S', 'E', 'start', 'end').
+                If None, preserves source position when identifiable, otherwise uses default 'E'
 
         Returns:
             Converted time series data
@@ -132,35 +139,69 @@ class FrequencyConverter(TemporalConverter):
             # Import local pour éviter l'import circulaire
             from ...frequency.detector import detect_frequency
 
-            # Détection de la fréquence actuelle
-            current_freq = detect_frequency(data=data, literal=False)
-            if not current_freq:
+            # Détection de la fréquence actuelle (avec position et anchor)
+            detected_freq = detect_frequency(data=data, literal=False)
+            if not detected_freq:
                 raise ValueError("Cannot detect current frequency of the data")
 
-            # Retraitement de la fréquence détectée
-            current_freq = current_freq.split('-')[0]
-
-            # Extraction de la position si renseignée
-            if re.search(r'[SE]$', current_freq) and (len(current_freq) == 2):
-                position = current_freq[-1]
-                current_freq = current_freq[:-1]
-            else:
-                position = ''
+            # Extraction de la fréquence de base et de la position en utilisant le normalisateur
+            # Split pour supprimer l'anchor (-DEC, -OCT, etc.) avant décomposition
+            detected_freq_base = detected_freq.split('-')[0]
+            current_freq_base, source_position = self._position_normalizer.decompose_offset(detected_freq_base)
 
             # Normalisation de la fréquence cible (doit être str pour Series)
             if isinstance(target_freq, dict):
                 raise ValueError("target_freq must be a string for Series input")
-            target_freq_normalized = normalize_frequency(target_freq)
 
-            # Si les fréquences sont identiques, retourner les données telles quelles
-            if normalize_frequency(current_freq) == target_freq_normalized:
+            # Décomposition de la fréquence cible si elle contient déjà une position
+            target_freq_base, target_pos_in_arg = self._position_normalizer.decompose_offset(target_freq)
+
+            # Normalisation de la fréquence de base cible
+            target_freq_normalized = normalize_frequency(target_freq_base)
+
+            # Détermination de la position cible selon la priorité :
+            # 1. target_position explicite (argument)
+            # 2. Position dans target_freq si spécifiée (target_pos_in_arg != 'E' ou explicitement dans target_freq)
+            # 3. Position source si identifiable (source_position)
+            # 4. Convention par défaut 'E'
+            if target_position is not None:
+                # Cas 1: position explicitement fournie en argument
+                final_position = self._position_normalizer.normalize(target_position)
+            elif target_freq != target_freq_base:
+                # Cas 2: la target_freq contient déjà une position (ex: 'MS', 'QE')
+                final_position = target_pos_in_arg
+            else:
+                # Cas 3: préserver la position source si identifiable, sinon 'E'
+                final_position = source_position
+
+            # Construction de la fréquence cible complète avec position
+            target_freq_with_position = self._position_normalizer.combine_frequency_position(
+                target_freq_normalized,
+                final_position
+            )
+
+            # Si les fréquences sont identiques (base + position), retourner les données telles quelles
+            current_freq_with_position = self._position_normalizer.combine_frequency_position(
+                normalize_frequency(current_freq_base),
+                source_position
+            )
+            if current_freq_with_position == target_freq_with_position:
                 return data
 
             # Détermination de la direction de conversion
-            if is_higher_frequency(target_freq, current_freq):
-                return self._upsample(data=data, target_freq=target_freq_normalized + position, method=method, fill_method=fill_method)
+            if is_higher_frequency(target_freq_normalized, current_freq_base):
+                return self._upsample(
+                    data=data,
+                    target_freq=target_freq_with_position,
+                    method=method,
+                    fill_method=fill_method
+                )
             else:
-                return self._downsample(data=data, target_freq=target_freq_normalized + position, method=method)
+                return self._downsample(
+                    data=data,
+                    target_freq=target_freq_with_position,
+                    method=method
+                )
 
         # Cas 2: Traitement des DataFrames
         elif isinstance(data, pd.DataFrame):
@@ -232,7 +273,7 @@ class FrequencyConverter(TemporalConverter):
 
         Args:
             data: Time series data to aggregate
-            target_freq: Target frequency (must be lower than current)
+            target_freq: Target frequency (must be lower than current), with optional position ('MS', 'QE', etc.)
             method: Aggregation method
 
         Returns:
@@ -247,10 +288,15 @@ class FrequencyConverter(TemporalConverter):
             >>> len(monthly)
             1
         """
-        # Normalisation de la fréquence
-        target_base_freq = normalize_frequency(target_freq)
-        # Resampling à la bonne fréquence
-        resampled = data.resample(target_base_freq)
+        # Validation que target_freq est un offset pandas valide
+        # On ne normalise plus la fréquence pour préserver la position (S/E)
+        try:
+            to_offset(target_freq)
+        except Exception as e:
+            raise ValueError(f"Invalid target frequency '{target_freq}': {e}")
+
+        # Resampling à la bonne fréquence (avec position préservée)
+        resampled = data.resample(target_freq)
 
         # Application de la méthode d'agrégation
         if method == 'mean':
@@ -284,7 +330,7 @@ class FrequencyConverter(TemporalConverter):
 
         Args:
             data: Time series data to interpolate
-            target_freq: Target frequency (must be higher than current)
+            target_freq: Target frequency (must be higher than current), with optional position ('MS', 'QE', etc.)
             method: Interpolation method
             fill_method: Fill method for missing values
 
@@ -300,11 +346,36 @@ class FrequencyConverter(TemporalConverter):
             >>> len(daily) > len(monthly_series)
             True
         """
-        # Normalisation de la fréquence
-        target_base_freq = normalize_frequency(target_freq)
+        # Validation que target_freq est un offset pandas valide
+        # On ne normalise plus la fréquence pour préserver la position (S/E)
+        try:
+            to_offset(target_freq)
+        except Exception as e:
+            raise ValueError(f"Invalid target frequency '{target_freq}': {e}")
 
-        # Utilisation de 'asfreq' pour créer la nouvelle fréquence
-        upsampled = data.asfreq(target_base_freq)
+        # Détection de la fréquence source à partir de l'index
+        source_freq = data.index.inferred_freq
+        if not source_freq:
+            # Tentative de déduction à partir de l'index
+            try:
+                source_freq = pd.infer_freq(data.index)
+            except Exception:
+                source_freq = None
+
+        # Si on peut détecter la fréquence source, on étend l'index pour inclure toutes les périodes
+        if source_freq:
+            # Extension de l'index pour inclure toutes les périodes intermédiaires
+            extended_index = self._extend_index_for_upsampling(
+                original_index=data.index,
+                source_freq=source_freq,
+                target_freq=target_freq
+            )
+
+            # Réindexation des données sur l'index étendu
+            upsampled = data.reindex(extended_index)
+        else:
+            # Fallback : utilisation de asfreq si la fréquence source n'est pas détectable
+            upsampled = data.asfreq(target_freq)
 
         # Application du remplissage si spécifié
         if fill_method == 'ffill':
@@ -426,9 +497,12 @@ class FrequencyConverter(TemporalConverter):
 
         # Validation de target_freq selon son type
         if isinstance(target_freq, str):
-            # Validation simple de la fréquence
+            # Validation de la fréquence en décomposant d'abord pour gérer les positions S/E
             try:
-                normalize_frequency(target_freq)
+                # Décomposition de la fréquence pour extraire la base et la position
+                freq_base, freq_pos = self._position_normalizer.decompose_offset(target_freq)
+                # Normalisation de la fréquence de base uniquement
+                normalize_frequency(freq_base)
             except ValueError as e:
                 raise ValueError(f"Invalid target frequency: {e}")
         elif isinstance(target_freq, dict):
@@ -449,7 +523,10 @@ class FrequencyConverter(TemporalConverter):
             # Validation de chaque fréquence cible
             for col, freq in target_freq.items():
                 try:
-                    normalize_frequency(freq)
+                    # Décomposition de la fréquence pour extraire la base et la position
+                    freq_base, freq_pos = self._position_normalizer.decompose_offset(freq)
+                    # Normalisation de la fréquence de base uniquement
+                    normalize_frequency(freq_base)
                 except ValueError as e:
                     raise ValueError(f"Invalid target frequency for column '{col}': {e}")
         else:
@@ -602,8 +679,14 @@ class FrequencyConverter(TemporalConverter):
             # Extraction des colonnes à convertir
             subset = data[columns]
 
-            # Détermination de la direction de conversion
-            if is_higher_frequency(target_freq, source_freq):
+            # Décomposition des fréquences pour extraire les bases (sans positions ni anchors)
+            source_freq_clean = source_freq.split('-')[0]
+            target_freq_clean = target_freq.split('-')[0]
+            source_base, _ = self._position_normalizer.decompose_offset(source_freq_clean)
+            target_base, _ = self._position_normalizer.decompose_offset(target_freq_clean)
+
+            # Détermination de la direction de conversion (basée sur les fréquences de base)
+            if is_higher_frequency(target_base, source_base):
                 # Upsampling
                 converted = self._upsample(data=subset, target_freq=target_freq, method=conv_method, fill_method=fill_method)
             else:
@@ -818,4 +901,109 @@ class FrequencyConverter(TemporalConverter):
             return self._apply_panel_resample(data, target_freq, method, 'downsample')
         else:
             return self.aggregate_to_lower_frequency(data, target_freq, method)
+
+    # Méthode auxiliaire d'extension de l'index pour l'upsampling
+    def _extend_index_for_upsampling(self,
+                                     original_index: pd.DatetimeIndex,
+                                     source_freq: str,
+                                     target_freq: str) -> pd.DatetimeIndex:
+        """Extend index to include all periods when upsampling between frequencies.
+
+        Cette méthode gère l'extension de la plage temporelle lors de l'upsampling
+        pour s'assurer que toutes les périodes intermédiaires sont incluses.
+
+        Args:
+            original_index: Index original de la série temporelle
+            source_freq: Fréquence source avec position (ex: 'QE', 'QS')
+            target_freq: Fréquence cible avec position (ex: 'ME', 'MS')
+
+        Returns:
+            Index étendu incluant toutes les périodes
+
+        Examples:
+            >>> # QE to ME: 4 quarters -> 12 months
+            >>> qe_index = pd.date_range('2024-03-31', periods=4, freq='QE')
+            >>> extended = _extend_index_for_upsampling(qe_index, 'QE', 'ME')
+            >>> len(extended)
+            12
+        """
+        # Extraction des informations de fréquence et position
+        # IMPORTANT : source_freq peut contenir un anchor (ex: 'QS-OCT'), il faut le supprimer
+        source_freq_clean = source_freq.split('-')[0]
+        source_base, source_pos = self._position_normalizer.decompose_offset(source_freq_clean)
+        target_base, target_pos = self._position_normalizer.decompose_offset(target_freq)
+
+        # Vérification si extension nécessaire
+        # On étend seulement si les bases de fréquence sont différentes et compatibles
+        # Ex: Q->M nécessite extension, mais M->M ne nécessite pas extension
+        if source_base == target_base:
+            # Même fréquence de base, pas d'extension nécessaire
+            return original_index
+
+        # Dictionnaire de mapping pour déterminer combien de périodes target par période source
+        # Ex: 1 trimestre (Q) = 3 mois (M)
+        freq_multipliers = {
+            ('Y', 'Q'): 4,   # 1 an = 4 trimestres
+            ('Y', 'M'): 12,  # 1 an = 12 mois
+            ('Q', 'M'): 3,   # 1 trimestre = 3 mois
+            ('Y', 'W'): 52,  # 1 an ≈ 52 semaines (approximation)
+            ('Q', 'W'): 13,  # 1 trimestre ≈ 13 semaines (approximation)
+            ('M', 'W'): 4,   # 1 mois ≈ 4 semaines (approximation)
+            ('M', 'D'): 30,  # 1 mois ≈ 30 jours (approximation)
+            ('W', 'D'): 7,   # 1 semaine = 7 jours
+            ('Y', 'D'): 365, # 1 an ≈ 365 jours (approximation)
+            ('Q', 'D'): 91,  # 1 trimestre ≈ 91 jours (approximation)
+        }
+
+        freq_key = (source_base, target_base)
+        if freq_key not in freq_multipliers:
+            # Pas de mapping connu, retourner l'index original sans extension
+            return original_index
+
+        # Détermination de la plage complète en fonction de la position
+        # IMPORTANT: pd.Period() n'accepte pas les suffixes S/E, il faut utiliser les fréquences de base
+        # On utilise donc source_base et target_base pour créer les périodes
+        start_date = original_index[0]
+        end_date = original_index[-1]
+
+        # Conversion en périodes pandas en utilisant la fréquence de BASE (sans S/E)
+        # Pour déterminer les bornes de la plage étendue
+        try:
+            start_period = pd.Period(start_date, freq=source_base)
+            end_period = pd.Period(end_date, freq=source_base)
+        except Exception:
+            # Si la création de Period échoue, retourner l'index original
+            return original_index
+
+        # Détermination des bornes de la plage étendue en fonction de la position
+        if source_pos == 'E' and target_pos == 'E':
+            # Source et cible en position 'end'
+            # Ex: QE -> ME : étendre depuis le début de la première période jusqu'à la fin de la dernière
+            # Dernier trimestre Q4-2024 se termine le 2024-12-31
+            # On veut créer : 2024-10-31, 2024-11-30, 2024-12-31
+            extended_start = start_period.to_timestamp(how='start')
+            extended_end = end_period.to_timestamp(how='end')
+
+        elif source_pos == 'S' and target_pos == 'S':
+            # Source et cible en position 'start'
+            # Ex: QS -> MS : étendre depuis le début de la première période jusqu'à la fin de la dernière
+            # Premier trimestre Q1-2024 commence le 2024-01-01
+            # On veut créer : 2024-01-01, 2024-02-01, 2024-03-01
+            extended_start = start_period.to_timestamp(how='start')
+            extended_end = end_period.to_timestamp(how='end')
+
+        else:
+            # Positions mixtes (source=E, target=S ou inverse)
+            # Utiliser une approche générique : étendre sur toute la plage
+            extended_start = start_period.to_timestamp(how='start')
+            extended_end = end_period.to_timestamp(how='end')
+
+        # Création de l'index complet avec la fréquence cible (incluant position S/E)
+        try:
+            extended_index = pd.date_range(start=extended_start, end=extended_end, freq=target_freq)
+        except Exception:
+            # En cas d'erreur, retourner l'index original
+            return original_index
+
+        return extended_index
 
