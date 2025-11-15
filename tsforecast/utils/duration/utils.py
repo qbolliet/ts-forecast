@@ -43,7 +43,7 @@ def normalize_duration(duration: Union[DurationType, UserDurationType]) -> str:
         >>> normalize_duration('business_day')
         'B'
     """
-    return _normalizer.normalize_duration(duration)
+    return _normalizer.normalize(duration)
 
 
 # Conversion d'une durée dans son expression littérale

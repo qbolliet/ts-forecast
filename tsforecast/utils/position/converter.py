@@ -72,8 +72,8 @@ class PeriodPositionConverter(TemporalConverter):
             >>> # Index: 2023-01-31, 2023-02-28, 2023-03-31
         """
         # Normalisation des positions
-        from_code = self._normalizer.normalize_position(from_unit)
-        to_code = self._normalizer.normalize_position(to_unit)
+        from_code = self._normalizer.normalize(from_unit)
+        to_code = self._normalizer.normalize(to_unit)
 
         # Si les positions sont identiques, retourner les données telles quelles
         if from_code == to_code:
@@ -122,8 +122,8 @@ class PeriodPositionConverter(TemporalConverter):
             -1.0
         """
         # Normalisation des positions
-        from_code = self._normalizer.normalize_position(from_unit)
-        to_code = self._normalizer.normalize_position(to_unit)
+        from_code = self._normalizer.normalize(from_unit)
+        to_code = self._normalizer.normalize(to_unit)
 
         # Retour du facteur (1 si identique, -1 si différent pour indiquer un shift)
         return 1.0 if from_code == to_code else -1.0
@@ -269,7 +269,7 @@ class PeriodPositionConverter(TemporalConverter):
         freq, from_pos = self._normalizer.decompose_offset(offset_str)
 
         # Normalisation de la position cible
-        to_pos = self._normalizer.normalize_position(to_position)
+        to_pos = self._normalizer.normalize(to_position)
 
         # Si les positions sont identiques, retourner tel quel
         if from_pos == to_pos:
