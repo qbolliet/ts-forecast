@@ -95,8 +95,8 @@ class DurationConverter(TemporalConverter):
             1
         """
         # Normalisation des durées
-        from_code = self._normalizer.normalize_duration(from_unit)
-        to_code = self._normalizer.normalize_duration(to_unit)
+        from_code = self._normalizer.normalize(from_unit)
+        to_code = self._normalizer.normalize(to_unit)
 
         # Récupération du facteur de conversion
         conversion_factor = self.get_conversion_factor(from_code, to_code)
@@ -138,8 +138,8 @@ class DurationConverter(TemporalConverter):
             24.0
         """
         # Normalisation des durées
-        from_code = self._normalizer.normalize_duration(from_unit)
-        to_code = self._normalizer.normalize_duration(to_unit)
+        from_code = self._normalizer.normalize(from_unit)
+        to_code = self._normalizer.normalize(to_unit)
 
         # Vérification que les facteurs existent
         if from_code not in self._conversion_factors:

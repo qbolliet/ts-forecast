@@ -205,10 +205,13 @@ def _calculate_release_delays(new_observations: pd.DataFrame,
     # Ajout de l'indicateur à l'index et suppression de la date
     publication_delays.set_index("column", drop=True, append=True, inplace=True)
     publication_delays.reset_index(
-        level=publication_delays.index.nlevels-2, 
-        drop=False, 
-        inplace=True, 
-        names=[e for e in range(publication_delays.index.nlevels) if e!= publication_delays.index.nlevels-2 else "observation_date"],
+        level=publication_delays.index.nlevels-2,
+        drop=False,
+        inplace=True,
+        names=[
+            "observation_date" if i == publication_delays.index.nlevels-2 else i
+            for i in range(publication_delays.index.nlevels)
+        ],
     )
 
     # Ajout d'informations d'intérêt
