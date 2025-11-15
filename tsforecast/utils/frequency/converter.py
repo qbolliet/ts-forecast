@@ -47,6 +47,10 @@ class FrequencyConverter(TemporalConverter):
         # Initialisation du normalisateur de positions pour gérer les positions S/E
         self._position_normalizer = PeriodPositionNormalizer()
 
+        # Initialisation du convertisseur de durées pour les facteurs de conversion
+        from ..duration.converter import DurationConverter
+        self._duration_converter = DurationConverter()
+
     # Implémentation de la méthode abstraite convert de TemporalConverter
     def convert(self,
                 value: Union[pd.Series, pd.DataFrame],
@@ -503,6 +507,9 @@ class FrequencyConverter(TemporalConverter):
                 freq_base, freq_pos = self._position_normalizer.decompose_offset(target_freq)
                 # Normalisation de la fréquence de base uniquement
                 normalize_frequency(freq_base)
+                # Validation de la position si elle est spécifiée et non-default
+                if freq_pos and not self._position_normalizer.validate(freq_pos):
+                    raise ValueError(f"Invalid position '{freq_pos}' in target frequency '{target_freq}'")
             except ValueError as e:
                 raise ValueError(f"Invalid target frequency: {e}")
         elif isinstance(target_freq, dict):
@@ -527,6 +534,9 @@ class FrequencyConverter(TemporalConverter):
                     freq_base, freq_pos = self._position_normalizer.decompose_offset(freq)
                     # Normalisation de la fréquence de base uniquement
                     normalize_frequency(freq_base)
+                    # Validation de la position si elle est spécifiée et non-default
+                    if freq_pos and not self._position_normalizer.validate(freq_pos):
+                        raise ValueError(f"Invalid position '{freq_pos}' in frequency '{freq}'")
                 except ValueError as e:
                     raise ValueError(f"Invalid target frequency for column '{col}': {e}")
         else:
@@ -563,13 +573,21 @@ class FrequencyConverter(TemporalConverter):
 
         if isinstance(target_freq, str):
             # Même fréquence cible pour toutes les colonnes
-            target_freq_normalized = normalize_frequency(target_freq)
+            # Décomposition pour gérer les positions S/E
+            target_freq_base, target_freq_pos = self._position_normalizer.decompose_offset(target_freq)
+            target_freq_normalized = normalize_frequency(target_freq_base)
+            # Reconstruction avec position si présente
+            if target_freq_pos and target_freq_pos != 'E':
+                target_freq_full = self._position_normalizer.combine_frequency_position(target_freq_normalized, target_freq_pos)
+            else:
+                target_freq_full = target_freq_normalized
+
             for col in list(data.columns):
                 # Extraction de la fréquence de la colonne
                 current_freq = current_frequencies.get(col)
                 # Création de l'association pour la colonne
                 if current_freq:
-                    frequency_map[col] = (current_freq, target_freq_normalized)
+                    frequency_map[col] = (current_freq, target_freq_full)
         else:
             # Fréquences cibles spécifiques par colonne
             for col, target in target_freq.items():
@@ -577,8 +595,16 @@ class FrequencyConverter(TemporalConverter):
                 current_freq = current_frequencies.get(col)
                 # Création de l'association pour la colonne
                 if current_freq:
-                    target_freq_normalized = normalize_frequency(target)
-                    frequency_map[col] = (current_freq, target_freq_normalized)
+                    # Décomposition pour gérer les positions S/E
+                    target_base, target_pos = self._position_normalizer.decompose_offset(target)
+                    target_freq_normalized = normalize_frequency(target_base)
+                    # Reconstruction avec position si présente
+                    if target_pos and target_pos != 'E':
+                        target_freq_full = self._position_normalizer.combine_frequency_position(target_freq_normalized, target_pos)
+                    else:
+                        target_freq_full = target_freq_normalized
+
+                    frequency_map[col] = (current_freq, target_freq_full)
 
         return frequency_map
 
@@ -940,24 +966,24 @@ class FrequencyConverter(TemporalConverter):
             # Même fréquence de base, pas d'extension nécessaire
             return original_index
 
-        # Dictionnaire de mapping pour déterminer combien de périodes target par période source
-        # Ex: 1 trimestre (Q) = 3 mois (M)
-        freq_multipliers = {
-            ('Y', 'Q'): 4,   # 1 an = 4 trimestres
-            ('Y', 'M'): 12,  # 1 an = 12 mois
-            ('Q', 'M'): 3,   # 1 trimestre = 3 mois
-            ('Y', 'W'): 52,  # 1 an ≈ 52 semaines (approximation)
-            ('Q', 'W'): 13,  # 1 trimestre ≈ 13 semaines (approximation)
-            ('M', 'W'): 4,   # 1 mois ≈ 4 semaines (approximation)
-            ('M', 'D'): 30,  # 1 mois ≈ 30 jours (approximation)
-            ('W', 'D'): 7,   # 1 semaine = 7 jours
-            ('Y', 'D'): 365, # 1 an ≈ 365 jours (approximation)
-            ('Q', 'D'): 91,  # 1 trimestre ≈ 91 jours (approximation)
-        }
+        # Calcul dynamique du ratio de conversion en utilisant DurationConverter
+        # Cela garantit la cohérence avec les facteurs de conversion du reste du package
+        # Ex: 1 trimestre (Q) = 3 mois (M) → ratio = 3.0
+        try:
+            # Récupération du facteur de conversion depuis DurationConverter
+            ratio = self._duration_converter.get_conversion_factor(source_base, target_base)
 
-        freq_key = (source_base, target_base)
-        if freq_key not in freq_multipliers:
-            # Pas de mapping connu, retourner l'index original sans extension
+            # Vérification que le ratio est un entier positif (ou proche d'un entier)
+            # Pour l'extension d'index, on a besoin d'un ratio entier
+            if ratio < 1 or abs(ratio - round(ratio)) > 1e-6:
+                # Le ratio n'est pas un entier ou est < 1, pas d'extension possible
+                return original_index
+
+            # Conversion en entier pour l'utilisation dans l'extension
+            multiplier = int(round(ratio))
+        except (ValueError, KeyError):
+            # Si la paire (source_base, target_base) n'est pas supportée par DurationConverter
+            # retourner l'index original sans extension
             return original_index
 
         # Détermination de la plage complète en fonction de la position
