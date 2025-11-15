@@ -258,16 +258,16 @@ def _calculate_release_delays(new_observations: pd.DataFrame,
     delays_timedelta = download_date - reference_dates
 
     # Conversion selon l'unité spécifiée
-    # Timedelta n'a que pour attributs "days", "seconds", "microseconds"
+    # Timedelta n'a que pour attributs "day", "second", "microsecond"
     if unit in ["D", "day"]:
         publication_delays["release_delay"] = np.ceil(delays_timedelta.dt.total_seconds() / 86400)
-        publication_delays["unit"] = "days"
+        publication_delays["unit"] = "day"
     elif unit in ["s", "second"]:
         publication_delays["release_delay"] = np.ceil(delays_timedelta.dt.total_seconds())
-        publication_delays["unit"] = "seconds"
+        publication_delays["unit"] = "second"
     elif unit in ["us", "microsecond"]:
         publication_delays["release_delay"] = np.ceil(delays_timedelta.dt.total_seconds() * 1_000_000)
-        publication_delays["unit"] = "microseconds"
+        publication_delays["unit"] = "microsecond"
     else:
         raise ValueError(f"Unit must be one of 'us', 's', 'D', 'microsecond', 'second', 'day', got {unit}") 
 

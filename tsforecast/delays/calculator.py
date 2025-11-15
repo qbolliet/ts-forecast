@@ -105,12 +105,7 @@ def calculate_applicable_delay(
     
     # Copie indépendante des données
     delays = publication_delays.copy()
-    
-    # Extraction de l'index (indicateur et éventuellement panel)
-    # L'index doit contenir au moins un niveau (l'indicateur)
-    if not isinstance(delays.index, pd.MultiIndex):
-        raise ValueError("publication_delays must have a MultiIndex with at least indicator level")
-    
+
     # Identification du niveau de l'indicateur (dernier niveau de l'index)
     indicator_level_name = delays.index.names[-1]
     
