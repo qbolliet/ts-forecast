@@ -6,20 +6,13 @@ to time series and panel data using sklearn-compatible transformers.
 """
 # Importation des modules
 # Importation du module d'inférence des délais de publication à partir de deux jeux de données
-from .data_manager import ReleaseDataManager
+from .data_manager import compare_and_detect_delays
 # Importation du module de calcul du délai de publication à partir des dates de publication de différentes observations
-from .delay_calculator import ReleaseDelayCalculator
+from .calculator import calculate_applicable_delay
 # Importation du module d'application des délais de publication à des données
-from .transformers import (
-    ReleaseDelayTransformer,
-    create_delay_transformer_from_calculator,
-    create_delay_transformer_from_dict
-)
+
 
 __all__ = [
-    'ReleaseDataManager',
-    'ReleaseDelayCalculator',
-    'ReleaseDelayTransformer',
-    'create_delay_transformer_from_calculator',
-    'create_delay_transformer_from_dict'
+    'compare_and_detect_delays',
+    'calculate_applicable_delay'
 ]

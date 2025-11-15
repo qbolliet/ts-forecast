@@ -15,41 +15,6 @@ from ..utils.frequency import normalize_frequency, is_higher_frequency, to_panda
 from ..utils.time import get_period_boundaries
 from ..utils.duration import to_code as duration_to_code, convert_duration
 
-# Fonction auxiliaire de validation des colonnes
-def _validate_columns(df: pd.DataFrame) -> None:
-    """Validate that all required columns are present in the DataFrame.
-
-    Args:
-        df: DataFrame to validate
-
-    Raises:
-        ValueError: If any required column is missing
-
-    Examples:
-        >>> _validate_columns(publication_delays_df)
-        # Raises ValueError if columns are missing
-    """
-    # Colonnes requises pour le calcul des délais
-    required_columns = [
-        'observation_date',
-        'download_date',
-        'frequency',
-        'period_start',
-        'period_end',
-        'reference_point',
-        'release_delay',
-        'unit'
-    ]
-
-    # Vérification de la présence de toutes les colonnes
-    missing_columns = [col for col in required_columns if col not in df.columns]
-
-    if missing_columns:
-        raise ValueError(
-            f"Missing required columns in publication_delays DataFrame: {missing_columns}. "
-            f"Required columns are: {required_columns}"
-        )
-
 # Fonction de calcul du délai applicable
 def calculate_applicable_delay(
     publication_delays: pd.DataFrame,
@@ -194,6 +159,42 @@ def calculate_applicable_delay(
     )
     
     return result
+
+# Fonction auxiliaire de validation des colonnes
+def _validate_columns(df: pd.DataFrame) -> None:
+    """Validate that all required columns are present in the DataFrame.
+
+    Args:
+        df: DataFrame to validate
+
+    Raises:
+        ValueError: If any required column is missing
+
+    Examples:
+        >>> _validate_columns(publication_delays_df)
+        # Raises ValueError if columns are missing
+    """
+    # Colonnes requises pour le calcul des délais
+    required_columns = [
+        'observation_date',
+        'download_date',
+        'frequency',
+        'period_start',
+        'period_end',
+        'reference_point',
+        'release_delay',
+        'unit'
+    ]
+
+    # Vérification de la présence de toutes les colonnes
+    missing_columns = [col for col in required_columns if col not in df.columns]
+
+    if missing_columns:
+        raise ValueError(
+            f"Missing required columns in publication_delays DataFrame: {missing_columns}. "
+            f"Required columns are: {required_columns}"
+        )
+
 
 # Fonction auxiliaire de conversion à la fréquence cible et au point de référence cible des délais de publication
 def _convert_to_target_frequency_and_reference(

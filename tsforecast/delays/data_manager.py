@@ -19,7 +19,7 @@ from ..utils.time import get_period_boundaries
 
 # /!\ Faire un prompt pour intégrer un logger à cette fonction : comment mettre du logging optionnel + implémentation
 # Fonction de comparaison et d'inférence des délais de publication
-def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: pd.DataFrame, download_date: Union[str, datetime], detection_mode: str = 'new_only', reference_point: str = 'start', delay_unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day'] = 'day', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None, frequency_detector: Optional[FrequencyDetector] = None) :
+def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: pd.DataFrame, download_date: Union[str, datetime], detection_mode: str = 'new_only', reference_point: str = 'start', delay_unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day'] = 'day', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None) -> pd.DataFrame:
     # Validation des arguments
     # Validation des jeux de données
     new_data = _validate_input_data(data=new_data, time_col=time_col, panel_cols=panel_cols)
