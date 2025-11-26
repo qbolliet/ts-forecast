@@ -1,12 +1,14 @@
 # Importation des modules
+# Sklearn
 from sklearn.base import BaseEstimator, RegressorMixin
+# 
 from hierarchicalforecast import HierarchicalReconciliation
 from hierarchicalforecast.methods import MinTrace
 from hierarchicalforecast.utils import aggregate
 
 class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
     """Wrapper unifiant forecast + réconciliation."""
-    
+    # Initialisation
     def __init__(self, base_forecaster, reconciliation_method='mint_shrink',
                  hierarchy_spec=None):
         self.base_forecaster = base_forecaster
