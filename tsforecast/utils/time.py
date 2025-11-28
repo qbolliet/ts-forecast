@@ -8,6 +8,53 @@ from datetime import datetime, timedelta
 # Import des utilitaires de fréquence
 from .frequency import normalize_frequency, FrequencyType, UserFrequencyType
 
+# Fonction de conversion d'une chaîne de caractères en date
+def resolve_date(date: Union[str, datetime], format: str = None) -> datetime:
+    """Resolve date from provided parameter.
+
+    Args:
+        date: Date ('today' or datetime)
+        format: String format for dates
+
+    Returns:
+        Resolved date
+
+    Raises:
+        ValueError: If date is not 'today', a string, or a datetime object
+
+    Examples:
+        >>> from datetime import datetime
+        >>> resolve_date('today')  # doctest: +SKIP
+        datetime.datetime(2025, 11, 28, 10, 30, 15, 123456)
+
+        >>> resolve_date('2023-06-15')
+        datetime.datetime(2023, 6, 15, 0, 0)
+
+        >>> resolve_date('06/15/2023', format='%m/%d/%Y')
+        datetime.datetime(2023, 6, 15, 0, 0)
+
+        >>> existing_date = datetime(2023, 6, 15, 14, 30)
+        >>> resolve_date(existing_date)
+        datetime.datetime(2023, 6, 15, 14, 30)
+    """
+    # Distinction suivant le type de l'argument
+    # Cas où la date est une chaîne de caractères
+    if isinstance(date, str):
+        # Cas où l'on souhaite obtenir la date d'aujourd'hui
+        if date.lower() == 'today':
+            return datetime.now()
+        else:
+            # Utilise le format si spécifié
+            if format is not None :
+                return pd.to_datetime(date, format=format).to_pydatetime()
+            else:
+                return pd.to_datetime(date).to_pydatetime()
+    # Cas où la date est un datetime
+    elif isinstance(date, datetime):
+        return date
+    else:
+        raise ValueError("'date' must be 'today', a string or datetime")
+
 # Fonctions de conversion entre timeseries et string
 def timeseries_to_string(ts: pd.Series, format: str = "%Y-%m-%d") -> pd.Series:
     """Convert a time series index to string format.
