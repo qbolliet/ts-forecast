@@ -10,9 +10,10 @@ from .data_manager import compare_and_detect_delays
 # Importation du module de calcul du délai de publication à partir des dates de publication de différentes observations
 from .calculator import calculate_applicable_delay
 # Importation du module d'application des délais de publication à des données
-
+from .transformers import PublicationDelayTransformer
 
 __all__ = [
     'compare_and_detect_delays',
-    'calculate_applicable_delay'
+    'calculate_applicable_delay',
+    'PublicationDelayTransformer'
 ]

@@ -3,20 +3,223 @@
 This module provides sklearn API-compatible transformers for applying
 publication delays to time series and panel data.
 """
-
+# Importation des modules
+# Modules de base
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, Union, Tuple, List, Any, Callable
 from datetime import datetime, timedelta
 import warnings
+# Sklearn
 from sklearn.utils.validation import check_is_fitted
-import copy
 
+# Importation des modules du package
+from ..utils.time import resolve_date
 from ..utils.base_transformers import PanelTimeSeriesTransformer, ReversibleTransformerMixin
-from .delay_calculator import ReleaseDelayCalculator
 
 
-class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixin):
+
+# Fonctions utilitaires de conversion des formats de délais
+# Fonction de convertion d'un dictionnaire de délais en DataFrame
+def delays_dict_to_dataframe(
+    delays_dict: Dict[Union[str, Tuple[str, str]], float],
+    unit: str = 'D'
+) -> pd.DataFrame:
+    """Convert delays dictionary to DataFrame format.
+
+    Convertit un dictionnaire de délais en DataFrame compatible avec
+    le format retourné par calculate_applicable_delay().
+
+    Args:
+        delays_dict: Dictionary of delays {indicator: delay} or {(entity, indicator): delay}
+        unit: Unit of delays ('D' for days, 's' for seconds, 'us' for microseconds)
+
+    Returns:
+        DataFrame with columns: applicable_delay, unit, indicator (and entity if panel)
+
+    Examples:
+        >>> # Simple time series format
+        >>> delays = {'GDP': 45.0, 'inflation': 30.0}
+        >>> df = delays_dict_to_dataframe(delays)
+        >>>
+        >>> # Panel data format
+        >>> panel_delays = {('France', 'GDP'): 45.0, ('Germany', 'GDP'): 38.0}
+        >>> df = delays_dict_to_dataframe(panel_delays)
+    """
+    # Détection du format (time series vs panel)
+    is_panel = any(isinstance(k, tuple) for k in delays_dict.keys())
+
+    if is_panel:
+        # Format panel: extraction des entités et indicateurs
+        data = []
+        for key, delay in delays_dict.items():
+            if isinstance(key, tuple):
+                entity, indicator = key
+                data.append({
+                    'entity': entity,
+                    'indicator': indicator,
+                    'applicable_delay': delay,
+                    'unit': unit
+                })
+            else:
+                # Clé non-tuple dans un contexte panel (on suppose que c'est un indicateur seul)
+                data.append({
+                    'entity': None,
+                    'indicator': key,
+                    'applicable_delay': delay,
+                    'unit': unit
+                })
+        # Création du jeu de données
+        df = pd.DataFrame(data)
+        # Création du MultiIndex uniquement si toutes les entités sont non-null
+        if df['entity'].notna().all():
+            df = df.set_index(['entity', 'indicator'])
+        else:
+            df = df.set_index('indicator')
+            df = df.drop(columns=['entity'])
+    else:
+        # Format time series simple
+        data = []
+        for indicator, delay in delays_dict.items():
+            data.append({
+                'indicator': indicator,
+                'applicable_delay': delay,
+                'unit': unit
+            })
+        df = pd.DataFrame(data)
+        df = df.set_index('indicator')
+
+    return df
+
+# Conversion d'un DataFrame en dictionnaire de délais de publication
+def delays_dataframe_to_dict(
+    delays_df: pd.DataFrame,
+    use_entity: bool = None
+) -> Dict[Union[str, Tuple[str, str]], float]:
+    """Convert delays DataFrame to dictionary format.
+
+    Convertit un DataFrame de délais (format calculate_applicable_delay)
+    en dictionnaire compatible avec PublicationDelayTransformer.
+
+    Args:
+        delays_df: DataFrame with 'applicable_delay' column and index on indicator
+                   (and optionally entity)
+        use_entity: If True, uses (entity, indicator) format. If None, auto-detected.
+
+    Returns:
+        Dictionary {indicator: delay} or {(entity, indicator): delay}
+
+    Raises:
+        ValueError: If 'applicable_delay' column is missing
+
+    Examples:
+        >>> # DataFrame from calculate_applicable_delay
+        >>> df = pd.DataFrame({'applicable_delay': [45.0, 30.0]},
+        ...                   index=pd.Index(['GDP', 'inflation'], name='indicator'))
+        >>> delays_dict = delays_dataframe_to_dict(df)
+        >>> # Returns: {'GDP': 45.0, 'inflation': 30.0}
+    """
+    # Validation de la présence de la colonne applicable_delay
+    if 'applicable_delay' not in delays_df.columns:
+        raise ValueError(
+            "DataFrame must contain 'applicable_delay' column. "
+            "Expected format from calculate_applicable_delay()"
+        )
+
+    # Détection automatique du format si use_entity est None
+    if use_entity is None:
+        use_entity = isinstance(delays_df.index, pd.MultiIndex)
+
+    # Initialisation du dictionnaire résultat
+    delays_dict = {}
+
+    if use_entity and isinstance(delays_df.index, pd.MultiIndex):
+        # Format panel: (entity, indicator) -> delay
+        for idx, row in delays_df.iterrows():
+            # MultiIndex: idx est un tuple (entity, indicator, ...)
+            delays_dict[idx] = row['applicable_delay']
+    else:
+        # Format time series: indicator -> delay
+        for idx, row in delays_df.iterrows():
+            delays_dict[idx] = row['applicable_delay']
+
+    return delays_dict
+
+# Fonction auxiliaire de validation des paramètres de délais de publication
+def _validate_delays_parameter(
+    delays: Union[Dict, pd.DataFrame],
+    panel_cols: Optional[List[str]] = None
+) -> None:
+    """Validate delays parameter structure.
+
+    Valide la structure du paramètre delays selon qu'il s'agit
+    d'un dictionnaire ou d'un DataFrame.
+
+    Args:
+        delays: Dictionary or DataFrame of delays
+        panel_cols: Panel columns to determine expected format
+
+    Raises:
+        ValueError: If structure is invalid
+        TypeError: If type is neither Dict nor DataFrame
+    """
+    # Détection de la structure de panel
+    is_panel = panel_cols is not None and len(panel_cols) > 0
+
+    # Distinction suivant le type de l'argument
+    if isinstance(delays, dict):
+        # Validation du dictionnaire
+        if len(delays) == 0:
+            warnings.warn("Empty delays dictionary provided")
+            return
+
+        # Vérification de la cohérence des clés
+        first_key = next(iter(delays.keys()))
+        is_tuple_key = isinstance(first_key, tuple)
+
+        # Pour panel data, les clés devraient être des tuples
+        if is_panel and not is_tuple_key:
+            warnings.warn(
+                "Panel data detected but delays keys are not tuples. "
+                "Expected format: {(entity, indicator): delay}"
+            )
+
+        # Vérification que toutes les valeurs sont numériques
+        for key, value in delays.items():
+            if not isinstance(value, (int, float, np.number)):
+                raise ValueError(
+                    f"Delay value for {key} must be numeric, got {type(value)}"
+                )
+
+    elif isinstance(delays, pd.DataFrame):
+        # Validation du DataFrame
+        if 'applicable_delay' not in delays.columns:
+            raise ValueError(
+                "DataFrame must contain 'applicable_delay' column. "
+                "Expected format from calculate_applicable_delay()"
+            )
+
+        # Vérification que l'index est approprié
+        if is_panel and not isinstance(delays.index, pd.MultiIndex):
+            warnings.warn(
+                "Panel data detected but DataFrame index is not MultiIndex. "
+                "Expected MultiIndex with (entity, indicator)"
+            )
+
+        # Vérification des valeurs numériques
+        if not pd.api.types.is_numeric_dtype(delays['applicable_delay']):
+            raise ValueError(
+                "'applicable_delay' column must contain numeric values"
+            )
+
+    else:
+        raise TypeError(
+            f"delays must be Dict or DataFrame, got {type(delays)}"
+        )
+
+
+# Classe d'application des délais de publication
+class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixin):
     """Sklearn transformer for applying publication delays.
 
     This class applies publication delays to data using either
@@ -72,22 +275,24 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
         ... )
     """
 
+    # Initialisation
     def __init__(self,
-                 delays_dict: Optional[Dict[Union[str, Tuple[str, str]], float]] = None,
-                 delay_calculator: Optional[ReleaseDelayCalculator] = None,
+                 delays: Union[Dict[Union[str, tuple], float], pd.DataFrame],
                  mode: str = 'shift',
                  prediction_date: Union[str, datetime] = 'today',
+                 prediction_date_format: Optional[str] = None,
                  reference_point: str = 'end',
                  time_col: str = 'date',
                  panel_cols: Optional[List[str]] = None,
                  handle_missing_delays: str = 'warn',
                  default_delay: Optional[float] = None,
-                 validate_input: bool = True):
+                 validate_input: bool = True,
+                 strict_validation: bool = True,
+                 auto_sort: bool = False):
         """Initialize the publication delay transformer.
 
         Args:
-            delays_dict: Dictionary of delays by indicator
-            delay_calculator: Calculator to get delays from data
+            delays: Dictionary or DataFrame of delays by indicator
             mode: Transformation mode ('shift' or 'mask')
             prediction_date: Reference date ('today' or datetime)
             reference_point: Reference point ('start' or 'end')
@@ -96,28 +301,37 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
             handle_missing_delays: Missing delay handling
             default_delay: Default delay if missing
             validate_input: Input data validation
+            strict_validation: If True, raises errors; if False, emits warnings
+            auto_sort: If True, automatically sorts unsorted data
         """
         # Initialisation de la classe parent
-        super().__init__(time_col=time_col, panel_cols=panel_cols, validate_input=validate_input)
+        super().__init__(
+            time_col=time_col,
+            panel_cols=panel_cols,
+            validate_input=validate_input,
+            strict_validation=strict_validation,
+            auto_sort=auto_sort
+        )
 
         # Validation des paramètres
-        if delays_dict is None and delay_calculator is None:
-            raise ValueError("You must provide either delays_dict or delay_calculator")
-
+        # Validation du mode d'application des délais de publication
         if mode not in ['shift', 'mask']:
             raise ValueError("mode must be 'shift' or 'mask'")
-
+        # Validation du point de référence des délais de publication
         if reference_point not in ['start', 'end']:
             raise ValueError("reference_point must be 'start' or 'end'")
-
+        # Validation de la gestion des délais manquants
         if handle_missing_delays not in ['ignore', 'warn', 'error']:
             raise ValueError("handle_missing_delays must be 'ignore', 'warn' or 'error'")
 
+        # Validation de la structure du paramètre delays
+        _validate_delays_parameter(delays, panel_cols)
+
         # Assignation des paramètres
-        self.delays_dict = delays_dict
-        self.delay_calculator = delay_calculator
+        self.delays = delays
         self.mode = mode
         self.prediction_date = prediction_date
+        self.prediction_date_format = prediction_date_format
         self.reference_point = reference_point
         self.handle_missing_delays = handle_missing_delays
         self.default_delay = default_delay
@@ -130,6 +344,7 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
         self.original_data_ = None
         self.transformation_metadata_ = {}
 
+    # Méthode d'entraînement du transformer
     def _fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
         """Transformer fitting (internal method).
 
@@ -138,19 +353,35 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
             y: Target variable (not used)
         """
         # Résolution de la date de prédiction
-        self.prediction_date_ = self._resolve_prediction_date(self.prediction_date, X)
+        self.prediction_date_ = resolve_date(date=self.prediction_date, format=self.prediction_date_format)
 
         # Obtention du dictionnaire des délais
-        if self.delays_dict is not None:
-            self.delays_dict_ = self.delays_dict.copy()
-        elif self.delay_calculator is not None:
-            self.delays_dict_ = self._get_delays_from_calculator(X)
+        if self.delays is not None:
+            # Conversion en dictionnaire si nécessaire
+            if isinstance(self.delays, pd.DataFrame):
+                # Conversion DataFrame -> Dict avec préservation de l'unité
+                self.delays_dict_ = delays_dataframe_to_dict(
+                    self.delays,
+                    use_entity=self.is_panel_
+                )
+                # Stockage de l'unité pour get_delays_as_dataframe()
+                if 'unit' in self.delays.columns:
+                    self._delays_unit = self.delays['unit'].iloc[0]
+                else:
+                    self._delays_unit = 'D'
+            elif isinstance(self.delays, dict):
+                # Copie directe du dictionnaire
+                self.delays_dict_ = self.delays.copy()
+                self._delays_unit = 'D'  # Défaut pour dicts
+            else:
+                raise TypeError(
+                    f"delays must be Dict or DataFrame, got {type(self.delays)}"
+                )
         else:
             raise RuntimeError("No delay source available")
 
         # Stockage des métadonnées de transformation
         self.transformation_metadata_ = {
-            'fitted_on': datetime.utcnow(),
             'mode': self.mode_,
             'prediction_date': self.prediction_date_,
             'reference_point': self.reference_point_,
@@ -159,6 +390,7 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
             'original_columns': list(X.columns)
         }
 
+    # Fonction de transformation des données
     def _transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """Apply transformation (internal method).
 
@@ -179,6 +411,7 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
         else:
             raise ValueError(f"Unknown transformation mode: {self.mode_}")
 
+    # Méthode de transformation inverse des données
     def inverse_transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """Reverse applied transformation.
 
@@ -191,11 +424,14 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
         Raises:
             ValueError: If transformation cannot be reversed
         """
+        # Vérification que le transformer est estimé
         check_is_fitted(self, 'delays_dict_')
 
+        # Vérification que les données originales sont renseignées
         if self.original_data_ is None:
             raise ValueError("No original data stored for inversion")
 
+        # Distinction suivant le mode de transformation
         if self.mode_ == 'shift':
             return self._reverse_shift_transformation(X)
         elif self.mode_ == 'mask':
@@ -203,54 +439,7 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
         else:
             raise ValueError(f"Unknown transformation mode for inversion: {self.mode_}")
 
-    def _resolve_prediction_date(self,
-                                prediction_date: Union[str, datetime],
-                                X: pd.DataFrame) -> datetime:
-        """Resolve prediction date from provided parameter.
-
-        Args:
-            prediction_date: Prediction date ('today' or datetime)
-            X: Input data to extract latest date if needed
-
-        Returns:
-            Resolved prediction date
-        """
-        if isinstance(prediction_date, str):
-            if prediction_date.lower() == 'today':
-                return datetime.now()
-            else:
-                try:
-                    return pd.to_datetime(prediction_date).to_pydatetime()
-                except:
-                    raise ValueError(f"Invalid date format: {prediction_date}")
-        elif isinstance(prediction_date, datetime):
-            return prediction_date
-        else:
-            raise ValueError("prediction_date must be 'today', a string or datetime")
-
-    def _get_delays_from_calculator(self, X: pd.DataFrame) -> Dict[Union[str, Tuple[str, str]], float]:
-        """Get delays from delay calculator.
-
-        Args:
-            X: Input data to determine indicators
-
-        Returns:
-            Dictionary of delays by indicator/entity
-        """
-        # Identification des indicateurs dans les données
-        data_cols = [col for col in X.columns
-                    if col != self.time_col and (not self.panel_cols or col not in self.panel_cols)]
-
-        # Calcul des délais
-        group_by_entity = self.is_panel_
-        delays = self.delay_calculator.calculate_median_delays(
-            reference_point=self.reference_point_,
-            group_by_entity=group_by_entity,
-            indicators=data_cols
-        )
-
-        return delays
-
+    # Méthode d'application que la transformation par décalage
     def _apply_shift_transformation(self, X: pd.DataFrame) -> pd.DataFrame:
         """Apply transformation in 'shift' mode.
 
@@ -264,6 +453,7 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
         Returns:
             Data with shifted values
         """
+        # Copie indépendante du jeu de données
         X_shifted = X.copy()
 
         # Identification des colonnes de données
@@ -272,11 +462,12 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
 
         # Application du décalage pour chaque colonne
         for col in data_cols:
+            # Extraction du délai
             delay = self._get_delay_for_column(col, X)
-
+            # Si aucun délai n'est identifié pour l'indicateur, passe à la suivante
             if delay is None:
                 continue
-
+            
             if self.is_panel_:
                 # Traitement par groupe pour les données panel
                 X_shifted = self._shift_column_panel(X_shifted, col, delay)
@@ -286,6 +477,7 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
 
         return X_shifted
 
+    # Méthode d'application de la transformation par masque
     def _apply_mask_transformation(self, X: pd.DataFrame) -> pd.DataFrame:
         """Apply transformation in 'mask' mode.
 
@@ -298,16 +490,18 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
         Returns:
             Data with future values masked
         """
+        # Copie indépendante des données
         X_masked = X.copy()
 
         # Identification des colonnes de données
         data_cols = [col for col in X.columns
                     if col != self.time_col and (not self.panel_cols or col not in self.panel_cols)]
 
-        # Application du masquage pour chaque colonne
+        # Application du masque pour chaque colonne
         for col in data_cols:
+            # Identification du délai de publication
             delay = self._get_delay_for_column(col, X)
-
+            # Si aucun délai n'est identifié pour l'indicateur, passe à la suivante
             if delay is None:
                 continue
 
@@ -320,6 +514,7 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
 
         return X_masked
 
+    # Méthode auxiliaire du délai valable
     def _get_delay_for_column(self,
                              column: str,
                              X: pd.DataFrame) -> Optional[float]:
@@ -332,6 +527,7 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
         Returns:
             Delay in days or None if not found
         """
+        # Initialisation du délai
         delay = None
 
         if self.is_panel_:
@@ -364,7 +560,7 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
                 raise ValueError(f"Missing delay for column '{column}'")
             elif self.handle_missing_delays == 'warn':
                 warnings.warn(f"Missing delay for column '{column}', using default delay")
-
+            # Application du délai par défaut
             delay = self.default_delay
 
         return delay
@@ -615,35 +811,79 @@ class ReleaseDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerM
             return {}
         return self.delays_dict_.copy()
 
+    def get_delays_as_dataframe(self) -> pd.DataFrame:
+        """Return delays in DataFrame format.
+
+        Retourne les délais au format DataFrame compatible avec
+        calculate_applicable_delay().
+
+        Returns:
+            DataFrame with columns: applicable_delay, unit
+            Index: indicator or MultiIndex(entity, indicator)
+
+        Raises:
+            RuntimeError: If transformer has not been fitted yet
+
+        Examples:
+            >>> # Initialize with dictionary
+            >>> transformer = PublicationDelayTransformer(delays={'GDP': 45.0, 'inflation': 30.0})
+            >>> transformer.fit(X)
+            >>> df = transformer.get_delays_as_dataframe()
+            >>> print(df.columns)
+            Index(['applicable_delay', 'unit'], dtype='object')
+            >>>
+            >>> # Panel data example
+            >>> delays = {('France', 'GDP'): 45.0, ('Germany', 'GDP'): 38.0}
+            >>> transformer = PublicationDelayTransformer(delays=delays, panel_cols=['country'])
+            >>> transformer.fit(X)
+            >>> df = transformer.get_delays_as_dataframe()
+            >>> print(df.index.names)
+            ['entity', 'indicator']
+        """
+        if self.delays_dict_ is None:
+            raise RuntimeError("Transformer has not been fitted yet")
+
+        return delays_dict_to_dataframe(
+            self.delays_dict_,
+            unit=getattr(self, '_delays_unit', 'D')
+        )
+
 
 def create_delay_transformer_from_calculator(
-    calculator: ReleaseDelayCalculator,
+    calculator: Any,  # ReleaseDelayCalculator type hint temporarily disabled
     mode: str = 'shift',
     prediction_date: Union[str, datetime] = 'today',
-    **kwargs) -> ReleaseDelayTransformer:
+    **kwargs) -> 'PublicationDelayTransformer':
     """Factory function to create transformer from calculator.
 
+    Note: This function uses calculate_applicable_delay from the calculator
+    to get delays as a DataFrame, which is then passed to the transformer.
+
     Args:
-        calculator: Configured delay calculator
+        calculator: Configured delay calculator with calculate_applicable_delay() method
         mode: Transformation mode ('shift' or 'mask')
         prediction_date: Reference prediction date
-        **kwargs: Additional arguments for ReleaseDelayTransformer
+        **kwargs: Additional arguments for PublicationDelayTransformer
 
     Returns:
-        Configured ReleaseDelayTransformer instance
+        Configured PublicationDelayTransformer instance
 
     Examples:
-        >>> from tsforecast.delays import ReleaseDelayCalculator
-        >>> from tsforecast.delays import create_delay_transformer_from_calculator
+        >>> # from tsforecast.delays import ReleaseDelayCalculator
+        >>> # from tsforecast.delays import create_delay_transformer_from_calculator
         >>>
-        >>> delay_df = pd.DataFrame({...})
-        >>> calculator = ReleaseDelayCalculator(delay_data=delay_df)
-        >>> transformer = create_delay_transformer_from_calculator(
-        ...     calculator, mode='mask', prediction_date='2023-12-01'
-        ... )
+        >>> # delay_df = pd.DataFrame({...})
+        >>> # calculator = ReleaseDelayCalculator(delay_data=delay_df)
+        >>> # transformer = create_delay_transformer_from_calculator(
+        >>> #     calculator, mode='mask', prediction_date='2023-12-01'
+        >>> # )
+        >>> pass  # Placeholder until ReleaseDelayCalculator is implemented
     """
-    return ReleaseDelayTransformer(
-        delay_calculator=calculator,
+    # Obtention des délais depuis le calculator au format DataFrame
+    delays_df = calculator.calculate_applicable_delay()
+
+    return PublicationDelayTransformer(
+        delays=delays_df,
         mode=mode,
         prediction_date=prediction_date,
         **kwargs
@@ -654,7 +894,7 @@ def create_delay_transformer_from_dict(
     delays_dict: Dict[Union[str, Tuple[str, str]], float],
     mode: str = 'shift',
     prediction_date: Union[str, datetime] = 'today',
-    **kwargs) -> ReleaseDelayTransformer:
+    **kwargs) -> 'PublicationDelayTransformer':
     """Factory function to create transformer from dictionary.
 
     Args:
@@ -672,9 +912,13 @@ def create_delay_transformer_from_dict(
         ...     delays, mode='shift', prediction_date='2023-12-01'
         ... )
     """
-    return ReleaseDelayTransformer(
-        delays_dict=delays_dict,
+    return PublicationDelayTransformer(
+        delays=delays_dict,
         mode=mode,
         prediction_date=prediction_date,
         **kwargs
     )
+
+
+# Alias pour compatibilité arrière
+ReleaseDelayTransformer = PublicationDelayTransformer

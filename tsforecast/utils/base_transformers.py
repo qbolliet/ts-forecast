@@ -12,6 +12,13 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 import warnings
 
+# Importation des fonctions de validation
+from .validation import (
+    validate_temporal_data,
+    validate_entities_grouped,
+    validate_sorted_within_groups
+)
+
 
 class TimeSeriesTransformerMixin:
     """Mixin class for time series transformers.
@@ -114,16 +121,30 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         time_col (str): Name of the time column
         panel_cols (Optional[List[str]]): Columns identifying panel dimensions
         validate_input (bool): Whether to validate input data
+        strict_validation (bool): If True, raises errors; if False, emits warnings
+        auto_sort (bool): If True, automatically sorts unsorted data
     """
-    
-    def __init__(self, 
+
+    def __init__(self,
                  time_col: str = 'date',
                  panel_cols: Optional[List[str]] = None,
-                 validate_input: bool = True):
-        """Initialize the transformer."""
+                 validate_input: bool = True,
+                 strict_validation: bool = True,
+                 auto_sort: bool = False):
+        """Initialize the transformer.
+
+        Args:
+            time_col: Nom de la colonne temporelle
+            panel_cols: Colonnes identifiant les dimensions du panel
+            validate_input: Active ou désactive la validation des données d'entrée
+            strict_validation: Si True, lève des erreurs; si False, émet des warnings
+            auto_sort: Si True, trie automatiquement les données mal ordonnées
+        """
         self.time_col = time_col
         self.panel_cols = panel_cols
         self.validate_input = validate_input
+        self.strict_validation = strict_validation
+        self.auto_sort = auto_sort
     
     def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> 'PanelTimeSeriesTransformer':
         """Fit the transformer.
@@ -199,75 +220,95 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         pass
     
     def _validate_input(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Validate input data.
-        
+        """Validate input data with comprehensive temporal checks.
+
+        Validation complète incluant:
+        - Type et présence des colonnes
+        - Validation temporelle (index ou colonne)
+        - Unicité des combinaisons (entity, date)
+        - Tri temporel global et intra-groupe (panel)
+        - Groupement contigü des entités (panel)
+
         Args:
             X: Input data
-            
+
         Returns:
-            Validated data
-            
+            Validated (et potentiellement trié si auto_sort=True)
+
         Raises:
             ValueError: If validation fails
         """
+        # 1. Vérification type de base
         if not isinstance(X, pd.DataFrame):
             raise ValueError("Input must be a pandas DataFrame")
-        
-        # Vérification des colonnes panel si spécifiées
+
+        # 2. Vérification colonnes panel
         if self.panel_cols:
             missing_cols = set(self.panel_cols) - set(X.columns)
             if missing_cols:
                 raise ValueError(f"Panel columns not found: {missing_cols}")
-        
-        # Vérification de la colonne temporelle ou index
+
+        # 3. Vérification colonne/index temporel (méthode existante)
         try:
             self._validate_time_index(X, self.time_col)
         except ValueError as e:
             raise ValueError(f"Time validation failed: {str(e)}")
-        
-        return X
 
+        # 4. Validation complète via validate_temporal_data
+        try:
+            X_validated = validate_temporal_data(
+                data=X,
+                time_col=self.time_col if self.time_col in X.columns else None,
+                panel_cols=self.panel_cols,
+                strict=self.strict_validation,
+                sort_data=self.auto_sort,  # Tri auto si demandé
+                return_metadata=False
+            )
+        except ValueError as e:
+            if self.strict_validation:
+                raise ValueError(f"Temporal data validation failed: {str(e)}")
+            else:
+                warnings.warn(f"Temporal data validation warning: {str(e)}")
+                X_validated = X
 
-class StatefulTransformerMixin:
-    """Mixin for transformers that maintain state between fit and transform.
-    
-    Provides utilities for saving and loading transformer state.
-    """
-    
-    def get_state(self) -> Dict[str, Any]:
-        """Get the current state of the transformer.
-        
-        Returns:
-            Dictionary containing transformer state
-        """
-        state = {}
-        
-        # Sauvegarde des attributs qui se terminent par '_'
-        for attr_name in dir(self):
-            if attr_name.endswith('_') and not attr_name.startswith('_'):
-                attr_value = getattr(self, attr_name)
-                
-                # Sérialisation basique pour les types courants
-                if isinstance(attr_value, (dict, list, tuple, str, int, float, bool, type(None))):
-                    state[attr_name] = attr_value
-                elif isinstance(attr_value, pd.DataFrame):
-                    state[attr_name] = attr_value.to_dict('records')
-                elif isinstance(attr_value, pd.Series):
-                    state[attr_name] = attr_value.to_dict()
-                elif isinstance(attr_value, np.ndarray):
-                    state[attr_name] = attr_value.tolist()
-        
-        return state
-    
-    def set_state(self, state: Dict[str, Any]) -> None:
-        """Set the transformer state.
-        
-        Args:
-            state: Dictionary containing transformer state
-        """
-        for attr_name, attr_value in state.items():
-            setattr(self, attr_name, attr_value)
+        # 5. Validations spécifiques panel
+        if self.panel_cols:
+            # Vérification groupement des entités
+            if not validate_entities_grouped(X_validated, panel_cols=self.panel_cols):
+                msg = (
+                    "Panel entities are not contiguous. "
+                    "Consider sorting by panel_cols or enabling auto_sort=True"
+                )
+                if self.strict_validation:
+                    raise ValueError(msg)
+                else:
+                    warnings.warn(msg)
 
+            # Vérification tri intra-groupe
+            if not validate_sorted_within_groups(
+                X_validated,
+                panel_cols=self.panel_cols,
+                time_col=self.time_col if self.time_col in X.columns else None
+            ):
+                msg = (
+                    "Time series not sorted within panel groups. "
+                    "Consider enabling auto_sort=True"
+                )
+                if self.strict_validation:
+                    raise ValueError(msg)
+                else:
+                    warnings.warn(msg)
+
+        # 6. Validation série temporelle simple (non-panel)
+        elif isinstance(X_validated.index, pd.DatetimeIndex):
+            if not X_validated.index.is_monotonic_increasing:
+                msg = "Time series index is not sorted"
+                if self.strict_validation:
+                    raise ValueError(msg)
+                else:
+                    warnings.warn(msg)
+
+        return X_validated
 
 class ReversibleTransformerMixin:
     """Mixin for transformers that support inverse transformation.
@@ -306,137 +347,3 @@ class ReversibleTransformerMixin:
         if not X.index.equals(X_transformed.index):
             self.original_index_ = X.index
             self.transformed_index_ = X_transformed.index
-
-
-class WindowedTransformerMixin:
-    """Mixin for transformers that use sliding windows.
-    
-    Provides utilities for window-based operations.
-    """
-    
-    def _create_windows(self, 
-                       X: pd.DataFrame, 
-                       window_size: int,
-                       step_size: int = 1,
-                       min_periods: Optional[int] = None) -> List[pd.DataFrame]:
-        """Create sliding windows from data.
-        
-        Args:
-            X: Input data
-            window_size: Size of each window
-            step_size: Step between windows
-            min_periods: Minimum observations in window
-            
-        Returns:
-            List of DataFrame windows
-        """
-        if min_periods is None:
-            min_periods = window_size
-        
-        windows = []
-        
-        for i in range(0, len(X) - window_size + 1, step_size):
-            window = X.iloc[i:i + window_size]
-            
-            # Vérification du nombre minimal d'observations non-nulles
-            if window.notna().sum().sum() >= min_periods:
-                windows.append(window)
-        
-        return windows
-    
-    def _apply_to_windows(self,
-                         X: pd.DataFrame,
-                         func: callable,
-                         window_size: int,
-                         **kwargs) -> pd.DataFrame:
-        """Apply a function to sliding windows.
-        
-        Args:
-            X: Input data
-            func: Function to apply to each window
-            window_size: Size of window
-            **kwargs: Additional arguments for window creation
-            
-        Returns:
-            DataFrame with results
-        """
-        windows = self._create_windows(X, window_size, **kwargs)
-        
-        results = []
-        for window in windows:
-            result = func(window)
-            results.append(result)
-        
-        # Concaténation des résultats
-        if results and isinstance(results[0], pd.DataFrame):
-            return pd.concat(results, axis=0)
-        elif results and isinstance(results[0], pd.Series):
-            return pd.DataFrame(results)
-        else:
-            return pd.DataFrame(results, index=range(len(results)))
-
-
-class CachedTransformerMixin:
-    """Mixin for transformers with caching capabilities.
-    
-    Provides caching functionality to avoid redundant computations.
-    """
-    
-    def __init__(self, cache_size: int = 100):
-        """Initialize the cache.
-        
-        Args:
-            cache_size: Maximum number of cached results
-        """
-        self.cache_size = cache_size
-        self._cache = {}
-        self._cache_keys = []
-    
-    def _get_cache_key(self, X: pd.DataFrame) -> str:
-        """Generate cache key for data.
-        
-        Args:
-            X: Input data
-            
-        Returns:
-            Cache key
-        """
-        # Utilisation d'un hash simple basé sur la forme et quelques valeurs
-        shape_str = f"{X.shape}"
-        sample_values = X.iloc[:5, :5].values.flatten() if X.shape[0] >= 5 else X.values.flatten()
-        sample_str = str(sample_values[:10])
-        
-        return f"{shape_str}_{sample_str}_{X.columns.tolist()}"
-    
-    def _get_from_cache(self, key: str) -> Optional[Any]:
-        """Get result from cache.
-        
-        Args:
-            key: Cache key
-            
-        Returns:
-            Cached result or None
-        """
-        return self._cache.get(key)
-    
-    def _add_to_cache(self, key: str, result: Any) -> None:
-        """Add result to cache.
-        
-        Args:
-            key: Cache key
-            result: Result to cache
-        """
-        # Gestion de la taille du cache
-        if key not in self._cache and len(self._cache) >= self.cache_size:
-            # Suppression du plus ancien élément (FIFO)
-            oldest_key = self._cache_keys.pop(0)
-            del self._cache[oldest_key]
-        
-        self._cache[key] = result
-        if key not in self._cache_keys:
-            self._cache_keys.append(key)
-    
-    def clear_cache(self) -> None:
-        """Clear the cache."""
-        self._cache.clear()
-        self._cache_keys.clear()
