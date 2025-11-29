@@ -6,9 +6,7 @@ by converting frequencies and aggregating delays across time series.
 # Importation des modules
 # Modules de base
 import pandas as pd
-import numpy as np
 from typing import List, Optional, Union, Literal
-from datetime import datetime
 
 # Modules du package
 from ..utils.frequency import normalize_frequency, is_higher_frequency, to_pandas_freq
