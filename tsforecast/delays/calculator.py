@@ -34,16 +34,16 @@ def calculate_applicable_delay(
     **Important behavior for higher frequency conversions:**
 
     When converting to a higher frequency (e.g., quarterly to monthly), the
-    sub-period used as reference depends on the original reference_point:
+    sub-period used as reference is determined by identifying which sub-period
+    contains the observation_date.
 
-    - If original reference_point='start': Uses the first sub-period that
-      coincides with the start of the original period (e.g., January for Q1)
-    - If original reference_point='end': Uses the last sub-period that
-      coincides with the end of the original period (e.g., March for Q1)
+    For example, when converting quarterly data (Q1 = Jan-Feb-Mar) to monthly:
+    - If observation_date is in January: The target period is January
+    - If observation_date is in February: The target period is February
+    - If observation_date is in March: The target period is March
 
-    This ensures consistency: if a quarterly series references the end of
-    the quarter, the monthly conversion will reference the end of the last
-    month of that quarter.
+    This ensures that the delay is calculated relative to the specific
+    sub-period when the observation actually occurred.
 
     Args:
         publication_delays: DataFrame returned by compare_and_detect_delays()
@@ -237,10 +237,12 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
     2. **Determination of target period**: Calculates the period boundaries
        at the target frequency. The logic differs based on frequency conversion:
 
-       - **Higher frequency** (e.g., quarterly → monthly): Selects the sub-period
-         that coincides with the original reference point:
-         * If reference_point='start': First sub-period (e.g., January for Q1)
-         * If reference_point='end': Last sub-period (e.g., March for Q1)
+       - **Higher frequency** (e.g., quarterly → monthly): Identifies the sub-period
+         that contains the observation_date. For example, if converting Q1 (Jan-Mar)
+         to monthly:
+         * If observation_date is in January: Uses January as target period
+         * If observation_date is in February: Uses February as target period
+         * If observation_date is in March: Uses March as target period
 
        - **Equal/lower frequency** (e.g., monthly → quarterly): Uses the period
          containing the observation_date at the target frequency.
@@ -268,8 +270,9 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
 
     Examples:
         >>> # Q1 2024 data (Jan 1 - Mar 31), published 45 days after quarter end
-        >>> # Convert to monthly with 'start' reference
+        >>> # Observation occurred in March, convert to monthly with 'start' reference
         >>> row = pd.Series({
+        ...     'observation_date': pd.Timestamp('2024-03-15'),
         ...     'period_start': pd.Timestamp('2024-01-01'),
         ...     'period_end': pd.Timestamp('2024-03-31'),
         ...     'reference_point': 'end',
@@ -280,7 +283,7 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
         ... })
         >>> result = _calculate_converted_delay(row, 'start')
         # Download date: Mar 31 + 45 days = May 15
-        # Target period: March 2024 (Mar 1 - Mar 31) because reference_point='end'
+        # Target period: March 2024 (Mar 1 - Mar 31) because observation_date is in March
         # Converted delay: May 15 - Mar 1 = 75 days
     """
     # Reconstruction de la date de téléchargement originale
@@ -310,15 +313,33 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
     
     # Détermination de la période de référence pour la fréquence cible
     if is_higher_frequency(target_freq_normalized, current_freq_normalized):
-        # Fréquence plus élevée : on choisit la sous-période selon le point de référence original
-        # Si reference_point='start' : on prend la première sous-période (ex: janvier pour Q1)
-        # Si reference_point='end' : on prend la dernière sous-période (ex: mars pour Q1)
-        if row['reference_point'] == 'start':
-            # Première sous-période : on utilise period_start
-            reference_date_for_subperiod = row['period_start']
-        else:
-            # Dernière sous-période : on utilise period_end
-            reference_date_for_subperiod = row['period_end']
+        # Fréquence plus élevée : on identifie la sous-période qui coïncide avec observation_date
+        # Génération de toutes les sous-périodes dans la période originale
+        target_freq_pandas = to_pandas_freq(target_freq_normalized)
+        subperiods = pd.date_range(
+            start=row['period_start'],
+            end=row['period_end'],
+            freq=target_freq_pandas
+        )
+
+        # Identification de la sous-période qui contient observation_date
+        # On cherche la sous-période dont les bornes englobent observation_date
+        observation_date = row['observation_date']
+        reference_date_for_subperiod = None
+
+        for subperiod_date in subperiods:
+            subperiod_start, subperiod_end = get_period_boundaries(
+                date=subperiod_date,
+                frequency=target_freq_normalized
+            )
+            # Vérification si observation_date se trouve dans cette sous-période
+            if subperiod_start <= observation_date < subperiod_end:
+                reference_date_for_subperiod = subperiod_date
+                break
+
+        # Si aucune sous-période ne correspond (cas limite), on utilise la dernière
+        if reference_date_for_subperiod is None:
+            reference_date_for_subperiod = subperiods[-1]
 
         target_period_start, target_period_end = get_period_boundaries(
             date=reference_date_for_subperiod,
