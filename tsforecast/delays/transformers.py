@@ -18,206 +18,6 @@ from ..utils.time import resolve_date
 from ..utils.base_transformers import PanelTimeSeriesTransformer, ReversibleTransformerMixin
 
 
-
-# Fonctions utilitaires de conversion des formats de délais
-# Fonction de convertion d'un dictionnaire de délais en DataFrame
-def delays_dict_to_dataframe(
-    delays_dict: Dict[Union[str, Tuple[str, str]], float],
-    unit: str = 'D'
-) -> pd.DataFrame:
-    """Convert delays dictionary to DataFrame format.
-
-    Convertit un dictionnaire de délais en DataFrame compatible avec
-    le format retourné par calculate_applicable_delay().
-
-    Args:
-        delays_dict: Dictionary of delays {indicator: delay} or {(entity, indicator): delay}
-        unit: Unit of delays ('D' for days, 's' for seconds, 'us' for microseconds)
-
-    Returns:
-        DataFrame with columns: applicable_delay, unit, indicator (and entity if panel)
-
-    Examples:
-        >>> # Simple time series format
-        >>> delays = {'GDP': 45.0, 'inflation': 30.0}
-        >>> df = delays_dict_to_dataframe(delays)
-        >>>
-        >>> # Panel data format
-        >>> panel_delays = {('France', 'GDP'): 45.0, ('Germany', 'GDP'): 38.0}
-        >>> df = delays_dict_to_dataframe(panel_delays)
-    """
-    # Détection du format (time series vs panel)
-    is_panel = any(isinstance(k, tuple) for k in delays_dict.keys())
-
-    if is_panel:
-        # Format panel: extraction des entités et indicateurs
-        data = []
-        for key, delay in delays_dict.items():
-            if isinstance(key, tuple):
-                entity, indicator = key
-                data.append({
-                    'entity': entity,
-                    'indicator': indicator,
-                    'applicable_delay': delay,
-                    'unit': unit
-                })
-            else:
-                # Clé non-tuple dans un contexte panel (on suppose que c'est un indicateur seul)
-                data.append({
-                    'entity': None,
-                    'indicator': key,
-                    'applicable_delay': delay,
-                    'unit': unit
-                })
-        # Création du jeu de données
-        df = pd.DataFrame(data)
-        # Création du MultiIndex uniquement si toutes les entités sont non-null
-        if df['entity'].notna().all():
-            df = df.set_index(['entity', 'indicator'])
-        else:
-            df = df.set_index('indicator')
-            df = df.drop(columns=['entity'])
-    else:
-        # Format time series simple
-        data = []
-        for indicator, delay in delays_dict.items():
-            data.append({
-                'indicator': indicator,
-                'applicable_delay': delay,
-                'unit': unit
-            })
-        df = pd.DataFrame(data)
-        df = df.set_index('indicator')
-
-    return df
-
-# Conversion d'un DataFrame en dictionnaire de délais de publication
-def delays_dataframe_to_dict(
-    delays_df: pd.DataFrame,
-    use_entity: bool = None
-) -> Dict[Union[str, Tuple[str, str]], float]:
-    """Convert delays DataFrame to dictionary format.
-
-    Convertit un DataFrame de délais (format calculate_applicable_delay)
-    en dictionnaire compatible avec PublicationDelayTransformer.
-
-    Args:
-        delays_df: DataFrame with 'applicable_delay' column and index on indicator
-                   (and optionally entity)
-        use_entity: If True, uses (entity, indicator) format. If None, auto-detected.
-
-    Returns:
-        Dictionary {indicator: delay} or {(entity, indicator): delay}
-
-    Raises:
-        ValueError: If 'applicable_delay' column is missing
-
-    Examples:
-        >>> # DataFrame from calculate_applicable_delay
-        >>> df = pd.DataFrame({'applicable_delay': [45.0, 30.0]},
-        ...                   index=pd.Index(['GDP', 'inflation'], name='indicator'))
-        >>> delays_dict = delays_dataframe_to_dict(df)
-        >>> # Returns: {'GDP': 45.0, 'inflation': 30.0}
-    """
-    # Validation de la présence de la colonne applicable_delay
-    if 'applicable_delay' not in delays_df.columns:
-        raise ValueError(
-            "DataFrame must contain 'applicable_delay' column. "
-            "Expected format from calculate_applicable_delay()"
-        )
-
-    # Détection automatique du format si use_entity est None
-    if use_entity is None:
-        use_entity = isinstance(delays_df.index, pd.MultiIndex)
-
-    # Initialisation du dictionnaire résultat
-    delays_dict = {}
-
-    if use_entity and isinstance(delays_df.index, pd.MultiIndex):
-        # Format panel: (entity, indicator) -> delay
-        for idx, row in delays_df.iterrows():
-            # MultiIndex: idx est un tuple (entity, indicator, ...)
-            delays_dict[idx] = row['applicable_delay']
-    else:
-        # Format time series: indicator -> delay
-        for idx, row in delays_df.iterrows():
-            delays_dict[idx] = row['applicable_delay']
-
-    return delays_dict
-
-# Fonction auxiliaire de validation des paramètres de délais de publication
-def _validate_delays_parameter(
-    delays: Union[Dict, pd.DataFrame],
-    panel_cols: Optional[List[str]] = None
-) -> None:
-    """Validate delays parameter structure.
-
-    Valide la structure du paramètre delays selon qu'il s'agit
-    d'un dictionnaire ou d'un DataFrame.
-
-    Args:
-        delays: Dictionary or DataFrame of delays
-        panel_cols: Panel columns to determine expected format
-
-    Raises:
-        ValueError: If structure is invalid
-        TypeError: If type is neither Dict nor DataFrame
-    """
-    # Détection de la structure de panel
-    is_panel = panel_cols is not None and len(panel_cols) > 0
-
-    # Distinction suivant le type de l'argument
-    if isinstance(delays, dict):
-        # Validation du dictionnaire
-        if len(delays) == 0:
-            warnings.warn("Empty delays dictionary provided")
-            return
-
-        # Vérification de la cohérence des clés
-        first_key = next(iter(delays.keys()))
-        is_tuple_key = isinstance(first_key, tuple)
-
-        # Pour panel data, les clés devraient être des tuples
-        if is_panel and not is_tuple_key:
-            warnings.warn(
-                "Panel data detected but delays keys are not tuples. "
-                "Expected format: {(entity, indicator): delay}"
-            )
-
-        # Vérification que toutes les valeurs sont numériques
-        for key, value in delays.items():
-            if not isinstance(value, (int, float, np.number)):
-                raise ValueError(
-                    f"Delay value for {key} must be numeric, got {type(value)}"
-                )
-
-    elif isinstance(delays, pd.DataFrame):
-        # Validation du DataFrame
-        if 'applicable_delay' not in delays.columns:
-            raise ValueError(
-                "DataFrame must contain 'applicable_delay' column. "
-                "Expected format from calculate_applicable_delay()"
-            )
-
-        # Vérification que l'index est approprié
-        if is_panel and not isinstance(delays.index, pd.MultiIndex):
-            warnings.warn(
-                "Panel data detected but DataFrame index is not MultiIndex. "
-                "Expected MultiIndex with (entity, indicator)"
-            )
-
-        # Vérification des valeurs numériques
-        if not pd.api.types.is_numeric_dtype(delays['applicable_delay']):
-            raise ValueError(
-                "'applicable_delay' column must contain numeric values"
-            )
-
-    else:
-        raise TypeError(
-            f"delays must be Dict or DataFrame, got {type(delays)}"
-        )
-
-
 # Classe d'application des délais de publication
 class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixin):
     """Sklearn transformer for applying publication delays.
@@ -278,6 +78,7 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
     # Initialisation
     def __init__(self,
                  delays: Union[Dict[Union[str, tuple], float], pd.DataFrame],
+                 delays_unit: Optional[str] = None,
                  mode: str = 'shift',
                  prediction_date: Union[str, datetime] = 'today',
                  prediction_date_format: Optional[str] = None,
@@ -293,6 +94,8 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
 
         Args:
             delays: Dictionary or DataFrame of delays by indicator
+            delays_unit: Unit of delays ('D' for days, 's' for seconds, etc.).
+                        If None, inferred from DataFrame 'unit' column or defaults to 'D'
             mode: Transformation mode ('shift' or 'mask')
             prediction_date: Reference date ('today' or datetime)
             reference_point: Reference point ('start' or 'end')
@@ -316,16 +119,33 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
         # Validation des paramètres
         # Validation du mode d'application des délais de publication
         if mode not in ['shift', 'mask']:
-            raise ValueError("mode must be 'shift' or 'mask'")
+            raise ValueError("'mode' must be 'shift' or 'mask'")
         # Validation du point de référence des délais de publication
         if reference_point not in ['start', 'end']:
-            raise ValueError("reference_point must be 'start' or 'end'")
+            raise ValueError("'reference_point' must be 'start' or 'end'")
         # Validation de la gestion des délais manquants
         if handle_missing_delays not in ['ignore', 'warn', 'error']:
-            raise ValueError("handle_missing_delays must be 'ignore', 'warn' or 'error'")
+            raise ValueError("'handle_missing_delays' must be 'ignore', 'warn' or 'error'")
 
         # Validation de la structure du paramètre delays
         _validate_delays_parameter(delays, panel_cols)
+
+        # Inférence de l'unité des délais si non fournie
+        if delays_unit is None:
+            if isinstance(delays, pd.DataFrame):
+                # Inférence depuis le DataFrame si colonne 'unit' présente
+                if 'unit' in delays.columns:
+                    # Une seule unité par transformer (utilise la première valeur)
+                    self.delays_unit = delays['unit'].iloc[0]
+                else:
+                    # Défaut si colonne 'unit' absente
+                    self.delays_unit = 'D'
+            else:
+                # Défaut pour les dictionnaires
+                self.delays_unit = 'D'
+        else:
+            # Utilisation de la valeur explicite
+            self.delays_unit = delays_unit
 
         # Assignation des paramètres
         self.delays = delays
@@ -337,7 +157,7 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
         self.default_delay = default_delay
 
         # Attributs à définir lors du fit
-        self.delays_dict_ = None
+        self.delays_series_ = None
         self.mode_ = mode
         self.prediction_date_ = None
         self.reference_point_ = reference_point
@@ -355,24 +175,26 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
         # Résolution de la date de prédiction
         self.prediction_date_ = resolve_date(date=self.prediction_date, format=self.prediction_date_format)
 
-        # Obtention du dictionnaire des délais
+        # Création de la Series des délais
         if self.delays is not None:
-            # Conversion en dictionnaire si nécessaire
             if isinstance(self.delays, pd.DataFrame):
-                # Conversion DataFrame -> Dict avec préservation de l'unité
-                self.delays_dict_ = delays_dataframe_to_dict(
-                    self.delays,
-                    use_entity=self.is_panel_
-                )
-                # Stockage de l'unité pour get_delays_as_dataframe()
-                if 'unit' in self.delays.columns:
-                    self._delays_unit = self.delays['unit'].iloc[0]
-                else:
-                    self._delays_unit = 'D'
+                # Conversion DataFrame -> Series
+                self.delays_series_ = self.delays['applicable_delay']
+
             elif isinstance(self.delays, dict):
-                # Copie directe du dictionnaire
-                self.delays_dict_ = self.delays.copy()
-                self._delays_unit = 'D'  # Défaut pour dicts
+                # Conversion directe Dict -> Series
+                self.delays_series_ = pd.Series(self.delays)
+
+                # Nommage des niveaux de l'index
+                if isinstance(self.delays_series_.index, pd.MultiIndex):
+                    # Détermination du nombre de niveaux d'entités
+                    n_levels = self.delays_series_.index.nlevels
+                    # Noms des niveaux : entity_1, ..., entity_N, indicator
+                    level_names = [f'entity_{i}' for i in range(1, n_levels)] + ['indicator']
+                    self.delays_series_.index.names = level_names
+                else:
+                    # Index simple : nom 'indicator'
+                    self.delays_series_.index.name = 'indicator'
             else:
                 raise TypeError(
                     f"delays must be Dict or DataFrame, got {type(self.delays)}"
@@ -385,7 +207,7 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
             'mode': self.mode_,
             'prediction_date': self.prediction_date_,
             'reference_point': self.reference_point_,
-            'delays_count': len(self.delays_dict_),
+            'delays_count': len(self.delays_series_),
             'original_shape': X.shape,
             'original_columns': list(X.columns)
         }
@@ -425,7 +247,7 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
             ValueError: If transformation cannot be reversed
         """
         # Vérification que le transformer est estimé
-        check_is_fitted(self, 'delays_dict_')
+        check_is_fitted(self, 'delays_series_')
 
         # Vérification que les données originales sont renseignées
         if self.original_data_ is None:
@@ -433,11 +255,16 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
 
         # Distinction suivant le mode de transformation
         if self.mode_ == 'shift':
-            return self._reverse_shift_transformation(X)
+            X_restored = self._reverse_shift_transformation(X)
         elif self.mode_ == 'mask':
-            return self._reverse_mask_transformation(X)
+            X_restored = self._reverse_mask_transformation(X)
         else:
             raise ValueError(f"Unknown transformation mode for inversion: {self.mode_}")
+
+        # Restauration de la structure originale si conversion appliquée
+        X_restored = self._restore_structure_if_converted(X_restored)
+
+        return X_restored
 
     # Méthode d'application que la transformation par décalage
     def _apply_shift_transformation(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -516,43 +343,33 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
 
     # Méthode auxiliaire du délai valable
     def _get_delay_for_column(self,
-                             column: str,
-                             X: pd.DataFrame) -> Optional[float]:
+                             column: str) -> Optional[Union[float, pd.Series]]:
         """Get delay for a given column.
 
+        Recherche le délai de publication pour une colonne donnée, avec support
+        des structures multi-niveaux et fallback sur l'indicateur seul.
+
         Args:
-            column: Column name
-            X: Data (for panel context if needed)
+            column: Column name (indicator)
 
         Returns:
-            Delay in days or None if not found
+            Delay value or None if not found
         """
         # Initialisation du délai
         delay = None
 
-        if self.is_panel_:
-            # Pour données panel, chercher avec les entités
-            # Note: cette implémentation suppose une seule entité par DataFrame
-            # Pour plusieurs entités, il faudrait grouper par entité
-            if self.panel_cols:
-                # Extraction de la première entité comme exemple
-                first_row = X.iloc[0]
-                entity_parts = []
-                for pcol in self.panel_cols:
-                    if pcol in first_row:
-                        entity_parts.append(str(first_row[pcol]))
-                entity_key = '|'.join(entity_parts) if entity_parts else None
-
-                # Tentative avec clé entité-indicateur
-                if entity_key:
-                    delay = self.delays_dict_.get((entity_key, column))
-
-                # Fallback sur indicateur seul
-                if delay is None:
-                    delay = self.delays_dict_.get(column)
+        if self.is_panel_ and self.panel_cols:
+            # Extraction des valeurs d'entité et de leur délai associé
+            try:
+                delay = self.delays_series_.xs(key=column, level='indicator')
+            except KeyError:
+                delay = None
         else:
-            # Pour série temporelle simple
-            delay = self.delays_dict_.get(column)
+            # Série temporelle simple : lookup direct sur l'indicateur
+            try:
+                delay = self.delays_series_.loc[column]
+            except KeyError:
+                delay = None
 
         # Gestion des délais manquants
         if delay is None:
@@ -565,6 +382,7 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
 
         return delay
 
+    # Méthode auxiliaire de shift pour les séries temporelles
     def _shift_column_timeseries(self,
                                 X: pd.DataFrame,
                                 column: str,
@@ -771,45 +589,68 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
         Returns:
             Dictionary containing transformation information
         """
-        check_is_fitted(self, 'delays_dict_')
+        check_is_fitted(self, 'delays_series_')
 
         return {
             'mode': self.mode_,
             'prediction_date': self.prediction_date_.isoformat() if self.prediction_date_ else None,
             'reference_point': self.reference_point_,
-            'delays_applied': dict(self.delays_dict_),
+            'delays_applied': self.delays_series_.to_dict(),
             'transformation_metadata': self.transformation_metadata_,
             'is_panel_data': self.is_panel_,
             'time_column': self.time_col,
             'panel_columns': self.panel_cols
         }
 
-    def update_delays(self, new_delays: Dict[Union[str, Tuple[str, str]], float]) -> None:
-        """Update delays dictionary.
+    def update_delays(self, new_delays: Union[Dict[Union[str, tuple], float], pd.Series]) -> None:
+        """Update delays series.
+
+        Accepte soit un dictionnaire, soit une Series pandas pour mettre à jour
+        les délais existants.
 
         Args:
-            new_delays: New delays dictionary
+            new_delays: New delays (Dict or pandas.Series)
 
         Raises:
             RuntimeError: If transformer has not been fitted
         """
-        check_is_fitted(self, 'delays_dict_')
+        check_is_fitted(self, 'delays_series_')
 
-        self.delays_dict_.update(new_delays)
+        # Conversion en Series si Dict fourni
+        if isinstance(new_delays, dict):
+            new_delays_series = pd.Series(new_delays)
+        elif isinstance(new_delays, pd.Series):
+            new_delays_series = new_delays
+        else:
+            raise TypeError(f"new_delays must be Dict or Series, got {type(new_delays)}")
+
+        # Fusion avec la Series existante (update)
+        # pd.Series.update() modifie en place, donc on utilise combine_first
+        self.delays_series_ = new_delays_series.combine_first(self.delays_series_)
 
         # Mise à jour des métadonnées
         self.transformation_metadata_['delays_updated'] = datetime.utcnow()
-        self.transformation_metadata_['delays_count'] = len(self.delays_dict_)
+        self.transformation_metadata_['delays_count'] = len(self.delays_series_)
 
-    def get_available_delays(self) -> Dict[Union[str, Tuple[str, str]], float]:
-        """Return dictionary of currently available delays.
+    def get_available_delays(self) -> pd.Series:
+        """Return Series of currently available delays.
+
+        BREAKING CHANGE: Retourne maintenant une pandas.Series au lieu d'un Dict.
+        Utiliser `.to_dict()` si un dictionnaire est nécessaire.
 
         Returns:
-            Dictionary of delays by indicator/entity
+            Series of delays with Index (time series) or MultiIndex (panel data)
+
+        Examples:
+            >>> transformer = PublicationDelayTransformer(delays={'GDP': 45.0, 'inflation': 30.0})
+            >>> transformer.fit(X)
+            >>> delays_series = transformer.get_available_delays()
+            >>> # Pour obtenir un Dict :
+            >>> delays_dict = delays_series.to_dict()
         """
-        if self.delays_dict_ is None:
-            return {}
-        return self.delays_dict_.copy()
+        if self.delays_series_ is None:
+            return pd.Series(dtype=float)
+        return self.delays_series_.copy()
 
     def get_delays_as_dataframe(self) -> pd.DataFrame:
         """Return delays in DataFrame format.
@@ -819,7 +660,7 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
 
         Returns:
             DataFrame with columns: applicable_delay, unit
-            Index: indicator or MultiIndex(entity, indicator)
+            Index: indicator or MultiIndex(entity_1, ..., entity_N, indicator)
 
         Raises:
             RuntimeError: If transformer has not been fitted yet
@@ -832,20 +673,28 @@ class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransfor
             >>> print(df.columns)
             Index(['applicable_delay', 'unit'], dtype='object')
             >>>
-            >>> # Panel data example
+            >>> # Panel data example (2-level)
             >>> delays = {('France', 'GDP'): 45.0, ('Germany', 'GDP'): 38.0}
             >>> transformer = PublicationDelayTransformer(delays=delays, panel_cols=['country'])
             >>> transformer.fit(X)
             >>> df = transformer.get_delays_as_dataframe()
             >>> print(df.index.names)
-            ['entity', 'indicator']
+            ['entity_1', 'indicator']
+            >>>
+            >>> # Panel data example (multi-level)
+            >>> delays = {('France', 'Paris', 'GDP'): 45.0, ('France', 'Lyon', 'GDP'): 48.0}
+            >>> transformer = PublicationDelayTransformer(delays=delays, panel_cols=['country', 'city'])
+            >>> transformer.fit(X)
+            >>> df = transformer.get_delays_as_dataframe()
+            >>> print(df.index.names)
+            ['entity_1', 'entity_2', 'indicator']
         """
-        if self.delays_dict_ is None:
+        if self.delays_series_ is None:
             raise RuntimeError("Transformer has not been fitted yet")
 
         return delays_dict_to_dataframe(
-            self.delays_dict_,
-            unit=getattr(self, '_delays_unit', 'D')
+            self.delays_series_.to_dict(),
+            unit=self.delays_unit
         )
 
 
@@ -920,5 +769,182 @@ def create_delay_transformer_from_dict(
     )
 
 
-# Alias pour compatibilité arrière
-ReleaseDelayTransformer = PublicationDelayTransformer
+# Fonctions utilitaires de conversion des formats de délais
+# Fonction de convertion d'un dictionnaire de délais en DataFrame
+def delays_dict_to_dataframe(
+    delays_dict: Dict[Union[str, tuple], float],
+    unit: str = 'D'
+) -> pd.DataFrame:
+    """Convert delays dictionary to DataFrame format.
+
+    Convertit un dictionnaire de délais en DataFrame compatible avec
+    le format retourné par calculate_applicable_delay(). Supporte les tuples
+    multi-niveaux où les n-1 premiers éléments sont des entités et le dernier
+    est l'indicateur.
+
+    Args:
+        delays_dict: Dictionary of delays {indicator: delay} or {(*entities, indicator): delay}
+                    where tuple can have 2+ elements (entity1, ..., entityN, indicator)
+        unit: Unit of delays ('D' for days, 's' for seconds, 'us' for microseconds)
+
+    Returns:
+        DataFrame with columns: applicable_delay, unit
+        Index: 'indicator' for time series, or MultiIndex(['entity_1', ..., 'entity_N', 'indicator']) for panel
+
+    Examples:
+        >>> # Simple time series format
+        >>> delays = {'GDP': 45.0, 'inflation': 30.0}
+        >>> df = delays_dict_to_dataframe(delays)
+        >>>
+        >>> # Panel data format (2-level)
+        >>> panel_delays = {('France', 'GDP'): 45.0, ('Germany', 'GDP'): 38.0}
+        >>> df = delays_dict_to_dataframe(panel_delays)
+        >>>
+        >>> # Panel data format (multi-level)
+        >>> multi_delays = {('France', 'Paris', 'GDP'): 45.0, ('France', 'Lyon', 'GDP'): 48.0}
+        >>> df = delays_dict_to_dataframe(multi_delays)
+    """
+    # Détection du format (time series vs panel)
+    is_panel = any(isinstance(k, tuple) for k in delays_dict.keys())
+
+    if is_panel:
+        # Détermination du nombre de niveaux d'entités
+        # On cherche la longueur maximale des tuples pour déterminer la structure
+        max_tuple_len = max(len(k) if isinstance(k, tuple) else 1 for k in delays_dict.keys())
+
+        # Vérification de la cohérence : tous les tuples doivent avoir la même longueur
+        tuple_lengths = [len(k) if isinstance(k, tuple) else 1 for k in delays_dict.keys()]
+        if len(set(tuple_lengths)) > 1:
+            raise ValueError(
+                f"Inconsistent tuple lengths in delays_dict: {set(tuple_lengths)}. "
+                "All tuples must have the same length (n-1 entity levels + 1 indicator)."
+            )
+
+        # Format panel: extraction des entités et indicateurs
+        # Pour un tuple de longueur N : éléments [0:N-1] = entités, élément [N-1] = indicateur
+        n_entity_levels = max_tuple_len - 1 if max_tuple_len > 1 else 0
+
+        data = []
+        for key, delay in delays_dict.items():
+            if isinstance(key, tuple) and len(key) >= 2:
+                # Extraction des niveaux d'entités et de l'indicateur
+                entity_values = key[:-1]  # Tous sauf le dernier
+                indicator = key[-1]  # Le dernier élément
+
+                row = {}
+                for i, entity_val in enumerate(entity_values, start=1):
+                    row[f'entity_{i}'] = entity_val
+                row['indicator'] = indicator
+                row['applicable_delay'] = delay
+                row['unit'] = unit
+                data.append(row)
+            else:
+                # Clé non-tuple ou tuple à 1 élément dans un contexte panel
+                # On suppose que c'est un indicateur seul
+                row = {}
+                for i in range(1, n_entity_levels + 1):
+                    row[f'entity_{i}'] = None
+                row['indicator'] = key if not isinstance(key, tuple) else key[0]
+                row['applicable_delay'] = delay
+                row['unit'] = unit
+                data.append(row)
+
+        # Création du DataFrame
+        df = pd.DataFrame(data)
+
+        # Création du MultiIndex si toutes les entités sont non-null
+        entity_cols = [f'entity_{i}' for i in range(1, n_entity_levels + 1)]
+        if all(df[col].notna().all() for col in entity_cols):
+            # Toutes les entités sont présentes : créer MultiIndex
+            index_cols = entity_cols + ['indicator']
+            df = df.set_index(index_cols)
+        else:
+            # Certaines entités manquent : utiliser seulement 'indicator' comme index
+            df = df.set_index('indicator')
+            df = df.drop(columns=entity_cols)
+    else:
+        # Format time series simple
+        data = []
+        for indicator, delay in delays_dict.items():
+            data.append({
+                'indicator': indicator,
+                'applicable_delay': delay,
+                'unit': unit
+            })
+        df = pd.DataFrame(data)
+        df = df.set_index('indicator')
+
+    return df
+
+
+# Fonction auxiliaire de validation des paramètres de délais de publication
+def _validate_delays_parameter(
+    delays: Union[Dict, pd.DataFrame],
+    panel_cols: Optional[List[str]] = None
+) -> None:
+    """Validate delays parameter structure.
+
+    Valide la structure du paramètre delays selon qu'il s'agit
+    d'un dictionnaire ou d'un DataFrame.
+
+    Args:
+        delays: Dictionary or DataFrame of delays
+        panel_cols: Panel columns to determine expected format
+
+    Raises:
+        ValueError: If structure is invalid
+        TypeError: If type is neither Dict nor DataFrame
+    """
+    # Détection de la structure de panel
+    is_panel = panel_cols is not None and len(panel_cols) > 0
+
+    # Distinction suivant le type de l'argument
+    if isinstance(delays, dict):
+        # Validation du dictionnaire
+        if len(delays) == 0:
+            warnings.warn("Empty delays dictionary provided")
+            return
+
+        # Vérification de la cohérence des clés
+        first_key = next(iter(delays.keys()))
+        is_tuple_key = isinstance(first_key, tuple)
+
+        # Pour panel data, les clés devraient être des tuples
+        if is_panel and not is_tuple_key:
+            warnings.warn(
+                "Panel data detected but delays keys are not tuples. "
+                "Expected format: {(entity, indicator): delay}"
+            )
+
+        # Vérification que toutes les valeurs sont numériques
+        for key, value in delays.items():
+            if not isinstance(value, (int, float, np.number)):
+                raise ValueError(
+                    f"Delay value for {key} must be numeric, got {type(value)}"
+                )
+
+    elif isinstance(delays, pd.DataFrame):
+        # Validation du DataFrame
+        if 'applicable_delay' not in delays.columns:
+            raise ValueError(
+                "DataFrame must contain 'applicable_delay' column. "
+                "Expected format from calculate_applicable_delay()"
+            )
+
+        # Vérification que l'index est approprié
+        if is_panel and not isinstance(delays.index, pd.MultiIndex):
+            warnings.warn(
+                "Panel data detected but DataFrame index is not MultiIndex. "
+                "Expected MultiIndex with (entity, indicator)"
+            )
+
+        # Vérification des valeurs numériques
+        if not pd.api.types.is_numeric_dtype(delays['applicable_delay']):
+            raise ValueError(
+                "'applicable_delay' column must contain numeric values"
+            )
+
+    else:
+        raise TypeError(
+            f"delays must be Dict or DataFrame, got {type(delays)}"
+        )
