@@ -119,15 +119,15 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         """Initialize the PanelwiseTransformer.
 
         Args:
-            transformer: Transformer sklearn-compatible à appliquer par entité
-            time_col: Nom de la colonne temporelle
-            panel_cols: Colonnes identifiant les entités du panel
-            validate_input: Active la validation des données d'entrée
-            strict_validation: Si True, lève des erreurs; sinon émet des warnings
-            auto_sort: Si True, trie automatiquement les données
-            convert_cols_to_index: Si True, convertit time_col et panel_cols en index
-            n_jobs: Nombre de jobs parallèles (-1 = tous les processeurs)
-            error_handling: Gestion des erreurs ('raise', 'warn', 'ignore')
+            transformer: Sklearn-compatible transformer to apply per entity.
+            time_col: Name of the time column.
+            panel_cols: Columns identifying panel entities.
+            validate_input: Whether to validate input data.
+            strict_validation: If True, raises errors; otherwise emits warnings.
+            auto_sort: If True, automatically sorts the data.
+            convert_cols_to_index: If True, converts time_col and panel_cols to index.
+            n_jobs: Number of parallel jobs (-1 = all processors).
+            error_handling: Error handling strategy ('raise', 'warn', 'ignore').
         """
         # Initialisation du parent
         super().__init__(
@@ -366,13 +366,36 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         """Inverse transform data using entity-specific transformers.
 
         Args:
-            X: Transformed data
+            X: Transformed data.
 
         Returns:
-            Original data format
+            Original data format.
 
         Raises:
-            AttributeError: If base transformer doesn't support inverse_transform
+            AttributeError: If base transformer doesn't support inverse_transform.
+
+        Examples:
+            >>> import pandas as pd
+            >>> import numpy as np
+            >>> from sklearn.preprocessing import StandardScaler
+            >>>
+            >>> # Create panel data
+            >>> df = pd.DataFrame({
+            ...     'date': pd.date_range('2023-01-01', periods=10).tolist() * 2,
+            ...     'country': ['FR'] * 10 + ['DE'] * 10,
+            ...     'value': np.random.randn(20)
+            ... })
+            >>>
+            >>> # Fit and transform
+            >>> transformer = PanelwiseTransformer(
+            ...     transformer=StandardScaler(),
+            ...     time_col='date',
+            ...     panel_cols=['country']
+            ... )
+            >>> df_scaled = transformer.fit_transform(df)
+            >>>
+            >>> # Inverse transform to get original scale
+            >>> df_original = transformer.inverse_transform(df_scaled)
         """
         # Vérification que l'estimateur a été entraîné
         check_is_fitted(self)
@@ -535,10 +558,26 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         """Get parameters for this estimator.
 
         Args:
-            deep: If True, returns parameters of nested estimators
+            deep: If True, returns parameters of nested estimators.
 
         Returns:
-            Parameter names mapped to their values
+            Parameter names mapped to their values.
+
+        Examples:
+            >>> from sklearn.preprocessing import StandardScaler
+            >>>
+            >>> transformer = PanelwiseTransformer(
+            ...     transformer=StandardScaler(),
+            ...     panel_cols=['country'],
+            ...     n_jobs=2
+            ... )
+            >>>
+            >>> # Get all parameters
+            >>> params = transformer.get_params(deep=True)
+            >>> print(params['n_jobs'])
+            2
+            >>> print(params['transformer__with_mean'])  # nested parameter
+            True
         """
         # Extraction des paramètres du parent
         params = super().get_params(deep=False)
@@ -560,10 +599,26 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         """Set the parameters of this estimator.
 
         Args:
-            **params: Estimator parameters
+            **params: Estimator parameters.
 
         Returns:
-            Self for method chaining
+            Self for method chaining.
+
+        Examples:
+            >>> from sklearn.preprocessing import StandardScaler
+            >>>
+            >>> transformer = PanelwiseTransformer(
+            ...     transformer=StandardScaler(),
+            ...     panel_cols=['country']
+            ... )
+            >>>
+            >>> # Update n_jobs parameter
+            >>> transformer.set_params(n_jobs=4)
+            PanelwiseTransformer(...)
+            >>>
+            >>> # Update nested transformer parameter
+            >>> transformer.set_params(transformer__with_std=False)
+            PanelwiseTransformer(...)
         """
         # Séparation des paramètres du transformer
         transformer_params = {}
@@ -591,14 +646,40 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         """Get the fitted transformer for a specific entity.
 
         Args:
-            entity_key: Entity identifier (tuple ou valeur scalaire)
+            entity_key: Entity identifier (tuple or scalar value).
 
         Returns:
-            Fitted transformer for the entity
+            Fitted transformer for the entity.
 
         Raises:
-            KeyError: If entity not found
-            NotFittedError: If transformer not fitted
+            KeyError: If entity not found.
+            NotFittedError: If transformer not fitted.
+
+        Examples:
+            >>> import pandas as pd
+            >>> import numpy as np
+            >>> from sklearn.preprocessing import StandardScaler
+            >>>
+            >>> # Create and fit transformer
+            >>> df = pd.DataFrame({
+            ...     'date': pd.date_range('2023-01-01', periods=10).tolist() * 2,
+            ...     'country': ['FR'] * 10 + ['DE'] * 10,
+            ...     'value': np.random.randn(20)
+            ... })
+            >>>
+            >>> transformer = PanelwiseTransformer(
+            ...     transformer=StandardScaler(),
+            ...     time_col='date',
+            ...     panel_cols=['country']
+            ... )
+            >>> transformer.fit(df)
+            >>>
+            >>> # Get transformer for France
+            >>> fr_scaler = transformer.get_entity_transformer('FR')
+            >>> print(fr_scaler.mean_)  # Access fitted attributes
+            >>>
+            >>> # For multi-column entities, use tuple
+            >>> de_scaler = transformer.get_entity_transformer(('DE',))
         """
         # Vérification que les transformers sont estimés
         check_is_fitted(self, ['transformers_'])
@@ -616,7 +697,29 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
     # Propriété d'extraction du nombre d'entités pour lesquelles un transformer est estimé
     @property
     def n_entities_(self) -> int:
-        """Number of entities with fitted transformers."""
+        """Number of entities with fitted transformers.
+
+        Examples:
+            >>> import pandas as pd
+            >>> from sklearn.preprocessing import StandardScaler
+            >>>
+            >>> df = pd.DataFrame({
+            ...     'date': pd.date_range('2023-01-01', periods=10).tolist() * 3,
+            ...     'country': ['FR'] * 10 + ['DE'] * 10 + ['IT'] * 10,
+            ...     'value': range(30)
+            ... })
+            >>>
+            >>> transformer = PanelwiseTransformer(
+            ...     transformer=StandardScaler(),
+            ...     time_col='date',
+            ...     panel_cols=['country']
+            ... )
+            >>> transformer.fit(df)
+            >>>
+            >>> # Check number of entities
+            >>> print(transformer.n_entities_)
+            3
+        """
         # Vérification que les transformers sont entraîné
         check_is_fitted(self, ['transformers_'])
         return len(self.transformers_)
