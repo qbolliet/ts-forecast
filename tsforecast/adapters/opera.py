@@ -2,12 +2,12 @@
 # Modules de base
 import numpy as np
 # Sklearn
-from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.base import BaseEstimator
 # Opera
 from opera import Mixture
 
 # Wrapper permettant l'intégration des modèles du package "opera" dans un syntaxe "sklearn-like"
-class OperaAdapter(BaseEstimator, RegressorMixin):
+class OperaAdapter(BaseEstimator):
     """Wrapper sklearn pour opera avec support partial_fit."""
 
     # Initialisation

@@ -1,12 +1,15 @@
 # Importation des modules
+# Modules de base
+from typing import Dict, List, Union
 # Sklearn
-from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.base import BaseEstimator
 # 
 from hierarchicalforecast import HierarchicalReconciliation
 from hierarchicalforecast.methods import MinTrace
 from hierarchicalforecast.utils import aggregate
 
-class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
+# Wrapper permettant l'intégration des modèles du package "hierarchicalforecast" dans un syntaxe "sklearn-like"
+class HierarchicalForecastAdapter(BaseEstimator):
     """Wrapper unifiant forecast + réconciliation."""
     # Initialisation
     def __init__(self, base_forecaster, reconciliation_method='mint_shrink',
@@ -14,7 +17,8 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
         self.base_forecaster = base_forecaster
         self.reconciliation_method = reconciliation_method
         self.hierarchy_spec = hierarchy_spec
-    
+
+    # Méthode d'entraînement du jeu de données
     def fit(self, X, y=None):
         """
         X: DataFrame avec colonnes hiérarchiques + ds + y
@@ -34,8 +38,9 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
             self.Y_fitted_ = self.Y_df_
         
         return self
-    
-    def predict(self, h=None, X=None):
+
+    # Méthode de prédiction
+    def predict(self, X):
         """
         h: horizon de prévision
         """
