@@ -17,7 +17,7 @@ from ..utils.duration import to_code as duration_to_code, convert_duration
 def calculate_applicable_delay(
     publication_delays: pd.DataFrame,
     target_reference_point: Literal['start', 'end'],
-    target_frequency: Union[str, List[str]],
+    target_frequency: str,
     indicators: Optional[List[str]] = None,
     aggregate_by_panel: bool = False,
     aggregation_method: Union[str, callable] = 'median',
@@ -48,9 +48,8 @@ def calculate_applicable_delay(
             containing columns: observation_date, download_date, frequency,
             period_start, period_end, reference_point, release_delay, unit
         target_reference_point: Reference point for delay calculation ('start' or 'end')
-        target_frequency: Target frequency for delay calculation. Can be:
-            - A single frequency string to apply to all indicators
-            - A list of frequency strings (one per indicator in same order)
+        target_frequency: Target frequency for delay calculation (applied to all indicators).
+            Examples: 'monthly', 'M', 'quarterly', 'Q', etc.
         indicators: List of indicators to calculate delays for. If None, uses all
             indicators found in the data.
         aggregate_by_panel: If True, calculate separate delays for each (panel_entity, indicator)
@@ -113,21 +112,10 @@ def calculate_applicable_delay(
         if len(delays) == 0:
             raise ValueError(f"No data found for specified indicators: {indicators}")
     
-    # Gestion de la fréquence cible
-    if isinstance(target_frequency, list):
-        # Vérification que le nombre de fréquences correspond au nombre d'indicateurs
-        unique_indicators = delays.index.get_level_values(indicator_level_name).unique()
-        if len(target_frequency) != len(unique_indicators):
-            raise ValueError(
-                f"Number of target frequencies ({len(target_frequency)}) must match "
-                f"number of indicators ({len(unique_indicators)})"
-            )
-        # Création d'un mapping indicateur -> fréquence cible
-        target_freq_map = dict(zip(unique_indicators, target_frequency))
-    else:
-        # Fréquence unique pour tous les indicateurs
-        unique_indicators = delays.index.get_level_values(indicator_level_name).unique()
-        target_freq_map = {ind: target_frequency for ind in unique_indicators}
+    # Création du mapping indicateur -> fréquence cible
+    # Fréquence unique pour tous les indicateurs
+    unique_indicators = delays.index.get_level_values(indicator_level_name).unique()
+    target_freq_map = {ind: target_frequency for ind in unique_indicators}
     
     # Conversion des délais au point de référence et à la fréquence cibles
     delays = _convert_to_target_frequency_and_reference(

@@ -1,751 +1,696 @@
 """Sklearn-compatible transformers for applying publication delays.
 
-This module provides sklearn API-compatible transformers for applying
-publication delays to time series and panel data.
+This module provides a modular architecture with:
+- ShiftTransformer: Pure helper to shift data by N periods
+- MaskTransformer: Pure helper to mask N observations per period
+- PublicationDelayTransformer: Intelligent orchestrator that handles inference, frequency detection, and panel wrapping
 """
 # Importation des modules
 # Modules de base
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, Union, Tuple, List, Any, Callable
-from datetime import datetime, timedelta
+from typing import Dict, Optional, Union, List, Literal
+from datetime import datetime
 import warnings
+
 # Sklearn
-from sklearn.utils.validation import check_is_fitted
+from sklearn.base import BaseEstimator, TransformerMixin
 
 # Importation des modules du package
-from ..utils.time import resolve_date
-from ..utils.base_transformers import PanelTimeSeriesTransformer, ReversibleTransformerMixin
+from tsforecast.utils.frequency import normalize_frequency, to_pandas_freq
+from tsforecast.utils.time import resolve_date, get_period_boundaries
 
 
-# Classe d'application des délais de publication
-class PublicationDelayTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixin):
-    """Sklearn transformer for applying publication delays.
+class ShiftTransformer(BaseEstimator, TransformerMixin):
+    """Simple helper to shift time series data by N periods.
 
-    This class applies publication delays to data using either
-    a provided delay dictionary or delays calculated from a delay calculator.
-
-    Two transformation modes available:
-    - 'shift': Shifts data according to publication delays
-    - 'mask': Masks observations that would not yet be available
+    This is a pure operational transformer with no inference logic.
+    Panel data handling is done by the orchestrator (PublicationDelayTransformer).
 
     Parameters:
-        delays_dict (Optional[Dict]): Dictionary of delays by indicator/entity
-        delay_calculator (Optional[ReleaseDelayCalculator]): Delay calculator
-        mode (str): Transformation mode ('shift' or 'mask')
-        prediction_date (Union[str, datetime]): Reference prediction date
-        reference_point (str): Reference point for delays ('start' or 'end')
-        time_col (str): Name of time column
-        panel_cols (Optional[List[str]]): Columns identifying panel dimensions
-        handle_missing_delays (str): Strategy for missing delays ('ignore', 'warn', 'error')
-        default_delay (Optional[float]): Default delay if missing
-        validate_input (bool): Validate input data
+        n_periods: Number of periods to shift (can be negative for future predictions)
+        frequency: Frequency for period arithmetic ('D', 'M', 'Q', 'W', 'h', etc.)
 
     Attributes:
-        delays_dict_ (Dict): Dictionary of delays used
-        mode_ (str): Transformation mode
-        prediction_date_ (datetime): Reference prediction date
-        reference_point_ (str): Reference point
-        original_data_ (Optional[pd.DataFrame]): Original data for inverse_transform
-        transformation_metadata_ (Dict): Transformation metadata
+        n_periods: Stored number of periods to shift
+        frequency: Stored frequency code
 
     Examples:
-        >>> from tsforecast.delays import ReleaseDelayTransformer
+        >>> import pandas as pd
+        >>> dates = pd.date_range('2024-01-01', periods=5, freq='M')
+        >>> series = pd.Series([1, 2, 3, 4, 5], index=dates, name='GDP')
         >>>
-        >>> # Use with delay dictionary
-        >>> delays = {'GDP': 45.0, 'inflation': 30.0}
-        >>> transformer = ReleaseDelayTransformer(
-        ...     delays_dict=delays,
-        ...     mode='shift',
-        ...     prediction_date='2023-12-01'
-        ... )
+        >>> # Shift forward by 2 monthly periods
+        >>> shifter = ShiftTransformer(n_periods=2, frequency='M')
+        >>> shifted = shifter.fit_transform(series)
         >>>
-        >>> # Apply transformation
-        >>> X_transformed = transformer.fit_transform(X)
-        >>>
-        >>> # Reverse transformation
-        >>> X_original = transformer.inverse_transform(X_transformed)
-        >>>
-        >>> # Use with delay calculator
-        >>> calculator = ReleaseDelayCalculator(delay_data=df)
-        >>> transformer = ReleaseDelayTransformer(
-        ...     delay_calculator=calculator,
-        ...     mode='mask',
-        ...     prediction_date='today'
-        ... )
+        >>> # Inverse shift
+        >>> original = shifter.inverse_transform(shifted)
     """
 
-    # Initialisation
-    def __init__(self,
-                 delays: Union[Dict[Union[str, tuple], float], pd.DataFrame],
-                 delays_unit: Optional[str] = None,
-                 mode: str = 'shift',
-                 prediction_date: Union[str, datetime] = 'today',
-                 prediction_date_format: Optional[str] = None,
-                 reference_point: str = 'end',
-                 time_col: str = 'date',
-                 panel_cols: Optional[List[str]] = None,
-                 handle_missing_delays: str = 'warn',
-                 default_delay: Optional[float] = None,
-                 validate_input: bool = True,
-                 strict_validation: bool = True,
-                 auto_sort: bool = False):
-        """Initialize the publication delay transformer.
+    def __init__(self, n_periods: int, frequency: str):
+        """Initialize ShiftTransformer.
 
         Args:
-            delays: Dictionary or DataFrame of delays by indicator
-            delays_unit: Unit of delays ('D' for days, 's' for seconds, etc.).
-                        If None, inferred from DataFrame 'unit' column or defaults to 'D'
-            mode: Transformation mode ('shift' or 'mask')
-            prediction_date: Reference date ('today' or datetime)
-            reference_point: Reference point ('start' or 'end')
-            time_col: Name of time column
-            panel_cols: Panel dimension columns
-            handle_missing_delays: Missing delay handling
-            default_delay: Default delay if missing
-            validate_input: Input data validation
-            strict_validation: If True, raises errors; if False, emits warnings
-            auto_sort: If True, automatically sorts unsorted data
+            n_periods: Number of periods to shift (can be negative)
+            frequency: Frequency for period arithmetic ('D', 'M', 'Q', etc.)
         """
-        # Initialisation de la classe parent
-        super().__init__(
-            time_col=time_col,
-            panel_cols=panel_cols,
-            validate_input=validate_input,
-            strict_validation=strict_validation,
-            auto_sort=auto_sort
-        )
+        self.n_periods = n_periods
+        self.frequency = frequency
 
-        # Validation des paramètres
-        # Validation du mode d'application des délais de publication
-        if mode not in ['shift', 'mask']:
-            raise ValueError("'mode' must be 'shift' or 'mask'")
-        # Validation du point de référence des délais de publication
-        if reference_point not in ['start', 'end']:
-            raise ValueError("'reference_point' must be 'start' or 'end'")
-        # Validation de la gestion des délais manquants
-        if handle_missing_delays not in ['ignore', 'warn', 'error']:
-            raise ValueError("'handle_missing_delays' must be 'ignore', 'warn' or 'error'")
-
-        # Validation de la structure du paramètre delays
-        _validate_delays_parameter(delays, panel_cols)
-
-        # Inférence de l'unité des délais si non fournie
-        if delays_unit is None:
-            if isinstance(delays, pd.DataFrame):
-                # Inférence depuis le DataFrame si colonne 'unit' présente
-                if 'unit' in delays.columns:
-                    # Une seule unité par transformer (utilise la première valeur)
-                    self.delays_unit = delays['unit'].iloc[0]
-                else:
-                    # Défaut si colonne 'unit' absente
-                    self.delays_unit = 'D'
-            else:
-                # Défaut pour les dictionnaires
-                self.delays_unit = 'D'
-        else:
-            # Utilisation de la valeur explicite
-            self.delays_unit = delays_unit
-
-        # Assignation des paramètres
-        self.delays = delays
-        self.mode = mode
-        self.prediction_date = prediction_date
-        self.prediction_date_format = prediction_date_format
-        self.reference_point = reference_point
-        self.handle_missing_delays = handle_missing_delays
-        self.default_delay = default_delay
-
-        # Attributs à définir lors du fit
-        self.delays_series_ = None
-        self.mode_ = mode
-        self.prediction_date_ = None
-        self.reference_point_ = reference_point
-        self.original_data_ = None
-        self.transformation_metadata_ = {}
-
-    # Méthode d'entraînement du transformer
-    def _fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
-        """Transformer fitting (internal method).
+    def fit(self, X: pd.Series, y=None):
+        """Fit transformer (no-op for ShiftTransformer).
 
         Args:
-            X: Input data
-            y: Target variable (not used)
-        """
-        # Résolution de la date de prédiction
-        self.prediction_date_ = resolve_date(date=self.prediction_date, format=self.prediction_date_format)
-
-        # Création de la Series des délais
-        if self.delays is not None:
-            if isinstance(self.delays, pd.DataFrame):
-                # Conversion DataFrame -> Series
-                self.delays_series_ = self.delays['applicable_delay']
-
-            elif isinstance(self.delays, dict):
-                # Conversion directe Dict -> Series
-                self.delays_series_ = pd.Series(self.delays)
-
-                # Nommage des niveaux de l'index
-                if isinstance(self.delays_series_.index, pd.MultiIndex):
-                    # Détermination du nombre de niveaux d'entités
-                    n_levels = self.delays_series_.index.nlevels
-                    # Noms des niveaux : entity_1, ..., entity_N, indicator
-                    level_names = [f'entity_{i}' for i in range(1, n_levels)] + ['indicator']
-                    self.delays_series_.index.names = level_names
-                else:
-                    # Index simple : nom 'indicator'
-                    self.delays_series_.index.name = 'indicator'
-            else:
-                raise TypeError(
-                    f"delays must be Dict or DataFrame, got {type(self.delays)}"
-                )
-        else:
-            raise RuntimeError("No delay source available")
-
-        # Stockage des métadonnées de transformation
-        self.transformation_metadata_ = {
-            'mode': self.mode_,
-            'prediction_date': self.prediction_date_,
-            'reference_point': self.reference_point_,
-            'delays_count': len(self.delays_series_),
-            'original_shape': X.shape,
-            'original_columns': list(X.columns)
-        }
-
-    # Fonction de transformation des données
-    def _transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Apply transformation (internal method).
-
-        Args:
-            X: Data to transform
+            X: Time series to fit
+            y: Ignored
 
         Returns:
-            Data transformed according to chosen mode
+            self
         """
+        return self
+
+    def transform(self, X: pd.Series) -> pd.Series:
+        """Shift series by n_periods at given frequency.
+
+        Args:
+            X: Time series to transform
+
+        Returns:
+            Shifted time series
+
+        Raises:
+            ValueError: If X is not a pandas Series or doesn't have DatetimeIndex
+        """
+        # Validation de l'entrée
+        if not isinstance(X, pd.Series):
+            raise ValueError("X must be a pandas Series")
+
+        if not isinstance(X.index, pd.DatetimeIndex):
+            raise ValueError("X must have a DatetimeIndex")
+
+        return self._shift_by_periods(X, self.n_periods, self.frequency)
+
+    def inverse_transform(self, X: pd.Series) -> pd.Series:
+        """Inverse shift by -n_periods.
+
+        Args:
+            X: Transformed series
+
+        Returns:
+            Series shifted back by -n_periods
+        """
+        if not isinstance(X, pd.Series):
+            raise ValueError("X must be a pandas Series")
+
+        if not isinstance(X.index, pd.DatetimeIndex):
+            raise ValueError("X must have a DatetimeIndex")
+
+        return self._shift_by_periods(X, -self.n_periods, self.frequency)
+
+    def _shift_by_periods(self, series: pd.Series, n_periods: int, frequency: str) -> pd.Series:
+        """Core shift logic using PeriodIndex.
+
+        Args:
+            series: Series to shift
+            n_periods: Number of periods to shift
+            frequency: Frequency for period arithmetic
+
+        Returns:
+            Shifted series with original index structure
+        """
+        # Cas où aucun shift n'est nécessaire
+        if n_periods == 0:
+            return series.copy()
+
+        # Normalisation de la fréquence
+        pandas_freq = to_pandas_freq(frequency)
+
+        # Conversion en PeriodIndex pour validation de la fréquence
+        # Puis utilisation du shift standard de pandas qui décale les valeurs
+        period_index = series.index.to_period(freq=pandas_freq)
+        series_period = pd.Series(series.values, index=period_index, name=series.name)
+
+        # Shift standard : décale les valeurs, l'index reste fixe
+        shifted_period = series_period.shift(n_periods)
+
+        # Reconversion en DatetimeIndex en préservant les timestamps originaux
+        # On map chaque période de l'index original vers son timestamp original
+        period_to_timestamp = dict(zip(period_index, series.index))
+
+        # Construction de l'index de sortie
+        result_index = pd.DatetimeIndex([
+            period_to_timestamp.get(period, pd.NaT)
+            for period in shifted_period.index
+        ])
+
+        # Création de la série avec l'index datetime restauré
+        result = pd.Series(shifted_period.values, index=result_index, name=series.name)
+
+        # Filtrage des NaT (périodes qui n'existent pas dans l'original)
+        # et alignement sur l'index original
+        return result.reindex(series.index)
+
+
+class MaskTransformer(BaseEstimator, TransformerMixin):
+    """Simple helper to mask N observations per period.
+
+    This is a pure operational transformer with no inference logic.
+    Panel data handling is done by the orchestrator (PublicationDelayTransformer).
+
+    Parameters:
+        n_obs: Number of observations to mask per period
+        mask_frequency: Frequency for period grouping ('D', 'M', 'Q', 'W', 'h', etc.)
+        prediction_date: Reference date for masking
+
+    Attributes:
+        n_obs: Stored number of observations to mask per period
+        mask_frequency: Stored frequency for period grouping
+        prediction_date: Stored prediction date
+        original_data_: Original data before masking (for inverse_transform)
+
+    Examples:
+        >>> import pandas as pd
+        >>> from datetime import datetime
+        >>> dates = pd.date_range('2024-01-01', periods=90, freq='D')
+        >>> series = pd.Series(range(90), index=dates, name='GDP')
+        >>>
+        >>> # Mask 2 most recent observations per month
+        >>> masker = MaskTransformer(
+        ...     n_obs=2,
+        ...     mask_frequency='M',
+        ...     prediction_date=datetime(2024, 3, 31)
+        ... )
+        >>> masked = masker.fit_transform(series)
+        >>>
+        >>> # Restore original data
+        >>> original = masker.inverse_transform(masked)
+    """
+
+    def __init__(self, n_obs: int, mask_frequency: str, prediction_date: datetime):
+        """Initialize MaskTransformer.
+
+        Args:
+            n_obs: Number of observations to mask per period
+            mask_frequency: Frequency for period grouping ('D', 'M', 'Q', etc.)
+            prediction_date: Reference date for masking
+        """
+        self.n_obs = n_obs
+        self.mask_frequency = mask_frequency
+        self.prediction_date = prediction_date
+        self.original_data_ = None
+
+    def fit(self, X: pd.Series, y=None):
+        """Fit transformer (no-op for MaskTransformer).
+
+        Args:
+            X: Time series to fit
+            y: Ignored
+
+        Returns:
+            self
+        """
+        return self
+
+    def transform(self, X: pd.Series) -> pd.Series:
+        """Mask N most recent observations per period.
+
+        Args:
+            X: Time series to transform
+
+        Returns:
+            Masked time series
+
+        Raises:
+            ValueError: If X is not a pandas Series or doesn't have DatetimeIndex
+        """
+        # Validation de l'entrée
+        if not isinstance(X, pd.Series):
+            raise ValueError("X must be a pandas Series")
+
+        if not isinstance(X.index, pd.DatetimeIndex):
+            raise ValueError("X must have a DatetimeIndex")
+
         # Stockage des données originales pour inverse_transform
         self.original_data_ = X.copy()
 
-        # Application de la transformation selon le mode
-        if self.mode_ == 'shift':
-            return self._apply_shift_transformation(X)
-        elif self.mode_ == 'mask':
-            return self._apply_mask_transformation(X)
-        else:
-            raise ValueError(f"Unknown transformation mode: {self.mode_}")
+        return self._mask_n_obs_per_period(X)
 
-    # Méthode de transformation inverse des données
-    def inverse_transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Reverse applied transformation.
+    def inverse_transform(self, X: pd.Series) -> pd.Series:
+        """Restore masked values from original data.
 
         Args:
-            X: Transformed data to reverse
+            X: Masked series
 
         Returns:
-            Data in original format
+            Original series before masking
 
         Raises:
-            ValueError: If transformation cannot be reversed
-        """
-        # Vérification que le transformer est estimé
-        check_is_fitted(self, 'delays_series_')
-
-        # Vérification que les données originales sont renseignées
-        if self.original_data_ is None:
-            raise ValueError("No original data stored for inversion")
-
-        # Distinction suivant le mode de transformation
-        if self.mode_ == 'shift':
-            X_restored = self._reverse_shift_transformation(X)
-        elif self.mode_ == 'mask':
-            X_restored = self._reverse_mask_transformation(X)
-        else:
-            raise ValueError(f"Unknown transformation mode for inversion: {self.mode_}")
-
-        # Restauration de la structure originale si conversion appliquée
-        X_restored = self._restore_structure_if_converted(X_restored)
-
-        return X_restored
-
-    # Méthode d'application que la transformation par décalage
-    def _apply_shift_transformation(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Apply transformation in 'shift' mode.
-
-        In shift mode, data is shifted towards the future according to their
-        publication delays. For example, if GDP has a 45-day delay, GDP values
-        are shifted 45 days into the future.
-
-        Args:
-            X: Data to transform
-
-        Returns:
-            Data with shifted values
-        """
-        # Copie indépendante du jeu de données
-        X_shifted = X.copy()
-
-        # Identification des colonnes de données
-        data_cols = [col for col in X.columns
-                    if col != self.time_col and (not self.panel_cols or col not in self.panel_cols)]
-
-        # Application du décalage pour chaque colonne
-        for col in data_cols:
-            # Extraction du délai
-            delay = self._get_delay_for_column(col, X)
-            # Si aucun délai n'est identifié pour l'indicateur, passe à la suivante
-            if delay is None:
-                continue
-            
-            if self.is_panel_:
-                # Traitement par groupe pour les données panel
-                X_shifted = self._shift_column_panel(X_shifted, col, delay)
-            else:
-                # Traitement pour série temporelle simple
-                X_shifted = self._shift_column_timeseries(X_shifted, col, delay)
-
-        return X_shifted
-
-    # Méthode d'application de la transformation par masque
-    def _apply_mask_transformation(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Apply transformation in 'mask' mode.
-
-        In mask mode, observations that would not yet be available
-        at the prediction date are replaced by NaN.
-
-        Args:
-            X: Data to transform
-
-        Returns:
-            Data with future values masked
-        """
-        # Copie indépendante des données
-        X_masked = X.copy()
-
-        # Identification des colonnes de données
-        data_cols = [col for col in X.columns
-                    if col != self.time_col and (not self.panel_cols or col not in self.panel_cols)]
-
-        # Application du masque pour chaque colonne
-        for col in data_cols:
-            # Identification du délai de publication
-            delay = self._get_delay_for_column(col, X)
-            # Si aucun délai n'est identifié pour l'indicateur, passe à la suivante
-            if delay is None:
-                continue
-
-            if self.is_panel_:
-                # Traitement par groupe pour les données panel
-                X_masked = self._mask_column_panel(X_masked, col, delay)
-            else:
-                # Traitement pour série temporelle simple
-                X_masked = self._mask_column_timeseries(X_masked, col, delay)
-
-        return X_masked
-
-    # Méthode auxiliaire du délai valable
-    def _get_delay_for_column(self,
-                             column: str) -> Optional[Union[float, pd.Series]]:
-        """Get delay for a given column.
-
-        Recherche le délai de publication pour une colonne donnée, avec support
-        des structures multi-niveaux et fallback sur l'indicateur seul.
-
-        Args:
-            column: Column name (indicator)
-
-        Returns:
-            For time series data: float value representing the delay
-            For panel data: pandas Series with entity values as index
-                (single or MultiIndex depending on panel structure) and
-                delays as values. Returns None if delay not found and
-                no default is specified.
-        """
-        # Initialisation du délai
-        delay = None
-
-        if self.is_panel_ and self.panel_cols:
-            # Extraction des valeurs d'entité et de leur délai associé
-            try:
-                delay = self.delays_series_.xs(key=column, level='indicator')
-            except KeyError:
-                delay = None
-        else:
-            # Série temporelle simple : lookup direct sur l'indicateur
-            try:
-                delay = self.delays_series_.loc[column]
-            except KeyError:
-                delay = None
-
-        # Gestion des délais manquants
-        if delay is None:
-            if self.handle_missing_delays == 'error':
-                raise ValueError(f"Missing delay for column '{column}'")
-            elif self.handle_missing_delays == 'warn':
-                warnings.warn(f"Missing delay for column '{column}', using default delay")
-            # Application du délai par défaut
-            delay = self.default_delay
-
-        return delay
-
-    # Méthode auxiliaire de shift pour les séries temporelles
-    def _shift_column_timeseries(self,
-                                X: pd.DataFrame,
-                                column: str,
-                                delay_days: float) -> pd.DataFrame:
-        """Décale une colonne pour série temporelle simple.
-
-        Args:
-            X: DataFrame à modifier
-            column: Nom de la colonne à décaler
-            delay_days: Délai en jours
-
-        Returns:
-            DataFrame avec la colonne décalée
-        """
-        if delay_days == 0:
-            return X
-
-        # Création d'un index temporel si nécessaire
-        if self.time_col in X.columns:
-            time_index = pd.to_datetime(X[self.time_col])
-        else:
-            time_index = pd.to_datetime(X.index)
-
-        # Calcul de la nouvelle position temporelle
-        shifted_dates = time_index + pd.Timedelta(days=delay_days)
-
-        # Interpolation/alignement des valeurs décalées
-        # Les valeurs sont décalées vers le futur, donc certaines positions
-        # deviennent NaN (données pas encore disponibles)
-        X_copy = X.copy()
-
-        # Reset des valeurs pour cette colonne
-        X_copy[column] = np.nan
-
-        # Réassignation des valeurs aux nouvelles positions
-        for i, (orig_date, new_date, value) in enumerate(zip(time_index, shifted_dates, X[column])):
-            if pd.notna(value):
-                # Trouve la position la plus proche dans l'index original
-                closest_idx = (abs(time_index - new_date)).argmin()
-                if abs((time_index.iloc[closest_idx] - new_date).days) <= 1:  # Tolérance d'1 jour
-                    X_copy.iloc[closest_idx, X_copy.columns.get_loc(column)] = value
-
-        return X_copy
-
-    def _shift_column_panel(self,
-                           X: pd.DataFrame,
-                           column: str,
-                           delay_days: Union[float, pd.Series]) -> pd.DataFrame:
-        """Décale une colonne pour données panel.
-
-        Args:
-            X: DataFrame à modifier
-            column: Nom de la colonne à décaler
-            delay_days: Délai en jours (float) ou Series de délais indexée
-                par les entités du panel (single ou MultiIndex)
-
-        Returns:
-            DataFrame avec la colonne décalée
-        """
-        X_copy = X.copy()
-
-        # Traitement par groupe panel
-        for group_values, group_data in X.groupby(self.panel_cols):
-            group_indices = group_data.index
-
-            # Extraction du délai spécifique au groupe
-            if isinstance(delay_days, pd.Series):
-                # Normalisation de group_values en tuple si nécessaire
-                if not isinstance(group_values, tuple):
-                    group_values = (group_values,)
-
-                try:
-                    # Extraction du délai pour cette entité
-                    group_delay = delay_days.loc[group_values]
-                except (KeyError, TypeError):
-                    # Entité non trouvée dans les délais, passe au groupe suivant
-                    continue
-            else:
-                # Délai uniforme pour tous les groupes
-                group_delay = delay_days
-
-            # Vérification du délai nul
-            if group_delay == 0:
-                continue
-
-            # Application du décalage pour ce groupe
-            shifted_group = self._shift_column_timeseries(
-                group_data, column, group_delay
-            )
-
-            # Réassignation des valeurs
-            X_copy.loc[group_indices, column] = shifted_group[column]
-
-        return X_copy
-
-    def _mask_column_timeseries(self,
-                               X: pd.DataFrame,
-                               column: str,
-                               delay_days: float) -> pd.DataFrame:
-        """Masque une colonne pour série temporelle simple.
-
-        Args:
-            X: DataFrame à modifier
-            column: Nom de la colonne à masquer
-            delay_days: Délai en jours
-
-        Returns:
-            DataFrame avec la colonne masquée
-        """
-        if delay_days <= 0:
-            return X
-
-        X_copy = X.copy()
-
-        # Calcul de la date limite de disponibilité
-        cutoff_date = self.prediction_date_ - timedelta(days=delay_days)
-
-        # Identification des indices temporels
-        if self.time_col in X.columns:
-            time_index = pd.to_datetime(X[self.time_col])
-        else:
-            time_index = pd.to_datetime(X.index)
-
-        # Masquage des observations trop récentes
-        mask = time_index > cutoff_date
-        X_copy.loc[mask, column] = np.nan
-
-        return X_copy
-
-    def _mask_column_panel(self,
-                          X: pd.DataFrame,
-                          column: str,
-                          delay_days: Union[float, pd.Series]) -> pd.DataFrame:
-        """Masque une colonne pour données panel.
-
-        Args:
-            X: DataFrame à modifier
-            column: Nom de la colonne à masquer
-            delay_days: Délai en jours (float) ou Series de délais indexée
-                par les entités du panel (single ou MultiIndex)
-
-        Returns:
-            DataFrame avec la colonne masquée
-        """
-        X_copy = X.copy()
-
-        # Traitement par groupe panel
-        for group_values, group_data in X.groupby(self.panel_cols):
-            group_indices = group_data.index
-
-            # Extraction du délai spécifique au groupe
-            if isinstance(delay_days, pd.Series):
-                # Normalisation de group_values en tuple si nécessaire
-                if not isinstance(group_values, tuple):
-                    group_values = (group_values,)
-
-                try:
-                    # Extraction du délai pour cette entité
-                    group_delay = delay_days.loc[group_values]
-                except (KeyError, TypeError):
-                    # Entité non trouvée dans les délais, passe au groupe suivant
-                    continue
-            else:
-                # Délai uniforme pour tous les groupes
-                group_delay = delay_days
-
-            # Vérification du délai nul ou négatif
-            if group_delay <= 0:
-                continue
-
-            # Application du masquage pour ce groupe
-            masked_group = self._mask_column_timeseries(
-                group_data, column, group_delay
-            )
-
-            # Réassignation des valeurs
-            X_copy.loc[group_indices, column] = masked_group[column]
-
-        return X_copy
-
-    def _reverse_shift_transformation(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Reverse shift transformation.
-
-        Args:
-            X: Transformed data
-
-        Returns:
-            Reconstructed original data
+            ValueError: If transform has not been called yet
         """
         if self.original_data_ is None:
-            raise ValueError("Original data not available for inversion")
+            raise ValueError("Must call transform before inverse_transform")
 
-        # Pour la transformation shift, on retourne les données originales
-        # car le shift est difficile à inverser parfaitement sans perte d'information
-        warnings.warn("Inversion of 'shift' transformation returns original data")
         return self.original_data_.copy()
 
-    def _reverse_mask_transformation(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Reverse mask transformation.
+    def _mask_n_obs_per_period(self, series: pd.Series) -> pd.Series:
+        """Core masking logic: mask N most recent obs per period.
+
+        Args:
+            series: Series to mask
+
+        Returns:
+            Series with masked observations
+        """
+        # Cas où aucun masquage n'est nécessaire
+        if self.n_obs == 0:
+            return series.copy()
+
+        masked_series = series.copy()
+
+        # Génération des périodes
+        periods = self._generate_periods(
+            start_date=series.index.min(),
+            end_date=self.prediction_date,
+            frequency=self.mask_frequency
+        )
+
+        # Masquage dans chaque période
+        for period_start, period_end in periods:
+            # Observations dans cette période
+            period_mask = (series.index >= period_start) & (series.index < period_end)
+            period_obs = series[period_mask]
+
+            if len(period_obs) > 0:
+                # Masquer les n_obs plus récentes
+                n_to_mask = min(self.n_obs, len(period_obs))
+                most_recent_indices = period_obs.index[-n_to_mask:]
+                masked_series.loc[most_recent_indices] = np.nan
+
+        return masked_series
+
+    def _generate_periods(
+        self,
+        start_date: pd.Timestamp,
+        end_date: datetime,
+        frequency: str
+    ) -> List[tuple[datetime, datetime]]:
+        """Generate list of (period_start, period_end) tuples.
+
+        Args:
+            start_date: Start date for period generation
+            end_date: End date for period generation
+            frequency: Frequency code for periods
+
+        Returns:
+            List of (period_start, period_end) tuples
+        """
+        # Normalisation de la fréquence
+        pandas_freq = to_pandas_freq(frequency)
+
+        # Génération des dates de début de période
+        period_starts = pd.date_range(
+            start=start_date,
+            end=end_date,
+            freq=pandas_freq
+        )
+
+        # Création des tuples (start, end) pour chaque période
+        periods = []
+        for period_date in period_starts:
+            period_start, period_end = get_period_boundaries(period_date, frequency)
+            periods.append((period_start, period_end))
+
+        return periods
+
+
+class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
+    """Intelligent orchestrator for applying publication delays to time series/panel data.
+
+    This transformer handles:
+    - Parameter inference from delays DataFrame
+    - Frequency detection per column
+    - Period-based calculations (not day-based)
+    - Automatic panel wrapping with PanelwiseTransformer
+    - Warning generation for all-NaN columns
+
+    Parameters:
+        delays: Delays specification (Dict or DataFrame)
+        strategy: Transformation strategy ('shift' or 'mask')
+        delay_unit: Unit of delay ('D', 's', 'h', etc.). If None, inferred from DataFrame
+        reference_point: Reference point ('start' or 'end'). If None, inferred from DataFrame
+        target_frequency: Target frequency for delay calculation. If None, uses column frequency
+        prediction_date: Date of prediction (required for 'mask' strategy)
+        time_col: Name of time column (default: 'date')
+        panel_cols: Panel column names (None for non-panel data)
+        handle_missing_delays: Strategy for missing delays ('ignore', 'warn', 'error')
+        default_delay: Default delay value if missing
+
+    Attributes:
+        column_transformers_: Dict mapping column names to helper transformers
+        inferred_params_: Dict of parameters inferred from delays DataFrame
+        detected_frequencies_: Dict of detected frequencies per column
+
+    Examples:
+        >>> import pandas as pd
+        >>> from datetime import datetime
+        >>>
+        >>> # Create delays DataFrame with metadata
+        >>> delays_df = pd.DataFrame({
+        ...     'variable': ['GDP', 'inflation'],
+        ...     'delay': [45.0, 30.0],
+        ...     'unit': ['D', 'D'],
+        ...     'reference_point': ['end', 'end'],
+        ...     'target_frequency': ['M', 'M']
+        ... })
+        >>>
+        >>> # Create transformer (parameters inferred from DataFrame)
+        >>> transformer = PublicationDelayTransformer(
+        ...     delays=delays_df,
+        ...     strategy='shift',
+        ...     prediction_date=datetime(2024, 12, 15)
+        ... )
+        >>>
+        >>> # Apply transformation
+        >>> X_shifted = transformer.fit_transform(X)
+        >>>
+        >>> # Reverse transformation
+        >>> X_original = transformer.inverse_transform(X_shifted)
+    """
+
+    def __init__(
+        self,
+        delays: Union[Dict[str, float], pd.DataFrame],
+        strategy: str = 'shift',
+        delay_unit: Optional[str] = None,
+        reference_point: Optional[str] = None,
+        target_frequency: Optional[str] = None,
+        prediction_date: Union[str, datetime] = 'today',
+        time_col: str = 'date',
+        panel_cols: Optional[List[str]] = None,
+        handle_missing_delays: str = 'warn',
+        default_delay: Optional[float] = None
+    ):
+        """Initialize PublicationDelayTransformer.
+
+        Args:
+            delays: Dict mapping variable names to delays, or DataFrame with delays
+            strategy: 'shift' or 'mask'
+            delay_unit: Unit of delay (inferred from DataFrame if None)
+            reference_point: 'start' or 'end' (inferred from DataFrame if None)
+            target_frequency: Target frequency (inferred from DataFrame if None)
+            prediction_date: Prediction date
+            time_col: Time column name
+            panel_cols: Panel column names
+            handle_missing_delays: 'ignore', 'warn', or 'error'
+            default_delay: Default delay if missing
+        """
+        # Validation des paramètres
+        if strategy not in ['shift', 'mask']:
+            raise ValueError(f"strategy must be 'shift' or 'mask', got '{strategy}'")
+        if reference_point is not None and reference_point not in ['start', 'end']:
+            raise ValueError(f"reference_point must be 'start' or 'end', got '{reference_point}'")
+        if handle_missing_delays not in ['ignore', 'warn', 'error']:
+            raise ValueError(f"handle_missing_delays must be 'ignore', 'warn', or 'error', got '{handle_missing_delays}'")
+
+        # Stockage des paramètres
+        self.delays = delays
+        self.strategy = strategy
+        self.delay_unit = delay_unit
+        self.reference_point = reference_point
+        self.target_frequency = target_frequency
+        self.prediction_date = prediction_date
+        self.time_col = time_col
+        self.panel_cols = panel_cols
+        self.handle_missing_delays = handle_missing_delays
+        self.default_delay = default_delay
+
+    def fit(self, X: Union[pd.Series, pd.DataFrame], y=None):
+        """Fit transformer by inferring parameters and preparing helpers.
+
+        Args:
+            X: Time series or panel data
+            y: Ignored
+
+        Returns:
+            self
+        """
+        # Résolution de la date de prédiction
+        self.prediction_date_ = resolve_date(self.prediction_date)
+
+        # Inférence des paramètres depuis delays DataFrame si nécessaire
+        self.inferred_params_ = self._infer_parameters_from_delays()
+
+        # Détermination des valeurs finales (explicites > inférées > défaut)
+        delay_unit_final = self.delay_unit or self.inferred_params_.get('delay_unit', 'D')
+        reference_point_final = self.reference_point or self.inferred_params_.get('reference_point', 'end')
+
+        # Conversion des delays en dictionnaire si DataFrame
+        if isinstance(self.delays, pd.DataFrame):
+            delays_dict = dict(zip(self.delays['variable'], self.delays['delay']))
+        else:
+            delays_dict = self.delays
+
+        # Détection du type de données (Series ou DataFrame)
+        self.is_series_ = isinstance(X, pd.Series)
+
+        # Détection des fréquences par colonne
+        self.detected_frequencies_ = self._detect_frequencies(X)
+
+        # Création des transformers pour chaque colonne
+        self.column_transformers_ = {}
+
+        if self.is_series_:
+            # Cas d'une Series : un seul transformer
+            column_name = X.name or 'series'
+            self._fit_column_transformer(
+                column_name=column_name,
+                series=X,
+                delays_dict=delays_dict,
+                delay_unit=delay_unit_final,
+                reference_point=reference_point_final
+            )
+        else:
+            # Cas d'un DataFrame : un transformer par colonne
+            for column_name in X.columns:
+                if column_name == self.time_col:
+                    continue  # Skip time column
+                if self.panel_cols and column_name in self.panel_cols:
+                    continue  # Skip panel columns
+
+                self._fit_column_transformer(
+                    column_name=column_name,
+                    series=X[column_name],
+                    delays_dict=delays_dict,
+                    delay_unit=delay_unit_final,
+                    reference_point=reference_point_final
+                )
+
+        return self
+
+    def transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
+        """Apply publication delays to data.
+
+        Args:
+            X: Time series or panel data
+
+        Returns:
+            Transformed data with publication delays applied
+        """
+        if self.is_series_:
+            # Transform series
+            column_name = X.name or 'series'
+            if column_name in self.column_transformers_:
+                result = self.column_transformers_[column_name].transform(X)
+                # Check for all-NaN
+                if result.isna().all():
+                    warnings.warn(
+                        f"Column '{column_name}' became all-NaN after applying {self.strategy} strategy"
+                    )
+                return result
+            else:
+                return X.copy()
+        else:
+            # Transform DataFrame column by column
+            X_result = X.copy()
+            for column_name, transformer in self.column_transformers_.items():
+                if column_name in X_result.columns:
+                    X_result[column_name] = transformer.transform(X_result[column_name])
+                    # Check for all-NaN
+                    if X_result[column_name].isna().all():
+                        warnings.warn(
+                            f"Column '{column_name}' became all-NaN after applying {self.strategy} strategy"
+                        )
+            return X_result
+
+    def inverse_transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
+        """Reverse publication delay transformation.
 
         Args:
             X: Transformed data
 
         Returns:
-            Reconstructed original data
+            Data with delays reversed
         """
-        if self.original_data_ is None:
-            raise ValueError("Original data not available for inversion")
-
-        # Pour la transformation mask, on remplace les NaN par les valeurs originales
-        X_restored = X.copy()
-
-        # Identification des colonnes de données
-        data_cols = [col for col in X.columns
-                    if col != self.time_col and (not self.panel_cols or col not in self.panel_cols)]
-
-        # Restauration des valeurs masquées
-        for col in data_cols:
-            if col in self.original_data_.columns:
-                mask = X_restored[col].isna()
-                X_restored.loc[mask, col] = self.original_data_.loc[mask, col]
-
-        return X_restored
-
-    def get_transformation_summary(self) -> Dict[str, Any]:
-        """Return summary of applied transformation.
-
-        Returns:
-            Dictionary containing transformation information
-        """
-        check_is_fitted(self, 'delays_series_')
-
-        return {
-            'mode': self.mode_,
-            'prediction_date': self.prediction_date_.isoformat() if self.prediction_date_ else None,
-            'reference_point': self.reference_point_,
-            'delays_applied': self.delays_series_.to_dict(),
-            'transformation_metadata': self.transformation_metadata_,
-            'is_panel_data': self.is_panel_,
-            'time_column': self.time_col,
-            'panel_columns': self.panel_cols
-        }
-
-    def update_delays(self, new_delays: Union[Dict[Union[str, tuple], float], pd.Series]) -> None:
-        """Update delays series.
-
-        Accepte soit un dictionnaire, soit une Series pandas pour mettre à jour
-        les délais existants.
-
-        Args:
-            new_delays: New delays (Dict or pandas.Series)
-
-        Raises:
-            RuntimeError: If transformer has not been fitted
-        """
-        check_is_fitted(self, 'delays_series_')
-
-        # Conversion en Series si Dict fourni
-        if isinstance(new_delays, dict):
-            new_delays_series = pd.Series(new_delays)
-        elif isinstance(new_delays, pd.Series):
-            new_delays_series = new_delays
+        if self.is_series_:
+            # Inverse transform series
+            column_name = X.name or 'series'
+            if column_name in self.column_transformers_:
+                return self.column_transformers_[column_name].inverse_transform(X)
+            else:
+                return X.copy()
         else:
-            raise TypeError(f"new_delays must be Dict or Series, got {type(new_delays)}")
+            # Inverse transform DataFrame column by column
+            X_result = X.copy()
+            for column_name, transformer in self.column_transformers_.items():
+                if column_name in X_result.columns:
+                    X_result[column_name] = transformer.inverse_transform(X_result[column_name])
+            return X_result
 
-        # Fusion avec la Series existante (update)
-        # pd.Series.update() modifie en place, donc on utilise combine_first
-        self.delays_series_ = new_delays_series.combine_first(self.delays_series_)
-
-        # Mise à jour des métadonnées
-        self.transformation_metadata_['delays_updated'] = datetime.utcnow()
-        self.transformation_metadata_['delays_count'] = len(self.delays_series_)
-
-    def get_available_delays(self) -> pd.Series:
-        """Return Series of currently available delays.
+    def _infer_parameters_from_delays(self) -> Dict[str, any]:
+        """Infer delay_unit, reference_point, target_frequency from delays DataFrame.
 
         Returns:
-            Series of delays with Index (time series) or MultiIndex (panel data)
-
-        Examples:
-            >>> transformer = PublicationDelayTransformer(delays={'GDP': 45.0, 'inflation': 30.0})
-            >>> transformer.fit(X)
-            >>> delays_series = transformer.get_available_delays()
-            >>> # Pour obtenir un Dict :
-            >>> delays_dict = delays_series.to_dict()
+            Dict of inferred parameters
         """
-        if self.delays_series_ is None:
-            return pd.Series(dtype=float)
-        return self.delays_series_.copy()
+        inferred = {}
 
+        if isinstance(self.delays, pd.DataFrame):
+            # Infer delay_unit from 'unit' column
+            if 'unit' in self.delays.columns:
+                # Use first value (assume consistent across all variables)
+                inferred['delay_unit'] = self.delays['unit'].iloc[0]
 
-# Fonction auxiliaire de validation des paramètres de délais de publication
-def _validate_delays_parameter(
-    delays: Union[Dict, pd.DataFrame],
-    panel_cols: Optional[List[str]] = None
-) -> None:
-    """Validate delays parameter structure.
+            # Infer reference_point from 'reference_point' column
+            if 'reference_point' in self.delays.columns:
+                inferred['reference_point'] = self.delays['reference_point'].iloc[0]
 
-    Valide la structure du paramètre delays selon qu'il s'agit
-    d'un dictionnaire ou d'un DataFrame.
-
-    Args:
-        delays: Dictionary or DataFrame of delays
-        panel_cols: Panel columns to determine expected format
-
-    Raises:
-        ValueError: If structure is invalid
-        TypeError: If type is neither Dict nor DataFrame
-    """
-    # Détection de la structure de panel
-    is_panel = panel_cols is not None and len(panel_cols) > 0
-
-    # Distinction suivant le type de l'argument
-    if isinstance(delays, dict):
-        # Validation du dictionnaire
-        if len(delays) == 0:
-            warnings.warn("Empty delays dictionary provided")
-            return
-
-        # Vérification de la cohérence des clés
-        first_key = next(iter(delays.keys()))
-        is_tuple_key = isinstance(first_key, tuple)
-
-        # Pour panel data, les clés devraient être des tuples
-        if is_panel and not is_tuple_key:
-            warnings.warn(
-                "Panel data detected but delays keys are not tuples. "
-                "Expected format: {(entity, indicator): delay}"
-            )
-
-        # Vérification que toutes les valeurs sont numériques
-        for key, value in delays.items():
-            if not isinstance(value, (int, float, np.number)):
-                raise ValueError(
-                    f"Delay value for {key} must be numeric, got {type(value)}"
+            # Infer target_frequency from 'target_frequency' column
+            if 'target_frequency' in self.delays.columns:
+                # Store as dict mapping variable to target_frequency
+                inferred['target_frequencies'] = dict(
+                    zip(self.delays['variable'], self.delays['target_frequency'])
                 )
 
-    elif isinstance(delays, pd.DataFrame):
-        # Validation du DataFrame
-        if 'applicable_delay' not in delays.columns:
-            raise ValueError(
-                "DataFrame must contain 'applicable_delay' column. "
-                "Expected format from calculate_applicable_delay()"
-            )
+        return inferred
 
-        # Vérification que l'index est approprié
-        if is_panel and not isinstance(delays.index, pd.MultiIndex):
-            warnings.warn(
-                "Panel data detected but DataFrame index is not MultiIndex. "
-                "Expected MultiIndex with (entity, indicator)"
-            )
+    def _detect_frequencies(self, X: Union[pd.Series, pd.DataFrame]) -> Dict[str, str]:
+        """Detect frequencies for each column.
 
-        # Vérification des valeurs numériques
-        if not pd.api.types.is_numeric_dtype(delays['applicable_delay']):
-            raise ValueError(
-                "'applicable_delay' column must contain numeric values"
-            )
+        Args:
+            X: Input data
 
-    else:
-        raise TypeError(
-            f"delays must be Dict or DataFrame, got {type(delays)}"
+        Returns:
+            Dict mapping column names to detected frequencies
+        """
+        from ..frequency.detector import detect_frequency
+
+        frequencies = {}
+
+        # Mapping pour convertir pandas 2.2+ codes vers codes compatibles
+        freq_mapping = {
+            'ME': 'M',    # MonthEnd
+            'MS': 'M',    # MonthStart (on traite comme mensuel)
+            'QE': 'Q',    # QuarterEnd
+            'QS': 'Q',    # QuarterStart
+            'YE': 'Y',    # YearEnd
+            'YS': 'Y',    # YearStart
+            'BME': 'B',   # BusinessMonthEnd
+            'BMS': 'B',   # BusinessMonthStart
+        }
+
+        if self.is_series_:
+            column_name = X.name or 'series'
+            freq = detect_frequency(X)
+            # Conversion si nécessaire
+            freq = freq_mapping.get(freq, freq) if freq else freq
+            frequencies[column_name] = freq
+        else:
+            # Detect frequency per column
+            for column_name in X.columns:
+                if column_name == self.time_col:
+                    continue
+                if self.panel_cols and column_name in self.panel_cols:
+                    continue
+
+                freq = detect_frequency(X[column_name])
+                # Conversion si nécessaire
+                freq = freq_mapping.get(freq, freq) if freq else freq
+                frequencies[column_name] = freq
+
+        return frequencies
+
+    def _fit_column_transformer(
+        self,
+        column_name: str,
+        series: pd.Series,
+        delays_dict: Dict[str, float],
+        delay_unit: str,
+        reference_point: str
+    ):
+        """Fit helper transformer for a single column.
+
+        Args:
+            column_name: Name of the column
+            series: Series data for the column
+            delays_dict: Dictionary of delays
+            delay_unit: Unit of delay
+            reference_point: Reference point
+        """
+        # Obtention du délai pour cette colonne
+        if column_name in delays_dict:
+            applicable_delay = delays_dict[column_name]
+        elif self.default_delay is not None:
+            applicable_delay = self.default_delay
+        else:
+            if self.handle_missing_delays == 'error':
+                raise ValueError(f"No delay found for column '{column_name}'")
+            elif self.handle_missing_delays == 'warn':
+                warnings.warn(f"No delay found for column '{column_name}', skipping transformation")
+            return  # Skip this column
+
+        # Obtention de la fréquence détectée
+        column_frequency = self.detected_frequencies_.get(column_name)
+        if column_frequency is None:
+            warnings.warn(f"Could not detect frequency for column '{column_name}', skipping transformation")
+            return
+
+        # Détermination de la target_frequency
+        target_freq = None
+        if self.target_frequency is not None:
+            target_freq = self.target_frequency
+        elif 'target_frequencies' in self.inferred_params_ and column_name in self.inferred_params_['target_frequencies']:
+            target_freq = self.inferred_params_['target_frequencies'][column_name]
+        # Si target_freq reste None, calculate_n_periods_delay utilisera column_frequency
+
+        # Calcul du nombre de périodes
+        from .period_utils import calculate_n_periods_delay
+
+        # Utilisation d'une observation typique pour le calcul
+        observation_date = series.index[len(series) // 2]
+
+        n_periods = calculate_n_periods_delay(
+            applicable_delay=applicable_delay,
+            delay_unit=delay_unit,
+            prediction_date=self.prediction_date_,
+            reference_point=reference_point,
+            observation_date=observation_date,
+            column_frequency=column_frequency,
+            target_frequency=target_freq
         )
+
+        # Création du helper transformer approprié
+        if self.strategy == 'shift':
+            helper = ShiftTransformer(
+                n_periods=n_periods,
+                frequency=target_freq or column_frequency
+            )
+        else:  # mask
+            helper = MaskTransformer(
+                n_obs=abs(n_periods),  # MaskTransformer expects positive integer
+                mask_frequency=target_freq or column_frequency,
+                prediction_date=self.prediction_date_
+            )
+
+        # Stockage du transformer
+        self.column_transformers_[column_name] = helper
