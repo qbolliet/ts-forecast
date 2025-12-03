@@ -207,6 +207,7 @@ class HierarchicalForecastAdapter(BaseEstimator):
 
         return df
 
+    # Méthode d'entraînement
     def fit(self, X, y):
         """Fit the hierarchical reconciliation adapter.
 
@@ -229,19 +230,21 @@ class HierarchicalForecastAdapter(BaseEstimator):
         from hierarchicalforecast.core import HierarchicalReconciliation
         from hierarchicalforecast.utils import aggregate, aggregate_temporal
 
-        # Convertion de la Series en DataFrame si nécessaire
+        # Conversion de la Series en DataFrame si nécessaire
         if isinstance(y, pd.Series):
             col_name = y.name if y.name is not None else self.target_cols[0]
             y = y.to_frame(name=col_name)
 
-        # Convertion de l'index en colonnes
+        # Conversion de l'index en colonnes
         df = self._convert_index_to_columns(y)
 
-        # Appeler la fonction d'agrégation appropriée selon le type de spec
+        # Appel de la fonction d'agrégation appropriée selon le type de spec
         if self._is_temporal_hierarchy:
+            # Extraction du nom de la colonne temporelle
             effective_id_time_col = (
                 self.id_time_col if self.id_time_col is not None else "temporal_id"
             )
+            # Extraction des jeux de données au format adapté
             self.Y_df_, self.S_df_, self.tags_ = aggregate_temporal(
                 df=df,
                 spec=self.spec,
@@ -254,6 +257,7 @@ class HierarchicalForecastAdapter(BaseEstimator):
                 aggregation_type=self.aggregation_type,
             )
         else:
+            # Extraction des jeux de données au format adapté
             self.Y_df_, self.S_df_, self.tags_ = aggregate(
                 df=df,
                 spec=self.spec,
@@ -265,11 +269,12 @@ class HierarchicalForecastAdapter(BaseEstimator):
                 target_cols=self.target_cols,
             )
 
-        # Créer l'objet de réconciliation
+        # Création de l'objet de réconciliation
         self.hrec_ = HierarchicalReconciliation(reconcilers=self.reconcilers)
 
         return self
 
+    # Méthode de prédiction
     def predict(self, X):
         """Reconcile base forecasts using the fitted hierarchy.
 
@@ -286,16 +291,17 @@ class HierarchicalForecastAdapter(BaseEstimator):
             RuntimeError: If called before fit().
             ValueError: If X has incompatible structure with fitted hierarchy.
         """
+        # Vérification qu'un réconciliateur avait bien été initialisé
         if not hasattr(self, "hrec_"):
             raise RuntimeError(
                 "This adapter instance is not fitted yet. "
                 "Call 'fit' with appropriate arguments before using 'predict'."
             )
 
-        # Convertir l'index en colonnes
+        # Convertion de l'index en colonnes
         Y_hat_df = self._convert_index_to_columns(X)
 
-        # Construire les arguments pour reconcile
+        # Construction des arguments pour reconcile à partir des attributs
         reconcile_kwargs = {
             "Y_hat_df": Y_hat_df,
             "Y_df": self.Y_df_,
@@ -303,7 +309,7 @@ class HierarchicalForecastAdapter(BaseEstimator):
             "tags": self.tags_,
         }
 
-        # Ajouter les arguments optionnels s'ils sont définis
+        # Ajout des arguments optionnels s'ils sont définis
         if self.level is not None:
             reconcile_kwargs["level"] = self.level
 
@@ -313,11 +319,12 @@ class HierarchicalForecastAdapter(BaseEstimator):
         if self.num_samples != -1:
             reconcile_kwargs["num_samples"] = self.num_samples
 
-        # Effectuer la réconciliation
+        # Réconciliation
         Y_rec = self.hrec_.reconcile(**reconcile_kwargs)
 
         return Y_rec
 
+    # Méthode combinée d'entraînement et de prédiction
     def fit_predict(self, X, y):
         """Fit the adapter and reconcile forecasts in one step.
 
@@ -332,6 +339,7 @@ class HierarchicalForecastAdapter(BaseEstimator):
         """
         return self.fit(X=None, y=y).predict(X)
 
+    # Méthode d'extraction d'informations sur la hiérarchie
     def get_hierarchy_info(self) -> Dict:
         """Get information about the fitted hierarchy.
 
@@ -345,12 +353,14 @@ class HierarchicalForecastAdapter(BaseEstimator):
         Raises:
             RuntimeError: If called before fit().
         """
+        # Vérification qu'un attribut "tags_" est instancié
         if not hasattr(self, "tags_"):
             raise RuntimeError(
                 "This adapter instance is not fitted yet. "
                 "Call 'fit' before accessing hierarchy information."
             )
 
+        # Extraction du nombre total de séries
         n_total = len(self.S_df_) if hasattr(self, "S_df_") else 0
 
         # Le nombre de séries bottom correspond aux colonnes de S
