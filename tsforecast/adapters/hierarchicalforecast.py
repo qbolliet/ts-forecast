@@ -5,12 +5,13 @@ to enable seamless integration with sklearn pipelines and workflows.
 """
 # Importation des modules
 # Modules de base
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Sequence, Union
+import pandas as pd
 # Sklearn
-from sklearn.base import BaseEstimator
+from sklearn.base import BaseEstimator, RegressorMixin
 
 # Wrapper permettant l'intégration des modèles du package "hierarchicalforecast" dans un syntaxe "sklearn-like"
-class HierarchicalForecastAdapter(BaseEstimator):
+class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
     """Adapter for hierarchicalforecast reconciliation with sklearn-like API.
 
     This adapter wraps the hierarchicalforecast library's aggregation and
@@ -336,6 +337,31 @@ class HierarchicalForecastAdapter(BaseEstimator):
 
         Returns:
             DataFrame containing reconciled forecasts.
+
+        Examples:
+            Convenient one-step reconciliation::
+
+                from hierarchicalforecast.methods import BottomUp
+                import pandas as pd
+
+                # Define hierarchy
+                spec = [['Country'], ['Country', 'State']]
+                adapter = HierarchicalForecastAdapter(
+                    reconcilers=[BottomUp()],
+                    spec=spec
+                )
+
+                # Fit and predict in one step
+                reconciled = adapter.fit_predict(X=base_forecasts, y=historical_data)
+
+            Equivalent to separate fit and predict::
+
+                # This:
+                reconciled = adapter.fit_predict(X=forecasts, y=history)
+
+                # Is equivalent to:
+                adapter.fit(None, history)
+                reconciled = adapter.predict(forecasts)
         """
         return self.fit(X=None, y=y).predict(X)
 
@@ -352,6 +378,31 @@ class HierarchicalForecastAdapter(BaseEstimator):
 
         Raises:
             RuntimeError: If called before fit().
+
+        Examples:
+            Inspecting hierarchy structure::
+
+                from hierarchicalforecast.methods import BottomUp
+
+                # Fit adapter on hierarchical data
+                adapter = HierarchicalForecastAdapter(
+                    reconcilers=[BottomUp()],
+                    spec=[['Country'], ['Country', 'State']]
+                )
+                adapter.fit(None, y_train)
+
+                # Get hierarchy information
+                info = adapter.get_hierarchy_info()
+                print(f"Total series: {info['n_series']}")
+                print(f"Bottom-level series: {info['n_bottom']}")
+                print(f"Hierarchy levels: {info['levels']}")
+
+            Exploring hierarchy tags::
+
+                # Access tags mapping
+                info = adapter.get_hierarchy_info()
+                for level, series_ids in info['tags'].items():
+                    print(f"{level}: {series_ids}")
         """
         # Vérification qu'un attribut "tags_" est instancié
         if not hasattr(self, "tags_"):
@@ -377,3 +428,60 @@ class HierarchicalForecastAdapter(BaseEstimator):
             "levels": list(self.tags_.keys()),
             "tags": self.tags_,
         }
+
+    def score(
+        self,
+        X: Union[pd.Series, pd.DataFrame],
+        y: Union[pd.Series, pd.DataFrame],
+        sample_weight: Optional[Union[pd.Series, pd.DataFrame]] = None
+    ) -> float:
+        """Calculate R² score for reconciled forecasts.
+
+        This method is required for GridSearchCV compatibility and follows
+        sklearn convention where higher values are better.
+
+        Args:
+            X: Base forecasts to reconcile (passed to predict).
+            y: True target values to compare against reconciled forecasts.
+            sample_weight: Sample weights for scoring. Defaults to None.
+
+        Returns:
+            R² score (coefficient of determination). Returns 1.0 for perfect
+            predictions, can be negative for very poor predictions.
+
+        Raises:
+            RuntimeError: If called before fit().
+
+        Examples:
+            Evaluating reconciliation performance::
+
+                # Fit adapter on historical data
+                adapter.fit(None, y_train)
+
+                # Get base forecasts and true values for test period
+                y_reconciled = adapter.predict(y_hat_test)
+
+                # Calculate score
+                r2 = adapter.score(y_hat_test, y_test)
+                print(f"R² score: {r2:.3f}")
+
+            Using with cross-validation::
+
+                from sklearn.model_selection import cross_val_score
+
+                scores = cross_val_score(
+                    adapter,
+                    X_forecasts,
+                    y_true,
+                    cv=5,
+                    scoring='r2'
+                )
+                print(f"Mean R²: {scores.mean():.3f}")
+        """
+        from sklearn.metrics import r2_score
+
+        # Obtention des prédictions réconciliées
+        y_pred = self.predict(X)
+
+        # Calcul du score R²
+        return r2_score(y, y_pred, sample_weight=sample_weight)

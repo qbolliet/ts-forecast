@@ -13,6 +13,20 @@ dependencies = [
     "joblib>=1.5.1,<2",
 ]
 
+[project.optional-dependencies]
+adapters-darts = [
+    "darts>=0.30.0,<1",
+]
+adapters-hierarchical = [
+    "hierarchicalforecast>=0.5.0,<1",
+]
+adapters-opera = [
+    "opera>=0.1.0,<1",
+]
+adapters-all = [
+    "ts-forecast[adapters-darts,adapters-hierarchical,adapters-opera]",
+]
+
 [dependency-groups]
 dev = [
     "ipykernel>=6.30.1,<7",
