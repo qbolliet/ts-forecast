@@ -16,7 +16,7 @@ Installation:
     pip install ts-forecast[adapters-all]  # Install all adapters
 """
 
-
+# Lazy import pour ne pas forcer l'installation de l'ensemble des packages darts, opera-python et hierarchicalforecast
 def __getattr__(name):
     """Lazy import of adapters with helpful error messages.
 
@@ -70,7 +70,7 @@ def __getattr__(name):
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-
+# Export des modules du package
 __all__ = [
     "DartsAdapter",
     "HierarchicalForecastAdapter",

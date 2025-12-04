@@ -9,8 +9,10 @@ from typing import Dict, List, Optional, Sequence, Union
 import pandas as pd
 # Sklearn
 from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.metrics import r2_score
 
 # Wrapper permettant l'intégration des modèles du package "hierarchicalforecast" dans un syntaxe "sklearn-like"
+# /!\ La méthode "score" (nécessaire pour GridSearchCV) et l'héritage de RegressorMixin font que l'on wrappe des régresseurs et non des classifieurs par défaut
 class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
     """Adapter for hierarchicalforecast reconciliation with sklearn-like API.
 
@@ -429,6 +431,7 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
             "tags": self.tags_,
         }
 
+    # Méthode de caclul de métriques
     def score(
         self,
         X: Union[pd.Series, pd.DataFrame],
@@ -478,8 +481,6 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
                 )
                 print(f"Mean R²: {scores.mean():.3f}")
         """
-        from sklearn.metrics import r2_score
-
         # Obtention des prédictions réconciliées
         y_pred = self.predict(X)
 

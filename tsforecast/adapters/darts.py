@@ -3,11 +3,17 @@
 This module provides a wrapper around the darts library's GlobalForecastingModel
 to enable seamless integration with sklearn pipelines and tools like GridSearchCV.
 """
+# Importation des modules
+# Modules de base
 import pandas as pd
 from typing import Any, Optional, Union
+# Sklearn
 from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.metrics import r2_score
 
 
+# Wrapper permettant l'intégration des modèles du package "darts" dans un syntaxe "sklearn-like"
+# /!\ La méthode "score" (nécessaire pour GridSearchCV) et l'héritage de RegressorMixin font que l'on wrappe des régresseurs et non des classifieurs par défaut
 class DartsAdapter(BaseEstimator, RegressorMixin):
     """Sklearn-compatible adapter for darts GlobalForecastingModel.
 
@@ -97,7 +103,7 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
             grid_search.fit(X_train, y_train)
             print(f"Best parameters: {grid_search.best_params_}")
     """
-
+    # Initialisation
     def __init__(self, model: Any) -> None:
         """Initialize the DartsAdapter.
 
@@ -120,6 +126,7 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         """
         self.model = model
 
+    # Méthode d'entraînement
     def fit(
         self,
         X: Optional[Union[pd.Series, pd.DataFrame]],
@@ -198,6 +205,7 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         # Gestion des covariables passées (past covariates)
         # Darts spécifie les modèles supportant ces arguments :
         # https://unit8co.github.io/darts/#forecasting-models
+    # Les cas où des valeurs futures sont connues ou des valeurs statisques sont utilisées ne sont pas traitées dans ce cadre mais à travers les 'fit_params'
         if X is not None:
             self.covariates_ = TimeSeries.from_dataframe(X)
             fit_params['past_covariates'] = self.covariates_
@@ -206,6 +214,7 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         self.model.fit(self.series_, **fit_params)
         return self
 
+    # Méthode de prédiction
     def predict(self, X: Union[pd.Series, pd.DataFrame]) -> pd.Series:
         """Generate forecasts using the fitted darts model.
 
@@ -265,6 +274,7 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         # Conversion TimeSeries → pandas Series
         return pred_series.pd_series()
 
+    # Méthode de caclul de métriques
     def score(
         self,
         X: Union[pd.Series, pd.DataFrame],
@@ -314,7 +324,7 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
                 )
                 print(f"Mean R²: {scores.mean():.3f} (+/- {scores.std():.3f})")
         """
-        from sklearn.metrics import r2_score
-
+        # Calcul des prédictions
         y_pred = self.predict(X)
+        # Calcul de la métrique
         return r2_score(y, y_pred, sample_weight=sample_weight)

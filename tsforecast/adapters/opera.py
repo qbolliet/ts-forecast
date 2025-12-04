@@ -3,11 +3,16 @@
 This module provides a wrapper around the opera library's Mixture class
 for online expert aggregation and ensemble learning.
 """
+# Importation des modules
+# Modules de base
 import numpy as np
 from typing import Any, Dict, Optional
+# Sklearn
 from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.metrics import r2_score
 
-
+# Wrapper permettant l'intégration des modèles du package "opera" dans un syntaxe "sklearn-like"
+# /!\ La méthode "score" (nécessaire pour GridSearchCV) et l'héritage de RegressorMixin font que l'on wrappe des régresseurs et non des classifieurs par défaut
 class OperaAdapter(BaseEstimator, RegressorMixin):
     """Sklearn-compatible adapter for opera Mixture ensemble models.
 
@@ -112,7 +117,7 @@ class OperaAdapter(BaseEstimator, RegressorMixin):
 
             print(f"Best model: {grid_search.best_params_}")
     """
-
+    # Initialisation
     def __init__(
         self,
         model: str = "BOA",
@@ -147,14 +152,17 @@ class OperaAdapter(BaseEstimator, RegressorMixin):
                     parameters={"lambda": 0.1}
                 )
         """
+        # Initialisation des paramètres du modèle Mixture
         self.model = model
         self.coefficients = coefficients
         self.loss_type = loss_type
         self.loss_gradient = loss_gradient
         self.parameters = parameters
         self.mixture_ = None
+        # Initialisation du booléen du statut d'entraînement
         self.is_fitted_ = False
 
+    # Méthode d'entraînement
     def fit(
         self,
         X: np.ndarray,
@@ -232,10 +240,11 @@ class OperaAdapter(BaseEstimator, RegressorMixin):
             loss_gradient=self.loss_gradient,
             parameters=self.parameters
         )
-
+        # Mise à jour du statut d'entraînement
         self.is_fitted_ = True
         return self
 
+    # Méthode d'entraînement partiel
     def partial_fit(
         self,
         X: np.ndarray,
@@ -301,6 +310,7 @@ class OperaAdapter(BaseEstimator, RegressorMixin):
         self.mixture_.update(new_experts=X, new_y=y)
         return self
 
+    # Méthode de prédiction
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Generate ensemble predictions from expert forecasts.
 
@@ -343,6 +353,7 @@ class OperaAdapter(BaseEstimator, RegressorMixin):
                 # Combine using trained opera adapter
                 ensemble_pred = adapter.predict(test_expert_preds)
         """
+        # Vérification que l'estimateur est entraîné
         if not self.is_fitted_:
             raise ValueError(
                 "This OperaAdapter instance is not fitted yet. "
@@ -352,6 +363,7 @@ class OperaAdapter(BaseEstimator, RegressorMixin):
         # Prédiction sans mise à jour des coefficients
         return self.mixture_.predict(new_experts=X)
 
+    # Méthode de caclul de métriques
     def score(
         self,
         X: np.ndarray,
@@ -393,7 +405,8 @@ class OperaAdapter(BaseEstimator, RegressorMixin):
 
                 print(f"Ensemble R²: {ensemble_r2:.3f}")
         """
-        from sklearn.metrics import r2_score
-
+        # Calcul des prédictions
         y_pred = self.predict(X)
+
+        # Calcul de la métrique
         return r2_score(y, y_pred, sample_weight=sample_weight)
