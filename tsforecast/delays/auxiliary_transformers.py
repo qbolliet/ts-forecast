@@ -11,7 +11,9 @@ import warnings
 from sklearn.base import BaseEstimator, TransformerMixin
 
 # Importation des modules du package
-from tsforecast.utils.frequency import to_pandas_freq, normalize_frequency
+from tsforecast.utils.frequency import to_pandas_freq, normalize_frequency, is_higher_frequency
+from tsforecast.utils.duration.converter import DurationConverter
+from tsforecast.utils.position import combine_frequency_position
 from tsforecast.utils.time import get_period_boundaries
 from tsforecast.utils.validation import validate_temporal_data
 from ..frequency.detector import detect_frequency
@@ -114,9 +116,6 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
 
         # Validation de la structure temporelle des données
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
-        
-        # Stockage du type de données
-        self.is_series_ = isinstance(X, pd.Series)
 
         # Détection de la fréquence de l'index
         self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
@@ -155,20 +154,13 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
             self._validate_frequency()
 
         # Branchement selon le type de données
-        if self.is_series_:
-            return self._shift_by_periods(X, self.n_periods, self.frequency)
-        else:
-            # Pour DataFrame : appliquer le shift à toutes les colonnes
-            result = X.copy()
-            for col in result.columns:
-                result[col] = self._shift_by_periods(result[col], self.n_periods, self.frequency)
-            return result
+        return self._shift_by_periods(data=X, n_periods=self.n_periods)
 
     # Méthode d'inversion de la transformation
     def inverse_transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
         """Reverse shift to recover original data.
 
-        This is STATELESS - recalculates everything based on inverse logic.
+        This is stateless - recalculates everything based on inverse logic.
 
         Args:
             X: Transformed series or DataFrame
@@ -183,68 +175,121 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         if not isinstance(X, (pd.Series, pd.DataFrame)):
             raise ValueError("X must be a pandas Series or DataFrame")
 
-        # Vérification que l'index est un DateTime
-        if not isinstance(X.index, pd.DatetimeIndex):
-            raise ValueError("X must have a DatetimeIndex")
+        # Validation de la structure temporelle des données
+        X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
+
+        # Détection de la fréquence de l'index
+        self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
+
+        # Validation de la fréquence si demandé
+        if self.frequency_check != "ignore":
+            self._validate_frequency()
 
         # Branchement selon le type de données (shift opposé)
-        if self.is_series_:
-            return self._shift_by_periods(X, -self.n_periods, self.frequency)
-        else:
-            # Pour DataFrame : appliquer le shift inverse à toutes les colonnes
-            result = X.copy()
-            for col in result.columns:
-                result[col] = self._shift_by_periods(result[col], -self.n_periods, self.frequency)
-            return result
+        return self._shift_by_periods(data=X, n_periods=-self.n_periods,)
 
-    # Méthode auxiliaire de décalage des périodes
-    def _shift_by_periods(self, series: pd.Series, n_periods: int, frequency: str) -> pd.Series:
-        """Core shift logic - shifts the index by n periods, not the values.
+    # Méthode auxiliaire de conversion des périodes de shift en périodes d'index
+    def _convert_shift_periods_to_index_periods(self, n_periods: int) -> int:
+        """Convert shift periods to equivalent index periods.
 
-        The values stay at the same array positions, but their associated dates change.
-        Preserves the exact position of each timestamp within its period.
+        When shift frequency is less granular than index frequency (e.g., monthly
+        on daily index), calculates how many index periods correspond to n_periods
+        in the shift frequency.
 
         Args:
-            series: Series to shift
-            n_periods: Number of periods to shift
-            frequency: Frequency for period arithmetic
+            n_periods: Number of periods in shift frequency
 
         Returns:
-            Series with shifted index (same values, different dates)
+            Number of equivalent periods in index frequency
+
+        Examples:
+            # Shifting by 2 months on daily index: 2 months ≈ 60 days
+            >>> self._convert_shift_periods_to_index_periods(2)
+            60
+        """
+        # Normalisation des fréquences
+        shift_freq_normalized = normalize_frequency(self.frequency)
+        index_freq_normalized = normalize_frequency(self.index_frequency_)
+
+        # Si les fréquences sont identiques, pas de conversion
+        if shift_freq_normalized == index_freq_normalized:
+            return n_periods
+
+        # Calcul du facteur de conversion via DurationConverter
+        converter = DurationConverter()
+        try:
+            # Exemple: get_conversion_factor('M', 'D') = 30 (1 mois = 30 jours)
+            conversion_factor = converter.get_conversion_factor(
+                shift_freq_normalized,
+                index_freq_normalized
+            )
+        except ValueError as e:
+            raise ValueError(
+                f"Cannot convert between frequencies '{self.frequency}' and "
+                f"'{self.index_frequency_}': {str(e)}"
+            )
+
+        # Application du facteur avec arrondi approprié
+        return round(n_periods * conversion_factor)
+
+    # Méthode auxiliaire de décalage des périodes
+    def _shift_by_periods(self, data: Union[pd.Series, pd.DataFrame], n_periods: int) -> Union[pd.Series, pd.DataFrame]:
+        """Core shift logic using index extension and truncation.
+
+        Positive shift: Extend at start, drop from end
+        Negative shift: Extend at end, drop from start
+        This avoids NaN introduction.
+
+        Args:
+            data: Series or DataFrame to shift
+            n_periods: Number of periods to shift (in shift frequency)
+
+        Returns:
+            Series or DataFrame with shifted index (same values, different dates)
         """
         # Cas où aucun shift n'est nécessaire
         if n_periods == 0:
-            return series.copy()
+            return data.copy()
 
-        # Normalisation de la fréquence
-        pandas_freq = to_pandas_freq(frequency)
+        # Validation : shift frequency ne doit PAS être plus granulaire que l'index
+        if is_higher_frequency(self.frequency, self.index_frequency_):
+            raise ValueError(
+                f"Shift frequency '{self.frequency}' cannot be more granular "
+                f"than index frequency '{self.index_frequency_}'. "
+                f"Cannot shift by {self.frequency} on a {self.index_frequency_} index.\n"
+                f"Example: You can shift by months ('M') on a daily ('D') index, "
+                f"but not by days ('D') on a monthly ('M') index."
+            )
 
-        # Conversion de l'index en PeriodIndex pour l'arithmétique de périodes
-        period_index = series.index.to_period(freq=pandas_freq)
+        # Conversion des périodes si les fréquences diffèrent
+        index_periods = self._convert_shift_periods_to_index_periods(n_periods)
 
-        # Shift des périodes
-        shifted_periods = period_index + n_periods
+        # Construction de la fréquence complète avec position et suffixe
+        full_freq = self._build_complete_frequency_string()
 
-        # Pour préserver la position exacte des timestamps dans chaque période,
-        # on calcule le décalage entre le timestamp original et le début de sa période
-        shifted_index_list = []
-        for i, (original_ts, original_period, shifted_period) in enumerate(
-            zip(series.index, period_index, shifted_periods)
-        ):
-            # Début de la période originale
-            original_period_start = original_period.to_timestamp()
-            # Décalage entre le timestamp original et le début de sa période
-            offset = original_ts - original_period_start
-            # Appliquer le même décalage à la nouvelle période
-            shifted_period_start = shifted_period.to_timestamp()
-            shifted_ts = shifted_period_start + offset
-            shifted_index_list.append(shifted_ts)
+        if index_periods > 0:
+            # Shift positif : extension au début, suppression à la fin
+            extended_index = self._extend_index_start(
+                data.index,
+                abs(index_periods),
+                full_freq
+            )
+            # Conservation seulement des len(series) premières dates
+            new_index = extended_index[:len(data)]
 
-        # Création du nouvel index
-        shifted_index = pd.DatetimeIndex(shifted_index_list)
+        else:  # index_periods < 0
+            # Shift négatif : extension à la fin, suppression au début
+            extended_index = self._extend_index_end(
+                data.index,
+                abs(index_periods),
+                full_freq
+            )
+            # Conservation seulement des len(series) dernières dates
+            new_index = extended_index[-len(data):]
 
         # Création de la série avec le nouvel index
-        result = pd.Series(series.values, index=shifted_index, name=series.name)
+        result = data.copy()
+        result.index = new_index
 
         return result
 
@@ -275,15 +320,13 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         # Séparation de la fréquence de sa position et de son suffixe afin que la fréquence de l'index soit comparable avec celle demandée
         # Initialisation de l'expression régulière
         # Doit matcher : indicateur [S|E] optionnel [-suffixe] optionnel
-        match = re.match(r"([A-Z]+)([SE])?(-(.*?))?$", freq)
+        match = re.match(r"([A-Z]+?)([SE])?(-(.*?))?$", freq)
         # Extraction des éléments si un appariement est trouvé
         if match:
             freq_ind, position, _, suffix = match.groups()
             return freq_ind, position, suffix
         else :
             raise ValueError(f"Unable to parse frequency, position and suffix in {freq}. Should follow the format : [FREQ][S|E?]-[SUFFIX?]")
-
-    
 
     # Méthode auxiliaire de validation de fréquence
     def _validate_frequency(self):
@@ -316,6 +359,53 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
             elif self.frequency_check == "warn":
                 warnings.warn(message, UserWarning)
 
+    # Méthode auxiliaire de construction de la chaîne de fréquence complète
+    def _build_complete_frequency_string(self) -> str:
+        """Build complete frequency string including position and suffix.
+
+        Combines frequency, position (S/E), and suffix (e.g., DEC for quarters)
+        to create a complete pandas frequency string.
+
+        Returns:
+            Complete frequency string (e.g., 'D', 'MS', 'QE-DEC')
+
+        Examples:
+            # Daily frequency (no position/suffix)
+            >>> self.index_frequency_ = 'D'
+            >>> self.index_position_ = None
+            >>> self._build_complete_frequency_string()
+            'D'
+
+            # Monthly frequency at start
+            >>> self.index_frequency_ = 'M'
+            >>> self.index_position_ = 'S'
+            >>> self.index_suffix_ = None
+            >>> self._build_complete_frequency_string()
+            'MS'
+
+            # Quarterly frequency at end with December anchor
+            >>> self.index_frequency_ = 'Q'
+            >>> self.index_position_ = 'E'
+            >>> self.index_suffix_ = 'DEC'
+            >>> self._build_complete_frequency_string()
+            'QE-DEC'
+        """
+        # Fréquence de base
+        base_freq = self.index_frequency_
+
+        # Si pas de position, retour de la fréquence de base
+        if self.index_position_ is None:
+            return base_freq
+
+        # Combinaison avec la position
+        freq_with_position = combine_frequency_position(base_freq, self.index_position_)
+
+        # Ajout du suffixe si présent
+        if self.index_suffix_ is not None:
+            return f"{freq_with_position}-{self.index_suffix_}"
+
+        return freq_with_position
+
     # Méthode auxiliaire d'extension de l'index au début
     def _extend_index_start(
         self,
@@ -328,13 +418,14 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         Args:
             original_index: Index original
             n_periods: Nombre de périodes à ajouter
-            freq: Fréquence détectée de l'index
+            freq: Complete frequency string including position/suffix (e.g., 'MS', 'QE-DEC')
 
         Returns:
             Index étendu au début
+
+        Notes:
+            freq should be built using _build_complete_frequency_string()
         """
-        # Normalisation de la fréquence
-        pandas_freq = to_pandas_freq(freq)
         # Extraction de la première date
         first_date = original_index[0]
 
@@ -342,7 +433,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         new_dates = pd.date_range(
             end=first_date,
             periods=n_periods + 1,  # +1 car end est inclus
-            freq=pandas_freq
+            freq=freq
         )[:-1]  # Exclure first_date (déjà dans original)
 
         # Concaténation
@@ -360,13 +451,14 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         Args:
             original_index: Index original
             n_periods: Nombre de périodes à ajouter
-            freq: Fréquence détectée de l'index
+            freq: Complete frequency string including position/suffix (e.g., 'MS', 'QE-DEC')
 
         Returns:
             Index étendu à la fin
+
+        Notes:
+            freq should be built using _build_complete_frequency_string()
         """
-        # Normalisation de la fréquence
-        pandas_freq = to_pandas_freq(freq)
         # Extraction de la dernière date
         last_date = original_index[-1]
 
@@ -374,7 +466,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         new_dates = pd.date_range(
             start=last_date,
             periods=n_periods + 1, # +1, car start est déjà inclus
-            freq=pandas_freq
+            freq=freq
         )[1:]  # Exclure last_date (déjà dans original)
 
         # Concaténation
