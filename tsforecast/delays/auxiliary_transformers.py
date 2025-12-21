@@ -3,7 +3,7 @@
 import pandas as pd
 import numpy as np
 import re
-from typing import Dict, Optional, Union, List, Literal
+from typing import Dict, Optional, Union, List, Literal, Tuple
 from datetime import datetime
 import warnings
 
@@ -80,19 +80,16 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         self,
         n_periods: int,
         frequency: str,
-        frequency_check: Literal["ignore", "warn", "raise"] = "ignore"
     ):
         """Initialize ShiftTransformer with frequency validation.
 
         Args:
             n_periods: Number of periods to shift (can be negative)
             frequency: Frequency for period arithmetic ('D', 'M', 'Q', etc.)
-            frequency_check: Frequency validation mode ('ignore', 'warn', 'raise')
         """
         # Initialisation des attributs
         self.n_periods = n_periods
         self.frequency = frequency
-        self.frequency_check = frequency_check
 
     # Méthode d'entraînement
     def fit(self, X: Union[pd.Series, pd.DataFrame], y=None):
@@ -120,10 +117,6 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         # Détection de la fréquence de l'index
         self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
 
-        # Validation de la fréquence si demandé
-        if self.frequency_check != "ignore":
-            self._validate_frequency()
-
         return self
 
     # Méthode de transformation
@@ -148,10 +141,6 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
 
         # Détection de la fréquence de l'index
         self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
-
-        # Validation de la fréquence si demandé
-        if self.frequency_check != "ignore":
-            self._validate_frequency()
 
         # Branchement selon le type de données
         return self._shift_by_periods(data=X, n_periods=self.n_periods)
@@ -180,10 +169,6 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
 
         # Détection de la fréquence de l'index
         self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
-
-        # Validation de la fréquence si demandé
-        if self.frequency_check != "ignore":
-            self._validate_frequency()
 
         # Branchement selon le type de données (shift opposé)
         return self._shift_by_periods(data=X, n_periods=-self.n_periods,)
@@ -294,7 +279,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         return result
 
     # Méthode auxiliaire de détection de fréquence
-    def _detect_index_frequency(self, index: pd.DatetimeIndex) -> str:
+    def _detect_index_frequency(self, index: pd.DatetimeIndex) -> Tuple[str, str, str]:
         """Détecte la fréquence d'un DatetimeIndex.
 
         Args:
@@ -327,37 +312,6 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
             return freq_ind, position, suffix
         else :
             raise ValueError(f"Unable to parse frequency, position and suffix in {freq}. Should follow the format : [FREQ][S|E?]-[SUFFIX?]")
-
-    # Méthode auxiliaire de validation de fréquence
-    def _validate_frequency(self):
-        """Valide la cohérence entre fréquence détectée et fréquence spécifiée.
-
-        Raises:
-            ValueError: If frequency_check='raise' and frequencies don't match
-        """
-        # Normalisation des deux fréquences pour comparaison
-        try:
-            detected_normalized = normalize_frequency(self.index_frequency_)
-            param_normalized = normalize_frequency(self.frequency)
-        except (ValueError, KeyError):
-            # Si normalisation échoue, utiliser les valeurs brutes
-            detected_normalized = self.index_frequency_
-            param_normalized = self.frequency
-
-        # Gestion des cas d'erreur
-        if detected_normalized != param_normalized:
-            message = (
-                f"Frequency validation failed:\n"
-                f"  Detected index frequency: {self.index_frequency_}\n"
-                f"  Parameter frequency: {self.frequency}\n"
-                f"  Hint: Set frequency_check='ignore' to bypass validation, "
-                f"or use frequency='{self.index_frequency_}' to match detected frequency."
-            )
-
-            if self.frequency_check == "raise":
-                raise ValueError(message)
-            elif self.frequency_check == "warn":
-                warnings.warn(message, UserWarning)
 
     # Méthode auxiliaire de construction de la chaîne de fréquence complète
     def _build_complete_frequency_string(self) -> str:
@@ -473,16 +427,15 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         return original_index.append(new_dates)
 
 
+# Transformer masquant les séries sur un nombre donnée de périodes
 class MaskTransformer(BaseEstimator, TransformerMixin):
     """Simple helper to mask N observations per period.
 
     This is a pure operational transformer with no inference logic.
-    Panel data handling is done by the orchestrator (PublicationDelayTransformer).
 
     Parameters:
         n_obs: Number of observations to mask per period
         mask_frequency: Frequency for period grouping ('D', 'M', 'Q', 'W', 'h', etc.)
-        prediction_date: Reference date for masking
 
     Attributes:
         n_obs: Stored number of observations to mask per period
@@ -508,20 +461,24 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         >>> original = masker.inverse_transform(masked)
     """
 
-    def __init__(self, n_obs: int, mask_frequency: str, prediction_date: datetime):
+    # Initialisation
+    def __init__(self, n_obs: int, mask_frequency: str, how: Literal['first', "last"]):
         """Initialize MaskTransformer.
 
         Args:
             n_obs: Number of observations to mask per period
             mask_frequency: Frequency for period grouping ('D', 'M', 'Q', etc.)
-            prediction_date: Reference date for masking
+            how: Reference date for masking
         """
+        # Initialisation des attributs
         self.n_obs = n_obs
         self.mask_frequency = mask_frequency
-        self.prediction_date = prediction_date
-        self.original_data_ = None
+        self.how = how
+        # Initialisation des données masquées pour les transformations inverses
+        self.masked_data_ = None
 
-    def fit(self, X: pd.Series, y=None):
+    # Méthode d'entraînement
+    def fit(self, X: Union[pd.Series, pd.DataFrame], y=None):
         """Fit transformer (no-op for MaskTransformer).
 
         Args:
@@ -531,8 +488,19 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         Returns:
             self
         """
+        # Validation du type de données
+        if not isinstance(X, (pd.Series, pd.DataFrame)):
+            raise ValueError("X must be a pandas Series or DataFrame")
+
+        # Validation de la structure temporelle des données
+        X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
+
+        # Détection de la fréquence de l'index
+        self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
+
         return self
 
+    # Méthode de transformation des données
     def transform(self, X: pd.Series) -> pd.Series:
         """Mask N most recent observations per period.
 
@@ -545,15 +513,16 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         Raises:
             ValueError: If X is not a pandas Series or doesn't have DatetimeIndex
         """
-        # Validation de l'entrée
-        if not isinstance(X, pd.Series):
-            raise ValueError("X must be a pandas Series")
+        # Validation du type de données
+        if not isinstance(X, (pd.Series, pd.DataFrame)):
+            raise ValueError("X must be a pandas Series or DataFrame")
 
-        if not isinstance(X.index, pd.DatetimeIndex):
-            raise ValueError("X must have a DatetimeIndex")
+        # Validation de la structure temporelle des données
+        X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
-        # Stockage des données originales pour inverse_transform
-        self.original_data_ = X.copy()
+        # Détection de la fréquence de l'index
+        self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
+    
 
         return self._mask_n_obs_per_period(X)
 
@@ -574,7 +543,43 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
 
         return self.original_data_.copy()
 
-    def _mask_n_obs_per_period(self, series: pd.Series) -> pd.Series:
+    # Méthode auxiliaire de détection de fréquence
+    def _detect_index_frequency(self, index: pd.DatetimeIndex) -> Tuple[str, str, str]:
+        """Détecte la fréquence d'un DatetimeIndex.
+
+        Args:
+            index: DatetimeIndex to analyze
+
+        Returns:
+            Pandas frequency code ('D', 'M', etc.)
+
+        Raises:
+            ValueError: If frequency cannot be detected
+        """
+        # Utilisation de detect_frequency sur un dummy Series avec valeurs
+        dummy = pd.Series(range(len(index)), index=index, dtype=float)
+        freq = detect_frequency(dummy, literal=False)
+
+        # Renvoie une erreur si aucune fréquence n'est détectée
+        if freq is None:
+            raise ValueError(
+                "Could not detect index frequency. "
+                "Index may be irregular or have insufficient observations."
+            )
+
+        # Séparation de la fréquence de sa position et de son suffixe afin que la fréquence de l'index soit comparable avec celle demandée
+        # Initialisation de l'expression régulière
+        # Doit matcher : indicateur [S|E] optionnel [-suffixe] optionnel
+        match = re.match(r"([A-Z]+?)([SE])?(-(.*?))?$", freq)
+        # Extraction des éléments si un appariement est trouvé
+        if match:
+            freq_ind, position, _, suffix = match.groups()
+            return freq_ind, position, suffix
+        else :
+            raise ValueError(f"Unable to parse frequency, position and suffix in {freq}. Should follow the format : [FREQ][S|E?]-[SUFFIX?]")
+
+    # Méthode auxiliaire de masque du nombre de périodes adapté
+    def _mask_n_obs_per_period(self, data: Union[pd.Series, pd.DataFrame]) -> pd.Series:
         """Core masking logic: mask N most recent obs per period.
 
         Args:
@@ -585,7 +590,11 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         """
         # Cas où aucun masquage n'est nécessaire
         if self.n_obs == 0:
-            return series.copy()
+            return data.copy()
+
+        # Vérification que la fréquence de l'index est strictement supérieure à la fréquence du masque
+        if not is_higher_frequency(self.index_frequency_, self.mask_frequency):
+            
 
         masked_series = series.copy()
 
