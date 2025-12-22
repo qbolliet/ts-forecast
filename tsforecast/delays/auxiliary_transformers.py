@@ -280,16 +280,19 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
 
     # Méthode auxiliaire de détection de fréquence
     def _detect_index_frequency(self, index: pd.DatetimeIndex) -> Tuple[str, str, str]:
-        """Détecte la fréquence d'un DatetimeIndex.
+        """Detect DatetimeIndex frequency and parse position/suffix components.
 
         Args:
             index: DatetimeIndex to analyze
 
         Returns:
-            Pandas frequency code ('D', 'M', etc.)
+            Tuple of (frequency_code, position, suffix) where:
+            - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
+            - position: Optional position indicator ('S' for start, 'E' for end)
+            - suffix: Optional suffix (e.g., 'DEC' for December quarter end)
 
         Raises:
-            ValueError: If frequency cannot be detected
+            ValueError: If frequency cannot be detected or parsed
         """
         # Utilisation de detect_frequency sur un dummy Series avec valeurs
         dummy = pd.Series(range(len(index)), index=index, dtype=float)
@@ -367,15 +370,18 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         n_periods: int,
         freq: str
     ) -> pd.DatetimeIndex:
-        """Étend l'index au début (pour shift positif).
+        """Extend index backward by adding periods before the first date.
+
+        Used for positive shifts: adds dates before the original index,
+        preserving data by shifting the temporal alignment.
 
         Args:
-            original_index: Index original
-            n_periods: Nombre de périodes à ajouter
+            original_index: Original DatetimeIndex
+            n_periods: Number of periods to add before first date
             freq: Complete frequency string including position/suffix (e.g., 'MS', 'QE-DEC')
 
         Returns:
-            Index étendu au début
+            Extended DatetimeIndex with new periods prepended
 
         Notes:
             freq should be built using _build_complete_frequency_string()
@@ -400,15 +406,18 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         n_periods: int,
         freq: str
     ) -> pd.DatetimeIndex:
-        """Étend l'index à la fin (pour shift négatif).
+        """Extend index forward by adding periods after the last date.
+
+        Used for negative shifts: adds dates after the original index,
+        preserving data by shifting the temporal alignment.
 
         Args:
-            original_index: Index original
-            n_periods: Nombre de périodes à ajouter
+            original_index: Original DatetimeIndex
+            n_periods: Number of periods to add after last date
             freq: Complete frequency string including position/suffix (e.g., 'MS', 'QE-DEC')
 
         Returns:
-            Index étendu à la fin
+            Extended DatetimeIndex with new periods appended
 
         Notes:
             freq should be built using _build_complete_frequency_string()
@@ -545,16 +554,19 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
 
     # Méthode auxiliaire de détection de fréquence
     def _detect_index_frequency(self, index: pd.DatetimeIndex) -> Tuple[str, str, str]:
-        """Détecte la fréquence d'un DatetimeIndex.
+        """Detect DatetimeIndex frequency and parse position/suffix components.
 
         Args:
             index: DatetimeIndex to analyze
 
         Returns:
-            Pandas frequency code ('D', 'M', etc.)
+            Tuple of (frequency_code, position, suffix) where:
+            - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
+            - position: Optional position indicator ('S' for start, 'E' for end)
+            - suffix: Optional suffix (e.g., 'DEC' for December quarter end)
 
         Raises:
-            ValueError: If frequency cannot be detected
+            ValueError: If frequency cannot be detected or parsed
         """
         # Utilisation de detect_frequency sur un dummy Series avec valeurs
         dummy = pd.Series(range(len(index)), index=index, dtype=float)
@@ -579,14 +591,20 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
             raise ValueError(f"Unable to parse frequency, position and suffix in {freq}. Should follow the format : [FREQ][S|E?]-[SUFFIX?]")
 
     # Méthode auxiliaire de masque du nombre de périodes adapté
-    def _mask_n_obs_per_period(self, data: Union[pd.Series, pd.DataFrame]) -> pd.Series:
-        """Core masking logic: mask N most recent obs per period.
+    def _mask_n_obs_per_period(self, data: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
+        """Core masking logic: mask N most recent observations per period.
+
+        Masks the N most recent observations within each period defined by
+        mask_frequency, setting masked values to NaN.
 
         Args:
-            series: Series to mask
+            data: Series or DataFrame to mask
 
         Returns:
-            Series with masked observations
+            Series or DataFrame with masked observations (NaN values)
+
+        Raises:
+            ValueError: If index frequency is not higher than mask frequency
         """
         # Cas où aucun masquage n'est nécessaire
         if self.n_obs == 0:
