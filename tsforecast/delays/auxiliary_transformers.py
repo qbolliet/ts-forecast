@@ -471,7 +471,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
     """
 
     # Initialisation
-    def __init__(self, n_obs: int, mask_frequency: str, how: Literal['first', "last"]):
+    def __init__(self, n_obs: int, mask_frequency: str, how: Literal['first', "last"]="last"):
         """Initialize MaskTransformer.
 
         Args:
@@ -510,7 +510,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         return self
 
     # Méthode de transformation des données
-    def transform(self, X: pd.Series) -> pd.Series:
+    def transform(self, X: Union[pd.Series, pd.DataFrame]) -> pd.Series:
         """Mask N most recent observations per period.
 
         Args:
@@ -534,22 +534,50 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
     
         return self._mask_n_obs_per_period(X)
 
-    def inverse_transform(self, X: pd.Series) -> pd.Series:
-        """Restore masked values from original data.
+    # Méthode de transformation inverse des données
+    def inverse_transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
+        """Restore masked values from stored masked data.
+
+        Combines the input X with the masked rows stored during transform,
+        then validates and sorts the combined data to maintain temporal structure.
 
         Args:
-            X: Masked series
+            X: Masked series or DataFrame
 
         Returns:
-            Original series before masking
+            Restored series or DataFrame with original values restored for masked rows
 
         Raises:
             ValueError: If transform has not been called yet
         """
-        if self.original_data_ is None:
+        if self.masked_data_ is None:
             raise ValueError("Must call transform before inverse_transform")
 
-        return self.original_data_.copy()
+        # Validation du type de données
+        if not isinstance(X, (pd.Series, pd.DataFrame)):
+            raise ValueError("X must be a pandas Series or DataFrame")
+
+        # Si aucune donnée masquée n'a été stockée, retourner X tel quel
+        if len(self.masked_data_) == 0:
+            return X.copy()
+
+        # Combine X avec les lignes masquées
+        # Concaténation
+        combined = pd.concat([X, self.masked_data_])
+        # Gestion des duplicats en conservant la dernière occurrence (celles de masked_data_ qui viennent en dernier)
+        combined = combined[~combined.index.duplicated(keep='last')]
+
+        # Tri des données pour maintenir la structure de série temporelle
+        restored = validate_temporal_data(
+            data=combined,
+            time_col=None,
+            panel_cols=None,
+            strict=True,
+            sort_data=True,
+            return_metadata=False
+        )
+
+        return restored
 
     # Méthode auxiliaire de détection de fréquence
     def _detect_index_frequency(self, index: pd.DatetimeIndex) -> Tuple[str, str, str]:
@@ -641,7 +669,8 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         """Core masking logic: mask N most recent observations per period.
 
         Masks the N most recent observations within each period defined by
-        mask_frequency, setting masked values to NaN.
+        mask_frequency, setting masked values to NaN. Stores masked rows in
+        self.masked_data_ for later restoration via inverse_transform.
 
         Args:
             data: Series or DataFrame to mask
@@ -654,12 +683,17 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         """
         # Cas où aucun masquage n'est nécessaire
         if self.n_obs == 0:
+            # Initialiser masked_data_ avec une structure vide
+            if isinstance(data, pd.Series):
+                self.masked_data_ = pd.Series(dtype=data.dtype, name=data.name)
+            else:
+                self.masked_data_ = pd.DataFrame(columns=data.columns)
             return data.copy()
 
         # Vérification que la fréquence de l'index est strictement supérieure à la fréquence du masque
         if not is_higher_frequency(self.index_frequency_, self.mask_frequency):
             raise ValueError(
-                "The index frequency should be strictly higher than the mask frequency." 
+                "The index frequency should be strictly higher than the mask frequency."
                 f"The index frequency is {self.index_frequency_} and the mask frequency is {self.mask_frequency}"
             )
 
@@ -673,6 +707,9 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
             frequency=self.mask_frequency
         )
 
+        # Liste pour collecter les lignes masquées
+        masked_rows_list = []
+
         # Masque dans chaque période
         for period_start, period_end in periods:
             # Filtre des observations dans cette période
@@ -685,11 +722,25 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
             if (len(period_obs) > 0) & (self.how == 'last'):
                 # Masque des n_obs plus récentes
                 most_recent_indices = period_obs.index[-n_to_mask:]
+                # Stocker les lignes avant de les masquer
+                masked_rows_list.append(data.loc[most_recent_indices])
                 masked_data.loc[most_recent_indices] = np.nan
             elif (len(period_obs) > 0) & (self.how =='first'):
                 # Masque des n_obs les plus anciennes
                 oldest_indices = period_obs.index[:n_to_mask]
+                # Stocker les lignes avant de les masquer
+                masked_rows_list.append(data.loc[oldest_indices])
                 masked_data.loc[oldest_indices] = np.nan
+
+        # Combiner toutes les lignes masquées dans self.masked_data_
+        if masked_rows_list:
+            self.masked_data_ = pd.concat(masked_rows_list)
+        else:
+            # Aucune ligne masquée
+            if isinstance(data, pd.Series):
+                self.masked_data_ = pd.Series(dtype=data.dtype, name=data.name)
+            else:
+                self.masked_data_ = pd.DataFrame(columns=data.columns)
 
         return masked_data
 
