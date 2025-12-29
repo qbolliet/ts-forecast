@@ -2,7 +2,6 @@
 # Modules de base
 import pandas as pd
 import numpy as np
-import re
 from typing import Dict, Optional, Union, List, Literal, Tuple
 from datetime import datetime
 import warnings
@@ -12,11 +11,13 @@ from sklearn.base import BaseEstimator, TransformerMixin
 
 # Importation des modules du package
 from tsforecast.utils.frequency import to_pandas_freq, normalize_frequency, is_higher_frequency
+from tsforecast.utils.frequency.parser import (
+    detect_and_parse_frequency,
+    build_frequency_string
+)
 from tsforecast.utils.duration.converter import DurationConverter
-from tsforecast.utils.position import combine_frequency_position
 from tsforecast.utils.time import get_period_boundaries
 from tsforecast.utils.validation import validate_temporal_data
-from ..frequency.detector import detect_frequency
 
 
 # Transformer 'shiftant' les séries sur un nombre donnée de périodes
@@ -115,7 +116,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_frequency(X.index)
 
         return self
 
@@ -140,7 +141,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_frequency(X.index)
 
         # Branchement selon le type de données
         return self._shift_by_periods(data=X, n_periods=self.n_periods)
@@ -168,7 +169,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_frequency(X.index)
 
         # Branchement selon le type de données (shift opposé)
         return self._shift_by_periods(data=X, n_periods=-self.n_periods,)
@@ -250,7 +251,11 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         index_periods = self._convert_shift_periods_to_index_periods(n_periods)
 
         # Construction de la fréquence complète avec position et suffixe
-        full_freq = self._build_complete_frequency_string()
+        full_freq = build_frequency_string(
+            self.index_frequency_,
+            self.index_position_,
+            self.index_suffix_
+        )
 
         if index_periods > 0:
             # Shift positif : extension au début, suppression à la fin
@@ -278,90 +283,6 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
 
         return result
 
-    # Méthode auxiliaire de détection de fréquence
-    def _detect_index_frequency(self, index: pd.DatetimeIndex) -> Tuple[str, str, str]:
-        """Detect DatetimeIndex frequency and parse position/suffix components.
-
-        Args:
-            index: DatetimeIndex to analyze
-
-        Returns:
-            Tuple of (frequency_code, position, suffix) where:
-            - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
-            - position: Optional position indicator ('S' for start, 'E' for end)
-            - suffix: Optional suffix (e.g., 'DEC' for December quarter end)
-
-        Raises:
-            ValueError: If frequency cannot be detected or parsed
-        """
-        # Utilisation de detect_frequency sur un dummy Series avec valeurs
-        dummy = pd.Series(range(len(index)), index=index, dtype=float)
-        freq = detect_frequency(dummy, literal=False)
-
-        # Renvoie une erreur si aucune fréquence n'est détectée
-        if freq is None:
-            raise ValueError(
-                "Could not detect index frequency. "
-                "Index may be irregular or have insufficient observations."
-            )
-
-        # Séparation de la fréquence de sa position et de son suffixe afin que la fréquence de l'index soit comparable avec celle demandée
-        # Initialisation de l'expression régulière
-        # Doit matcher : indicateur [S|E] optionnel [-suffixe] optionnel
-        match = re.match(r"([A-Z]+?)([SE])?(-(.*?))?$", freq)
-        # Extraction des éléments si un appariement est trouvé
-        if match:
-            freq_ind, position, _, suffix = match.groups()
-            return freq_ind, position, suffix
-        else :
-            raise ValueError(f"Unable to parse frequency, position and suffix in {freq}. Should follow the format : [FREQ][S|E?]-[SUFFIX?]")
-
-    # Méthode auxiliaire de construction de la chaîne de fréquence complète
-    def _build_complete_frequency_string(self) -> str:
-        """Build complete frequency string including position and suffix.
-
-        Combines frequency, position (S/E), and suffix (e.g., DEC for quarters)
-        to create a complete pandas frequency string.
-
-        Returns:
-            Complete frequency string (e.g., 'D', 'MS', 'QE-DEC')
-
-        Examples:
-            # Daily frequency (no position/suffix)
-            >>> self.index_frequency_ = 'D'
-            >>> self.index_position_ = None
-            >>> self._build_complete_frequency_string()
-            'D'
-
-            # Monthly frequency at start
-            >>> self.index_frequency_ = 'M'
-            >>> self.index_position_ = 'S'
-            >>> self.index_suffix_ = None
-            >>> self._build_complete_frequency_string()
-            'MS'
-
-            # Quarterly frequency at end with December anchor
-            >>> self.index_frequency_ = 'Q'
-            >>> self.index_position_ = 'E'
-            >>> self.index_suffix_ = 'DEC'
-            >>> self._build_complete_frequency_string()
-            'QE-DEC'
-        """
-        # Fréquence de base
-        base_freq = self.index_frequency_
-
-        # Si pas de position, retour de la fréquence de base
-        if self.index_position_ is None:
-            return base_freq
-
-        # Combinaison avec la position
-        freq_with_position = combine_frequency_position(base_freq, self.index_position_)
-
-        # Ajout du suffixe si présent
-        if self.index_suffix_ is not None:
-            return f"{freq_with_position}-{self.index_suffix_}"
-
-        return freq_with_position
 
     # Méthode auxiliaire d'extension de l'index au début
     def _extend_index_start(
@@ -505,7 +426,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_frequency(X.index)
 
         return self
 
@@ -530,7 +451,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_frequency(X.index)
     
         return self._mask_n_obs_per_period(X)
 
@@ -579,91 +500,6 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
 
         return restored
 
-    # Méthode auxiliaire de détection de fréquence
-    def _detect_index_frequency(self, index: pd.DatetimeIndex) -> Tuple[str, str, str]:
-        """Detect DatetimeIndex frequency and parse position/suffix components.
-
-        Args:
-            index: DatetimeIndex to analyze
-
-        Returns:
-            Tuple of (frequency_code, position, suffix) where:
-            - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
-            - position: Optional position indicator ('S' for start, 'E' for end)
-            - suffix: Optional suffix (e.g., 'DEC' for December quarter end)
-
-        Raises:
-            ValueError: If frequency cannot be detected or parsed
-        """
-        # Utilisation de detect_frequency sur un dummy Series avec valeurs
-        dummy = pd.Series(range(len(index)), index=index, dtype=float)
-        freq = detect_frequency(dummy, literal=False)
-
-        # Renvoie une erreur si aucune fréquence n'est détectée
-        if freq is None:
-            raise ValueError(
-                "Could not detect index frequency. "
-                "Index may be irregular or have insufficient observations."
-            )
-
-        # Séparation de la fréquence de sa position et de son suffixe afin que la fréquence de l'index soit comparable avec celle demandée
-        # Initialisation de l'expression régulière
-        # Doit matcher : indicateur [S|E] optionnel [-suffixe] optionnel
-        match = re.match(r"([A-Z]+?)([SE])?(-(.*?))?$", freq)
-        # Extraction des éléments si un appariement est trouvé
-        if match:
-            freq_ind, position, _, suffix = match.groups()
-            return freq_ind, position, suffix
-        else :
-            raise ValueError(f"Unable to parse frequency, position and suffix in {freq}. Should follow the format : [FREQ][S|E?]-[SUFFIX?]")
-
-    # Méthode auxiliaire de construction de la chaîne de fréquence complète
-    def _build_complete_frequency_string(self, freq : str) -> str:
-        """Build complete frequency string including position and suffix.
-
-        Combines frequency, position (S/E), and suffix (e.g., DEC for quarters)
-        to create a complete pandas frequency string.
-
-        Returns:
-            Complete frequency string (e.g., 'D', 'MS', 'QE-DEC')
-
-        Examples:
-            # Daily frequency (no position/suffix)
-            >>> freq = 'D'
-            >>> self.index_position_ = None
-            >>> self._build_complete_frequency_string(freq)
-            'D'
-
-            # Monthly frequency at start
-            >>> freq = 'M'
-            >>> self.index_position_ = 'S'
-            >>> self.index_suffix_ = None
-            >>> self._build_complete_frequency_string(freq)
-            'MS'
-
-            # Quarterly frequency at end with December anchor
-            >>> freq = 'Q'
-            >>> self.index_position_ = 'E'
-            >>> self.index_suffix_ = 'DEC'
-            >>> self._build_complete_frequency_string(freq)
-            'QE-DEC'
-        """
-        # Fréquence de base
-        base_freq = freq
-
-        # Si pas de position, retour de la fréquence de base
-        if self.index_position_ is None:
-            return base_freq
-
-        # Combinaison avec la position
-        freq_with_position = combine_frequency_position(base_freq, self.index_position_)
-
-        # Ajout du suffixe si présent
-        if self.index_suffix_ is not None:
-            return f"{freq_with_position}-{self.index_suffix_}"
-
-        return freq_with_position
-    
     # Méthode auxiliaire de masque du nombre de périodes adapté
     def _mask_n_obs_per_period(self, data: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
         """Core masking logic: mask N most recent observations per period.
@@ -762,7 +598,11 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
             List of (period_start, period_end) tuples
         """
         # Reconstitution de la fréquence avec position et suffixe
-        pandas_freq = self._build_complete_frequency_string(freq=frequency)
+        pandas_freq = build_frequency_string(
+            frequency,
+            self.index_position_,
+            self.index_suffix_
+        )
 
         # Génération des dates de début de période
         period_starts = pd.date_range(
