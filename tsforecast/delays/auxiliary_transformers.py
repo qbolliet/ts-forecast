@@ -532,7 +532,6 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         # Détection de la fréquence de l'index
         self.index_frequency_, self.index_position_, self.index_suffix_ = self._detect_index_frequency(X.index)
     
-
         return self._mask_n_obs_per_period(X)
 
     def inverse_transform(self, X: pd.Series) -> pd.Series:
@@ -590,6 +589,53 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         else :
             raise ValueError(f"Unable to parse frequency, position and suffix in {freq}. Should follow the format : [FREQ][S|E?]-[SUFFIX?]")
 
+    # Méthode auxiliaire de construction de la chaîne de fréquence complète
+    def _build_complete_frequency_string(self, freq : str) -> str:
+        """Build complete frequency string including position and suffix.
+
+        Combines frequency, position (S/E), and suffix (e.g., DEC for quarters)
+        to create a complete pandas frequency string.
+
+        Returns:
+            Complete frequency string (e.g., 'D', 'MS', 'QE-DEC')
+
+        Examples:
+            # Daily frequency (no position/suffix)
+            >>> freq = 'D'
+            >>> self.index_position_ = None
+            >>> self._build_complete_frequency_string(freq)
+            'D'
+
+            # Monthly frequency at start
+            >>> freq = 'M'
+            >>> self.index_position_ = 'S'
+            >>> self.index_suffix_ = None
+            >>> self._build_complete_frequency_string(freq)
+            'MS'
+
+            # Quarterly frequency at end with December anchor
+            >>> freq = 'Q'
+            >>> self.index_position_ = 'E'
+            >>> self.index_suffix_ = 'DEC'
+            >>> self._build_complete_frequency_string(freq)
+            'QE-DEC'
+        """
+        # Fréquence de base
+        base_freq = freq
+
+        # Si pas de position, retour de la fréquence de base
+        if self.index_position_ is None:
+            return base_freq
+
+        # Combinaison avec la position
+        freq_with_position = combine_frequency_position(base_freq, self.index_position_)
+
+        # Ajout du suffixe si présent
+        if self.index_suffix_ is not None:
+            return f"{freq_with_position}-{self.index_suffix_}"
+
+        return freq_with_position
+    
     # Méthode auxiliaire de masque du nombre de périodes adapté
     def _mask_n_obs_per_period(self, data: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
         """Core masking logic: mask N most recent observations per period.
@@ -612,35 +658,46 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
 
         # Vérification que la fréquence de l'index est strictement supérieure à la fréquence du masque
         if not is_higher_frequency(self.index_frequency_, self.mask_frequency):
-            
+            raise ValueError(
+                "The index frequency should be strictly higher than the mask frequency." 
+                f"The index frequency is {self.index_frequency_} and the mask frequency is {self.mask_frequency}"
+            )
 
-        masked_series = series.copy()
+        # Copie indépendante des données
+        masked_data = data.copy()
 
         # Génération des périodes
         periods = self._generate_periods(
-            start_date=series.index.min(),
-            end_date=self.prediction_date,
+            start_date=data.index.min(),
+            end_date=data.index.max(),
             frequency=self.mask_frequency
         )
 
-        # Masquage dans chaque période
+        # Masque dans chaque période
         for period_start, period_end in periods:
-            # Observations dans cette période
-            period_mask = (series.index >= period_start) & (series.index < period_end)
-            period_obs = series[period_mask]
+            # Filtre des observations dans cette période
+            period_mask = (data.index >= period_start) & (data.index < period_end)
+            period_obs = data[period_mask]
 
-            if len(period_obs) > 0:
-                # Masquer les n_obs plus récentes
-                n_to_mask = min(self.n_obs, len(period_obs))
+            # Calcul du nombre de périodes à masquer
+            n_to_mask = min(self.n_obs, len(period_obs))
+
+            if (len(period_obs) > 0) & (self.how == 'last'):
+                # Masque des n_obs plus récentes
                 most_recent_indices = period_obs.index[-n_to_mask:]
-                masked_series.loc[most_recent_indices] = np.nan
+                masked_data.loc[most_recent_indices] = np.nan
+            elif (len(period_obs) > 0) & (self.how =='first'):
+                # Masque des n_obs les plus anciennes
+                oldest_indices = period_obs.index[:n_to_mask]
+                masked_data.loc[oldest_indices] = np.nan
 
-        return masked_series
+        return masked_data
 
+    # Méthode auxiliaire de génération de période
     def _generate_periods(
         self,
         start_date: pd.Timestamp,
-        end_date: datetime,
+        end_date: pd.Timestamp,
         frequency: str
     ) -> List[tuple[datetime, datetime]]:
         """Generate list of (period_start, period_end) tuples.
@@ -653,8 +710,8 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         Returns:
             List of (period_start, period_end) tuples
         """
-        # Normalisation de la fréquence
-        pandas_freq = to_pandas_freq(frequency)
+        # Reconstitution de la fréquence avec position et suffixe
+        pandas_freq = self._build_complete_frequency_string(freq=frequency)
 
         # Génération des dates de début de période
         period_starts = pd.date_range(
@@ -664,9 +721,13 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         )
 
         # Création des tuples (start, end) pour chaque période
+        # Initialisation de la liste des périodes
         periods = []
+        # Parcours des périodes
         for period_date in period_starts:
+            # Extraction des dates de début et de fin de période
             period_start, period_end = get_period_boundaries(period_date, frequency)
+            # Ajout du tupe à la liste
             periods.append((period_start, period_end))
 
         return periods
