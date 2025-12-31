@@ -263,7 +263,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             if not is_consistent:
                 warnings.warn(f"Panel structure issues: {'; '.join(issues)}")
         
-        # Appel de la méthode spécifique à implémenter
+        # Appel de la méthode d'entraînement spécifique à implémenter
         self._fit(X, y)
         
         return self
