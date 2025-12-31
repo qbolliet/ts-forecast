@@ -162,9 +162,6 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         # Après validation, les colonnes peuvent avoir été converties en index
         self._has_multiindex = isinstance(X.index, pd.MultiIndex)
 
-        # Identification des colonnes d'entité
-        self.entity_columns_ = list(self.panel_cols)
-
         # Détermination des colonnes à transformer
         if self._has_multiindex:
             # Les colonnes panel sont dans l'index, on transforme toutes les colonnes
@@ -173,9 +170,11 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
             entity_level_indices = list(range(len(self.panel_cols)))
         else:
             # Les colonnes panel sont dans le DataFrame
-            exclude_cols = set(self.entity_columns_)
+            exclude_cols = set(self.panel_cols)
+            # Ajout de la colonne de temps aux colonnes à exclure si elle est dans le jeu de données
             if self.time_col in X.columns:
                 exclude_cols.add(self.time_col)
+            # Liste des colonnes à transformer
             self.transform_columns_ = [c for c in X.columns if c not in exclude_cols]
 
         # Stockage des transformers par entité
@@ -191,7 +190,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
             # Groupement par les niveaux de l'index
             entity_groups = X.groupby(level=entity_level_indices)
         else:
-            entity_groups = X.groupby(self.entity_columns_)
+            entity_groups = X.groupby(self.panel_cols)
 
         # Extraction du nombre d'entités
         self.entities_ = entity_groups.ngroups
@@ -234,7 +233,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 # Fit du transformer
                 entity_transformer.fit(X_entity, y_entity)
 
-                # Stockage
+                # Ajout du transformer au dictionnaire
                 self.transformers_[entity_key] = entity_transformer
 
             except Exception as e:
@@ -256,12 +255,18 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         """
 
         # Fonction d'estimation d'un transformer sur une entité
-        def fit_single_entity(entity_key, group_idx):
+        def fit_single_entity(entity_key, group_idx) -> Dict[tuple, BaseEstimator]:
+            # TODO : Traduire la docstring + respecter la convention de Google
+            # TODO : Typer la fonction
             """Fit un transformer pour une seule entité."""
+            # Normalisation de la clé de l'entité
             entity_key = self._normalize_entity_key(entity_key)
+            # Clone du transformer
             entity_transformer = clone(self.transformer)
+            # Identification des observations afférentes au groupe
             X_entity = X.loc[group_idx, self.transform_columns_]
             y_entity = y.loc[group_idx] if y is not None else None
+            # Entrainement du transformer
             entity_transformer.fit(X_entity, y_entity)
             return entity_key, entity_transformer
 
@@ -272,7 +277,9 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         )
 
         # Collecte des résultats
+        # Parcours des résultats
         for entity_key, fitted_transformer in results:
+            # Ajout au dictionnaire
             self.transformers_[entity_key] = fitted_transformer
 
     # Fonction de transformation
@@ -293,19 +300,21 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
             entity_level_indices = list(range(len(self.panel_cols)))
             entity_groups = X.groupby(level=entity_level_indices)
         else:
-            entity_groups = X.groupby(self.entity_columns_)
+            entity_groups = X.groupby(self.panel_cols)
 
         # Liste pour stocker les DataFrames transformés
         transformed_parts = []
 
         # Parcours des entités
         for entity_key, group_idx in entity_groups.groups.items():
+            # Normalisation de la clé de l'entité
             entity_key = self._normalize_entity_key(entity_key)
 
             # Vérification que l'entité a été vue pendant le fit
             if entity_key not in self.transformers_:
+                # Gestion des identités inconnues
                 self._handle_unknown_entity(entity_key)
-                # On garde les données non transformées
+                # Conservation des données non transformées
                 transformed_parts.append(X.loc[group_idx])
                 continue
 
@@ -350,7 +359,9 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 transformed_parts.append(df_part)
 
             except Exception as e:
+                # Gestion de l'erreur de transformation
                 self._handle_entity_error(entity_key, e, "transforming")
+                # Conservation des données non transformées
                 transformed_parts.append(X.loc[group_idx])
 
         # Concaténation des résultats
@@ -415,7 +426,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
             entity_level_indices = list(range(len(self.panel_cols)))
             entity_groups = X.groupby(level=entity_level_indices)
         else:
-            entity_groups = X.groupby(self.entity_columns_)
+            entity_groups = X.groupby(self.panel_cols)
 
         # Liste pour stocker les DataFrames inversés
         inverted_parts = []
@@ -427,10 +438,9 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
 
             # Renvoie une erreur si l'entité n'a pas de transformer associé
             if entity_key not in self.transformers_:
-                warnings.warn(
-                    f"Entity {entity_key} not found in fitted transformers. "
-                    "Returning data unchanged."
-                )
+                # Gestion des identités inconnues
+                self._handle_unknown_entity(entity_key)
+                # Conservation des données non transformées
                 inverted_parts.append(X.loc[group_idx])
                 continue
 
@@ -445,17 +455,25 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 # Reconstruction du DataFrame
                 df_part = X.loc[group_idx].copy()
 
+                # Remplacement des valeurs des colonnes par la transformation inverse
+                # Le cas où le nombre de colonnes retrourné par le Transformer est différent du nombre d'origine n'est pas traité
                 if isinstance(X_entity_inverted, np.ndarray):
-                    for i, col in enumerate(self.transform_columns_):
-                        df_part[col] = X_entity_inverted[:, i]
+                    if X_entity_inverted.shape[1] != len(self.transform_columns_):
+                        raise NotImplementedError("Do not handle the case when the number of columns returned is different from the number of transformed columns for 'inverse_tranform'")
+                    else :
+                        for i, col in enumerate(self.transform_columns_):
+                            df_part[col] = X_entity_inverted[:, i]
                 else:
                     for col in X_entity_inverted.columns:
                         df_part[col] = X_entity_inverted[col].values
 
+                # Ajout à la liste des données transformées
                 inverted_parts.append(df_part)
 
             except Exception as e:
+                # Gestion de l'erreur de transformation
                 self._handle_entity_error(entity_key, e, "inverse_transforming")
+                # Conservation des données non transformées
                 inverted_parts.append(X.loc[group_idx])
 
         # Concaténation et restauration de l'ordre
