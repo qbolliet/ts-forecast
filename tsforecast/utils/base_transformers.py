@@ -164,7 +164,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
 
     # Initialisation
     def __init__(self,
-                 time_col: str = 'date',
+                 time_col: Optional[str] = None,
                  panel_cols: Optional[List[str]] = None,
                  validate_input: bool = True,
                  strict_validation: bool = True,
@@ -173,8 +173,11 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         """Initialize the transformer.
 
         Args:
-            time_col: Name of the temporal column
-            panel_cols: Columns identifying panel dimensions (entity identifiers)
+            time_col: Name of the temporal column. If None, uses the index
+                (last level for MultiIndex). Default is None.
+            panel_cols: Columns identifying panel dimensions (entity identifiers).
+                If None with MultiIndex, auto-detects from first n-1 levels.
+                Default is None.
             validate_input: Whether to activate input data validation
             strict_validation: If True, raises errors; if False, emits warnings
             auto_sort: If True, automatically sorts improperly ordered data
@@ -182,25 +185,37 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
                 and stores metadata for later restoration
 
         Examples:
-            >>> # Example 1: Basic time series transformer
+            >>> # Example 1: Column-based panel (backward compatible)
             >>> transformer = PanelTimeSeriesTransformer(
             ...     time_col='date',
-            ...     validate_input=True
+            ...     panel_cols=['entity']
             ... )
             >>>
-            >>> # Example 2: Panel transformer with auto-sorting
+            >>> # Example 2: MultiIndex panel (new)
+            >>> idx = pd.MultiIndex.from_arrays([
+            ...     ['A', 'A', 'B', 'B'],
+            ...     pd.date_range('2023-01-01', periods=2).tolist() * 2
+            ... ], names=['entity', 'date'])
+            >>> df = pd.DataFrame({'value': [1, 2, 3, 4]}, index=idx)
+            >>> transformer = PanelTimeSeriesTransformer(
+            ...     time_col=None,
+            ...     panel_cols=None  # Auto-detects from MultiIndex
+            ... )
+            >>>
+            >>> # Example 3: DatetimeIndex time series
+            >>> dates = pd.date_range('2023-01-01', periods=5)
+            >>> df = pd.DataFrame({'value': [1, 2, 3, 4, 5]}, index=dates)
+            >>> transformer = PanelTimeSeriesTransformer(
+            ...     time_col=None,
+            ...     panel_cols=None
+            ... )
+            >>>
+            >>> # Example 4: Panel transformer with auto-sorting
             >>> panel_transformer = PanelTimeSeriesTransformer(
             ...     time_col='date',
             ...     panel_cols=['country', 'sector'],
             ...     auto_sort=True,
             ...     strict_validation=False
-            ... )
-            >>>
-            >>> # Example 3: Transformer with index conversion
-            >>> index_transformer = PanelTimeSeriesTransformer(
-            ...     time_col='date',
-            ...     panel_cols=['entity_id'],
-            ...     convert_cols_to_index=True
             ... )
         """
         # Initialisation des paramètres en attributs
@@ -213,7 +228,104 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
 
         # Attribut pour stocker les métadonnées de conversion
         self.conversion_metadata_ = None
-    
+
+    # Méthode de détection de la structure des données
+    def _detect_data_structure(self, X: pd.DataFrame) -> Tuple[bool, bool, bool]:
+        """Detect data structure (panel vs time series, columns vs index).
+
+        Determines whether data is panel or time series, and whether temporal
+        and panel information is in columns or index levels.
+
+        Args:
+            X: Input DataFrame
+
+        Returns:
+            Tuple of (is_panel, panel_in_index, time_in_index):
+                - is_panel: True if panel data (multiple entities)
+                - panel_in_index: True if panel columns are in index levels
+                - time_in_index: True if time column is in index
+
+        Raises:
+            ValueError: If structure is ambiguous or invalid
+
+        Examples:
+            >>> # Example 1: Column-based panel
+            >>> df = pd.DataFrame({
+            ...     'entity': ['A', 'A', 'B', 'B'],
+            ...     'date': pd.date_range('2023-01-01', periods=2).tolist() * 2,
+            ...     'value': [1, 2, 3, 4]
+            ... })
+            >>> transformer = PanelTimeSeriesTransformer(
+            ...     time_col='date',
+            ...     panel_cols=['entity']
+            ... )
+            >>> is_panel, panel_in_idx, time_in_idx = transformer._detect_data_structure(df)
+            >>> # Returns: (True, False, False)
+
+            >>> # Example 2: MultiIndex panel
+            >>> idx = pd.MultiIndex.from_arrays([
+            ...     ['A', 'A', 'B', 'B'],
+            ...     pd.date_range('2023-01-01', periods=2).tolist() * 2
+            ... ], names=['entity', 'date'])
+            >>> df = pd.DataFrame({'value': [1, 2, 3, 4]}, index=idx)
+            >>> transformer = PanelTimeSeriesTransformer(
+            ...     time_col=None,
+            ...     panel_cols=None
+            ... )
+            >>> is_panel, panel_in_idx, time_in_idx = transformer._detect_data_structure(df)
+            >>> # Returns: (True, True, True)
+
+            >>> # Example 3: DatetimeIndex time series
+            >>> dates = pd.date_range('2023-01-01', periods=5)
+            >>> df = pd.DataFrame({'value': [1, 2, 3, 4, 5]}, index=dates)
+            >>> transformer = PanelTimeSeriesTransformer(
+            ...     time_col=None,
+            ...     panel_cols=None
+            ... )
+            >>> is_panel, panel_in_idx, time_in_idx = transformer._detect_data_structure(df)
+            >>> # Returns: (False, False, True)
+        """
+        # Cas 1: time_col et panel_cols spécifiés → panel colonnes
+        if self.time_col is not None and self.panel_cols is not None:
+            return True, False, False
+
+        # Cas 2: Seulement time_col → série temporelle colonnes
+        if self.time_col is not None and self.panel_cols is None:
+            return False, False, False
+
+        # Cas 3: panel_cols sans time_col → INVALIDE
+        if self.time_col is None and self.panel_cols is not None:
+            raise ValueError(
+                "Invalid configuration: panel_cols specified but time_col is None. "
+                "For column-based panel data, both time_col and panel_cols must be specified. "
+                "For MultiIndex panel data, both should be None (auto-detected from index)."
+            )
+
+        # Cas 4: Les deux None → détection depuis index
+        if self.time_col is None and self.panel_cols is None:
+            if isinstance(X.index, pd.MultiIndex):
+                if X.index.nlevels >= 2:
+                    return True, True, True  # Panel MultiIndex
+                else:
+                    raise ValueError(
+                        "MultiIndex must have at least 2 levels for panel data "
+                        "(entity levels + time level). For simple time series, use DatetimeIndex."
+                    )
+            elif isinstance(X.index, pd.DatetimeIndex):
+                return False, False, True  # Série temporelle simple
+            else:
+                # Tentative conversion index en datetime
+                try:
+                    pd.to_datetime(X.index)
+                    return False, False, True
+                except:
+                    raise ValueError(
+                        "When time_col and panel_cols are None, index must be "
+                        "DatetimeIndex (for time series) or MultiIndex (for panel data)"
+                    )
+
+        raise ValueError("Unexpected data structure configuration")
+
     # Méthode d'entraînement
     def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> 'PanelTimeSeriesTransformer':
         """Fit the transformer.
@@ -249,23 +361,34 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         # Validation des données si demandée
         if self.validate_input:
             X = self._validate_input(X)
-        
-        # Détermination du type de données
-        self.is_panel_ = self.panel_cols is not None and len(self.panel_cols) > 0
-        
+
+        # Détection de la structure
+        is_panel, panel_in_index, time_in_index = self._detect_data_structure(X)
+
+        # Stockage métadonnées structure
+        self.is_panel_ = is_panel
+        self._panel_in_index = panel_in_index
+        self._time_in_index = time_in_index
+
+        # Extraction noms niveaux panel si MultiIndex
+        if is_panel and panel_in_index:
+            self._panel_level_names = X.index.names[:-1]  # Tous sauf dernier (temps)
+        else:
+            self._panel_level_names = None
+
         # Stockage des métadonnées
         self.n_features_ = X.shape[1]
         self.feature_names_ = X.columns.tolist()
-        
+
         # Vérification de la cohérence des individus du panel
         if self.is_panel_:
-            is_consistent, issues = self._check_panel_consistency(X, self.panel_cols)
+            is_consistent, issues = self._check_panel_consistency(X)
             if not is_consistent:
                 warnings.warn(f"Panel structure issues: {'; '.join(issues)}")
-        
+
         # Appel de la méthode d'entraînement spécifique à implémenter
         self._fit(X, y)
-        
+
         return self
     
     # Méthode auxiliaire d'entraînement
@@ -414,23 +537,153 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         if not isinstance(X, pd.DataFrame):
             raise ValueError("Input must be a pandas DataFrame")
 
-        # 2. Vérification colonnes panel
+        # 2. Détection structure
+        _, panel_in_index, time_in_index = self._detect_data_structure(X)
+
+        # 3. Routage selon structure
+        if panel_in_index and time_in_index:
+            # MultiIndex panel
+            X_validated = self._validate_multiindex_panel(X)
+        elif not panel_in_index and not time_in_index:
+            # Colonnes (panel ou série temporelle)
+            X_validated = self._validate_column_based(X)
+        elif not panel_in_index and time_in_index:
+            # Index-based time series (DatetimeIndex, pas panel)
+            X_validated = self._validate_index_time_series(X)
+        else:
+            raise ValueError("Invalid data structure configuration")
+
+        return X_validated
+
+    # Méthodes auxiliaires de validation selon la structure
+    # Méthode auxiliaire de validation de données de panel sous forme de multi-index
+    def _validate_multiindex_panel(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Validate MultiIndex panel data.
+
+        Validates panel data where entities are identified by the first n-1 levels
+        of a MultiIndex and time is in the last level.
+
+        Args:
+            X: DataFrame with MultiIndex (entity levels + time level)
+
+        Returns:
+            Validated DataFrame
+
+        Raises:
+            ValueError: If validation fails and strict_validation=True
+
+        Examples:
+            >>> import pandas as pd
+            >>> idx = pd.MultiIndex.from_arrays([
+            ...     ['A', 'A', 'B', 'B'],
+            ...     pd.date_range('2023-01-01', periods=2).tolist() * 2
+            ... ], names=['entity', 'date'])
+            >>> df = pd.DataFrame({'value': [1, 2, 3, 4]}, index=idx)
+            >>> transformer = PanelTimeSeriesTransformer(
+            ...     time_col=None,
+            ...     panel_cols=None
+            ... )
+            >>> validated = transformer._validate_multiindex_panel(df)
+        """
+        # Vérification MultiIndex
+        if not isinstance(X.index, pd.MultiIndex):
+            raise ValueError("Expected MultiIndex for panel data")
+
+        if X.index.nlevels < 2:
+            raise ValueError(
+                "MultiIndex must have at least 2 levels (entity levels + time level)"
+            )
+
+        # Validation via validate_temporal_data
+        try:
+            X_validated = validate_temporal_data(
+                data=X,
+                time_col=None,  # Temps dans index (dernier niveau)
+                panel_cols=None,  # Panel dans index (premiers niveaux)
+                strict=self.strict_validation,
+                sort_data=self.auto_sort,
+                return_metadata=False
+            )
+        except ValueError as e:
+            if self.strict_validation:
+                raise ValueError(f"MultiIndex panel validation failed: {str(e)}")
+            else:
+                warnings.warn(f"MultiIndex panel validation warning: {str(e)}")
+                X_validated = X
+
+        # Vérification groupement entités
+        if not validate_entities_grouped(X_validated, panel_cols=None):
+            msg = (
+                "Panel entities are not contiguous in MultiIndex. "
+                "Consider sorting by entity levels or enabling auto_sort=True"
+            )
+            if self.strict_validation:
+                raise ValueError(msg)
+            else:
+                warnings.warn(msg)
+
+        # Vérification tri intra-groupe
+        if not validate_sorted_within_groups(
+            X_validated,
+            panel_cols=None,  # Auto-détection depuis MultiIndex
+            time_col=None     # Temps dans dernier niveau
+        ):
+            msg = (
+                "Time series not sorted within panel groups. "
+                "Consider enabling auto_sort=True"
+            )
+            if self.strict_validation:
+                raise ValueError(msg)
+            else:
+                warnings.warn(msg)
+
+        return X_validated
+
+    # Méthode auxiliaire de validation de données dont la structure est dans des colonnes
+    def _validate_column_based(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Validate column-based data (panel or time series).
+
+        Validates data where temporal and panel information is stored in columns
+        rather than index levels. This preserves the existing validation logic.
+
+        Args:
+            X: DataFrame with time and panel information in columns
+
+        Returns:
+            Validated DataFrame
+
+        Raises:
+            ValueError: If validation fails and strict_validation=True
+
+        Examples:
+            >>> import pandas as pd
+            >>> # Example: Column-based panel
+            >>> df = pd.DataFrame({
+            ...     'entity': ['A', 'A', 'B', 'B'],
+            ...     'date': pd.date_range('2023-01-01', periods=2).tolist() * 2,
+            ...     'value': [1, 2, 3, 4]
+            ... })
+            >>> transformer = PanelTimeSeriesTransformer(
+            ...     time_col='date',
+            ...     panel_cols=['entity']
+            ... )
+            >>> validated = transformer._validate_column_based(df)
+        """
+        # Vérification colonnes panel
         if self.panel_cols:
             missing_cols = set(self.panel_cols) - set(X.columns)
             if missing_cols:
                 raise ValueError(f"Panel columns not found: {missing_cols}")
 
-        # 3. Vérification colonne/index temporel (méthode existante)
+        # Vérification colonne/index temporel
         try:
             self._validate_time_index(X, self.time_col)
         except ValueError as e:
             raise ValueError(f"Time validation failed: {str(e)}")
 
-        # 4. Validation complète via validate_temporal_data
-        # Si convert_cols_to_index=True, demander les métadonnées pour restauration
+        # Validation complète du séquencement temporel via validate_temporal_data
         try:
             if self.convert_cols_to_index:
-                # Demande des métadonnées pour restauration ultérieure
                 X_validated, metadata = validate_temporal_data(
                     data=X,
                     time_col=self.time_col if self.time_col in X.columns else None,
@@ -439,10 +692,8 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
                     sort_data=self.auto_sort,
                     return_metadata=True
                 )
-                # Stockage des métadonnées pour inverse_transform
                 self.conversion_metadata_ = metadata
             else:
-                # Validation sans métadonnées
                 X_validated = validate_temporal_data(
                     data=X,
                     time_col=self.time_col if self.time_col in X.columns else None,
@@ -458,35 +709,38 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
                 warnings.warn(f"Temporal data validation warning: {str(e)}")
                 X_validated = X
 
-        # 5. Validations spécifiques panel
+        # Validations spécifiques panel
         if self.panel_cols:
-            # Vérification groupement des entités
+            # Validation du groupement des entités
             if not validate_entities_grouped(X_validated, panel_cols=self.panel_cols):
+                # Message
                 msg = (
                     "Panel entities are not contiguous. "
                     "Consider sorting by panel_cols or enabling auto_sort=True"
                 )
+                # Affichage
                 if self.strict_validation:
                     raise ValueError(msg)
                 else:
                     warnings.warn(msg)
-
-            # Vérification tri intra-groupe
+            # validation du tri intra-groupe
             if not validate_sorted_within_groups(
                 X_validated,
                 panel_cols=self.panel_cols,
                 time_col=self.time_col if self.time_col in X.columns else None
             ):
+                # Message
                 msg = (
                     "Time series not sorted within panel groups. "
                     "Consider enabling auto_sort=True"
                 )
+                # Affichage
                 if self.strict_validation:
                     raise ValueError(msg)
                 else:
                     warnings.warn(msg)
 
-        # 6. Validation série temporelle simple (non-panel)
+        # Validation série temporelle simple
         elif isinstance(X_validated.index, pd.DatetimeIndex):
             if not X_validated.index.is_monotonic_increasing:
                 msg = "Time series index is not sorted"
@@ -496,19 +750,79 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
                     warnings.warn(msg)
 
         return X_validated
-    
+
+    # Méthode auxiliaire de validation d'une série temporelle en index
+    def _validate_index_time_series(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Validate index-based time series (DatetimeIndex, no panel).
+
+        Validates time series data where temporal information is in a DatetimeIndex
+        rather than a column.
+
+        Args:
+            X: DataFrame with DatetimeIndex
+
+        Returns:
+            Validated DataFrame
+
+        Raises:
+            ValueError: If validation fails and strict_validation=True
+
+        Examples:
+            >>> import pandas as pd
+            >>> dates = pd.date_range('2023-01-01', periods=5)
+            >>> df = pd.DataFrame({'value': [1, 2, 3, 4, 5]}, index=dates)
+            >>> transformer = PanelTimeSeriesTransformer(
+            ...     time_col=None,
+            ...     panel_cols=None
+            ... )
+            >>> validated = transformer._validate_index_time_series(df)
+        """
+        # Vérification index DatetimeIndex
+        if not isinstance(X.index, pd.DatetimeIndex):
+            try:
+                X.index = pd.to_datetime(X.index)
+            except Exception as e:
+                raise ValueError(f"Failed to convert index to datetime: {e}")
+
+        # Validation du séquencement temporel via validate_temporal_data
+        try:
+            X_validated = validate_temporal_data(
+                data=X,
+                time_col=None,  # Temps dans index
+                panel_cols=None,  # Pas de panel
+                strict=self.strict_validation,
+                sort_data=self.auto_sort,
+                return_metadata=False
+            )
+        except ValueError as e:
+            if self.strict_validation:
+                raise ValueError(f"Time series validation failed: {str(e)}")
+            else:
+                warnings.warn(f"Time series validation warning: {str(e)}")
+                X_validated = X
+
+        # Vérification du tri
+        if not X_validated.index.is_monotonic_increasing:
+            # Message
+            msg = "Time series index is not sorted"
+            # Affichage
+            if self.strict_validation:
+                raise ValueError(msg)
+            else:
+                warnings.warn(msg)
+
+        return X_validated
+
     # Fonction auxiliaire de vérification de la consistence des éléments du panel
-    def _check_panel_consistency(self,
-                               X: pd.DataFrame,
-                               panel_cols: List[str]) -> Tuple[bool, List[str]]:
+    def _check_panel_consistency(self, X: pd.DataFrame) -> Tuple[bool, List[str]]:
         """Check consistency of panel structure.
 
-        Verifies that panel identifier columns are present and contain no
+        Handles both column-based and MultiIndex-based panel data. Verifies that
+        panel identifier columns or index levels are present and contain no
         missing values, which would compromise panel integrity.
 
         Args:
-            X: Input data with panel structure
-            panel_cols: Panel identifier columns to check
+            X: Input data with panel structure (columns or MultiIndex)
 
         Returns:
             Tuple of (is_consistent, list_of_issues) where is_consistent is
@@ -516,42 +830,75 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
 
         Examples:
             >>> import pandas as pd
-            >>> # Example 1: Consistent panel
+            >>> # Example 1: Column-based panel
             >>> df = pd.DataFrame({
             ...     'entity': ['A', 'A', 'B', 'B'],
             ...     'date': pd.date_range('2023-01-01', periods=2).tolist() * 2,
             ...     'value': [1, 2, 3, 4]
             ... })
-            >>> transformer = PanelTimeSeriesTransformer(panel_cols=['entity'])
-            >>> is_consistent, issues = transformer._check_panel_consistency(df, ['entity'])
+            >>> transformer = PanelTimeSeriesTransformer(
+            ...     time_col='date',
+            ...     panel_cols=['entity']
+            ... )
+            >>> transformer.fit(df)  # Sets up structure detection
+            >>> is_consistent, issues = transformer._check_panel_consistency(df)
             >>> is_consistent
             True
             >>>
-            >>> # Example 2: Inconsistent panel with missing values
-            >>> df_bad = pd.DataFrame({
-            ...     'entity': ['A', None, 'B', 'B'],
-            ...     'value': [1, 2, 3, 4]
-            ... })
-            >>> is_consistent, issues = transformer._check_panel_consistency(df_bad, ['entity'])
+            >>> # Example 2: MultiIndex panel
+            >>> idx = pd.MultiIndex.from_arrays([
+            ...     ['A', 'A', 'B', 'B'],
+            ...     pd.date_range('2023-01-01', periods=2).tolist() * 2
+            ... ], names=['entity', 'date'])
+            >>> df = pd.DataFrame({'value': [1, 2, 3, 4]}, index=idx)
+            >>> transformer = PanelTimeSeriesTransformer(
+            ...     time_col=None,
+            ...     panel_cols=None
+            ... )
+            >>> transformer.fit(df)
+            >>> is_consistent, issues = transformer._check_panel_consistency(df)
             >>> is_consistent
-            False
-            >>> 'Missing values in panel identifier: entity' in issues
             True
         """
         # Initialisation de la liste des problèmes
         issues = []
-        
-        # Vérification de la présence des colonnes panel
-        missing_cols = set(panel_cols) - set(X.columns)
-        if missing_cols:
-            issues.append(f"Missing panel columns: {missing_cols}")
-            return False, issues
-        
-        # Vérification des valeurs manquantes dans les identifiants
-        for col in panel_cols:
-            if X[col].isnull().any():
-                issues.append(f"Missing values in panel identifier: {col}")
-        
+
+        # Détection structure si pas déjà fait
+        if not hasattr(self, '_panel_in_index'):
+            _, panel_in_index, _ = self._detect_data_structure(X)
+        else:
+            panel_in_index = self._panel_in_index
+
+        if panel_in_index:
+            # Panel MultiIndex
+            if not isinstance(X.index, pd.MultiIndex):
+                issues.append("Expected MultiIndex for panel data")
+                return False, issues
+            # Vérification qu'il contient au moins deux niveaux
+            if X.index.nlevels < 2:
+                issues.append("MultiIndex must have at least 2 levels")
+                return False, issues
+
+            # Vérification valeurs manquantes dans niveaux entité
+            for i in range(X.index.nlevels - 1):  # Tous sauf dernier (temps)
+                level_values = X.index.get_level_values(i)
+                if level_values.isna().any():
+                    level_name = X.index.names[i] or f"level_{i}"
+                    issues.append(f"Missing values in panel identifier level: {level_name}")
+
+        else:
+            # Panel colonnes
+            missing_cols = set(self.panel_cols) - set(X.columns)
+            # Vérification des colonnes manquantes
+            if missing_cols:
+                issues.append(f"Missing panel columns: {missing_cols}")
+                return False, issues
+            # Parcours des colonnes de panel
+            for col in self.panel_cols:
+                # Vérification des valeurs manquantes parmi les entités
+                if X[col].isnull().any():
+                    issues.append(f"Missing values in panel identifier: {col}")
+
         return len(issues) == 0, issues
 
 # Mixin d'inversion des transformations
@@ -705,9 +1052,15 @@ class ReversibleTransformerMixin:
             >>> 'entity' in X_restored.columns and 'date' in X_restored.columns
             True
         """
+        # Si données déjà MultiIndex, pas de conversion à restaurer
+        if hasattr(self, '_panel_in_index') and self._panel_in_index:
+            # Structure préservée (MultiIndex in, MultiIndex out)
+            return X
+
         # Vérification que les métadonnées existent
         if hasattr(self, 'conversion_metadata_') and self.conversion_metadata_ is not None:
             # Restauration de la structure originale
             return restore_original_structure(X, self.conversion_metadata_)
+
         # Pas de conversion appliquée : retour inchangé
         return X

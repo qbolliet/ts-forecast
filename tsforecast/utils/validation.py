@@ -77,8 +77,11 @@ def validate_temporal_data(
         raise ValueError("Input data must be a pandas Series or DataFrame")
 
     # Vérification de la cohérence des paramètres
-    if panel_cols and time_col is None:
-        raise ValueError("Cannot specify panel_cols without time_col")
+    if panel_cols is not None and len(panel_cols) > 0 and time_col is None:
+        raise ValueError(
+            "Cannot specify panel_cols without time_col for column-based panel data. "
+            "For MultiIndex panel data, both should be None."
+        )
 
     # Conversion Series en DataFrame pour traitement uniforme
     is_series_input = isinstance(data, pd.Series)
