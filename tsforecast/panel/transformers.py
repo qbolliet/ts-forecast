@@ -1,13 +1,14 @@
 """Panelwise transformer for applying transformations independently per entity.
 
 This module provides a transformer that wraps any sklearn-compatible transformer
-and applies it independently to each entity in panel data.
+and applies it independently to each entity in panel data. Supports entity-specific
+parameterization via callable factories or entity_kwargs.
 """
 # Importation des modules
 # Modules de base
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, Union, List, Any
+from typing import Dict, Optional, Union, List, Any, Callable
 import warnings
 # Joblib
 from joblib import Parallel, delayed
@@ -21,7 +22,7 @@ from ..utils.base_transformers import (
     PanelTimeSeriesTransformer,
     ReversibleTransformerMixin
 )
-
+from .utils import normalize_entity_key
 
 # Classe d'application d'un transformer indépendamment sur chaque entité du panel
 class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixin):
@@ -32,72 +33,84 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
     fitted transformer instance, enabling entity-specific transformations such as
     scaling, encoding, or feature engineering.
 
+    Supports three modes for entity-specific parameterization:
+    1. Simple mode: Same transformer cloned for all entities
+    2. Factory mode: Callable that creates a transformer per entity
+    3. Entity kwargs mode: Dict of kwargs applied via set_params per entity
+
     The transformer is fully compatible with sklearn pipelines, GridSearchCV,
     cross-validation, and other sklearn utilities.
 
     Args:
-        transformer (BaseEstimator): Base transformer or pipeline to apply to each entity.
-            Must be sklearn-compatible (implement fit/transform).
-        time_col (str): Name of the time column. Defaults to 'date'.
-        panel_cols (Optional[List[str]]): Columns identifying panel entities.
-            Required for panel data operations.
-        validate_input (bool): Whether to validate input data. Defaults to True.
-        strict_validation (bool): If True, raises errors on validation failure.
-            Defaults to True.
-        auto_sort (bool): If True, automatically sorts unsorted data. Defaults to False.
-        convert_cols_to_index (bool): If True, converts time_col and panel_cols
-            to index. Defaults to False.
-        n_jobs (int): Number of parallel jobs for fitting/transforming.
+        transformer: Base transformer, pipeline, or callable factory.
+            - If BaseEstimator: Cloned for each entity (default sklearn behavior)
+            - If Callable[[tuple], BaseEstimator]: Called with entity_key to create
+              entity-specific transformer instances
+        time_col: Name of the time column. Defaults to 'date'.
+        panel_cols: Columns identifying panel entities. Required for panel data.
+        entity_kwargs: Dict mapping entity keys to kwargs dicts. When provided
+            (and transformer is not callable), these kwargs are passed to
+            set_params() on the cloned transformer for each entity before fitting.
+            Ignored if transformer is a callable factory.
+        default_entity_kwargs: Default kwargs applied to entities not found in
+            entity_kwargs. Only used when entity_kwargs is provided.
+        validate_input: Whether to validate input data. Defaults to True.
+        strict_validation: If True, raises errors on validation failure.
+        auto_sort: If True, automatically sorts unsorted data. Defaults to False.
+        convert_cols_to_index: If True, converts time_col and panel_cols to index.
+        n_jobs: Number of parallel jobs for fitting/transforming.
             -1 means using all processors. Defaults to 1 (no parallelism).
-        error_handling (str): How to handle errors during entity transformation.
-            Options: 'raise' (raises exception), 'warn' (emits warning and skips entity),
-            'ignore' (silently skips entity). Defaults to 'raise'.
+        error_handling: How to handle errors during entity transformation.
+            Options: 'raise', 'warn', 'ignore'. Defaults to 'raise'.
 
     Attributes:
-        transformers_ (Dict[tuple, BaseEstimator]): Dictionary mapping entity keys to fitted transformers.
-        transform_columns_ (List[str]): List of columns to transform for each entity.
-        entities_ (int): Number of unique entities found during fit.
-        failed_entities_ (List[tuple]): List of entities that failed during fitting/transforming.
+        transformers_: Dict mapping entity keys to fitted transformers.
+        transform_columns_: List of columns to transform for each entity.
+        entities_: Number of unique entities found during fit.
+        failed_entities_: List of entities that failed during fitting/transforming.
+        is_factory_mode_: Whether transformer is a callable factory.
 
     Examples:
-        >>> import pandas as pd
-        >>> import numpy as np
+        Simple mode - same transformer for all entities:
+
         >>> from sklearn.preprocessing import StandardScaler
-        >>>
-        >>> # Create panel data
-        >>> df = pd.DataFrame({
-        ...     'date': pd.date_range('2023-01-01', periods=10).tolist() * 2,
-        ...     'country': ['FR'] * 10 + ['DE'] * 10,
-        ...     'value': np.random.randn(20),
-        ...     'feature': np.random.randn(20)
-        ... })
-        >>>
-        >>> # Apply StandardScaler per country
         >>> transformer = PanelwiseTransformer(
         ...     transformer=StandardScaler(),
-        ...     time_col='date',
         ...     panel_cols=['country']
         ... )
         >>> df_scaled = transformer.fit_transform(df)
+
+        Factory mode - callable creates entity-specific transformers:
+
+        >>> def scaler_factory(entity_key):
+        ...     # Different scaling strategy per country
+        ...     if entity_key == ('FR',):
+        ...         return StandardScaler(with_mean=True)
+        ...     return StandardScaler(with_mean=False)
         >>>
-        >>> # Use in sklearn pipeline
-        >>> from sklearn.pipeline import Pipeline
-        >>> pipe = Pipeline([
-        ...     ('panelwise_scale', PanelwiseTransformer(
-        ...         transformer=StandardScaler(),
-        ...         panel_cols=['country']
-        ...     )),
-        ...     ('other_step', SomeOtherTransformer())
-        ... ])
-        >>>
-        >>> # Compatible with GridSearchCV
-        >>> from sklearn.model_selection import GridSearchCV
-        >>> param_grid = {
-        ...     'panelwise_scale__transformer__with_mean': [True, False]
-        ... }
+        >>> transformer = PanelwiseTransformer(
+        ...     transformer=scaler_factory,
+        ...     panel_cols=['country']
+        ... )
+
+        Entity kwargs mode - same base transformer with per-entity params:
+
+        >>> transformer = PanelwiseTransformer(
+        ...     transformer=PublicationDelayTransformer(
+        ...         strategy='shift',
+        ...         prediction_date='2024-12-15',
+        ...         delays={}  # Placeholder
+        ...     ),
+        ...     entity_kwargs={
+        ...         ('FR',): {'delays': {'GDP': 45}, 'delay_unit': 'D'},
+        ...         ('DE',): {'delays': {'GDP': 60}, 'delay_unit': 'D'},
+        ...     },
+        ...     panel_cols=['country']
+        ... )
 
     Notes:
-        - Each entity receives its own clone of the base transformer
+        - Factory mode takes precedence over entity_kwargs mode
+        - Each entity receives its own transformer instance
         - The transformer preserves the original DataFrame structure
         - Supports inverse_transform if the base transformer does
         - Memory usage scales with the number of entities
@@ -106,9 +119,11 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
     # Initialisation
     def __init__(
         self,
-        transformer: BaseEstimator,
+        transformer: Union[BaseEstimator, Callable[[tuple], BaseEstimator]],
         time_col: str = 'date',
         panel_cols: Optional[List[str]] = None,
+        entity_kwargs: Optional[Dict[tuple, Dict[str, Any]]] = None,
+        default_entity_kwargs: Optional[Dict[str, Any]] = None,
         validate_input: bool = True,
         strict_validation: bool = True,
         auto_sort: bool = False,
@@ -119,18 +134,19 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         """Initialize the PanelwiseTransformer.
 
         Args:
-            transformer (BaseEstimator): Sklearn-compatible transformer to apply per entity.
-            time_col (str): Name of the time column. Defaults to 'date'.
-            panel_cols (Optional[List[str]]): Columns identifying panel entities.
-            validate_input (bool): Whether to validate input data. Defaults to True.
-            strict_validation (bool): If True, raises errors; otherwise emits warnings.
-                Defaults to True.
-            auto_sort (bool): If True, automatically sorts the data. Defaults to False.
-            convert_cols_to_index (bool): If True, converts time_col and panel_cols to index.
-                Defaults to False.
-            n_jobs (int): Number of parallel jobs (-1 = all processors). Defaults to 1.
-            error_handling (str): Error handling strategy. Options: 'raise', 'warn', 'ignore'.
-                Defaults to 'raise'.
+            transformer: Sklearn-compatible transformer, pipeline, or callable factory.
+                If callable, must accept entity_key (tuple) and return a transformer.
+            time_col: Name of the time column. Defaults to 'date'.
+            panel_cols: Columns identifying panel entities.
+            entity_kwargs: Dict mapping entity keys (tuples) to kwargs dicts.
+                Applied via set_params() when transformer is not a callable.
+            default_entity_kwargs: Default kwargs for entities not in entity_kwargs.
+            validate_input: Whether to validate input data. Defaults to True.
+            strict_validation: If True, raises errors; otherwise emits warnings.
+            auto_sort: If True, automatically sorts the data. Defaults to False.
+            convert_cols_to_index: If True, converts time_col and panel_cols to index.
+            n_jobs: Number of parallel jobs (-1 = all processors). Defaults to 1.
+            error_handling: Error handling strategy ('raise', 'warn', 'ignore').
         """
         # Initialisation du parent
         super().__init__(
@@ -141,22 +157,115 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
             auto_sort=auto_sort,
             convert_cols_to_index=convert_cols_to_index
         )
-        # Initialisation 
+        # Instanciation des paramètres
         self.transformer = transformer
+        self.entity_kwargs = entity_kwargs
+        self.default_entity_kwargs = default_entity_kwargs
         self.n_jobs = n_jobs
         self.error_handling = error_handling
+
+    # Méthode auxiliaire de création du transformer pour une entité
+    def _create_entity_transformer(self, entity_key: tuple) -> BaseEstimator:
+        """Create a transformer instance for a specific entity.
+
+        Handles three cases in order of priority:
+        1. Factory mode: transformer is callable -> call it with entity_key
+        2. Entity kwargs mode: clone transformer and apply entity-specific kwargs
+        3. Simple mode: just clone the transformer
+
+        Args:
+            entity_key: Normalized entity identifier as tuple.
+
+        Returns:
+            Configured transformer instance for the entity.
+
+        Raises:
+            ValueError: If factory returns None or invalid transformer.
+            TypeError: If entity_kwargs contains invalid parameter names.
+        """
+        # Cas 1 : Mode factory - le transformer est un callable
+        if self.is_factory_mode_:
+            transformer = self.transformer(entity_key)
+            # Validation du résultat de la factory
+            if transformer is None:
+                raise ValueError(
+                    f"Transformer factory returned None for entity {entity_key}. "
+                    "Factory must return a valid transformer instance."
+                )
+            if not hasattr(transformer, 'fit') or not hasattr(transformer, 'transform'):
+                raise ValueError(
+                    f"Transformer factory returned invalid object for entity {entity_key}. "
+                    f"Got {type(transformer)}, expected sklearn-compatible transformer."
+                )
+            return transformer
+
+        # Cas 2 et 3 : Clone du transformer de base
+        transformer = clone(self.transformer)
+
+        # Cas 2 : Mode entity_kwargs - application des kwargs spécifiques
+        if self.entity_kwargs is not None:
+            # Recherche des kwargs pour cette entité
+            kwargs = self.entity_kwargs.get(entity_key)
+
+            # Fallback sur les kwargs par défaut si l'entité n'est pas trouvée
+            if kwargs is None and self.default_entity_kwargs is not None:
+                kwargs = self.default_entity_kwargs
+
+            # Application des kwargs si disponibles
+            if kwargs is not None:
+                try:
+                    transformer.set_params(**kwargs)
+                except TypeError as e:
+                    raise TypeError(
+                        f"Invalid parameters in entity_kwargs for entity {entity_key}: {e}"
+                    ) from e
+
+        return transformer
+
+    # Méthode auxiliaire de détection du mode factory
+    def _detect_factory_mode(self) -> bool:
+        """Detect if transformer is a callable factory.
+
+        A callable is considered a factory if:
+        - It's callable
+        - It's not a class (type)
+        - It's not an sklearn estimator instance with fit/transform methods
+
+        Returns:
+            True if transformer should be treated as a factory callable.
+        """
+        # Si c'est une classe (type), ce n'est pas une factory
+        if isinstance(self.transformer, type):
+            return False
+
+        # Si c'est un estimator sklearn (a fit et transform), ce n'est pas une factory
+        if hasattr(self.transformer, 'fit') and hasattr(self.transformer, 'transform'):
+            return False
+
+        # Sinon, c'est une factory si c'est callable
+        return callable(self.transformer)
 
     # Méthode auxiliaire d'entraînement du transformer
     def _fit(self, X: pd.DataFrame, y: Optional[Union[pd.Series, np.ndarray]] = None) -> None:
         """Fit a separate transformer for each panel entity.
 
         Args:
-            X (pd.DataFrame): Input features with panel_cols as columns or MultiIndex.
-            y (Optional[Union[pd.Series, np.ndarray]]): Target variable aligned with X.
+            X: Input features with panel_cols as columns or MultiIndex.
+            y: Target variable aligned with X.
 
         Raises:
             ValueError: If panel_cols is not specified.
         """
+        # Détection du mode factory (une seule fois au fit)
+        self.is_factory_mode_ = self._detect_factory_mode()
+
+        # Warning si entity_kwargs fourni mais mode factory actif
+        if self.is_factory_mode_ and self.entity_kwargs is not None:
+            warnings.warn(
+                "entity_kwargs is ignored when transformer is a callable factory. "
+                "The factory is responsible for entity-specific parameterization."
+            )
+
         # Détection du format des données (colonnes vs MultiIndex)
         # Après validation, les colonnes peuvent avoir été converties en index
         self._has_multiindex = isinstance(X.index, pd.MultiIndex)
@@ -166,7 +275,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
             # Les colonnes panel sont dans l'index, on transforme toutes les colonnes
             self.transform_columns_ = list(X.columns)
             # Récupération des entités depuis l'index
-            entity_level_indices = list(range(X.index.nlevels -1))
+            entity_level_indices = list(range(X.index.nlevels - 1))
         else:
             # Les colonnes panel sont dans le DataFrame
             exclude_cols = set(self.panel_cols)
@@ -200,6 +309,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         else:
             self._fit_parallel(entity_groups, X, y)
 
+    # Méthode auxiliaire d'entraînement séquenciel des transformers
     def _fit_sequential(
         self,
         entity_groups,
@@ -209,18 +319,18 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         """Fit transformers sequentially for each entity.
 
         Args:
-            entity_groups (pandas.core.groupby.GroupBy): GroupBy object grouping entities.
-            X (pd.DataFrame): Complete input DataFrame.
-            y (Optional[pd.Series]): Target variable aligned with X.
+            entity_groups: GroupBy object grouping entities.
+            X: Complete input DataFrame.
+            y: Target variable aligned with X.
         """
         # Parcours des entités
         for entity_key, group_idx in entity_groups.groups.items():
             # Normalisation de la clé en tuple
-            entity_key = self._normalize_entity_key(entity_key)
+            entity_key = normalize_entity_key(entity_key)
 
             try:
-                # Clone du transformer pour cette entité
-                entity_transformer = clone(self.transformer)
+                # Création du transformer pour cette entité
+                entity_transformer = self._create_entity_transformer(entity_key)
 
                 # Extraction des données de l'entité
                 X_entity = X.loc[group_idx, self.transform_columns_].xs(entity_key)
@@ -237,6 +347,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
             except Exception as e:
                 self._handle_entity_error(entity_key, e, "fitting")
 
+    # Méthode auxiliaire d'entraînement parallèle des transformers
     def _fit_parallel(
         self,
         entity_groups,
@@ -246,10 +357,12 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         """Fit transformers in parallel for each entity.
 
         Args:
-            entity_groups (pandas.core.groupby.GroupBy): GroupBy object grouping entities.
-            X (pd.DataFrame): Complete input DataFrame.
-            y (Optional[pd.Series]): Target variable aligned with X.
+            entity_groups: GroupBy object grouping entities.
+            X: Complete input DataFrame.
+            y: Target variable aligned with X.
         """
+        # Référence à self pour la closure
+        parent = self
 
         def fit_single_entity(entity_key, group_idx) -> tuple:
             """Fit a transformer for a single entity.
@@ -262,11 +375,11 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 Tuple of (normalized_entity_key, fitted_transformer).
             """
             # Normalisation de la clé de l'entité
-            entity_key = self._normalize_entity_key(entity_key)
-            # Clone du transformer
-            entity_transformer = clone(self.transformer)
+            entity_key = normalize_entity_key(entity_key)
+            # Création du transformer pour cette entité
+            entity_transformer = parent._create_entity_transformer(entity_key)
             # Identification des observations afférentes au groupe
-            X_entity = X.loc[group_idx, self.transform_columns_].xs(entity_key)
+            X_entity = X.loc[group_idx, parent.transform_columns_].xs(entity_key)
             y_entity = y.loc[group_idx].xs(entity_key) if y is not None else None
             # Entrainement du transformer
             entity_transformer.fit(X_entity, y_entity)
@@ -279,19 +392,18 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         )
 
         # Collecte des résultats
-        # Parcours des résultats
         for entity_key, fitted_transformer in results:
-            # Ajout au dictionnaire
             self.transformers_[entity_key] = fitted_transformer
 
+    # Méthode de transformation des données
     def _transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """Transform data using entity-specific transformers.
 
         Args:
-            X (pd.DataFrame): Input data with same structure as during fit.
+            X: Input data with same structure as during fit.
 
         Returns:
-            pd.DataFrame: Transformed data with same structure as input.
+            Transformed data with same structure as input.
         """
         # Détection du format des données
         has_multiindex = isinstance(X.index, pd.MultiIndex)
@@ -309,7 +421,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         # Parcours des entités
         for entity_key, group_idx in entity_groups.groups.items():
             # Normalisation de la clé de l'entité
-            entity_key = self._normalize_entity_key(entity_key)
+            entity_key = normalize_entity_key(entity_key)
 
             # Vérification que l'entité a été vue pendant le fit
             if entity_key not in self.transformers_:
@@ -359,35 +471,20 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
 
         Raises:
             AttributeError: If base transformer doesn't support inverse_transform.
-
-        Examples:
-            >>> import pandas as pd
-            >>> import numpy as np
-            >>> from sklearn.preprocessing import StandardScaler
-            >>>
-            >>> # Create panel data
-            >>> df = pd.DataFrame({
-            ...     'date': pd.date_range('2023-01-01', periods=10).tolist() * 2,
-            ...     'country': ['FR'] * 10 + ['DE'] * 10,
-            ...     'value': np.random.randn(20)
-            ... })
-            >>>
-            >>> # Fit and transform
-            >>> transformer = PanelwiseTransformer(
-            ...     transformer=StandardScaler(),
-            ...     time_col='date',
-            ...     panel_cols=['country']
-            ... )
-            >>> df_scaled = transformer.fit_transform(df)
-            >>>
-            >>> # Inverse transform to get original scale
-            >>> df_original = transformer.inverse_transform(df_scaled)
         """
         # Vérification que l'estimateur a été entraîné
         check_is_fitted(self)
 
         # Vérification que le transformer supporte inverse_transform
-        if not hasattr(self.transformer, 'inverse_transform'):
+        # En mode factory, on vérifie que le premier transformer est entraîné
+        if self.is_factory_mode_:
+            sample_transformer = next(iter(self.transformers_.values()), None)
+            if sample_transformer and not hasattr(sample_transformer, 'inverse_transform'):
+                raise AttributeError(
+                    f"The transformer {type(sample_transformer).__name__} "
+                    "does not support inverse_transform"
+                )
+        elif not hasattr(self.transformer, 'inverse_transform'):
             raise AttributeError(
                 f"The base transformer {type(self.transformer).__name__} "
                 "does not support inverse_transform"
@@ -409,7 +506,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         # Parcours des entités
         for entity_key, group_idx in entity_groups.groups.items():
             # Normalisation de l'entité
-            entity_key = self._normalize_entity_key(entity_key)
+            entity_key = normalize_entity_key(entity_key)
 
             # Renvoie une erreur si l'entité n'a pas de transformer associé
             if entity_key not in self.transformers_:
@@ -451,20 +548,6 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
 
         return X_result
 
-    # Méthode auxiliaire de normalisation de l'entité du panel
-    def _normalize_entity_key(self, key) -> tuple:
-        """Normalize entity key to tuple format.
-
-        Args:
-            key: Entity key (scalar or tuple).
-
-        Returns:
-            tuple: Normalized entity key as a tuple.
-        """
-        if isinstance(key, tuple):
-            return key
-        return (key,)
-
     # Méthode auxiliaire de reconstitution de la structure de panel par entité
     def _reconstruct_entity_dataframe(
         self,
@@ -477,17 +560,16 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         Args:
             X_entity_transformed: Transformed data (array or DataFrame) with temporal index.
             entity_key: Entity identifier as tuple.
-            original_index: Original MultiIndex or Index from the input data (for structure reference).
+            original_index: Original MultiIndex or Index from the input data.
 
         Returns:
-            pd.DataFrame: Reconstructed DataFrame with proper panel structure and index from transformer.
+            Reconstructed DataFrame with proper panel structure and index.
         """
         # Conversion en DataFrame si nécessaire
         if isinstance(X_entity_transformed, np.ndarray):
             # Gestion des noms de colonnes
             if X_entity_transformed.shape[1] != len(self.transform_columns_):
                 # Le transformer a changé le nombre de colonnes
-                # Génération de nouveaux de noms de colonnes
                 cols = self._generate_column_names(
                     X_entity_transformed.shape[1],
                     self.transformers_[entity_key]
@@ -495,113 +577,47 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
             else:
                 cols = self.transform_columns_
 
-            # Création d'un DataFrame temporaire pour obtenir l'index
-            # L'index est celui qui correspond aux lignes de X_entity_transformed
+            # Création d'un DataFrame avec l'index temporel
             df_transformed = pd.DataFrame(
                 X_entity_transformed,
                 columns=cols
             )
         else:
-            df_transformed = X_entity_transformed.copy()
+            df_transformed = X_entity_transformed
 
-        # Reconstruction de la structure panel
-        if self._has_multiindex:
-            # Création d'un MultiIndex combinant entity_key et l'index temporel
-            # entity_key est un tuple avec les valeurs pour chaque niveau panel
-            # L'index de df_transformed est le niveau temporel
+        # Reconstruction du MultiIndex avec l'entité
+        if isinstance(original_index, pd.MultiIndex):
+            # Extraction des noms des niveaux panel
+            panel_level_names = list(original_index.names[:-1])
+            time_level_name = original_index.names[-1]
 
-            # Construction des arrays pour chaque niveau du MultiIndex
+            # Création du MultiIndex pour cette entité
             n_rows = len(df_transformed)
-            index_arrays = []
+            entity_arrays = [[entity_key[i]] * n_rows for i in range(len(entity_key))]
+            time_array = df_transformed.index
 
-            # Ajout des niveaux pour les panel_cols
-            for i, value in enumerate(entity_key):
-                index_arrays.append([value] * n_rows)
-
-            # Ajout du niveau temporel (dernier niveau)
-            index_arrays.append(df_transformed.index)
-
-            # Création du MultiIndex
-            new_index = pd.MultiIndex.from_arrays(index_arrays, names=original_index.names)
+            new_index = pd.MultiIndex.from_arrays(
+                entity_arrays + [time_array],
+                names=panel_level_names + [time_level_name]
+            )
             df_transformed.index = new_index
-
-        else:
-            # Les panel_cols sont des colonnes
-            # Ajout des colonnes panel avec les valeurs de entity_key
-            for i, col in enumerate(self.panel_cols):
-                df_transformed[col] = entity_key[i]
-
-            # Ajout de la colonne time_col si elle existe dans les colonnes originales
-            if self.time_col in original_index.names or not isinstance(original_index, pd.MultiIndex):
-                # L'index de df_transformed est déjà l'index temporel
-                # On le nomme correctement
-                df_transformed.index.name = self.time_col
 
         return df_transformed
 
-    # Méthode auxiliaire de gestion des erreurs concernant une entité
-    def _handle_entity_error(
-        self,
-        entity_key: tuple,
-        error: Exception,
-        operation: str
-    ) -> None:
-        """Handle errors during entity processing.
-
-        Args:
-            entity_key (tuple): Entity identifier.
-            error (Exception): Exception that was raised.
-            operation (str): Type of operation ('fitting', 'transforming', etc.).
-        """
-        # Initialisation du message
-        msg = f"Error {operation} entity {entity_key}: {str(error)}"
-
-        if self.error_handling == 'raise':
-            raise RuntimeError(msg) from error
-        elif self.error_handling == 'warn':
-            warnings.warn(msg)
-            self.failed_entities_.append(entity_key)
-        else:  # 'ignore'
-            self.failed_entities_.append(entity_key)
-
-    # Méthode auxiliaire de gestion des entités pour lesquelles aucun transformer n'est entraîné
-    def _handle_unknown_entity(
-        self,
-        entity_key: tuple
-    ) -> None:
-        """Handle entities not seen during fit.
-
-        Args:
-            entity_key (tuple): Identifier of the unknown entity.
-
-        Raises:
-            ValueError: If error_handling is 'raise'.
-        """
-        # Génération du message d'erreur
-        msg = (
-            f"Entity {entity_key} was not seen during fit. "
-            "Data will be returned unchanged."
-        )
-        # Distinction suivant la méthode de gestion des erreurs
-        if self.error_handling == 'raise':
-            raise ValueError(msg)
-        elif self.error_handling == 'warn':
-            warnings.warn(msg)
-
-    # Méthode auxiliaire de génération de noms de colonnes
+    # Méthode auxiliaire de génération des noms de colonnes
     def _generate_column_names(
         self,
         n_cols: int,
         transformer: BaseEstimator
     ) -> List[str]:
-        """Generate column names for transformed output.
+        """Generate column names for transformed data.
 
         Args:
-            n_cols (int): Number of columns in the output.
-            transformer (BaseEstimator): Transformer that generated the columns.
+            n_cols: Number of columns in transformed data.
+            transformer: Fitted transformer instance.
 
         Returns:
-            List[str]: List of generated column names.
+            List of generated column names.
         """
         # Tentative de récupération des noms via get_feature_names_out
         if hasattr(transformer, 'get_feature_names_out'):
@@ -613,6 +629,48 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         # Noms génériques
         return [f"feature_{i}" for i in range(n_cols)]
 
+    # Méthode auxiliaire de gestion des erreurs par entité
+    def _handle_entity_error(self, entity_key: tuple, error: Exception, operation: str) -> None:
+        """Handle errors during entity operations.
+
+        Args:
+            entity_key: Entity identifier.
+            error: Exception that occurred.
+            operation: Name of the operation ('fitting', 'transforming', etc.).
+
+        Raises:
+            Exception: If error_handling is 'raise'.
+        """
+        # Ajout à la liste des entités pour lesquelles une erreur a été constatée
+        self.failed_entities_.append(entity_key)
+
+        # Distinction suivant la méthode de gestion des erreurs
+        if self.error_handling == 'raise':
+            raise error
+        elif self.error_handling == 'warn':
+            warnings.warn(
+                f"Error {operation} entity {entity_key}: {error}. Skipping."
+            )
+        # 'ignore' : ne rien faire
+
+    # Méthode auxiliaire de gestion des entités inconnues
+    def _handle_unknown_entity(self, entity_key: tuple) -> None:
+        """Handle unknown entities encountered during transform.
+
+        Args:
+            entity_key: Unknown entity identifier.
+        """
+        # Initialisation du message d'erreur
+        msg = f"Entity {entity_key} was not seen during fit"
+
+        # Distinction suivant la méthode de gestion des erreurs
+        if self.error_handling == 'raise':
+            raise KeyError(msg)
+        elif self.error_handling == 'warn':
+            warnings.warn(f"{msg}. Using untransformed data.")
+        # 'ignore' : ne rien faire
+
+
     # Méthode auxiliaire d'extraction des paramètres
     def get_params(self, deep: bool = True) -> Dict[str, Any]:
         """Get parameters for this estimator.
@@ -622,35 +680,23 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
 
         Returns:
             Parameter names mapped to their values.
-
-        Examples:
-            >>> from sklearn.preprocessing import StandardScaler
-            >>>
-            >>> transformer = PanelwiseTransformer(
-            ...     transformer=StandardScaler(),
-            ...     panel_cols=['country'],
-            ...     n_jobs=2
-            ... )
-            >>>
-            >>> # Get all parameters
-            >>> params = transformer.get_params(deep=True)
-            >>> print(params['n_jobs'])
-            2
-            >>> print(params['transformer__with_mean'])  # nested parameter
-            True
         """
         # Extraction des paramètres du parent
         params = super().get_params(deep=False)
-        # Ajout des paramètres de la classe
+
+        # Ajout des paramètres propres
         params['transformer'] = self.transformer
+        params['entity_kwargs'] = self.entity_kwargs
+        params['default_entity_kwargs'] = self.default_entity_kwargs
         params['n_jobs'] = self.n_jobs
         params['error_handling'] = self.error_handling
-        # Ajout des paramètres
-        if deep and hasattr(self.transformer, 'get_params'):
-            # Ajout des paramètres du transformer avec préfixe
-            transformer_params = self.transformer.get_params(deep=True)
-            for key, value in transformer_params.items():
-                params[f'transformer__{key}'] = value
+
+        # Ajout des paramètres imbriqués si deep=True et mode non-factory
+        if deep and not callable(self.transformer):
+            if hasattr(self.transformer, 'get_params'):
+                transformer_params = self.transformer.get_params(deep=True)
+                for key, value in transformer_params.items():
+                    params[f'transformer__{key}'] = value
 
         return params
 
@@ -663,26 +709,11 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
 
         Returns:
             Self for method chaining.
-
-        Examples:
-            >>> from sklearn.preprocessing import StandardScaler
-            >>>
-            >>> transformer = PanelwiseTransformer(
-            ...     transformer=StandardScaler(),
-            ...     panel_cols=['country']
-            ... )
-            >>>
-            >>> # Update n_jobs parameter
-            >>> transformer.set_params(n_jobs=4)
-            PanelwiseTransformer(...)
-            >>>
-            >>> # Update nested transformer parameter
-            >>> transformer.set_params(transformer__with_std=False)
-            PanelwiseTransformer(...)
         """
         # Séparation des paramètres du transformer
         transformer_params = {}
         own_params = {}
+
         # Parcours des paramètres
         for key, value in params.items():
             if key.startswith('transformer__'):
@@ -695,9 +726,15 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         if own_params:
             super().set_params(**own_params)
 
-        # Application des paramètres du transformer
+        # Application des paramètres du transformer (seulement si pas une factory)
         if transformer_params:
-            self.transformer.set_params(**transformer_params)
+            if callable(self.transformer) and not hasattr(self.transformer, 'set_params'):
+                warnings.warn(
+                    "Cannot set nested parameters on a callable factory transformer. "
+                    "Ignoring transformer__ parameters."
+                )
+            else:
+                self.transformer.set_params(**transformer_params)
 
         return self
 
@@ -714,32 +751,6 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         Raises:
             KeyError: If entity not found.
             NotFittedError: If transformer not fitted.
-
-        Examples:
-            >>> import pandas as pd
-            >>> import numpy as np
-            >>> from sklearn.preprocessing import StandardScaler
-            >>>
-            >>> # Create and fit transformer
-            >>> df = pd.DataFrame({
-            ...     'date': pd.date_range('2023-01-01', periods=10).tolist() * 2,
-            ...     'country': ['FR'] * 10 + ['DE'] * 10,
-            ...     'value': np.random.randn(20)
-            ... })
-            >>>
-            >>> transformer = PanelwiseTransformer(
-            ...     transformer=StandardScaler(),
-            ...     time_col='date',
-            ...     panel_cols=['country']
-            ... )
-            >>> transformer.fit(df)
-            >>>
-            >>> # Get transformer for France
-            >>> fr_scaler = transformer.get_entity_transformer('FR')
-            >>> print(fr_scaler.mean_)  # Access fitted attributes
-            >>>
-            >>> # For multi-column entities, use tuple
-            >>> de_scaler = transformer.get_entity_transformer(('DE',))
         """
         # Vérification que les transformers sont estimés
         check_is_fitted(self, ['transformers_'])
@@ -754,50 +765,37 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         # Retourne le transformer de l'entité
         return self.transformers_[entity_key]
 
+    # Nombre d'entités traitées par le transformer
     @property
     def n_entities_(self) -> int:
         """Number of entities with fitted transformers.
 
         Returns:
-            int: Number of unique entities found during fit.
+            Number of unique entities found during fit.
 
         Raises:
             NotFittedError: If transformer has not been fitted.
-
-        Examples:
-            >>> import pandas as pd
-            >>> import numpy as np
-            >>> from sklearn.preprocessing import StandardScaler
-            >>>
-            >>> df = pd.DataFrame({
-            ...     'date': pd.date_range('2023-01-01', periods=10).tolist() * 3,
-            ...     'country': ['FR'] * 10 + ['DE'] * 10 + ['IT'] * 10,
-            ...     'value': np.arange(30)
-            ... })
-            >>>
-            >>> transformer = PanelwiseTransformer(
-            ...     transformer=StandardScaler(),
-            ...     time_col='date',
-            ...     panel_cols=['country']
-            ... )
-            >>> transformer.fit(df)
-            >>> print(transformer.n_entities_)
-            3
         """
         check_is_fitted(self, ['transformers_'])
         return len(self.transformers_)
 
+    # Représentation sous forme de chaîne de caractères du transformer
     def __repr__(self) -> str:
         """Return a string representation of the transformer.
 
         Returns:
-            str: String representation showing key parameters.
+            String representation showing key parameters.
         """
-        transformer_repr = repr(self.transformer)
+        if callable(self.transformer) and not hasattr(self.transformer, 'fit'):
+            transformer_repr = f"<factory: {self.transformer.__name__ if hasattr(self.transformer, '__name__') else 'callable'}>"
+        else:
+            transformer_repr = repr(self.transformer)
+
         return (
             f"PanelwiseTransformer(\n"
             f"    transformer={transformer_repr},\n"
             f"    panel_cols={self.panel_cols},\n"
-            f"    time_col='{self.time_col}'\n"
+            f"    time_col='{self.time_col}',\n"
+            f"    entity_kwargs={'provided' if self.entity_kwargs else None}\n"
             f")"
         )
