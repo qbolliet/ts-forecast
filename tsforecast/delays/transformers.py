@@ -10,12 +10,13 @@ This module provides a modular architecture with:
 import pandas as pd
 import numpy as np
 import math
-from typing import Dict, Optional, Union, List, Literal
+from typing import Any, Callable, Dict, Optional, Union, List, Literal
 from datetime import datetime
 import warnings
 
 # Sklearn
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.utils.validation import check_is_fitted
 
 # Importation des modules du package
 from tsforecast.utils.frequency import normalize_frequency, to_pandas_freq
@@ -398,6 +399,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
 
         return self
 
+    # Méthode de transformation des données
     def transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
         """Apply publication delays to data.
 
@@ -407,8 +409,12 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         Returns:
             Transformed data with publication delays applied
         """
+        # Vérification que le transformer est entraîné
+        check_is_fitted(self)
+
         # Détection de la structure de panel
-        # Des transformations similaires sont appliquées à tous les individus du panel dans ce cas.
+        # Des transformations similaires sont appliquées à tous les individus du panel. (L'AJOUTER EN DOCSTRING)
+        
 
         if self.is_series_:
             # Transform series
@@ -436,6 +442,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                         )
             return X_result
 
+    # Méthode de transformation inverse des données
     def inverse_transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
         """Reverse publication delay transformation.
 
@@ -574,3 +581,424 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
 
         # Stockage du transformer
         self.column_transformers_[column_name] = helper
+
+
+# Fonction de création d'une factory de PublicationDelayTransformer pour l'utilisation sur des données de panel
+def create_delay_transformer_factory(
+    df_delays: pd.DataFrame,
+    strategy: Union[
+        Literal['shift', 'mask'],
+        Dict[Union[str, tuple], Literal['shift', 'mask']],
+        Callable[[tuple], Literal['shift', 'mask']]
+    ] = 'shift',
+    prediction_date: Union[str, datetime] = 'today',
+    delay_col: str = 'applicable_delay',
+    unit_col: str = 'unit',
+    reference_point_col: str = 'target_reference_point',
+    target_frequency_col: str = 'target_frequency',
+    default_transformer_kwargs: Optional[Dict[str, Any]] = None,
+) -> Callable[[tuple], PublicationDelayTransformer]:
+    """Create a transformer factory from a publication delays DataFrame.
+
+    This function generates a callable factory that creates entity-specific
+    PublicationDelayTransformer instances, suitable for use with
+    PanelwiseTransformer. The factory extracts delay parameters for each
+    entity from the provided DataFrame.
+
+    Args:
+        df_delays: DataFrame from calculate_applicable_delay() with
+            aggregate_by_panel=True, expected to have a MultiIndex with
+            panel entity as the first levels and variable as the last level, and columns for delay values
+            and metadata.
+        strategy: Delay application strategy. Can be:
+            - str: 'shift' or 'mask' applied to all entities
+            - Dict[tuple, str]: Mapping of entity keys to strategies
+            - Callable[[tuple], str]: Function returning strategy for entity
+        prediction_date: Date of prediction for delay calculations.
+            Passed to PublicationDelayTransformer.
+        panel_level: Index level name or position for panel entities.
+            Defaults to 0 (first level).
+        variable_level: Index level name or position for variables.
+            Defaults to -1 (last level).
+        delay_col: Column name for delay values. Defaults to 'applicable_delay'.
+        unit_col: Column name for delay units. Defaults to 'unit'.
+        reference_point_col: Column name for reference point.
+            Defaults to 'target_reference_point'.
+        target_frequency_col: Column name for target frequency.
+            Defaults to 'target_frequency'.
+        default_transformer_kwargs: Additional kwargs passed to all
+            PublicationDelayTransformer instances (e.g., time_col, panel_cols).
+
+    Returns:
+        Callable that takes an entity_key (tuple) and returns a configured
+        transformer instance for that entity.
+
+    Raises:
+        ValueError: If required columns are missing from df_delays.
+        KeyError: If entity not found in df_delays (at factory call time).
+
+    Examples:
+        Basic usage with uniform strategy:
+
+        >>> # Calculate delays with panel aggregation
+        >>> delays = calculate_applicable_delay(
+        ...     publication_delays=raw_delays,
+        ...     target_reference_point='end',
+        ...     target_frequency='M',
+        ...     aggregate_by_panel=True
+        ... )
+        >>>
+        >>> # Create factory
+        >>> factory = create_delay_transformer_factory(
+        ...     df_delays=delays,
+        ...     strategy='shift',
+        ...     prediction_date='2024-12-15'
+        ... )
+        >>>
+        >>> # Use with PanelwiseTransformer
+        >>> panelwise = PanelwiseTransformer(
+        ...     transformer=factory,
+        ...     panel_cols=['country'],
+        ...     time_col='date'
+        ... )
+        >>> X_transformed = panelwise.fit_transform(X)
+
+        Entity-specific strategies via dict:
+
+        >>> factory = create_delay_transformer_factory(
+        ...     df_delays=delays,
+        ...     strategy={
+        ...         ('FR',): 'shift',
+        ...         ('DE',): 'mask',
+        ...         ('IT',): 'shift'
+        ...     },
+        ...     prediction_date='2024-12-15'
+        ... )
+
+        Entity-specific strategies via callable:
+
+        >>> def strategy_selector(entity_key):
+        ...     # Use mask for entities with short delays
+        ...     if entity_key in high_frequency_entities:
+        ...         return 'mask'
+        ...     return 'shift'
+        >>>
+        >>> factory = create_delay_transformer_factory(
+        ...     df_delays=delays,
+        ...     strategy=strategy_selector,
+        ...     prediction_date='2024-12-15'
+        ... )
+
+    Notes:
+        - The factory caches parsed entity configurations for efficiency
+        - Missing entities raise KeyError with helpful error message
+        - All transformers share the same prediction_date
+        - Strategy can vary per entity while other params come from DataFrame
+    """
+    # Validation des colonnes requises
+    required_cols = [delay_col, unit_col, reference_point_col, target_frequency_col]
+    missing_cols = [col for col in required_cols if col not in df_delays.columns]
+    if missing_cols:
+        raise ValueError(
+            f"Missing required columns in df_delays: {missing_cols}. "
+            f"Expected columns: {required_cols}"
+        )
+
+    # Validation de l'index
+    if not isinstance(df_delays.index, pd.MultiIndex):
+        raise ValueError(
+            "df_delays must have a MultiIndex (panel_entity, variable). "
+            "Use calculate_applicable_delay with aggregate_by_panel=True."
+        )
+
+    # Calcul des paramètres pour chaque entité
+    entity_params = _build_entity_params(
+        df_delays=df_delays,
+        delay_col=delay_col,
+        unit_col=unit_col,
+        reference_point_col=reference_point_col,
+        target_frequency_col=target_frequency_col
+    )
+
+
+    # Préparation des kwargs par défaut
+    base_kwargs = default_transformer_kwargs.copy() if default_transformer_kwargs else {}
+    base_kwargs['prediction_date'] = prediction_date
+
+    # Création de la factory
+    def transformer_factory(entity_key: tuple) -> BaseEstimator:
+        """Create a configured transformer for the specified entity.
+
+        Args:
+            entity_key: Entity identifier as tuple.
+
+        Returns:
+            Configured transformer instance.
+
+        Raises:
+            KeyError: If entity not found in delays configuration.
+        """
+        # Normalisation de la clé
+        if not isinstance(entity_key, tuple):
+            entity_key = (entity_key,)
+
+        # Vérification de l'existence de l'entité
+        if entity_key not in entity_params:
+            available = list(entity_params.keys())[:10]
+            more = f"... and {len(entity_params) - 10} more" if len(entity_params) > 10 else ""
+            raise KeyError(
+                f"Entity {entity_key} not found in delays configuration. "
+                f"Available entities: {available}{more}"
+            )
+
+        # Récupération de la configuration de l'entité
+        params = entity_params[entity_key]
+
+        # Détermination de la stratégie pour cette entité
+        entity_strategy = _resolve_strategy(strategy, entity_key)
+
+        # Construction des kwargs du transformer
+        transformer_kwargs = {
+            **base_kwargs,
+            'delays': params['delays'],
+            'delay_unit': params['delay_unit'],
+            'reference_point': params['reference_point'],
+            'target_frequency': params['target_frequency'],
+            'strategy': entity_strategy
+        }
+
+        # Création et retour du transformer
+        return PublicationDelayTransformer(**transformer_kwargs)
+
+    return transformer_factory
+
+
+# Fonction auxiliaire de construction des dictionnaires de paramètres pour chaque entité
+def _build_entity_params(
+    df_delays: pd.DataFrame,
+    delay_col: str,
+    unit_col: str,
+    reference_point_col: str,
+    target_frequency_col: str
+) -> Dict[tuple, Dict[str, Any]]:
+    """Build parameters dictionaries for each entity.
+
+    Args:
+        df_delays: Source DataFrame with delays.
+        panel_level_name: Name of panel entity level.
+        variable_level_name: Name of variable level.
+        delay_col: Column name for delays.
+        unit_col: Column name for units.
+        reference_point_col: Column name for reference points.
+        target_frequency_col: Column name for frequencies.
+
+    Returns:
+        Dict mapping entity keys to configuration dicts.
+    """
+    # Initialisation du dictionnaire de paramètres associés à l'entité
+    entity_params = {}
+
+    # Groupement par entité panel
+    for entity_key, group in df_delays.groupby(level=list(range(df_delays.index.nlevels - 1))):
+        # Normalisation de la clé en tuple
+        entity_key = normalize_entity_key(entity_key)
+
+        # Construction du dictionnaire de délais (variable -> delay)
+        delays_dict = dict(zip(
+            group.index.get_level_values(df_delays.index.nlevels - 1),
+            group[delay_col]
+        ))
+
+        # Construction du dictionnaire de paramètres
+        entity_params[entity_key] = {
+            'delays': delays_dict,
+            'delay_unit': _extract_param_by_variable(group, unit_col),
+            'reference_point': _extract_param_by_variable(group, reference_point_col),
+            'target_frequency': _extract_param_by_variable(group, target_frequency_col)
+        }
+
+    return entity_params
+
+# Fonction auxiliaire d'extraction de la variable
+def _extract_param_by_variable(
+    group: pd.DataFrame,
+    column: str
+) -> Union[str, Dict[str, str]]:
+    """Extract parameter, returning dict if varies by variable.
+
+    Args:
+        group: DataFrame group for one entity.
+        col: Column to extract.
+        variable_level_name: Name of variable index level.
+
+    Returns:
+        Single value if constant, or dict mapping variable to value.
+    """
+    # Vérification de l'unicité de la valeur
+    unique_values = group[column].unique()
+
+    if len(unique_values) == 1:
+        # Valeur constante pour toutes les variables
+        return unique_values[0]
+    else:
+        # Valeur variable selon les variables -> retourne un dictionnaire
+        return dict(zip(
+            group.index.get_level_values(group.index.nlevels - 1),
+            group[column]
+        ))
+
+# A REVOIR
+def _resolve_strategy(
+    strategy: Union[str, Dict[tuple, str], Callable[[tuple], str]],
+    entity_key: tuple
+) -> str:
+    """Resolve strategy for a specific entity.
+
+    Args:
+        strategy: Strategy specification (str, dict, or callable).
+        entity_key: Entity identifier.
+
+    Returns:
+        Strategy string ('shift' or 'mask') for the entity.
+
+    Raises:
+        ValueError: If strategy is invalid.
+        KeyError: If entity not found in strategy dict.
+    """
+    if isinstance(strategy, str):
+        # Stratégie globale
+        if strategy not in ('shift', 'mask'):
+            raise ValueError(f"Invalid strategy: '{strategy}'. Must be 'shift' or 'mask'.")
+        return strategy
+
+    elif isinstance(strategy, dict):
+        # Dictionnaire de stratégies par entité
+        if entity_key not in strategy:
+            # Tentative avec clé non-tuple si entité simple
+            if len(entity_key) == 1 and entity_key[0] in strategy:
+                return strategy[entity_key[0]]
+            raise KeyError(
+                f"No strategy defined for entity {entity_key}. "
+                f"Available entities in strategy dict: {list(strategy.keys())}"
+            )
+        return strategy[entity_key]
+
+    elif callable(strategy):
+        # Callable qui retourne la stratégie
+        result = strategy(entity_key)
+        if result not in ('shift', 'mask'):
+            raise ValueError(
+                f"Strategy callable returned invalid value '{result}' for entity {entity_key}. "
+                "Must return 'shift' or 'mask'."
+            )
+        return result
+
+    else:
+        raise TypeError(
+            f"strategy must be str, dict, or callable, got {type(strategy).__name__}"
+        )
+
+
+def prepare_entity_kwargs_from_delays(
+    df_delays: pd.DataFrame,
+    strategy: Union[
+        Literal['shift', 'mask'],
+        Dict[tuple, Literal['shift', 'mask']]
+    ] = 'shift',
+    panel_level: Union[str, int] = 0,
+    variable_level: Union[str, int] = -1,
+    delay_col: str = 'applicable_delay',
+    unit_col: str = 'unit',
+    reference_point_col: str = 'target_reference_point',
+    target_frequency_col: str = 'target_frequency'
+) -> Dict[tuple, Dict[str, Any]]:
+    """Prepare entity_kwargs dict from a publication delays DataFrame.
+
+    This is an alternative to create_delay_transformer_factory() for use
+    with PanelwiseTransformer's entity_kwargs parameter instead of the
+    factory pattern.
+
+    Args:
+        df_delays: DataFrame from calculate_applicable_delay() with
+            aggregate_by_panel=True.
+        strategy: Delay strategy ('shift' or 'mask'), or dict mapping
+            entity keys to strategies.
+        panel_level: Index level for panel entities.
+        variable_level: Index level for variables.
+        delay_col: Column name for delays.
+        unit_col: Column name for units.
+        reference_point_col: Column name for reference points.
+        target_frequency_col: Column name for frequencies.
+
+    Returns:
+        Dict mapping entity keys to kwargs dicts suitable for set_params().
+
+    Examples:
+        >>> entity_kwargs = prepare_entity_kwargs_from_delays(
+        ...     df_delays=calculated_delays,
+        ...     strategy={'FR': 'shift', 'DE': 'mask'}
+        ... )
+        >>>
+        >>> panelwise = PanelwiseTransformer(
+        ...     transformer=PublicationDelayTransformer(
+        ...         strategy='shift',  # Default, overridden by entity_kwargs
+        ...         prediction_date='2024-12-15',
+        ...         delays={}
+        ...     ),
+        ...     entity_kwargs=entity_kwargs,
+        ...     panel_cols=['country']
+        ... )
+
+    Notes:
+        - This approach is simpler but less flexible than the factory pattern
+        - Requires base transformer to support all entity-specific params via set_params()
+        - Does not support callable strategy selectors (use factory for that)
+    """
+    # Validation des colonnes requises
+    required_cols = [delay_col, unit_col, reference_point_col, target_frequency_col]
+    missing_cols = [col for col in required_cols if col not in df_delays.columns]
+    if missing_cols:
+        raise ValueError(
+            f"Missing required columns in df_delays: {missing_cols}"
+        )
+
+    # Résolution des noms de niveaux
+    panel_level_name = _resolve_index_level(df_delays.index, panel_level)
+    variable_level_name = _resolve_index_level(df_delays.index, variable_level)
+
+    # Construction des configs
+    entity_configs = _build_entity_configs(
+        df_delays=df_delays,
+        panel_level_name=panel_level_name,
+        variable_level_name=variable_level_name,
+        delay_col=delay_col,
+        unit_col=unit_col,
+        reference_point_col=reference_point_col,
+        target_frequency_col=target_frequency_col
+    )
+
+    # Conversion en entity_kwargs format
+    entity_kwargs = {}
+    for entity_key, config in entity_configs.items():
+        # Résolution de la stratégie
+        if isinstance(strategy, dict):
+            # Recherche dans le dict avec gestion des clés non-tuple
+            if entity_key in strategy:
+                entity_strategy = strategy[entity_key]
+            elif len(entity_key) == 1 and entity_key[0] in strategy:
+                entity_strategy = strategy[entity_key[0]]
+            else:
+                raise KeyError(f"No strategy defined for entity {entity_key}")
+        else:
+            entity_strategy = strategy
+
+        # Construction des kwargs
+        entity_kwargs[entity_key] = {
+            'delays': config['delays'],
+            'delay_unit': config['delay_unit'],
+            'reference_point': config['reference_point'],
+            'target_frequency': config['target_frequency'],
+            'strategy': entity_strategy
+        }
+
+    return entity_kwargs
