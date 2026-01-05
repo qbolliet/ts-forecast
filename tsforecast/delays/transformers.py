@@ -20,6 +20,8 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from tsforecast.utils.frequency import normalize_frequency, to_pandas_freq
 from tsforecast.utils.time import resolve_date, get_period_boundaries
 from ..frequency.detector import detect_frequency
+from ..panel import PanelwiseTransformer
+from .auxiliary_transformers import ShiftTransformer, MaskTransformer
 
 
 # Classe d'application des délais de publication
@@ -81,49 +83,77 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         delays: Union[Dict[str, float], pd.DataFrame],
-        strategy: str = 'shift',
-        delay_unit: Optional[str] = None,
-        reference_point: Optional[str] = None,
-        target_frequency: Optional[str] = None,
         prediction_date: Union[str, datetime] = 'today',
+        strategy: Union[Literal['shift', 'mask'], Dict[str, Literal['shift', 'mask']]] = 'shift',
+        target_frequency: Optional[Union[str, Dict[str, str]]] = None,
+        delay_unit: Optional[Union[str, Dict[str, str]]] = None,
+        reference_point: Optional[Union[Literal['start', 'end'], Dict[str, Literal['start', 'end']]]] = None,
         time_col: str = 'date',
         panel_cols: Optional[List[str]] = None,
-        handle_missing_delays: str = 'warn',
-        default_delay: Optional[float] = None
+        handle_missing_delays: Literal['ignore', 'warn', 'error'] = 'warn',
+        default_values: Optional[Dict[str, Union[int, float, str]]] = None
     ):
         """Initialize PublicationDelayTransformer.
 
         Args:
             delays: Dict mapping variable names to delays, or DataFrame with delays
-            strategy: 'shift' or 'mask'
-            delay_unit: Unit of delay (inferred from DataFrame if None)
-            reference_point: 'start' or 'end' (inferred from DataFrame if None)
-            target_frequency: Target frequency (inferred from DataFrame if None)
             prediction_date: Prediction date
+            strategy: 'shift' or 'mask' or dictionnary mapping variables names to strategies. Default delay is ignored when strategies are dictionnaries
+            target_frequency: Target frequency for mask strategy
+            delay_unit: Unit of delay (inferred from DataFrame if None)
+            reference_point: Delay reference point, 'start' or 'end' (inferred from DataFrame if None)
             time_col: Time column name
             panel_cols: Panel column names
-            handle_missing_delays: 'ignore', 'warn', or 'error'
-            default_delay: Default delay if missing
+            handle_missing_delays: 'ignore', 'ignore', or 'error'
+            default_values: Default delay if missing
         """
         # Validation des paramètres
-        if strategy not in ['shift', 'mask']:
-            raise ValueError(f"strategy must be 'shift' or 'mask', got '{strategy}'")
+        # Paramètre de stratégie
+        if isinstance(strategy, str) :
+            if strategy not in ['shift', 'mask']:
+                raise ValueError(f"strategy must be 'shift' or 'mask', got '{strategy}'")
+        elif isinstance(strategy, dict):
+            # Parcours des valeurs :
+            for k, v in strategy.items():
+                if v not in ['shift', 'mask']:
+                    raise ValueError(f"strategy must be 'shift' or 'mask', for variable '{k}' got '{v}'")
+        else:
+            raise TypeError(f"'strategy' should be a string of a dictionnary, got a {type(strategy)}")
+        
+        # Paramètre de point de référence
         if reference_point is not None and reference_point not in ['start', 'end']:
             raise ValueError(f"reference_point must be 'start' or 'end', got '{reference_point}'")
+        
+        # Gestion des délais manquants
         if handle_missing_delays not in ['ignore', 'warn', 'error']:
             raise ValueError(f"handle_missing_delays must be 'ignore', 'warn', or 'error', got '{handle_missing_delays}'")
 
+        # Paramètre de délai par défaut
+        if default_values is not None :
+            # Clés attendues
+            expected_keys = ['delay', 'unit', 'reference_point'] if (strategy != 'mask') else ['delay', 'unit', 'reference_point', 'target_frequency'] 
+            # Clés manquantes
+            missing_default_delay_keys = set(expected_keys) - set(default_values.keys())
+            if len(missing_default_delay_keys) > 0:
+                raise ValueError(f"Expected a 'default_values' dictionnary with the keys : {expected_keys}, the following keys are missing{list(missing_default_delay_keys)}")
+
         # Stockage des paramètres
         self.delays = delays
+        self.prediction_date = prediction_date
         self.strategy = strategy
+        self.target_frequency = target_frequency
         self.delay_unit = delay_unit
         self.reference_point = reference_point
-        self.target_frequency = target_frequency
-        self.prediction_date = prediction_date
         self.time_col = time_col
         self.panel_cols = panel_cols
         self.handle_missing_delays = handle_missing_delays
-        self.default_delay = default_delay
+        self.default_values = default_values
+
+        # Warnings
+        if isinstance(strategy, dict) and (default_values is not None):
+            warnings.warn("'default_values' is ignored when the strategy is specified as a dictionnary")
+        if (strategy == 'shift') and (target_frequency is not None):
+            warnings.warn("'target_frequency' is ignored when a shifting strategy is applied")
 
     # Méthode d'entraînement
     def fit(self, X: Union[pd.Series, pd.DataFrame], y=None):
@@ -142,7 +172,63 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         # Inférence des paramètres depuis delays DataFrame si nécessaire
         self.inferred_params_ = self._infer_parameters_from_delays()
 
-        # Détermination des valeurs finales (explicites > inférées > défaut)
+        # Détermination des valeurs des paramètres (explicites > inférées > défaut)
+        # Fréquence cible
+        # Initialisation avec les paramètres inférés
+        target_frequency = self.inferred_params_['target_frequency']
+        # Mise à jour avec les paramètres spécifiés
+        if isinstance(self.target_frequency, dict):
+            target_frequency.update(self.target_frequency)
+        elif isinstance(self.target_frequency, str):
+            target_frequency.update({c : self.target_frequency for c in X.columns})
+        # Ajout de la valeur par défaut pour les colonnes restantes
+        if self.default_values is not None :
+            # Détection des variables qui n'ont pas de target frequency
+            missing_target_frequency = set(X.columns) - set(target_frequency.keys())
+            # Si les stratégies sont fournies sous forme de dictionnaire, on vérifie que les variables pour lesquelles la fréquence est manquante sont des 'mask'
+            if isinstance(self.strategy, dict) & ('target_frequency' in self.default_values.keys()):
+                missing_target_frequency_strategy = missing_target_frequency - set([k for k,v in self.strategy.items() if v == 'shift'])
+                if len(missing_target_frequency_strategy) > 0:
+                    # Ajout de la valeur par défaut
+                    for col in missing_target_frequency_strategy :
+                        target_frequency[col] = self.default_values['target_frequency']
+                        # Warning
+                        warnings.warn(f"Imputed default target frequency value '{self.default_values['target_frequency']}' for column '{col}'")
+            # Cas où toutes les variables doivent être masquées
+            elif (self.strategy=="mask") & ('target_frequency' in self.default_values.keys()) and (len(missing_target_frequency) > 0):
+                # Ajout de la valeur par défaut
+                for col in missing_target_frequency :
+                    target_frequency[col] = self.default_values['target_frequency']
+                    # Warning
+                    warnings.warn(f"Imputed default target frequency value '{self.default_values['target_frequency']}' for column '{col}'")
+            # Cas où il y aurait des variables à imputer mais qu'un fréquence par défaut n'est pas spécifiée
+            elif ('target_frequency' in self.default_values.keys()) and (len(missing_target_frequency)>0):
+                # Distinction suivant la stratégie
+                if isinstance(self.strategy, dict):
+                    if len([k for k,v in self.strategy.items() if v == 'mask']) > 0:
+                        # Warning
+                        warnings.warn("Could not impute a default 'target_frequency' because it is not specified in the 'default_values' dictionnary")
+                elif self.strategy == "mask" :
+                    # Warning
+                    warnings.warn("Could not impute a default 'target_frequency' because it is not specified in the 'default_values' dictionnary")
+        # Tous les autres cas ("shift"), absence de valeur par défaut, absence de variable pour laquelle la "target_frequency" n'est pas spécifiée sont normaux et ne nécessitent ni warning ni imputation
+        
+        
+        # Unité des délais
+        # Initialisation avec les paramètres inférés
+        delay_unit = self.inferred_params_['delay_unit']
+        # Mise à jour avec les paramètres spécifiés
+        if isinstance(self.delay_unit, dict):
+            delay_unit.update(self.delay_unit)
+        elif isinstance(self.delay_unit, str):
+            delay_unit.update({c : self.delay_unit for c in X.columns})
+        # Ajout de la valeur par défaut pour les colonnes restantes
+        if self.default_values is not None :
+
+
+        # Point de référence
+
+
         delay_unit_final = self.delay_unit or self.inferred_params_.get('delay_unit', 'D')
         reference_point_final = self.reference_point or self.inferred_params_.get('reference_point', 'end')
         
@@ -152,41 +238,36 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         else:
             delays_dict = self.delays
 
-        # Détection du type de données (Series ou DataFrame)
-        self.is_series_ = isinstance(X, pd.Series)
+        # Enumération des variables auxquelles appliquer une stratégie de 'shift' et de 'mask'
+        if isinstance(self.strategy, str):
+            # Distinction suivant la stratégie à appliquer
+            if self.strategy == 'shift' :
+                shift_columns = np.intersect1d(X.columns.tolist(), list(delays_dict.keys())).tolist() if self.default_delay is None else X.columns.tolist()
+                mask_columns = []
+            else : # équivalent à self.strategy == 'mask'
+                mask_columns = np.intersect1d(X.columns.tolist(), list(delays_dict.keys())).tolist() if self.default_delay is None else X.columns.tolist()
+                shift_columns = []
+        else : # équivalent à isinstance(self.strategy, dict)
+            shift_columns = np.intersect1d(X.columns.tolist(), [k for k,v in self.strategy if v == 'shift']).tolist()
+            mask_columns = np.intersect1d(X.columns.tolist(), [k for k,v in self.strategy if v == 'mask']).tolist()
 
         # Détection des fréquences par colonne
         self.detected_frequencies_ = detect_frequency(data=X, time_col=self.time_col, panel_cols=self.panel_cols, literal = False, check_consistency= False)
 
-        # Création des transformers pour chaque colonne
-        self.column_transformers_ = {}
+        # Calcul du nombre de périodes à shifter pour chaque variable
+        # Parcours des variables
+        for col in shift_columns:
 
-        if self.is_series_:
-            # Cas d'une Series : un seul transformer
-            column_name = X.name or 'series'
-            # Entrainement du transformer
-            self._fit_column_transformer(
-                column_name=column_name,
-                series=X,
-                delays_dict=delays_dict,
-                delay_unit=delay_unit_final,
-                reference_point=reference_point_final
-            )
-        else:
-            # Cas d'un DataFrame : un transformer par colonne
-            for column_name in X.columns:
-                if column_name == self.time_col:
-                    continue  # Skip time column
-                if self.panel_cols and column_name in self.panel_cols:
-                    continue  # Skip panel columns
-                # Entrainement du transformer
-                self._fit_column_transformer(
-                    column_name=column_name,
-                    series=X[column_name],
-                    delays_dict=delays_dict,
-                    delay_unit=delay_unit_final,
-                    reference_point=reference_point_final
-                )
+            # applicable_delay
+            # unit
+            # target_frequency
+            # target_reference_point
+
+        # Calcul du nombre d'observations à masquer pour chaque variable
+        # Parcours des variables
+        for col in mask_columns:
+
+
 
         return self
 
@@ -264,17 +345,25 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         if isinstance(self.delays, pd.DataFrame):
             # Inférence de 'delay_unit' à partir de la colonne 'unit'
             if 'unit' in self.delays.columns:
-                inferred['delay_unit'] = self.delays['unit'].iloc[0]
+                # Stockage sous la forme d'un dictionnaire de l'association entre les variables et l'unité
+                df_unit = self.delays[['variable', 'unit']].drop_duplicates(subset=['variable'])
+                inferred['delay_unit'] = dict(
+                    zip(df_unit['variable'], df_unit['unit'])
+                )
 
             # Inférence de 'reference_point' à partir de la colonne 'reference_point'
             if 'reference_point' in self.delays.columns:
-                inferred['reference_point'] = self.delays['reference_point'].iloc[0]
+                # Stockage sous la forme d'un dictionnaire de l'association entre les variables et lde point de référence
+                df_reference_point = self.delays[['variable', 'reference_point']].drop_duplicates(subset=['variable'])
+                inferred['reference_point'] = dict(
+                    zip(df_reference_point['variable'], df_reference_point['reference_point'])
+                )
 
             # Inférence de 'target_frequency' à partir de la colonne 'target_frequency'
             if 'target_frequency' in self.delays.columns:
                 # Stockage sous la forme d'un dictionnaire de l'association entre les variables et la fréquence
-                df_frequency = self.delays[['variable', 'target_frequency']].drop_duplicates()
-                inferred['target_frequencies'] = dict(
+                df_frequency = self.delays[['variable', 'target_frequency']].drop_duplicates(subset=['variable'])
+                inferred['target_frequency'] = dict(
                     zip(df_frequency['variable'], df_frequency['target_frequency'])
                 )
 
@@ -355,316 +444,3 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
 
         # Stockage du transformer
         self.column_transformers_[column_name] = helper
-
-
-# Transformer 'shiftant' les séries sur un nombre donnée de périodes
-class ShiftTransformer(BaseEstimator, TransformerMixin):
-    """Simple helper to shift time series data by N periods.
-
-    This is a pure operational transformer with no inference logic.
-    Panel data handling is done by the orchestrator (PublicationDelayTransformer).
-
-    Parameters:
-        n_periods: Number of periods to shift (can be negative for future predictions)
-        frequency: Frequency for period arithmetic ('D', 'M', 'Q', 'W', 'h', etc.)
-
-    Attributes:
-        n_periods: Stored number of periods to shift
-        frequency: Stored frequency code
-
-    Examples:
-        >>> import pandas as pd
-        >>> dates = pd.date_range('2024-01-01', periods=5, freq='M')
-        >>> series = pd.Series([1, 2, 3, 4, 5], index=dates, name='GDP')
-        >>>
-        >>> # Shift forward by 2 monthly periods
-        >>> shifter = ShiftTransformer(n_periods=2, frequency='M')
-        >>> shifted = shifter.fit_transform(series)
-        >>>
-        >>> # Inverse shift
-        >>> original = shifter.inverse_transform(shifted)
-    """
-
-    # Initialisation
-    def __init__(self, n_periods: int, frequency: str):
-        """Initialize ShiftTransformer.
-
-        Args:
-            n_periods: Number of periods to shift (can be negative)
-            frequency: Frequency for period arithmetic ('D', 'M', 'Q', etc.)
-        """
-        # Initialisation des attributs
-        self.n_periods = n_periods
-        self.frequency = frequency
-
-    # Méthode d'entraînement
-    def fit(self, X: pd.Series, y=None):
-        """Fit transformer (no-op for ShiftTransformer).
-
-        Args:
-            X: Time series to fit
-            y: Ignored
-
-        Returns:
-            self
-        """
-        return self
-
-    # Méthode de transformation
-    def transform(self, X: pd.Series) -> pd.Series:
-        """Shift series by n_periods at given frequency.
-
-        Args:
-            X: Time series to transform
-
-        Returns:
-            Shifted time series
-
-        Raises:
-            ValueError: If X is not a pandas Series or doesn't have DatetimeIndex
-        """
-        # Validation que l'argument est une série
-        if not isinstance(X, pd.Series):
-            raise ValueError("X must be a pandas Series")
-
-        # Vérification que l'index est un DateTime
-        if not isinstance(X.index, pd.DatetimeIndex):
-            raise ValueError("X must have a DatetimeIndex")
-
-        return self._shift_by_periods(X, self.n_periods, self.frequency)
-
-    # Méthode d'inversion de la transformation
-    def inverse_transform(self, X: pd.Series) -> pd.Series:
-        """Inverse shift by -n_periods.
-
-        Args:
-            X: Transformed series
-
-        Returns:
-            Series shifted back by -n_periods
-        """
-        # Validation que l'argument est une série
-        if not isinstance(X, pd.Series):
-            raise ValueError("X must be a pandas Series")
-
-        # Vérification que l'index est un DateTime
-        if not isinstance(X.index, pd.DatetimeIndex):
-            raise ValueError("X must have a DatetimeIndex")
-
-        return self._shift_by_periods(X, -self.n_periods, self.frequency)
-
-    # Méthode auxiliaire de décalage des périodes
-    def _shift_by_periods(self, series: pd.Series, n_periods: int, frequency: str) -> pd.Series:
-        """Core shift logic using PeriodIndex.
-
-        Args:
-            series: Series to shift
-            n_periods: Number of periods to shift
-            frequency: Frequency for period arithmetic
-
-        Returns:
-            Shifted series with original index structure
-        """
-        # Cas où aucun shift n'est nécessaire
-        if n_periods == 0:
-            return series.copy()
-
-        # Normalisation de la fréquence
-        pandas_freq = to_pandas_freq(frequency)
-
-        # Conversion en PeriodIndex pour validation de la fréquence
-        # Puis utilisation du shift standard de pandas qui décale les valeurs
-        period_index = series.index.to_period(freq=pandas_freq)
-        series_period = pd.Series(series.values, index=period_index, name=series.name)
-
-        # Shift standard : décale les valeurs, l'index reste fixe
-        shifted_period = series_period.shift(n_periods)
-
-        # Reconversion en DatetimeIndex en préservant les timestamps originaux
-        # On map chaque période de l'index original vers son timestamp original
-        period_to_timestamp = dict(zip(period_index, series.index))
-
-        # Construction de l'index de sortie
-        result_index = pd.DatetimeIndex([
-            period_to_timestamp.get(period, pd.NaT)
-            for period in shifted_period.index
-        ])
-
-        # Création de la série avec l'index datetime restauré
-        result = pd.Series(shifted_period.values, index=result_index, name=series.name)
-
-        # Filtrage des NaT (périodes qui n'existent pas dans l'original)
-        # et alignement sur l'index original
-        return result.reindex(series.index)
-
-
-class MaskTransformer(BaseEstimator, TransformerMixin):
-    """Simple helper to mask N observations per period.
-
-    This is a pure operational transformer with no inference logic.
-    Panel data handling is done by the orchestrator (PublicationDelayTransformer).
-
-    Parameters:
-        n_obs: Number of observations to mask per period
-        mask_frequency: Frequency for period grouping ('D', 'M', 'Q', 'W', 'h', etc.)
-        prediction_date: Reference date for masking
-
-    Attributes:
-        n_obs: Stored number of observations to mask per period
-        mask_frequency: Stored frequency for period grouping
-        prediction_date: Stored prediction date
-        original_data_: Original data before masking (for inverse_transform)
-
-    Examples:
-        >>> import pandas as pd
-        >>> from datetime import datetime
-        >>> dates = pd.date_range('2024-01-01', periods=90, freq='D')
-        >>> series = pd.Series(range(90), index=dates, name='GDP')
-        >>>
-        >>> # Mask 2 most recent observations per month
-        >>> masker = MaskTransformer(
-        ...     n_obs=2,
-        ...     mask_frequency='M',
-        ...     prediction_date=datetime(2024, 3, 31)
-        ... )
-        >>> masked = masker.fit_transform(series)
-        >>>
-        >>> # Restore original data
-        >>> original = masker.inverse_transform(masked)
-    """
-
-    def __init__(self, n_obs: int, mask_frequency: str, prediction_date: datetime):
-        """Initialize MaskTransformer.
-
-        Args:
-            n_obs: Number of observations to mask per period
-            mask_frequency: Frequency for period grouping ('D', 'M', 'Q', etc.)
-            prediction_date: Reference date for masking
-        """
-        self.n_obs = n_obs
-        self.mask_frequency = mask_frequency
-        self.prediction_date = prediction_date
-        self.original_data_ = None
-
-    def fit(self, X: pd.Series, y=None):
-        """Fit transformer (no-op for MaskTransformer).
-
-        Args:
-            X: Time series to fit
-            y: Ignored
-
-        Returns:
-            self
-        """
-        return self
-
-    def transform(self, X: pd.Series) -> pd.Series:
-        """Mask N most recent observations per period.
-
-        Args:
-            X: Time series to transform
-
-        Returns:
-            Masked time series
-
-        Raises:
-            ValueError: If X is not a pandas Series or doesn't have DatetimeIndex
-        """
-        # Validation de l'entrée
-        if not isinstance(X, pd.Series):
-            raise ValueError("X must be a pandas Series")
-
-        if not isinstance(X.index, pd.DatetimeIndex):
-            raise ValueError("X must have a DatetimeIndex")
-
-        # Stockage des données originales pour inverse_transform
-        self.original_data_ = X.copy()
-
-        return self._mask_n_obs_per_period(X)
-
-    def inverse_transform(self, X: pd.Series) -> pd.Series:
-        """Restore masked values from original data.
-
-        Args:
-            X: Masked series
-
-        Returns:
-            Original series before masking
-
-        Raises:
-            ValueError: If transform has not been called yet
-        """
-        if self.original_data_ is None:
-            raise ValueError("Must call transform before inverse_transform")
-
-        return self.original_data_.copy()
-
-    def _mask_n_obs_per_period(self, series: pd.Series) -> pd.Series:
-        """Core masking logic: mask N most recent obs per period.
-
-        Args:
-            series: Series to mask
-
-        Returns:
-            Series with masked observations
-        """
-        # Cas où aucun masquage n'est nécessaire
-        if self.n_obs == 0:
-            return series.copy()
-
-        masked_series = series.copy()
-
-        # Génération des périodes
-        periods = self._generate_periods(
-            start_date=series.index.min(),
-            end_date=self.prediction_date,
-            frequency=self.mask_frequency
-        )
-
-        # Masquage dans chaque période
-        for period_start, period_end in periods:
-            # Observations dans cette période
-            period_mask = (series.index >= period_start) & (series.index < period_end)
-            period_obs = series[period_mask]
-
-            if len(period_obs) > 0:
-                # Masquer les n_obs plus récentes
-                n_to_mask = min(self.n_obs, len(period_obs))
-                most_recent_indices = period_obs.index[-n_to_mask:]
-                masked_series.loc[most_recent_indices] = np.nan
-
-        return masked_series
-
-    def _generate_periods(
-        self,
-        start_date: pd.Timestamp,
-        end_date: datetime,
-        frequency: str
-    ) -> List[tuple[datetime, datetime]]:
-        """Generate list of (period_start, period_end) tuples.
-
-        Args:
-            start_date: Start date for period generation
-            end_date: End date for period generation
-            frequency: Frequency code for periods
-
-        Returns:
-            List of (period_start, period_end) tuples
-        """
-        # Normalisation de la fréquence
-        pandas_freq = to_pandas_freq(frequency)
-
-        # Génération des dates de début de période
-        period_starts = pd.date_range(
-            start=start_date,
-            end=end_date,
-            freq=pandas_freq
-        )
-
-        # Création des tuples (start, end) pour chaque période
-        periods = []
-        for period_date in period_starts:
-            period_start, period_end = get_period_boundaries(period_date, frequency)
-            periods.append((period_start, period_end))
-
-        return periods
