@@ -186,31 +186,32 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             # Détection des variables qui n'ont pas de target frequency
             missing_target_frequency = set(X.columns) - set(target_frequency.keys())
             # Si les stratégies sont fournies sous forme de dictionnaire, on vérifie que les variables pour lesquelles la fréquence est manquante sont des 'mask'
-            if isinstance(self.strategy, dict) & ('target_frequency' in self.default_values.keys()):
+            if isinstance(self.strategy, dict) and ('target_frequency' in self.default_values.keys()):
                 missing_target_frequency_strategy = missing_target_frequency - set([k for k,v in self.strategy.items() if v == 'shift'])
-                if len(missing_target_frequency_strategy) > 0:
+                if len(missing_target_frequency_strategy) > 0: # Ce if est possiblement inutile
                     # Ajout de la valeur par défaut
                     for col in missing_target_frequency_strategy :
                         target_frequency[col] = self.default_values['target_frequency']
                         # Warning
                         warnings.warn(f"Imputed default target frequency value '{self.default_values['target_frequency']}' for column '{col}'")
             # Cas où toutes les variables doivent être masquées
-            elif (self.strategy=="mask") & ('target_frequency' in self.default_values.keys()) and (len(missing_target_frequency) > 0):
+            elif (self.strategy=="mask") and ('target_frequency' in self.default_values.keys()) and (len(missing_target_frequency) > 0):
                 # Ajout de la valeur par défaut
                 for col in missing_target_frequency :
                     target_frequency[col] = self.default_values['target_frequency']
                     # Warning
                     warnings.warn(f"Imputed default target frequency value '{self.default_values['target_frequency']}' for column '{col}'")
             # Cas où il y aurait des variables à imputer mais qu'un fréquence par défaut n'est pas spécifiée
-            elif ('target_frequency' in self.default_values.keys()) and (len(missing_target_frequency)>0):
+            elif ('target_frequency' not in self.default_values.keys()) and (len(missing_target_frequency)>0):
                 # Distinction suivant la stratégie
                 if isinstance(self.strategy, dict):
-                    if len([k for k,v in self.strategy.items() if v == 'mask']) > 0:
+                    missing_target_frequency_strategy = missing_target_frequency - set([k for k,v in self.strategy.items() if v == 'shift'])
+                    if len(missing_target_frequency_strategy) > 0:
                         # Warning
-                        warnings.warn("Could not impute a default 'target_frequency' because it is not specified in the 'default_values' dictionnary")
+                        warnings.warn(f"Could not impute a default 'target_frequency' for columns {missing_target_frequency_strategy} because it is not specified in the 'default_values' dictionnary")
                 elif self.strategy == "mask" :
                     # Warning
-                    warnings.warn("Could not impute a default 'target_frequency' because it is not specified in the 'default_values' dictionnary")
+                    warnings.warn(f"Could not impute a default 'target_frequency' for columns : {missing_target_frequency} because it is not specified in the 'default_values' dictionnary")
         # Tous les autres cas ("shift"), absence de valeur par défaut, absence de variable pour laquelle la "target_frequency" n'est pas spécifiée sont normaux et ne nécessitent ni warning ni imputation
         
         
@@ -224,13 +225,61 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             delay_unit.update({c : self.delay_unit for c in X.columns})
         # Ajout de la valeur par défaut pour les colonnes restantes
         if self.default_values is not None :
-
-
+            # Détection des variables qui n'ont pas d'unité
+            missing_delay_unit = set(X.columns) - set(delay_unit.keys())
+            # Cas où le répertoire des stratégies est un dictionnaire
+            if isinstance(self.strategy, dict) and ('delay_unit' in self.default_values.keys()):
+                missing_delay_unit_strategy = missing_delay_unit - set(self.strategy.keys())
+                if len(missing_delay_unit_strategy) > 0: # Ce if est possiblement inutile
+                    # Ajout de la valeur par défaut
+                    for col in missing_delay_unit_strategy :
+                        delay_unit[col] = self.default_values['delay_unit']
+                        # Warning
+                        warnings.warn(f"Imputed default delay unit value '{self.default_values['delay_unit']}' for column '{col}'")
+            # Cas où la valeur par défaut doit être associée à toutes les colonnes non référencées 
+            elif ('delay_unit' in self.default_values.keys()) and (len(missing_delay_unit) > 0):
+                # Ajout de la valeur par défaut
+                for col in missing_delay_unit :
+                    delay_unit[col] = self.default_values['delay_unit']
+                    # Warning
+                    warnings.warn(f"Imputed default delay unit value '{self.default_values['delay_unit']}' for column '{col}'")
+            # Cas où il y aurait des variables à imputer mais qu'un fréquence par défaut n'est pas spécifiée
+            elif ('delay_unit' not in self.default_values.keys()) and (len(missing_delay_unit)>0):
+                warnings.warn(f"Could not impute a default 'delay_unit' for columns {missing_delay_unit} because it is not specified in the 'default_values' dictionnary")
+        # Tous les autres cas, absence de valeur par défaut, absence de variable pour laquelle le "delay_unit" n'est pas spécifiée sont normaux et ne nécessitent ni warning ni imputation
+        
         # Point de référence
-
-
-        delay_unit_final = self.delay_unit or self.inferred_params_.get('delay_unit', 'D')
-        reference_point_final = self.reference_point or self.inferred_params_.get('reference_point', 'end')
+        # Initialisation avec les paramètres inférés
+        reference_point = self.inferred_params_['reference_point']
+        # Mise à jour avec les paramètres spécifiés
+        if isinstance(self.reference_point, dict):
+            reference_point.update(self.reference_point)
+        elif isinstance(self.reference_point, str):
+            reference_point.update({c : self.reference_point for c in X.columns})
+        # Ajout de la valeur par défaut pour les colonnes restantes
+        if self.default_values is not None :
+            # Détection des variables qui n'ont pas d'unité
+            missing_reference_point = set(X.columns) - set(reference_point.keys())
+            # Cas où le répertoire des stratégies est un dictionnaire
+            if isinstance(self.strategy, dict) and ('reference_point' in self.default_values.keys()):
+                missing_reference_point_strategy = missing_reference_point - set(self.strategy.keys())
+                if len(missing_reference_point_strategy) > 0: # Ce if est possiblement inutile
+                    # Ajout de la valeur par défaut
+                    for col in missing_reference_point_strategy :
+                        reference_point[col] = self.default_values['reference_point']
+                        # Warning
+                        warnings.warn(f"Imputed default delay unit value '{self.default_values['reference_point']}' for column '{col}'")
+            # Cas où la valeur par défaut doit être associée à toutes les colonnes non référencées 
+            elif ('reference_point' in self.default_values.keys()) and (len(missing_reference_point) > 0):
+                # Ajout de la valeur par défaut
+                for col in missing_reference_point :
+                    reference_point[col] = self.default_values['reference_point']
+                    # Warning
+                    warnings.warn(f"Imputed default delay unit value '{self.default_values['reference_point']}' for column '{col}'")
+            # Cas où il y aurait des variables à imputer mais qu'un fréquence par défaut n'est pas spécifiée
+            elif ('reference_point' not in self.default_values.keys()) and (len(missing_reference_point)>0):
+                warnings.warn(f"Could not impute a default 'reference_point' for columns {missing_reference_point} because it is not specified in the 'default_values' dictionnary")
+        # Tous les autres cas, absence de valeur par défaut, absence de variable pour laquelle le "reference_point" n'est pas spécifiée sont normaux et ne nécessitent ni warning ni imputation
         
         # Conversion des delays en dictionnaire si DataFrame
         if isinstance(self.delays, pd.DataFrame):
@@ -247,6 +296,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             else : # équivalent à self.strategy == 'mask'
                 mask_columns = np.intersect1d(X.columns.tolist(), list(delays_dict.keys())).tolist() if self.default_delay is None else X.columns.tolist()
                 shift_columns = []
+
         else : # équivalent à isinstance(self.strategy, dict)
             shift_columns = np.intersect1d(X.columns.tolist(), [k for k,v in self.strategy if v == 'shift']).tolist()
             mask_columns = np.intersect1d(X.columns.tolist(), [k for k,v in self.strategy if v == 'mask']).tolist()
