@@ -23,7 +23,7 @@ from tsforecast.utils.frequency import normalize_frequency, to_pandas_freq
 from tsforecast.utils.time import resolve_date, get_period_boundaries
 from tsforecast.utils.duration import convert_duration, normalize_duration
 from ..frequency.detector import detect_frequency
-from ..panel import PanelwiseTransformer
+from ..panel import PanelwiseTransformer, normalize_entity_key
 from .auxiliary_transformers import ShiftTransformer, MaskTransformer
 
 
@@ -45,8 +45,6 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         reference_point: Reference point ('start' or 'end'). If None, inferred from DataFrame
         target_frequency: Target frequency for delay calculation. If None, uses column frequency
         prediction_date: Date of prediction (required for 'mask' strategy)
-        time_col: Name of time column (default: 'date')
-        panel_cols: Panel column names (None for non-panel data)
         handle_missing_delays: Strategy for missing delays ('ignore', 'warn', 'error')
         default_delay: Default delay value if missing
 
@@ -91,8 +89,6 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         target_frequency: Optional[Union[str, Dict[str, str]]] = None,
         delay_unit: Optional[Union[str, Dict[str, str]]] = None,
         reference_point: Optional[Union[Literal['start', 'end'], Dict[str, Literal['start', 'end']]]] = None,
-        time_col: str = 'date',
-        panel_cols: Optional[List[str]] = None,
         handle_missing_delays: Literal['ignore', 'warn', 'error'] = 'warn',
         default_values: Optional[Dict[str, Union[int, float, str]]] = None
     ):
@@ -105,8 +101,6 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             target_frequency: Target frequency for mask strategy
             delay_unit: Unit of delay (inferred from DataFrame if None)
             reference_point: Delay reference point, 'start' or 'end' (inferred from DataFrame if None)
-            time_col: Time column name
-            panel_cols: Panel column names
             handle_missing_delays: 'ignore', 'ignore', or 'error'
             default_values: Default delay if missing
         """
@@ -132,7 +126,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             raise ValueError(f"'handle_missing_delays' must be 'ignore', 'warn', or 'error', got '{handle_missing_delays}'")
 
         # Paramètre de délai par défaut
-        if default_values is not None :
+        if default_values is not None:
             # Clés attendues
             expected_keys = ['delay', 'unit', 'reference_point'] if (strategy != 'mask') else ['delay', 'unit', 'reference_point', 'target_frequency'] 
             # Clés manquantes
@@ -147,8 +141,6 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         self.target_frequency = target_frequency
         self.delay_unit = delay_unit
         self.reference_point = reference_point
-        self.time_col = time_col
-        self.panel_cols = panel_cols
         self.handle_missing_delays = handle_missing_delays
         self.default_values = default_values
 
@@ -183,24 +175,24 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         if isinstance(self.target_frequency, dict):
             target_frequency_dict.update(self.target_frequency)
         elif isinstance(self.target_frequency, str):
-            target_frequency_dict.update({c : self.target_frequency for c in X.columns})
+            target_frequency_dict.update({c: self.target_frequency for c in X.columns})
         # Ajout de la valeur par défaut pour les colonnes restantes
-        if self.default_values is not None :
+        if self.default_values is not None:
             # Détection des variables qui n'ont pas de target frequency
             missing_target_frequency = set(X.columns) - set(target_frequency_dict.keys())
             # Si les stratégies sont fournies sous forme de dictionnaire, on vérifie que les variables pour lesquelles la fréquence est manquante sont des 'mask'
             if isinstance(self.strategy, dict) and ('target_frequency' in self.default_values.keys()):
                 missing_target_frequency_strategy = missing_target_frequency - set([k for k,v in self.strategy.items() if v == 'shift'])
-                if len(missing_target_frequency_strategy) > 0: # Ce if est possiblement inutile
+                if len(missing_target_frequency_strategy) > 0:  # Ce if est possiblement inutile
                     # Ajout de la valeur par défaut
-                    for col in missing_target_frequency_strategy :
+                    for col in missing_target_frequency_strategy:
                         target_frequency_dict[col] = self.default_values['target_frequency']
                         # Warning
                         warnings.warn(f"Imputed default target frequency value '{self.default_values['target_frequency']}' for column '{col}'")
             # Cas où toutes les variables doivent être masquées
-            elif (self.strategy=="mask") and ('target_frequency' in self.default_values.keys()) and (len(missing_target_frequency) > 0):
+            elif (self.strategy == "mask") and ('target_frequency' in self.default_values.keys()) and (len(missing_target_frequency) > 0):
                 # Ajout de la valeur par défaut
-                for col in missing_target_frequency :
+                for col in missing_target_frequency:
                     target_frequency_dict[col] = self.default_values['target_frequency']
                     # Warning
                     warnings.warn(f"Imputed default target frequency value '{self.default_values['target_frequency']}' for column '{col}'")
@@ -235,14 +227,14 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                 missing_delay_unit_strategy = missing_delay_unit - set(self.strategy.keys())
                 if len(missing_delay_unit_strategy) > 0: # Ce if est possiblement inutile
                     # Ajout de la valeur par défaut
-                    for col in missing_delay_unit_strategy :
+                    for col in missing_delay_unit_strategy:
                         delay_unit_dict[col] = self.default_values['delay_unit']
                         # Warning
                         warnings.warn(f"Imputed default delay unit value '{self.default_values['delay_unit']}' for column '{col}'")
             # Cas où la valeur par défaut doit être associée à toutes les colonnes non référencées 
             elif ('delay_unit' in self.default_values.keys()) and (len(missing_delay_unit) > 0):
                 # Ajout de la valeur par défaut
-                for col in missing_delay_unit :
+                for col in missing_delay_unit:
                     delay_unit_dict[col] = self.default_values['delay_unit']
                     # Warning
                     warnings.warn(f"Imputed default delay unit value '{self.default_values['delay_unit']}' for column '{col}'")
@@ -258,7 +250,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         if isinstance(self.reference_point, dict):
             reference_point_dict.update(self.reference_point)
         elif isinstance(self.reference_point, str):
-            reference_point_dict.update({c : self.reference_point for c in X.columns})
+            reference_point_dict.update({c: self.reference_point for c in X.columns})
         # Ajout de la valeur par défaut pour les colonnes restantes
         if self.default_values is not None :
             # Détection des variables qui n'ont pas d'unité
@@ -268,14 +260,14 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                 missing_reference_point_strategy = missing_reference_point - set(self.strategy.keys())
                 if len(missing_reference_point_strategy) > 0: # Ce if est possiblement inutile
                     # Ajout de la valeur par défaut
-                    for col in missing_reference_point_strategy :
+                    for col in missing_reference_point_strategy:
                         reference_point_dict[col] = self.default_values['reference_point']
                         # Warning
                         warnings.warn(f"Imputed default delay unit value '{self.default_values['reference_point']}' for column '{col}'")
             # Cas où la valeur par défaut doit être associée à toutes les colonnes non référencées 
             elif ('reference_point' in self.default_values.keys()) and (len(missing_reference_point) > 0):
                 # Ajout de la valeur par défaut
-                for col in missing_reference_point :
+                for col in missing_reference_point:
                     reference_point_dict[col] = self.default_values['reference_point']
                     # Warning
                     warnings.warn(f"Imputed default delay unit value '{self.default_values['reference_point']}' for column '{col}'")
@@ -296,16 +288,16 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             if self.strategy == 'shift' :
                 shift_columns = np.intersect1d(X.columns.tolist(), list(delays_dict.keys())).tolist() if self.default_delay is None else X.columns.tolist()
                 mask_columns = []
-            else : # équivalent à self.strategy == 'mask'
+            else:  # équivalent à self.strategy == 'mask'
                 mask_columns = np.intersect1d(X.columns.tolist(), list(delays_dict.keys())).tolist() if self.default_delay is None else X.columns.tolist()
                 shift_columns = []
 
-        else : # équivalent à isinstance(self.strategy, dict)
+        else:  # équivalent à isinstance(self.strategy, dict)
             shift_columns = np.intersect1d(X.columns.tolist(), [k for k,v in self.strategy if v == 'shift']).tolist()
             mask_columns = np.intersect1d(X.columns.tolist(), [k for k,v in self.strategy if v == 'mask']).tolist()
 
         # Détection des fréquences par colonne
-        self.detected_frequencies_ = detect_frequency(data=X, time_col=self.time_col, panel_cols=None, literal = False, check_consistency= True)
+        self.detected_frequencies_ = detect_frequency(data=X, time_col=None, panel_cols=None, literal=False, check_consistency=True)
 
         # Calcul du nombre de périodes à shifter pour chaque variable
         # Initialisation du dictionnaire résultat
@@ -413,34 +405,61 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         check_is_fitted(self)
 
         # Détection de la structure de panel
-        # Des transformations similaires sont appliquées à tous les individus du panel. (L'AJOUTER EN DOCSTRING)
+        is_panel = isinstance(X.index, pd.MultiIndex)
         
+        # Initialisation du dictionnaire des transformers auxiliaires pour les transformations inverses
+        self.auxiliary_transformers_: Dict[str, BaseEstimator] = {}
 
-        if self.is_series_:
-            # Transform series
-            column_name = X.name or 'series'
-            if column_name in self.column_transformers_:
-                result = self.column_transformers_[column_name].transform(X)
-                # Check for all-NaN
-                if result.isna().all():
-                    warnings.warn(
-                        f"Column '{column_name}' became all-NaN after applying {self.strategy} strategy"
-                    )
-                return result
+        # Initialisation de la liste des jeux de données résultats
+        list_df_transformed = []
+
+        # Traitement des variables à shift
+        # Parcours des valeurs de paramètres
+        for params in self.shift_params.values():
+            # Construction de la liste des colonnes associée à cette valeur
+            columns = [k for k, v in self.shift_params.items() if v == params]
+            # Distinction suivant la structure de panel
+            if is_panel:
+                # Initialisation d'un PanelwiseTransformer
+                transformer_ = PanelwiseTransformer(
+                    transformer=ShiftTransformer(**params),
+                    time_col=None,
+                    panel_cols=None
+                )
             else:
-                return X.copy()
-        else:
-            # Transform DataFrame column by column
-            X_result = X.copy()
-            for column_name, transformer in self.column_transformers_.items():
-                if column_name in X_result.columns:
-                    X_result[column_name] = transformer.transform(X_result[column_name])
-                    # Check for all-NaN
-                    if X_result[column_name].isna().all():
-                        warnings.warn(
-                            f"Column '{column_name}' became all-NaN after applying {self.strategy} strategy"
-                        )
-            return X_result
+                # Initialisation d'un ShiftTransformer
+                transformer_ = ShiftTransformer(**params)
+            # Transformation des données
+            list_df_transformed.append(transformer_.fit_transform(X[columns]))
+
+        # Traitement des variables à mask
+        # Parcours des valeurs de paramètres
+        for params in self.mask_params.values():
+            # Construction de la liste des colonnes associée à cette valeur
+            columns = [k for k, v in self.mask_params.items() if v == params]
+            # Distinction suivant la structure de panel
+            if is_panel:
+                # Initialisation d'un PanelwiseTransformer
+                transformer_ = PanelwiseTransformer(
+                    transformer=MaskTransformer(**params),
+                    time_col=None,
+                    panel_cols=None
+                )
+            else:
+                # Initialisation d'un MaskTransformer
+                transformer_ = MaskTransformer(**params)
+            # Transformation des données
+            list_df_transformed.append(transformer_.fit_transform(X[columns]))
+
+        # Jointure sur l'index des données transformées
+        df_transformed = pd.concat(list_df_transformed, axis=1, join='outer', ignore_index=False)
+        # Ajout des colonnes non transformées
+        df_transformed = pd.concat([df_transformed, X[list(set(X.columns) - set(df_transformed.columns))]], axis=1, join='outer', ignore_index=False)
+        # Restauration de l'ordre original des colonnes
+        df_transformed = df_transformed[X.columns]
+
+        return df_transformed
+
 
     # Méthode de transformation inverse des données
     def inverse_transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
@@ -452,20 +471,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         Returns:
             Data with delays reversed
         """
-        if self.is_series_:
-            # Inverse transform series
-            column_name = X.name or 'series'
-            if column_name in self.column_transformers_:
-                return self.column_transformers_[column_name].inverse_transform(X)
-            else:
-                return X.copy()
-        else:
-            # Inverse transform DataFrame column by column
-            X_result = X.copy()
-            for column_name, transformer in self.column_transformers_.items():
-                if column_name in X_result.columns:
-                    X_result[column_name] = transformer.inverse_transform(X_result[column_name])
-            return X_result
+        pass
 
     # Méthode auxiliaire d'inférence des paramètres d'unité du délai, de point de référence et de fréquence cible
     def _infer_parameters_from_delays(self) -> Dict[str, any]:
@@ -506,80 +512,6 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
 
         return inferred
 
-    # Méthode auxiliaire d'entrainement du transformer
-    def _fit_column_transformer(
-        self,
-        column_name: str,
-        series: pd.Series,
-        delays_dict: Dict[str, float],
-        delay_unit: str,
-        reference_point: str
-    ):
-        """Fit helper transformer for a single column.
-
-        Args:
-            column_name: Name of the column
-            series: Series data for the column
-            delays_dict: Dictionary of delays
-            delay_unit: Unit of delay
-            reference_point: Reference point
-        """
-        # Obtention du délai pour cette colonne
-        if column_name in delays_dict:
-            applicable_delay = delays_dict[column_name]
-        elif self.default_delay is not None:
-            applicable_delay = self.default_delay
-        else:
-            if self.handle_missing_delays == 'error':
-                raise ValueError(f"No delay found for column '{column_name}'")
-            elif self.handle_missing_delays == 'warn':
-                warnings.warn(f"No delay found for column '{column_name}', skipping transformation")
-            return  # Skip this column
-
-        # Obtention de la fréquence détectée
-        column_frequency = self.detected_frequencies_.get(column_name)
-        if column_frequency is None:
-            warnings.warn(f"Could not detect frequency for column '{column_name}', skipping transformation")
-            return
-
-        # Détermination de la target_frequency
-        target_freq = None
-        if self.target_frequency is not None:
-            target_freq = self.target_frequency
-        elif 'target_frequencies' in self.inferred_params_ and column_name in self.inferred_params_['target_frequencies']:
-            target_freq = self.inferred_params_['target_frequencies'][column_name]
-        # Si target_freq reste None, calculate_n_periods_delay utilisera column_frequency
-
-        # Calcul du nombre de périodes
-        from .period_utils import calculate_n_periods_delay
-
-        # Utilisation d'une observation typique pour le calcul
-        observation_date = series.index[len(series) // 2]
-
-        n_periods = calculate_n_periods_delay(
-            applicable_delay=applicable_delay,
-            delay_unit=delay_unit,
-            prediction_date=self.prediction_date_,
-            reference_point=reference_point,
-            observation_date=observation_date,
-            column_frequency=column_frequency,
-            target_frequency=target_freq
-        )
-
-        # Création du helper transformer approprié
-        if self.strategy == 'shift':
-            helper = ShiftTransformer(
-                n_periods=n_periods,
-                frequency=target_freq or column_frequency
-            )
-        else:  # mask
-            helper = MaskTransformer(
-                n_obs=abs(n_periods),  # MaskTransformer expects positive integer
-                mask_frequency=target_freq or column_frequency,
-                prediction_date=self.prediction_date_
-            )
-
-        # Stockage du transformer
         self.column_transformers_[column_name] = helper
 
 
@@ -627,7 +559,7 @@ def create_delay_transformer_factory(
         target_frequency_col: Column name for target frequency.
             Defaults to 'target_frequency'.
         default_transformer_kwargs: Additional kwargs passed to all
-            PublicationDelayTransformer instances (e.g., time_col, panel_cols).
+            PublicationDelayTransformer instances.
 
     Returns:
         Callable that takes an entity_key (tuple) and returns a configured
@@ -719,7 +651,6 @@ def create_delay_transformer_factory(
         reference_point_col=reference_point_col,
         target_frequency_col=target_frequency_col
     )
-
 
     # Préparation des kwargs par défaut
     base_kwargs = default_transformer_kwargs.copy() if default_transformer_kwargs else {}
@@ -847,9 +778,10 @@ def _extract_param_by_variable(
             group[column]
         ))
 
-# A REVOIR
+
+# Fonction auxiliaire de résolution de la stratégie
 def _resolve_strategy(
-    strategy: Union[str, Dict[tuple, str], Callable[[tuple], str]],
+    strategy: Union[str, Dict[Union[tuple, str], str], Callable[[tuple], str]],
     entity_key: tuple
 ) -> str:
     """Resolve strategy for a specific entity.
@@ -865,6 +797,7 @@ def _resolve_strategy(
         ValueError: If strategy is invalid.
         KeyError: If entity not found in strategy dict.
     """
+    # Distinction suivant le type de la stratégie
     if isinstance(strategy, str):
         # Stratégie globale
         if strategy not in ('shift', 'mask'):
@@ -873,14 +806,18 @@ def _resolve_strategy(
 
     elif isinstance(strategy, dict):
         # Dictionnaire de stratégies par entité
-        if entity_key not in strategy:
+        if (entity_key not in strategy):
             # Tentative avec clé non-tuple si entité simple
-            if len(entity_key) == 1 and entity_key[0] in strategy:
+            if len(entity_key) == 1 and (entity_key[0] in strategy):
                 return strategy[entity_key[0]]
-            raise KeyError(
-                f"No strategy defined for entity {entity_key}. "
-                f"Available entities in strategy dict: {list(strategy.keys())}"
-            )
+            # Si toutes les clés sont des strings et non des tuples, alors il s'agit d'un dictionnaire qui associe à chaque variable une stratégie, quelle que soit l'entité
+            elif all([isinstance(k, str) for k in strategy.keys()]) :
+                return strategy
+            else :
+                raise KeyError(
+                    f"No strategy defined for entity {entity_key}. "
+                    f"Available entities in strategy dict: {list(strategy.keys())}"
+                )
         return strategy[entity_key]
 
     elif callable(strategy):
@@ -898,15 +835,13 @@ def _resolve_strategy(
             f"strategy must be str, dict, or callable, got {type(strategy).__name__}"
         )
 
-
+# Fonction de construction des kwargs pour chaque transformer spécifique à une entité
 def prepare_entity_kwargs_from_delays(
     df_delays: pd.DataFrame,
     strategy: Union[
         Literal['shift', 'mask'],
-        Dict[tuple, Literal['shift', 'mask']]
+        Dict[Union[tuple, str], Literal['shift', 'mask']]
     ] = 'shift',
-    panel_level: Union[str, int] = 0,
-    variable_level: Union[str, int] = -1,
     delay_col: str = 'applicable_delay',
     unit_col: str = 'unit',
     reference_point_col: str = 'target_reference_point',
@@ -962,42 +897,29 @@ def prepare_entity_kwargs_from_delays(
             f"Missing required columns in df_delays: {missing_cols}"
         )
 
-    # Résolution des noms de niveaux
-    panel_level_name = _resolve_index_level(df_delays.index, panel_level)
-    variable_level_name = _resolve_index_level(df_delays.index, variable_level)
-
     # Construction des configs
-    entity_configs = _build_entity_configs(
+    entity_params = _build_entity_params(
         df_delays=df_delays,
-        panel_level_name=panel_level_name,
-        variable_level_name=variable_level_name,
         delay_col=delay_col,
         unit_col=unit_col,
         reference_point_col=reference_point_col,
         target_frequency_col=target_frequency_col
     )
 
-    # Conversion en entity_kwargs format
+    # Conversion au format des entity_kwargs 
+    # Initialisation du dictionnaire résultat
     entity_kwargs = {}
-    for entity_key, config in entity_configs.items():
+    # Parcours des paramètres
+    for entity_key, params in entity_params.items():
         # Résolution de la stratégie
-        if isinstance(strategy, dict):
-            # Recherche dans le dict avec gestion des clés non-tuple
-            if entity_key in strategy:
-                entity_strategy = strategy[entity_key]
-            elif len(entity_key) == 1 and entity_key[0] in strategy:
-                entity_strategy = strategy[entity_key[0]]
-            else:
-                raise KeyError(f"No strategy defined for entity {entity_key}")
-        else:
-            entity_strategy = strategy
+        entity_strategy = _resolve_strategy(strategy=strategy, entity_key=entity_key)
 
         # Construction des kwargs
         entity_kwargs[entity_key] = {
-            'delays': config['delays'],
-            'delay_unit': config['delay_unit'],
-            'reference_point': config['reference_point'],
-            'target_frequency': config['target_frequency'],
+            'delays': params['delays'],
+            'delay_unit': params['delay_unit'],
+            'reference_point': params['reference_point'],
+            'target_frequency': params['target_frequency'],
             'strategy': entity_strategy
         }
 
