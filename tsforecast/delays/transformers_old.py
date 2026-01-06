@@ -14,8 +14,8 @@ import warnings
 from sklearn.utils.validation import check_is_fitted
 
 # Importation des modules du package
-from ..utils.time import resolve_date
-from ..utils.base_transformers import PanelTimeSeriesTransformer, ReversibleTransformerMixin
+from ..utils.time.utils import resolve_date
+from ..base.transformers import PanelTimeSeriesTransformer, ReversibleTransformerMixin
 
 
 # Classe d'application des délais de publication

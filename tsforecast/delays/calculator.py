@@ -10,7 +10,7 @@ from typing import List, Optional, Union, Literal
 
 # Modules du package
 from ..utils.frequency import normalize_frequency, is_higher_frequency, to_pandas_freq
-from ..utils.time import get_period_boundaries
+from ..utils.time.utils import get_period_boundaries
 from ..utils.duration import to_code as duration_to_code, convert_duration
 
 # Fonction de calcul du délai applicable

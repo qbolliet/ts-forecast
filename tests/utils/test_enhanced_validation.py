@@ -6,7 +6,7 @@ import numpy as np
 from datetime import datetime
 import warnings
 
-from tsforecast.utils.base_transformers import PanelTimeSeriesTransformer
+from tsforecast.base.transformers import PanelTimeSeriesTransformer
 
 
 # Classe de test concrète (PanelTimeSeriesTransformer est abstraite)

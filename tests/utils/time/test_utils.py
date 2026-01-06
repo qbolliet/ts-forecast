@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import pytest
 
 # Fonctions à tester d'extraction des limites de périodes
-from tsforecast.utils.time import get_period_start, get_period_end, get_period_boundaries
+from tsforecast.utils.time.utils import get_period_start, get_period_end, get_period_boundaries
 
 class TestPeriodFunctions:
     """Test suite for period start and end functions."""

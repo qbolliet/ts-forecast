@@ -15,7 +15,7 @@ from ..frequency.detector import detect_frequency
 # Module de validation des données temporelles
 from ..utils.validation import validate_temporal_data
 # Module de manipulation temporelle
-from ..utils.time import get_period_boundaries
+from ..utils.time.utils import get_period_boundaries
 
 # /!\ Faire un prompt pour intégrer un logger à cette fonction : comment mettre du logging optionnel + implémentation
 # Fonction de comparaison et d'inférence des délais de publication

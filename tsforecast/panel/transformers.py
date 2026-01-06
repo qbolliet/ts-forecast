@@ -18,7 +18,7 @@ from sklearn.utils.validation import check_is_fitted
 from sklearn.utils.metaestimators import _BaseComposition
 
 # Importation des utilitaires de gestion de package
-from ..utils.base_transformers import (
+from ..base.transformers import (
     PanelTimeSeriesTransformer,
     ReversibleTransformerMixin
 )

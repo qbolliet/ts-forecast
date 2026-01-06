@@ -14,7 +14,7 @@ import pandas as pd
 # Import des utilitaires du package
 from tsforecast.utils.frequency import normalize_frequency
 from tsforecast.utils.duration import convert_duration, normalize_duration
-from tsforecast.utils.time import get_period_boundaries
+from tsforecast.utils.time.utils import get_period_boundaries
 
 
 def calculate_n_periods_delay(

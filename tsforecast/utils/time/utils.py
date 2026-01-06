@@ -6,7 +6,7 @@ from typing import Literal, Union
 from datetime import datetime, timedelta
 
 # Import des utilitaires de fréquence
-from .frequency import normalize_frequency, FrequencyType, UserFrequencyType
+from ..frequency import normalize_frequency, FrequencyType, UserFrequencyType
 
 # Fonction de conversion d'une chaîne de caractères en date
 def resolve_date(date: Union[str, datetime], format: str = None) -> datetime:
@@ -58,14 +58,14 @@ def resolve_date(date: Union[str, datetime], format: str = None) -> datetime:
 # Fonctions de conversion entre timeseries et string
 def timeseries_to_string(ts: pd.Series, format: str = "%Y-%m-%d") -> pd.Series:
     """Convert a time series index to string format.
-    
+
     Args:
         ts: Time series with datetime index
         format: String format for dates (default: "%Y-%m-%d" for year-month-day)
-        
+
     Returns:
         Series with string-formatted dates as index
-        
+
     Examples:
         >>> import pandas as pd
         >>> dates = pd.date_range('2023-01-01', periods=3, freq='D')
@@ -75,7 +75,7 @@ def timeseries_to_string(ts: pd.Series, format: str = "%Y-%m-%d") -> pd.Series:
         2023-01-02    2
         2023-01-03    3
         dtype: int64
-        
+
         >>> timeseries_to_string(ts, format="%m/%d/%Y")
         01/01/2023    1
         01/02/2023    2
@@ -88,14 +88,14 @@ def timeseries_to_string(ts: pd.Series, format: str = "%Y-%m-%d") -> pd.Series:
 
 def string_to_timeseries(ts: pd.Series, format: str = None) -> pd.Series:
     """Convert a time series with string index to datetime index.
-    
+
     Args:
         ts: Time series with string index representing dates
         format: String format to parse dates (if None, pandas will infer)
-        
+
     Returns:
         Series with datetime index
-        
+
     Examples:
         >>> import pandas as pd
         >>> string_ts = pd.Series([1, 2, 3], index=['2023-01-01', '2023-01-02', '2023-01-03'])
@@ -104,7 +104,7 @@ def string_to_timeseries(ts: pd.Series, format: str = None) -> pd.Series:
         2023-01-02    2
         2023-01-03    3
         dtype: int64
-        
+
         >>> string_ts_custom = pd.Series([1, 2, 3], index=['01/01/2023', '01/02/2023', '01/03/2023'])
         >>> string_to_timeseries(string_ts_custom, format="%m/%d/%Y")
         2023-01-01    1
@@ -117,7 +117,7 @@ def string_to_timeseries(ts: pd.Series, format: str = None) -> pd.Series:
         datetime_index = pd.to_datetime(ts.index, format=format)
     else:
         datetime_index = pd.to_datetime(ts.index)
-    
+
     return pd.Series(ts.values, index=datetime_index, name=ts.name)
 
 # Fonction identifiant la date de début d'une période à partir d'une date et d'une fréquence
@@ -170,7 +170,7 @@ def get_period_start(date: Union[pd.Timestamp, datetime], frequency: Union[Frequ
             date.hour, date.minute, date.second,
             millisecond
         )
-    
+
     # Fréquences infra-journalières
     elif base_freq == 's':
         # Début de la seconde
@@ -190,7 +190,7 @@ def get_period_start(date: Union[pd.Timestamp, datetime], frequency: Union[Frequ
             date.year, date.month, date.day,
             date.hour
         )
-    
+
     # Fréquences journalières et supérieures
     elif base_freq == 'D' or base_freq == 'B':
         # Début du jour (minuit)
@@ -265,7 +265,7 @@ def get_period_end(date: Union[pd.Timestamp, datetime], frequency: Union[Frequen
     elif base_freq == 'ms':
         # Milliseconde suivante
         return date + timedelta(milliseconds=1)
-    
+
     # Fréquences infra-journalières
     elif base_freq == 's':
         # Seconde suivante
@@ -276,7 +276,7 @@ def get_period_end(date: Union[pd.Timestamp, datetime], frequency: Union[Frequen
     elif base_freq == 'h':
         # Heure suivante
         return date.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    
+
     # Fréquences journalières et supérieures
     elif base_freq == 'D' or base_freq == 'B':
         # Jour suivant (minuit)

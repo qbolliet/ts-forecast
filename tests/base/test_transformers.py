@@ -6,7 +6,7 @@ and MultiIndex-based panel data structures.
 import pandas as pd
 import pytest
 import numpy as np
-from tsforecast.utils.base_transformers import PanelTimeSeriesTransformer
+from tsforecast.base.transformers import PanelTimeSeriesTransformer
 
 
 # Créer un transformateur concret pour les tests

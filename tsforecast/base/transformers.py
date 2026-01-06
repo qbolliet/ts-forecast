@@ -14,7 +14,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
 # Importation des fonctions de validation
-from .validation import (
+from ..utils.validation import (
     restore_original_structure,
     validate_temporal_data,
     validate_entities_grouped,
@@ -43,7 +43,7 @@ class TimeSeriesTransformerMixin:
         >>> isinstance(time_idx, pd.DatetimeIndex)
         True
     """
-    
+
     # Méthode auxiliaire de validation de l'index
     def _validate_time_index(self, X: pd.DataFrame, time_col: Optional[str] = None) -> pd.DatetimeIndex:
         """Validate and extract time index from data.
@@ -97,9 +97,9 @@ class TimeSeriesTransformerMixin:
                     "Cannot determine time index. Please provide a datetime index "
                     "or specify time_col parameter."
                 )
-        
+
         return time_index
-    
+
 
 # Transformer pour les données de panel
 class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTransformerMixin, ABC):
@@ -390,7 +390,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         self._fit(X, y)
 
         return self
-    
+
     # Méthode auxiliaire d'entraînement
     @abstractmethod
     def _fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
@@ -419,7 +419,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             ...         return X_transformed
         """
         pass
-    
+
     # Méthode de transformation
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """Transform the data.
@@ -454,14 +454,14 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         """
         # Vérification que le transformer est ajusté
         check_is_fitted(self)
-        
+
         # Validation des données
         if self.validate_input:
             X = self._validate_input(X)
-        
+
         # Appel de la méthode spécifique
         return self._transform(X)
-    
+
     # Méthode auxiliaire de transformation
     @abstractmethod
     def _transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -490,7 +490,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             ...         return X_transformed
         """
         pass
-    
+
     # Méthode auxiliaire de validation des données
     def _validate_input(self, X: pd.DataFrame) -> pd.DataFrame:
         """Validate input data with comprehensive temporal checks.
@@ -936,7 +936,7 @@ class ReversibleTransformerMixin:
         >>> transformed = scaler.transform(df)
         >>> restored = scaler.inverse_transform(transformed)
     """
-    
+
     # Méthode d'inversion de la transformation
     @abstractmethod
     def inverse_transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -970,7 +970,7 @@ class ReversibleTransformerMixin:
             ...         return self._restore_structure_if_converted(X_original)
         """
         pass
-    
+
     # Méthode de stockage des méta-données (index, colonnes, dimensions) des jeux de données initial et transformé
     def _store_transformation_info(self, X: pd.DataFrame, X_transformed: pd.DataFrame) -> None:
         """Store information needed for inverse transformation.

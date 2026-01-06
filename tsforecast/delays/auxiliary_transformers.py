@@ -16,7 +16,7 @@ from tsforecast.utils.frequency.parser import (
     build_frequency_string
 )
 from tsforecast.utils.duration.converter import DurationConverter
-from tsforecast.utils.time import get_period_boundaries
+from tsforecast.utils.time.utils import get_period_boundaries
 from tsforecast.utils.validation import validate_temporal_data
 
 
