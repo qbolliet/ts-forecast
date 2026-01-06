@@ -20,7 +20,7 @@ from sklearn.utils.validation import check_is_fitted
 
 # Importation des modules du package
 from tsforecast.utils.frequency import normalize_frequency, to_pandas_freq
-from tsforecast.utils.time import resolve_date, get_period_boundaries
+from tsforecast.utils.time import resolve_date, get_period_start
 from tsforecast.utils.duration import convert_duration, normalize_duration
 from ..frequency.detector import detect_frequency
 from ..panel import PanelwiseTransformer, normalize_entity_key
@@ -286,10 +286,10 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         if isinstance(self.strategy, str):
             # Distinction suivant la stratégie à appliquer
             if self.strategy == 'shift' :
-                shift_columns = np.intersect1d(X.columns.tolist(), list(delays_dict.keys())).tolist() if self.default_delay is None else X.columns.tolist()
+                shift_columns = np.intersect1d(X.columns.tolist(), list(delays_dict.keys())).tolist() if self.default_values is None else X.columns.tolist()
                 mask_columns = []
             else:  # équivalent à self.strategy == 'mask'
-                mask_columns = np.intersect1d(X.columns.tolist(), list(delays_dict.keys())).tolist() if self.default_delay is None else X.columns.tolist()
+                mask_columns = np.intersect1d(X.columns.tolist(), list(delays_dict.keys())).tolist() if self.default_values is None else X.columns.tolist()
                 shift_columns = []
 
         else:  # équivalent à isinstance(self.strategy, dict)
@@ -308,10 +308,10 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             delay_unit = normalize_duration(delay_unit_dict[col])
 
             # Calcul des bornes de la période associée à la date de prédiction
-            period_start, period_end = get_period_boundaries(self.prediction_date_, self.detected_frequencies_[col])
+            period_start = get_period_start(self.prediction_date_, self.detected_frequencies_[col])
             # Calcul du temps écoulé, dans l'unité du délai, entre la date de prédiction et le début de la période
             elapsed_duration = convert_duration(
-                value=(self.prediction_date_ - period_start).to_seconds(),
+                value=(self.prediction_date_ - period_start).total_seconds(),
                 from_duration='s',
                 to_duration=delay_unit,
                 rounding=None
@@ -347,7 +347,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             target_frequency = normalize_frequency(target_frequency_dict[col])
 
             # Calcul des bornes de la période associée à la date de prédiction
-            period_start, period_end = get_period_boundaries(self.prediction_date_, self.detected_frequencies_[col])
+            period_start = get_period_start(self.prediction_date_, self.detected_frequencies_[col])
             # Calcul du temps écoulé, dans l'unité du délai, entre la date de prédiction et le début de la période
             elapsed_duration = convert_duration(
                 value=(self.prediction_date_ - period_start).to_seconds(),
@@ -406,55 +406,89 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
 
         # Détection de la structure de panel
         is_panel = isinstance(X.index, pd.MultiIndex)
-        
+
         # Initialisation du dictionnaire des transformers auxiliaires pour les transformations inverses
-        self.auxiliary_transformers_: Dict[str, BaseEstimator] = {}
+        self.auxiliary_transformers_: Dict[str, Dict[tuple, BaseEstimator]] = {'shift': {}, 'mask': {}}
 
         # Initialisation de la liste des jeux de données résultats
         list_df_transformed = []
 
         # Traitement des variables à shift
-        # Parcours des valeurs de paramètres
+        # Suivi des paramètres déjà traités
+        seen_shift_params = set()
+        # Parcours des colonnes et de leurs paramètres
         for params in self.shift_params.values():
-            # Construction de la liste des colonnes associée à cette valeur
-            columns = [k for k, v in self.shift_params.items() if v == params]
-            # Distinction suivant la structure de panel
-            if is_panel:
-                # Initialisation d'un PanelwiseTransformer
-                transformer_ = PanelwiseTransformer(
-                    transformer=ShiftTransformer(**params),
-                    time_col=None,
-                    panel_cols=None
-                )
-            else:
-                # Initialisation d'un ShiftTransformer
-                transformer_ = ShiftTransformer(**params)
-            # Transformation des données
-            list_df_transformed.append(transformer_.fit_transform(X[columns]))
+            # Création d'une clé hashable à partir des paramètres
+            params_key = tuple(sorted(params.items()))
+
+            # Vérification si ces paramètres ont déjà été traités
+            if params_key not in seen_shift_params:
+                # Construction de la liste des colonnes avec ces mêmes paramètres
+                columns = [k for k, v in self.shift_params.items()
+                           if tuple(sorted(v.items())) == params_key]
+
+                # Distinction suivant la structure de panel
+                if is_panel:
+                    # Initialisation d'un PanelwiseTransformer
+                    transformer_ = PanelwiseTransformer(
+                        transformer=ShiftTransformer(**params),
+                        time_col=None,
+                        panel_cols=None
+                    )
+                else:
+                    # Initialisation d'un ShiftTransformer
+                    transformer_ = ShiftTransformer(**params)
+
+                # Stockage du transformer
+                self.auxiliary_transformers_['shift'][params_key] = transformer_
+
+                # Transformation des données
+                list_df_transformed.append(transformer_.fit_transform(X[columns]))
+
+                # Marquage des paramètres comme traités
+                seen_shift_params.add(params_key)
 
         # Traitement des variables à mask
-        # Parcours des valeurs de paramètres
-        for params in self.mask_params.values():
-            # Construction de la liste des colonnes associée à cette valeur
-            columns = [k for k, v in self.mask_params.items() if v == params]
-            # Distinction suivant la structure de panel
-            if is_panel:
-                # Initialisation d'un PanelwiseTransformer
-                transformer_ = PanelwiseTransformer(
-                    transformer=MaskTransformer(**params),
-                    time_col=None,
-                    panel_cols=None
-                )
-            else:
-                # Initialisation d'un MaskTransformer
-                transformer_ = MaskTransformer(**params)
-            # Transformation des données
-            list_df_transformed.append(transformer_.fit_transform(X[columns]))
+        # Suivi des paramètres déjà traités
+        seen_mask_params = set()
+        # Parcours des colonnes et de leurs paramètres
+        for col, params in self.mask_params.items():
+            # Création d'une clé hashable à partir des paramètres
+            params_key = tuple(sorted(params.items()))
+
+            # Vérification si ces paramètres ont déjà été traités
+            if params_key not in seen_mask_params:
+                # Construction de la liste des colonnes avec ces mêmes paramètres
+                columns = [k for k, v in self.mask_params.items()
+                           if tuple(sorted(v.items())) == params_key]
+
+                # Distinction suivant la structure de panel
+                if is_panel:
+                    # Initialisation d'un PanelwiseTransformer
+                    transformer_ = PanelwiseTransformer(
+                        transformer=MaskTransformer(**params),
+                        time_col=None,
+                        panel_cols=None
+                    )
+                else:
+                    # Initialisation d'un MaskTransformer
+                    transformer_ = MaskTransformer(**params)
+
+                # Stockage du transformer
+                self.auxiliary_transformers_['mask'][params_key] = transformer_
+
+                # Transformation des données
+                list_df_transformed.append(transformer_.fit_transform(X[columns]))
+
+                # Marquage des paramètres comme traités
+                seen_mask_params.add(params_key)
 
         # Jointure sur l'index des données transformées
         df_transformed = pd.concat(list_df_transformed, axis=1, join='outer', ignore_index=False)
         # Ajout des colonnes non transformées
-        df_transformed = pd.concat([df_transformed, X[list(set(X.columns) - set(df_transformed.columns))]], axis=1, join='outer', ignore_index=False)
+        untransformed_columns = set(X.columns) - set(df_transformed.columns)
+        if untransformed_columns :
+            df_transformed = pd.concat([df_transformed, X[list(untransformed_columns)]], axis=1, join='outer', ignore_index=False)
         # Restauration de l'ordre original des colonnes
         df_transformed = df_transformed[X.columns]
 
@@ -471,10 +505,76 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         Returns:
             Data with delays reversed
         """
-        pass
+        # Vérification que le transformer est entraîné
+        check_is_fitted(self)
+
+        # Initialisation de la liste des jeux de données inversés
+        list_df_inversed = []
+
+        # Inversion des shifts
+        # Suivi des paramètres déjà traités
+        seen_shift_params = set()
+        # Parcours des colonnes et de leurs paramètres
+        for params in self.shift_params.values():
+            # Création d'une clé hashable à partir des paramètres
+            params_key = tuple(sorted(params.items()))
+
+            # Vérification si ces paramètres ont déjà été traités
+            if params_key not in seen_shift_params:
+                # Récupération du transformer correspondant
+                transformer_ = self.auxiliary_transformers_['shift'][params_key]
+
+                # Récupération de toutes les colonnes avec ces mêmes paramètres
+                columns = [k for k, v in self.shift_params.items()
+                           if tuple(sorted(v.items())) == params_key]
+
+                # Application de la transformation inverse
+                list_df_inversed.append(transformer_.inverse_transform(X[columns]))
+
+                # Marquage des paramètres comme traités
+                seen_shift_params.add(params_key)
+
+        # Inversion des masks
+        # Suivi des paramètres déjà traités
+        seen_mask_params = set()
+        # Parcours des colonnes et de leurs paramètres
+        for col, params in self.mask_params.items():
+            # Création d'une clé hashable à partir des paramètres
+            params_key = tuple(sorted(params.items()))
+
+            # Vérification si ces paramètres ont déjà été traités
+            if params_key not in seen_mask_params:
+                # Récupération du transformer correspondant
+                transformer_ = self.auxiliary_transformers_['mask'][params_key]
+
+                # Récupération de toutes les colonnes avec ces mêmes paramètres
+                columns = [k for k, v in self.mask_params.items()
+                           if tuple(sorted(v.items())) == params_key]
+
+                # Application de la transformation inverse
+                list_df_inversed.append(transformer_.inverse_transform(X[columns]))
+
+                # Marquage des paramètres comme traités
+                seen_mask_params.add(params_key)
+
+        # Jointure sur l'index des données inversées
+        df_inversed = pd.concat(list_df_inversed, axis=1, join='outer', ignore_index=False)
+
+        # Ajout des colonnes non transformées
+        untransformed_columns = set(X.columns) - set(df_inversed.columns)
+        if untransformed_columns:
+            df_inversed = pd.concat(
+                [df_inversed, X[list(untransformed_columns)]],
+                axis=1, join='outer', ignore_index=False
+            )
+
+        # Restauration de l'ordre original des colonnes
+        df_inversed = df_inversed[X.columns]
+
+        return df_inversed
 
     # Méthode auxiliaire d'inférence des paramètres d'unité du délai, de point de référence et de fréquence cible
-    def _infer_parameters_from_delays(self) -> Dict[str, any]:
+    def _infer_parameters_from_delays(self) -> Dict[str, Any]:
         """Infer delay_unit, reference_point, target_frequency from delays DataFrame.
 
         Returns:
