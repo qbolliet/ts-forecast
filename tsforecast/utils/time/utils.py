@@ -86,6 +86,7 @@ def timeseries_to_string(ts: pd.Series, format: str = "%Y-%m-%d") -> pd.Series:
     string_index = ts.index.strftime(format)
     return pd.Series(ts.values, index=string_index, name=ts.name)
 
+# Fonction de conversion d'une série avec en index des dates sous forme de chaine de caractères à une série temporelle
 def string_to_timeseries(ts: pd.Series, format: str = None) -> pd.Series:
     """Convert a time series with string index to datetime index.
 

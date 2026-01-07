@@ -1,5 +1,5 @@
 """Time manipulation utilities for time series processing."""
-
+# Import des éléments du module
 from .utils import (
     resolve_date,
     timeseries_to_string,
@@ -8,7 +8,7 @@ from .utils import (
     get_period_end,
     get_period_boundaries
 )
-
+# Réexport des éléments d'intérêt
 __all__ = [
     'resolve_date',
     'timeseries_to_string',

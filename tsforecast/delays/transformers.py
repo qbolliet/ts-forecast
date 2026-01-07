@@ -20,7 +20,7 @@ from sklearn.utils.validation import check_is_fitted
 
 # Importation des modules du package
 from tsforecast.utils.frequency import normalize_frequency, to_pandas_freq
-from tsforecast.utils.time.utils import resolve_date, get_period_start
+from tsforecast.utils.time import resolve_date, get_period_start
 from tsforecast.utils.duration import convert_duration, normalize_duration
 from ..frequency.detector import detect_frequency
 from ..panel import PanelwiseTransformer, normalize_entity_key

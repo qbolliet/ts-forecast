@@ -4,5 +4,6 @@ from .utils import normalize_entity_key
 
 # Exportation des éléments du module
 __all__ = [
-    'PanelwiseTransformer'
+    'PanelwiseTransformer',
+    'normalize_entity_key'
 ]

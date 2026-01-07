@@ -1,9 +1,3 @@
-"""Temporal data validation utilities.
-
-This module provides functions for validating and preparing time series
-and panel data structures, including validation of datetime indexes,
-uniqueness checks, and proper index configuration.
-"""
 # Importation des modules
 # Modules de base
 import numpy as np
