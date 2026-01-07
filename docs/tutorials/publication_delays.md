@@ -41,7 +41,7 @@ Il existe deux stratégies principales pour gérer les délais de publication, c
 | **Conservation de l'acquis** | Masquer les observations non disponibles | Préserve l'alignement temporel | Modèles à horizon fixe, validation réaliste |
 | **Décalage des séries** | Shifter les séries selon leur délai | Utilise toute l'information disponible | Nowcasting, prévision immédiate |
 
-### 2.2 Approche 1 : Conservation de l'acquis (mode `mask`)
+### 2.2 Approche 1 : Conservation de l'acquis (strategy `mask`)
 
 **Principe** : On conserve l'alignement temporel original mais on remplace par `NaN` les observations qui ne seraient pas encore disponibles au moment de la prévision.
 
@@ -59,7 +59,7 @@ Pour chaque série x_i avec délai d_i :
 ```python
 import pandas as pd
 import numpy as np
-from tsforecast.delays import ReleaseDelayTransformer
+from tsforecast.delays import PublicationDelayTransformer
 
 # Données avec deux indicateurs
 dates = pd.date_range('2024-01-01', periods=100, freq='D')
@@ -73,9 +73,9 @@ data = pd.DataFrame({
 delays = {'GDP': 30, 'inflation': 7}
 
 # Application du masquage
-transformer = ReleaseDelayTransformer(
-    delays_dict=delays,
-    mode='mask',
+transformer = PublicationDelayTransformer(
+    delays=delays,
+    strategy='mask',
     prediction_date='2024-03-15',  # Date de référence
     time_col='date'
 )
@@ -97,7 +97,7 @@ data_masked = transformer.fit_transform(data)
 - ❌ Perte d'information (observations masquées)
 - ❌ Nécessite des modèles robustes aux valeurs manquantes
 
-### 2.3 Approche 2 : Décalage des séries (mode `shift`)
+### 2.3 Approche 2 : Décalage des séries (strategy `shift`)
 
 **Principe** : On décale chaque série vers le futur selon son délai de publication, de sorte que la valeur disponible à la date `t` soit alignée avec cette date.
 
@@ -113,12 +113,10 @@ Pour chaque série x_i avec délai d_i :
 **Exemple pratique** :
 ```python
 # Même configuration que précédemment
-transformer = ReleaseDelayTransformer(
-    delays_dict=delays,
-    mode='shift',  # Mode décalage
-    prediction_date='2024-03-15',
-    time_col='date'
-)
+transformer = PublicationDelayTransformer(
+    delays=delays,
+    strategy='shift',  # Mode décalage
+    prediction_date='2024-03-15')
 
 # Transformation
 data_shifted = transformer.fit_transform(data)
@@ -149,11 +147,11 @@ Supposons trois séries avec des délais différents :
 - Série A (bleu foncé) : délai de 5 jours
 - Série B (bleu clair) : délai de 15 jours
 
-### 3.2 Après application du mode `mask`
+### 3.2 Après application de la stratégie `mask`
 
 Les observations trop récentes sont masquées (remplacées par NaN). L'alignement temporel est préservé mais certaines cellules deviennent vides.
 
-### 3.3 Après application du mode `shift`
+### 3.3 Après application de la stratégie `shift`
 
 Les séries sont décalées vers le futur. Aucune observation n'est perdue, mais les valeurs ne correspondent plus à leur date de référence originale.
 
@@ -175,10 +173,10 @@ Les délais sont généralement exprimés en jours calendaires, mais les donnée
 
 ### 4.2 Agrégation avec conservation de l'acquis
 
-Lors de l'agrégation temporelle en mode `mask`, on calcule les statistiques sur les observations disponibles uniquement.
+Lors de l'agrégation temporelle avec la stratégie `mask`, on calcule les statistiques sur les observations disponibles uniquement.
 
 ```python
-# Exemple : agrégation mensuelle avec mode mask
+# Exemple : agrégation mensuelle avec la stratégie mask
 data_monthly = data_masked.resample('MS', on='date').agg({
     'GDP': 'mean',        # Moyenne des valeurs non-NaN
     'inflation': 'mean'
@@ -187,10 +185,10 @@ data_monthly = data_masked.resample('MS', on='date').agg({
 
 ### 4.3 Agrégation avec décalage des séries
 
-En mode `shift`, l'agrégation se fait après le décalage. Les observations agrégées représentent les moyennes des valeurs disponibles à chaque période.
+Avec la stratégie `shift`, l'agrégation se fait après le décalage. Les observations agrégées représentent les moyennes des valeurs disponibles à chaque période.
 
 ```python
-# Exemple : agrégation mensuelle avec mode shift
+# Exemple : agrégation mensuelle avec la stratégie shift
 data_monthly = data_shifted.resample('MS', on='date').agg({
     'GDP': 'mean',
     'inflation': 'mean'
@@ -204,7 +202,7 @@ data_monthly = data_shifted.resample('MS', on='date').agg({
 ```python
 from sklearn.pipeline import Pipeline
 from sklearn.ensemble import RandomForestRegressor
-from tsforecast.delays import ReleaseDelayTransformer
+from tsforecast.delays import PublicationDelayTransformer
 
 # Définition des délais (en jours)
 delays = {
@@ -216,9 +214,9 @@ delays = {
 
 # Construction du pipeline
 pipeline = Pipeline([
-    ('delays', ReleaseDelayTransformer(
-        delays_dict=delays,
-        mode='mask',
+    ('delays', PublicationDelayTransformer(
+        delays=delays,
+        strategy='mask',
         prediction_date='today',
         time_col='date'
     )),
@@ -253,9 +251,9 @@ for train_idx, test_idx in splitter.split(X):
     X_test = X.iloc[test_idx]
     
     # Application des délais uniquement sur l'ensemble de test
-    transformer = ReleaseDelayTransformer(
-        delays_dict=delays,
-        mode='mask',
+    transformer = PublicationDelayTransformer(
+        delays=delays,
+        strategy='mask',
         prediction_date=X_test['date'].iloc[0],  # Date du début du test
         time_col='date'
     )
@@ -274,71 +272,72 @@ for train_idx, test_idx in splitter.split(X):
 
 ### 6.1 Délais variables par entité (données panel)
 
-Pour les données panel, chaque entité peut avoir des délais différents :
+Pour les données panel, chaque entité peut avoir des délais différents. On utilise `PanelwiseTransformer` avec les fonctions helper :
+
+**Méthode 1 : Factory pattern avec `create_delay_transformer_factory`**
 
 ```python
-# Délais par entité et indicateur
-delays_panel = {
-    ('France', 'GDP'): 45,
-    ('Germany', 'GDP'): 40,
-    ('France', 'inflation'): 30,
-    ('Germany', 'inflation'): 28
-}
-
-transformer = ReleaseDelayTransformer(
-    delays_dict=delays_panel,
-    mode='mask',
-    prediction_date='2024-03-15',
-    time_col='date',
-    panel_cols=['country']  # Colonne identifiant les entités
+from tsforecast.delays import (
+    PublicationDelayTransformer,
+    compare_and_detect_delays,
+    calculate_applicable_delay,
+    create_delay_transformer_factory
 )
-```
+from tsforecast.panel import PanelwiseTransformer
 
-### 6.2 Délais calculés dynamiquement
-
-Utilisation d'un calculateur pour extraire les délais des données historiques :
-
-```python
-from tsforecast.delays import ReleaseDelayCalculator
-
-# Données historiques de publication
-publication_history = pd.DataFrame({
-    'indicator': ['GDP', 'GDP', 'inflation', 'inflation'],
-    'reference_date': ['2023-Q1', '2023-Q2', '2023-01', '2023-02'],
-    'publication_date': ['2023-05-15', '2023-08-10', '2023-02-12', '2023-03-11']
-})
-
-# Calcul des délais médians
-calculator = ReleaseDelayCalculator(delay_data=publication_history)
-median_delays = calculator.calculate_median_delays(reference_point='end')
-
-# Utilisation dans le transformer
-transformer = ReleaseDelayTransformer(
-    delay_calculator=calculator,
-    mode='mask',
-    prediction_date='today'
+# 1. Détection des délais par entité
+df_delays = compare_and_detect_delays(
+    new_data=panel_data,
+    download_date='2024-03-15',
+    panel_cols=['country']
 )
-```
 
-### 6.3 Mise à jour dynamique des délais
+# 2. Calcul des délais applicables par entité
+df_applicable = calculate_applicable_delay(
+    publication_delays=df_delays,
+    target_reference_point='end',
+    target_frequency='M',
+    aggregate_by_panel=True  # Agrège par entité
+)
 
-```python
-# Création du transformer
-transformer = ReleaseDelayTransformer(
-    delays_dict={'GDP': 45, 'inflation': 30},
-    mode='mask',
+# 3. Création de la factory
+factory = create_delay_transformer_factory(
+    df_delays=df_applicable,
+    strategy='mask',
     prediction_date='2024-03-15'
 )
 
-# Fit initial
-transformer.fit(X)
+# 4. Application avec PanelwiseTransformer
+panel_transformer = PanelwiseTransformer(
+    transformer=factory,
+    panel_cols=['country']
+)
 
-# Mise à jour des délais après obtention de nouvelles informations
-new_delays = {'GDP': 42, 'retail_sales': 25}  # Délai GDP révisé
-transformer.update_delays(new_delays)
+data_transformed = panel_transformer.fit_transform(panel_data)
+```
 
-# Les transformations suivantes utiliseront les délais mis à jour
-X_transformed = transformer.transform(X_new)
+**Méthode 2 : entity_kwargs avec `prepare_entity_kwargs_from_delays`**
+
+```python
+from tsforecast.delays import prepare_entity_kwargs_from_delays
+
+# Préparation des kwargs par entité
+entity_kwargs = prepare_entity_kwargs_from_delays(
+    df_delays=df_applicable,
+    strategy='shift'
+)
+
+# Application avec un transformer de base
+panel_transformer = PanelwiseTransformer(
+    transformer=PublicationDelayTransformer(
+        delays={},  # Sera remplacé par entity_kwargs
+        prediction_date='2024-03-15'
+    ),
+    entity_kwargs=entity_kwargs,
+    panel_cols=['country']
+)
+
+data_transformed = panel_transformer.fit_transform(panel_data)
 ```
 
 ## 7. Choix de la méthode appropriée
@@ -349,18 +348,18 @@ X_transformed = transformer.transform(X_new)
 Quel est votre objectif ?
 │
 ├─ Validation réaliste / Backtesting
-│  └─ Mode 'mask' (conservation de l'acquis)
+│  └─ Stratégie 'mask' (conservation de l'acquis)
 │     → Simule exactement les conditions de production
 │
 ├─ Prévision immédiate / Nowcasting
-│  └─ Mode 'shift' (décalage des séries)
+│  └─ Stratégie 'shift' (décalage des séries)
 │     → Utilise toute l'information disponible
 │
 ├─ Modèle sensible aux valeurs manquantes
-│  └─ Mode 'shift' ou imputation + 'mask'
+│  └─ Stratégie 'shift' ou imputation + 'mask'
 │
 └─ Interprétabilité importante
-   └─ Mode 'mask' (alignement temporel préservé)
+   └─ Stratégie 'mask' (alignement temporel préservé)
 ```
 
 ### 7.2 Recommandations par contexte
@@ -387,7 +386,7 @@ score = model.score(X_test, y_test)  # Surestimation !
 ✅ **Correction** :
 ```python
 # CORRECT : Applique les délais avant l'évaluation
-transformer = ReleaseDelayTransformer(delays_dict=delays, mode='mask')
+transformer = PublicationDelayTransformer(delays=delays, strategy='mask')
 X_test_real = transformer.fit_transform(X_test)
 score = model.score(X_test_real, y_test)
 ```
@@ -414,7 +413,7 @@ from datetime import datetime, timedelta
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from tsforecast.delays import ReleaseDelayTransformer
+from tsforecast.delays import PublicationDelayTransformer
 from tsforecast.crossvals import TSOutOfSampleSplit
 
 # ============================================================================
@@ -486,13 +485,11 @@ for split_num, (train_idx, test_idx) in enumerate(splitter.split(X)):
     y_test = y.iloc[test_idx + horizon]
     
     # Application des délais sur le test uniquement
-    delay_transformer = ReleaseDelayTransformer(
-        delays_dict=publication_delays,
-        mode='mask',
+    delay_transformer = PublicationDelayTransformer(
+        delays=publication_delays,
+        strategy='mask',
         prediction_date=X_test['date'].iloc[0],
-        time_col='date',
-        handle_missing_delays='warn',
-        default_delay=0
+        handle_missing_delays='warn'
     )
     
     # Transformation
@@ -560,13 +557,11 @@ print("\n" + "=" * 50)
 print("DÉPLOIEMENT EN PRODUCTION")
 print("=" * 50)
 
-# En production, on utilise le mode 'shift' pour utiliser toutes les données
-production_transformer = ReleaseDelayTransformer(
-    delays_dict=publication_delays,
-    mode='shift',  # Mode shift pour la production
-    prediction_date='today',
-    time_col='date'
-)
+# En production, on utilise la stratégie 'shift' pour utiliser toutes les données
+production_transformer = PublicationDelayTransformer(
+    delays=publication_delays,
+    strategy='shift',  # Stratégie shift pour la production
+    prediction_date='today')
 
 # Entraînement sur toutes les données disponibles
 X_all = X[feature_cols]
@@ -593,13 +588,6 @@ La gestion rigoureuse des délais de publication est essentielle pour :
 
 1. **Obtenir des évaluations réalistes** : Éviter la surestimation des performances
 2. **Déployer des modèles fonctionnels** : Simuler les vraies conditions de production
-
-**Points clés à retenir** :
-
-- 🎯 **Mode `mask`** : Pour validation et backtesting
-- 🎯 **Mode `shift`** : Pour production et nowcasting
-- 🎯 **Combiner avec gap** : `gap = horizon + max(delays)` pour la validation croisée
-- 🎯 **Documenter les délais** : Tracer l'origine et la date des délais utilisés
 
 **Ressources complémentaires** :
 - Documentation de `tsforecast.delays`
