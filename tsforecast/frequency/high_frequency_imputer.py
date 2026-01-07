@@ -673,11 +673,16 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
         else:
             self.inferred_delays_ = {}
 
-    def _transform_X(self, X: pd.DataFrame) -> pd.DataFrame:
+    # -------------------------------------------------------------------------
+    # Transformation des features X
+    # -------------------------------------------------------------------------
+    def _transform_X(self, X: pd.DataFrame, y: pd.Series = None) -> pd.DataFrame:
         """Transform features X.
 
         Args:
             X: Features to transform.
+            y: Targets (optional, not used in this transformer but required
+                by XYTransformerMixin interface).
 
         Returns:
             Transformed features.
@@ -898,10 +903,14 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
 
         return result
 
-    def _transform_y(self, y: pd.Series) -> pd.Series:
+    # -------------------------------------------------------------------------
+    # Transformation des targets y
+    # -------------------------------------------------------------------------
+    def _transform_y(self, X: pd.DataFrame, y: pd.Series = None) -> pd.Series:
         """Transform target y.
 
         Args:
+            X: Features (for conditional transformations, not used here).
             y: Targets to transform.
 
         Returns:
@@ -926,11 +935,15 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
 
         return y_transformed
 
-    def _inverse_transform_X(self, X: pd.DataFrame) -> pd.DataFrame:
+    # -------------------------------------------------------------------------
+    # Transformation inverse des features X
+    # -------------------------------------------------------------------------
+    def _inverse_transform_X(self, X: pd.DataFrame, y: pd.Series = None) -> pd.DataFrame:
         """Inverse transform features.
 
         Args:
             X: Transformed features.
+            y: Transformed targets (optional, not used here).
 
         Returns:
             Original features (at target frequency - disaggregation is lossy).
@@ -951,10 +964,14 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
 
         return result
 
-    def _inverse_transform_y(self, y: pd.Series) -> pd.Series:
+    # -------------------------------------------------------------------------
+    # Transformation inverse des targets y
+    # -------------------------------------------------------------------------
+    def _inverse_transform_y(self, X: pd.DataFrame, y: pd.Series = None) -> pd.Series:
         """Inverse transform targets.
 
         Args:
+            X: Transformed features (optional, not used here).
             y: Transformed targets.
 
         Returns:

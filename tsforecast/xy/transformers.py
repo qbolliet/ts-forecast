@@ -1,54 +1,21 @@
-"""Pipeline extension that supports transformers returning (X_transformed, y_transformed).
+"""Mixin pour transformateurs XY qui transforment à la fois X et y.
 
-This module provides XYPipeline, a drop-in replacement for sklearn.pipeline.Pipeline
-that can handle transformers with the following signatures:
-- Standard: transform(X) -> X_t
-- XY transformers: transform(X, y) -> (X_t, y_t)
-
-The pipeline is fully compatible with sklearn's GridSearchCV, metadata routing (1.4+),
-and pandas DataFrames.
+Ce module fournit XYTransformerMixin, une classe mixin qui standardise
+l'interface pour les transformateurs capables de transformer simultanément
+les features (X) et les targets (y).
 """
 
 from __future__ import annotations
 
-import inspect
-from typing import Any, Literal
-
-import numpy as np
-from sklearn import get_config
-from sklearn.base import clone, TransformerMixin, BaseEstimator
-from sklearn.pipeline import Pipeline
-from sklearn.utils.metaestimators import available_if
-
-# Import conditionnel pour pandas
-try:
-    import pandas as pd
-    PANDAS_INSTALLED = True
-except ImportError:
-    PANDAS_INSTALLED = False
-    pd = None
-
-# Import conditionnel pour le metadata routing (sklearn >= 1.4)
-try:
-    from sklearn.utils.metadata_routing import (
-        MetadataRouter,
-        MethodMapping,
-        process_routing,
-        _routing_enabled,
-    )
-    METADATA_ROUTING_AVAILABLE = True
-except ImportError:
-    METADATA_ROUTING_AVAILABLE = False
-    MetadataRouter = None
-    MethodMapping = None
-    process_routing = None
-    _routing_enabled = lambda: False
+from sklearn.base import TransformerMixin
 
 
-
-
-
-
+# =============================================================================
+# Classe mixin pour transformateurs XY
+# =============================================================================
+# Cette classe fournit une interface standardisée pour les transformateurs
+# qui transforment à la fois X et y. Elle est conçue pour être utilisée
+# avec XYPipeline qui gère correctement le passage de y à travers le pipeline.
 
 class XYTransformerMixin(TransformerMixin):
     """Mixin class for transformers that transform both X and y.
@@ -58,10 +25,13 @@ class XYTransformerMixin(TransformerMixin):
 
     Subclasses should implement:
     - _fit(X, y): Learn transformation parameters from X and y.
-    - _transform_X(X): Transform features.
-    - _transform_y(y): Transform targets.
-    - _inverse_transform_X(X): Inverse transform features (optional).
-    - _inverse_transform_y(y): Inverse transform targets (optional).
+    - _transform_X(X, y): Transform features (receives both X and y).
+    - _transform_y(X, y): Transform targets (receives both X and y).
+    - _inverse_transform_X(X, y): Inverse transform features (optional).
+    - _inverse_transform_y(X, y): Inverse transform targets (optional).
+
+    The dual-argument signature (_transform_X(X, y) instead of _transform_X(X))
+    allows transformations where X depends on y or vice versa.
 
     Example:
         >>> class LogTransformXY(BaseEstimator, XYTransformerMixin):
@@ -70,19 +40,26 @@ class XYTransformerMixin(TransformerMixin):
         ...         self.y_offset_ = y.min() if y is not None else 0
         ...         return self
         ...
-        ...     def _transform_X(self, X):
+        ...     def _transform_X(self, X, y=None):
         ...         return np.log1p(X - self.X_offset_)
         ...
-        ...     def _transform_y(self, y):
+        ...     def _transform_y(self, X, y=None):
+        ...         if y is None:
+        ...             return None
         ...         return np.log1p(y - self.y_offset_)
         ...
-        ...     def _inverse_transform_X(self, X):
+        ...     def _inverse_transform_X(self, X, y=None):
         ...         return np.expm1(X) + self.X_offset_
         ...
-        ...     def _inverse_transform_y(self, y):
+        ...     def _inverse_transform_y(self, X, y=None):
+        ...         if y is None:
+        ...             return None
         ...         return np.expm1(y) + self.y_offset_
     """
 
+    # -------------------------------------------------------------------------
+    # Méthode fit : apprentissage des paramètres de transformation
+    # -------------------------------------------------------------------------
     def fit(self, X, y=None):
         """Fit the transformer.
 
@@ -93,10 +70,18 @@ class XYTransformerMixin(TransformerMixin):
         Returns:
             self: The fitted transformer.
         """
+        # Délégation à la méthode abstraite _fit
         self._fit(X, y)
+
+        # Marquage de l'état fitted
         self._is_fitted = True
+
         return self
 
+    # -------------------------------------------------------------------------
+    # Méthode abstraite _fit : apprentissage des paramètres
+    # -------------------------------------------------------------------------
+    # À implémenter par les sous-classes pour définir la logique d'apprentissage
     def _fit(self, X, y):
         """Learn transformation parameters. Override in subclasses.
 
@@ -109,6 +94,9 @@ class XYTransformerMixin(TransformerMixin):
         """
         raise NotImplementedError("Subclasses must implement _fit")
 
+    # -------------------------------------------------------------------------
+    # Méthode transform : transformation des données X et y
+    # -------------------------------------------------------------------------
     def transform(self, X, y=None):
         """Transform X and optionally y.
 
@@ -120,29 +108,44 @@ class XYTransformerMixin(TransformerMixin):
             X_transformed if y is None.
             (X_transformed, y_transformed) if y is provided.
         """
-        X_t = self._transform_X(X)
+        # Transformation des features (X et y passés pour permettre
+        # des transformations conditionnelles)
+        X_t = self._transform_X(X, y)
 
+        # Transformation des targets si y est fourni
         if y is not None:
-            y_t = self._transform_y(y)
+            y_t = self._transform_y(X, y)
             return X_t, y_t
 
         return X_t
 
-    def _transform_X(self, X):
+    # -------------------------------------------------------------------------
+    # Méthode abstraite _transform_X : transformation des features
+    # -------------------------------------------------------------------------
+    # À implémenter par les sous-classes
+    # Reçoit X et y pour permettre des transformations où X dépend de y
+    def _transform_X(self, X, y=None):
         """Transform features. Override in subclasses.
 
         Args:
             X: Features to transform.
+            y: Targets (optional, for conditional transformations).
 
         Returns:
             Transformed features.
         """
         raise NotImplementedError("Subclasses must implement _transform_X")
 
-    def _transform_y(self, y):
+    # -------------------------------------------------------------------------
+    # Méthode abstraite _transform_y : transformation des targets
+    # -------------------------------------------------------------------------
+    # À implémenter par les sous-classes
+    # Reçoit X et y pour permettre des transformations où y dépend de X
+    def _transform_y(self, X, y=None):
         """Transform targets. Override in subclasses.
 
         Args:
+            X: Features (for conditional transformations).
             y: Targets to transform.
 
         Returns:
@@ -150,6 +153,9 @@ class XYTransformerMixin(TransformerMixin):
         """
         raise NotImplementedError("Subclasses must implement _transform_y")
 
+    # -------------------------------------------------------------------------
+    # Méthode inverse_transform : transformation inverse des données
+    # -------------------------------------------------------------------------
     def inverse_transform(self, X, y=None):
         """Inverse transform X and optionally y.
 
@@ -161,19 +167,26 @@ class XYTransformerMixin(TransformerMixin):
             X_original if y is None.
             (X_original, y_original) if y is provided.
         """
-        X_inv = self._inverse_transform_X(X)
+        # Transformation inverse des features
+        X_inv = self._inverse_transform_X(X, y)
 
+        # Transformation inverse des targets si y est fourni
         if y is not None:
-            y_inv = self._inverse_transform_y(y)
+            y_inv = self._inverse_transform_y(X, y)
             return X_inv, y_inv
 
         return X_inv
 
-    def _inverse_transform_X(self, X):
+    # -------------------------------------------------------------------------
+    # Méthode _inverse_transform_X : transformation inverse des features
+    # -------------------------------------------------------------------------
+    # Optionnelle - implémentation par défaut lève une erreur
+    def _inverse_transform_X(self, X, y=None):
         """Inverse transform features. Override in subclasses.
 
         Args:
             X: Transformed features.
+            y: Transformed targets (optional, for conditional transformations).
 
         Returns:
             Original features.
@@ -182,10 +195,15 @@ class XYTransformerMixin(TransformerMixin):
             f"{self.__class__.__name__} does not implement _inverse_transform_X"
         )
 
-    def _inverse_transform_y(self, y):
+    # -------------------------------------------------------------------------
+    # Méthode _inverse_transform_y : transformation inverse des targets
+    # -------------------------------------------------------------------------
+    # Optionnelle - implémentation par défaut lève une erreur
+    def _inverse_transform_y(self, X, y=None):
         """Inverse transform targets. Override in subclasses.
 
         Args:
+            X: Transformed features (for conditional transformations).
             y: Transformed targets.
 
         Returns:
@@ -195,6 +213,10 @@ class XYTransformerMixin(TransformerMixin):
             f"{self.__class__.__name__} does not implement _inverse_transform_y"
         )
 
+    # -------------------------------------------------------------------------
+    # Méthode fit_transform : apprentissage et transformation combinés
+    # -------------------------------------------------------------------------
+    # Cette méthode DOIT être implémentée pour propager correctement y
     def fit_transform(self, X, y=None):
         """Fit and transform.
 
