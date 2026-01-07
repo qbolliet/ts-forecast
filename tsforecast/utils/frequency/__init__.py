@@ -14,6 +14,10 @@ from .converter import (
     AggregationMethod, 
     InterpolationMethod
 )
+from .parser import (
+    detect_and_parse_frequency,
+    build_frequency_string
+)
 from .utils import (
     normalize_frequency,
     to_literal,
@@ -35,6 +39,8 @@ __all__ = [
     'FrequencyConverter',
     'AggregationMethod',
     'InterpolationMethod',
+    'detect_and_parse_frequency',
+    'build_frequency_string',
     'normalize_frequency',
     'to_literal',
     'to_code',

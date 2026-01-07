@@ -19,7 +19,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
 # Importation des modules du package
-from tsforecast.utils.frequency import normalize_frequency, to_pandas_freq
+from tsforecast.utils.frequency import normalize_frequency, to_pandas_freq, detect_and_parse_frequency
 from tsforecast.utils.time import resolve_date, get_period_start
 from tsforecast.utils.duration import convert_duration, normalize_duration
 from ..frequency.detector import detect_frequency
@@ -285,7 +285,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         # Enumération des variables auxquelles appliquer une stratégie de 'shift' et de 'mask'
         if isinstance(self.strategy, str):
             # Distinction suivant la stratégie à appliquer
-            if self.strategy == 'shift' :
+            if self.strategy == 'shift':
                 shift_columns = np.intersect1d(X.columns.tolist(), list(delays_dict.keys())).tolist() if self.default_values is None else X.columns.tolist()
                 mask_columns = []
             else:  # équivalent à self.strategy == 'mask'
@@ -364,12 +364,23 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                 rounding=None
             )
 
+            # Extraction de la fréquence de l'index
+            index_frequency, _, _ = detect_and_parse_frequency(X.index.get_level_values(-1) if isinstance(X.index, pd.MultiIndex) else X.index)
+            # Conversion de la durée de la période de l'index dans l'unité du délai
+            index_period_duration = convert_duration(
+                value=1,
+                from_duration=index_frequency,
+                to_duration=delay_unit,
+                rounding=None
+            )
+
             # Si le point de référence de calcul du délai est la fin, on lui ajoute la durée de la période
             if reference_point_dict[col] == 'end':
                 elapsed_duration += period_duration
 
-            # On calcule l'arrondi à l'unité supérieure de la différence entre le délai et la date de prédiction, divisée par la longueur de la période associée à la fréquence de la série
-            n_periods = math.ceil((delays_dict[col] - elapsed_duration) / period_duration)
+            # On calcule l'arrondi à l'unité supérieure de la différence entre le délai et la date de prédiction, divisée par la longueur de la période associée à la fréquence de l'index de la série
+            # Cela donne le nombr de périodes qu'il faut masquer
+            n_periods = math.ceil((delays_dict[col] - elapsed_duration) / index_period_duration)
 
             # Calcul du nombre d'observations à la fréquence de la série il y a dans la période à la fréquence cible
             target_period_duration = convert_duration(
