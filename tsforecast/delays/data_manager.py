@@ -236,6 +236,36 @@ def _calculate_release_delays(new_observations: pd.DataFrame,
                                 reference_point: Literal['start', 'end'],
                                 unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day']
                                 ) -> pd.DataFrame :
+    """Calculate publication delays for observed data points.
+
+    Computes the delay between the observation date (period start or end) and the
+    download date. Also enriches the observations with metadata including frequency,
+    period boundaries, and delay values in the specified unit.
+
+    Args:
+        new_observations: DataFrame with detected observations, indexed by datetime/multi-level
+            and containing 'column' and 'has_changes' columns
+        new_data: Original DataFrame containing the time series data
+        download_date: Date when the data was downloaded (as datetime object)
+        reference_point: Point used for delay calculation - 'start' (period start) or 'end'
+            (period end)
+        unit: Unit for delay values - 'day'/'D', 'second'/'s', or 'microsecond'/'us'
+
+    Returns:
+        DataFrame with computed publication delays containing columns:
+        - 'observation_date': The date of the observation
+        - 'column': The column name
+        - 'download_date': Date when data was downloaded
+        - 'frequency': Detected frequency of the data
+        - 'period_start': Start boundary of the period
+        - 'period_end': End boundary of the period
+        - 'reference_point': Reference point used ('start' or 'end')
+        - 'release_delay': Calculated publication delay (ceil-rounded)
+        - 'unit': Unit of the delay value
+
+    Raises:
+        ValueError: If unit is not one of 'us', 's', 'D', 'microsecond', 'second', 'day'
+    """
     # Copie indépendante du jeu de données
     publication_delays = new_observations.copy()
 
