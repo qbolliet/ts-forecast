@@ -106,7 +106,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         """
         # Validation des paramètres
         # Paramètre de stratégie
-        if isinstance(strategy, str) :
+        if isinstance(strategy, str):
             if strategy not in ['shift', 'mask']:
                 raise ValueError(f"strategy must be 'shift' or 'mask', got '{strategy}'")
         elif isinstance(strategy, dict):
@@ -154,12 +154,19 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
     def fit(self, X: Union[pd.Series, pd.DataFrame], y=None):
         """Fit transformer by inferring parameters and preparing helpers.
 
+        The `fit` method is used to infer transform parameters from data
+        and to prepare auxiliary transformers for the application of publication delays.
+        It calculates the number of periods to be shifted or masked for each variable according to
+        specified delays and prediction date.
+
         Args:
-            X: Time series or panel data
-            y: Ignored
+            X: Time series or panel data. Dates are expected in the index. For panel
+                data with a MultiIndex, entities should be on the first n-1 levels
+                and dates on the last level.
+            y: Ignored.
 
         Returns:
-            self
+            self: The fitted transformer instance.
         """
         # Résolution de la date de prédiction
         self.prediction_date_ = resolve_date(self.prediction_date)
@@ -167,114 +174,25 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         # Inférence des paramètres depuis delays DataFrame si nécessaire
         self.inferred_params_ = self._infer_parameters_from_delays()
 
-        # Détermination des valeurs des paramètres (explicites > inférées > défaut)
-        # Fréquence cible
-        # Initialisation avec les paramètres inférés
-        target_frequency_dict = self.inferred_params_['target_frequency']
-        # Mise à jour avec les paramètres spécifiés
-        if isinstance(self.target_frequency, dict):
-            target_frequency_dict.update(self.target_frequency)
-        elif isinstance(self.target_frequency, str):
-            target_frequency_dict.update({c: self.target_frequency for c in X.columns})
-        # Ajout de la valeur par défaut pour les colonnes restantes
-        if self.default_values is not None:
-            # Détection des variables qui n'ont pas de target frequency
-            missing_target_frequency = set(X.columns) - set(target_frequency_dict.keys())
-            # Si les stratégies sont fournies sous forme de dictionnaire, on vérifie que les variables pour lesquelles la fréquence est manquante sont des 'mask'
-            if isinstance(self.strategy, dict) and ('target_frequency' in self.default_values.keys()):
-                missing_target_frequency_strategy = missing_target_frequency - set([k for k,v in self.strategy.items() if v == 'shift'])
-                if len(missing_target_frequency_strategy) > 0:  # Ce if est possiblement inutile
-                    # Ajout de la valeur par défaut
-                    for col in missing_target_frequency_strategy:
-                        target_frequency_dict[col] = self.default_values['target_frequency']
-                        # Warning
-                        warnings.warn(f"Imputed default target frequency value '{self.default_values['target_frequency']}' for column '{col}'")
-            # Cas où toutes les variables doivent être masquées
-            elif (self.strategy == "mask") and ('target_frequency' in self.default_values.keys()) and (len(missing_target_frequency) > 0):
-                # Ajout de la valeur par défaut
-                for col in missing_target_frequency:
-                    target_frequency_dict[col] = self.default_values['target_frequency']
-                    # Warning
-                    warnings.warn(f"Imputed default target frequency value '{self.default_values['target_frequency']}' for column '{col}'")
-            # Cas où il y aurait des variables à imputer mais qu'un fréquence par défaut n'est pas spécifiée
-            elif ('target_frequency' not in self.default_values.keys()) and (len(missing_target_frequency)>0):
-                # Distinction suivant la stratégie
-                if isinstance(self.strategy, dict):
-                    missing_target_frequency_strategy = missing_target_frequency - set([k for k,v in self.strategy.items() if v == 'shift'])
-                    if len(missing_target_frequency_strategy) > 0:
-                        # Warning
-                        warnings.warn(f"Could not impute a default 'target_frequency' for columns {missing_target_frequency_strategy} because it is not specified in the 'default_values' dictionnary")
-                elif self.strategy == "mask" :
-                    # Warning
-                    warnings.warn(f"Could not impute a default 'target_frequency' for columns : {missing_target_frequency} because it is not specified in the 'default_values' dictionnary")
-        # Tous les autres cas ("shift"), absence de valeur par défaut, absence de variable pour laquelle la "target_frequency" n'est pas spécifiée sont normaux et ne nécessitent ni warning ni imputation
-        
-        
+        # Construction des dictionnaires de paramètres
+        # Fréquence cible (logique spécifique car dépend de la stratégie)
+        target_frequency_dict = self._build_target_frequency_dict(X)
         # Unité des délais
-        # Initialisation avec les paramètres inférés
-        delay_unit_dict = self.inferred_params_['delay_unit']
-        # Mise à jour avec les paramètres spécifiés
-        if isinstance(self.delay_unit, dict):
-            delay_unit_dict.update(self.delay_unit)
-        elif isinstance(self.delay_unit, str):
-            delay_unit_dict.update({c : self.delay_unit for c in X.columns})
-        # Ajout de la valeur par défaut pour les colonnes restantes
-        if self.default_values is not None :
-            # Détection des variables qui n'ont pas d'unité
-            missing_delay_unit = set(X.columns) - set(delay_unit_dict.keys())
-            # Cas où le répertoire des stratégies est un dictionnaire
-            if isinstance(self.strategy, dict) and ('delay_unit' in self.default_values.keys()):
-                missing_delay_unit_strategy = missing_delay_unit - set(self.strategy.keys())
-                if len(missing_delay_unit_strategy) > 0: # Ce if est possiblement inutile
-                    # Ajout de la valeur par défaut
-                    for col in missing_delay_unit_strategy:
-                        delay_unit_dict[col] = self.default_values['delay_unit']
-                        # Warning
-                        warnings.warn(f"Imputed default delay unit value '{self.default_values['delay_unit']}' for column '{col}'")
-            # Cas où la valeur par défaut doit être associée à toutes les colonnes non référencées 
-            elif ('delay_unit' in self.default_values.keys()) and (len(missing_delay_unit) > 0):
-                # Ajout de la valeur par défaut
-                for col in missing_delay_unit:
-                    delay_unit_dict[col] = self.default_values['delay_unit']
-                    # Warning
-                    warnings.warn(f"Imputed default delay unit value '{self.default_values['delay_unit']}' for column '{col}'")
-            # Cas où il y aurait des variables à imputer mais qu'un fréquence par défaut n'est pas spécifiée
-            elif ('delay_unit' not in self.default_values.keys()) and (len(missing_delay_unit)>0):
-                warnings.warn(f"Could not impute a default 'delay_unit' for columns {missing_delay_unit} because it is not specified in the 'default_values' dictionnary")
-        # Tous les autres cas, absence de valeur par défaut, absence de variable pour laquelle le "delay_unit" n'est pas spécifiée sont normaux et ne nécessitent ni warning ni imputation
-        
+        delay_unit_dict = self._build_parameter_dict(
+            X=X,
+            param_name='delay_unit',
+            explicit_value=self.delay_unit,
+            inferred_key='delay_unit',
+            default_key='delay_unit'
+        )
         # Point de référence
-        # Initialisation avec les paramètres inférés
-        reference_point_dict = self.inferred_params_['reference_point']
-        # Mise à jour avec les paramètres spécifiés
-        if isinstance(self.reference_point, dict):
-            reference_point_dict.update(self.reference_point)
-        elif isinstance(self.reference_point, str):
-            reference_point_dict.update({c: self.reference_point for c in X.columns})
-        # Ajout de la valeur par défaut pour les colonnes restantes
-        if self.default_values is not None :
-            # Détection des variables qui n'ont pas d'unité
-            missing_reference_point = set(X.columns) - set(reference_point_dict.keys())
-            # Cas où le répertoire des stratégies est un dictionnaire
-            if isinstance(self.strategy, dict) and ('reference_point' in self.default_values.keys()):
-                missing_reference_point_strategy = missing_reference_point - set(self.strategy.keys())
-                if len(missing_reference_point_strategy) > 0: # Ce if est possiblement inutile
-                    # Ajout de la valeur par défaut
-                    for col in missing_reference_point_strategy:
-                        reference_point_dict[col] = self.default_values['reference_point']
-                        # Warning
-                        warnings.warn(f"Imputed default delay unit value '{self.default_values['reference_point']}' for column '{col}'")
-            # Cas où la valeur par défaut doit être associée à toutes les colonnes non référencées 
-            elif ('reference_point' in self.default_values.keys()) and (len(missing_reference_point) > 0):
-                # Ajout de la valeur par défaut
-                for col in missing_reference_point:
-                    reference_point_dict[col] = self.default_values['reference_point']
-                    # Warning
-                    warnings.warn(f"Imputed default delay unit value '{self.default_values['reference_point']}' for column '{col}'")
-            # Cas où il y aurait des variables à imputer mais qu'un fréquence par défaut n'est pas spécifiée
-            elif ('reference_point' not in self.default_values.keys()) and (len(missing_reference_point)>0):
-                warnings.warn(f"Could not impute a default 'reference_point' for columns {missing_reference_point} because it is not specified in the 'default_values' dictionnary")
-        # Tous les autres cas, absence de valeur par défaut, absence de variable pour laquelle le "reference_point" n'est pas spécifiée sont normaux et ne nécessitent ni warning ni imputation
+        reference_point_dict = self._build_parameter_dict(
+            X=X,
+            param_name='reference_point',
+            explicit_value=self.reference_point,
+            inferred_key='reference_point',
+            default_key='reference_point'
+        )
         
         # Conversion des delays en dictionnaire si DataFrame
         if isinstance(self.delays, pd.DataFrame):
@@ -282,7 +200,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         else:
             delays_dict = self.delays
 
-        # Enumération des variables auxquelles appliquer une stratégie de 'shift' et de 'mask'
+        # Énumération des variables auxquelles appliquer une stratégie de 'shift' et de 'mask'
         if isinstance(self.strategy, str):
             # Distinction suivant la stratégie à appliquer
             if self.strategy == 'shift':
@@ -304,101 +222,43 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         self.shift_params = {}
         # Parcours des variables
         for col in shift_columns:
-            # Normalisation de l'unité des délais
-            delay_unit = normalize_duration(delay_unit_dict[col])
-
-            # Calcul des bornes de la période associée à la date de prédiction
-            period_start = get_period_start(self.prediction_date_, self.detected_frequencies_[col])
-            # Calcul du temps écoulé, dans l'unité du délai, entre la date de prédiction et le début de la période
-            elapsed_duration = convert_duration(
-                value=(self.prediction_date_ - period_start).total_seconds(),
-                from_duration='s',
-                to_duration=delay_unit,
-                rounding=None
+            # Calcul du nombre de périodes à shifter
+            n_periods = self._compute_shift_periods(
+                col=col,
+                delays_dict=delays_dict,
+                delay_unit_dict=delay_unit_dict,
+                reference_point_dict=reference_point_dict
             )
-            
-            # Conversion de la durée de la période dans l'unité du délai
-            period_duration = convert_duration(
-                value=1,
-                from_duration=self.detected_frequencies_[col],
-                to_duration=delay_unit,
-                rounding=None
-            )
-
-            # Si le point de référence de calcul du délai est la fin, on lui ajoute la durée de la période
-            if reference_point_dict[col] == 'end':
-                elapsed_duration += period_duration
-
-            # On calcule l'arrondi à l'unité supérieure de la différence entre le délai et la date de prédiction, divisée par la longueur de la période associée à la fréquence de la série
-            n_periods = math.ceil((delays_dict[col] - elapsed_duration) / period_duration)
-             
             # Ajout au dictionnaire résultat
             self.shift_params[col] = {'n_periods': n_periods, 'frequency': self.detected_frequencies_[col]}
-
 
         # Calcul du nombre d'observations à masquer pour chaque variable
         # Initialisation du dictionnaire résultat
         self.mask_params = {}
         # Parcours des variables
         for col in mask_columns:
-            # Normalisation de l'unité des délais
-            delay_unit = normalize_duration(delay_unit_dict[col])
-            # Normalisation de la fréquence cible
-            target_frequency = normalize_frequency(target_frequency_dict[col])
-
-            # Calcul des bornes de la période associée à la date de prédiction
-            period_start = get_period_start(self.prediction_date_, self.detected_frequencies_[col])
-            # Calcul du temps écoulé, dans l'unité du délai, entre la date de prédiction et le début de la période
-            elapsed_duration = convert_duration(
-                value=(self.prediction_date_ - period_start).to_seconds(),
-                from_duration='s',
-                to_duration=delay_unit,
-                rounding=None
+            # Calcul du nombre de périodes à masquer
+            result = self._compute_mask_periods(
+                col=col,
+                X=X,
+                delays_dict=delays_dict,
+                delay_unit_dict=delay_unit_dict,
+                reference_point_dict=reference_point_dict,
+                target_frequency_dict=target_frequency_dict
             )
-            
-            # Conversion de la durée de la période dans l'unité du délai
-            period_duration = convert_duration(
-                value=1,
-                from_duration=self.detected_frequencies_[col],
-                to_duration=delay_unit,
-                rounding=None
-            )
-
-            # Extraction de la fréquence de l'index
-            index_frequency, _, _ = detect_and_parse_frequency(X.index.get_level_values(-1) if isinstance(X.index, pd.MultiIndex) else X.index)
-            # Conversion de la durée de la période de l'index dans l'unité du délai
-            index_period_duration = convert_duration(
-                value=1,
-                from_duration=index_frequency,
-                to_duration=delay_unit,
-                rounding=None
-            )
-
-            # Si le point de référence de calcul du délai est la fin, on lui ajoute la durée de la période
-            if reference_point_dict[col] == 'end':
-                elapsed_duration += period_duration
-
-            # On calcule l'arrondi à l'unité supérieure de la différence entre le délai et la date de prédiction, divisée par la longueur de la période associée à la fréquence de l'index de la série
-            # Cela donne le nombr de périodes qu'il faut masquer
-            n_periods = math.ceil((delays_dict[col] - elapsed_duration) / index_period_duration)
-
-            # Calcul du nombre d'observations à la fréquence de la série il y a dans la période à la fréquence cible
-            target_period_duration = convert_duration(
-                value=1,
-                from_duration=target_frequency,
-                to_duration=self.detected_frequencies_[col],
-                rounding=None
-            )
-            # Vérification que le nombre d'observations à masquer est bien strictement inférieur au nombre d'observations dans la période à la 'target_frequency'
-            if (math.floor(target_period_duration) > n_periods):
-                # Ajout au dictionnaire des variables à mask
-                self.mask_params[col] = {'n_obs': n_periods, 'mask_frequency': target_frequency, "how": "last"}
-            # Sinon, on met un warning et on ajoute au dictionnaire de shifts
-            else :
-                # Warning
+            # Distinction suivant que le masquage est possible ou non
+            if result['can_mask']:
+                # Ajout au dictionnaire résultat
+                self.mask_params[col] = {
+                    'n_obs': result['n_periods'],
+                    'mask_frequency': result['target_frequency'],
+                    'how': 'last'
+                }
+            else:
+                # Warning 
                 warnings.warn(f"Could not mask the column '{col}' because it would have created a series of Nan. Moved it to the shifted columns")
-                # Ajout du dictionnaire des variables à shift
-                self.shift_params[col] = {'n_periods': n_periods, 'frequency': self.detected_frequencies_[col]}
+                # Ajout au dictionnaire des variables à shift
+                self.shift_params[col] = {'n_periods': result['n_periods'], 'frequency': self.detected_frequencies_[col]}
 
         return self
 
@@ -406,11 +266,18 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
     def transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
         """Apply publication delays to data.
 
+        The `transform` method applies the publication delays to the data using the
+        parameters calculated during `fit`. It automatically handles panel data by
+        encapsulating auxiliary transformers in a PanelwiseTransformer.
+
         Args:
-            X: Time series or panel data
+            X: Time series or panel data. Dates are expected in the index. For panel
+                data with a MultiIndex, entities should be on the first n-1 levels
+                and dates on the last level. In the case of panel data, similar
+                transformations are applied to all individuals in the panel.
 
         Returns:
-            Transformed data with publication delays applied
+            Transformed data with publication delays applied.
         """
         # Vérification que le transformer est entraîné
         check_is_fitted(self)
@@ -425,74 +292,26 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         list_df_transformed = []
 
         # Traitement des variables à shift
-        # Suivi des paramètres déjà traités
-        seen_shift_params = set()
-        # Parcours des colonnes et de leurs paramètres
-        for params in self.shift_params.values():
-            # Création d'une clé hashable à partir des paramètres
-            params_key = tuple(sorted(params.items()))
-
-            # Vérification si ces paramètres ont déjà été traités
-            if params_key not in seen_shift_params:
-                # Construction de la liste des colonnes avec ces mêmes paramètres
-                columns = [k for k, v in self.shift_params.items()
-                           if tuple(sorted(v.items())) == params_key]
-
-                # Distinction suivant la structure de panel
-                if is_panel:
-                    # Initialisation d'un PanelwiseTransformer
-                    transformer_ = PanelwiseTransformer(
-                        transformer=ShiftTransformer(**params),
-                        time_col=None,
-                        panel_cols=None
-                    )
-                else:
-                    # Initialisation d'un ShiftTransformer
-                    transformer_ = ShiftTransformer(**params)
-
-                # Stockage du transformer
-                self.auxiliary_transformers_['shift'][params_key] = transformer_
-
-                # Transformation des données
-                list_df_transformed.append(transformer_.fit_transform(X[columns]))
-
-                # Marquage des paramètres comme traités
-                seen_shift_params.add(params_key)
+        list_df_transformed.extend(
+            self._apply_auxiliary_transformers(
+                X=X,
+                params_dict=self.shift_params,
+                transformer_class=ShiftTransformer,
+                transformer_type='shift',
+                is_panel=is_panel
+            )
+        )
 
         # Traitement des variables à mask
-        # Suivi des paramètres déjà traités
-        seen_mask_params = set()
-        # Parcours des colonnes et de leurs paramètres
-        for col, params in self.mask_params.items():
-            # Création d'une clé hashable à partir des paramètres
-            params_key = tuple(sorted(params.items()))
-
-            # Vérification si ces paramètres ont déjà été traités
-            if params_key not in seen_mask_params:
-                # Construction de la liste des colonnes avec ces mêmes paramètres
-                columns = [k for k, v in self.mask_params.items()
-                           if tuple(sorted(v.items())) == params_key]
-
-                # Distinction suivant la structure de panel
-                if is_panel:
-                    # Initialisation d'un PanelwiseTransformer
-                    transformer_ = PanelwiseTransformer(
-                        transformer=MaskTransformer(**params),
-                        time_col=None,
-                        panel_cols=None
-                    )
-                else:
-                    # Initialisation d'un MaskTransformer
-                    transformer_ = MaskTransformer(**params)
-
-                # Stockage du transformer
-                self.auxiliary_transformers_['mask'][params_key] = transformer_
-
-                # Transformation des données
-                list_df_transformed.append(transformer_.fit_transform(X[columns]))
-
-                # Marquage des paramètres comme traités
-                seen_mask_params.add(params_key)
+        list_df_transformed.extend(
+            self._apply_auxiliary_transformers(
+                X=X,
+                params_dict=self.mask_params,
+                transformer_class=MaskTransformer,
+                transformer_type='mask',
+                is_panel=is_panel
+            )
+        )
 
         # Jointure sur l'index des données transformées
         df_transformed = pd.concat(list_df_transformed, axis=1, join='outer', ignore_index=False)
@@ -511,10 +330,10 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         """Reverse publication delay transformation.
 
         Args:
-            X: Transformed data
+            X: Transformed data.
 
         Returns:
-            Data with delays reversed
+            Data with delays reversed.
         """
         # Vérification que le transformer est entraîné
         check_is_fitted(self)
@@ -523,50 +342,22 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         list_df_inversed = []
 
         # Inversion des shifts
-        # Suivi des paramètres déjà traités
-        seen_shift_params = set()
-        # Parcours des colonnes et de leurs paramètres
-        for params in self.shift_params.values():
-            # Création d'une clé hashable à partir des paramètres
-            params_key = tuple(sorted(params.items()))
-
-            # Vérification si ces paramètres ont déjà été traités
-            if params_key not in seen_shift_params:
-                # Récupération du transformer correspondant
-                transformer_ = self.auxiliary_transformers_['shift'][params_key]
-
-                # Récupération de toutes les colonnes avec ces mêmes paramètres
-                columns = [k for k, v in self.shift_params.items()
-                           if tuple(sorted(v.items())) == params_key]
-
-                # Application de la transformation inverse
-                list_df_inversed.append(transformer_.inverse_transform(X[columns]))
-
-                # Marquage des paramètres comme traités
-                seen_shift_params.add(params_key)
+        list_df_inversed.extend(
+            self._apply_inverse_transformers(
+                X=X,
+                params_dict=self.shift_params,
+                transformer_type='shift'
+            )
+        )
 
         # Inversion des masks
-        # Suivi des paramètres déjà traités
-        seen_mask_params = set()
-        # Parcours des colonnes et de leurs paramètres
-        for col, params in self.mask_params.items():
-            # Création d'une clé hashable à partir des paramètres
-            params_key = tuple(sorted(params.items()))
-
-            # Vérification si ces paramètres ont déjà été traités
-            if params_key not in seen_mask_params:
-                # Récupération du transformer correspondant
-                transformer_ = self.auxiliary_transformers_['mask'][params_key]
-
-                # Récupération de toutes les colonnes avec ces mêmes paramètres
-                columns = [k for k, v in self.mask_params.items()
-                           if tuple(sorted(v.items())) == params_key]
-
-                # Application de la transformation inverse
-                list_df_inversed.append(transformer_.inverse_transform(X[columns]))
-
-                # Marquage des paramètres comme traités
-                seen_mask_params.add(params_key)
+        list_df_inversed.extend(
+            self._apply_inverse_transformers(
+                X=X,
+                params_dict=self.mask_params,
+                transformer_type='mask'
+            )
+        )
 
         # Jointure sur l'index des données inversées
         df_inversed = pd.concat(list_df_inversed, axis=1, join='outer', ignore_index=False)
@@ -589,10 +380,15 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         """Infer delay_unit, reference_point, target_frequency from delays DataFrame.
 
         Returns:
-            Dict of inferred parameters
+            Dict of inferred parameters with keys 'delay_unit', 'reference_point',
+            and 'target_frequency', each mapping variable names to their values.
         """
-        # Initialisation du dictionnaire résultat
-        inferred = {}
+        # Initialisation du dictionnaire résultat avec des dictionnaires vides
+        inferred = {
+            'delay_unit': {},
+            'reference_point': {},
+            'target_frequency': {}
+        }
 
         # Extraction des éléments du jeu de données
         # Extrait à chaque fois la première valeur en faisant l'hypothèse qu'elle est constante
@@ -623,8 +419,373 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
 
         return inferred
 
-        self.column_transformers_[column_name] = helper
+    # Méthode auxiliaire de construction d'un dictionnaire de paramètres
+    def _build_parameter_dict(
+        self,
+        X: pd.DataFrame,
+        param_name: str,
+        explicit_value: Optional[Union[str, Dict[str, str]]],
+        inferred_key: str,
+        default_key: str
+    ) -> Dict[str, str]:
+        """Build a parameter dictionary from inferred, explicit, and default values.
 
+        This method constructs a dictionary mapping column names to parameter values
+        by combining (in order of priority): explicit values > inferred values > default values.
+
+        Args:
+            X: Input DataFrame to get column names from.
+            param_name: Name of the parameter (for warning messages).
+            explicit_value: Explicitly provided value (str or dict).
+            inferred_key: Key to look up in self.inferred_params_.
+            default_key: Key to look up in self.default_values.
+
+        Returns:
+            Dictionary mapping column names to parameter values.
+        """
+        # Initialisation avec les paramètres inférés
+        param_dict = self.inferred_params_.get(inferred_key, {}).copy()
+        
+        # Mise à jour avec les paramètres spécifiés
+        if isinstance(explicit_value, dict):
+            param_dict.update(explicit_value)
+        elif isinstance(explicit_value, str):
+            param_dict.update({c: explicit_value for c in X.columns})
+        
+        # Ajout de la valeur par défaut pour les colonnes restantes
+        if self.default_values is not None:
+            # Détection des variables qui n'ont pas de valeur
+            missing_params = set(X.columns) - set(param_dict.keys())
+            
+            # Cas où le répertoire des stratégies est un dictionnaire
+            if isinstance(self.strategy, dict) and (default_key in self.default_values.keys()):
+                missing_params_strategy = missing_params - set(self.strategy.keys())
+                if len(missing_params_strategy) > 0:
+                    # Ajout de la valeur par défaut
+                    for col in missing_params_strategy:
+                        param_dict[col] = self.default_values[default_key]
+                        warnings.warn(f"Imputed default {param_name} value '{self.default_values[default_key]}' for column '{col}'")
+            
+            # Cas où la valeur par défaut doit être associée à toutes les colonnes non référencées
+            elif (default_key in self.default_values.keys()) and (len(missing_params) > 0):
+                for col in missing_params:
+                    param_dict[col] = self.default_values[default_key]
+                    warnings.warn(f"Imputed default {param_name} value '{self.default_values[default_key]}' for column '{col}'")
+            
+            # Cas où il y aurait des variables à imputer mais qu'une valeur par défaut n'est pas spécifiée
+            elif (default_key not in self.default_values.keys()) and (len(missing_params) > 0):
+                warnings.warn(f"Could not impute a default '{param_name}' for columns {missing_params} because it is not specified in the 'default_values' dictionnary")
+        # Tous les autres cas, absence de valeur par défaut, absence de variable pour laquelle le "param_name" n'est pas spécifiée sont normaux et ne nécessitent ni warning ni imputation
+        
+        return param_dict
+
+    # Méthode auxiliaire de construction du dictionnaire de fréquence cible
+    def _build_target_frequency_dict(self, X: pd.DataFrame) -> Dict[str, str]:
+        """Build target frequency dictionary with strategy-aware logic.
+
+        This method constructs a dictionary mapping column names to target frequencies,
+        with special handling for the 'mask' strategy which requires target_frequency.
+
+        Args:
+            X: Input DataFrame to get column names from.
+
+        Returns:
+            Dictionary mapping column names to target frequency values.
+        """
+        # Initialisation avec les paramètres inférés
+        target_frequency_dict = self.inferred_params_.get('target_frequency', {}).copy()
+        
+        # Mise à jour avec les paramètres spécifiés
+        if isinstance(self.target_frequency, dict):
+            target_frequency_dict.update(self.target_frequency)
+        elif isinstance(self.target_frequency, str):
+            target_frequency_dict.update({c: self.target_frequency for c in X.columns})
+        
+        # Ajout de la valeur par défaut pour les colonnes restantes
+        if self.default_values is not None:
+            # Détection des variables qui n'ont pas de target frequency
+            missing_target_frequency = set(X.columns) - set(target_frequency_dict.keys())
+            
+            # Si les stratégies sont fournies sous forme de dictionnaire, on vérifie que les variables pour lesquelles la fréquence est manquante sont des 'mask'
+            if isinstance(self.strategy, dict) and ('target_frequency' in self.default_values.keys()):
+                missing_target_frequency_strategy = missing_target_frequency - set([k for k, v in self.strategy.items() if v == 'shift'])
+                if len(missing_target_frequency_strategy) > 0:
+                    # Ajout de la valeur par défaut
+                    for col in missing_target_frequency_strategy:
+                        target_frequency_dict[col] = self.default_values['target_frequency']
+                        warnings.warn(f"Imputed default target frequency value '{self.default_values['target_frequency']}' for column '{col}'")
+            
+            # Cas où toutes les variables doivent être masquées
+            elif (self.strategy == "mask") and ('target_frequency' in self.default_values.keys()) and (len(missing_target_frequency) > 0):
+                for col in missing_target_frequency:
+                    target_frequency_dict[col] = self.default_values['target_frequency']
+                    warnings.warn(f"Imputed default target frequency value '{self.default_values['target_frequency']}' for column '{col}'")
+            
+            # Cas où il y aurait des variables à imputer mais qu'une fréquence par défaut n'est pas spécifiée
+            elif ('target_frequency' not in self.default_values.keys()) and (len(missing_target_frequency) > 0):
+                # Distinction suivant la stratégie
+                if isinstance(self.strategy, dict):
+                    missing_target_frequency_strategy = missing_target_frequency - set([k for k, v in self.strategy.items() if v == 'shift'])
+                    if len(missing_target_frequency_strategy) > 0:
+                        warnings.warn(f"Could not impute a default 'target_frequency' for columns {missing_target_frequency_strategy} because it is not specified in the 'default_values' dictionnary")
+                elif self.strategy == "mask":
+                    warnings.warn(f"Could not impute a default 'target_frequency' for columns : {missing_target_frequency} because it is not specified in the 'default_values' dictionnary")
+        # Tous les autres cas ("shift"), absence de valeur par défaut, absence de variable pour laquelle la "target_frequency" n'est pas spécifiée sont normaux et ne nécessitent ni warning ni imputation
+        
+        return target_frequency_dict
+
+    # Méthode auxiliaire de calcul du nombre de périodes à shifter
+    def _compute_shift_periods(
+        self,
+        col: str,
+        delays_dict: Dict[str, float],
+        delay_unit_dict: Dict[str, str],
+        reference_point_dict: Dict[str, str]
+    ) -> int:
+        """Compute the number of periods to shift for a given column.
+
+        This method calculates how many periods of data should be shifted based on
+        the publication delay, taking into account the delay unit and reference point.
+
+        Args:
+            col: Column name to compute shift periods for.
+            delays_dict: Dictionary mapping column names to delay values.
+            delay_unit_dict: Dictionary mapping column names to delay units.
+            reference_point_dict: Dictionary mapping column names to reference points.
+
+        Returns:
+            Number of periods to shift (rounded up to the nearest integer).
+        """
+        # Normalisation de l'unité des délais
+        delay_unit = normalize_duration(delay_unit_dict[col])
+
+        # Calcul des bornes de la période associée à la date de prédiction
+        period_start = get_period_start(self.prediction_date_, self.detected_frequencies_[col])
+        
+        # Calcul du temps écoulé, dans l'unité du délai, entre la date de prédiction et le début de la période
+        elapsed_duration = convert_duration(
+            value=(self.prediction_date_ - period_start).total_seconds(),
+            from_duration='s',
+            to_duration=delay_unit,
+            rounding=None
+        )
+        
+        # Conversion de la durée de la période dans l'unité du délai
+        period_duration = convert_duration(
+            value=1,
+            from_duration=self.detected_frequencies_[col],
+            to_duration=delay_unit,
+            rounding=None
+        )
+
+        # Si le point de référence de calcul du délai est la fin, on lui ajoute la durée de la période
+        if reference_point_dict[col] == 'end':
+            elapsed_duration += period_duration
+
+        # Calcul de l'arrondi à l'unité supérieure de la différence entre le délai et la date de prédiction,
+        # divisée par la longueur de la période associée à la fréquence de la série
+        n_periods = math.ceil((delays_dict[col] - elapsed_duration) / period_duration)
+        
+        return n_periods
+
+    # Méthode auxiliaire de calcul du nombre de périodes à masquer
+    def _compute_mask_periods(
+        self,
+        col: str,
+        X: pd.DataFrame,
+        delays_dict: Dict[str, float],
+        delay_unit_dict: Dict[str, str],
+        reference_point_dict: Dict[str, str],
+        target_frequency_dict: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """Compute the number of observations to mask for a given column.
+
+        This method calculates how many observations should be masked based on
+        the publication delay, and checks if masking is feasible without creating
+        an all-NaN series.
+
+        Args:
+            col: Column name to compute mask periods for.
+            X: Input DataFrame (used to extract index frequency).
+            delays_dict: Dictionary mapping column names to delay values.
+            delay_unit_dict: Dictionary mapping column names to delay units.
+            reference_point_dict: Dictionary mapping column names to reference points.
+            target_frequency_dict: Dictionary mapping column names to target frequencies.
+
+        Returns:
+            Dictionary with keys:
+                - 'n_periods': Number of observations to mask.
+                - 'target_frequency': Normalized target frequency.
+                - 'can_mask': Boolean indicating if masking is feasible.
+        """
+        # Normalisation de l'unité des délais
+        delay_unit = normalize_duration(delay_unit_dict[col])
+        # Normalisation de la fréquence cible
+        target_frequency = normalize_frequency(target_frequency_dict[col])
+
+        # Calcul des bornes de la période associée à la date de prédiction
+        period_start = get_period_start(self.prediction_date_, self.detected_frequencies_[col])
+        
+        # Calcul du temps écoulé, dans l'unité du délai, entre la date de prédiction et le début de la période
+        elapsed_duration = convert_duration(
+            value=(self.prediction_date_ - period_start).to_seconds(),
+            from_duration='s',
+            to_duration=delay_unit,
+            rounding=None
+        )
+        
+        # Conversion de la durée de la période dans l'unité du délai
+        period_duration = convert_duration(
+            value=1,
+            from_duration=self.detected_frequencies_[col],
+            to_duration=delay_unit,
+            rounding=None
+        )
+
+        # Extraction de la fréquence de l'index
+        index_frequency, _, _ = detect_and_parse_frequency(X.index.get_level_values(-1) if isinstance(X.index, pd.MultiIndex) else X.index)
+        
+        # Conversion de la durée de la période de l'index dans l'unité du délai
+        index_period_duration = convert_duration(
+            value=1,
+            from_duration=index_frequency,
+            to_duration=delay_unit,
+            rounding=None
+        )
+
+        # Si le point de référence de calcul du délai est la fin, on lui ajoute la durée de la période
+        if reference_point_dict[col] == 'end':
+            elapsed_duration += period_duration
+
+        # Calcul de l'arrondi à l'unité supérieure de la différence entre le délai et la date de prédiction,
+        # divisée par la longueur de la période associée à la fréquence de l'index de la série.
+        # Cela donne le nombre de périodes qu'il faut masquer.
+        n_periods = math.ceil((delays_dict[col] - elapsed_duration) / index_period_duration)
+
+        # Calcul du nombre d'observations à la fréquence de la série qu'il y a dans la période à la fréquence cible
+        target_period_duration = convert_duration(
+            value=1,
+            from_duration=target_frequency,
+            to_duration=self.detected_frequencies_[col],
+            rounding=None
+        )
+        
+        # Vérification que le nombre d'observations à masquer est bien strictement inférieur
+        # au nombre d'observations dans la période à la 'target_frequency'
+        can_mask = math.floor(target_period_duration) > n_periods
+
+        return {
+            'n_periods': n_periods,
+            'target_frequency': target_frequency,
+            'can_mask': can_mask
+        }
+
+    # Méthode auxiliaire d'application des transformers auxiliaires
+    def _apply_auxiliary_transformers(
+        self,
+        X: pd.DataFrame,
+        params_dict: Dict[str, Dict],
+        transformer_class: type,
+        transformer_type: str,
+        is_panel: bool
+    ) -> List[pd.DataFrame]:
+        """Apply auxiliary transformers (ShiftTransformer or MaskTransformer) to columns.
+
+        This method groups columns by their transformation parameters and applies
+        the appropriate transformer, optionally wrapping in PanelwiseTransformer
+        for panel data.
+
+        Args:
+            X: Input DataFrame.
+            params_dict: Dictionary mapping column names to transformation parameters.
+            transformer_class: Class of transformer to use (ShiftTransformer or MaskTransformer).
+            transformer_type: Type identifier ('shift' or 'mask') for storage.
+            is_panel: Whether the data is panel data (MultiIndex).
+
+        Returns:
+            List of transformed DataFrames, one per unique parameter combination.
+        """
+        # Initialisation de la liste des jeux de données résultats
+        list_df_transformed = []
+        # Suivi des paramètres déjà traités
+        seen_params = set()
+        
+        # Parcours des colonnes et de leurs paramètres
+        for params in params_dict.values():
+            # Création d'une clé hashable à partir des paramètres
+            params_key = tuple(sorted(params.items()))
+
+            # Vérification si ces paramètres ont déjà été traités
+            if params_key not in seen_params:
+                # Construction de la liste des colonnes avec ces mêmes paramètres
+                columns = [k for k, v in params_dict.items()
+                           if tuple(sorted(v.items())) == params_key]
+
+                # Distinction suivant la structure de panel
+                if is_panel:
+                    # Initialisation d'un PanelwiseTransformer
+                    transformer_ = PanelwiseTransformer(
+                        transformer=transformer_class(**params),
+                        time_col=None,
+                        panel_cols=None
+                    )
+                else:
+                    transformer_ = transformer_class(**params)
+
+                # Stockage du transformer
+                self.auxiliary_transformers_[transformer_type][params_key] = transformer_
+
+                # Transformation des données
+                list_df_transformed.append(transformer_.fit_transform(X[columns]))
+
+                # Marquage des paramètres comme traités
+                seen_params.add(params_key)
+
+        return list_df_transformed
+
+    # Méthode auxiliaire d'application des transformations inverses
+    def _apply_inverse_transformers(
+        self,
+        X: pd.DataFrame,
+        params_dict: Dict[str, Dict],
+        transformer_type: str
+    ) -> List[pd.DataFrame]:
+        """Apply inverse transformations using stored auxiliary transformers.
+
+        Args:
+            X: Transformed DataFrame to inverse.
+            params_dict: Dictionary mapping column names to transformation parameters.
+            transformer_type: Type identifier ('shift' or 'mask') for retrieval.
+
+        Returns:
+            List of inverse-transformed DataFrames, one per unique parameter combination.
+        """
+        # Initialisation de la liste des jeux de données inversés
+        list_df_inversed = []
+        # Suivi des paramètres déjà traités
+        seen_params = set()
+        
+        # Parcours des colonnes et de leurs paramètres
+        for params in params_dict.values():
+            # Création d'une clé hashable à partir des paramètres
+            params_key = tuple(sorted(params.items()))
+
+            # Vérification si ces paramètres ont déjà été traités
+            if params_key not in seen_params:
+                # Récupération du transformer correspondant
+                transformer_ = self.auxiliary_transformers_[transformer_type][params_key]
+
+                # Récupération de toutes les colonnes avec ces mêmes paramètres
+                columns = [k for k, v in params_dict.items()
+                           if tuple(sorted(v.items())) == params_key]
+
+                # Application de la transformation inverse
+                list_df_inversed.append(transformer_.inverse_transform(X[columns]))
+
+                # Marquage des paramètres comme traités
+                seen_params.add(params_key)
+
+        return list_df_inversed
 
 # Fonction de création d'une factory de PublicationDelayTransformer pour l'utilisation sur des données de panel
 def create_delay_transformer_factory(
