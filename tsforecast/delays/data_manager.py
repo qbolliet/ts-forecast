@@ -15,17 +15,48 @@ from ..frequency.detector import detect_frequency
 # Module de validation des données temporelles
 from ..utils.validation import validate_temporal_data
 # Module de manipulation temporelle
-from ..utils.time.utils import get_period_boundaries
+from ..utils.time import resolve_date, get_period_boundaries
 
 # /!\ Faire un prompt pour intégrer un logger à cette fonction : comment mettre du logging optionnel + implémentation
 # Fonction de comparaison et d'inférence des délais de publication
-def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: pd.DataFrame, download_date: Union[str, datetime], detection_mode: str = 'new_only', reference_point: str = 'start', delay_unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day'] = 'day', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None) -> pd.DataFrame:
+def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd.DataFrame] = None, download_date: Union[str, datetime] = None, detection_mode: str = 'new_only', reference_point: str = 'start', delay_unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day'] = 'day', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None) -> pd.DataFrame:
+    """Compare new data with existing data and detect publication delays.
+
+    This function identifies new or changed observations by comparing new_data with
+    existing_data (if provided), then calculates publication delays for these observations.
+    
+    When existing_data is None, the function identifies the most recent non-null observation
+    for each variable (and each panel entity if panel data is provided).
+
+    Args:
+        new_data: New data DataFrame to analyze
+        existing_data: Existing data DataFrame for comparison. If None, identifies the most
+            recent non-null observation for each variable/entity
+        download_date: Date when the data was downloaded. If None, uses current datetime
+        detection_mode: Detection mode - 'new_only' (only null→non-null transitions) or
+            'all_changes' (all value changes). Only used when existing_data is provided
+        reference_point: Reference point for delay calculation - 'start' or 'end' of the period
+        delay_unit: Unit for delay calculation - 'day'/'D', 'second'/'s', or 'microsecond'/'us'
+        time_col: Name of the time column (optional)
+        panel_cols: List of panel column names for panel data (optional)
+
+    Returns:
+        DataFrame containing detected observations with publication delay information
+
+    Raises:
+        ValueError: If invalid parameters are provided
+    """
     # Validation des arguments
     # Validation des jeux de données
     new_data = _validate_input_data(data=new_data, time_col=time_col, panel_cols=panel_cols)
-    existing_data = _validate_input_data(data=existing_data, time_col=time_col, panel_cols=panel_cols)
+    if existing_data is not None:
+        existing_data = _validate_input_data(data=existing_data, time_col=time_col, panel_cols=panel_cols)
+    
     # Validation de la date de téléchargement
-    download_date = _parse_download_date(download_date=download_date)
+    if download_date is None:
+        download_date = datetime.now()
+    download_date = resolve_date(date=download_date)
+    
     # Validation du point de référence
     if reference_point not in ['start', 'end']:
         raise ValueError("reference_point must be 'start' or 'end'")
@@ -82,114 +113,120 @@ def _validate_input_data(data: pd.DataFrame, time_col: Optional[str] = None, pan
 
     return data_validated
 
-# /!\ Voir si n'est util qu'ici où s'il est préférable de faire une fonction plus générique de parsing de date dans utils
-# Méthode auxiliaire de conversion et de validation de la date de téléchargement
-def _parse_download_date(download_date: Union[str, datetime]) -> datetime:
-    """Parse and validate download date.
 
-    Args:
-        download_date: Date as string or datetime
-
-    Returns:
-        Validated download date
-
-    Raises:
-        ValueError: If date cannot be parsed
-    """
-    if isinstance(download_date, str):
-        try:
-            return pd.to_datetime(download_date).to_pydatetime()
-        except:
-            raise ValueError(f"Invalid date format: {download_date}")
-    elif isinstance(download_date, datetime):
-        return download_date
-    else:
-        raise ValueError("download_date must be a string or datetime")
-
-
-# Méthode auxiliaire d'identification des nouvelles observations
-def _identify_new_observations(new_data: pd.DataFrame, existing_data: pd.DataFrame, detection_mode: str = 'new_only') -> pd.DataFrame:
+# Fonction auxiliaire d'identification des nouvelles observations
+def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[pd.DataFrame] = None, detection_mode: str = 'new_only') -> pd.DataFrame:
     """Identify new or changed observations.
+
+    When existing_data is provided, compares the two DataFrames to identify changes.
+    When existing_data is None, identifies the most recent non-null observation for
+    each variable (and each panel entity if panel data).
 
     Args:
         new_data: New data DataFrame
-        existing_data: Existing data DataFrame
-        detection_mode: 'new_only' or 'all_changes'
+        existing_data: Existing data DataFrame for comparison. If None, identifies the
+            most recent non-null observation for each variable/entity
+        detection_mode: 'new_only' or 'all_changes'. Only used when existing_data is provided
 
     Returns:
-        DataFrame containing only new or changed observations
+        DataFrame containing only new or changed observations with columns 'column' and 'has_changes'
     """
-    # Vérification que les deux DataFrames ont des colonnes en commun
-    common_columns = list(set(new_data.columns).intersection(set(existing_data.columns)))
+    # Cas où existing_data n'est pas fourni : identification des observations les plus récentes
+    if existing_data is None:
+        # Initialisation de la liste des résultats
+        results = []
+        
+        # Obtention des niveaux d'index (pour distinguer time vs panel)
+        is_panel = isinstance(new_data, pd.MultiIndex)
+        
+        # Identification des colonnes de valeurs (exclure les niveaux d'index)
+        value_columns = [col for col in new_data.columns]
+        
+        # Traitement selon la structure des données (panel ou non)
+        if is_panel:
+            # Cas panel data : l'index est multi-niveau (entités + temps)
+            # Groupement par toutes les dimensions sauf la dernière (qui est le temps)
+            panel_levels = list(range(new_data.index.nlevels - 1))
+            
+            # Parcours des colonnes
+            for col in value_columns:
+                # Pour chaque colonne, groupement par entité et identification de la dernière observation non-nulle
+                grouped = new_data.groupby(level=panel_levels)
+                # Parcours des groupes
+                for _, group_data in grouped:
+                    # Filtre des valeurs non-nulles
+                    non_null_mask = group_data[col].notna()
+                    non_null_data = group_data[non_null_mask]
+                    
+                    # Si des observations non-nulles existent, extraction de la plus récente
+                    if len(non_null_data) > 0:
+                        last_idx = non_null_data.index[-1]  # Dernière observation (données triées)
+                        results.append({
+                            'index': last_idx,
+                            'column': col,
+                            'has_changes': True
+                        })
+        else:
+            # Cas série temporelle simple : l'index est uni-niveau (temps uniquement)
+            for col in value_columns:
+                # Filtre des valeurs non-nulles
+                non_null_mask = new_data[col].notna()
+                non_null_data = new_data[non_null_mask]
+                
+                # Si des observations non-nulles existent, extraction de la plus récente
+                if len(non_null_data) > 0:
+                    last_idx = non_null_data.index[-1]  # Dernière observation (données triées)
+                    results.append({
+                        'index': last_idx,
+                        'column': col,
+                        'has_changes': True
+                    })
+        
+        # Création du DataFrame de résultats
+        if results:
+            df_changes = pd.DataFrame(results)
+            df_changes = df_changes.set_index('index')
+            df_changes.index.names = new_data.index.names
+        else:
+            # Aucune observation non-nulle trouvée
+            df_changes = pd.DataFrame(columns=['column', 'has_changes'])
+            df_changes.index.names = new_data.index.names
+        
+        return df_changes
+    else :
+        # Cas où existing_data est fourni : comportement existant
+        # Vérification que les deux DataFrames ont des colonnes en commun
+        common_columns = list(set(new_data.columns).intersection(set(existing_data.columns)))
 
-    # Aucune colonne commune, toutes les observations sont nouvelles
-    # if not common_data_cols:
-    #     return self._format_observations_output(new_data, data_cols)
+        # Restriction aux colonnes communes
+        new_common_data = new_data[common_columns]
+        existing_common_data = existing_data[common_columns]
 
-    # Restriction aux colonnes communes
-    new_common_data = new_data[common_columns]
-    existing_common_data = existing_data[common_columns]
+        # Alignement des DataFrames sur l'index commun
+        aligned_new, aligned_existing = new_common_data.align(existing_common_data, fill_value=np.nan)
 
-    # Alignement des DataFrames sur l'index commun
-    aligned_new, aligned_existing = new_common_data.align(existing_common_data, fill_value=np.nan)
+        # Création des masques booléens pour les valeurs nulles
+        new_isnull = aligned_new.isnull()
+        existing_isnull = aligned_existing.isnull()
 
-    # Création des masques booléens pour les valeurs nulles
-    new_isnull = aligned_new.isnull()
-    existing_isnull = aligned_existing.isnull()
+        # Détection des changements
+        if detection_mode == 'new_only':
+            # Détection uniquement des valeurs null → non-null
+            # Condition: valeur existante était null ET nouvelle valeur n'est pas null
+            changes_mask = existing_isnull & ~new_isnull
+        else:  # 'all_changes'
+            # Détection de tous les changements (null → non-null ET valeur → nouvelle valeur)
+            # Condition: (ancien null ET nouveau non-null) OU (valeurs différentes)
+            changes_mask = (existing_isnull & ~new_isnull) | (
+                ~new_isnull & ~existing_isnull & (aligned_new != aligned_existing)
+            )
 
-    # Détection des changements
-    if detection_mode == 'new_only':
-        # Détection uniquement des valeurs null → non-null
-        # Condition: valeur existante était null ET nouvelle valeur n'est pas null
-        changes_mask = existing_isnull & ~new_isnull
-    else:  # 'all_changes'
-        # Détection de tous les changements (null → non-null ET valeur → nouvelle valeur)
-        # Condition: (ancien null ET nouveau non-null) OU (valeurs différentes)
-        changes_mask = (existing_isnull & ~new_isnull) | (
-            ~new_isnull & ~existing_isnull & (aligned_new != aligned_existing)
-        )
+        # Mise en forme du jeu de données
+        df_changes = pd.melt(changes_mask, var_name="column", value_name="has_changes", ignore_index=False)
+        # Filtre sur les changements
+        df_changes = df_changes.loc[df_changes["has_changes"]]
 
-    # Mise en forme du jeu de données
-    df_changes = pd.melt(changes_mask, var_name="column", value_name="has_changes", ignore_index=False)
-    # Filtre sur les changements
-    df_changes = df_changes.loc[df_changes["has_changes"]]
-
-    return df_changes
-    # # Identification des observations avec des changements
-    # changed_observations = []
-
-    # # Parcours des lignes avec changements
-    # for idx, row_changes in changes_mask.iterrows():
-    #     if row_changes.any():  # S'il y a au moins un changement dans cette ligne
-    #         # Récupération des valeurs d'index (panel + time)
-    #         if isinstance(idx, tuple):
-    #             index_values = dict(zip(id_cols, idx))
-    #         else:
-    #             index_values = {id_cols[0]: idx}
-
-    #         # Parcours des colonnes avec changements
-    #         for col in row_changes[row_changes].index:
-    #             new_value = aligned_new.loc[idx, col]
-
-    #             # Ignore les valeurs NaN dans les nouvelles données
-    #             if pd.isna(new_value):
-    #                 continue
-
-    #             # Création de l'observation
-    #             obs_dict = {
-    #                 **index_values,
-    #                 'indicator_name': col,
-    #                 'value': new_value
-    #             }
-    #             changed_observations.append(obs_dict)
-
-    # # Conversion en DataFrame
-    # if changed_observations:
-    #     return pd.DataFrame(changed_observations)
-    # else:
-    #     # Retour d'un DataFrame vide avec les bonnes colonnes
-    #     empty_cols = id_cols + ['indicator_name', 'value']
-    #     return pd.DataFrame(columns=empty_cols)
+        return df_changes
 
 
 # Fonction de calcul des délais de publication
