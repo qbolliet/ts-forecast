@@ -25,6 +25,8 @@ from sklearn.utils.metadata_routing import (
     process_routing,
     _routing_enabled,
 )
+from sklearn.utils.validation import check_memory, check_is_fitted
+from sklearn.utils._user_interface import _print_elapsed_time
 
 
 # Fonctions utilitaires pour la détection des transformateurs XY
@@ -106,7 +108,6 @@ class XYPipeline(Pipeline):
         classes_: The classes labels (only if final estimator is a classifier).
         n_features_in_: Number of features seen during fit.
         feature_names_in_: Names of features seen during fit.
-        y_transformer_indices_: List of step indices that transform y.
 
     Example:
         >>> from sklearn.preprocessing import StandardScaler
@@ -133,7 +134,6 @@ class XYPipeline(Pipeline):
         - XY transformers MUST implement fit_transform to properly pass y.
         - When calling transform(X) without y, XY transformers receive y=None.
         - inverse_transform works in reverse order and handles both X and y.
-        - The pipeline tracks which steps transform y via y_transformer_indices_.
         - Metadata routing is supported (sklearn >= 1.4 required).
     """
 
@@ -159,7 +159,6 @@ class XYPipeline(Pipeline):
         super().__init__(steps, memory=memory, transform_input=transform_input, verbose=verbose)
         # Instanciation des attributs
         self.preserve_dataframe = preserve_dataframe
-        self._y_transformers: list[int] = []
 
     # Sauvegarde des métadonnées pandas pour restauration ultérieure
     def _save_pandas_metadata(self, X, y=None):
@@ -232,59 +231,122 @@ class XYPipeline(Pipeline):
         # Retourne X sinon
         return X_out
 
+    # Gestion des métadonnées pour transform_input
+    def _get_metadata_for_step(self, *, step_idx, step_params, all_params):
+        """Get params (metadata) for step, transforming if required.
+
+        If a param in step_params is included in transform_input,
+        it will be transformed by the sub-pipeline up to this step.
+
+        Args:
+            step_idx: Index of the step in the pipeline.
+            step_params: Routed parameters for this step.
+            all_params: All parameters passed by the user.
+
+        Returns:
+            Parameters to be passed to the step.
+        """
+        # Cas où aucune transformation n'est nécessaire
+        if (
+            self.transform_input is None
+            or not all_params
+            or not step_params
+            or step_idx == 0
+        ):
+            return step_params
+
+        # Création du sub-pipeline jusqu'à ce step
+        sub_pipeline = self[:step_idx]
+
+        transformed_params = {}
+        transformed_cache = {}
+
+        for method, method_params in step_params.items():
+            transformed_params[method] = {}
+            if not isinstance(method_params, dict):
+                transformed_params[method] = method_params
+                continue
+
+            for param_name, param_value in method_params.items():
+                if param_name in self.transform_input:
+                    # Transformation via le sub-pipeline avec cache
+                    if param_name not in transformed_cache:
+                        if isinstance(param_value, tuple):
+                            transformed_cache[param_name] = tuple(
+                                sub_pipeline.transform(elem) for elem in param_value
+                            )
+                        else:
+                            transformed_cache[param_name] = sub_pipeline.transform(
+                                param_value
+                            )
+                    transformed_params[method][param_name] = transformed_cache[param_name]
+                else:
+                    transformed_params[method][param_name] = param_value
+
+        return transformed_params
+
     # Apprentissage et transformation des données
-    def _fit(self, X, y=None, routed_params=None):
+    def _fit(self, X, y=None, routed_params=None, raw_params=None):
         """Fit the pipeline and transform X (and optionally y).
 
         Args:
             X: Training data.
             y: Training targets.
             routed_params: Parameters routed to steps.
+            raw_params: Raw parameters passed by user (for transform_input).
 
         Returns:
             Tuple of (X_transformed, y_transformed).
         """
-        # Copie des étapes
+        # Copie et validation des étapes (comme sklearn)
         self.steps = list(self.steps)
-        # Validation des étapes
         self._validate_steps()
 
-        # Sauvegarde des métadonnées pandas
+        # Setup du cache mémoire (comme sklearn)
+        memory = check_memory(self.memory)
+
+        # Sauvegarde des métadonnées pandas (spécifique XYPipeline)
         self._save_pandas_metadata(X, y)
 
         if routed_params is None:
             routed_params = {}
 
-        # Réinitialisation de la liste des transformateurs y
-        self._y_transformers = []
+        Xt, yt = X, y
 
-        Xt = X
-        yt = y
-
-        # Itération sur tous les steps sauf le dernier
-        for step_idx in range(len(self.steps) - 1):
-            name, transformer = self.steps[step_idx]
-
-            # Skip des steps passthrough
+        # Itération sur les steps intermédiaires (comme sklearn)
+        for step_idx, name, transformer in self._iter(
+            with_final=False, filter_passthrough=False
+        ):
             if transformer is None or transformer == "passthrough":
-                continue
+                with _print_elapsed_time("Pipeline", self._log_message(step_idx)):
+                    continue
 
-            # Clonage du transformateur
-            cloned_transformer = clone(transformer)
+            # Cloning conditionnel (comme sklearn)
+            # Ne clone pas si le caching est désactivé pour préserver la compatibilité
+            if hasattr(memory, "location") and memory.location is None:
+                cloned_transformer = transformer
+            else:
+                cloned_transformer = clone(transformer)
 
-            # Récupération des paramètres routés pour ce step
-            fit_params = routed_params.get(name, {}).get("fit", {})
-            transform_params = routed_params.get(name, {}).get("transform", {})
-
-            # Fit et transformation
-            result = self._fit_transform_step(
-                cloned_transformer, Xt, yt, fit_params, transform_params, step_idx
+            # Récupération des paramètres pour ce step
+            step_params = self._get_metadata_for_step(
+                step_idx=step_idx,
+                step_params=routed_params.get(name, {}),
+                all_params=raw_params,
             )
+
+            fit_params = step_params.get("fit", {})
+            transform_params = step_params.get("transform", {})
+
+            # Fit et transformation avec timing verbose
+            with _print_elapsed_time("Pipeline", self._log_message(step_idx)):
+                result = self._fit_transform_step(
+                    cloned_transformer, Xt, yt, fit_params, transform_params, step_idx
+                )
 
             # Gestion du résultat (tuple ou valeur simple)
             if isinstance(result, tuple) and len(result) == 2:
                 Xt, yt = result
-                self._y_transformers.append(step_idx)
             else:
                 Xt = result
 
@@ -407,26 +469,40 @@ class XYPipeline(Pipeline):
         Returns:
             self: The fitted pipeline.
         """
+        # Validation de transform_input (comme sklearn)
+        if not _routing_enabled() and self.transform_input is not None:
+            raise ValueError(
+                "The `transform_input` parameter can only be set if metadata "
+                "routing is enabled. You can enable metadata routing using "
+                "`sklearn.set_config(enable_metadata_routing=True)`."
+            )
+
         # Routage des paramètres
         routed_params = self._route_params("fit", params)
 
         # Fit et transformation des steps intermédiaires
-        Xt, yt = self._fit(X, y, routed_params)
+        Xt, yt = self._fit(X, y, routed_params, raw_params=params)
 
-        # Fit de l'estimateur final
+        # Fit de l'estimateur final avec verbose
         last_step_idx = len(self.steps) - 1
         name, final_estimator = self.steps[last_step_idx]
 
-        if final_estimator is not None and final_estimator != "passthrough":
-            cloned_final = clone(final_estimator)
-            fit_params = routed_params.get(name, {}).get("fit", {})
+        with _print_elapsed_time("Pipeline", self._log_message(last_step_idx)):
+            if final_estimator is not None and final_estimator != "passthrough":
+                cloned_final = clone(final_estimator)
+                last_step_params = self._get_metadata_for_step(
+                    step_idx=last_step_idx,
+                    step_params=routed_params.get(name, {}),
+                    all_params=params,
+                )
+                fit_params = last_step_params.get("fit", {})
 
-            try:
-                cloned_final.fit(Xt, yt, **fit_params)
-            except TypeError:
-                cloned_final.fit(Xt, **fit_params)
+                try:
+                    cloned_final.fit(Xt, yt, **fit_params)
+                except TypeError:
+                    cloned_final.fit(Xt, **fit_params)
 
-            self.steps[last_step_idx] = (name, cloned_final)
+                self.steps[last_step_idx] = (name, cloned_final)
 
         return self
 
@@ -443,46 +519,63 @@ class XYPipeline(Pipeline):
             X_transformed if y was not transformed by any step.
             (X_transformed, y_transformed) if at least one step transformed y.
         """
+        # Validation de transform_input (comme sklearn)
+        if not _routing_enabled() and self.transform_input is not None:
+            raise ValueError(
+                "The `transform_input` parameter can only be set if metadata "
+                "routing is enabled. You can enable metadata routing using "
+                "`sklearn.set_config(enable_metadata_routing=True)`."
+            )
+
         # Routage des paramètres
         routed_params = self._route_params("fit_transform", params)
 
         # Fit et transformation des steps intermédiaires
-        Xt, yt = self._fit(X, y, routed_params)
+        Xt, yt = self._fit(X, y, routed_params, raw_params=params)
+
+        # Tracking local de la transformation de y
+        y_was_transformed = (y is not None) and (yt is not y)
 
         # Traitement du dernier step s'il est un transformer
         last_step_idx = len(self.steps) - 1
         name, final_estimator = self.steps[last_step_idx]
 
-        if final_estimator is not None and final_estimator != "passthrough":
-            cloned_final = clone(final_estimator)
-            fit_params = routed_params.get(name, {}).get("fit", {})
-            transform_params = routed_params.get(name, {}).get("transform", {})
-
-            # Vérification si c'est un transformer
-            if hasattr(cloned_final, "fit_transform") or hasattr(
-                cloned_final, "transform"
-            ):
-                result = self._fit_transform_step(
-                    cloned_final, Xt, yt, fit_params, transform_params, last_step_idx
+        with _print_elapsed_time("Pipeline", self._log_message(last_step_idx)):
+            if final_estimator is not None and final_estimator != "passthrough":
+                cloned_final = clone(final_estimator)
+                last_step_params = self._get_metadata_for_step(
+                    step_idx=last_step_idx,
+                    step_params=routed_params.get(name, {}),
+                    all_params=params,
                 )
+                fit_params = last_step_params.get("fit", {})
+                transform_params = last_step_params.get("transform", {})
 
-                if isinstance(result, tuple) and len(result) == 2:
-                    Xt, yt = result
-                    self._y_transformers.append(last_step_idx)
+                # Vérification si c'est un transformer
+                if hasattr(cloned_final, "fit_transform") or hasattr(
+                    cloned_final, "transform"
+                ):
+                    result = self._fit_transform_step(
+                        cloned_final, Xt, yt, fit_params, transform_params, last_step_idx
+                    )
+
+                    if isinstance(result, tuple) and len(result) == 2:
+                        Xt, yt = result
+                        y_was_transformed = True
+                    else:
+                        Xt = result
+
+                    self.steps[last_step_idx] = (name, cloned_final)
                 else:
-                    Xt = result
-
-                self.steps[last_step_idx] = (name, cloned_final)
-            else:
-                # Estimateur final sans transform
-                try:
-                    cloned_final.fit(Xt, yt, **fit_params)
-                except TypeError:
-                    cloned_final.fit(Xt, **fit_params)
-                self.steps[last_step_idx] = (name, cloned_final)
+                    # Estimateur final sans transform
+                    try:
+                        cloned_final.fit(Xt, yt, **fit_params)
+                    except TypeError:
+                        cloned_final.fit(Xt, **fit_params)
+                    self.steps[last_step_idx] = (name, cloned_final)
 
         # Restauration de la structure pandas si nécessaire
-        if self._y_transformers and yt is not None:
+        if y_was_transformed and yt is not None:
             return self._restore_pandas_output(Xt, yt)
         return self._restore_pandas_output(Xt, None)
 
@@ -500,6 +593,9 @@ class XYPipeline(Pipeline):
             X_transformed if y is None or no step transforms y.
             (X_transformed, y_transformed) if y is provided and transformed.
         """
+        # Vérification que le pipeline est fitted
+        check_is_fitted(self)
+
         # Routage des paramètres
         routed_params = self._route_params("transform", params)
 
@@ -540,6 +636,9 @@ class XYPipeline(Pipeline):
             X_inverse if y is None or no step inverse transforms y.
             (X_inverse, y_inverse) if y is provided and inverse transformed.
         """
+        # Vérification que le pipeline est fitted
+        check_is_fitted(self)
+
         # Routage des paramètres
         routed_params = self._route_params("inverse_transform", params)
 
@@ -587,6 +686,9 @@ class XYPipeline(Pipeline):
         Returns:
             Predictions from the final estimator.
         """
+        # Vérification que le pipeline est fitted
+        check_is_fitted(self)
+
         # Routage des paramètres
         routed_params = self._route_params("predict", params)
 
@@ -623,6 +725,9 @@ class XYPipeline(Pipeline):
         Returns:
             Probability predictions from the final estimator.
         """
+        # Vérification que le pipeline est fitted
+        check_is_fitted(self)
+
         # Routage des paramètres
         routed_params = self._route_params("predict_proba", params)
 
@@ -661,6 +766,9 @@ class XYPipeline(Pipeline):
         Returns:
             Decision function output from the final estimator.
         """
+        # Vérification que le pipeline est fitted
+        check_is_fitted(self)
+
         # Routage des paramètres
         routed_params = self._route_params("decision_function", params)
 
@@ -700,6 +808,9 @@ class XYPipeline(Pipeline):
         Returns:
             Score from the final estimator.
         """
+        # Vérification que le pipeline est fitted
+        check_is_fitted(self)
+
         # Routage des paramètres
         routed_params = self._route_params("score", params)
 
@@ -881,30 +992,3 @@ class XYPipeline(Pipeline):
 
         return router
 
-    # Propriétés et accesseurs
-    # Indices des steps qui transforment y
-    @property
-    def y_transformer_indices_(self) -> list[int]:
-        """Indices of steps that transform y.
-
-        Returns:
-            List of step indices (0-based) that transformed y during fit.
-        """
-        if not hasattr(self, "_y_transformers"):
-            raise AttributeError(
-                "y_transformer_indices_ is not available before fitting."
-            )
-        return self._y_transformers
-
-    # Récupération des transformateurs de y
-    def get_y_transformers(self) -> list[tuple[str, Any]]:
-        """Get the transformers that modify y.
-
-        Returns:
-            List of (name, transformer) tuples for steps that transform y.
-        """
-        if not hasattr(self, "_y_transformers"):
-            raise AttributeError(
-                "Pipeline must be fitted before accessing y transformers."
-            )
-        return [(self.steps[i][0], self.steps[i][1]) for i in self._y_transformers]
