@@ -5,17 +5,16 @@ qui peut gérer les transformateurs avec les signatures suivantes :
 - Standard : transform(X) -> X_t
 - XY transformateurs : transform(X, y) -> (X_t, y_t)
 
-Le pipeline est entièrement compatible avec GridSearchCV de sklearn,
-le metadata routing (sklearn >= 1.4), et les pandas DataFrames.
+Le pipeline est entièrement compatible avec GridSearchCV de sklearn
 """
-
-from __future__ import annotations
-
+# Importation des modules
+# Modules de base
 import inspect
 from typing import Any, Literal
-
+# manipulation de données
 import numpy as np
 import pandas as pd
+# Sklearn
 from sklearn import get_config
 from sklearn.base import clone, TransformerMixin, BaseEstimator
 from sklearn.pipeline import Pipeline
@@ -28,43 +27,8 @@ from sklearn.utils.metadata_routing import (
 )
 
 
-# =============================================================================
 # Fonctions utilitaires pour la détection des transformateurs XY
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-# Vérification si un transformateur supporte la signature transform(X, y)
-# -----------------------------------------------------------------------------
-def _is_xy_transformer(transformer: Any) -> bool:
-    """Check if a transformer supports transform(X, y) -> (X_t, y_t) signature.
-
-    Args:
-        transformer: A fitted or unfitted transformer object.
-
-    Returns:
-        True if the transformer's transform method accepts y as a parameter
-        and it's not just for sklearn compatibility.
-    """
-    # Vérification de l'existence de la méthode transform
-    if not hasattr(transformer, "transform"):
-        return False
-
-    # Inspection de la signature
-    sig = inspect.signature(transformer.transform)
-    params = list(sig.parameters.values())
-
-    # Recherche du paramètre y sans valeur par défaut
-    for param in params[1:]:  # Skip self/X
-        if param.name == "y":
-            if param.default is inspect.Parameter.empty:
-                return True
-            return False
-    return False
-
-
-# -----------------------------------------------------------------------------
-# Vérification si une méthode accepte y comme paramètre
-# -----------------------------------------------------------------------------
+# Vérification qu'une méthode accepte y comme paramètre
 def _accepts_y_param(transformer: Any, method_name: str) -> bool:
     """Check if a method accepts y as a parameter.
 
@@ -78,17 +42,21 @@ def _accepts_y_param(transformer: Any, method_name: str) -> bool:
     # Vérification de l'existence de la méthode
     if not hasattr(transformer, method_name):
         return False
-
+    
+    # Extraction de la méthode
     method = getattr(transformer, method_name)
+
+    # Inspection de la signature
     try:
         sig = inspect.signature(method)
     except (ValueError, TypeError):
         return False
-
+    
+    # Extraction des paramètres de la signature
     params = list(sig.parameters.values())
 
-    # Recherche du paramètre y positionnel
-    for param in params[1:]:  # Skip self/X
+    # Recherche du paramètre y
+    for param in params[1:]:  # Ignore self/X
         if param.name == "y":
             if param.kind in (
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -98,37 +66,7 @@ def _accepts_y_param(transformer: Any, method_name: str) -> bool:
     return False
 
 
-# -----------------------------------------------------------------------------
-# Vérification si un résultat est un tuple (X, y)
-# -----------------------------------------------------------------------------
-def _check_xy_output(result: Any) -> tuple[bool, Any, Any]:
-    """Check if a transform result is an (X, y) tuple.
-
-    Args:
-        result: Output from a transform call.
-
-    Returns:
-        Tuple of (is_xy_tuple, X_transformed, y_transformed).
-    """
-    if isinstance(result, tuple) and len(result) == 2:
-        X_t, y_t = result
-        # Vérification avec numpy arrays
-        if isinstance(X_t, np.ndarray) and isinstance(y_t, np.ndarray):
-            return True, X_t, y_t
-        # Vérification avec pandas
-        if isinstance(X_t, (pd.DataFrame, pd.Series)) or isinstance(
-            y_t, (pd.DataFrame, pd.Series)
-        ):
-            return True, X_t, y_t
-        # Vérification avec attribut shape
-        if hasattr(X_t, "shape") and hasattr(y_t, "shape"):
-            return True, X_t, y_t
-    return False, result, None
-
-
-# -----------------------------------------------------------------------------
-# Vérification de l'existence d'un attribut sur l'estimateur final
-# -----------------------------------------------------------------------------
+# Fonction auxiliaire de vérification de l'existence d'un attribut sur l'estimateur final de la pipeline
 def _final_estimator_has(attr: str):
     """Check if the final estimator has a given attribute."""
     def check(self):
@@ -139,78 +77,8 @@ def _final_estimator_has(attr: str):
     return check
 
 
-# =============================================================================
-# Fonctions de conversion pandas
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-# Conversion vers DataFrame
-# -----------------------------------------------------------------------------
-def _convert_to_dataframe(
-    X: Any,
-    feature_names: list[str] | None = None,
-    index: Any = None,
-) -> Any:
-    """Convert array-like to DataFrame if pandas is available.
-
-    Args:
-        X: Input data.
-        feature_names: Column names for the DataFrame.
-        index: Index for the DataFrame.
-
-    Returns:
-        DataFrame if pandas is available, otherwise the input.
-    """
-    if isinstance(X, pd.DataFrame):
-        return X
-
-    if isinstance(X, np.ndarray):
-        df = pd.DataFrame(X)
-        if feature_names is not None and len(feature_names) == X.shape[1]:
-            df.columns = feature_names
-        if index is not None:
-            df.index = index
-        return df
-
-    return X
-
-
-# -----------------------------------------------------------------------------
-# Conversion vers Series
-# -----------------------------------------------------------------------------
-def _convert_to_series(
-    y: Any,
-    name: str | None = None,
-    index: Any = None,
-) -> Any:
-    """Convert array-like to Series if pandas is available.
-
-    Args:
-        y: Input data.
-        name: Name for the Series.
-        index: Index for the Series.
-
-    Returns:
-        Series if pandas is available, otherwise the input.
-    """
-    if isinstance(y, pd.Series):
-        return y
-
-    if isinstance(y, np.ndarray) and y.ndim == 1:
-        series = pd.Series(y, name=name)
-        if index is not None:
-            series.index = index
-        return series
-
-    return y
-
-
-# =============================================================================
-# Classe XYPipeline
-# =============================================================================
-# Pipeline étendu qui supporte les transformateurs retournant (X, y)
-# Compatible avec GridSearchCV, cross_val_score, et le metadata routing
-
+# Pipeline étendu qui supporte les transformers retournant (X, y).
+# Compatible avec GridSearchCV, cross_val_score, et le metadata routing.
 class XYPipeline(Pipeline):
     """Pipeline that supports transformers returning (X_transformed, y_transformed).
 
@@ -269,9 +137,7 @@ class XYPipeline(Pipeline):
         - Metadata routing is supported (sklearn >= 1.4 required).
     """
 
-    # -------------------------------------------------------------------------
     # Initialisation du pipeline
-    # -------------------------------------------------------------------------
     def __init__(
         self,
         steps: list,
@@ -292,9 +158,7 @@ class XYPipeline(Pipeline):
         self.preserve_dataframe = preserve_dataframe
         self._y_transformers: list[int] = []
 
-    # -------------------------------------------------------------------------
     # Sauvegarde des métadonnées pandas pour restauration ultérieure
-    # -------------------------------------------------------------------------
     def _save_pandas_metadata(self, X, y=None):
         """Save pandas metadata for later restoration.
 
@@ -322,9 +186,7 @@ class XYPipeline(Pipeline):
             self._y_name = None
             self._y_index = None
 
-    # -------------------------------------------------------------------------
     # Restauration de la structure pandas après transformation
-    # -------------------------------------------------------------------------
     def _restore_pandas_output(self, X, y=None, restore_X=True, restore_y=True):
         """Restore pandas structure to outputs if applicable.
 
@@ -364,9 +226,7 @@ class XYPipeline(Pipeline):
             return X_out, y_out
         return X_out
 
-    # -------------------------------------------------------------------------
-    # Méthode interne _fit : apprentissage et transformation des données
-    # -------------------------------------------------------------------------
+    # Apprentissage et transformation des données
     def _fit(self, X, y=None, routed_params=None):
         """Fit the pipeline and transform X (and optionally y).
 
@@ -425,9 +285,7 @@ class XYPipeline(Pipeline):
 
         return Xt, yt
 
-    # -------------------------------------------------------------------------
     # Fit et transformation d'un step individuel
-    # -------------------------------------------------------------------------
     def _fit_transform_step(
         self, transformer, X, y, fit_params, transform_params, step_idx
     ):
@@ -470,9 +328,7 @@ class XYPipeline(Pipeline):
 
             return self._transform_step(transformer, X, y, transform_params)
 
-    # -------------------------------------------------------------------------
     # Transformation d'un step individuel
-    # -------------------------------------------------------------------------
     def _transform_step(self, transformer, X, y, transform_params=None):
         """Transform a single step, handling XY transformers.
 
@@ -499,9 +355,7 @@ class XYPipeline(Pipeline):
         # Transformation standard (X seulement)
         return transformer.transform(X, **transform_params)
 
-    # -------------------------------------------------------------------------
     # Transformation inverse d'un step individuel
-    # -------------------------------------------------------------------------
     def _inverse_transform_step(self, transformer, X, y, params=None):
         """Inverse transform a single step, handling XY transformers.
 
@@ -528,9 +382,7 @@ class XYPipeline(Pipeline):
         # Transformation inverse standard
         return transformer.inverse_transform(X, **params)
 
-    # -------------------------------------------------------------------------
-    # Méthode fit : apprentissage du pipeline
-    # -------------------------------------------------------------------------
+    # Apprentissage du pipeline
     def fit(self, X, y=None, **params):
         """Fit the pipeline.
 
@@ -570,9 +422,7 @@ class XYPipeline(Pipeline):
 
         return self
 
-    # -------------------------------------------------------------------------
-    # Méthode fit_transform : apprentissage et transformation combinés
-    # -------------------------------------------------------------------------
+    # Apprentissage et transformation combinés
     def fit_transform(self, X, y=None, **params):
         """Fit and transform the data.
 
@@ -628,9 +478,7 @@ class XYPipeline(Pipeline):
             return self._restore_pandas_output(Xt, yt)
         return self._restore_pandas_output(Xt, None)
 
-    # -------------------------------------------------------------------------
-    # Méthode transform : transformation des données
-    # -------------------------------------------------------------------------
+    # Transformation des données
     def transform(self, X, y=None, **params):
         """Transform the data.
 
@@ -671,9 +519,7 @@ class XYPipeline(Pipeline):
             return self._restore_pandas_output(Xt, yt)
         return self._restore_pandas_output(Xt, None)
 
-    # -------------------------------------------------------------------------
-    # Méthode inverse_transform : transformation inverse des données
-    # -------------------------------------------------------------------------
+    # Transformation inverse des données
     def inverse_transform(self, X, y=None, **params):
         """Inverse transform the data.
 
@@ -720,9 +566,7 @@ class XYPipeline(Pipeline):
             return Xt, yt
         return Xt
 
-    # -------------------------------------------------------------------------
-    # Méthode predict : transformation et prédiction
-    # -------------------------------------------------------------------------
+    # Transformation et prédiction
     @available_if(_final_estimator_has("predict"))
     def predict(self, X, y=None, **params):
         """Transform and predict.
@@ -758,20 +602,18 @@ class XYPipeline(Pipeline):
         predict_params = routed_params.get(self.steps[-1][0], {}).get("predict", {})
         return self.steps[-1][1].predict(Xt, **predict_params)
 
-    # -------------------------------------------------------------------------
-    # Méthode predict_proba : transformation et prédiction de probabilités
-    # -------------------------------------------------------------------------
+    # Prédiction de probabilités
     @available_if(_final_estimator_has("predict_proba"))
     def predict_proba(self, X, y=None, **params):
-        """Transform and predict probabilities.
+        """Transform and predict_proba.
 
         Args:
             X: Data to transform and predict.
             y: Optional y for XY transformers during transform.
-            **params: Parameters passed to predict_proba of final estimator.
+            **params: Parameters passed to predict_proba of the final estimator.
 
         Returns:
-            Probability predictions.
+            Probability predictions from the final estimator.
         """
         # Routage des paramètres
         routed_params = self._route_params("predict_proba", params)
@@ -792,26 +634,24 @@ class XYPipeline(Pipeline):
             else:
                 Xt = result
 
-        # Prédiction de probabilités
+        # Prédiction avec l'estimateur final
         predict_params = routed_params.get(self.steps[-1][0], {}).get(
             "predict_proba", {}
         )
         return self.steps[-1][1].predict_proba(Xt, **predict_params)
 
-    # -------------------------------------------------------------------------
-    # Méthode decision_function : transformation et fonction de décision
-    # -------------------------------------------------------------------------
+    # Fonction de décision
     @available_if(_final_estimator_has("decision_function"))
     def decision_function(self, X, y=None, **params):
-        """Transform and apply decision_function.
+        """Transform and decision_function.
 
         Args:
             X: Data to transform.
             y: Optional y for XY transformers during transform.
-            **params: Parameters passed to decision_function of final estimator.
+            **params: Parameters passed to decision_function of the final estimator.
 
         Returns:
-            Decision function output.
+            Decision function output from the final estimator.
         """
         # Routage des paramètres
         routed_params = self._route_params("decision_function", params)
@@ -832,24 +672,22 @@ class XYPipeline(Pipeline):
             else:
                 Xt = result
 
-        # Fonction de décision
-        dec_params = routed_params.get(self.steps[-1][0], {}).get(
+        # Decision function avec l'estimateur final
+        df_params = routed_params.get(self.steps[-1][0], {}).get(
             "decision_function", {}
         )
-        return self.steps[-1][1].decision_function(Xt, **dec_params)
+        return self.steps[-1][1].decision_function(Xt, **df_params)
 
-    # -------------------------------------------------------------------------
-    # Méthode score : transformation et scoring
-    # -------------------------------------------------------------------------
+    # Calcul du score
     @available_if(_final_estimator_has("score"))
     def score(self, X, y=None, sample_weight=None, **params):
         """Transform and score.
 
         Args:
             X: Data to transform and score.
-            y: Targets for both transformation and scoring.
+            y: Targets for scoring.
             sample_weight: Sample weights for scoring.
-            **params: Additional parameters.
+            **params: Parameters passed to score of the final estimator.
 
         Returns:
             Score from the final estimator.
@@ -880,13 +718,8 @@ class XYPipeline(Pipeline):
 
         return self.steps[-1][1].score(Xt, yt, **score_params)
 
-    # =========================================================================
-    # Gestion du routage des paramètres (metadata routing sklearn >= 1.4)
-    # =========================================================================
-
-    # -------------------------------------------------------------------------
+    # Gestion du routage des paramètres
     # Routage des paramètres vers les steps
-    # -------------------------------------------------------------------------
     def _route_params(self, method: str, params: dict) -> dict:
         """Route parameters to steps based on method and routing configuration.
 
@@ -906,9 +739,7 @@ class XYPipeline(Pipeline):
             # Fallback vers le routage par syntaxe dunder
             return self._route_params_dunder(method, params)
 
-    # -------------------------------------------------------------------------
     # Routage via metadata routing de sklearn
-    # -------------------------------------------------------------------------
     def _route_params_metadata_routing(self, method: str, params: dict) -> dict:
         """Route parameters using sklearn's metadata routing system.
 
@@ -947,9 +778,7 @@ class XYPipeline(Pipeline):
             # Fallback vers le routage dunder
             return self._route_params_dunder(method, params)
 
-    # -------------------------------------------------------------------------
     # Routage via syntaxe dunder (step__param)
-    # -------------------------------------------------------------------------
     def _route_params_dunder(self, method: str, params: dict) -> dict:
         """Route parameters using dunder (__) syntax.
 
@@ -996,9 +825,7 @@ class XYPipeline(Pipeline):
 
         return routed
 
-    # -------------------------------------------------------------------------
     # Configuration du metadata routing pour sklearn
-    # -------------------------------------------------------------------------
     def get_metadata_routing(self):
         """Get metadata routing configuration.
 
@@ -1046,13 +873,8 @@ class XYPipeline(Pipeline):
 
         return router
 
-    # =========================================================================
     # Propriétés et accesseurs
-    # =========================================================================
-
-    # -------------------------------------------------------------------------
-    # Propriété y_transformer_indices_ : indices des steps qui transforment y
-    # -------------------------------------------------------------------------
+    # Indices des steps qui transforment y
     @property
     def y_transformer_indices_(self) -> list[int]:
         """Indices of steps that transform y.
@@ -1066,9 +888,7 @@ class XYPipeline(Pipeline):
             )
         return self._y_transformers
 
-    # -------------------------------------------------------------------------
-    # Méthode get_y_transformers : récupération des transformateurs de y
-    # -------------------------------------------------------------------------
+    # Récupération des transformateurs de y
     def get_y_transformers(self) -> list[tuple[str, Any]]:
         """Get the transformers that modify y.
 
