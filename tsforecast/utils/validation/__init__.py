@@ -6,11 +6,18 @@ uniqueness checks, and proper index configuration.
 """
 
 # Import des fonctions de validation temporelle
-from .validation import validate_temporal_data, restore_original_structure
+from .utils import (
+    validate_temporal_data,
+    restore_original_structure,
+    validate_entities_grouped,
+    validate_sorted_within_groups,
+)
 
 
 __all__ = [
     # Fonctions de validation
-    'validate_temporal_data',
-    'restore_original_structure'
+    "validate_temporal_data",
+    "restore_original_structure",
+    "validate_entities_grouped",
+    "validate_sorted_within_groups",
 ]
