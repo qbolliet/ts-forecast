@@ -142,6 +142,7 @@ class XYPipeline(Pipeline):
         self,
         steps: list,
         *,
+        transform_input=None,
         memory=None,
         verbose: bool = False,
         preserve_dataframe: bool = True,
@@ -152,9 +153,11 @@ class XYPipeline(Pipeline):
             steps: List of (name, transform) tuples.
             memory: Caching directory or joblib.Memory object.
             verbose: If True, print fitting times.
-            preserve_dataframe: If True, preserve pandas DataFrame structure.
+            preserve_dataframe: If True, preserve pandas DataFrame structure when possible.
         """
-        super().__init__(steps, memory=memory, verbose=verbose)
+        # Initialisation du parent
+        super().__init__(steps, memory=memory, transform_input=transform_input, verbose=verbose)
+        # Instanciation des attributs
         self.preserve_dataframe = preserve_dataframe
         self._y_transformers: list[int] = []
 
@@ -199,9 +202,11 @@ class XYPipeline(Pipeline):
         Returns:
             Restored X, y (or just X if y is None).
         """
+        # Vérification que la structure de DataFrame doit être préservée
         if not self.preserve_dataframe:
             return (X, y) if y is not None else X
 
+        # Initialisation des output à transformer
         X_out = X
         y_out = y
 
@@ -221,9 +226,10 @@ class XYPipeline(Pipeline):
                 y_out = pd.Series(y, name=self._y_name)
                 if self._y_index is not None and len(y) == len(self._y_index):
                     y_out.index = self._y_index
-
+        # Retourne X et y si y est spécifié
         if y is not None:
             return X_out, y_out
+        # Retourne X sinon
         return X_out
 
     # Apprentissage et transformation des données
@@ -238,7 +244,9 @@ class XYPipeline(Pipeline):
         Returns:
             Tuple of (X_transformed, y_transformed).
         """
+        # Copie des étapes
         self.steps = list(self.steps)
+        # Validation des étapes
         self._validate_steps()
 
         # Sauvegarde des métadonnées pandas
