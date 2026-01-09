@@ -2,7 +2,7 @@
 
 import pytest
 import pandas as pd
-from tsforecast.utils.frequency.parser import (
+from tsforecast.frequency import (
     detect_and_parse_frequency,
     build_frequency_string
 )

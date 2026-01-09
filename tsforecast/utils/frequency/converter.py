@@ -4,10 +4,8 @@ This module provides the FrequencyConverter class to handle conversions between
 different time frequencies using pandas built-in functionality (asfreq and resample).
 """
 # Importation des modules
-import re
 import pandas as pd
-import numpy as np
-from typing import Union, Optional, Literal, Dict, Any, Tuple, List
+from typing import Union, Optional, Literal, Dict, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
 # Import de la classe parente
@@ -16,7 +14,7 @@ from ..abc.converter import TemporalConverter
 # Import des utilitaires de fréquence
 from .normalizer import FrequencyType, UserFrequencyType
 from .utils import normalize_frequency, is_higher_frequency, get_frequency_order
-from .. import validate_temporal_data
+from ..validation import validate_temporal_data
 
 # Import de l'utilitaire de gestion des positions
 from ..position.normalizer import PeriodPositionNormalizer

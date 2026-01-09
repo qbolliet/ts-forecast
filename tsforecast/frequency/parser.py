@@ -10,9 +10,9 @@ import pandas as pd
 from typing import Tuple, Optional
 
 # Importation des modules du package
-from tsforecast.frequency.detector import detect_frequency
-from .utils import normalize_frequency
-from tsforecast.utils.position import combine_frequency_position
+from .detector import detect_frequency
+from ..utils.frequency.utils import normalize_frequency
+from ..utils.position import combine_frequency_position
 
 
 # Fonction de détection et de parsing de la fréquence d'un index

@@ -20,8 +20,10 @@ from sklearn.utils.validation import check_is_fitted
 
 # Importation des modules du package
 from tsforecast.utils.frequency import (
-    normalize_frequency, 
-    is_higher_frequency, 
+    normalize_frequency,
+    is_higher_frequency
+)
+from tsforecast.frequency import (
     detect_and_parse_frequency,
     build_frequency_string
 )
