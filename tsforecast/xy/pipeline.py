@@ -10,18 +10,15 @@ Le pipeline est entièrement compatible avec GridSearchCV de sklearn
 # Importation des modules
 # Modules de base
 import inspect
-from typing import Any, Literal
+from typing import Any
 # manipulation de données
 import numpy as np
 import pandas as pd
 # Sklearn
-from sklearn import get_config
-from sklearn.base import clone, TransformerMixin, BaseEstimator
+from sklearn.base import clone, _fit_context
 from sklearn.pipeline import Pipeline
 from sklearn.utils.metaestimators import available_if
 from sklearn.utils.metadata_routing import (
-    MetadataRouter,
-    MethodMapping,
     process_routing,
     _routing_enabled,
 )
@@ -231,60 +228,6 @@ class XYPipeline(Pipeline):
         # Retourne X sinon
         return X_out
 
-    # Gestion des métadonnées pour transform_input
-    def _get_metadata_for_step(self, *, step_idx, step_params, all_params):
-        """Get params (metadata) for step, transforming if required.
-
-        If a param in step_params is included in transform_input,
-        it will be transformed by the sub-pipeline up to this step.
-
-        Args:
-            step_idx: Index of the step in the pipeline.
-            step_params: Routed parameters for this step.
-            all_params: All parameters passed by the user.
-
-        Returns:
-            Parameters to be passed to the step.
-        """
-        # Cas où aucune transformation n'est nécessaire
-        if (
-            self.transform_input is None
-            or not all_params
-            or not step_params
-            or step_idx == 0
-        ):
-            return step_params
-
-        # Création du sub-pipeline jusqu'à ce step
-        sub_pipeline = self[:step_idx]
-
-        transformed_params = {}
-        transformed_cache = {}
-
-        for method, method_params in step_params.items():
-            transformed_params[method] = {}
-            if not isinstance(method_params, dict):
-                transformed_params[method] = method_params
-                continue
-
-            for param_name, param_value in method_params.items():
-                if param_name in self.transform_input:
-                    # Transformation via le sub-pipeline avec cache
-                    if param_name not in transformed_cache:
-                        if isinstance(param_value, tuple):
-                            transformed_cache[param_name] = tuple(
-                                sub_pipeline.transform(elem) for elem in param_value
-                            )
-                        else:
-                            transformed_cache[param_name] = sub_pipeline.transform(
-                                param_value
-                            )
-                    transformed_params[method][param_name] = transformed_cache[param_name]
-                else:
-                    transformed_params[method][param_name] = param_value
-
-        return transformed_params
-
     # Méthode d'entrainement de l'estimateur et de transformation des données
     def _fit(self, X, y=None, routed_params=None, raw_params=None):
         """Fit the pipeline and transform X (and optionally y).
@@ -311,7 +254,7 @@ class XYPipeline(Pipeline):
         if routed_params is None:
             routed_params = {}
 
-        # Initalisation des X et y transformés à leurs valeurs initiales
+        # Initialisation des X et y transformés à leurs valeurs initiales
         Xt, yt = X, y
 
         # Itération sur les steps intermédiaires
@@ -323,7 +266,7 @@ class XYPipeline(Pipeline):
                 with _print_elapsed_time("Pipeline", self._log_message(step_idx)):
                     continue
 
-            # Cloning conditionnel
+            # Clonage conditionnel
             # Ne clone pas si le caching est désactivé pour préserver la compatibilité
             if hasattr(memory, "location") and memory.location is None:
                 cloned_transformer = transformer
@@ -337,15 +280,16 @@ class XYPipeline(Pipeline):
                 all_params=raw_params,
             )
 
-            # Extraction des paramètres d'entraînement et de transformation
-            fit_params = step_params.get("fit", {})
-            transform_params = step_params.get("transform", {})
-
-            # Fit et transformation avec timing verbose
-            with _print_elapsed_time("Pipeline", self._log_message(step_idx)):
-                result = self._fit_transform_step(
-                    cloned_transformer, Xt, yt, fit_params, transform_params, step_idx
-                )
+            # Fit et transformation
+            result, fitted_transformer = self._fit_transform_step(
+                cloned_transformer,
+                Xt,
+                yt,
+                weight=None,
+                message_clsname="Pipeline",
+                message=self._log_message(step_idx),
+                params=step_params,
+            )
 
             # Gestion du résultat (tuple ou valeur simple)
             if isinstance(result, tuple) and len(result) == 2:
@@ -354,13 +298,14 @@ class XYPipeline(Pipeline):
                 Xt = result
 
             # Mise à jour du step avec le transformateur fitté
-            self.steps[step_idx] = (name, cloned_transformer)
+            self.steps[step_idx] = (name, fitted_transformer)
 
         return Xt, yt
 
     # Fit et transformation d'un step individuel
     def _fit_transform_step(
-        self, transformer, X, y, fit_params, transform_params, step_idx
+        self, transformer, X, y, weight=None,
+        message_clsname="", message=None, params=None
     ):
         """Fit and transform a single step, handling XY transformers.
 
@@ -368,38 +313,48 @@ class XYPipeline(Pipeline):
             transformer: The transformer to fit.
             X: Input features.
             y: Input targets.
-            fit_params: Parameters for fit.
-            transform_params: Parameters for transform.
-            step_idx: Index of the current step.
+            weight: Weight to apply to result (for FeatureUnion compatibility).
+            message_clsname: Class name for timing message.
+            message: Timing message.
+            params: Routed parameters dict with keys 'fit', 'transform', 'fit_transform'.
 
         Returns:
-            X_transformed or (X_transformed, y_transformed).
+            Tuple (result, transformer) where result is X_t or (X_t, y_t).
         """
-        if hasattr(transformer, "fit_transform"):
-            # Tentative de fit_transform avec y
-            if _accepts_y_param(transformer, "fit_transform") and y is not None:
-                try:
-                    all_params = {**fit_params, **transform_params}
-                    result = transformer.fit_transform(X, y, **all_params)
-                    return result
-                except TypeError:
-                    pass
+        # Initialisation des paramètres
+        if params is None:
+            params = {}
 
-            # Fallback : fit puis transform
-            try:
-                transformer.fit(X, y, **fit_params)
-            except TypeError:
-                transformer.fit(X, **fit_params)
+        with _print_elapsed_time(message_clsname, message):
+            if hasattr(transformer, "fit_transform"):
+                # Utilisation de fit_transform avec y si supporté
+                if _accepts_y_param(transformer, "fit_transform") and y is not None:
+                    result = transformer.fit_transform(
+                        X, y, **params.get("fit_transform", {})
+                    )
+                else:
+                    result = transformer.fit_transform(
+                        X, **params.get("fit_transform", {})
+                    )
+            else:
+                # Fallback : fit puis transform
+                if _accepts_y_param(transformer, "fit") and y is not None:
+                    transformer.fit(X, y, **params.get("fit", {}))
+                else:
+                    transformer.fit(X, **params.get("fit", {}))
 
-            return self._transform_step(transformer, X, y, transform_params)
-        else:
-            # Pas de fit_transform, utilisation de fit puis transform
-            try:
-                transformer.fit(X, y, **fit_params)
-            except TypeError:
-                transformer.fit(X, **fit_params)
+                result = self._transform_step(
+                    transformer, X, y, params.get("transform", {})
+                )
 
-            return self._transform_step(transformer, X, y, transform_params)
+        # Gestion du poids (compatibilité FeatureUnion)
+        if weight is not None:
+            if isinstance(result, tuple):
+                result = (result[0] * weight, result[1])
+            else:
+                result = result * weight
+
+        return result, transformer
 
     # Transformation d'un step individuel
     def _transform_step(self, transformer, X, y, transform_params=None):
@@ -414,16 +369,13 @@ class XYPipeline(Pipeline):
         Returns:
             X_transformed or (X_transformed, y_transformed).
         """
+        # Initialisation des paramètres
         if transform_params is None:
             transform_params = {}
 
-        # Tentative de transformation avec y
+        # Transformation avec y si supporté
         if _accepts_y_param(transformer, "transform") and y is not None:
-            try:
-                result = transformer.transform(X, y, **transform_params)
-                return result
-            except TypeError:
-                pass
+            return transformer.transform(X, y, **transform_params)
 
         # Transformation standard (X seulement)
         return transformer.transform(X, **transform_params)
@@ -441,22 +393,19 @@ class XYPipeline(Pipeline):
         Returns:
             X_original or (X_original, y_original).
         """
-        # Initialisation des paramètres sous forme de dictionnaire
+        # Initialisation des paramètres
         if params is None:
             params = {}
 
-        # Tentative de transformation inverse avec y
+        # Transformation inverse avec y si supporté
         if _accepts_y_param(transformer, "inverse_transform") and y is not None:
-            try:
-                result = transformer.inverse_transform(X, y, **params)
-                return result
-            except TypeError:
-                pass
+            return transformer.inverse_transform(X, y, **params)
 
         # Transformation inverse standard
         return transformer.inverse_transform(X, **params)
 
     # Apprentissage du pipeline
+    @_fit_context(prefer_skip_nested_validation=False)
     def fit(self, X, y=None, **params):
         """Fit the pipeline.
 
@@ -482,41 +431,32 @@ class XYPipeline(Pipeline):
             )
 
         # Routage des paramètres
-        routed_params = self._route_params("fit", params)
+        routed_params = self._check_method_params(method="fit", props=params)
 
         # Fit et transformation des steps intermédiaires
         Xt, yt = self._fit(X, y, routed_params, raw_params=params)
 
         # Fit de l'estimateur final avec verbose
-        last_step_idx = len(self.steps) - 1
-        name, final_estimator = self.steps[last_step_idx]
-
-        with _print_elapsed_time("Pipeline", self._log_message(last_step_idx)):
-            # Vérification que l'estimateur final est spécifié
-            if final_estimator is not None and final_estimator != "passthrough":
-                # Clone e l'estimateur final
-                cloned_final = clone(final_estimator)
+        with _print_elapsed_time("Pipeline", self._log_message(len(self.steps) - 1)):
+            if self._final_estimator != "passthrough":
                 # Extraction des paramètres de la dernière étape
                 last_step_params = self._get_metadata_for_step(
-                    step_idx=last_step_idx,
-                    step_params=routed_params.get(name, {}),
+                    step_idx=len(self) - 1,
+                    step_params=routed_params[self.steps[-1][0]],
                     all_params=params,
                 )
-                # Extraction des paramètres d'entrainement
-                fit_params = last_step_params.get("fit", {})
 
-                # Entraînement
-                try:
-                    cloned_final.fit(Xt, yt, **fit_params)
-                except TypeError:
-                    cloned_final.fit(Xt, **fit_params)
-
-                # Ajout à l'étape
-                self.steps[last_step_idx] = (name, cloned_final)
+                # Entraînement avec y si supporté
+                if _accepts_y_param(self._final_estimator, "fit") and yt is not None:
+                    self._final_estimator.fit(Xt, yt, **last_step_params["fit"])
+                else:
+                    self._final_estimator.fit(Xt, **last_step_params["fit"])
 
         return self
 
     # Apprentissage et transformation combinés
+    @available_if(Pipeline._can_fit_transform)
+    @_fit_context(prefer_skip_nested_validation=False)
     def fit_transform(self, X, y=None, **params):
         """Fit and transform the data.
 
@@ -538,51 +478,64 @@ class XYPipeline(Pipeline):
             )
 
         # Routage des paramètres
-        routed_params = self._route_params("fit_transform", params)
+        routed_params = self._check_method_params(method="fit_transform", props=params)
 
         # Fit et transformation des steps intermédiaires
         Xt, yt = self._fit(X, y, routed_params, raw_params=params)
 
-        # Tracking local de la transformation de y
+        # Suivi de la transformation de y
         y_was_transformed = (y is not None) and (yt is not y)
 
-        # Traitement du dernier step s'il est un transformer
-        last_step_idx = len(self.steps) - 1
-        name, final_estimator = self.steps[last_step_idx]
-
-        with _print_elapsed_time("Pipeline", self._log_message(last_step_idx)):
-            if final_estimator is not None and final_estimator != "passthrough":
-                cloned_final = clone(final_estimator)
+        # Traitement du dernier step
+        last_step = self._final_estimator
+        with _print_elapsed_time("Pipeline", self._log_message(len(self.steps) - 1)):
+            if last_step == "passthrough":
+                pass
+            elif hasattr(last_step, "fit_transform") or hasattr(last_step, "transform"):
+                # Extraction des paramètres de la dernière étape
                 last_step_params = self._get_metadata_for_step(
-                    step_idx=last_step_idx,
-                    step_params=routed_params.get(name, {}),
+                    step_idx=len(self) - 1,
+                    step_params=routed_params[self.steps[-1][0]],
                     all_params=params,
                 )
-                fit_params = last_step_params.get("fit", {})
-                transform_params = last_step_params.get("transform", {})
 
-                # Vérification si c'est un transformer
-                if hasattr(cloned_final, "fit_transform") or hasattr(
-                    cloned_final, "transform"
-                ):
-                    result = self._fit_transform_step(
-                        cloned_final, Xt, yt, fit_params, transform_params, last_step_idx
+                # Fit et transformation du dernier step (timing déjà géré dans _fit_transform_step)
+                # Mais ici on utilise le timing externe pour cohérence avec l'original
+                if _accepts_y_param(last_step, "fit_transform") and yt is not None:
+                    result = last_step.fit_transform(
+                        Xt, yt, **last_step_params.get("fit_transform", {})
+                    )
+                elif hasattr(last_step, "fit_transform"):
+                    result = last_step.fit_transform(
+                        Xt, **last_step_params.get("fit_transform", {})
+                    )
+                else:
+                    # fit puis transform
+                    if _accepts_y_param(last_step, "fit") and yt is not None:
+                        last_step.fit(Xt, yt, **last_step_params.get("fit", {}))
+                    else:
+                        last_step.fit(Xt, **last_step_params.get("fit", {}))
+                    result = self._transform_step(
+                        last_step, Xt, yt, last_step_params.get("transform", {})
                     )
 
-                    if isinstance(result, tuple) and len(result) == 2:
-                        Xt, yt = result
-                        y_was_transformed = True
-                    else:
-                        Xt = result
-
-                    self.steps[last_step_idx] = (name, cloned_final)
+                # Gestion du résultat
+                if isinstance(result, tuple) and len(result) == 2:
+                    Xt, yt = result
+                    y_was_transformed = True
                 else:
-                    # Estimateur final sans transform
-                    try:
-                        cloned_final.fit(Xt, yt, **fit_params)
-                    except TypeError:
-                        cloned_final.fit(Xt, **fit_params)
-                    self.steps[last_step_idx] = (name, cloned_final)
+                    Xt = result
+            else:
+                # Estimateur final sans transform (fit seulement)
+                last_step_params = self._get_metadata_for_step(
+                    step_idx=len(self) - 1,
+                    step_params=routed_params[self.steps[-1][0]],
+                    all_params=params,
+                )
+                if _accepts_y_param(last_step, "fit") and yt is not None:
+                    last_step.fit(Xt, yt, **last_step_params.get("fit", {}))
+                else:
+                    last_step.fit(Xt, **last_step_params.get("fit", {}))
 
         # Restauration de la structure pandas si nécessaire
         if y_was_transformed and yt is not None:
@@ -590,6 +543,7 @@ class XYPipeline(Pipeline):
         return self._restore_pandas_output(Xt, None)
 
     # Transformation des données
+    @available_if(Pipeline._can_transform)
     def transform(self, X, y=None, **params):
         """Transform the data.
 
@@ -606,8 +560,8 @@ class XYPipeline(Pipeline):
         # Vérification que le pipeline est fitted
         check_is_fitted(self)
 
-        # Routage des paramètres
-        routed_params = self._route_params("transform", params)
+        # Routage des paramètres via process_routing
+        routed_params = process_routing(self, "transform", **params)
 
         # Initialisation des éléments transformés
         Xt = X
@@ -615,12 +569,12 @@ class XYPipeline(Pipeline):
         y_was_transformed = False
 
         # Itération sur tous les steps
-        for step_idx, name, transformer in self._iter():
+        for _, name, transformer in self._iter():
             # Vérification que le transformer est spécifié
             if transformer is None or transformer == "passthrough":
                 continue
             # Extraction des paramètres de transformation
-            transform_params = routed_params.get(name, {}).get("transform", {})
+            transform_params = routed_params[name].transform
             # Transformation
             result = self._transform_step(transformer, Xt, yt, transform_params)
 
@@ -637,6 +591,7 @@ class XYPipeline(Pipeline):
         return self._restore_pandas_output(Xt, None)
 
     # Transformation inverse des données
+    @available_if(Pipeline._can_inverse_transform)
     def inverse_transform(self, X, y=None, **params):
         """Inverse transform the data.
 
@@ -652,8 +607,8 @@ class XYPipeline(Pipeline):
         # Vérification que le pipeline est fitted
         check_is_fitted(self)
 
-        # Routage des paramètres
-        routed_params = self._route_params("inverse_transform", params)
+        # Routage des paramètres via process_routing
+        routed_params = process_routing(self, "inverse_transform", **params)
 
         # Initialisation des éléments transformés
         Xt = X
@@ -669,14 +624,8 @@ class XYPipeline(Pipeline):
             if transformer is None or transformer == "passthrough":
                 continue
 
-            # Vérification de l'existence de inverse_transform
-            if not hasattr(transformer, "inverse_transform"):
-                raise TypeError(
-                    f"Transformer '{name}' does not have inverse_transform method."
-                )
-
             # Extraction des paramètres de la transformation inverse
-            inv_params = routed_params.get(name, {}).get("inverse_transform", {})
+            inv_params = routed_params[name].inverse_transform
             # Transformation inverse
             result = self._inverse_transform_step(transformer, Xt, yt, inv_params)
 
@@ -707,8 +656,8 @@ class XYPipeline(Pipeline):
         # Vérification que le pipeline est fitted
         check_is_fitted(self)
 
-        # Routage des paramètres
-        routed_params = self._route_params("predict", params)
+        # Routage des paramètres via process_routing
+        routed_params = process_routing(self, "predict", **params)
 
         # Initialisation des éléments transformés
         Xt = X
@@ -721,7 +670,7 @@ class XYPipeline(Pipeline):
                 continue
 
             # Extraction des paramètres de transformation
-            transform_params = routed_params.get(name, {}).get("transform", {})
+            transform_params = routed_params[name].transform
             # Transformation
             result = self._transform_step(transformer, Xt, yt, transform_params)
 
@@ -732,8 +681,9 @@ class XYPipeline(Pipeline):
                 Xt = result
 
         # Prédiction avec l'estimateur final
-        predict_params = routed_params.get(self.steps[-1][0], {}).get("predict", {})
-        return self.steps[-1][1].predict(Xt, **predict_params)
+        return self.steps[-1][1].predict(
+            Xt, **routed_params[self.steps[-1][0]].predict
+        )
 
     # Prédiction de probabilités
     @available_if(_final_estimator_has("predict_proba"))
@@ -751,8 +701,8 @@ class XYPipeline(Pipeline):
         # Vérification que le pipeline est fitted
         check_is_fitted(self)
 
-        # Routage des paramètres
-        routed_params = self._route_params("predict_proba", params)
+        # Routage des paramètres via process_routing
+        routed_params = process_routing(self, "predict_proba", **params)
 
         # Initialisation des éléments transformés
         Xt = X
@@ -764,10 +714,10 @@ class XYPipeline(Pipeline):
             if transformer is None or transformer == "passthrough":
                 continue
             # Extraction des paramètres de transformation
-            transform_params = routed_params.get(name, {}).get("transform", {})
+            transform_params = routed_params[name].transform
             # Transformation
             result = self._transform_step(transformer, Xt, yt, transform_params)
-            
+
             # Gestion du résultat
             if isinstance(result, tuple) and len(result) == 2:
                 Xt, yt = result
@@ -775,10 +725,9 @@ class XYPipeline(Pipeline):
                 Xt = result
 
         # Prédiction avec l'estimateur final
-        predict_params = routed_params.get(self.steps[-1][0], {}).get(
-            "predict_proba", {}
+        return self.steps[-1][1].predict_proba(
+            Xt, **routed_params[self.steps[-1][0]].predict_proba
         )
-        return self.steps[-1][1].predict_proba(Xt, **predict_params)
 
     # Fonction de décision
     @available_if(_final_estimator_has("decision_function"))
@@ -796,8 +745,8 @@ class XYPipeline(Pipeline):
         # Vérification que le pipeline est fitted
         check_is_fitted(self)
 
-        # Routage des paramètres
-        routed_params = self._route_params("decision_function", params)
+        # Routage des paramètres via process_routing
+        routed_params = process_routing(self, "decision_function", **params)
 
         # Initialisation des éléments transformés
         Xt = X
@@ -805,11 +754,11 @@ class XYPipeline(Pipeline):
 
         # Transformation des steps intermédiaires
         for step_idx, name, transformer in self._iter(with_final=False):
-            # Vérification que le transformer est spécifé
+            # Vérification que le transformer est spécifié
             if transformer is None or transformer == "passthrough":
                 continue
             # Extraction des paramètres de transformation
-            transform_params = routed_params.get(name, {}).get("transform", {})
+            transform_params = routed_params[name].transform
             # Transformation
             result = self._transform_step(transformer, Xt, yt, transform_params)
 
@@ -819,11 +768,10 @@ class XYPipeline(Pipeline):
             else:
                 Xt = result
 
-        # onction de décision avec l'estimateur final
-        df_params = routed_params.get(self.steps[-1][0], {}).get(
-            "decision_function", {}
+        # Fonction de décision avec l'estimateur final
+        return self.steps[-1][1].decision_function(
+            Xt, **routed_params[self.steps[-1][0]].decision_function
         )
-        return self.steps[-1][1].decision_function(Xt, **df_params)
 
     # Calcul du score
     @available_if(_final_estimator_has("score"))
@@ -842,8 +790,10 @@ class XYPipeline(Pipeline):
         # Vérification que le pipeline est fitted
         check_is_fitted(self)
 
-        # Routage des paramètres
-        routed_params = self._route_params("score", params)
+        # Routage des paramètres via process_routing
+        routed_params = process_routing(
+            self, "score", sample_weight=sample_weight, **params
+        )
 
         # Initialisation des éléments transformés
         Xt = X
@@ -854,9 +804,9 @@ class XYPipeline(Pipeline):
             # Vérification que le transformer est spécifié
             if transformer is None or transformer == "passthrough":
                 continue
-            
+
             # Extraction des paramètres de transformation
-            transform_params = routed_params.get(name, {}).get("transform", {})
+            transform_params = routed_params[name].transform
             # Transformation
             result = self._transform_step(transformer, Xt, yt, transform_params)
 
@@ -866,166 +816,126 @@ class XYPipeline(Pipeline):
             else:
                 Xt = result
 
-        # Extraction des paramètres de scoring
-        score_params = routed_params.get(self.steps[-1][0], {}).get("score", {})
-        # Pondération si spécifié
-        if sample_weight is not None:
-            score_params["sample_weight"] = sample_weight
-        # Scoring
-        return self.steps[-1][1].score(Xt, yt, **score_params)
+        # Scoring avec l'estimateur final
+        return self.steps[-1][1].score(
+            Xt, yt, **routed_params[self.steps[-1][0]].score
+        )
 
-    # Gestion du routage des paramètres
-    # Routage des paramètres vers les steps
-    def _route_params(self, method: str, params: dict) -> dict:
-        """Route parameters to steps based on method and routing configuration.
-
-        Uses sklearn's metadata routing system (sklearn >= 1.4 required).
+    # Prédiction des log-probabilités
+    @available_if(_final_estimator_has("predict_log_proba"))
+    def predict_log_proba(self, X, y=None, **params):
+        """Transform and predict_log_proba.
 
         Args:
-            method: Name of the method (fit, transform, etc.).
-            params: Dictionary of parameters.
+            X: Data to transform and predict.
+            y: Optional y for XY transformers during transform.
+            **params: Parameters passed to predict_log_proba of the final estimator.
 
         Returns:
-            Dictionary mapping step names to their parameters by method.
+            Log probability predictions from the final estimator.
         """
-        # Vérification si le metadata routing est activé
-        if _routing_enabled():
-            return self._route_params_metadata_routing(method, params)
-        else:
-            # Fallback vers le routage par syntaxe dunder
-            return self._route_params_dunder(method, params)
+        # Vérification que le pipeline est fitted
+        check_is_fitted(self)
 
-    # Routage via metadata routing de sklearn
-    def _route_params_metadata_routing(self, method: str, params: dict) -> dict:
-        """Route parameters using sklearn's metadata routing system.
+        # Routage des paramètres via process_routing
+        routed_params = process_routing(self, "predict_log_proba", **params)
 
-        Args:
-            method: Name of the method.
-            params: Dictionary of parameters.
+        # Initialisation des éléments transformés
+        Xt = X
+        yt = y
 
-        Returns:
-            Dictionary mapping step names to their parameters.
-        """
-        if not params:
-            return {}
-
-        try:
-            # Utilisation de process_routing de sklearn
-            routed = process_routing(self, method, **params)
-
-            # Conversion au format attendu par nos méthodes
-            result = {}
-            for name, step_routing in routed.items():
-                if name == "router":
-                    continue
-                result[name] = {}
-                for method_name in ["fit", "transform", "predict", "score",
-                                   "inverse_transform", "predict_proba",
-                                   "decision_function"]:
-                    if hasattr(step_routing, method_name):
-                        result[name][method_name] = dict(
-                            getattr(step_routing, method_name)
-                        )
-                    else:
-                        result[name][method_name] = {}
-
-            return result
-        except Exception:
-            # Fallback vers le routage dunder
-            return self._route_params_dunder(method, params)
-
-    # Routage via syntaxe dunder (step__param)
-    def _route_params_dunder(self, method: str, params: dict) -> dict:
-        """Route parameters using dunder (__) syntax.
-
-        Args:
-            method: Name of the method.
-            params: Dictionary of parameters.
-
-        Returns:
-            Dictionary mapping step names to their parameters.
-        """
-        routed = {}
-
-        for key, value in params.items():
-            if "__" in key:
-                # Syntaxe step__param
-                step_name, param_name = key.split("__", 1)
-                if step_name not in routed:
-                    routed[step_name] = {
-                        "fit": {},
-                        "transform": {},
-                        "predict": {},
-                        "score": {},
-                        "inverse_transform": {},
-                        "predict_proba": {},
-                        "decision_function": {},
-                    }
-                # Routage vers toutes les méthodes par défaut
-                for m in routed[step_name]:
-                    routed[step_name][m][param_name] = value
-            else:
-                # Paramètre pour le dernier step
-                last_step_name = self.steps[-1][0]
-                if last_step_name not in routed:
-                    routed[last_step_name] = {
-                        "fit": {},
-                        "transform": {},
-                        "predict": {},
-                        "score": {},
-                        "inverse_transform": {},
-                        "predict_proba": {},
-                        "decision_function": {},
-                    }
-                routed[last_step_name][method][key] = value
-
-        return routed
-
-    # Configuration du metadata routing pour sklearn
-    def get_metadata_routing(self):
-        """Get metadata routing configuration.
-
-        Returns:
-            MetadataRouter configuration for this pipeline.
-        """
-        router = MetadataRouter(owner=self.__class__.__name__)
-
-        # Configuration du routage pour chaque step
-        for name, step in self.steps:
-            if step is None or step == "passthrough":
+        # Transformation des steps intermédiaires
+        for step_idx, name, transformer in self._iter(with_final=False):
+            # Vérification que le transformer est spécifié
+            if transformer is None or transformer == "passthrough":
                 continue
+            # Extraction des paramètres de transformation
+            transform_params = routed_params[name].transform
+            # Transformation
+            result = self._transform_step(transformer, Xt, yt, transform_params)
 
-            method_mapping = MethodMapping()
-
-            # Mapping des méthodes du pipeline vers les méthodes des steps
-            # fit -> fit, transform
-            method_mapping.add(caller="fit", callee="fit")
-            method_mapping.add(caller="fit", callee="transform")
-
-            # fit_transform -> fit, transform
-            method_mapping.add(caller="fit_transform", callee="fit")
-            method_mapping.add(caller="fit_transform", callee="transform")
-
-            # transform -> transform
-            method_mapping.add(caller="transform", callee="transform")
-
-            # inverse_transform -> inverse_transform
-            method_mapping.add(caller="inverse_transform", callee="inverse_transform")
-
-            # predict, score, etc. -> transform (pour les steps intermédiaires)
-            if step != self.steps[-1][1]:
-                method_mapping.add(caller="predict", callee="transform")
-                method_mapping.add(caller="predict_proba", callee="transform")
-                method_mapping.add(caller="decision_function", callee="transform")
-                method_mapping.add(caller="score", callee="transform")
+            # Gestion du résultat
+            if isinstance(result, tuple) and len(result) == 2:
+                Xt, yt = result
             else:
-                # Dernier step : mapping vers les méthodes correspondantes
-                method_mapping.add(caller="predict", callee="predict")
-                method_mapping.add(caller="predict_proba", callee="predict_proba")
-                method_mapping.add(caller="decision_function", callee="decision_function")
-                method_mapping.add(caller="score", callee="score")
+                Xt = result
 
-            router.add(method_mapping=method_mapping, **{name: step})
+        # Prédiction avec l'estimateur final
+        return self.steps[-1][1].predict_log_proba(
+            Xt, **routed_params[self.steps[-1][0]].predict_log_proba
+        )
 
-        return router
+    # Fit et prédiction combinés
+    @available_if(_final_estimator_has("fit_predict"))
+    @_fit_context(prefer_skip_nested_validation=False)
+    def fit_predict(self, X, y=None, **params):
+        """Fit the pipeline and predict with the final estimator.
 
+        Args:
+            X: Training data of shape (n_samples, n_features).
+            y: Training targets of shape (n_samples,) or (n_samples, n_targets).
+            **params: Parameters passed to fit_predict of the final estimator.
+
+        Returns:
+            Predictions from the final estimator.
+        """
+        # Validation de transform_input (comme sklearn)
+        if not _routing_enabled() and self.transform_input is not None:
+            raise ValueError(
+                "The `transform_input` parameter can only be set if metadata "
+                "routing is enabled. You can enable metadata routing using "
+                "`sklearn.set_config(enable_metadata_routing=True)`."
+            )
+
+        # Routage des paramètres
+        routed_params = self._check_method_params(method="fit_predict", props=params)
+
+        # Fit et transformation des steps intermédiaires
+        Xt, yt = self._fit(X, y, routed_params, raw_params=params)
+
+        # Extraction des paramètres du dernier step
+        last_step_params = routed_params[self.steps[-1][0]]
+
+        # Fit et prédiction avec l'estimateur final
+        with _print_elapsed_time("Pipeline", self._log_message(len(self.steps) - 1)):
+            y_pred = self._final_estimator.fit_predict(
+                Xt, yt, **last_step_params.get("fit_predict", {})
+            )
+
+        return y_pred
+
+    # Score des échantillons
+    @available_if(_final_estimator_has("score_samples"))
+    def score_samples(self, X, y=None):
+        """Transform and score_samples with the final estimator.
+
+        Args:
+            X: Data to transform and score.
+            y: Optional y for XY transformers during transform.
+
+        Returns:
+            Score samples from the final estimator.
+        """
+        # Vérification que le pipeline est fitted
+        check_is_fitted(self)
+
+        # Initialisation des éléments transformés
+        Xt = X
+        yt = y
+
+        # Transformation des steps intermédiaires
+        for step_idx, name, transformer in self._iter(with_final=False):
+            # Vérification que le transformer est spécifié
+            if transformer is None or transformer == "passthrough":
+                continue
+            # Transformation
+            result = self._transform_step(transformer, Xt, yt, {})
+
+            # Gestion du résultat
+            if isinstance(result, tuple) and len(result) == 2:
+                Xt, yt = result
+            else:
+                Xt = result
+
+        # Score des échantillons avec l'estimateur final
+        return self._final_estimator.score_samples(Xt)
