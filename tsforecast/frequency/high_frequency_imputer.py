@@ -3,17 +3,17 @@
 This module provides the HighFrequencyImputer class to impute high-frequency values
 for low-frequency series in mixed-frequency datasets using machine learning models.
 """
-
-from __future__ import annotations
-
+# Importation des modules
+# Modules de base
 import warnings
 from typing import Dict, List, Literal, Optional, Union, Any, Tuple
-
+# Manipulation de données
 import numpy as np
 import pandas as pd
+# Sklearn
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.utils.validation import check_is_fitted
-
+# Utilitaires du package
 from ..xy.transformers import XYTransformerMixin
 from ..utils.frequency.converter import FrequencyConverter
 from ..utils.frequency.utils import (
@@ -25,8 +25,7 @@ from .detector import FrequencyDetector, detect_frequency
 
 
 # Type aliases
-LowFreqHandling = Literal['interpolate', 'impute']
-VariableCategory = Literal['aggregate', 'interpolate', 'impute', 'target_freq']
+VariableCategory = Literal['aggregate', 'impute', 'target_freq']
 
 
 class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
@@ -102,167 +101,82 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
         ... )
         >>> imputed = imputer.fit_transform(df)
     """
-
+    # Initialisation
     def __init__(
         self,
         target_frequency: str,
+        estimator: Union[BaseEstimator, Dict[str, BaseEstimator]],
         additive_transformer: Optional[TransformerMixin] = None,
-        estimator: Union[BaseEstimator, Dict[str, BaseEstimator], None] = None,
-        low_frequency_handling: Optional[Dict[str, LowFreqHandling]] = None,
-        delays: Optional[pd.DataFrame] = None,
         impute_delayed_values: bool = False,
-        fit_per_entity: bool = False,
-        time_col: str = 'date',
-        panel_cols: Optional[List[str]] = None,
+        delays: Optional[pd.DataFrame] = None,
     ):
         """Initialize the HighFrequencyImputer."""
-        self.target_frequency = target_frequency
-        self.additive_transformer = additive_transformer
-        self.estimator = estimator
-        # Ne pas modifier les paramètres pour la compatibilité sklearn clone()
-        self.low_frequency_handling = low_frequency_handling
-        self.delays = delays
-        self.impute_delayed_values = impute_delayed_values
-        self.fit_per_entity = fit_per_entity
-        self.time_col = time_col
-        self.panel_cols = panel_cols
-
-    @property
-    def _freq_detector(self) -> FrequencyDetector:
-        """Lazy initialization of frequency detector."""
-        if not hasattr(self, '_freq_detector_cache'):
-            self._freq_detector_cache = FrequencyDetector()
-        return self._freq_detector_cache
-
-    @property
-    def _freq_converter(self) -> FrequencyConverter:
-        """Lazy initialization of frequency converter."""
-        if not hasattr(self, '_freq_converter_cache'):
-            self._freq_converter_cache = FrequencyConverter()
-        return self._freq_converter_cache
-
-    def _validate_parameters(self) -> None:
-        """Validate constructor parameters.
-
-        Raises:
-            ValueError: If parameters are invalid.
-        """
-        # Validation de target_frequency
+        # Validation des paramètres
+        # Validation de la fréquence cible
         try:
-            normalize_frequency(self.target_frequency)
+            target_frequency = normalize_frequency(target_frequency)
         except ValueError as e:
-            raise ValueError(f"Invalid target_frequency '{self.target_frequency}': {e}")
+            raise ValueError(f"Invalid target_frequency '{target_frequency}': {e}")
+        # Validation de l'estimateur (prévoir cas d'un estimateur de base et d'une pipeline)
+        # /!\ Faire un prompt pour effectuer cette vérification sur la base de méthodes
+        # # Cas où il s'agit d'un dictionnaire
+        # if isinstance(self.estimator, dict):
+        #     # Parcours des éléments du dictionnaire
+        #     for var_name, est in self.estimator.items():
+        #         # Test que chaque valeur est bien un estimateur
+        #         if not isinstance(est, BaseEstimator):
+        #             raise ValueError(
+        #                 f"Estimator for '{var_name}' must be a sklearn BaseEstimator, "
+        #                 f"got {type(est).__name__}"
+        #             )
+        # # Sinon il doit d'agit d'un estimateur
+        # elif not isinstance(self.estimator, BaseEstimator):
+        #     raise ValueError(
+        #         f"estimator must be a sklearn BaseEstimator or Dict[str, BaseEstimator], "
+        #         f"got {type(self.estimator).__name__}"
+        #     )
+        # # Validation du transformer additif
+        # if additive_transformer is not None:
 
-        # Validation de estimator
-        if self.estimator is not None:
-            if isinstance(self.estimator, dict):
-                for var_name, est in self.estimator.items():
-                    if not isinstance(est, BaseEstimator):
-                        raise ValueError(
-                            f"Estimator for '{var_name}' must be a sklearn BaseEstimator, "
-                            f"got {type(est).__name__}"
-                        )
-            elif not isinstance(self.estimator, BaseEstimator):
-                raise ValueError(
-                    f"estimator must be a sklearn BaseEstimator or Dict[str, BaseEstimator], "
-                    f"got {type(self.estimator).__name__}"
-                )
 
-        # Validation de low_frequency_handling
-        valid_strategies = {'interpolate', 'impute'}
-        low_freq_handling = self.low_frequency_handling or {}
-        for var_name, strategy in low_freq_handling.items():
-            if strategy not in valid_strategies:
-                raise ValueError(
-                    f"Invalid strategy '{strategy}' for variable '{var_name}'. "
-                    f"Must be one of {valid_strategies}"
-                )
-
-        # Validation de delays DataFrame
-        if self.delays is not None:
-            required_cols = {'variable', 'delay', 'unit', 'reference_point'}
-            missing_cols = required_cols - set(self.delays.columns)
+        # Validation des délais de publication
+        if delays is not None:
+            required_cols = ['variable', 'delay', 'unit', 'reference_point']
+            missing_cols = set(required_cols) - set(delays.columns)
             if missing_cols:
                 raise ValueError(
                     f"delays DataFrame missing required columns: {missing_cols}"
                 )
 
-    def _validate_fit_data(
-        self, X: pd.DataFrame, y: Optional[pd.Series] = None
-    ) -> pd.DataFrame:
-        """Validate and prepare data for fitting.
+        # Instanciation des attributs
+        self.target_frequency = target_frequency
+        self.additive_transformer = additive_transformer
+        self.estimator = estimator
+        self.delays = delays
+        self.impute_delayed_values = impute_delayed_values
 
-        Args:
-            X: Input features.
-            y: Target variable (optional).
+    # Détecteur de fréquence
+    @property
+    def _freq_detector(self) -> FrequencyDetector:
+        """Lazy initialization of frequency detector."""
+        # Initialisation d'une instance du détecteur de fréquence si elle n'existe pas déjà
+        if not hasattr(self, '_freq_detector_cache'):
+            self._freq_detector_cache = FrequencyDetector()
+        # Retourne cette instance
+        return self._freq_detector_cache
 
-        Returns:
-            Validated and prepared DataFrame.
+    # Convertisseur de fréquences
+    @property
+    def _freq_converter(self) -> FrequencyConverter:
+        """Lazy initialization of frequency converter."""
+        # Initialisation d'une instance du convertisseur de fréquence si elle n'existe pas déjà
+        if not hasattr(self, '_freq_converter_cache'):
+            self._freq_converter_cache = FrequencyConverter()
+        # Retourne cette instance
+        return self._freq_converter_cache
 
-        Raises:
-            ValueError: If data validation fails.
-        """
-        # Vérification du type
-        if not isinstance(X, pd.DataFrame):
-            raise ValueError(f"X must be a pandas DataFrame, got {type(X).__name__}")
-
-        # Vérification de l'index temporel
-        if not isinstance(X.index, pd.DatetimeIndex):
-            if self.time_col in X.columns:
-                X = X.set_index(self.time_col)
-            else:
-                raise ValueError(
-                    f"X must have a DatetimeIndex or a time column '{self.time_col}'"
-                )
-
-        # Vérification des panel_cols
-        if self.panel_cols:
-            missing_cols = set(self.panel_cols) - set(X.columns)
-            if missing_cols:
-                raise ValueError(f"Panel columns not found in X: {missing_cols}")
-
-        return X
-
-    def _detect_frequencies(self, X: pd.DataFrame) -> Dict[str, str]:
-        """Detect frequency for each column in the DataFrame.
-
-        Args:
-            X: Input DataFrame with DatetimeIndex.
-
-        Returns:
-            Dictionary mapping column names to detected frequencies.
-        """
-        frequencies = {}
-
-        # Colonnes à exclure (panel identifiers)
-        exclude_cols = set(self.panel_cols or [])
-
-        for col in X.columns:
-            if col in exclude_cols:
-                continue
-
-            try:
-                # Détection de la fréquence pour cette colonne
-                series = X[col].dropna()
-                if len(series) < 2:
-                    # Pas assez de données pour détecter la fréquence
-                    warnings.warn(
-                        f"Not enough data to detect frequency for column '{col}'"
-                    )
-                    continue
-
-                freq = detect_frequency(series, literal=False)
-                if freq:
-                    # Normalisation de la fréquence (extraction base sans position)
-                    freq_base = freq.split('-')[0]  # Supprime anchor comme -DEC
-                    if freq_base.endswith('S') or freq_base.endswith('E'):
-                        freq_base = freq_base[:-1]  # Supprime S/E
-                    frequencies[col] = normalize_frequency(freq_base)
-            except Exception as e:
-                warnings.warn(f"Could not detect frequency for column '{col}': {e}")
-
-        return frequencies
-
+    # Méthode auxiliaire de vérification que la fréquence cible est inférieure ou égale à la plus haute fréquence du jeu de données
+    # /!\ Faire un prompt pour utiliser judicieusement le résultat de détect_frequencies
     def _validate_target_frequency(self, detected_frequencies: Dict[str, str]) -> None:
         """Validate that target frequency is not higher than any data frequency.
 
@@ -272,17 +186,26 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
         Raises:
             ValueError: If target frequency is higher than any data frequency.
         """
-        target_freq_normalized = normalize_frequency(self.target_frequency)
+        # Pour être 
+        # Cas de données de séries temporelles
+        # Détermination de la colonne ayant la fréquence la plus élevée
 
+        # Comparaison avec la fréquence cible
+        
         for col, freq in detected_frequencies.items():
             # Vérifier si la fréquence cible est plus haute que la fréquence de la variable
-            if is_higher_frequency(target_freq_normalized, freq):
+            if is_higher_frequency(self.target_frequency, freq):
                 raise ValueError(
                     f"Target frequency '{self.target_frequency}' is higher than "
                     f"frequency '{freq}' of column '{col}'. Target frequency must be "
-                    f"equal to or lower than all data frequencies."
+                    f"equal to or lower than at least the frequency of one column."
                 )
+        # Cas de données de panel
+        # Détermination de la colonne ayant la fréquence la plus élevée pour chaque entité
 
+        # Comparaison avec la fréquence cible
+
+    # Méthode auxiliaire de classification des variables selon leur fréquence
     def _classify_variables(
         self, detected_frequencies: Dict[str, str]
     ) -> Dict[str, VariableCategory]:
