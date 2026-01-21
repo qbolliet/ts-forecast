@@ -12,6 +12,7 @@ from pandas.tseries.frequencies import to_offset
 
 # Import des utilitaires de fréquence
 from ..utils.frequency import to_literal, get_frequency_order, FrequencyType, UserFrequencyType
+from ..panel.utils import normalize_entity_key
 
 # Classe de détection de la fréquence d'une série temporelle
 class FrequencyDetector:
@@ -127,24 +128,6 @@ class FrequencyDetector:
         # Création d'une série temporelle simple avec l'index temporel
         return pd.Series(series.values, index=time_index)
 
-    # Méthode auxiliaire de création d'un identifiant de panel normalisé
-    def _create_panel_id(self, panel_values: Union[str, tuple], n_levels: int) -> Union[str, tuple]:
-        """Create a normalized panel identifier.
-
-        Args:
-            panel_values: Panel values (can be a string or a tuple)
-            n_levels: Number of panel levels
-
-        Returns:
-            Normalized identifier (string if 1 level, tuple otherwise)
-        """
-        if n_levels == 1:
-            # Si panel_values est déjà un tuple avec un seul élément, extraction de la valeur
-            return panel_values[0] if isinstance(panel_values, tuple) else panel_values
-        else:
-            # S'assure que c'est un tuple
-            return tuple(panel_values) if not isinstance(panel_values, tuple) else panel_values
-
     # Méthode auxiliaire d'extraction de la fréquence d'une colonne
     def _detect_column_frequency(self, series: pd.Series, literal: bool) -> Optional[Union[FrequencyType, UserFrequencyType]]:
         """Detect the frequency of a column (with automatic MultiIndex handling).
@@ -166,7 +149,7 @@ class FrequencyDetector:
             return None
 
     # Méthode de détection de la fréquence d'une série (simple ou avec MultiIndex)
-    def detect_frequency(self, series: pd.Series, literal: bool=False) -> Optional[Union[FrequencyType, UserFrequencyType, Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]]]:
+    def detect_frequency(self, series: pd.Series, literal: bool=False) -> Optional[Union[FrequencyType, UserFrequencyType, Dict[tuple, Union[FrequencyType, UserFrequencyType]]]]:
         """Detect the frequency of a series (simple or with MultiIndex for panel data).
 
         This method handles both simple time series and panel data with MultiIndex.
@@ -223,7 +206,7 @@ class FrequencyDetector:
         # Groupby sur les niveaux de panel et détection pour chaque groupe
         for panel_values, group_series in series.groupby(level=panel_levels):
             # Création de l'identifiant du panel normalisé
-            panel_id = self._create_panel_id(panel_values, len(panel_levels))
+            panel_id = normalize_entity_key(panel_values)
 
             # Extraction de la série temporelle simple et détection de la fréquence
             temp_series = self._extract_time_series_from_multiindex(group_series)
@@ -292,7 +275,7 @@ class FrequencyDetector:
             # Groupby par niveaux d'index
             for panel_values, group_df in df.groupby(level=panel_cols):
                 # Création de l'identifiant du panel
-                panel_id = self._create_panel_id(panel_values, len(panel_cols))
+                panel_id = normalize_entity_key(panel_values)
 
                 # Détection de la fréquence pour chaque colonne du groupe
                 for col in df.columns:
@@ -304,12 +287,12 @@ class FrequencyDetector:
                         # Détection de la fréquence
                         freq = self._detect_column_frequency(simple_series, literal)
                         if freq:
-                            frequency_map[(panel_id, col)] = freq
+                            frequency_map[panel_id + (col,)] = freq
         else:
             # Groupby par colonnes
             for panel_values, group_df in df.groupby(panel_cols):
                 # Création de l'identifiant du panel
-                panel_id = self._create_panel_id(panel_values, len(panel_cols))
+                panel_id = normalize_entity_key(panel_values)
 
                 # Détection de la fréquence pour chaque colonne du groupe
                 for col in df.columns:
@@ -317,7 +300,7 @@ class FrequencyDetector:
                         # Détection de la fréquence
                         freq = self._detect_column_frequency(group_df[col], literal)
                         if freq:
-                            frequency_map[(panel_id, col)] = freq
+                            frequency_map[panel_id + (col,)] = freq
 
         return frequency_map
 
