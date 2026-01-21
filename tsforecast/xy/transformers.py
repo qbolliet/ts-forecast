@@ -5,8 +5,13 @@ l'interface pour les transformateurs capables de transformer simultanément
 les features (X) et les targets (y).
 """
 # Importation des modules
+# Modules de base
+from abc import ABC, abstractmethod
 # Sklearn
 from sklearn.base import TransformerMixin
+from sklearn.utils.validation import check_is_fitted
+# Module du package
+from ..base.transformers import PanelTimeSeriesTransformer
 
 
 # Classe mixin pour transformateurs XY, conçue pour être utilisée avec
@@ -152,5 +157,60 @@ class XYTransformerMixin(TransformerMixin):
         Returns:
             X_transformed if y is None.
             (X_transformed, y_transformed) if y is provided.
+        """
+        return self.fit(X, y).transform(X, y)
+
+
+# Classe de transformation XYSur des données de panel et des séries temporelles
+class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
+    """Panel transformer with XY transformation support.
+    
+    Combines PanelTimeSeriesTransformer validation with the ability to
+    transform both X and y simultaneously.
+    """
+    
+    # Surcharge de transform pour accepter y tout en gardant les validations
+    def transform(self, X, y=None):
+        """Transform X and optionally y with full validation.
+        
+        Args:
+            X: Features to transform.
+            y: Targets to transform (optional).
+            
+        Returns:
+            X_transformed if y is None, (X_transformed, y_transformed) otherwise.
+        """
+        # Vérification de l'entraînement
+        check_is_fitted(self)
+        # Validation de X
+        if self.validate_input:
+            X = self._validate_input(X)
+
+        return self._transform(X, y)
+    
+    @abstractmethod
+    def _transform(self, X, y=None):
+        """Transform features and targets. Override in subclasses.
+
+        Args:
+            X: Features to transform.
+            y: Targets to transform (optional).
+
+        Returns:
+            X_transformed if y is None.
+            (X_transformed, y_transformed) if y is provided.
+        """
+        pass
+    
+    # fit_transform explicite pour propager y
+    def fit_transform(self, X, y=None):
+        """Fit and transform.
+        
+        Args:
+            X: Features.
+            y: Targets (optional).
+            
+        Returns:
+            X_transformed if y is None, (X_transformed, y_transformed) otherwise.
         """
         return self.fit(X, y).transform(X, y)
