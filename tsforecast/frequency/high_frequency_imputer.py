@@ -14,13 +14,14 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.utils.validation import check_is_fitted
 # Utilitaires du package
-from ..xy.transformers import XYTransformerMixin
+from ..xy.transformers import XYPanelTimeSeriesTransformer
 from ..utils.frequency.converter import FrequencyConverter
 from ..utils.frequency.utils import (
     normalize_frequency,
     is_higher_frequency,
     get_frequency_order,
 )
+from ..panel.utils import get_unique_panel_entities
 from .detector import FrequencyDetector, detect_frequency
 
 
@@ -28,32 +29,29 @@ from .detector import FrequencyDetector, detect_frequency
 VariableCategory = Literal['aggregate', 'impute', 'target_freq']
 
 
-class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
+# Classe d'imputation des valeurs de variables
+class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     """Impute high-frequency values for low-frequency series in mixed-frequency datasets.
 
     This XY transformer handles mixed-frequency datasets by:
     1. Making data additive via a user-provided transformer
     2. Aggregating high-frequency variables to the target frequency
-    3. Interpolating or imputing low-frequency variables
+    3. Imputing low-frequency variables
     4. Learning ML relationships between variables
     5. Imputing missing sub-period values
     6. Handling publication delays if provided
 
     Parameters:
-        target_frequency: Target frequency for imputation. Must not be higher
-            than the lowest frequency in the data. Examples: 'M', 'Q', 'monthly'.
+        target_frequency: Target frequency for imputation. Can be:
+            - str: Single frequency applied to all series/entities (e.g., 'M', 'Q', 'monthly')
+            - Dict[entity_id, str]: Entity-specific target frequencies for panel data
+            Must not be higher than the lowest frequency in the data.
         additive_transformer: Transformer to make data additive before imputation
             (e.g., log transformer, differencing). Must support fit_transform()
             and inverse_transform(). If None, data is assumed to already be additive.
         estimator: Estimator(s) for prediction. Can be:
             - Single estimator: Applied to all variables
             - Dict[variable_name, estimator]: Variable-specific models
-            - None: Uses linear interpolation fallback
-        low_frequency_handling: Strategy for variables at frequencies lower than
-            target. Maps variable names to:
-            - 'interpolate': Linear/time interpolation (no ML model)
-            - 'impute': Use cascading ML imputation
-            Default strategy for unlisted variables is 'interpolate'.
         delays: Publication delays DataFrame with columns:
             - variable: Variable name
             - delay: Delay value
@@ -63,11 +61,10 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
         impute_delayed_values: Whether to impute values affected by publication
             delays. Default is False. If True and delays=None, attempts to infer
             delays from trailing NaN patterns.
-        fit_per_entity: For panel data, whether to train separate models per
-            entity (True) or a single model across all entities (False).
-        time_col: Name of the time column.
-        panel_cols: Panel identifier columns. If None, treats data as simple
-            time series.
+        on_frequency_mismatch: How to handle cases where target_frequency is higher
+            than data frequencies. Options:
+            - 'error': Raise ValueError (default)
+            - 'warn': Issue warning and adjust target_frequency to highest available
 
     Attributes:
         detected_frequencies_: Detected frequency per variable.
@@ -80,6 +77,8 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
         is_panel_: Whether data is panel data.
         feature_columns_: X columns (features).
         target_column_: y column if provided.
+        adjusted_target_frequency_: Actual target frequency used after validation
+            (may differ from input if on_frequency_mismatch='warn').
 
     Examples:
         >>> import pandas as pd
@@ -96,48 +95,35 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
         >>> # Impute quarterly to monthly
         >>> imputer = HighFrequencyImputer(
         ...     target_frequency='M',
-        ...     estimator=LinearRegression(),
-        ...     low_frequency_handling={'quarterly_var': 'impute'}
+        ...     estimator=LinearRegression()
         ... )
         >>> imputed = imputer.fit_transform(df)
     """
     # Initialisation
     def __init__(
         self,
-        target_frequency: str,
+        target_frequency: Union[str, Dict[Union[str, tuple], str]],
         estimator: Union[BaseEstimator, Dict[str, BaseEstimator]],
         additive_transformer: Optional[TransformerMixin] = None,
         impute_delayed_values: bool = False,
         delays: Optional[pd.DataFrame] = None,
+        on_frequency_mismatch: Literal['error', 'warn'] = 'error',
+        time_col: Optional[str] = None,
+        panel_cols: Optional[List[str]] = None
     ):
         """Initialize the HighFrequencyImputer."""
+        # Initialisation du parent
+        super().__init__(time_col=time_col, panel_cols=panel_cols, validate_input=True, strict_validation=True, auto_sort=False, convert_cols_to_index=True)
         # Validation des paramètres
         # Validation de la fréquence cible
-        try:
-            target_frequency = normalize_frequency(target_frequency)
-        except ValueError as e:
-            raise ValueError(f"Invalid target_frequency '{target_frequency}': {e}")
-        # Validation de l'estimateur (prévoir cas d'un estimateur de base et d'une pipeline)
-        # /!\ Faire un prompt pour effectuer cette vérification sur la base de méthodes
-        # # Cas où il s'agit d'un dictionnaire
-        # if isinstance(self.estimator, dict):
-        #     # Parcours des éléments du dictionnaire
-        #     for var_name, est in self.estimator.items():
-        #         # Test que chaque valeur est bien un estimateur
-        #         if not isinstance(est, BaseEstimator):
-        #             raise ValueError(
-        #                 f"Estimator for '{var_name}' must be a sklearn BaseEstimator, "
-        #                 f"got {type(est).__name__}"
-        #             )
-        # # Sinon il doit d'agit d'un estimateur
-        # elif not isinstance(self.estimator, BaseEstimator):
-        #     raise ValueError(
-        #         f"estimator must be a sklearn BaseEstimator or Dict[str, BaseEstimator], "
-        #         f"got {type(self.estimator).__name__}"
-        #     )
-        # # Validation du transformer additif
-        # if additive_transformer is not None:
-
+        target_frequency = self._validate_target_frequency_format(target_frequency)
+        
+        # Validation de l'estimateur
+        self._validate_estimator(estimator)
+        
+        # Validation du transformer additif
+        if additive_transformer is not None:
+            self._validate_additive_transformer(additive_transformer)
 
         # Validation des délais de publication
         if delays is not None:
@@ -147,6 +133,13 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
                 raise ValueError(
                     f"delays DataFrame missing required columns: {missing_cols}"
                 )
+        
+        # Validation du paramètre on_frequency_mismatch
+        if on_frequency_mismatch not in ['error', 'warn']:
+            raise ValueError(
+                f"on_frequency_mismatch must be 'error' or 'warn', "
+                f"got '{on_frequency_mismatch}'"
+            )
 
         # Instanciation des attributs
         self.target_frequency = target_frequency
@@ -154,12 +147,149 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
         self.estimator = estimator
         self.delays = delays
         self.impute_delayed_values = impute_delayed_values
+        self.on_frequency_mismatch = on_frequency_mismatch
+
+    # Validation du format de la fréquence cible
+    def _validate_target_frequency_format(
+        self, 
+        target_frequency: Union[str, Dict[Union[str, tuple], str]]
+    ) -> Union[str, Dict[Union[str, tuple], str]]:
+        """Validate the format and values of target_frequency parameter.
+
+        Args:
+            target_frequency: Target frequency (string or dict mapping entities to frequencies)
+
+        Raises:
+            ValueError: If target_frequency format is invalid or contains invalid frequencies
+        """
+        # Cas d'une fréquence unique (string)
+        if isinstance(target_frequency, str):
+            try:
+                return normalize_frequency(target_frequency)
+            except ValueError as e:
+                raise ValueError(f"Invalid target_frequency '{target_frequency}': {e}")
+        
+        # Cas d'un dictionnaire de fréquences par entité
+        elif isinstance(target_frequency, dict):
+            # Vérification que le dictionnaire est non vide
+            if not target_frequency:
+                raise ValueError("target_frequency dict cannot be empty")
+            # Initialisation du dictionnaire de fréquences validées
+            validated_freqs = {}
+            # Initialisation du dictionnaire des fréquences invalides
+            invalid_freqs = {}
+
+            # Validation de chaque fréquence dans le dictionnaire
+            for entity, freq in target_frequency.items():
+                if not isinstance(freq, str):
+                    raise ValueError(
+                        f"Frequency for entity '{entity}' must be a string, "
+                        f"got {type(freq).__name__}"
+                    )
+                try:
+                    validated_freqs[entity] = normalize_frequency(freq)
+                except ValueError as e:
+                    invalid_freqs[entity] = str(e)
+            
+            # Levée d'erreur si des fréquences invalides
+            if invalid_freqs:
+                # Construction du message d'erreur
+                error_msg = "Invalid frequencies in target_frequency dict:\n"
+                for entity, error in invalid_freqs.items():
+                    error_msg += f"  - Entity '{entity}': {error}\n"
+                # Erreur
+                raise ValueError(error_msg.rstrip())
+            else:
+                return validated_freqs
+        
+        # Format invalide
+        else:
+            raise TypeError(
+                f"target_frequency must be a string or dict, "
+                f"got {type(target_frequency).__name__}"
+            )
+
+    # Validation de l'estimateur via duck typing
+    def _validate_estimator(
+        self, 
+        estimator: Union[BaseEstimator, Dict[str, BaseEstimator]]
+    ) -> None:
+        """Validate estimator has required methods (fit and predict).
+
+        Args:
+            estimator: Estimator or dict of estimators to validate
+
+        Raises:
+            ValueError: If estimator lacks required methods
+        """
+        # Cas d'un dictionnaire d'estimateurs
+        if isinstance(estimator, dict):
+            # Vérification que le dictionnaire n'est pas vide
+            if not estimator:
+                raise ValueError("estimator dict cannot be empty")
+            
+            # Validation de chaque estimateur
+            for var_name, est in estimator.items():
+                if not hasattr(est, 'fit') or not callable(getattr(est, 'fit')):
+                    raise ValueError(
+                        f"Estimator for '{var_name}' must have a 'fit' method, "
+                        f"got {type(est).__name__}"
+                    )
+                if not hasattr(est, 'predict') or not callable(getattr(est, 'predict')):
+                    raise ValueError(
+                        f"Estimator for '{var_name}' must have a 'predict' method, "
+                        f"got {type(est).__name__}"
+                    )
+        
+        # Cas d'un estimateur unique
+        else:
+            if not hasattr(estimator, 'fit') or not callable(getattr(estimator, 'fit')):
+                raise ValueError(
+                    f"estimator must have a 'fit' method, "
+                    f"got {type(estimator).__name__}"
+                )
+            if not hasattr(estimator, 'predict') or not callable(getattr(estimator, 'predict')):
+                raise ValueError(
+                    f"estimator must have a 'predict' method, "
+                    f"got {type(estimator).__name__}"
+                )
+
+    # Validation du transformer additif via duck typing
+    def _validate_additive_transformer(
+        self, 
+        transformer: TransformerMixin
+    ) -> None:
+        """Validate additive_transformer has required methods.
+
+        Args:
+            transformer: Transformer to validate
+
+        Raises:
+            ValueError: If transformer lacks required methods
+        """
+        # Initialisation de la liste des méthodes requises
+        required_methods = ['fit', 'transform', 'inverse_transform']
+        # Initialisation de la liste des méthodes manquantes
+        missing_methods = []
+
+        # Vérification de la présence des méthodes requises
+        for method_name in required_methods:
+            if not hasattr(transformer, method_name) or not callable(getattr(transformer, method_name)):
+                missing_methods.append(method_name)
+        
+        # Levée d'erreur si des méthodes manquent
+        if missing_methods:
+            raise ValueError(
+                f"additive_transformer must have methods: {', '.join(required_methods)}. "
+                f"Missing: {', '.join(missing_methods)}. "
+                f"Got {type(transformer).__name__}"
+            )
 
     # Détecteur de fréquence
     @property
     def _freq_detector(self) -> FrequencyDetector:
         """Lazy initialization of frequency detector."""
-        # Initialisation d'une instance du détecteur de fréquence si elle n'existe pas déjà
+        # Initialisation d'une instance du détecteur de fréquence si elle n'existe pas déjà 
         if not hasattr(self, '_freq_detector_cache'):
             self._freq_detector_cache = FrequencyDetector()
         # Retourne cette instance
@@ -169,41 +299,249 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
     @property
     def _freq_converter(self) -> FrequencyConverter:
         """Lazy initialization of frequency converter."""
-        # Initialisation d'une instance du convertisseur de fréquence si elle n'existe pas déjà
+        # Initialisation d'une instance du convertisseur de fréquence si elle n'existe pas déjà 
         if not hasattr(self, '_freq_converter_cache'):
             self._freq_converter_cache = FrequencyConverter()
         # Retourne cette instance
         return self._freq_converter_cache
 
-    # Méthode auxiliaire de vérification que la fréquence cible est inférieure ou égale à la plus haute fréquence du jeu de données
-    # /!\ Faire un prompt pour utiliser judicieusement le résultat de détect_frequencies
-    def _validate_target_frequency(self, detected_frequencies: Dict[str, str]) -> None:
-        """Validate that target frequency is not higher than any data frequency.
+    # Obtention de la fréquence la plus élevée pour les séries temporelles
+    def _get_highest_frequency_timeseries(
+        self, 
+        detected_frequencies: Dict[str, str]
+    ) -> str:
+        """Get the highest (most granular) frequency for time series data.
 
         Args:
-            detected_frequencies: Dictionary of detected frequencies per column.
+            detected_frequencies: Dictionary mapping columns to frequencies
+
+        Returns:
+            Highest frequency string
 
         Raises:
-            ValueError: If target frequency is higher than any data frequency.
+            ValueError: If no valid frequencies found
         """
-        # Pour être 
-        # Cas de données de séries temporelles
-        # Détermination de la colonne ayant la fréquence la plus élevée
-
-        # Comparaison avec la fréquence cible
+        # Extraction des fréquences valides
+        valid_freqs = [freq for freq in detected_frequencies.values() if freq is not None]
+        # Vérification que la liste est non vide
+        if not valid_freqs:
+            raise ValueError("No valid frequencies detected in the dataset")
         
-        for col, freq in detected_frequencies.items():
-            # Vérifier si la fréquence cible est plus haute que la fréquence de la variable
-            if is_higher_frequency(self.target_frequency, freq):
-                raise ValueError(
-                    f"Target frequency '{self.target_frequency}' is higher than "
-                    f"frequency '{freq}' of column '{col}'. Target frequency must be "
-                    f"equal to or lower than at least the frequency of one column."
-                )
-        # Cas de données de panel
-        # Détermination de la colonne ayant la fréquence la plus élevée pour chaque entité
+        # Détermination de la fréquence avec l'ordre le plus bas (plus granulaire)
+        freq_orders = {}
+        for freq in set(valid_freqs):
+            try:
+                # Normalisation de la fréquence (extraction de la partie base)
+                base_freq = freq.split('-')[0] if '-' in freq else freq
+                freq_orders[freq] = get_frequency_order(base_freq)
+            except ValueError:
+                # Tentative avec la fréquence complète en cas d'échec
+                try:
+                    freq_orders[freq] = get_frequency_order(freq)
+                except ValueError:
+                    continue
+        
+        if not freq_orders:
+            raise ValueError("Could not determine frequency order for detected frequencies")
+        
+        # Retour de la fréquence avec l'ordre le plus bas
+        return min(freq_orders.keys(), key=lambda x: freq_orders[x])
 
-        # Comparaison avec la fréquence cible
+    # Obtention de la fréquence la plus élevée pour une entité donnée
+    def _get_highest_frequency_entity(
+        self, 
+        entity: Union[str, tuple],
+        detected_frequencies: Dict[Tuple[Union[str, tuple], str], str]
+    ) -> str:
+        """Get the highest frequency for a specific entity in panel data.
+
+        Args:
+            entity: Entity identifier
+            detected_frequencies: Dictionary mapping (entity, variable) to frequency
+
+        Returns:
+            Highest frequency for the entity
+
+        Raises:
+            ValueError: If no valid frequencies found for the entity
+        """
+        # Extraction des fréquences pour cette entité
+        entity_freqs = {}
+        for (ent, var), freq in detected_frequencies.items():
+            if ent == entity and freq is not None:
+                entity_freqs[var] = freq
+        
+        if not entity_freqs:
+            raise ValueError(f"No valid frequencies detected for entity '{entity}'")
+        
+        # Utilisation de la méthode pour séries temporelles
+        return self._get_highest_frequency_timeseries(entity_freqs)
+
+    # Méthode auxiliaire de vérification de la fréquence cible
+    def _validate_target_frequency(
+        self
+    ) -> Union[str, Dict[Union[str, tuple], str]]:
+        """Validate that target frequency is appropriate for the data.
+
+        For time series: Validates target frequency is not higher than the highest
+        frequency in the data.
+        
+        For panel data: Validates each entity has at least one series with frequency
+        >= target frequency.
+
+        Args:
+            detected_frequencies: Dictionary of detected frequencies per column or
+                (entity, column) for panel data.
+
+        Returns:
+            Adjusted target frequency (may differ from input if on_frequency_mismatch='warn')
+
+        Raises:
+            ValueError: If target frequency is invalid and on_frequency_mismatch='error'
+        """
+        # Cas 1: Données de séries temporelles simples
+        if not self.is_panel_:
+            return self._validate_target_frequency_timeseries()
+        
+        # Cas 2: Données de panel
+        else:
+            return self._validate_target_frequency_panel()
+
+    # Validation de la fréquence cible pour les séries temporelles
+    def _validate_target_frequency_timeseries(
+        self
+    ) -> str:
+        """Validate target frequency for time series data.
+
+        Args:
+            detected_frequencies: Dictionary mapping columns to frequencies
+
+        Returns:
+            Adjusted target frequency
+
+        Raises:
+            ValueError: If target frequency is invalid and on_frequency_mismatch='error'
+        """
+        # Vérification que target_frequency est un string
+        if isinstance(self.effective_target_frequency, dict):
+            raise ValueError(
+                "target_frequency cannot be a dict for simple time series data. "
+                "Use a string frequency instead."
+            )
+        
+        # Obtention de la fréquence la plus élevée
+        highest_freq = self._get_highest_frequency_timeseries(self.detected_frequencies_)
+        
+        # Vérification si la fréquence cible est plus haute que la plus haute fréquence
+        if is_higher_frequency(self.effective_target_frequency, highest_freq):
+            # Construction du message d'erreur
+            error_msg = (
+                f"Target frequency '{self.effective_target_frequency}' is higher than "
+                f"the highest frequency '{highest_freq}' in the data. "
+                f"Target frequency must be equal to or lower than the highest frequency."
+            )
+            
+            # Gestion selon le paramètre on_frequency_mismatch
+            if self.on_frequency_mismatch == 'error':
+                raise ValueError(error_msg)
+            else:  # 'warn'
+                warnings.warn(
+                    f"{error_msg} Adjusting target_frequency to '{highest_freq}'.",
+                    UserWarning
+                )
+                return highest_freq
+        
+        # Fréquence cible valide
+        return self.self.effective_target_frequency
+
+    # Validation de la fréquence cible pour les données de panel
+    def _validate_target_frequency_panel(
+        self
+    ) -> Union[str, Dict[Union[str, tuple], str]]:
+        """Validate target frequency for panel data.
+
+        Args:
+            detected_frequencies: Dictionary mapping (entity, variable) to frequency
+
+        Returns:
+            Adjusted target frequency (dict or string)
+
+        Raises:
+            ValueError: If target frequency is invalid and on_frequency_mismatch='error'
+        """
+        # Vérification que toutes les entités ont une fréquence cible
+        missing_entities = set(self.entities_) - set(self.effective_target_frequency.keys())
+        if missing_entities:
+            raise ValueError(
+                f"target_frequency dict is missing entries for entities: "
+                f"{missing_entities}"
+            )
+        
+        # Vérification des entités supplémentaires dans target_frequency
+        extra_entities = set(self.effective_target_frequency.keys()) - set(self.entities_)
+        if extra_entities:
+            warnings.warn(
+                f"target_frequency dict contains entries for entities not in data: "
+                f"{extra_entities}. These will be ignored.",
+                UserWarning
+            )
+        
+        # Validation de chaque fréquence cible par entité
+        # Initialisation de la liste des entités invalides
+        invalid_entities = []
+        # Initialisation du dictionnaire des fréquences ajustées
+        adjusted_freqs = {}
+        
+        # Parcours des entités
+        for entity in self.entities_:
+            # Extraction de la fréquence cible associée à l'entité
+            target_freq = self.effective_target_frequency[entity]
+            
+            try:
+                # Obtention de la fréquence la plus élevée pour cette entité
+                highest_freq = self._get_highest_frequency_entity(entity, self.detected_frequencies_)
+                
+                # Vérification si la fréquence cible est plus haute
+                if is_higher_frequency(target_freq, highest_freq):
+                    # Ajout aux fréquences invalides
+                    invalid_entities.append((entity, target_freq, highest_freq))
+                    # Ajustement de la fréquence
+                    adjusted_freqs[entity] = highest_freq
+                else:
+                    adjusted_freqs[entity] = target_freq
+                    
+            except ValueError as e:
+                # Entité sans fréquence valide détectée
+                warnings.warn(f"Entity '{entity}': {e}", UserWarning)
+                continue
+        
+        # Traitement des entités invalides
+        if invalid_entities:
+            # Construction du message d'erreur
+            error_msg = (
+                f"Target frequencies are higher than highest frequencies for "
+                f"{len(invalid_entities)} entities:\n"
+            )
+            for entity, target, highest in invalid_entities[:5]:
+                error_msg += (
+                    f"  - Entity '{entity}': target '{target}' > highest '{highest}'\n"
+                )
+            if len(invalid_entities) > 5:
+                error_msg += f"  ... and {len(invalid_entities) - 5} more entities\n"
+            
+            # Gestion selon le paramètre on_frequency_mismatch
+            if self.on_frequency_mismatch == 'error':
+                raise ValueError(error_msg.rstrip())
+            else:  # 'warn'
+                warnings.warn(
+                    f"{error_msg.rstrip()}\n"
+                    f"Adjusting target frequencies to entity-specific highest frequencies.",
+                    UserWarning
+                )
+                return adjusted_freqs
+        
+        # Fréquences cibles valides
+        return adjusted_freqs
 
     # Méthode auxiliaire de classification des variables selon leur fréquence
     def _classify_variables(
@@ -528,6 +866,7 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
 
         return pd.DataFrame(records)
 
+    # Méthode d'entraînement
     def _fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
         """Learn transformation parameters from X and y.
 
@@ -535,12 +874,33 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
             X: Features of shape (n_samples, n_features).
             y: Targets of shape (n_samples,) or (n_samples, n_targets).
         """
-        # Validation des paramètres
-        self._validate_parameters()
+        # Construction du jeu de données de travail
+        if y is not None:
+            # Vérification que X et y sont de même longueur
+            if len(X) != len(y):
+                raise ValueError("X and y should be of equal length")
+            # Construction du jeu de données de travail en concaténant X et y
+            X_work = pd.concat([X, y.to_frame()], axis=1)
+        else:
+            X_work = X
+        
+        # Identification des entités du jeu de données
+        self.entities_ = get_unique_panel_entities(X)
 
-        # Validation et préparation des données
-        X = self._validate_fit_data(X, y)
+        # Si le jeu de données est un jeu de données de panel et 'target_frequency' une chaîne de caractères, on , alors on 
+        if self.is_panel_ and isinstance(self.target_frequency, str):
+            self.effective_target_frequency = {entity: self.target_frequency for entity in self.entities_}
+        else:
+            self.effective_target_frequency = self.target_frequency.copy()
 
+        # Détection des fréquences
+        self.detected_frequencies_ = detect_frequency(data=X_work)
+
+        # Validation de la fréquence cible
+        self.effective_target_frequency = self.validate_target_frequency()
+
+
+        ##################################################################################################################
         # Stockage des colonnes
         self.feature_columns_ = list(X.columns)
         self.target_column_ = y.name if y is not None else None
@@ -555,7 +915,7 @@ class HighFrequencyImputer(BaseEstimator, XYTransformerMixin):
             raise ValueError("Could not detect frequency for any column")
 
         # Validation de la fréquence cible
-        self._validate_target_frequency(self.detected_frequencies_)
+        self.effective_target_frequency = self._validate_target_frequency(X=X_work)
 
         # Classification des variables
         self.variable_categories_ = self._classify_variables(self.detected_frequencies_)
