@@ -105,6 +105,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         target_frequency: Union[str, Dict[Union[str, tuple], str]],
         estimator: Union[BaseEstimator, Dict[str, BaseEstimator]],
         additive_transformer: Optional[TransformerMixin] = None,
+        impute_lower_frequencies: bool = True,
+        refit: bool = True,
+        keep_lower_frequencies: bool = True,
         impute_delayed_values: bool = False,
         delays: Optional[pd.DataFrame] = None,
         on_frequency_mismatch: Literal['error', 'warn'] = 'error',
@@ -146,6 +149,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.additive_transformer = additive_transformer
         self.estimator = estimator
         self.delays = delays
+        self.impute_lower_frequencies = impute_lower_frequencies
+        self.refit = refit
+        self.keep_lower_frequencies = keep_lower_frequencies
         self.impute_delayed_values = impute_delayed_values
         self.on_frequency_mismatch = on_frequency_mismatch
 
@@ -545,8 +551,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
     # Méthode auxiliaire de classification des variables selon leur fréquence
     def _classify_variables(
-        self, detected_frequencies: Dict[str, str]
-    ) -> Dict[str, VariableCategory]:
+        self
+    ) -> Union[Dict[str, VariableCategory], Dict[tuple, Dict[str, VariableCategory]]]:
         """Classify each variable by its relationship to target frequency.
 
         Args:
@@ -555,25 +561,48 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Dictionary mapping column names to their category.
         """
-        target_freq_normalized = normalize_frequency(self.target_frequency)
-        categories: Dict[str, VariableCategory] = {}
-        low_freq_handling = self.low_frequency_handling or {}
+        # Initialisation du dictionnaire de catégories qui associe à chaque variable / entité X variable
+        categories: Union[Dict[str, VariableCategory], Dict[tuple, Dict[str, VariableCategory]]] = {}
 
-        for col, freq in detected_frequencies.items():
-            # Comparaison des fréquences
-            if is_higher_frequency(freq, target_freq_normalized):
-                # Variable à fréquence plus haute -> agrégation nécessaire
-                categories[col] = 'aggregate'
-            elif freq == target_freq_normalized:
-                # Variable à la fréquence cible
-                categories[col] = 'target_freq'
-            else:
-                # Variable à fréquence plus basse -> selon low_frequency_handling
-                strategy = low_freq_handling.get(col, 'interpolate')
-                categories[col] = strategy  # type: ignore
+        # Cas de données de panel
+        if self.is_panel_:
+            # Le dictionnaire de catégories prend en clé des tuples, identifiant les entités et en valeur un dictionnaire variable : stratégie
+            # Initialisation du dictionnaire qui associe à chaque entité X variable une catégorie d'imputation
+            categories: Dict[tuple, Dict[str, VariableCategory]] = {entity: {} for entity in self.entities_}
+            # Parcours des fréquences détectées
+            for key, freq in self.detected_frequencies_.items():
+                # Décomposition de la clé
+                entity, col = key[:-1], key[-1]
+                # Comparaison des fréquences
+                if is_higher_frequency(freq, self.effective_target_frequency[entity]):
+                    # Variable à fréquence plus haute -> agrégation nécessaire
+                    categories[entity][col] = 'aggregate'
+                elif freq == self.effective_target_frequency[entity]:
+                    # Variable à la fréquence cible
+                    categories[entity][col] = 'target_freq'
+                else:
+                    categories[entity][col] = 'impute'
+            
+        # Cas de données de séries temporelles
+        else:
+            # Le dictionnaire prend en clé les noms des colonnes et en valeur le nom de la stratégie à adopter
+            # Initialisation du dictionnaire qui associe à chaque variable une catégorie d'imputation
+            categories: Dict[str, VariableCategory] = {}
+            # Parcours des fréquences détectées
+            for col, freq in self.detected_frequencies_.items():
+                # Comparaison des fréquences
+                if is_higher_frequency(freq, self.effective_target_frequency):
+                    # Variable à fréquence plus haute -> agrégation nécessaire
+                    categories[col] = 'aggregate'
+                elif freq == self.effective_target_frequency:
+                    # Variable à la fréquence cible
+                    categories[col] = 'target_freq'
+                else:
+                    categories[col] = 'impute'
 
-        return categories
-
+            return categories
+    
+    # Méthode auxiliaire de détermination de l'ordre d'imputation des variables
     def _determine_imputation_order(
         self,
         variable_categories: Dict[str, VariableCategory],
@@ -591,7 +620,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Ordered list of variable names to impute.
         """
+        # Extraction des fréquences des variables
+        
         # Filtrer les variables marquées pour imputation
+
         impute_vars = [
             col for col, cat in variable_categories.items() if cat == 'impute'
         ]
@@ -898,6 +930,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Validation de la fréquence cible
         self.effective_target_frequency = self.validate_target_frequency()
+
+        # Classification des variables
+        self.variable_categories_ = self._classify_variables()
 
 
         ##################################################################################################################
