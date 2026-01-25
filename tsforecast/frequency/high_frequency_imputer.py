@@ -23,6 +23,8 @@ from ..utils.frequency.utils import (
 )
 from ..panel.utils import get_unique_panel_entities
 from .detector import FrequencyDetector, detect_frequency
+from .provenance import ImputationProvenanceTracker, ProvenanceType
+from .p1_window import P1WindowCalculator, ImputationScope
 
 
 # Type aliases
@@ -33,52 +35,65 @@ VariableCategory = Literal['aggregate', 'impute', 'target_freq']
 class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     """Impute high-frequency values for low-frequency series in mixed-frequency datasets.
 
-    This XY transformer handles mixed-frequency datasets by:
+    This XY transformer handles mixed-frequency datasets using a cascading imputation
+    approach that respects frequency hierarchies and tracks value provenance:
+
     1. Making data additive via a user-provided transformer
-    2. Aggregating high-frequency variables to the target frequency
-    3. Imputing low-frequency variables
-    4. Learning ML relationships between variables
-    5. Imputing missing sub-period values
+    2. Computing the P1 window (where all series have true values)
+    3. Aggregating high-frequency variables to lower frequencies
+    4. Cascading imputation from lowest to highest frequency
+    5. Optionally refitting models with imputed values (fit_on_imputed)
     6. Handling publication delays if provided
+    7. Tracking provenance of each imputed value
+
+    The cascade algorithm processes variables by frequency level, from lowest (e.g., quarterly)
+    to highest (e.g., daily). At each level:
+    - Features are aggregated to match the variable's frequency
+    - Models are trained on the P1 window (optionally extended)
+    - Predictions are made for missing values
+    - If fit_on_imputed=True, models are retrained after each frequency stage
 
     Parameters:
         target_frequency: Target frequency for imputation. Can be:
-            - str: Single frequency applied to all series/entities (e.g., 'M', 'Q', 'monthly')
+            - str: Single frequency applied to all series/entities
             - Dict[entity_id, str]: Entity-specific target frequencies for panel data
-            Must not be higher than the lowest frequency in the data.
-        additive_transformer: Transformer to make data additive before imputation
-            (e.g., log transformer, differencing). Must support fit_transform()
-            and inverse_transform(). If None, data is assumed to already be additive.
         estimator: Estimator(s) for prediction. Can be:
             - Single estimator: Applied to all variables
             - Dict[variable_name, estimator]: Variable-specific models
+        additive_transformer: Transformer to make data additive before imputation.
+        impute_lower_frequencies: Whether to impute lower frequency variables.
+        fit_on_imputed: If True, refit models using imputed values after each
+            frequency stage for more accurate cascade imputation.
+        keep_lower_frequencies: If True, output includes all intermediate frequencies
+            in a MultiIndex structure (Entity, Frequency, Date) for panel or
+            (Frequency, Date) for time series.
         delays: Publication delays DataFrame with columns:
-            - variable: Variable name
-            - delay: Delay value
-            - unit: Delay unit ('D', 's', etc.)
-            - reference_point: 'start' or 'end'
-            If None, no delay handling unless impute_delayed_values=True.
-        impute_delayed_values: Whether to impute values affected by publication
-            delays. Default is False. If True and delays=None, attempts to infer
-            delays from trailing NaN patterns.
-        on_frequency_mismatch: How to handle cases where target_frequency is higher
-            than data frequencies. Options:
-            - 'error': Raise ValueError (default)
-            - 'warn': Issue warning and adjust target_frequency to highest available
+            variable, delay, unit, reference_point.
+        impute_delayed_values: Whether to impute values affected by publication delays.
+        on_frequency_mismatch: How to handle target_frequency higher than data ('error'/'warn').
+        attrition_threshold: Minimum ratio of columns with data (0-1) for extended window.
+        imputation_scope: Training window scope ('P1_only', 'P1_and_before',
+            'P1_and_after', 'P1_and_both').
+        use_imputed_for_training: If True, use imputed values for training outside P1.
 
     Attributes:
-        detected_frequencies_: Detected frequency per variable.
-        variable_categories_: Category for each variable ('aggregate', 'interpolate',
-            'impute', 'target_freq').
-        imputation_order_: Order of variables for cascading imputation.
+        detected_frequencies_: Detected frequency per variable or (entity, variable).
+        variable_categories_: Category per (entity, variable) tuple:
+            'aggregate', 'impute', or 'target_freq'.
+        imputation_order_: Ordered list of variables for cascading imputation.
         imputation_models_: Fitted imputation models per variable.
-        inferred_delays_: Delays inferred from NaN patterns.
+        imputation_provenance_: DataFrame tracking origin of each value
+            ('original', 'model_on_true', 'model_on_mixed', 'aggregated').
+        p1_window_: Tuple (start, end) of the P1 window where all series have data.
+        training_window_: Tuple (start, end) of the extended training window.
+        frequency_progression_: Dict mapping variables to their frequency stages.
+        inferred_delays_: Delays inferred from NaN patterns (if impute_delayed_values=True).
         additive_transformer_: Fitted additive transformer.
         is_panel_: Whether data is panel data.
         feature_columns_: X columns (features).
         target_column_: y column if provided.
-        adjusted_target_frequency_: Actual target frequency used after validation
-            (may differ from input if on_frequency_mismatch='warn').
+        effective_target_frequency_: Actual target frequency used after validation.
+        entities_: Unique entities in panel data.
 
     Examples:
         >>> import pandas as pd
@@ -92,12 +107,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         ...     'quarterly_var': [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
         ... }, index=dates)
         >>>
-        >>> # Impute quarterly to monthly
+        >>> # Impute quarterly to monthly with cascade
         >>> imputer = HighFrequencyImputer(
         ...     target_frequency='M',
-        ...     estimator=LinearRegression()
+        ...     estimator=LinearRegression(),
+        ...     fit_on_imputed=True,
+        ...     imputation_scope='P1_and_both',
+        ...     attrition_threshold=0.5
         ... )
         >>> imputed = imputer.fit_transform(df)
+        >>>
+        >>> # Access provenance information
+        >>> print(imputer.imputation_provenance_)
     """
     # Initialisation
     def __init__(
@@ -106,24 +127,85 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         estimator: Union[BaseEstimator, Dict[str, BaseEstimator]],
         additive_transformer: Optional[TransformerMixin] = None,
         impute_lower_frequencies: bool = True,
-        refit: bool = True,
+        fit_on_imputed: bool = True,
         keep_lower_frequencies: bool = True,
         impute_delayed_values: bool = False,
         delays: Optional[pd.DataFrame] = None,
         on_frequency_mismatch: Literal['error', 'warn'] = 'error',
+        attrition_threshold: float = 0.5,
+        imputation_scope: ImputationScope = 'P1_only',
+        use_imputed_for_training: bool = False,
         time_col: Optional[str] = None,
-        panel_cols: Optional[List[str]] = None
+        panel_cols: Optional[List[str]] = None,
+        # Deprecated parameter
+        refit: Optional[bool] = None
     ):
-        """Initialize the HighFrequencyImputer."""
+        """Initialize the HighFrequencyImputer.
+
+        Args:
+            target_frequency: Target frequency for imputation. Can be:
+                - str: Single frequency applied to all series/entities (e.g., 'M', 'Q', 'monthly')
+                - Dict[entity_id, str]: Entity-specific target frequencies for panel data
+                Must not be higher than the lowest frequency in the data.
+            estimator: Estimator(s) for prediction. Can be:
+                - Single estimator: Applied to all variables
+                - Dict[variable_name, estimator]: Variable-specific models
+            additive_transformer: Transformer to make data additive before imputation
+                (e.g., log transformer, differencing). Must support fit_transform()
+                and inverse_transform(). If None, data is assumed to already be additive.
+            impute_lower_frequencies: Whether to impute lower frequency variables.
+            fit_on_imputed: If True, refit models using imputed values after each
+                frequency stage. This enables more accurate imputation in later stages.
+                (Previously named 'refit', which is deprecated.)
+            keep_lower_frequencies: If True, output includes all intermediate frequencies
+                in a MultiIndex structure. If False, only target frequency is returned.
+            impute_delayed_values: Whether to impute values affected by publication
+                delays. Default is False. If True and delays=None, attempts to infer
+                delays from trailing NaN patterns.
+            delays: Publication delays DataFrame with columns:
+                - variable: Variable name
+                - delay: Delay value
+                - unit: Delay unit ('D', 's', etc.)
+                - reference_point: 'start' or 'end'
+                If None, no delay handling unless impute_delayed_values=True.
+            on_frequency_mismatch: How to handle cases where target_frequency is higher
+                than data frequencies. Options:
+                - 'error': Raise ValueError (default)
+                - 'warn': Issue warning and adjust target_frequency to highest available
+            attrition_threshold: Minimum percentage of columns (0-1) that must have
+                non-null values to be included in the extended training window.
+                Minimum 2 columns required regardless of threshold. Default 0.5.
+            imputation_scope: Defines the training window scope:
+                - 'P1_only': Use only P1 window (where ALL series have data)
+                - 'P1_and_before': Extend P1 backwards where threshold is met
+                - 'P1_and_after': Extend P1 forwards where threshold is met
+                - 'P1_and_both': Extend P1 in both directions
+            use_imputed_for_training: If True, use imputed values for training models
+                outside P1 window. If False, only use true values for training.
+            time_col: Name of the time column (if data has time in column not index).
+            panel_cols: List of column names identifying panel entities.
+            refit: DEPRECATED. Use fit_on_imputed instead.
+        """
         # Initialisation du parent
         super().__init__(time_col=time_col, panel_cols=panel_cols, validate_input=True, strict_validation=True, auto_sort=False, convert_cols_to_index=True)
+
+        # Gestion de la dépréciation du paramètre refit
+        if refit is not None:
+            warnings.warn(
+                "Parameter 'refit' is deprecated and will be removed in a future version. "
+                "Use 'fit_on_imputed' instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            fit_on_imputed = refit
+
         # Validation des paramètres
         # Validation de la fréquence cible
         target_frequency = self._validate_target_frequency_format(target_frequency)
-        
+
         # Validation de l'estimateur
         self._validate_estimator(estimator)
-        
+
         # Validation du transformer additif
         if additive_transformer is not None:
             self._validate_additive_transformer(additive_transformer)
@@ -136,12 +218,25 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 raise ValueError(
                     f"delays DataFrame missing required columns: {missing_cols}"
                 )
-        
+
         # Validation du paramètre on_frequency_mismatch
         if on_frequency_mismatch not in ['error', 'warn']:
             raise ValueError(
                 f"on_frequency_mismatch must be 'error' or 'warn', "
                 f"got '{on_frequency_mismatch}'"
+            )
+
+        # Validation du seuil d'attrition
+        if not 0 <= attrition_threshold <= 1:
+            raise ValueError(
+                f"attrition_threshold must be between 0 and 1, got {attrition_threshold}"
+            )
+
+        # Validation du scope d'imputation
+        valid_scopes = ('P1_only', 'P1_and_before', 'P1_and_after', 'P1_and_both')
+        if imputation_scope not in valid_scopes:
+            raise ValueError(
+                f"imputation_scope must be one of {valid_scopes}, got '{imputation_scope}'"
             )
 
         # Instanciation des attributs
@@ -150,10 +245,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.estimator = estimator
         self.delays = delays
         self.impute_lower_frequencies = impute_lower_frequencies
-        self.refit = refit
+        self.fit_on_imputed = fit_on_imputed
         self.keep_lower_frequencies = keep_lower_frequencies
         self.impute_delayed_values = impute_delayed_values
         self.on_frequency_mismatch = on_frequency_mismatch
+        self.attrition_threshold = attrition_threshold
+        self.imputation_scope = imputation_scope
+        self.use_imputed_for_training = use_imputed_for_training
 
     # Validation du format de la fréquence cible
     def _validate_target_frequency_format(
@@ -452,7 +550,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 return highest_freq
         
         # Fréquence cible valide
-        return self.self.effective_target_frequency
+        return self.effective_target_frequency
 
     # Validation de la fréquence cible pour les données de panel
     def _validate_target_frequency_panel(
@@ -546,42 +644,67 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de classification des variables selon leur fréquence
     def _classify_variables(
         self
-    ) -> Union[Dict[str, VariableCategory], Dict[tuple, Dict[str, VariableCategory]]]:
+    ) -> Dict[Union[str, Tuple], VariableCategory]:
         """Classify each variable by its relationship to target frequency.
 
-        Args:
-            detected_frequencies: Dictionary of detected frequencies per column.
+        For time series data, returns a Dict mapping column names to categories.
+        For panel data, returns a Dict mapping (entity, variable) tuples to categories.
 
         Returns:
-            Dictionary mapping column names to their category.
+            Dictionary mapping variable identifiers to their category:
+            - For time series: {column_name: category}
+            - For panel: {(entity, variable): category}
+
+        Categories:
+            - 'aggregate': Variable has higher frequency than target, needs aggregation
+            - 'impute': Variable has lower frequency than target, needs imputation
+            - 'target_freq': Variable already at target frequency
         """
-        # Initialisation du dictionnaire de catégories qui associe à chaque variable / entité X variable
-        categories: Union[Dict[str, VariableCategory], Dict[tuple, Dict[str, VariableCategory]]] = {}
+        # Initialisation du dictionnaire de catégories
+        categories: Dict[Union[str, Tuple], VariableCategory] = {}
 
         # Cas de données de panel
         if self.is_panel_:
-            # Le dictionnaire de catégories prend en clé des tuples, identifiant les entités et en valeur un dictionnaire variable : stratégie
-            # Initialisation du dictionnaire qui associe à chaque entité X variable une catégorie d'imputation
-            categories: Dict[tuple, Dict[str, VariableCategory]] = {entity: {} for entity in self.entities_}
             # Parcours des fréquences détectées
+            # Clé = (entity..., variable), valeur = fréquence
             for key, freq in self.detected_frequencies_.items():
-                # Décomposition de la clé
-                entity, col = key[:-1], key[-1]
-                # Comparaison des fréquences
-                if is_higher_frequency(freq, self.effective_target_frequency[entity]):
-                    # Variable à fréquence plus haute -> agrégation nécessaire
-                    categories[entity][col] = 'aggregate'
-                elif freq == self.effective_target_frequency[entity]:
-                    # Variable à la fréquence cible
-                    categories[entity][col] = 'target_freq'
+                # Décomposition de la clé: les niveaux d'entité sont tous sauf le dernier
+                # Le dernier élément est le nom de la variable
+                if isinstance(key, tuple):
+                    entity = key[:-1] if len(key) > 2 else key[0]
+                    col = key[-1]
                 else:
-                    categories[entity][col] = 'impute'
-            
+                    # Cas dégénéré: pas de tuple (ne devrait pas arriver pour panel)
+                    entity = None
+                    col = key
+
+                # Extraction de la fréquence cible pour cette entité
+                if isinstance(self.effective_target_frequency, dict):
+                    # Normalisation de la clé d'entité
+                    entity_key = entity if isinstance(entity, tuple) else (entity,)
+                    target_freq = self.effective_target_frequency.get(entity_key)
+                    if target_freq is None:
+                        # Essai avec l'entité non-tuplée
+                        target_freq = self.effective_target_frequency.get(entity)
+                else:
+                    target_freq = self.effective_target_frequency
+
+                if target_freq is None:
+                    continue
+
+                # Comparaison des fréquences
+                if is_higher_frequency(freq, target_freq):
+                    # Variable à fréquence plus haute -> agrégation nécessaire
+                    categories[key] = 'aggregate'
+                elif freq == target_freq:
+                    # Variable à la fréquence cible
+                    categories[key] = 'target_freq'
+                else:
+                    # Variable à fréquence plus basse -> imputation nécessaire
+                    categories[key] = 'impute'
+
         # Cas de données de séries temporelles
         else:
-            # Le dictionnaire prend en clé les noms des colonnes et en valeur le nom de la stratégie à adopter
-            # Initialisation du dictionnaire qui associe à chaque variable une catégorie d'imputation
-            categories: Dict[str, VariableCategory] = {}
             # Parcours des fréquences détectées
             for col, freq in self.detected_frequencies_.items():
                 # Comparaison des fréquences
@@ -592,43 +715,118 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     # Variable à la fréquence cible
                     categories[col] = 'target_freq'
                 else:
+                    # Variable à fréquence plus basse -> imputation nécessaire
                     categories[col] = 'impute'
 
-            return categories
+        return categories
     
     # Méthode auxiliaire de détermination de l'ordre d'imputation des variables
     def _determine_imputation_order(
-        self,
-        variable_categories: Dict[str, VariableCategory],
-        detected_frequencies: Dict[str, str],
-    ) -> List[str]:
+        self
+    ) -> List[Union[str, Tuple]]:
         """Determine order of variables for cascading imputation.
 
-        Variables are sorted by frequency (lowest frequency first) to ensure
-        that dependencies are resolved before imputation.
+        Sorting logic:
+        1. Sort by frequency (lowest frequency first, e.g., quarterly before monthly)
+        2. For panel data with variable frequencies per entity:
+           - First, variables with the lowest frequencies
+           - Among those, variables affecting the fewest entities
 
-        Args:
-            variable_categories: Category for each variable.
-            detected_frequencies: Detected frequency for each variable.
+        This ensures that:
+        - Lower frequency variables are imputed first (they have more data points)
+        - Variables are processed efficiently without redundant computations
 
         Returns:
-            Ordered list of variable names to impute.
-        """
-        # Extraction des fréquences des variables
-        
-        # Filtrer les variables marquées pour imputation
+            Ordered list of variable identifiers to impute.
+            - For time series: List of column names
+            - For panel: List of (entity, variable) tuples or variable names
 
+        Examples:
+            >>> # Time series: ['quarterly_var', 'monthly_var', 'weekly_var']
+            >>> # Panel: [('A', 'quarterly_var'), ('B', 'quarterly_var'), ('A', 'monthly_var')]
+        """
+        # Extraction des variables marquées pour imputation
         impute_vars = [
-            col for col, cat in variable_categories.items() if cat == 'impute'
+            key for key, cat in self.variable_categories_.items() if cat == 'impute'
         ]
 
-        # Trier par fréquence (plus basse d'abord = ordre numérique le plus élevé)
-        impute_vars.sort(
-            key=lambda col: get_frequency_order(detected_frequencies.get(col, 'D')),
-            reverse=True,  # Ordre décroissant = fréquence la plus basse d'abord
-        )
+        if not impute_vars:
+            return []
 
-        return impute_vars
+        # Cas de données de séries temporelles simples
+        if not self.is_panel_:
+            # Tri par fréquence (plus basse d'abord = ordre numérique le plus élevé)
+            impute_vars.sort(
+                key=lambda col: get_frequency_order(
+                    self.detected_frequencies_.get(col, 'D')
+                ),
+                reverse=True,  # Ordre décroissant = fréquence la plus basse d'abord
+            )
+            return impute_vars
+
+        # Cas de données de panel
+        # Étape 1: Regrouper les variables par nom unique
+        # Cela permet de déterminer quelles variables sont présentes dans plusieurs entités
+        var_to_entities: Dict[str, List[Tuple]] = {}
+        var_to_frequencies: Dict[str, List[float]] = {}
+
+        for key in impute_vars:
+            if isinstance(key, tuple):
+                # Extraction du nom de variable (dernier élément)
+                var_name = key[-1]
+            else:
+                var_name = key
+
+            # Ajout de l'entité à la liste pour cette variable
+            if var_name not in var_to_entities:
+                var_to_entities[var_name] = []
+                var_to_frequencies[var_name] = []
+
+            var_to_entities[var_name].append(key)
+
+            # Extraction de la fréquence pour cette variable/entité
+            freq = self.detected_frequencies_.get(key, 'D')
+            freq_order = get_frequency_order(freq)
+            var_to_frequencies[var_name].append(freq_order)
+
+        # Étape 2: Calculer les métriques de tri par variable
+        # - Fréquence représentative (médiane des fréquences par entité)
+        # - Nombre d'entités affectées
+        var_metrics: List[Tuple[str, float, int]] = []
+
+        for var_name in var_to_entities:
+            # Fréquence représentative: médiane des ordres de fréquence
+            freq_orders = var_to_frequencies[var_name]
+            representative_freq = np.median(freq_orders)
+
+            # Nombre d'entités
+            n_entities = len(var_to_entities[var_name])
+
+            var_metrics.append((var_name, representative_freq, n_entities))
+
+        # Étape 3: Trier les variables
+        # Critère 1: Fréquence la plus basse d'abord (ordre numérique le plus élevé)
+        # Critère 2: Moins d'entités d'abord (en cas d'égalité de fréquence)
+        var_metrics.sort(key=lambda x: (-x[1], x[2]))  # -freq pour décroissant, +entities pour croissant
+
+        # Étape 4: Construire la liste finale ordonnée
+        # Pour chaque variable, on ajoute toutes ses clés (entité, variable)
+        # triées par fréquence locale
+        ordered_impute_vars = []
+
+        for var_name, _, _ in var_metrics:
+            # Récupération des clés pour cette variable
+            var_keys = var_to_entities[var_name]
+
+            # Tri interne par fréquence (plus basse d'abord)
+            var_keys.sort(
+                key=lambda k: get_frequency_order(self.detected_frequencies_.get(k, 'D')),
+                reverse=True
+            )
+
+            ordered_impute_vars.extend(var_keys)
+
+        return ordered_impute_vars
 
     def _get_estimator_for_variable(self, variable: str) -> Optional[BaseEstimator]:
         """Get the appropriate estimator for a variable.
@@ -770,7 +968,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Imputation simple des NaN dans les features
             X_train = X_train.fillna(X_train.mean())
 
-            if self.fit_per_entity and self.panel_cols:
+            if False and self.panel_cols:  # Entity-level fitting disabled in this method
                 # Entraînement par entité
                 models[variable] = self._fit_models_per_entity(
                     X, variable, feature_cols, estimator
@@ -896,10 +1094,24 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     def _fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
         """Learn transformation parameters from X and y.
 
+        Implements the cascade imputation fitting algorithm:
+        1. Detect frequencies for all variables
+        2. Classify variables (aggregate, impute, target_freq)
+        3. Calculate P1 window (where all series have data)
+        4. Initialize provenance tracking
+        5. Fit models for each variable in imputation order
+
         Args:
             X: Features of shape (n_samples, n_features).
             y: Targets of shape (n_samples,) or (n_samples, n_targets).
         """
+        # Stockage des colonnes
+        self.feature_columns_ = list(X.columns)
+        self.target_column_ = y.name if y is not None else None
+
+        # Détection si données panel
+        self.is_panel_ = bool(self.panel_cols) or isinstance(X.index, pd.MultiIndex)
+
         # Construction du jeu de données de travail
         if y is not None:
             # Vérification que X et y sont de même longueur
@@ -908,51 +1120,66 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Construction du jeu de données de travail en concaténant X et y
             X_work = pd.concat([X, y.to_frame()], axis=1)
         else:
-            X_work = X
-        
-        # Identification des entités du jeu de données
-        self.entities_ = get_unique_panel_entities(X)
+            X_work = X.copy()
 
-        # Si le jeu de données est un jeu de données de panel et 'target_frequency' une chaîne de caractères, on , alors on 
-        if self.is_panel_ and isinstance(self.target_frequency, str):
-            self.effective_target_frequency = {entity: self.target_frequency for entity in self.entities_}
+        # Identification des entités du jeu de données
+        if self.is_panel_ and isinstance(X.index, pd.MultiIndex):
+            self.entities_ = get_unique_panel_entities(X)
         else:
+            # Pour les séries temporelles simples, pas d'entités
+            self.entities_ = None
+
+        # Si le jeu de données est un panel et 'target_frequency' est un string, créer un dict
+        if self.is_panel_ and isinstance(self.target_frequency, str) and self.entities_:
+            self.effective_target_frequency = {
+                entity: self.target_frequency for entity in self.entities_
+            }
+        elif isinstance(self.target_frequency, dict):
             self.effective_target_frequency = self.target_frequency.copy()
+        else:
+            self.effective_target_frequency = self.target_frequency
 
         # Détection des fréquences
         self.detected_frequencies_ = detect_frequency(data=X_work)
-
-        # Validation de la fréquence cible
-        self.effective_target_frequency = self.validate_target_frequency()
-
-        # Classification des variables
-        self.variable_categories_ = self._classify_variables()
-
-
-        ##################################################################################################################
-        # Stockage des colonnes
-        self.feature_columns_ = list(X.columns)
-        self.target_column_ = y.name if y is not None else None
-
-        # Détection si données panel
-        self.is_panel_ = bool(self.panel_cols)
-
-        # Détection des fréquences
-        self.detected_frequencies_ = self._detect_frequencies(X)
 
         if not self.detected_frequencies_:
             raise ValueError("Could not detect frequency for any column")
 
         # Validation de la fréquence cible
-        self.effective_target_frequency = self._validate_target_frequency(X=X_work)
+        self.effective_target_frequency = self._validate_target_frequency()
 
         # Classification des variables
-        self.variable_categories_ = self._classify_variables(self.detected_frequencies_)
+        self.variable_categories_ = self._classify_variables()
 
         # Détermination de l'ordre d'imputation
-        self.imputation_order_ = self._determine_imputation_order(
-            self.variable_categories_, self.detected_frequencies_
+        self.imputation_order_ = self._determine_imputation_order()
+
+        # Initialisation du tracker de provenance
+        self._provenance_tracker = ImputationProvenanceTracker()
+        self._provenance_tracker.initialize(X_work, panel_cols=self.panel_cols)
+
+        # Calcul de la fenêtre P1 et de la fenêtre d'entraînement
+        self._p1_calculator = P1WindowCalculator(
+            attrition_threshold=self.attrition_threshold,
+            imputation_scope=self.imputation_scope,
+            min_columns=2,
+            exclude_delay_nans=True
         )
+        try:
+            self._p1_calculator.fit(X_work, delays=self.delays, panel_cols=self.panel_cols)
+            self.p1_window_ = (self._p1_calculator.p1_start_, self._p1_calculator.p1_end_)
+            self.training_window_ = (
+                self._p1_calculator.training_start_,
+                self._p1_calculator.training_end_
+            )
+        except ValueError as e:
+            # Si pas de fenêtre P1 valide, utiliser toutes les données
+            warnings.warn(
+                f"Could not calculate P1 window: {e}. Using all available data.",
+                UserWarning
+            )
+            self.p1_window_ = (X_work.index.min(), X_work.index.max())
+            self.training_window_ = self.p1_window_
 
         # Fit du transformer additif si fourni
         if self.additive_transformer is not None:
@@ -965,19 +1192,23 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             X_work = X.copy()
 
         # Agrégation des variables haute fréquence
-        aggregate_cols = [
-            col for col, cat in self.variable_categories_.items() if cat == 'aggregate'
+        aggregate_keys = [
+            key for key, cat in self.variable_categories_.items() if cat == 'aggregate'
         ]
+        # Extraction des noms de colonnes uniquement (pour les données de panel)
+        aggregate_cols = self._extract_column_names(aggregate_keys)
         X_work = self._aggregate_to_target(X_work, aggregate_cols)
 
-        # Interpolation des variables marquées pour interpolation
-        interpolate_cols = [
-            col for col, cat in self.variable_categories_.items() if cat == 'interpolate'
-        ]
-        X_work = self._interpolate_to_target(X_work, interpolate_cols)
+        # Marquage des valeurs agrégées dans le tracker de provenance
+        for col in aggregate_cols:
+            if col in X_work.columns:
+                self._provenance_tracker.mark_aggregated(col, X_work.index)
 
-        # Entraînement des modèles d'imputation
-        self.imputation_models_ = self._fit_imputation_models(X_work, y)
+        # Entraînement des modèles d'imputation avec la nouvelle logique de cascade
+        self.imputation_models_ = self._fit_cascade_imputation_models(X_work, y)
+
+        # Initialisation de la progression des fréquences
+        self.frequency_progression_ = self._compute_frequency_progression()
 
         # Inférence des délais si nécessaire
         if self.impute_delayed_values and self.delays is None:
@@ -985,11 +1216,293 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             self.inferred_delays_ = {}
 
+        # Stockage de la matrice de provenance (sera mise à jour pendant transform)
+        self.imputation_provenance_ = self._provenance_tracker.get_provenance_matrix()
+
+    def _extract_column_names(
+        self,
+        keys: List[Union[str, Tuple]]
+    ) -> List[str]:
+        """Extract unique column names from variable keys.
+
+        Args:
+            keys: List of variable identifiers (column names or (entity, column) tuples)
+
+        Returns:
+            List of unique column names
+        """
+        column_names = set()
+        for key in keys:
+            if isinstance(key, tuple):
+                # Dernier élément est le nom de colonne
+                column_names.add(key[-1])
+            else:
+                column_names.add(key)
+        return list(column_names)
+
+    def _compute_frequency_progression(self) -> Dict[str, List[str]]:
+        """Compute the frequency progression for each variable.
+
+        Returns:
+            Dict mapping variable names to list of frequency stages.
+        """
+        progression = {}
+
+        for key in self.imputation_order_:
+            # Extraction du nom de variable
+            if isinstance(key, tuple):
+                var_name = key[-1]
+            else:
+                var_name = key
+
+            # Extraction de la fréquence source
+            source_freq = self.detected_frequencies_.get(key, 'D')
+
+            # Extraction de la fréquence cible
+            if self.is_panel_ and isinstance(key, tuple):
+                entity = key[:-1] if len(key) > 2 else key[0]
+                if isinstance(self.effective_target_frequency, dict):
+                    target_freq = self.effective_target_frequency.get(entity, 'D')
+                else:
+                    target_freq = self.effective_target_frequency
+            else:
+                target_freq = self.effective_target_frequency
+
+            # Liste des fréquences intermédiaires (à implémenter si keep_lower_frequencies=True)
+            if var_name not in progression:
+                progression[var_name] = [source_freq, target_freq]
+
+        return progression
+
+    def _fit_cascade_imputation_models(
+        self,
+        X: pd.DataFrame,
+        y: Optional[pd.Series] = None
+    ) -> Dict[Union[str, Tuple], Any]:
+        """Fit imputation models using cascade algorithm.
+
+        The cascade algorithm:
+        1. Group variables by frequency level
+        2. For each frequency level (from lowest to highest):
+           a. Aggregate features to match variable frequency
+           b. Train models on P1 window (optionally extended)
+           c. If fit_on_imputed=True and not first level, use imputed values too
+
+        Args:
+            X: Training data (already transformed).
+            y: Target variable (optional).
+
+        Returns:
+            Dictionary mapping variable identifiers to fitted models.
+        """
+        models: Dict[Union[str, Tuple], Any] = {}
+
+        if not self.imputation_order_:
+            return models
+
+        # Groupement des variables par niveau de fréquence
+        freq_groups = self._group_variables_by_frequency()
+
+        # Suivi des données de travail (mises à jour si fit_on_imputed=True)
+        X_work = X.copy()
+
+        # Traitement par palier de fréquence
+        for freq_level, variables_at_level in freq_groups.items():
+            # Entraînement des modèles pour toutes les variables à ce niveau
+            for var_key in variables_at_level:
+                var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
+
+                # Obtention de l'estimateur pour cette variable
+                estimator = self._get_estimator_for_variable(var_name)
+                if estimator is None:
+                    warnings.warn(
+                        f"No estimator available for variable '{var_name}', "
+                        f"using linear interpolation as fallback"
+                    )
+                    models[var_key] = 'interpolate_fallback'
+                    continue
+
+                # Préparation des features
+                feature_cols = [
+                    c for c in X_work.columns
+                    if c != var_name and c not in (self.panel_cols or [])
+                ]
+
+                if not feature_cols:
+                    warnings.warn(
+                        f"No features available for imputing '{var_name}', "
+                        f"using linear interpolation as fallback"
+                    )
+                    models[var_key] = 'interpolate_fallback'
+                    continue
+
+                # Création du masque d'entraînement
+                if self._p1_calculator._is_fitted:
+                    training_mask = self._p1_calculator.get_training_mask(X_work, column=var_name)
+                else:
+                    training_mask = X_work[var_name].notna()
+
+                # Si use_imputed_for_training=False, filtrer uniquement les vraies valeurs
+                if not self.use_imputed_for_training:
+                    # Utiliser uniquement les valeurs originales (non-imputées)
+                    original_mask = self._provenance_tracker.get_mask(
+                        ProvenanceType.ORIGINAL, column=var_name
+                    )
+                    training_mask = training_mask & original_mask
+
+                # Extraction des données d'entraînement
+                X_train = X_work.loc[training_mask, feature_cols]
+                y_train = X_work.loc[training_mask, var_name]
+
+                if len(X_train) < 2:
+                    warnings.warn(
+                        f"Not enough training data for variable '{var_name}', "
+                        f"using linear interpolation as fallback"
+                    )
+                    models[var_key] = 'interpolate_fallback'
+                    continue
+
+                # Imputation simple des NaN dans les features
+                X_train = X_train.fillna(X_train.mean())
+
+                # Entraînement du modèle
+                try:
+                    estimator.fit(X_train, y_train)
+                    models[var_key] = {
+                        'model': estimator,
+                        'feature_cols': feature_cols,
+                        'freq_level': freq_level,
+                        'trained_on_imputed': self.use_imputed_for_training and freq_level > 0,
+                    }
+                except Exception as e:
+                    warnings.warn(
+                        f"Failed to fit model for variable '{var_name}': {e}. "
+                        f"Using linear interpolation as fallback"
+                    )
+                    models[var_key] = 'interpolate_fallback'
+
+            # Si fit_on_imputed=True, appliquer l'imputation intermédiaire et mettre à jour X_work
+            if self.fit_on_imputed and freq_level < max(freq_groups.keys()):
+                X_work = self._apply_intermediate_imputation(X_work, models, variables_at_level)
+
+        return models
+
+    def _group_variables_by_frequency(self) -> Dict[int, List[Union[str, Tuple]]]:
+        """Group variables to impute by frequency level.
+
+        Returns:
+            Dict mapping frequency level (int) to list of variable keys.
+            Lower frequency = higher level number.
+        """
+        freq_groups: Dict[int, List[Union[str, Tuple]]] = {}
+
+        for var_key in self.imputation_order_:
+            freq = self.detected_frequencies_.get(var_key, 'D')
+            freq_order = int(get_frequency_order(freq))
+
+            if freq_order not in freq_groups:
+                freq_groups[freq_order] = []
+            freq_groups[freq_order].append(var_key)
+
+        # Tri par niveau de fréquence décroissant (plus basse fréquence d'abord)
+        return dict(sorted(freq_groups.items(), reverse=True))
+
+    def _apply_intermediate_imputation(
+        self,
+        X: pd.DataFrame,
+        models: Dict[Union[str, Tuple], Any],
+        variables: List[Union[str, Tuple]]
+    ) -> pd.DataFrame:
+        """Apply intermediate imputation for refitting models.
+
+        Args:
+            X: Current working DataFrame.
+            models: Fitted models so far.
+            variables: Variables to impute at this level.
+
+        Returns:
+            Updated DataFrame with intermediate imputations.
+        """
+        result = X.copy()
+
+        for var_key in variables:
+            var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
+            model_info = models.get(var_key)
+
+            if model_info is None or model_info == 'interpolate_fallback':
+                # Fallback vers interpolation
+                if var_name in result.columns:
+                    result[var_name] = result[var_name].interpolate(
+                        method='linear', limit_direction='both'
+                    )
+                continue
+
+            # Identification des valeurs manquantes
+            if var_name not in result.columns:
+                continue
+
+            missing_mask = result[var_name].isna()
+            if not missing_mask.any():
+                continue
+
+            feature_cols = model_info.get('feature_cols', [])
+            X_features = result.loc[missing_mask, feature_cols]
+            X_features = X_features.fillna(X_features.mean())
+
+            try:
+                model = model_info['model']
+                predictions = model.predict(X_features)
+                result.loc[missing_mask, var_name] = predictions
+
+                # Marquage de la provenance
+                trained_on_imputed = model_info.get('trained_on_imputed', False)
+                self._provenance_tracker.mark_model_imputed(
+                    var_name, result.index[missing_mask], trained_on_imputed=trained_on_imputed
+                )
+            except Exception as e:
+                warnings.warn(f"Intermediate imputation failed for '{var_name}': {e}")
+                result[var_name] = result[var_name].interpolate(
+                    method='linear', limit_direction='both'
+                )
+
+        return result
+
+    # -------------------------------------------------------------------------
+    # Interface de transformation principale
+    # -------------------------------------------------------------------------
+    def _transform(
+        self,
+        X: pd.DataFrame,
+        y: Optional[pd.Series] = None
+    ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.Series]]:
+        """Transform X and optionally y using cascade imputation.
+
+        This method implements the abstract _transform from XYPanelTimeSeriesTransformer.
+        It delegates to _transform_X and optionally _transform_y.
+
+        Args:
+            X: Features to transform.
+            y: Targets to transform (optional).
+
+        Returns:
+            X_transformed if y is None.
+            (X_transformed, y_transformed) if y is provided.
+        """
+        # Transformation de X
+        X_transformed = self._transform_X(X, y)
+
+        # Transformation de y si fourni
+        if y is not None:
+            y_transformed = self._transform_y(X, y)
+            return X_transformed, y_transformed
+
+        return X_transformed
+
     # -------------------------------------------------------------------------
     # Transformation des features X
     # -------------------------------------------------------------------------
     def _transform_X(self, X: pd.DataFrame, y: pd.Series = None) -> pd.DataFrame:
-        """Transform features X.
+        """Transform features X using cascade imputation.
 
         Args:
             X: Features to transform.
@@ -997,7 +1510,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 by XYTransformerMixin interface).
 
         Returns:
-            Transformed features.
+            Transformed features. If keep_lower_frequencies=True, returns DataFrame
+            with MultiIndex structure:
+            - Time series: (Frequency, Date)
+            - Panel: (Entity, Frequency, Date)
         """
         # Validation des données
         if not isinstance(X, pd.DataFrame):
@@ -1007,11 +1523,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self._original_X_ = X.copy()
 
         # Préparation de l'index
-        if not isinstance(X.index, pd.DatetimeIndex):
-            if self.time_col in X.columns:
+        if not isinstance(X.index, (pd.DatetimeIndex, pd.MultiIndex)):
+            if self.time_col and self.time_col in X.columns:
                 X = X.set_index(self.time_col)
             else:
-                raise ValueError("X must have a DatetimeIndex")
+                raise ValueError("X must have a DatetimeIndex or MultiIndex")
+
+        # Initialisation du tracker de provenance pour la transformation
+        transform_tracker = ImputationProvenanceTracker()
+        transform_tracker.initialize(X, panel_cols=self.panel_cols)
 
         # Application de la transformation additive
         if self.additive_transformer_ is not None:
@@ -1022,81 +1542,188 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             X_work = X.copy()
 
         # Agrégation des variables haute fréquence
-        aggregate_cols = [
-            col for col, cat in self.variable_categories_.items() if cat == 'aggregate'
+        aggregate_keys = [
+            key for key, cat in self.variable_categories_.items() if cat == 'aggregate'
         ]
+        aggregate_cols = self._extract_column_names(aggregate_keys)
         X_work = self._aggregate_to_target(X_work, aggregate_cols)
 
-        # Interpolation des variables marquées pour interpolation
-        interpolate_cols = [
-            col for col, cat in self.variable_categories_.items() if cat == 'interpolate'
-        ]
-        X_work = self._interpolate_to_target(X_work, interpolate_cols)
+        # Marquage des valeurs agrégées
+        for col in aggregate_cols:
+            if col in X_work.columns:
+                transform_tracker.mark_aggregated(col, X_work.index)
 
         # Imputation cascadée
-        X_work = self._apply_cascading_imputation(X_work)
+        X_work, intermediate_results = self._apply_cascading_imputation(
+            X_work, transform_tracker
+        )
 
         # Gestion des délais
         if self.impute_delayed_values:
             X_work = self._impute_delayed_values(X_work)
 
-        return X_work
+        # Construction de la sortie selon keep_lower_frequencies
+        if self.keep_lower_frequencies and intermediate_results:
+            X_result = self._build_multifreq_output(X_work, intermediate_results)
+        else:
+            X_result = X_work
 
-    def _apply_cascading_imputation(self, X: pd.DataFrame) -> pd.DataFrame:
+        # Mise à jour de la matrice de provenance
+        self.imputation_provenance_ = transform_tracker.get_provenance_matrix()
+
+        return X_result
+
+    def _apply_cascading_imputation(
+        self,
+        X: pd.DataFrame,
+        provenance_tracker: ImputationProvenanceTracker
+    ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
         """Apply cascading imputation for variables marked for imputation.
 
         Args:
-            X: DataFrame with aggregated and interpolated variables.
+            X: DataFrame with aggregated variables.
+            provenance_tracker: Tracker to record provenance of imputed values.
 
         Returns:
-            DataFrame with imputed variables.
+            Tuple of:
+            - Final DataFrame with imputed variables
+            - Dict mapping frequency levels to intermediate DataFrames
+              (only if keep_lower_frequencies=True)
         """
         result = X.copy()
+        intermediate_results: Dict[str, pd.DataFrame] = {}
 
-        for variable in self.imputation_order_:
-            model_info = self.imputation_models_.get(variable)
+        # Groupement des variables par niveau de fréquence
+        freq_groups = self._group_variables_by_frequency()
 
-            if model_info is None or model_info == 'interpolate_fallback':
-                # Fallback vers interpolation linéaire
-                result[variable] = result[variable].interpolate(
-                    method='linear', limit_direction='both'
-                )
-                continue
+        for freq_level, variables_at_level in freq_groups.items():
+            # Stockage des résultats intermédiaires si nécessaire
+            if self.keep_lower_frequencies:
+                intermediate_results[f"freq_{freq_level}"] = result.copy()
 
-            # Identification des valeurs manquantes
-            missing_mask = result[variable].isna()
-            if not missing_mask.any():
-                continue
+            # Imputation des variables à ce niveau
+            for var_key in variables_at_level:
+                var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
+                model_info = self.imputation_models_.get(var_key)
 
-            feature_cols = model_info.get('feature_cols', [])
-            X_features = result.loc[missing_mask, feature_cols]
-
-            # Imputation des NaN dans les features
-            X_features = X_features.fillna(X_features.mean())
-
-            if 'entity_models' in model_info:
-                # Prédiction par entité
-                predictions = self._predict_per_entity(
-                    model_info, X_features, result.loc[missing_mask]
-                )
-            else:
-                # Prédiction globale
-                model = model_info['model']
-                try:
-                    predictions = model.predict(X_features)
-                except Exception as e:
-                    warnings.warn(
-                        f"Prediction failed for variable '{variable}': {e}. "
-                        f"Using interpolation fallback."
-                    )
-                    result[variable] = result[variable].interpolate(
-                        method='linear', limit_direction='both'
-                    )
+                if model_info is None or model_info == 'interpolate_fallback':
+                    # Fallback vers interpolation linéaire
+                    if var_name in result.columns:
+                        result[var_name] = result[var_name].interpolate(
+                            method='linear', limit_direction='both'
+                        )
                     continue
 
-            result.loc[missing_mask, variable] = predictions
+                # Identification des valeurs manquantes
+                if var_name not in result.columns:
+                    continue
 
-        return result
+                missing_mask = result[var_name].isna()
+                if not missing_mask.any():
+                    continue
+
+                feature_cols = model_info.get('feature_cols', [])
+                X_features = result.loc[missing_mask, feature_cols]
+
+                # Imputation des NaN dans les features
+                X_features = X_features.fillna(X_features.mean())
+
+                if 'entity_models' in model_info:
+                    # Prédiction par entité
+                    predictions = self._predict_per_entity(
+                        model_info, X_features, result.loc[missing_mask]
+                    )
+                else:
+                    # Prédiction globale
+                    model = model_info['model']
+                    try:
+                        predictions = model.predict(X_features)
+                    except Exception as e:
+                        warnings.warn(
+                            f"Prediction failed for variable '{var_name}': {e}. "
+                            f"Using interpolation fallback."
+                        )
+                        result[var_name] = result[var_name].interpolate(
+                            method='linear', limit_direction='both'
+                        )
+                        continue
+
+                result.loc[missing_mask, var_name] = predictions
+
+                # Marquage de la provenance
+                trained_on_imputed = model_info.get('trained_on_imputed', False)
+                provenance_tracker.mark_model_imputed(
+                    var_name,
+                    result.index[missing_mask],
+                    trained_on_imputed=trained_on_imputed
+                )
+
+        return result, intermediate_results
+
+    def _build_multifreq_output(
+        self,
+        final_result: pd.DataFrame,
+        intermediate_results: Dict[str, pd.DataFrame]
+    ) -> pd.DataFrame:
+        """Build MultiIndex output with all frequency levels.
+
+        Args:
+            final_result: Final DataFrame at target frequency.
+            intermediate_results: Dict mapping frequency levels to DataFrames.
+
+        Returns:
+            DataFrame with MultiIndex:
+            - Time series: (Frequency, Date)
+            - Panel: (Entity, Frequency, Date)
+        """
+        # Collecte de tous les DataFrames avec leur étiquette de fréquence
+        all_frames = []
+
+        for freq_label, df in intermediate_results.items():
+            # Ajout du niveau de fréquence à l'index
+            df_copy = df.copy()
+            df_copy['_frequency_level'] = freq_label
+            all_frames.append(df_copy)
+
+        # Ajout du résultat final
+        final_copy = final_result.copy()
+        final_copy['_frequency_level'] = 'target'
+        all_frames.append(final_copy)
+
+        # Concaténation
+        combined = pd.concat(all_frames, ignore_index=False)
+
+        # Reconstruction du MultiIndex
+        if self.is_panel_:
+            # Panel: (Entity, Frequency, Date)
+            if isinstance(combined.index, pd.MultiIndex):
+                # Extraction des niveaux existants
+                entity_values = combined.index.get_level_values(0)
+                date_values = combined.index.get_level_values(-1)
+                freq_values = combined['_frequency_level']
+
+                new_index = pd.MultiIndex.from_arrays(
+                    [entity_values, freq_values, date_values],
+                    names=['entity', 'frequency', 'date']
+                )
+            else:
+                # Index simple avec colonne de fréquence
+                new_index = pd.MultiIndex.from_arrays(
+                    [combined['_frequency_level'], combined.index],
+                    names=['frequency', 'date']
+                )
+        else:
+            # Time series: (Frequency, Date)
+            new_index = pd.MultiIndex.from_arrays(
+                [combined['_frequency_level'], combined.index],
+                names=['frequency', 'date']
+            )
+
+        # Application du nouvel index
+        combined.index = new_index
+        combined = combined.drop(columns=['_frequency_level'])
+
+        return combined
 
     def _predict_per_entity(
         self,

@@ -540,7 +540,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
 
         # 2. Détection structure
         if isinstance(data, pd.DataFrame):
-            _, panel_in_index, time_in_index = self._detect_data_structure(X)
+            _, panel_in_index, time_in_index = self._detect_data_structure(data)
         else: # Equivalent à isinstance(data, pd.Series) 
             panel_in_index, time_in_index = isinstance(data.index, pd.MultiIndex), True
 
