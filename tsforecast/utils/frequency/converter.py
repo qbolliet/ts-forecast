@@ -675,7 +675,6 @@ class FrequencyConverter(TemporalConverter):
     def _apply_grouped_conversions(self,
                                   data: pd.DataFrame,
                                   grouped_conversions: Dict[Tuple[str, str, str], List[str]],
-                                  method: str,
                                   fill_method: Optional[str],
                                   alignment_method: str) -> pd.DataFrame:
         """Apply grouped conversions efficiently with proper index alignment.
