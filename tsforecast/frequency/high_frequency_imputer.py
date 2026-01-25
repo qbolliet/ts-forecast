@@ -337,15 +337,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         freq_orders = {}
         for freq in set(valid_freqs):
             try:
-                # Normalisation de la fréquence (extraction de la partie base)
-                base_freq = freq.split('-')[0] if '-' in freq else freq
-                freq_orders[freq] = get_frequency_order(base_freq)
+                freq_orders[freq] = get_frequency_order(freq)
             except ValueError:
-                # Tentative avec la fréquence complète en cas d'échec
-                try:
-                    freq_orders[freq] = get_frequency_order(freq)
-                except ValueError:
-                    continue
+                continue
         
         if not freq_orders:
             raise ValueError("Could not determine frequency order for detected frequencies")

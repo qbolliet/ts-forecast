@@ -13,7 +13,7 @@ from typing import Union, Literal
 from ..abc.normalizer import TemporalNormalizer
 
 # Types supportés pour les fréquences
-FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'Y']
+FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'T', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'Y']
 UserFrequencyType = Literal[
     'daily', 'weekly', 'monthly', 'quarterly', 'annual', 'business_daily'
 ]
@@ -48,6 +48,7 @@ class FrequencyNormalizer(TemporalNormalizer):
             'ms': 'millisecond',
             's': 'second',
             'min': 'minute',
+            'T': 'minute',
             'h': 'hourly',
             'D': 'daily',
             'B': 'business_daily',
@@ -68,6 +69,7 @@ class FrequencyNormalizer(TemporalNormalizer):
             'ms': 3,
             's': 4,
             'min': 5,
+            'T': 5,
             'h': 6,
             'D': 7,
             'B': 7.5,
@@ -78,12 +80,57 @@ class FrequencyNormalizer(TemporalNormalizer):
             'Y': 11
         }
 
+    # Méthode auxiliaire d'extraction de la fréquence de base
+    def _extract_base_frequency(self, freq_string: str) -> Union[FrequencyType, None]:
+        """Extract base frequency from complex pandas frequency string.
+
+        Handles pandas DateOffset strings with positions and anchors:
+        - Position suffixes: 'MS', 'ME', 'QS', 'QE', 'AS', 'AE'
+        - Anchor suffixes: 'QE-DEC', 'QS-JAN', 'AS-MAR'
+
+        Args:
+            freq_string: Complex pandas frequency string
+
+        Returns:
+            Base frequency code if successful, None otherwise
+
+        Examples:
+            >>> normalizer = FrequencyNormalizer()
+            >>> normalizer._extract_base_frequency('QE-DEC')
+            'Q'
+            >>> normalizer._extract_base_frequency('MS')
+            'M'
+            >>> normalizer._extract_base_frequency('AS-JAN')
+            'Y'
+        """
+        # Pattern: [FREQ_BASE][S|E]?[-ANCHOR]?
+        match = re.match(r"^([A-Z]+?)([SE])?(-(.*?))?$", freq_string)
+
+        if not match:
+            return None
+
+        # Extraction de la fréquence de base (premier groupe)
+        base = match.group(1)
+
+        # Normalisation de 'A' (annual) vers 'Y' (year) pour cohérence
+        if base == 'A':
+            base = 'Y'
+
+        # Vérification que la base extraite est valide
+        if base in self._pandas_to_literal:
+            return base
+
+        return None
+
     # Méthode de normalisation de l'expression de la fréquence
     def normalize(self, value: Union[FrequencyType, UserFrequencyType]) -> FrequencyType:
         """Normalize any frequency representation to pandas frequency code.
 
+        Automatically extracts base frequencies from complex pandas frequency strings
+        (e.g., 'QE-DEC' → 'Q', 'MS' → 'M', 'AS-JAN' → 'Y').
+
         Args:
-            value: Frequency string (pandas code or litteral name)
+            value: Frequency string (pandas code, literal name, or complex pandas string)
 
         Returns:
             Pandas frequency code string
@@ -97,6 +144,12 @@ class FrequencyNormalizer(TemporalNormalizer):
             'M'
             >>> normalizer.normalize('D')
             'D'
+            >>> normalizer.normalize('QE-DEC')
+            'Q'
+            >>> normalizer.normalize('MS')
+            'M'
+            >>> normalizer.normalize('AS-JAN')
+            'Y'
         """
         # Vérification que la fréquence est du type spécifié
         if not isinstance(value, str):
@@ -105,10 +158,15 @@ class FrequencyNormalizer(TemporalNormalizer):
         # Retourne un code pandas inchangé
         if value in self._pandas_to_literal:
             return value
-        
+
         # Conversion du nom littéral en pandas
         if value in self._literal_to_pandas:
             return self._literal_to_pandas[value]
+
+        # Tentative d'extraction de la fréquence de base
+        base_freq = self._extract_base_frequency(value)
+        if base_freq is not None:
+            return base_freq
 
         # Renvoie une erreur si le code est inconnu
         raise ValueError(

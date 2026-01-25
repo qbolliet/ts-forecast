@@ -793,10 +793,8 @@ def _get_highest_frequency(frequency_map: Dict[Union[str, tuple], Union[Frequenc
     # Calcul de l'ordre de chaque fréquence et sélection de la plus haute (ordre le plus bas)
     freq_orders = {}
     for freq in unique_frequencies:
-        # Extraction de la partie base de la fréquence (avant le tiret s'il existe)
-        base_freq = freq.split('-')[0] if '-' in freq else freq
         try:
-            freq_orders[freq] = get_frequency_order(base_freq)
+            freq_orders[freq] = get_frequency_order(freq)
         except ValueError:
             # Si la normalisation échoue, essayer avec la fréquence complète
             try:
