@@ -286,3 +286,258 @@ class TestFrequencyNormalizerIntegration:
 
         for freq in complex_strings:
             assert normalizer.validate(freq) is True, f"Failed to validate {freq}"
+
+
+class TestDeprecatedAliasNormalization:
+    """Test normalization of deprecated 'A' alias to 'Y'."""
+
+    @pytest.fixture
+    def normalizer(self):
+        """Create a FrequencyNormalizer instance for testing."""
+        return FrequencyNormalizer()
+
+    def test_normalize_deprecated_alias_a(self, normalizer):
+        """Test that 'A' is recognized but normalized to 'Y'."""
+        assert normalizer.normalize('A') == 'Y'
+
+    def test_normalize_a_with_position(self, normalizer):
+        """Test that 'A' with position suffixes normalizes to 'Y'."""
+        assert normalizer.normalize('AS') == 'Y'
+        assert normalizer.normalize('AE') == 'Y'
+
+    def test_normalize_a_with_anchor(self, normalizer):
+        """Test that 'A' with anchor normalizes to 'Y'."""
+        assert normalizer.normalize('AS-JAN') == 'Y'
+        assert normalizer.normalize('AE-DEC') == 'Y'
+        assert normalizer.normalize('AS-MAR') == 'Y'
+
+    def test_a_in_dictionaries(self, normalizer):
+        """Test that 'A' is recognized in dictionaries."""
+        assert 'A' in normalizer._pandas_to_literal
+        assert 'A' in normalizer._frequency_order
+
+    def test_a_same_order_as_y(self, normalizer):
+        """Test that 'A' and 'Y' have the same order."""
+        assert normalizer._frequency_order['A'] == normalizer._frequency_order['Y']
+
+    def test_a_literal_conversion(self, normalizer):
+        """Test that 'A' converts to 'annual' literal."""
+        assert normalizer.to_literal('A') == 'annual'
+        assert normalizer.to_literal('Y') == 'annual'
+
+    def test_a_validate(self, normalizer):
+        """Test that 'A' and variations are valid."""
+        assert normalizer.validate('A') is True
+        assert normalizer.validate('AS') is True
+        assert normalizer.validate('AE') is True
+        assert normalizer.validate('AS-JAN') is True
+
+
+class TestFrequencyDecomposition:
+    """Test decompose_frequency() method."""
+
+    @pytest.fixture
+    def normalizer(self):
+        """Create a FrequencyNormalizer instance for testing."""
+        return FrequencyNormalizer()
+
+    def test_decompose_simple_frequencies(self, normalizer):
+        """Test decomposition of simple frequencies."""
+        assert normalizer.decompose_frequency('D') == ('D', None, None)
+        assert normalizer.decompose_frequency('M') == ('M', None, None)
+        assert normalizer.decompose_frequency('Q') == ('Q', None, None)
+        assert normalizer.decompose_frequency('Y') == ('Y', None, None)
+        assert normalizer.decompose_frequency('W') == ('W', None, None)
+        assert normalizer.decompose_frequency('B') == ('B', None, None)
+
+    def test_decompose_position_strings(self, normalizer):
+        """Test decomposition of position strings."""
+        assert normalizer.decompose_frequency('MS') == ('M', 'S', None)
+        assert normalizer.decompose_frequency('ME') == ('M', 'E', None)
+        assert normalizer.decompose_frequency('QS') == ('Q', 'S', None)
+        assert normalizer.decompose_frequency('QE') == ('Q', 'E', None)
+        assert normalizer.decompose_frequency('YS') == ('Y', 'S', None)
+        assert normalizer.decompose_frequency('YE') == ('Y', 'E', None)
+
+    def test_decompose_anchor_strings(self, normalizer):
+        """Test decomposition of anchor strings."""
+        assert normalizer.decompose_frequency('QE-DEC') == ('Q', 'E', 'DEC')
+        assert normalizer.decompose_frequency('QS-JAN') == ('Q', 'S', 'JAN')
+        assert normalizer.decompose_frequency('YS-MAR') == ('Y', 'S', 'MAR')
+        assert normalizer.decompose_frequency('W-SUN') == ('W', None, 'SUN')
+
+    def test_decompose_a_normalization(self, normalizer):
+        """Test that 'A' is normalized to 'Y' in decomposition."""
+        assert normalizer.decompose_frequency('A') == ('Y', None, None)
+        assert normalizer.decompose_frequency('AS') == ('Y', 'S', None)
+        assert normalizer.decompose_frequency('AE') == ('Y', 'E', None)
+        assert normalizer.decompose_frequency('AS-JAN') == ('Y', 'S', 'JAN')
+        assert normalizer.decompose_frequency('AE-DEC') == ('Y', 'E', 'DEC')
+
+    def test_decompose_literal_names(self, normalizer):
+        """Test decomposition of literal names."""
+        assert normalizer.decompose_frequency('daily') == ('D', None, None)
+        assert normalizer.decompose_frequency('monthly') == ('M', None, None)
+        assert normalizer.decompose_frequency('quarterly') == ('Q', None, None)
+        assert normalizer.decompose_frequency('annual') == ('Y', None, None)
+
+    def test_decompose_invalid_frequency(self, normalizer):
+        """Test that invalid frequencies raise ValueError."""
+        with pytest.raises(ValueError, match="Cannot parse"):
+            normalizer.decompose_frequency('invalid_freq')
+
+        # 'XYZ' matches regex but is unsupported, so raises different error
+        with pytest.raises(ValueError, match="Unsupported frequency base"):
+            normalizer.decompose_frequency('XYZ')
+
+    def test_decompose_invalid_type(self, normalizer):
+        """Test that non-string input raises ValueError."""
+        with pytest.raises(ValueError, match="must be a string"):
+            normalizer.decompose_frequency(123)
+
+        with pytest.raises(ValueError, match="must be a string"):
+            normalizer.decompose_frequency(None)
+
+
+class TestNormalizeFrequencyReturnFormats:
+    """Test normalize_frequency() with different return formats."""
+
+    def test_return_format_base_default(self):
+        """Test default 'base' format (backward compatible)."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        assert normalize_frequency('QE-DEC') == 'Q'
+        assert normalize_frequency('MS') == 'M'
+        assert normalize_frequency('AS-JAN') == 'Y'
+        assert normalize_frequency('D') == 'D'
+
+    def test_return_format_base_explicit(self):
+        """Test explicit 'base' format."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        assert normalize_frequency('QE-DEC', return_format='base') == 'Q'
+        assert normalize_frequency('MS', return_format='base') == 'M'
+        assert normalize_frequency('AS-JAN', return_format='base') == 'Y'
+
+    def test_return_format_with_position(self):
+        """Test 'with_position' format."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        assert normalize_frequency('QE-DEC', return_format='with_position') == 'QE'
+        assert normalize_frequency('MS', return_format='with_position') == 'MS'
+        assert normalize_frequency('D', return_format='with_position') == 'D'
+        assert normalize_frequency('AS-JAN', return_format='with_position') == 'YS'
+        assert normalize_frequency('W-SUN', return_format='with_position') == 'W'
+
+    def test_return_format_full(self):
+        """Test 'full' format (validated original)."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        assert normalize_frequency('QE-DEC', return_format='full') == 'QE-DEC'
+        assert normalize_frequency('MS', return_format='full') == 'MS'
+        assert normalize_frequency('D', return_format='full') == 'D'
+        assert normalize_frequency('AS-JAN', return_format='full') == 'AS-JAN'
+
+    def test_return_format_components(self):
+        """Test 'components' format (tuple)."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        assert normalize_frequency('QE-DEC', return_format='components') == ('Q', 'E', 'DEC')
+        assert normalize_frequency('MS', return_format='components') == ('M', 'S', None)
+        assert normalize_frequency('D', return_format='components') == ('D', None, None)
+        assert normalize_frequency('AS-JAN', return_format='components') == ('Y', 'S', 'JAN')
+
+    def test_return_format_invalid(self):
+        """Test invalid return_format raises ValueError."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        with pytest.raises(ValueError, match="Invalid return_format"):
+            normalize_frequency('M', return_format='invalid')
+
+        with pytest.raises(ValueError, match="Invalid return_format"):
+            normalize_frequency('D', return_format='xyz')
+
+    def test_return_format_with_literal_names(self):
+        """Test return formats work with literal names."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        assert normalize_frequency('monthly', return_format='base') == 'M'
+        assert normalize_frequency('monthly', return_format='components') == ('M', None, None)
+        assert normalize_frequency('quarterly', return_format='components') == ('Q', None, None)
+        assert normalize_frequency('annual', return_format='base') == 'Y'
+
+    def test_return_format_all_formats_for_same_input(self):
+        """Test all formats for the same input give consistent results."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        freq = 'QE-DEC'
+
+        # Base extraction
+        base = normalize_frequency(freq, return_format='base')
+        assert base == 'Q'
+
+        # With position
+        with_pos = normalize_frequency(freq, return_format='with_position')
+        assert with_pos == 'QE'
+
+        # Full
+        full = normalize_frequency(freq, return_format='full')
+        assert full == 'QE-DEC'
+
+        # Components
+        components = normalize_frequency(freq, return_format='components')
+        assert components == ('Q', 'E', 'DEC')
+
+        # Verify consistency
+        assert components[0] == base
+        assert f"{components[0]}{components[1]}" == with_pos
+
+
+class TestConverterIntegration:
+    """Test that converter.py can use new normalize_frequency features."""
+
+    def test_converter_decompose_detected_frequency(self):
+        """Test converter can decompose detected frequencies."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        # Simulate what converter.py does at line 151
+        detected_freq = 'QE-DEC'
+        base, position, anchor = normalize_frequency(detected_freq, return_format='components')
+
+        assert base == 'Q'
+        assert position == 'E'
+        assert anchor == 'DEC'
+
+    def test_converter_decompose_source_target(self):
+        """Test converter can decompose source/target frequencies."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        # Simulate what converter.py does at lines 707-708
+        source_freq = 'QE-DEC'
+        target_freq = 'MS'
+
+        source_base, _, _ = normalize_frequency(source_freq, return_format='components')
+        target_base, _, _ = normalize_frequency(target_freq, return_format='components')
+
+        assert source_base == 'Q'
+        assert target_base == 'M'
+
+    def test_converter_preserve_position(self):
+        """Test converter can preserve position information."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        freq = 'QE-DEC'
+        with_position = normalize_frequency(freq, return_format='with_position')
+        assert with_position == 'QE'
+
+    def test_converter_handle_a_alias(self):
+        """Test converter correctly handles 'A' alias."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+
+        # Simulate detection of 'AS-JAN'
+        detected_freq = 'AS-JAN'
+        base, position, anchor = normalize_frequency(detected_freq, return_format='components')
+
+        assert base == 'Y'  # Normalized from 'A'
+        assert position == 'S'
+        assert anchor == 'JAN'

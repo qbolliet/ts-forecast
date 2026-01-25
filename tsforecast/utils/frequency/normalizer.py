@@ -7,13 +7,13 @@ representations including pandas frequency codes, DateOffsets, and user-friendly
 import re
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
-from typing import Union, Literal
+from typing import Union, Literal, Tuple, Optional
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
 
 # Types supportés pour les fréquences
-FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'T', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'Y']
+FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'T', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'A', 'Y']
 UserFrequencyType = Literal[
     'daily', 'weekly', 'monthly', 'quarterly', 'annual', 'business_daily'
 ]
@@ -48,7 +48,6 @@ class FrequencyNormalizer(TemporalNormalizer):
             'ms': 'millisecond',
             's': 'second',
             'min': 'minute',
-            'T': 'minute',
             'h': 'hourly',
             'D': 'daily',
             'B': 'business_daily',
@@ -69,7 +68,6 @@ class FrequencyNormalizer(TemporalNormalizer):
             'ms': 3,
             's': 4,
             'min': 5,
-            'T': 5,
             'h': 6,
             'D': 7,
             'B': 7.5,
@@ -112,10 +110,6 @@ class FrequencyNormalizer(TemporalNormalizer):
         # Extraction de la fréquence de base (premier groupe)
         base = match.group(1)
 
-        # Normalisation de 'A' (annual) vers 'Y' (year) pour cohérence
-        if base == 'A':
-            base = 'Y'
-
         # Vérification que la base extraite est valide
         if base in self._pandas_to_literal:
             return base
@@ -127,7 +121,7 @@ class FrequencyNormalizer(TemporalNormalizer):
         """Normalize any frequency representation to pandas frequency code.
 
         Automatically extracts base frequencies from complex pandas frequency strings
-        (e.g., 'QE-DEC' → 'Q', 'MS' → 'M', 'AS-JAN' → 'Y').
+        (e.g., 'QE-DEC' → 'Q', 'MS' → 'M', 'YS-JAN' → 'Y').
 
         Args:
             value: Frequency string (pandas code, literal name, or complex pandas string)
@@ -148,7 +142,7 @@ class FrequencyNormalizer(TemporalNormalizer):
             'Q'
             >>> normalizer.normalize('MS')
             'M'
-            >>> normalizer.normalize('AS-JAN')
+            >>> normalizer.normalize('YS-JAN')
             'Y'
         """
         # Vérification que la fréquence est du type spécifié
@@ -174,6 +168,67 @@ class FrequencyNormalizer(TemporalNormalizer):
             f"Supported frequencies: {list(self._literal_to_pandas.keys())} "
             f"or pandas codes: {list(self._pandas_to_literal.keys())}"
         )
+
+    # Méthode de décomposition d'une fréquence en ses composants
+    def decompose_frequency(self, freq_string: str) -> Tuple[str, Optional[str], Optional[str]]:
+        """Decompose frequency into (base, position, anchor) components.
+
+        This method parses complex pandas frequency strings and extracts all
+        components while normalizing the base frequency.
+
+        Args:
+            freq_string: Frequency string to decompose
+
+        Returns:
+            Tuple of (base_frequency, position, anchor):
+            - base_frequency: Normalized base code ('Q', 'M', 'Y', etc.)
+            - position: Position suffix ('S' for start, 'E' for end) or None
+            - anchor: Anchor suffix ('DEC', 'JAN', 'SUN', etc.) or None
+
+        Raises:
+            ValueError: If frequency format is invalid or base is unsupported
+
+        Examples:
+            >>> normalizer = FrequencyNormalizer()
+            >>> normalizer.decompose_frequency('QE-DEC')
+            ('Q', 'E', 'DEC')
+            >>> normalizer.decompose_frequency('MS')
+            ('M', 'S', None)
+            >>> normalizer.decompose_frequency('D')
+            ('D', None, None)
+            >>> normalizer.decompose_frequency('YS-JAN')
+            ('Y', 'S', 'JAN')
+            >>> normalizer.decompose_frequency('monthly')
+            ('M', None, None)
+        """
+        # Validation du type
+        if not isinstance(freq_string, str):
+            raise ValueError(f"Frequency must be a string, got {type(freq_string)}")
+
+        # Pattern: [FREQ_BASE][S|E]?[-ANCHOR]?
+        match = re.match(r"^([A-Z]+?)([SE])?(-(.*?))?$", freq_string)
+
+        if not match:
+            # Fallback: try normalizing as simple frequency or literal name
+            try:
+                base = self.normalize(freq_string)
+                return (base, None, None)
+            except ValueError:
+                raise ValueError(f"Cannot parse frequency string: {freq_string}")
+
+        # Extraction des composants
+        base = match.group(1)
+        position = match.group(2)  # 'S', 'E' or None
+        anchor = match.group(4)     # 'DEC', 'JAN', etc. or None
+
+        # Validation que la base est supportée
+        if base not in self._pandas_to_literal:
+            raise ValueError(
+                f"Unsupported frequency base: {base}. "
+                f"Supported codes: {list(self._pandas_to_literal.keys())}"
+            )
+
+        return (base, position, anchor)
 
     # Méthode de conversion en nom littéraire
     def to_literal(self, frequency: FrequencyType) -> UserFrequencyType:

@@ -1,6 +1,6 @@
 # Importation des modules
 # Modules de base
-from typing import Union
+from typing import Union, Literal, Tuple, Optional
 import pandas as pd
 
 # Importation des modules du package
@@ -11,22 +11,82 @@ _normalizer = FrequencyNormalizer()
 
 # Fonctions de commodité pour accès direct
 # Fonction de normalisation de la fréquence
-def normalize_frequency(frequency: Union[FrequencyType, UserFrequencyType]) -> str:
-    """Normalize frequency to pandas frequency code.
+def normalize_frequency(
+    frequency: Union[str, FrequencyType, UserFrequencyType],
+    return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
+) -> Union[str, Tuple[str, Optional[str], Optional[str]]]:
+    """Normalize frequency with configurable output format.
+
+    This function provides flexible frequency normalization with multiple
+    output formats to support different use cases while maintaining
+    backward compatibility.
 
     Args:
-        frequency: Frequency string in pandas code or literal name format.
+        frequency: Frequency to normalize (pandas code, literal name, or complex string)
+        return_format: Output format level (default: 'base' for backward compatibility):
+            - 'base': Base frequency only → 'Q'
+            - 'with_position': Base + position if present → 'QE'
+            - 'full': Complete validated string → 'QE-DEC'
+            - 'components': Tuple (base, position, anchor) → ('Q', 'E', 'DEC')
 
     Returns:
-        Normalized pandas frequency code string.
+        Normalized frequency in requested format:
+        - 'base', 'with_position', 'full': str
+        - 'components': Tuple[str, Optional[str], Optional[str]]
+
+    Raises:
+        ValueError: If frequency is invalid or return_format is unsupported
 
     Examples:
+        >>> # Default: backward compatible base extraction
+        >>> normalize_frequency('QE-DEC')
+        'Q'
         >>> normalize_frequency('monthly')
         'M'
-        >>> normalize_frequency('D')
-        'D'
+
+        >>> # With position: useful for resampling
+        >>> normalize_frequency('QE-DEC', return_format='with_position')
+        'QE'
+        >>> normalize_frequency('MS', return_format='with_position')
+        'MS'
+
+        >>> # Full: validated original string
+        >>> normalize_frequency('QE-DEC', return_format='full')
+        'QE-DEC'
+
+        >>> # Components: complete parsing
+        >>> normalize_frequency('QE-DEC', return_format='components')
+        ('Q', 'E', 'DEC')
+        >>> normalize_frequency('MS', return_format='components')
+        ('M', 'S', None)
+        >>> normalize_frequency('D', return_format='components')
+        ('D', None, None)
     """
-    return _normalizer.normalize(frequency)
+    if return_format == 'base':
+        # Comportement actuel (backward compatible)
+        return _normalizer.normalize(frequency)
+
+    elif return_format == 'components':
+        # Décomposition complète
+        return _normalizer.decompose_frequency(frequency)
+
+    elif return_format == 'with_position':
+        # Base + position si présente
+        base, position, _ = _normalizer.decompose_frequency(frequency)
+        if position:
+            return f"{base}{position}"
+        return base
+
+    elif return_format == 'full':
+        # Validation + retour de la chaîne complète
+        _normalizer.decompose_frequency(frequency)  # Validation
+        return frequency
+
+    else:
+        raise ValueError(
+            f"Invalid return_format: {return_format}. "
+            f"Must be one of: 'base', 'with_position', 'full', 'components'"
+        )
 
 # Fonction de conversion en expression littéraire
 def to_literal(frequency: Union[FrequencyType, UserFrequencyType]) -> str:

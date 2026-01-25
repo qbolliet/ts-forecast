@@ -147,9 +147,11 @@ class FrequencyConverter(TemporalConverter):
                 raise ValueError("Cannot detect current frequency of the data")
 
             # Extraction de la fréquence de base et de la position en utilisant le normalisateur
-            # Split pour supprimer l'anchor (-DEC, -OCT, etc.) avant décomposition
-            detected_freq_base = detected_freq.split('-')[0]
-            current_freq_base, source_position = self._position_normalizer.decompose_offset(detected_freq_base)
+            from .utils import normalize_frequency
+            current_freq_base, source_position, _ = normalize_frequency(
+                detected_freq,
+                return_format='components'
+            )
 
             # Normalisation de la fréquence cible (doit être str pour Series)
             if isinstance(target_freq, dict):
@@ -174,7 +176,7 @@ class FrequencyConverter(TemporalConverter):
                 final_position = target_pos_in_arg
             else:
                 # Cas 3: préserver la position source si identifiable, sinon 'E'
-                final_position = source_position
+                final_position = source_position if source_position is not None else 'E'
 
             # Construction de la fréquence cible complète avec position
             target_freq_with_position = self._position_normalizer.combine_frequency_position(
@@ -214,7 +216,7 @@ class FrequencyConverter(TemporalConverter):
             grouped_conversions = self._group_conversions_by_operation(frequency_map=frequency_map, method=method)
 
             # Application des conversions groupées
-            result = self._apply_grouped_conversions(data=data, grouped_conversions=grouped_conversions, method=method, fill_method=fill_method, alignment_method=alignment_method)
+            result = self._apply_grouped_conversions(data=data, grouped_conversions=grouped_conversions, fill_method=fill_method, alignment_method=alignment_method)
 
             return result
 
@@ -703,10 +705,9 @@ class FrequencyConverter(TemporalConverter):
             subset = data[columns]
 
             # Décomposition des fréquences pour extraire les bases (sans positions ni anchors)
-            source_freq_clean = source_freq.split('-')[0]
-            target_freq_clean = target_freq.split('-')[0]
-            source_base, _ = self._position_normalizer.decompose_offset(source_freq_clean)
-            target_base, _ = self._position_normalizer.decompose_offset(target_freq_clean)
+            from .utils import normalize_frequency
+            source_base = normalize_frequency(source_freq, return_format='base')
+            target_base = normalize_frequency(target_freq, return_format='base')
 
             # Détermination de la direction de conversion (basée sur les fréquences de base)
             if is_higher_frequency(target_base, source_base):
@@ -951,10 +952,16 @@ class FrequencyConverter(TemporalConverter):
             12
         """
         # Extraction des informations de fréquence et position
-        # IMPORTANT : source_freq peut contenir un anchor (ex: 'QS-OCT'), il faut le supprimer
-        source_freq_clean = source_freq.split('-')[0]
-        source_base, source_pos = self._position_normalizer.decompose_offset(source_freq_clean)
-        target_base, target_pos = self._position_normalizer.decompose_offset(target_freq)
+        from .utils import normalize_frequency
+        source_base, source_pos, _ = normalize_frequency(
+            source_freq,
+            return_format='components'
+        )
+        target_base, target_pos, _ = normalize_frequency(target_freq, return_format='components')
+
+        # Définir des valeurs par défaut pour les positions si None (convention: 'E')
+        source_pos = source_pos if source_pos is not None else 'E'
+        target_pos = target_pos if target_pos is not None else 'E'
 
         # Vérification si extension nécessaire
         # On étend seulement si les bases de fréquence sont différentes et compatibles
