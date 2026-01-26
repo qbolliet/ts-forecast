@@ -1068,3 +1068,82 @@ class ReversibleTransformerMixin:
 
         # Pas de conversion appliquée : retour inchangé
         return X
+
+
+# Classe d'inversion des transformations directes et inverse d'un transformer
+class InverseTransformer(BaseEstimator, TransformerMixin):
+    """Wrapper that inverts the transform and inverse_transform methods of a transformer.
+    
+    This class takes a fitted transformer and swaps its transform and inverse_transform
+    methods, effectively creating an inverse version of the original transformer.
+    
+    Args:
+        transformer: A fitted sklearn transformer with transform and inverse_transform methods.
+        
+    Attributes:
+        transformer: The wrapped transformer instance.
+        
+    Examples:
+        >>> from sklearn.preprocessing import StandardScaler
+        >>> import numpy as np
+        >>> 
+        >>> X = np.array([[1, 2], [3, 4], [5, 6]])
+        >>> scaler = StandardScaler().fit(X)
+        >>> 
+        >>> # Transformation normale
+        >>> X_scaled = scaler.transform(X)
+        >>> 
+        >>> # Transformation inverse
+        >>> inverse_scaler = InverseTransformer(scaler)
+        >>> X_original = inverse_scaler.transform(X_scaled)
+    """
+    # Initialisation
+    def __init__(self, transformer):
+        """Initialize the InverseTransformer.
+        
+        Args:
+            transformer: A fitted sklearn transformer with transform and 
+                inverse_transform methods.
+        """
+        # Instanciation des attributs
+        self.transformer = transformer
+    
+    # Méthode d'entraînement
+    def fit(self, X, y=None):
+        """Fit method (no-op since transformer is already fitted).
+        
+        Args:
+            X: Input data (not used).
+            y: Target values (not used).
+            
+        Returns:
+            self: Returns self for method chaining.
+        """
+        # Pas d'entraînement nécessaire car le transformer est déjà entraîné
+        return self
+    
+    # Méthode de transformation
+    def transform(self, X):
+        """Apply the inverse_transform method of the wrapped transformer.
+        
+        Args:
+            X: Input data to transform.
+            
+        Returns:
+            Transformed data using the inverse_transform of the wrapped transformer.
+        """
+        # Application de la transformation inverse du transformer original
+        return self.transformer.inverse_transform(X)
+    
+    # Méthode de transformation inverse
+    def inverse_transform(self, X):
+        """Apply the transform method of the wrapped transformer.
+        
+        Args:
+            X: Input data to inverse transform.
+            
+        Returns:
+            Transformed data using the transform of the wrapped transformer.
+        """
+        # Application de la transformation du transformer original
+        return self.transformer.transform(X)
