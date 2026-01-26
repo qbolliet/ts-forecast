@@ -137,7 +137,7 @@ def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[p
         results = []
         
         # Obtention des niveaux d'index (pour distinguer time vs panel)
-        is_panel = isinstance(new_data, pd.MultiIndex)
+        is_panel = isinstance(new_data.index, pd.MultiIndex)
         
         # Identification des colonnes de valeurs (exclure les niveaux d'index)
         value_columns = [col for col in new_data.columns]
@@ -186,7 +186,11 @@ def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[p
         if results:
             df_changes = pd.DataFrame(results)
             df_changes = df_changes.set_index('index')
-            df_changes.index.names = new_data.index.names
+            # Création d'un multiindex s'il s'agit de données de panel
+            if is_panel:
+                df_changes.index = pd.MultiIndex.from_tuples(df_changes.index, names=new_data.index.names)
+            else:
+                df_changes.index.names = new_data.index.names
         else:
             # Aucune observation non-nulle trouvée
             df_changes = pd.DataFrame(columns=['column', 'has_changes'])

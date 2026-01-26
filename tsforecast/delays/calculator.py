@@ -6,7 +6,7 @@ by converting frequencies and aggregating delays across time series.
 # Importation des modules
 # Modules de base
 import pandas as pd
-from typing import List, Optional, Union, Literal
+from typing import Dict, List, Optional, Union, Literal
 
 # Modules du package
 from ..utils.frequency import normalize_frequency, is_higher_frequency, to_pandas_freq
@@ -17,7 +17,7 @@ from ..utils.duration import to_code as duration_to_code, convert_duration
 def calculate_applicable_delay(
     publication_delays: pd.DataFrame,
     target_reference_point: Literal['start', 'end'],
-    target_frequency: str,
+    target_frequency: Union[str, Dict[str, str]],
     indicators: Optional[List[str]] = None,
     aggregate_by_panel: bool = False,
     aggregation_method: Union[str, callable] = 'median',
@@ -113,9 +113,14 @@ def calculate_applicable_delay(
             raise ValueError(f"No data found for specified indicators: {indicators}")
     
     # Création du mapping indicateur -> fréquence cible
-    # Fréquence unique pour tous les indicateurs
-    unique_indicators = delays.index.get_level_values(indicator_level_name).unique()
-    target_freq_map = {ind: target_frequency for ind in unique_indicators}
+    if isinstance(target_frequency, str):
+        # Fréquence unique pour tous les indicateurs
+        unique_indicators = delays.index.get_level_values(indicator_level_name).unique()
+        target_freq_map = {ind: target_frequency for ind in unique_indicators}
+    elif isinstance(target_frequency, dict):
+        target_freq_map = target_frequency.copy()
+    else:
+        raise TypeError(f"'target_frequency' should be a string or a dict, git a {type(target_frequency).__name__}")
     
     # Conversion des délais au point de référence et à la fréquence cibles
     delays = _convert_to_target_frequency_and_reference(

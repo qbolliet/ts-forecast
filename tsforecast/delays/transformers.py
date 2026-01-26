@@ -65,7 +65,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         >>>
         >>> # Create delays DataFrame with metadata
         >>> delays_df = pd.DataFrame({
-        ...     'variable': ['GDP', 'inflation'],
+        ...     'column': ['GDP', 'inflation'],
         ...     'delay': [45.0, 30.0],
         ...     'unit': ['D', 'D'],
         ...     'reference_point': ['end', 'end'],
@@ -202,7 +202,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         
         # Conversion des delays en dictionnaire si DataFrame
         if isinstance(self.delays, pd.DataFrame):
-            delays_dict = dict(zip(self.delays['variable'], self.delays['delay']))
+            delays_dict = dict(zip(self.delays['column'], self.delays['delay']))
         else:
             delays_dict = self.delays
 
@@ -402,25 +402,25 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             # Inférence de 'delay_unit' à partir de la colonne 'unit'
             if 'unit' in self.delays.columns:
                 # Stockage sous la forme d'un dictionnaire de l'association entre les variables et l'unité
-                df_unit = self.delays[['variable', 'unit']].drop_duplicates(subset=['variable'])
+                df_unit = self.delays[['column', 'unit']].drop_duplicates(subset=['column'])
                 inferred['delay_unit'] = dict(
-                    zip(df_unit['variable'], df_unit['unit'])
+                    zip(df_unit['column'], df_unit['unit'])
                 )
 
             # Inférence de 'reference_point' à partir de la colonne 'reference_point'
             if 'reference_point' in self.delays.columns:
                 # Stockage sous la forme d'un dictionnaire de l'association entre les variables et lde point de référence
-                df_reference_point = self.delays[['variable', 'reference_point']].drop_duplicates(subset=['variable'])
+                df_reference_point = self.delays[['column', 'reference_point']].drop_duplicates(subset=['column'])
                 inferred['reference_point'] = dict(
-                    zip(df_reference_point['variable'], df_reference_point['reference_point'])
+                    zip(df_reference_point['column'], df_reference_point['reference_point'])
                 )
 
             # Inférence de 'target_frequency' à partir de la colonne 'target_frequency'
             if 'target_frequency' in self.delays.columns:
                 # Stockage sous la forme d'un dictionnaire de l'association entre les variables et la fréquence
-                df_frequency = self.delays[['variable', 'target_frequency']].drop_duplicates(subset=['variable'])
+                df_frequency = self.delays[['column', 'target_frequency']].drop_duplicates(subset=['column'])
                 inferred['target_frequency'] = dict(
-                    zip(df_frequency['variable'], df_frequency['target_frequency'])
+                    zip(df_frequency['column'], df_frequency['target_frequency'])
                 )
 
         return inferred
