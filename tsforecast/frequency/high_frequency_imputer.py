@@ -692,12 +692,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 if target_freq is None:
                     continue
 
-                # Comparaison des fréquences
+                # Comparaison des fréquences (avec normalisation)
+                freq_normalized = normalize_frequency(freq)
+                target_normalized = normalize_frequency(target_freq)
+
                 if is_higher_frequency(freq, target_freq):
                     # Variable à fréquence plus haute -> agrégation nécessaire
                     categories[key] = 'aggregate'
-                elif freq == target_freq:
-                    # Variable à la fréquence cible
+                elif freq_normalized == target_normalized:
+                    # Variable à la fréquence cible (comparaison normalisée)
                     categories[key] = 'target_freq'
                 else:
                     # Variable à fréquence plus basse -> imputation nécessaire
@@ -707,12 +710,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             # Parcours des fréquences détectées
             for col, freq in self.detected_frequencies_.items():
-                # Comparaison des fréquences
+                # Comparaison des fréquences (avec normalisation)
+                freq_normalized = normalize_frequency(freq)
+                target_normalized = normalize_frequency(self.effective_target_frequency)
+
                 if is_higher_frequency(freq, self.effective_target_frequency):
                     # Variable à fréquence plus haute -> agrégation nécessaire
                     categories[col] = 'aggregate'
-                elif freq == self.effective_target_frequency:
-                    # Variable à la fréquence cible
+                elif freq_normalized == target_normalized:
+                    # Variable à la fréquence cible (comparaison normalisée)
                     categories[col] = 'target_freq'
                 else:
                     # Variable à fréquence plus basse -> imputation nécessaire
@@ -968,25 +974,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Imputation simple des NaN dans les features
             X_train = X_train.fillna(X_train.mean())
 
-            if False and self.panel_cols:  # Entity-level fitting disabled in this method
-                # Entraînement par entité
-                models[variable] = self._fit_models_per_entity(
-                    X, variable, feature_cols, estimator
+            # Entraînement global
+            try:
+                estimator.fit(X_train, y_train)
+                models[variable] = {
+                    'model': estimator,
+                    'feature_cols': feature_cols,
+                }
+            except Exception as e:
+                warnings.warn(
+                    f"Failed to fit model for variable '{variable}': {e}. "
+                    f"Using linear interpolation as fallback"
                 )
-            else:
-                # Entraînement global
-                try:
-                    estimator.fit(X_train, y_train)
-                    models[variable] = {
-                        'model': estimator,
-                        'feature_cols': feature_cols,
-                    }
-                except Exception as e:
-                    warnings.warn(
-                        f"Failed to fit model for variable '{variable}': {e}. "
-                        f"Using linear interpolation as fallback"
-                    )
-                    models[variable] = 'interpolate_fallback'
+                models[variable] = 'interpolate_fallback'
 
         return models
 
@@ -1478,7 +1478,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """Transform X and optionally y using cascade imputation.
 
         This method implements the abstract _transform from XYPanelTimeSeriesTransformer.
-        It delegates to _transform_X and optionally _transform_y.
+        It concatenates X and y, applies transformations, then splits them.
 
         Args:
             X: Features to transform.
@@ -1488,90 +1488,82 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             X_transformed if y is None.
             (X_transformed, y_transformed) if y is provided.
         """
-        # Transformation de X
-        X_transformed = self._transform_X(X, y)
-
-        # Transformation de y si fourni
-        if y is not None:
-            y_transformed = self._transform_y(X, y)
-            return X_transformed, y_transformed
-
-        return X_transformed
-
-    # -------------------------------------------------------------------------
-    # Transformation des features X
-    # -------------------------------------------------------------------------
-    def _transform_X(self, X: pd.DataFrame, y: pd.Series = None) -> pd.DataFrame:
-        """Transform features X using cascade imputation.
-
-        Args:
-            X: Features to transform.
-            y: Targets (optional, not used in this transformer but required
-                by XYTransformerMixin interface).
-
-        Returns:
-            Transformed features. If keep_lower_frequencies=True, returns DataFrame
-            with MultiIndex structure:
-            - Time series: (Frequency, Date)
-            - Panel: (Entity, Frequency, Date)
-        """
         # Validation des données
         if not isinstance(X, pd.DataFrame):
             raise ValueError(f"X must be a pandas DataFrame, got {type(X).__name__}")
 
-        # Stockage de l'original pour inverse_transform
+        # Stockage des originaux pour inverse_transform
         self._original_X_ = X.copy()
+        self._original_y_ = y.copy() if y is not None else None
+
+        # Identification du nom de la colonne y pour la scission ultérieure
+        y_col_name = None
+        if y is not None:
+            y_col_name = y.name if y.name is not None else '__target__'
+
+        # Concaténation de X et y si y est fourni
+        if y is not None:
+            y_frame = y.to_frame(name=y_col_name)
+            data_work = pd.concat([X, y_frame], axis=1)
+        else:
+            data_work = X.copy()
 
         # Préparation de l'index
-        if not isinstance(X.index, (pd.DatetimeIndex, pd.MultiIndex)):
-            if self.time_col and self.time_col in X.columns:
-                X = X.set_index(self.time_col)
+        if not isinstance(data_work.index, (pd.DatetimeIndex, pd.MultiIndex)):
+            if self.time_col and self.time_col in data_work.columns:
+                data_work = data_work.set_index(self.time_col)
             else:
-                raise ValueError("X must have a DatetimeIndex or MultiIndex")
+                raise ValueError("Data must have a DatetimeIndex or MultiIndex")
 
         # Initialisation du tracker de provenance pour la transformation
         transform_tracker = ImputationProvenanceTracker()
-        transform_tracker.initialize(X, panel_cols=self.panel_cols)
+        transform_tracker.initialize(data_work, panel_cols=self.panel_cols)
 
         # Application de la transformation additive
         if self.additive_transformer_ is not None:
-            X_work = self.additive_transformer_.transform(X)
-            if isinstance(X_work, tuple):
-                X_work = X_work[0]
+            data_transformed = self.additive_transformer_.transform(data_work)
+            if isinstance(data_transformed, tuple):
+                data_transformed = data_transformed[0]
         else:
-            X_work = X.copy()
+            data_transformed = data_work.copy()
 
         # Agrégation des variables haute fréquence
         aggregate_keys = [
             key for key, cat in self.variable_categories_.items() if cat == 'aggregate'
         ]
         aggregate_cols = self._extract_column_names(aggregate_keys)
-        X_work = self._aggregate_to_target(X_work, aggregate_cols)
+        data_transformed = self._aggregate_to_target(data_transformed, aggregate_cols)
 
         # Marquage des valeurs agrégées
         for col in aggregate_cols:
-            if col in X_work.columns:
-                transform_tracker.mark_aggregated(col, X_work.index)
+            if col in data_transformed.columns:
+                transform_tracker.mark_aggregated(col, data_transformed.index)
 
         # Imputation cascadée
-        X_work, intermediate_results = self._apply_cascading_imputation(
-            X_work, transform_tracker
+        data_transformed, intermediate_results = self._apply_cascading_imputation(
+            data_transformed, transform_tracker
         )
 
         # Gestion des délais
         if self.impute_delayed_values:
-            X_work = self._impute_delayed_values(X_work)
+            data_transformed = self._impute_delayed_values(data_transformed)
 
         # Construction de la sortie selon keep_lower_frequencies
         if self.keep_lower_frequencies and intermediate_results:
-            X_result = self._build_multifreq_output(X_work, intermediate_results)
+            data_result = self._build_multifreq_output(data_transformed, intermediate_results)
         else:
-            X_result = X_work
+            data_result = data_transformed
 
         # Mise à jour de la matrice de provenance
         self.imputation_provenance_ = transform_tracker.get_provenance_matrix()
 
-        return X_result
+        # Scission de X et y si y était fourni
+        if y is not None and y_col_name in data_result.columns:
+            y_transformed = data_result[y_col_name]
+            X_transformed = data_result.drop(columns=[y_col_name])
+            return X_transformed, y_transformed
+        else:
+            return data_result
 
     def _apply_cascading_imputation(
         self,
@@ -1823,18 +1815,20 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 )
             else:
                 feature_cols = model_info.get('feature_cols', [])
-                X_features = result.loc[delayed_idx[missing_mask], feature_cols]
+                # Utilisation de .values pour obtenir un tableau booléen numpy
+                missing_idx = delayed_idx[missing_mask.values]
+                X_features = result.loc[missing_idx, feature_cols]
 
                 if not X_features.empty:
                     X_features = X_features.fillna(X_features.mean())
                     try:
                         if 'entity_models' in model_info:
                             predictions = self._predict_per_entity(
-                                model_info, X_features, result.loc[delayed_idx[missing_mask]]
+                                model_info, X_features, result.loc[missing_idx]
                             )
                         else:
                             predictions = model_info['model'].predict(X_features)
-                        result.loc[delayed_idx[missing_mask], variable] = predictions
+                        result.loc[missing_idx, variable] = predictions
                     except Exception as e:
                         warnings.warn(
                             f"Failed to impute delayed values for '{variable}': {e}"
@@ -1843,88 +1837,60 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         return result
 
     # -------------------------------------------------------------------------
-    # Transformation des targets y
+    # Transformation inverse
     # -------------------------------------------------------------------------
-    def _transform_y(self, X: pd.DataFrame, y: pd.Series = None) -> pd.Series:
-        """Transform target y.
+    def _inverse_transform(
+        self,
+        X: pd.DataFrame,
+        y: Optional[pd.Series] = None
+    ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.Series]]:
+        """Inverse transform X and optionally y.
 
-        Args:
-            X: Features (for conditional transformations, not used here).
-            y: Targets to transform.
-
-        Returns:
-            Transformed targets.
-        """
-        # Stockage de l'original
-        self._original_y_ = y.copy()
-
-        # Application de la transformation additive si applicable
-        if self.additive_transformer_ is not None:
-            # Certains transformers peuvent transformer y aussi
-            if hasattr(self.additive_transformer_, 'transform'):
-                try:
-                    # Essayer de transformer y seul
-                    y_transformed = y.copy()
-                except Exception:
-                    y_transformed = y.copy()
-            else:
-                y_transformed = y.copy()
-        else:
-            y_transformed = y.copy()
-
-        return y_transformed
-
-    # -------------------------------------------------------------------------
-    # Transformation inverse des features X
-    # -------------------------------------------------------------------------
-    def _inverse_transform_X(self, X: pd.DataFrame, y: pd.Series = None) -> pd.DataFrame:
-        """Inverse transform features.
+        Note: Disaggregation from lower to higher frequency is lossy.
+        The imputed sub-period values cannot be exactly reversed to original
+        low-frequency values.
 
         Args:
             X: Transformed features.
-            y: Transformed targets (optional, not used here).
+            y: Transformed targets (optional).
 
         Returns:
-            Original features (at target frequency - disaggregation is lossy).
+            X_original if y is None.
+            (X_original, y_original) if y is provided.
         """
-        result = X.copy()
+        # Identification du nom de la colonne y pour la scission ultérieure
+        y_col_name = None
+        if y is not None:
+            y_col_name = y.name if y.name is not None else '__target__'
+
+        # Concaténation de X et y si y est fourni
+        if y is not None:
+            y_frame = y.to_frame(name=y_col_name)
+            data_work = pd.concat([X, y_frame], axis=1)
+        else:
+            data_work = X.copy()
 
         # Application de l'inverse du transformer additif
         if self.additive_transformer_ is not None:
             if hasattr(self.additive_transformer_, 'inverse_transform'):
                 try:
-                    result = self.additive_transformer_.inverse_transform(result)
-                    if isinstance(result, tuple):
-                        result = result[0]
+                    data_result = self.additive_transformer_.inverse_transform(data_work)
+                    if isinstance(data_result, tuple):
+                        data_result = data_result[0]
                 except Exception as e:
                     warnings.warn(
                         f"Failed to inverse transform with additive transformer: {e}"
                     )
+                    data_result = data_work
+            else:
+                data_result = data_work
+        else:
+            data_result = data_work
 
-        return result
-
-    # -------------------------------------------------------------------------
-    # Transformation inverse des targets y
-    # -------------------------------------------------------------------------
-    def _inverse_transform_y(self, X: pd.DataFrame, y: pd.Series = None) -> pd.Series:
-        """Inverse transform targets.
-
-        Args:
-            X: Transformed features (optional, not used here).
-            y: Transformed targets.
-
-        Returns:
-            Original targets.
-        """
-        result = y.copy()
-
-        # Application de l'inverse du transformer additif si applicable
-        if self.additive_transformer_ is not None:
-            if hasattr(self.additive_transformer_, 'inverse_transform'):
-                try:
-                    # Certains transformers peuvent inverse transform y
-                    pass  # Pour l'instant, retourner tel quel
-                except Exception:
-                    pass
-
-        return result
+        # Scission de X et y si y était fourni
+        if y is not None and y_col_name in data_result.columns:
+            y_original = data_result[y_col_name]
+            X_original = data_result.drop(columns=[y_col_name])
+            return X_original, y_original
+        else:
+            return data_result

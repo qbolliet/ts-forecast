@@ -205,12 +205,45 @@ class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
     # fit_transform explicite pour propager y
     def fit_transform(self, X, y=None):
         """Fit and transform.
-        
+
         Args:
             X: Features.
             y: Targets (optional).
-            
+
         Returns:
             X_transformed if y is None, (X_transformed, y_transformed) otherwise.
         """
         return self.fit(X, y).transform(X, y)
+
+    # Méthode de transformation inverse des données
+    def inverse_transform(self, X, y=None):
+        """Inverse transform X and optionally y.
+
+        Args:
+            X: Transformed features.
+            y: Transformed targets (optional).
+
+        Returns:
+            X_original if y is None.
+            (X_original, y_original) if y is provided.
+        """
+        # Vérification de l'entraînement
+        check_is_fitted(self)
+        return self._inverse_transform(X, y)
+
+    def _inverse_transform(self, X, y=None):
+        """Inverse transform features and targets. Override in subclasses.
+
+        Default implementation raises NotImplementedError.
+
+        Args:
+            X: Transformed features.
+            y: Transformed targets (optional).
+
+        Returns:
+            X_original if y is None.
+            (X_original, y_original) if y is provided.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement _inverse_transform"
+        )
