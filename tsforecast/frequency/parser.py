@@ -15,6 +15,46 @@ from ..utils.position import combine_frequency_position
 
 # Fonction de parsing d'une chaîne de caractères contenant une fréquence
 def parse_frequency(frequency_str : str) -> Tuple[FrequencyType, str, str]:
+    """Parse a frequency string into its component parts.
+
+    Extracts the base frequency code, position indicator, and suffix from
+    a pandas-style frequency string. This is useful for decomposing frequency
+    specifications before normalization or conversion operations.
+
+    Args:
+        frequency_str: Pandas frequency string to parse (e.g., 'MS', 'QE-DEC', 'D')
+            Must follow the format: [FREQ][S|E?]-[SUFFIX?]
+            - FREQ: Base frequency code (uppercase letters like 'M', 'Q', 'W')
+            - S|E: Optional position indicator ('S' for start, 'E' for end)
+            - SUFFIX: Optional suffix after '-' (e.g., month names for quarters)
+
+    Returns:
+        Tuple containing:
+            - freq_ind (FrequencyType): Base frequency code ('M', 'Q', 'W', etc.)
+            - position (str): Position indicator ('S', 'E', or None)
+            - suffix (str): Suffix component (e.g., 'DEC') or None
+
+    Raises:
+        ValueError: If frequency_str is None (no frequency detected)
+        ValueError: If frequency_str doesn't match expected format
+
+    Examples:
+        >>> # Monthly start frequency
+        >>> parse_frequency('MS')
+        ('M', 'S', None)
+        >>>
+        >>> # Quarterly end with December anchor
+        >>> parse_frequency('QE-DEC')
+        ('Q', 'E', 'DEC')
+        >>>
+        >>> # Daily frequency (no position or suffix)
+        >>> parse_frequency('D')
+        ('D', None, None)
+        >>>
+        >>> # Weekly frequency
+        >>> parse_frequency('W')
+        ('W', None, None)
+    """
     # Levée d'une erreur si aucune fréquence n'est détectée
     if frequency_str is None:
         raise ValueError(
