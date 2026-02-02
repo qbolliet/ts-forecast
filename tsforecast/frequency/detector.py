@@ -812,9 +812,8 @@ def detect_index_frequency(
         >>> (freq, pos, suffix)
         ('Q', 'E', 'DEC')
     """
-    # Création d'une série dummy avec des valeurs pour detect_frequency
-    dummy = pd.Series(range(len(index)), index=index, dtype=float)
-    freq = detect_frequency(dummy, literal=False)
+    # Inférence de l'index
+    freq = index.inferred_freq
 
     # Parsing de la fréquence
     return normalize_frequency(frequency=freq, return_format='base')
@@ -864,9 +863,8 @@ def detect_and_parse_index_frequency(
         >>> (freq, pos, suffix)
         ('Q', 'E', 'DEC')
     """
-    # Création d'une série dummy avec des valeurs pour detect_frequency
-    dummy = pd.Series(range(len(index)), index=index, dtype=float)
-    freq = detect_frequency(dummy, literal=False)
+    # Inférence de la fréquence de l'index
+    freq = index.inferred_freq
 
     # Parsing de la fréquence
     return parse_frequency(frequency_str=freq)

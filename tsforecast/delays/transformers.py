@@ -24,7 +24,8 @@ from tsforecast.utils.frequency import (
     is_higher_frequency
 )
 from tsforecast.frequency import (
-    detect_and_parse_frequency,
+    detect_index_frequency,
+    detect_and_parse_index_frequency,
     build_frequency_string
 )
 from tsforecast.utils.time import resolve_date, get_period_start, get_period_boundaries
@@ -202,7 +203,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         
         # Conversion des delays en dictionnaire si DataFrame
         if isinstance(self.delays, pd.DataFrame):
-            delays_dict = dict(zip(self.delays['column'], self.delays['delay']))
+            delays_dict = dict(zip(self.delays['column'], self.delays['applicable_delay']))
         else:
             delays_dict = self.delays
 
@@ -221,7 +222,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             mask_columns = np.intersect1d(X.columns.tolist(), [k for k,v in self.strategy if v == 'mask']).tolist()
 
         # Détection des fréquences par colonne
-        self.detected_frequencies_ = detect_frequency(data=X, time_col=None, panel_cols=None, literal=False, check_consistency=True)
+        self.detected_frequencies_ = detect_frequency(data=X, time_col=None, panel_cols=None, literal=False, check_consistency=False, strict=False)
 
         # Calcul du nombre de périodes à shifter pour chaque variable
         # Initialisation du dictionnaire résultat
@@ -266,6 +267,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                 # Ajout au dictionnaire des variables à shift
                 self.shift_params[col] = {'n_periods': result['n_periods'], 'frequency': self.detected_frequencies_[col]}
 
+        print(self.shift_params)
+
+        print(self.mask_params)
         return self
 
     # Méthode de transformation des données
@@ -407,12 +411,12 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                     zip(df_unit['column'], df_unit['unit'])
                 )
 
-            # Inférence de 'reference_point' à partir de la colonne 'reference_point'
-            if 'reference_point' in self.delays.columns:
+            # Inférence de 'target_reference_point' à partir de la colonne 'target_reference_point'
+            if 'target_reference_point' in self.delays.columns:
                 # Stockage sous la forme d'un dictionnaire de l'association entre les variables et lde point de référence
-                df_reference_point = self.delays[['column', 'reference_point']].drop_duplicates(subset=['column'])
+                df_reference_point = self.delays[['column', 'target_reference_point']].drop_duplicates(subset=['column'])
                 inferred['reference_point'] = dict(
-                    zip(df_reference_point['column'], df_reference_point['reference_point'])
+                    zip(df_reference_point['column'], df_reference_point['target_reference_point'])
                 )
 
             # Inférence de 'target_frequency' à partir de la colonne 'target_frequency'
@@ -481,6 +485,11 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             # Cas où il y aurait des variables à imputer mais qu'une valeur par défaut n'est pas spécifiée
             elif (default_key not in self.default_values.keys()) and (len(missing_params) > 0):
                 warnings.warn(f"Could not impute a default '{param_name}' for columns {missing_params} because it is not specified in the 'default_values' dictionnary")
+        else:
+            # Détection des variables qui n'ont pas de valeur
+            missing_params = set(X.columns) - set(param_dict.keys())
+            # Cas où aucune valeur n'est disponible
+            warnings.warn(f"Could not impute a default '{param_name}' for columns {missing_params} because it is not specified explicitely, cannot be infered and is not in the 'default_values' dictionnary")
         # Tous les autres cas, absence de valeur par défaut, absence de variable pour laquelle le "param_name" n'est pas spécifiée sont normaux et ne nécessitent ni warning ni imputation
         
         return param_dict
@@ -570,8 +579,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         
         # Calcul du temps écoulé, dans l'unité du délai, entre la date de prédiction et le début de la période
         elapsed_duration = convert_duration(
-            value=(self.prediction_date_ - period_start).total_seconds(),
-            from_duration='s',
+            value=pd.Timedelta(self.prediction_date_ - period_start).value,
+            from_duration='ns',
             to_duration=delay_unit,
             rounding=None
         )
@@ -584,13 +593,13 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             rounding=None
         )
 
-        # Si le point de référence de calcul du délai est la fin, on lui ajoute la durée de la période
+        # Si le point de référence de calcul du délai est la fin, on lui retranche la durée de la période
         if reference_point_dict[col] == 'end':
-            elapsed_duration += period_duration
+            elapsed_duration -= period_duration
 
         # Calcul de l'arrondi à l'unité supérieure de la différence entre le délai et la date de prédiction,
         # divisée par la longueur de la période associée à la fréquence de la série
-        n_periods = math.ceil((delays_dict[col] - elapsed_duration) / period_duration)
+        n_periods = - math.ceil((delays_dict[col] - elapsed_duration) / period_duration)
         
         return n_periods
 
@@ -634,8 +643,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         
         # Calcul du temps écoulé, dans l'unité du délai, entre la date de prédiction et le début de la période
         elapsed_duration = convert_duration(
-            value=(self.prediction_date_ - period_start).to_seconds(),
-            from_duration='s',
+            value=pd.Timedelta(self.prediction_date_ - period_start).value,
+            from_duration='ns',
             to_duration=delay_unit,
             rounding=None
         )
@@ -649,7 +658,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         )
 
         # Extraction de la fréquence de l'index
-        index_frequency, _, _ = detect_and_parse_frequency(X.index.get_level_values(-1) if isinstance(X.index, pd.MultiIndex) else X.index)
+        index_frequency = detect_index_frequency(X.index.get_level_values(-1) if isinstance(X.index, pd.MultiIndex) else X.index)
         
         # Conversion de la durée de la période de l'index dans l'unité du délai
         index_period_duration = convert_duration(
@@ -659,9 +668,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             rounding=None
         )
 
-        # Si le point de référence de calcul du délai est la fin, on lui ajoute la durée de la période
+        # Si le point de référence de calcul du délai est la fin, on lui retranche la durée de la période
         if reference_point_dict[col] == 'end':
-            elapsed_duration += period_duration
+            elapsed_duration -= period_duration
 
         # Calcul de l'arrondi à l'unité supérieure de la différence entre le délai et la date de prédiction,
         # divisée par la longueur de la période associée à la fréquence de l'index de la série.
@@ -1300,7 +1309,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_index_frequency(X.index)
 
         return self
 
@@ -1325,7 +1334,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_index_frequency(X.index)
 
         # Branchement selon le type de données
         return self._shift_by_periods(data=X, n_periods=self.n_periods)
@@ -1353,7 +1362,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_index_frequency(X.index)
 
         # Branchement selon le type de données (shift opposé)
         return self._shift_by_periods(data=X, n_periods=-self.n_periods,)
@@ -1610,7 +1619,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_index_frequency(X.index)
 
         return self
 
@@ -1635,7 +1644,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_index_frequency(X.index)
     
         return self._mask_n_obs_per_period(X)
 
