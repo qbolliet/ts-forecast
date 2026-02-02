@@ -6,15 +6,21 @@ It also provides mixed-frequency imputation capabilities with provenance trackin
 """
 
 # Import des classes principales
-from .detector import FrequencyDetector
+from .detector import FrequencyDetector, detect_frequency, detect_dataset_frequency, detect_index_frequency, detect_and_parse_index_frequency
 from .high_frequency_imputer import HighFrequencyImputer
-from .parser import detect_and_parse_frequency, build_frequency_string
+from .parser import parse_frequency, build_frequency_string
 from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .p1_window import P1WindowCalculator, ImputationScope
 
 __all__ = [
-    # Classes principales
+    # Classes et fonctions principales
+    # Détection
     'FrequencyDetector',
+    'detect_frequency',
+    'detect_dataset_frequency',
+    'detect_index_frequency',
+    'detect_and_parse_index_frequency',
+    # Imputation
     'HighFrequencyImputer',
     # Provenance tracking
     'ImputationProvenanceTracker',
@@ -23,6 +29,6 @@ __all__ = [
     'P1WindowCalculator',
     'ImputationScope',
     # Parser functions
-    'detect_and_parse_frequency',
+    'parse_frequency',
     'build_frequency_string',
 ]

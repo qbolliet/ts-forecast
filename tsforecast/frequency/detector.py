@@ -11,8 +11,9 @@ from typing import Dict, Optional, Union, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
 # Import des utilitaires de fréquence
-from ..utils.frequency import to_literal, get_frequency_order, FrequencyType, UserFrequencyType
+from ..utils.frequency import to_literal, get_frequency_order, normalize_frequency, FrequencyType, UserFrequencyType
 from ..panel.utils import normalize_entity_key
+from .parser import parse_frequency
 
 # Classe de détection de la fréquence d'une série temporelle
 class FrequencyDetector:
@@ -94,6 +95,8 @@ class FrequencyDetector:
         # Utilisation principale de pandas.infer_freq
         try:
             inferred_freq = pd.infer_freq(time_index)
+            # Normalisation
+            inferred_freq = normalize_frequency(frequency=inferred_freq, return_format='base')
             if inferred_freq and literal:
                 # Conversion vers le format littéral
                 return to_literal(inferred_freq)
@@ -105,6 +108,8 @@ class FrequencyDetector:
 
         # Extension pour les fréquences non supportées par infer_freq
         extended_freq = self._extend_infer_freq(time_index, literal)
+        # Normalisation
+        extended_freq = normalize_frequency(frequency=extended_freq, return_format='base')
         if extended_freq and literal:
             # Conversion vers le format littéral
             return to_literal(extended_freq)
@@ -762,6 +767,109 @@ def detect_dataset_frequency(df: pd.DataFrame,
     else :
         return frequency_map
 
+# Fonction de détection de la fréquence d'un index
+def detect_index_frequency(
+    index: pd.DatetimeIndex
+) -> FrequencyType:
+    """Detect and parse DatetimeIndex frequency into components.
+
+    Analyzes a DatetimeIndex to detect its frequency and parses it into
+    three components: the base frequency code, the position indicator
+    (S for start, E for end), and an optional suffix (e.g., DEC for
+    quarterly data anchored to December).
+
+    Args:
+        index: DatetimeIndex to analyze. Must have at least 2 observations
+            and a regular frequency pattern.
+
+    Returns:
+        Tuple of (frequency_code, position, suffix) where:
+        - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
+        - position: Position indicator ('S' for start, 'E' for end, or None)
+        - suffix: Anchor suffix (e.g., 'DEC', 'JAN', or None)
+
+    Raises:
+        ValueError: If frequency cannot be detected or if the index has
+            insufficient observations (<2) or irregular spacing.
+
+    Examples:
+        >>> import pandas as pd
+        >>> # Daily frequency
+        >>> dates = pd.date_range('2024-01-01', periods=10, freq='D')
+        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
+        >>> (freq, pos, suffix)
+        ('D', None, None)
+        >>>
+        >>> # Monthly start
+        >>> dates = pd.date_range('2024-01-01', periods=5, freq='MS')
+        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
+        >>> (freq, pos, suffix)
+        ('M', 'S', None)
+        >>>
+        >>> # Quarterly end with December anchor
+        >>> dates = pd.date_range('2024-01-31', periods=4, freq='QE-DEC')
+        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
+        >>> (freq, pos, suffix)
+        ('Q', 'E', 'DEC')
+    """
+    # Création d'une série dummy avec des valeurs pour detect_frequency
+    dummy = pd.Series(range(len(index)), index=index, dtype=float)
+    freq = detect_frequency(dummy, literal=False)
+
+    # Parsing de la fréquence
+    return normalize_frequency(frequency=freq, return_format='base')
+
+# Fonction de détection de la fréquence associée à un index
+def detect_and_parse_index_frequency(
+    index: pd.DatetimeIndex
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Detect and parse DatetimeIndex frequency into components.
+
+    Analyzes a DatetimeIndex to detect its frequency and parses it into
+    three components: the base frequency code, the position indicator
+    (S for start, E for end), and an optional suffix (e.g., DEC for
+    quarterly data anchored to December).
+
+    Args:
+        index: DatetimeIndex to analyze. Must have at least 2 observations
+            and a regular frequency pattern.
+
+    Returns:
+        Tuple of (frequency_code, position, suffix) where:
+        - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
+        - position: Position indicator ('S' for start, 'E' for end, or None)
+        - suffix: Anchor suffix (e.g., 'DEC', 'JAN', or None)
+
+    Raises:
+        ValueError: If frequency cannot be detected or if the index has
+            insufficient observations (<2) or irregular spacing.
+
+    Examples:
+        >>> import pandas as pd
+        >>> # Daily frequency
+        >>> dates = pd.date_range('2024-01-01', periods=10, freq='D')
+        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
+        >>> (freq, pos, suffix)
+        ('D', None, None)
+        >>>
+        >>> # Monthly start
+        >>> dates = pd.date_range('2024-01-01', periods=5, freq='MS')
+        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
+        >>> (freq, pos, suffix)
+        ('M', 'S', None)
+        >>>
+        >>> # Quarterly end with December anchor
+        >>> dates = pd.date_range('2024-01-31', periods=4, freq='QE-DEC')
+        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
+        >>> (freq, pos, suffix)
+        ('Q', 'E', 'DEC')
+    """
+    # Création d'une série dummy avec des valeurs pour detect_frequency
+    dummy = pd.Series(range(len(index)), index=index, dtype=float)
+    freq = detect_frequency(dummy, literal=False)
+
+    # Parsing de la fréquence
+    return parse_frequency(frequency_str=freq)
 
 # Fonction auxiliaire d'extraction de la fréquence la plus haute d'un dictionnaire de fréquences
 def _get_highest_frequency(frequency_map: Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]) -> Optional[Union[FrequencyType, UserFrequencyType]]:

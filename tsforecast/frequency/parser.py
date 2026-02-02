@@ -10,62 +10,13 @@ import pandas as pd
 from typing import Tuple, Optional
 
 # Importation des modules du package
-from .detector import detect_frequency
-from ..utils.frequency.utils import normalize_frequency
+from ..utils.frequency.utils import normalize_frequency, FrequencyType
 from ..utils.position import combine_frequency_position
 
-
-# Fonction de détection et de parsing de la fréquence d'un index
-def detect_and_parse_frequency(
-    index: pd.DatetimeIndex
-) -> Tuple[str, Optional[str], Optional[str]]:
-    """Detect and parse DatetimeIndex frequency into components.
-
-    Analyzes a DatetimeIndex to detect its frequency and parses it into
-    three components: the base frequency code, the position indicator
-    (S for start, E for end), and an optional suffix (e.g., DEC for
-    quarterly data anchored to December).
-
-    Args:
-        index: DatetimeIndex to analyze. Must have at least 2 observations
-            and a regular frequency pattern.
-
-    Returns:
-        Tuple of (frequency_code, position, suffix) where:
-        - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
-        - position: Position indicator ('S' for start, 'E' for end, or None)
-        - suffix: Anchor suffix (e.g., 'DEC', 'JAN', or None)
-
-    Raises:
-        ValueError: If frequency cannot be detected or if the index has
-            insufficient observations (<2) or irregular spacing.
-
-    Examples:
-        >>> import pandas as pd
-        >>> # Daily frequency
-        >>> dates = pd.date_range('2024-01-01', periods=10, freq='D')
-        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
-        >>> (freq, pos, suffix)
-        ('D', None, None)
-        >>>
-        >>> # Monthly start
-        >>> dates = pd.date_range('2024-01-01', periods=5, freq='MS')
-        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
-        >>> (freq, pos, suffix)
-        ('M', 'S', None)
-        >>>
-        >>> # Quarterly end with December anchor
-        >>> dates = pd.date_range('2024-01-31', periods=4, freq='QE-DEC')
-        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
-        >>> (freq, pos, suffix)
-        ('Q', 'E', 'DEC')
-    """
-    # Création d'une série dummy avec des valeurs pour detect_frequency
-    dummy = pd.Series(range(len(index)), index=index, dtype=float)
-    freq = detect_frequency(dummy, literal=False)
-
+# Fonction de parsing d'une chaîne de caractères contenant une fréquence
+def parse_frequency(frequency_str : str) -> Tuple[FrequencyType, str, str]:
     # Levée d'une erreur si aucune fréquence n'est détectée
-    if freq is None:
+    if frequency_str is None:
         raise ValueError(
             "Could not detect index frequency. "
             "Index may be irregular or have insufficient observations."
@@ -73,7 +24,7 @@ def detect_and_parse_frequency(
 
     # Séparation de la fréquence de sa position et de son suffixe
     # Expression régulière pour matcher: indicateur [S|E] optionnel [-suffixe] optionnel
-    match = re.match(r"([A-Z]+?)([SE])?(-(.*?))?$", freq)
+    match = re.match(r"([A-Z]+?)([SE])?(-(.*?))?$", frequency_str)
 
     # Extraction des éléments si un appariement est trouvé
     if match:
@@ -81,7 +32,7 @@ def detect_and_parse_frequency(
         return freq_ind, position, suffix
     else:
         raise ValueError(
-            f"Unable to parse frequency, position and suffix in '{freq}'. "
+            f"Unable to parse frequency, position and suffix in '{frequency_str}'. "
             "Should follow the format: [FREQ][S|E?]-[SUFFIX?]"
         )
 
