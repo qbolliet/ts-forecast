@@ -1791,7 +1791,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
                     if idx in masked_data.index:
                         masked_data.loc[idx] = np.nan
 
-        # Combination de toutes les lignes masquées dans self.masked_data_
+        # Concaténation de toutes les lignes masquées dans self.masked_data_
         if masked_rows_list:
             self.masked_data_ = pd.concat(masked_rows_list)
         else:
@@ -1868,13 +1868,11 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
                         )
                     else:
                         missing_data = pd.DataFrame(
-                            np.nan,
                             index=missing_start_dates,
-                            columns=period_obs.columns,
-                            dtype=period_obs.dtype
+                            columns=period_obs.columns
                         )
-                    # Concaténation avec les données existantes
-                    period_obs = pd.concat([missing_data, period_obs])
+                    # Concaténation avec les données existantes et tri
+                    period_obs = pd.concat([missing_data, period_obs]).sort_index()
         
         if is_last_period:
             # Période incomplète à la fin : vérification si les dernières dates manquent
@@ -1892,13 +1890,11 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
                         )
                     else:
                         missing_data = pd.DataFrame(
-                            np.nan,
                             index=missing_end_dates,
-                            columns=period_obs.columns,
-                            dtype=period_obs.dtype
+                            columns=period_obs.columns
                         )
-                    # Concaténation avec les données existantes
-                    period_obs = pd.concat([period_obs, missing_data])
+                    # Concaténation avec les données existantes et tri
+                    period_obs = pd.concat([period_obs, missing_data]).sort_index()
         
         return period_obs
 
