@@ -1698,8 +1698,10 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         """Core masking logic: mask N most recent observations per period.
 
         Masks the N most recent observations within each period defined by
-        mask_frequency, setting masked values to NaN. Stores masked rows in
-        self.masked_data_ for later restoration via inverse_transform.
+        mask_frequency, setting masked values to NaN. For incomplete periods
+        at boundaries, artificially extends the period before masking, then
+        returns to original index. Stores masked rows in self.masked_data_ 
+        for later restoration via inverse_transform.
 
         Args:
             data: Series or DataFrame to mask
@@ -1728,6 +1730,9 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
 
         # Copie indépendante des données
         masked_data = data.copy()
+        
+        # Stockage de l'index original pour filtrer les résultats à la fin
+        original_index = data.index
 
         # Génération des périodes
         periods = self._generate_periods(
@@ -1740,10 +1745,24 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         masked_rows_list = []
 
         # Masque dans chaque période
-        for period_start, period_end in periods:
+        for i, (period_start, period_end) in enumerate(periods):
+            # Détermination si c'est la première ou dernière période
+            is_first_period = (i == 0)
+            is_last_period = (i == len(periods) - 1)
+            
             # Filtre des observations dans cette période
             period_mask = (data.index >= period_start) & (data.index < period_end)
             period_obs = data[period_mask]
+            
+            # Extension artificielle pour les périodes incomplètes aux extrémités
+            if (is_first_period or is_last_period) and len(period_obs) > 0:
+                period_obs = self._extend_period_if_incomplete(
+                    period_obs, 
+                    period_start, 
+                    period_end,
+                    is_first_period,
+                    is_last_period
+                )
 
             # Calcul du nombre de périodes à masquer
             n_to_mask = min(self.n_obs, len(period_obs))
@@ -1751,17 +1770,28 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
             if (len(period_obs) > 0) & (self.how == 'last'):
                 # Masque des n_obs plus récentes
                 most_recent_indices = period_obs.index[-n_to_mask:]
-                # Stocker les lignes avant de les masquer
-                masked_rows_list.append(data.loc[most_recent_indices])
-                masked_data.loc[most_recent_indices] = np.nan
+                # Stockage uniquement des lignes qui existaient dans les données originales
+                original_most_recent = [idx for idx in most_recent_indices if idx in original_index]
+                if original_most_recent:
+                    masked_rows_list.append(data.loc[original_most_recent])
+                # Masquage dans masked_data (seulement les indices originaux)
+                for idx in most_recent_indices:
+                    if idx in masked_data.index:
+                        masked_data.loc[idx] = np.nan
+                        
             elif (len(period_obs) > 0) & (self.how =='first'):
                 # Masque des n_obs les plus anciennes
                 oldest_indices = period_obs.index[:n_to_mask]
-                # Stocker les lignes avant de les masquer
-                masked_rows_list.append(data.loc[oldest_indices])
-                masked_data.loc[oldest_indices] = np.nan
+                # Stockage uniquement des lignes qui existaient dans les données originales
+                original_oldest = [idx for idx in oldest_indices if idx in original_index]
+                if original_oldest:
+                    masked_rows_list.append(data.loc[original_oldest])
+                # Masquage dans masked_data (seulement les indices originaux)
+                for idx in oldest_indices:
+                    if idx in masked_data.index:
+                        masked_data.loc[idx] = np.nan
 
-        # Combiner toutes les lignes masquées dans self.masked_data_
+        # Combination de toutes les lignes masquées dans self.masked_data_
         if masked_rows_list:
             self.masked_data_ = pd.concat(masked_rows_list)
         else:
@@ -1772,6 +1802,105 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
                 self.masked_data_ = pd.DataFrame(columns=data.columns)
 
         return masked_data
+
+    # Méthode auxiliaire d'extension des périodes incomplètes
+    def _extend_period_if_incomplete(
+        self,
+        period_obs: Union[pd.Series, pd.DataFrame],
+        period_start: pd.Timestamp,
+        period_end: pd.Timestamp,
+        is_first_period: bool,
+        is_last_period: bool
+    ) -> Union[pd.Series, pd.DataFrame]:
+        """Extend incomplete periods at boundaries with artificial dates.
+        
+        For incomplete periods at the start or end of the data, this method
+        adds missing sub-periods (filled with NaN) to ensure proper masking
+        behavior. After masking, only the original indices are kept.
+        
+        Args:
+            period_obs: Observations in the current period
+            period_start: Start of the period
+            period_end: End of the period
+            is_first_period: Whether this is the first period
+            is_last_period: Whether this is the last period
+            
+        Returns:
+            Extended period observations (or original if already complete)
+        """
+        # Reconstitution de la fréquence avec position et suffixe
+        pandas_freq = build_frequency_string(
+            self.index_frequency_,
+            self.index_position_,
+            self.index_suffix_
+        )
+        
+        # Génération de l'index complet pour cette période
+        full_period_index = pd.date_range(
+            start=period_start,
+            end=period_end,
+            freq=pandas_freq,
+            inclusive='left'  # Exclusion de period_end
+        )
+        
+        # Vérification si la période est déjà complète
+        if len(period_obs) == len(full_period_index):
+            return period_obs
+        
+        # Extension seulement aux extrémités
+        first_obs_date = period_obs.index.min()
+        last_obs_date = period_obs.index.max()
+        
+        # Vérification que c'est bien une période incomplète aux extrémités
+        if is_first_period:
+            # Période incomplète au début : vérification si les premières dates manquent
+            if first_obs_date > period_start:
+                # Création des dates manquantes au début
+                missing_start_dates = full_period_index[full_period_index < first_obs_date]
+                if len(missing_start_dates) > 0:
+                    # Création d'une série/dataframe avec NaN pour les dates manquantes
+                    if isinstance(period_obs, pd.Series):
+                        missing_data = pd.Series(
+                            np.nan, 
+                            index=missing_start_dates,
+                            name=period_obs.name,
+                            dtype=period_obs.dtype
+                        )
+                    else:
+                        missing_data = pd.DataFrame(
+                            np.nan,
+                            index=missing_start_dates,
+                            columns=period_obs.columns,
+                            dtype=period_obs.dtype
+                        )
+                    # Concaténation avec les données existantes
+                    period_obs = pd.concat([missing_data, period_obs])
+        
+        if is_last_period:
+            # Période incomplète à la fin : vérification si les dernières dates manquent
+            if last_obs_date < full_period_index[-1]:
+                # Création des dates manquantes à la fin
+                missing_end_dates = full_period_index[full_period_index > last_obs_date]
+                if len(missing_end_dates) > 0:
+                    # Création d'une série/dataframe avec NaN pour les dates manquantes
+                    if isinstance(period_obs, pd.Series):
+                        missing_data = pd.Series(
+                            np.nan,
+                            index=missing_end_dates,
+                            name=period_obs.name,
+                            dtype=period_obs.dtype
+                        )
+                    else:
+                        missing_data = pd.DataFrame(
+                            np.nan,
+                            index=missing_end_dates,
+                            columns=period_obs.columns,
+                            dtype=period_obs.dtype
+                        )
+                    # Concaténation avec les données existantes
+                    period_obs = pd.concat([period_obs, missing_data])
+        
+        return period_obs
 
     # Méthode auxiliaire de génération de période
     def _generate_periods(
@@ -1811,7 +1940,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         for period_date in period_starts:
             # Extraction des dates de début et de fin de période
             period_start, period_end = get_period_boundaries(period_date, frequency)
-            # Ajout du tupe à la liste
+            # Ajout du tuple à la liste
             periods.append((period_start, period_end))
 
         return periods
