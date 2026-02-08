@@ -61,9 +61,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             - Single estimator: Applied to all variables
             - Dict[variable_name, estimator]: Variable-specific models
         additive_transformer: Transformer to make data additive before imputation.
-        impute_lower_frequencies: Whether to impute lower frequency variables.
         fit_on_imputed: If True, refit models using imputed values after each
-            frequency stage for more accurate cascade imputation.
+            frequency stage for cascade imputation.
         keep_lower_frequencies: If True, output includes all intermediate frequencies
             in a MultiIndex structure (Entity, Frequency, Date) for panel or
             (Frequency, Date) for time series.
@@ -126,7 +125,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         target_frequency: Union[str, Dict[Union[str, tuple], str]],
         estimator: Union[BaseEstimator, Dict[str, BaseEstimator]],
         additive_transformer: Optional[TransformerMixin] = None,
-        impute_lower_frequencies: bool = True,
         fit_on_imputed: bool = True,
         keep_lower_frequencies: bool = True,
         impute_delayed_values: bool = False,
@@ -153,7 +151,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             additive_transformer: Transformer to make data additive before imputation
                 (e.g., log transformer, differencing). Must support fit_transform()
                 and inverse_transform(). If None, data is assumed to already be additive.
-            impute_lower_frequencies: Whether to impute lower frequency variables.
             fit_on_imputed: If True, refit models using imputed values after each
                 frequency stage. This enables more accurate imputation in later stages.
                 (Previously named 'refit', which is deprecated.)
@@ -244,7 +241,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.additive_transformer = additive_transformer
         self.estimator = estimator
         self.delays = delays
-        self.impute_lower_frequencies = impute_lower_frequencies
         self.fit_on_imputed = fit_on_imputed
         self.keep_lower_frequencies = keep_lower_frequencies
         self.impute_delayed_values = impute_delayed_values
