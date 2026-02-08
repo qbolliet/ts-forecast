@@ -1,5 +1,31 @@
 # Tutoriel : Traitement des délais de publication en prévision
 
+## Table des matières
+
+- [Introduction](#introduction)
+- [1. Comprendre les délais de publication](#1-comprendre-les-délais-de-publication)
+  - [1.1 Qu'est-ce qu'un délai de publication ?](#11-quest-ce-quun-délai-de-publication-)
+  - [1.2 Impact sur la prévision](#12-impact-sur-la-prévision)
+- [2. Deux approches pour gérer les délais](#2-deux-approches-pour-gérer-les-délais)
+  - [2.1 Vue d'ensemble](#21-vue-densemble)
+  - [2.2 Approche 1 : Conservation de l'acquis (strategy `mask`)](#22-approche-1--conservation-de-lacquis-strategy-mask)
+  - [2.3 Approche 2 : Décalage des séries (strategy `shift`)](#23-approche-2--décalage-des-séries-strategy-shift)
+- [3. Comparaison visuelle des deux approches](#3-comparaison-visuelle-des-deux-approches)
+  - [3.1 Données brutes avant transformation](#31-données-brutes-avant-transformation)
+  - [3.2 Après application de la stratégie `mask`](#32-après-application-de-la-stratégie-mask)
+  - [3.3 Après application de la stratégie `shift`](#33-après-application-de-la-stratégie-shift)
+- [4. Détails de l'implémentation](#4-détails-de-limplémentation)
+  - [4.1 Détection des délais : `compare_and_detect_delays`](#41-détection-des-délais--compare_and_detect_delays)
+  - [4.2 Calcul des délais applicables : `calculate_applicable_delay`](#42-calcul-des-délais-applicables--calculate_applicable_delay)
+  - [4.3 Application des délais : `PublicationDelayTransformer`](#43-application-des-délais--publicationdelaytransformer)
+- [5. Utilisation pratique dans un pipeline de prédiction](#5-utilisation-pratique-dans-un-pipeline-de-prédiction)
+  - [5.1 Pipeline complet](#51-pipeline-complet)
+  - [5.2 Validation croisée réaliste](#52-validation-croisée-réaliste)
+- [6. Cas d'usage avancés](#6-cas-dusage-avancés)
+  - [6.1 Délais variables par entité (données de panel)](#61-délais-variables-par-entité-données-de-panel)
+- [7. Erreurs courantes à éviter](#7-erreurs-courantes-à-éviter)
+- [8. Conclusion](#8-conclusion)
+
 ## Introduction
 
 Les **délais de publication** (ou *publication delays*) des variables utilisées pour construire un modèle de prévision sur séries temporelles constituent un écueil dont il faut tenir compte pour simuler justement la performance prédictive de modèles en production. En pratique, les données économiques, financières ou opérationnelles ne sont en effet pas disponibles instantanément : elles sont publiées avec un retard qui peut aller de quelques jours à plusieurs mois. Ignorer ces délais lors de l'entraînement et de l'évaluation des modèles conduit à une surestimation systématique des performances.
@@ -710,11 +736,17 @@ y_pred = pipeline.predict(X_test)
 
 ### 5.2 Validation croisée réaliste
 
-Pour une évaluation réaliste, il faut combiner la gestion des délais avec un découpage temporel correct :
+Pour une évaluation réaliste, il est **crucial** d'appliquer les délais de publication à la fois sur les données d'entraînement et de test, car en production, le modèle sera entraîné avec les mêmes contraintes de disponibilité des données.
+
+#### 5.2.1 Approche recommandée : Application avant le split
+
+La meilleure pratique consiste à appliquer le `PublicationDelayTransformer` sur l'ensemble complet des données pour chaque fold, en utilisant la date de début du test comme `prediction_date`. Cela simule exactement ce qui serait disponible au moment de la prédiction.
 
 ```python
 # Importation des modules
 from tsforecast.crossvals import TSOutOfSampleSplit
+from tsforecast.delays import PublicationDelayTransformer
+from sklearn.ensemble import RandomForestRegressor
 
 # Configuration de la validation croisée
 splitter = TSOutOfSampleSplit(
@@ -723,29 +755,77 @@ splitter = TSOutOfSampleSplit(
     gap=5  # Horizon de prévision
 )
 
-# Évaluation avec délais
+# Évaluation avec délais appliqués sur train ET test
 results = []
 for train_idx, test_idx in splitter.split(X):
-    X_train = X.iloc[train_idx]
-    X_test = X.iloc[test_idx]
-    
-    # Application des délais uniquement sur l'ensemble de test
+    # Identification de la date de prédiction (première date du test)
+    prediction_date = X.index[test_idx[0]]
+
+    # Application des délais sur TOUTES les données avec cette date de référence
     transformer = PublicationDelayTransformer(
         delays=delays,
         strategy='mask',
-        prediction_date=X_test['date'].iloc[0],  # Date du début du test
-        time_col='date'
+        prediction_date=prediction_date,
+        delay_unit='D',
+        reference_point='end'
     )
-    
-    X_test_delayed = transformer.fit_transform(X_test)
-    
+
+    # Transformation de l'ensemble complet
+    X_delayed = transformer.fit_transform(X)
+
+    # Séparation train/test APRÈS application des délais
+    X_train = X_delayed.iloc[train_idx]
+    X_test = X_delayed.iloc[test_idx]
+    y_train_split = y.iloc[train_idx]
+    y_test_split = y.iloc[test_idx]
+
     # Entraînement et évaluation
-    model = RandomForestRegressor()
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test_delayed)
-    
-    results.append(evaluate_predictions(y_test, y_pred))
+    model = RandomForestRegressor(n_estimators=100)
+    model.fit(X_train, y_train_split)
+    y_pred = model.predict(X_test)
+
+    results.append(evaluate_predictions(y_test_split, y_pred))
+
+# Agrégation des résultats
+mean_score = np.mean(results)
+std_score = np.std(results)
+print(f"Score moyen : {mean_score:.4f} ± {std_score:.4f}")
 ```
+
+**Pourquoi cette approche ?**
+- ✅ **Réalisme** : Simule exactement les données disponibles au moment de la prédiction
+- ✅ **Cohérence** : Train et test reflètent les mêmes contraintes de publication
+- ✅ **Prévention du data leakage** : Aucune observation future n'est utilisée
+
+#### 5.2.2 Approche avec Pipeline sklearn (production)
+
+Pour la mise en production, on peut utiliser un Pipeline sklearn standard :
+
+```python
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestRegressor
+from tsforecast.delays import PublicationDelayTransformer
+
+# Définition du pipeline
+pipeline = Pipeline([
+    ('delays', PublicationDelayTransformer(
+        delays=delays,
+        strategy='mask',
+        prediction_date='today',  # Date dynamique en production
+        delay_unit='D',
+        reference_point='end'
+    )),
+    ('model', RandomForestRegressor(n_estimators=100))
+])
+
+# Entraînement sur toutes les données historiques
+pipeline.fit(X_train, y_train)
+
+# Prédiction (les délais sont automatiquement appliqués)
+y_pred = pipeline.predict(X_test)
+```
+
+**Note importante** : Pour la validation croisée avec un Pipeline, il faudrait créer un transformer personnalisé qui ajuste dynamiquement `prediction_date` selon le fold. L'approche manuelle (5.2.1) est donc recommandée pour l'évaluation.
 
 ## 6. Cas d'usage avancés
 
