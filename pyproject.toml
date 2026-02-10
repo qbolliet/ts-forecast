@@ -14,6 +14,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+adapters-sktime = [
+    "sktime>=0.40.1,<1",
+]
 adapters-darts = [
     "darts>=0.39.0,<1",
 ]
@@ -24,7 +27,7 @@ adapters-opera = [
     "opera @ git+https://github.com/Dralliag/opera-python.git",
 ]
 adapters-all = [
-    "ts-forecast[adapters-darts,adapters-hierarchical, adapters-opera]",
+    "ts-forecast[adapters-sktime,adapters-darts,adapters-hierarchical, adapters-opera]",
 ]
 
 [dependency-groups]
