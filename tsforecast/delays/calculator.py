@@ -18,10 +18,10 @@ def calculate_applicable_delay(
     publication_delays: pd.DataFrame,
     target_reference_point: Literal['start', 'end'],
     target_frequency: Union[str, Dict[str, str]],
+    target_unit: Optional[Literal['us', 's', 'D', 'microsecond', 'second', 'day']] = None,
     indicators: Optional[List[str]] = None,
     aggregate_by_panel: bool = False,
-    aggregation_method: Union[str, callable] = 'median',
-    output_unit: Optional[Literal['us', 's', 'D', 'microsecond', 'second', 'day']] = None
+    aggregation_method: Union[str, callable] = 'median'
 ) -> pd.DataFrame:
     """Calculate applicable publication delay for specified indicators.
 
@@ -50,6 +50,8 @@ def calculate_applicable_delay(
         target_reference_point: Reference point for delay calculation ('start' or 'end')
         target_frequency: Target frequency for delay calculation (applied to all indicators).
             Examples: 'monthly', 'M', 'quarterly', 'Q', etc.
+        target_unit: Unit for output delays. If None, uses the unit from input data.
+            Options: 'us'/'microsecond', 's'/'second', 'D'/'day'
         indicators: List of indicators to calculate delays for. If None, uses all
             indicators found in the data.
         aggregate_by_panel: If True, calculate separate delays for each (panel_entity, indicator)
@@ -57,8 +59,6 @@ def calculate_applicable_delay(
         aggregation_method: Method to aggregate delays. Can be:
             - String: any method supported by pandas.agg ('mean', 'median', 'max', 'min', etc.)
             - Callable: custom aggregation function
-        output_unit: Unit for output delays. If None, uses the unit from input data.
-            Options: 'us'/'microsecond', 's'/'second', 'D'/'day'
 
     Returns:
         DataFrame with calculated applicable delays, indexed by indicator
@@ -131,8 +131,8 @@ def calculate_applicable_delay(
     )
     
     # Conversion de l'unité si nécessaire
-    if output_unit is not None:
-        delays = _convert_delay_unit(delays, output_unit)
+    if target_unit is not None:
+        delays = _convert_delay_unit(delays, target_unit)
     
     # Agrégation des délais
     result = _aggregate_delays(

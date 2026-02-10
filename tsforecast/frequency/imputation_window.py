@@ -14,13 +14,13 @@ import pandas as pd
 
 
 # Type pour le scope d'imputation
-ImputationScope = Literal['P1_only', 'P1_and_before', 'P1_and_after', 'P1_and_both']
+ImputationScope = Literal['strict', 'extended_backward', 'extended_forward', 'extended_both']
 
 
-class P1WindowCalculator:
-    """Calculate the P1 window and extended training windows for imputation.
+class ImputationWindowCalculator:
+    """Calculate the strict window and extended training windows for imputation.
 
-    The P1 window is defined as the temporal interval where ALL series in the
+    The strict window is defined as the temporal interval where ALL series in the
     dataset have real (non-NaN) values. This class also handles extending the
     window based on attrition thresholds and imputation scope settings.
 
@@ -28,8 +28,8 @@ class P1WindowCalculator:
     trailing NaN values that are attributable to delays rather than missing data.
 
     Attributes:
-        p1_start_: Start timestamp of the P1 window.
-        p1_end_: End timestamp of the P1 window.
+        p1_start_: Start timestamp of the strict window.
+        p1_end_: End timestamp of the strict window.
         training_start_: Start timestamp of the extended training window.
         training_end_: End timestamp of the extended training window.
         column_coverage_: Dict mapping column names to their coverage (non-NaN) timestamps.
@@ -44,7 +44,7 @@ class P1WindowCalculator:
         ...     'var2': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
         ...     'var3': [np.nan, np.nan, 1, 2, 3, 4, 5, 6, 7, 8, np.nan, np.nan]
         ... }, index=dates)
-        >>> calculator = P1WindowCalculator(attrition_threshold=0.5, imputation_scope='P1_and_both')
+        >>> calculator = P1WindowCalculator(attrition_threshold=0.5, imputation_scope='extended_both')
         >>> calculator.fit(data)
         >>> print(f"P1 window: {calculator.p1_start_} to {calculator.p1_end_}")
         >>> print(f"Training window: {calculator.training_start_} to {calculator.training_end_}")
@@ -53,7 +53,7 @@ class P1WindowCalculator:
     def __init__(
         self,
         attrition_threshold: float = 0.5,
-        imputation_scope: ImputationScope = 'P1_only',
+        imputation_scope: ImputationScope = 'strict',
         min_columns: int = 2,
         exclude_delay_nans: bool = True
     ):
@@ -64,10 +64,10 @@ class P1WindowCalculator:
                 non-null values for a date to be included in the extended window.
                 Value between 0 and 1. Default 0.5 (50%).
             imputation_scope: How to extend the P1 window for training:
-                - 'P1_only': Use only the P1 window (all series have data)
-                - 'P1_and_before': Extend P1 backwards where threshold is met
-                - 'P1_and_after': Extend P1 forwards where threshold is met
-                - 'P1_and_both': Extend P1 in both directions
+                - 'strict': Use only the P1 window (all series have data)
+                - 'extended_backward': Extend P1 backwards where threshold is met
+                - 'extended_forward': Extend P1 forwards where threshold is met
+                - 'extended_both': Extend P1 in both directions
             min_columns: Minimum number of columns required to have data.
                 Default 2. Used to ensure meaningful imputation.
             exclude_delay_nans: If True, trailing NaN values that appear to be
@@ -81,10 +81,10 @@ class P1WindowCalculator:
             raise ValueError(
                 f"attrition_threshold must be between 0 and 1, got {attrition_threshold}"
             )
-        if imputation_scope not in ('P1_only', 'P1_and_before', 'P1_and_after', 'P1_and_both'):
+        if imputation_scope not in ('strict', 'extended_backward', 'extended_forward', 'extended_both'):
             raise ValueError(
-                f"imputation_scope must be one of 'P1_only', 'P1_and_before', "
-                f"'P1_and_after', 'P1_and_both', got '{imputation_scope}'"
+                f"imputation_scope must be one of 'strict', 'extended_backward', "
+                f"'extended_forward', 'extended_both', got '{imputation_scope}'"
             )
         if min_columns < 2:
             raise ValueError(f"min_columns must be at least 2, got {min_columns}")
@@ -340,16 +340,16 @@ class P1WindowCalculator:
         training_start = self.p1_start_
         training_end = self.p1_end_
 
-        # Pas d'extension si scope est P1_only
-        if self.imputation_scope == 'P1_only':
+        # Pas d'extension si scope est strict
+        if self.imputation_scope == 'strict':
             return training_start, training_end
 
         # Calcul des extensions possibles
-        if self.imputation_scope in ('P1_and_before', 'P1_and_both'):
+        if self.imputation_scope in ('extended_backward', 'extended_both'):
             # Extension vers l'arrière
             training_start = self._extend_window_backward()
 
-        if self.imputation_scope in ('P1_and_after', 'P1_and_both'):
+        if self.imputation_scope in ('extended_forward', 'extended_both'):
             # Extension vers l'avant
             training_end = self._extend_window_forward()
 

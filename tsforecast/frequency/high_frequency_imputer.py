@@ -24,7 +24,7 @@ from ..utils.frequency.utils import (
 from ..panel.utils import get_unique_panel_entities
 from .detector import FrequencyDetector, detect_frequency
 from .provenance import ImputationProvenanceTracker, ProvenanceType
-from .p1_window import P1WindowCalculator, ImputationScope
+from .imputation_window import ImputationWindowCalculator, ImputationScope
 
 
 # Type aliases
@@ -42,7 +42,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     2. Computing the P1 window (where all series have true values)
     3. Aggregating high-frequency variables to lower frequencies
     4. Cascading imputation from lowest to highest frequency
-    5. Optionally refitting models with imputed values (fit_on_imputed)
+    5. Optionally refitting models with imputed values (cascade_refitting)
     6. Handling publication delays if provided
     7. Tracking provenance of each imputed value
 
@@ -51,7 +51,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     - Features are aggregated to match the variable's frequency
     - Models are trained on the P1 window (optionally extended)
     - Predictions are made for missing values
-    - If fit_on_imputed=True, models are retrained after each frequency stage
+    - If cascade_refitting=True, models are retrained after each frequency stage
 
     Parameters:
         target_frequency: Target frequency for imputation. Can be:
@@ -61,9 +61,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             - Single estimator: Applied to all variables
             - Dict[variable_name, estimator]: Variable-specific models
         additive_transformer: Transformer to make data additive before imputation.
-        impute_lower_frequencies: Whether to impute lower frequency variables.
-        fit_on_imputed: If True, refit models using imputed values after each
-            frequency stage for more accurate cascade imputation.
+        cascade_refitting: If True, refit models using imputed values after each
+            frequency stage for cascade imputation.
         keep_lower_frequencies: If True, output includes all intermediate frequencies
             in a MultiIndex structure (Entity, Frequency, Date) for panel or
             (Frequency, Date) for time series.
@@ -72,9 +71,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         impute_delayed_values: Whether to impute values affected by publication delays.
         on_frequency_mismatch: How to handle target_frequency higher than data ('error'/'warn').
         attrition_threshold: Minimum ratio of columns with data (0-1) for extended window.
-        imputation_scope: Training window scope ('P1_only', 'P1_and_before',
-            'P1_and_after', 'P1_and_both').
-        use_imputed_for_training: If True, use imputed values for training outside P1.
+        imputation_scope: Training window scope ('strict', 'extended_backward',
+            'extended_forward', 'extended_both').
+        train_on_partial_coverage: If True, use imputed values for training outside P1.
 
     Attributes:
         detected_frequencies_: Detected frequency per variable or (entity, variable).
@@ -111,8 +110,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         >>> imputer = HighFrequencyImputer(
         ...     target_frequency='M',
         ...     estimator=LinearRegression(),
-        ...     fit_on_imputed=True,
-        ...     imputation_scope='P1_and_both',
+        ...     cascade_refitting=True,
+        ...     imputation_scope='extended_both',
         ...     attrition_threshold=0.5
         ... )
         >>> imputed = imputer.fit_transform(df)
@@ -126,19 +125,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         target_frequency: Union[str, Dict[Union[str, tuple], str]],
         estimator: Union[BaseEstimator, Dict[str, BaseEstimator]],
         additive_transformer: Optional[TransformerMixin] = None,
-        impute_lower_frequencies: bool = True,
-        fit_on_imputed: bool = True,
+        cascade_refitting: bool = True,
         keep_lower_frequencies: bool = True,
         impute_delayed_values: bool = False,
         delays: Optional[pd.DataFrame] = None,
         on_frequency_mismatch: Literal['error', 'warn'] = 'error',
         attrition_threshold: float = 0.5,
-        imputation_scope: ImputationScope = 'P1_only',
-        use_imputed_for_training: bool = False,
+        imputation_scope: ImputationScope = 'strict',
+        train_on_partial_coverage: bool = False,
         time_col: Optional[str] = None,
         panel_cols: Optional[List[str]] = None,
-        # Deprecated parameter
-        refit: Optional[bool] = None
     ):
         """Initialize the HighFrequencyImputer.
 
@@ -153,10 +149,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             additive_transformer: Transformer to make data additive before imputation
                 (e.g., log transformer, differencing). Must support fit_transform()
                 and inverse_transform(). If None, data is assumed to already be additive.
-            impute_lower_frequencies: Whether to impute lower frequency variables.
-            fit_on_imputed: If True, refit models using imputed values after each
+            cascade_refitting: If True, refit models using imputed values after each
                 frequency stage. This enables more accurate imputation in later stages.
-                (Previously named 'refit', which is deprecated.)
             keep_lower_frequencies: If True, output includes all intermediate frequencies
                 in a MultiIndex structure. If False, only target frequency is returned.
             impute_delayed_values: Whether to impute values affected by publication
@@ -176,28 +170,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 non-null values to be included in the extended training window.
                 Minimum 2 columns required regardless of threshold. Default 0.5.
             imputation_scope: Defines the training window scope:
-                - 'P1_only': Use only P1 window (where ALL series have data)
-                - 'P1_and_before': Extend P1 backwards where threshold is met
-                - 'P1_and_after': Extend P1 forwards where threshold is met
-                - 'P1_and_both': Extend P1 in both directions
-            use_imputed_for_training: If True, use imputed values for training models
+                - 'strict': Use only P1 window (where ALL series have data)
+                - 'extended_backward': Extend P1 backwards where threshold is met
+                - 'extended_forward': Extend P1 forwards where threshold is met
+                - 'extended_both': Extend P1 in both directions
+            train_on_partial_coverage: If True, use imputed values for training models
                 outside P1 window. If False, only use true values for training.
             time_col: Name of the time column (if data has time in column not index).
             panel_cols: List of column names identifying panel entities.
-            refit: DEPRECATED. Use fit_on_imputed instead.
         """
         # Initialisation du parent
         super().__init__(time_col=time_col, panel_cols=panel_cols, validate_input=True, strict_validation=True, auto_sort=False, convert_cols_to_index=True)
-
-        # Gestion de la dépréciation du paramètre refit
-        if refit is not None:
-            warnings.warn(
-                "Parameter 'refit' is deprecated and will be removed in a future version. "
-                "Use 'fit_on_imputed' instead.",
-                DeprecationWarning,
-                stacklevel=2
-            )
-            fit_on_imputed = refit
 
         # Validation des paramètres
         # Validation de la fréquence cible
@@ -233,7 +216,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
 
         # Validation du scope d'imputation
-        valid_scopes = ('P1_only', 'P1_and_before', 'P1_and_after', 'P1_and_both')
+        valid_scopes = ('strict', 'extended_backward', 'extended_forward', 'extended_both')
         if imputation_scope not in valid_scopes:
             raise ValueError(
                 f"imputation_scope must be one of {valid_scopes}, got '{imputation_scope}'"
@@ -244,14 +227,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.additive_transformer = additive_transformer
         self.estimator = estimator
         self.delays = delays
-        self.impute_lower_frequencies = impute_lower_frequencies
-        self.fit_on_imputed = fit_on_imputed
+        self.cascade_refitting = cascade_refitting
         self.keep_lower_frequencies = keep_lower_frequencies
         self.impute_delayed_values = impute_delayed_values
         self.on_frequency_mismatch = on_frequency_mismatch
         self.attrition_threshold = attrition_threshold
         self.imputation_scope = imputation_scope
-        self.use_imputed_for_training = use_imputed_for_training
+        self.train_on_partial_coverage = train_on_partial_coverage
 
     # Validation du format de la fréquence cible
     def _validate_target_frequency_format(
@@ -1159,7 +1141,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self._provenance_tracker.initialize(X_work, panel_cols=self.panel_cols)
 
         # Calcul de la fenêtre P1 et de la fenêtre d'entraînement
-        self._p1_calculator = P1WindowCalculator(
+        self._p1_calculator = ImputationWindowCalculator(
             attrition_threshold=self.attrition_threshold,
             imputation_scope=self.imputation_scope,
             min_columns=2,
@@ -1286,7 +1268,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         2. For each frequency level (from lowest to highest):
            a. Aggregate features to match variable frequency
            b. Train models on P1 window (optionally extended)
-           c. If fit_on_imputed=True and not first level, use imputed values too
+           c. If cascade_refitting=True and not first level, use imputed values too
 
         Args:
             X: Training data (already transformed).
@@ -1303,7 +1285,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Groupement des variables par niveau de fréquence
         freq_groups = self._group_variables_by_frequency()
 
-        # Suivi des données de travail (mises à jour si fit_on_imputed=True)
+        # Suivi des données de travail (mises à jour si cascade_refitting=True)
         X_work = X.copy()
 
         # Traitement par palier de fréquence
@@ -1342,8 +1324,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 else:
                     training_mask = X_work[var_name].notna()
 
-                # Si use_imputed_for_training=False, filtrer uniquement les vraies valeurs
-                if not self.use_imputed_for_training:
+                # Si train_on_partial_coverage=False, filtrer uniquement les vraies valeurs
+                if not self.train_on_partial_coverage:
                     # Utiliser uniquement les valeurs originales (non-imputées)
                     original_mask = self._provenance_tracker.get_mask(
                         ProvenanceType.ORIGINAL, column=var_name
@@ -1372,7 +1354,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         'model': estimator,
                         'feature_cols': feature_cols,
                         'freq_level': freq_level,
-                        'trained_on_imputed': self.use_imputed_for_training and freq_level > 0,
+                        'trained_on_imputed': self.train_on_partial_coverage and freq_level > 0,
                     }
                 except Exception as e:
                     warnings.warn(
@@ -1381,8 +1363,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     )
                     models[var_key] = 'interpolate_fallback'
 
-            # Si fit_on_imputed=True, appliquer l'imputation intermédiaire et mettre à jour X_work
-            if self.fit_on_imputed and freq_level < max(freq_groups.keys()):
+            # Si cascade_refitting=True, appliquer l'imputation intermédiaire et mettre à jour X_work
+            if self.cascade_refitting and freq_level < max(freq_groups.keys()):
                 X_work = self._apply_intermediate_imputation(X_work, models, variables_at_level)
 
         return models
