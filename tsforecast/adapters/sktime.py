@@ -1,11 +1,15 @@
 """Adapter for sktime forecasters to sklearn API."""
-
+# Importation des modules
+# Modules de base
 import pandas as pd
 import numpy as np
+# Sklearn
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
 
 
+# Wrapper permettant l'intégration des forecasters du package "sktime" dans un syntaxe "sklearn-like"
+# /!\ La méthode "score" (nécessaire pour GridSearchCV) et l'héritage de RegressorMixin font que l'on wrappe des régresseurs et non des classifieurs par défaut
 class SktimeAdapter(BaseEstimator, RegressorMixin):
     """
     Adapter to use sktime forecasters with sklearn API.
@@ -31,11 +35,13 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         >>> # Utilisation avec cross_val_score
         >>> scores = cross_val_score(estimator, X, y, cv=cv)
     """
-    
+    # Initialisation
     def __init__(self, forecaster, fh=0):
+        # Initialisation des attributs
         self.forecaster = forecaster
         self.fh = fh
-    
+
+    # Méthode auxiliaire de conversion des données au format attendu par les sktime forecasters
     def _convert_to_sktime_format(self, X, y=None):
         """
         Convert sklearn-style DataFrame to sktime format.
@@ -68,7 +74,8 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
             y_sktime = None
             
         return X_sktime, y_sktime
-    
+
+    # Méthode d'entraînement
     def fit(self, X, y):
         """
         Fit the sktime forecaster.
@@ -87,7 +94,8 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         self.forecaster.fit(y=y_sktime, X=X_sktime, fh=self.fh)
         
         return self
-    
+
+    # Méthode de prédiction
     def predict(self, X):
         """
         Make predictions using the sktime forecaster.
@@ -111,23 +119,9 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         if isinstance(y_pred, pd.Series):
             return y_pred.values
         return y_pred
-    
-    def score(self, X, y):
-        """
-        Calculate R² score (sklearn compatibility).
-        
-        Args:
-            X: Features DataFrame
-            y: True target values
-        
-        Returns:
-            R² score
-        """
-        from sklearn.metrics import r2_score
-        
-        y_pred = self.predict(X)
-        return r2_score(y, y_pred)
-    
+
+    # Méthode d'extraction des paramètres 
+    # /!\ Ajouter en docstring que les paramètres du forecaster sont ajoutés avec le préfixe "forecaster_"
     def get_params(self, deep=True):
         """
         Get parameters for GridSearchCV compatibility.
@@ -138,15 +132,19 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         Returns:
             Parameter dictionary
         """
+        # Initialisation du dictionnaire des paramètres avec l'horizon de prédiction
         params = {'fh': self.fh}
-        
+
+        # Extraction des paramètres du forecaster
         if deep and hasattr(self.forecaster, 'get_params'):
             # Ajout des paramètres du forecaster avec le préfixe 'forecaster__'
             forecaster_params = self.forecaster.get_params(deep=True)
             params.update({f'forecaster__{k}': v for k, v in forecaster_params.items()})
         
         return params
-    
+
+    # Méthode d'initialisation des paramètres
+    # /!\ Ajouter en docstring que les paramètres du forecaster sont attendus avec le préfixe "forecaster_"
     def set_params(self, **params):
         """
         Set parameters for GridSearchCV compatibility.
@@ -160,7 +158,8 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         # Séparation des paramètres de l'adapter et du forecaster
         adapter_params = {}
         forecaster_params = {}
-        
+
+        # Parcours des paramètres
         for key, value in params.items():
             if key.startswith('forecaster__'):
                 # Paramètre du forecaster
