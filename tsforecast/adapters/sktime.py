@@ -96,6 +96,12 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         
         # Entraînement du forecaster avec fh
         self.forecaster.fit(y=y_sktime, X=X_sktime, fh=self.fh)
+
+        # Stockage des attributs fitted pour la compatibilité sklearn
+        self.is_fitted_ = True
+        self.n_features_in_ = X.shape[1] if hasattr(X, 'shape') else 0
+        if hasattr(X, 'columns'):
+            self.feature_names_in_ = np.array(X.columns)
         
         return self
 
@@ -111,7 +117,7 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
             Predictions array
         """
         # Vérification que le modèle est entraîné
-        check_is_fitted(self.forecaster)
+        check_is_fitted(self)
         
         # Conversion au format sktime
         X_sktime, _ = self._convert_to_sktime_format(X)
@@ -122,19 +128,24 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         return y_pred
 
     # Méthode d'extraction des paramètres 
-    # /!\ Ajouter en docstring que les paramètres du forecaster sont ajoutés avec le préfixe "forecaster_"
     def get_params(self, deep=True):
         """
         Get parameters for GridSearchCV compatibility.
+        
+        Forecaster parameters are prefixed with 'forecaster__' to enable
+        nested parameter tuning in GridSearchCV.
         
         Args:
             deep: If True, return parameters of sub-objects
         
         Returns:
-            Parameter dictionary
+            Parameter dictionary with 'forecaster', 'fh', and forecaster sub-parameters
         """
-        # Initialisation du dictionnaire des paramètres avec l'horizon de prédiction
-        params = {'fh': self.fh}
+        # Initialisation du dictionnaire des paramètres
+        params = {
+            'forecaster': self.forecaster,
+            'fh': self.fh
+        }
 
         # Extraction des paramètres du forecaster
         if deep and hasattr(self.forecaster, 'get_params'):
@@ -145,13 +156,15 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         return params
 
     # Méthode d'initialisation des paramètres
-    # /!\ Ajouter en docstring que les paramètres du forecaster sont attendus avec le préfixe "forecaster_"
     def set_params(self, **params):
         """
         Set parameters for GridSearchCV compatibility.
         
+        Forecaster parameters should be prefixed with 'forecaster__' for
+        nested parameter setting in GridSearchCV.
+        
         Args:
-            **params: Parameters to set
+            **params: Parameters to set (forecaster params must have 'forecaster__' prefix)
         
         Returns:
             self
