@@ -3,6 +3,7 @@
 # Modules de base
 import pandas as pd
 import numpy as np
+from typing import Any
 # Sklearn
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
@@ -36,7 +37,7 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         >>> scores = cross_val_score(estimator, X, y, cv=cv)
     """
     # Initialisation
-    def __init__(self, forecaster, fh=0):
+    def __init__(self, forecaster: Any, fh: int =0):
         # Initialisation des attributs
         self.forecaster = forecaster
         self.fh = fh
@@ -66,10 +67,13 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         # Conversion de y si présent
         if y is not None:
             if isinstance(y, pd.Series):
-                y_sktime = y
+                # Création d'un DataFrame s'il s'agit de données de panel
+                y_sktime = y.to_frame() if isinstance(y.index, pd.MultiIndex) else y
             else:
                 # Conversion d'un array numpy en Series
                 y_sktime = pd.Series(y, index=X.index if hasattr(X, 'index') else None)
+                # Conversion en DataFrame s'il s'agit de données de panel
+                y_sktime = y_sktime.to_frame() if isinstance(y_sktime.index, pd.MultiIndex) else y_sktime 
         else:
             y_sktime = None
             
@@ -115,9 +119,6 @@ class SktimeAdapter(BaseEstimator, RegressorMixin):
         # Prédiction
         y_pred = self.forecaster.predict(X=X_sktime, fh=self.fh)
         
-        # Conversion en array numpy pour compatibilité sklearn
-        if isinstance(y_pred, pd.Series):
-            return y_pred.values
         return y_pred
 
     # Méthode d'extraction des paramètres 
