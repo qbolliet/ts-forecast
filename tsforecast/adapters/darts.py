@@ -205,13 +205,20 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         # Gestion des covariables passées (past covariates)
         # Darts spécifie les modèles supportant ces arguments :
         # https://unit8co.github.io/darts/#forecasting-models
-    # Les cas où des valeurs futures sont connues ou des valeurs statisques sont utilisées ne sont pas traitées dans ce cadre mais à travers les 'fit_params'
+        # Les cas où des valeurs futures sont connues ou des valeurs statisques sont utilisées ne sont pas traitées dans ce cadre mais à travers les 'fit_params'
         if X is not None:
             self.covariates_ = TimeSeries.from_dataframe(X)
             fit_params['past_covariates'] = self.covariates_
 
         # Entraînement du modèle
         self.model.fit(self.series_, **fit_params)
+
+        # Stockage des attributs fitted pour la compatibilité sklearn
+        self.is_fitted_ = True
+        self.n_features_in_ = X.shape[1] if hasattr(X, 'shape') else 0
+        if hasattr(X, 'columns'):
+            self.feature_names_in_ = np.array(X.columns)
+        
         return self
 
     # Méthode de prédiction
