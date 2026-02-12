@@ -442,6 +442,23 @@ class OutOfSampleSplit(_BaseKFold):
         self.test_size = test_size
         self.gap = gap
 
+    # Méthode retournant le nombre de splits retournés
+    def get_n_splits(self, X=None, y=None, groups=None):
+        """Return the number of splitting iterations in the cross-validator.
+        
+        Args:
+            X, y, groups: Ignored, present for API consistency
+            
+        Returns:
+            int: Number of splits
+        """
+        # Si test_indices est spécifié, le nombre de splits correspond à sa longueur
+        if self.test_indices is not None:
+            return len(self.test_indices)
+        
+        # Sinon, utilisation de n_splits
+        return self.n_splits
+    
     # Méthode de séparation des indices d'entrainement et de test
     def split(self, X, y=None, groups=None):
         """Generate indices to split data into training and test sets for out-of-sample validation.
@@ -1003,7 +1020,24 @@ class InSampleSplit(_BaseKFold):
         self.test_indices = test_indices
         self.max_train_size = max_train_size
         self.test_size = test_size
-
+    
+    # Méthode retournant le nombre de splits retournés
+    def get_n_splits(self, X=None, y=None, groups=None):
+        """Return the number of splitting iterations in the cross-validator.
+        
+        Args:
+            X, y, groups: Ignored, present for API consistency
+            
+        Returns:
+            int: Number of splits
+        """
+        # Si test_indices est spécifié, le nombre de splits correspond à sa longueur
+        if self.test_indices is not None:
+            return len(self.test_indices)
+        
+        # Sinon, utilisation de n_splits
+        return self.n_splits
+    
     # Méthode principale de séparation des données
     def split(self, X, y=None, groups=None):
         """Generate indices to split data into training and test sets for in-sample validation.
