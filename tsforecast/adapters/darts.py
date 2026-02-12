@@ -5,6 +5,7 @@ to enable seamless integration with sklearn pipelines and tools like GridSearchC
 """
 # Importation des modules
 # Modules de base
+import numpy as np
 import pandas as pd
 from typing import Any, Optional, Union
 # Sklearn
@@ -200,29 +201,51 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         if y is None:
             y, X = X, None
 
-        # Réinitialisation de l'index pour ne garder que le niveau temporel (dernier niveau du MultiIndex)
-        # Cela permet de traiter les données de panel comme une seule série temporelle
+        # Transformation des panel data (MultiIndex) en série multivariée avec static_covariates
         if isinstance(y.index, pd.MultiIndex):
-            # Suppression de tous les niveaux sauf le dernier (temporel)
-            y_reset = y.droplevel(list(range(y.index.nlevels - 1)))
-            X_reset = X.droplevel(list(range(X.index.nlevels - 1))) if X is not None else None
-        else:
-            # Série temporelle simple : pas de modification
-            y_reset = y
-            X_reset = X
+            # Extraction des noms de niveaux (entités + temporel)
+            level_names = y.index.names
+            entity_levels = level_names[:-1]  # Tous sauf le dernier (temporel)
             
-        # Conversion de la série cible en TimeSeries darts
+            # Unstacking pour transformer en multivarié : colonnes = entités, index = dates
+            y_multivariate = y.unstack(level=list(range(len(entity_levels))))
+            
+            # Création des static_covariates à partir des entités (noms de colonnes)
+            if len(entity_levels) == 1:
+                # Cas simple : un seul niveau d'entités
+                static_cov_df = pd.DataFrame(
+                    {entity_levels[0]: y_multivariate.columns},
+                    index=y_multivariate.columns
+                )
+            else:
+                # Cas multiple : plusieurs niveaux d'entités (MultiIndex dans les colonnes)
+                static_cov_df = pd.DataFrame(
+                    y_multivariate.columns.tolist(),
+                    index=y_multivariate.columns,
+                    columns=entity_levels
+                )
+            
+            y_processed = y_multivariate
+        else:
+            # Série temporelle simple : pas de transformation
+            y_processed = y
+
+        # Conversion pandas → TimeSeries Darts (univarié ou multivarié)
         self.series_ = TimeSeries.from_dataframe(
-            pd.DataFrame({'value': y_reset}),
-            value_cols='value'
+            y_processed,
         )
 
-        # Gestion des covariables passées (past covariates)
-        # Darts spécifie les modèles supportant ces arguments :
-        # https://unit8co.github.io/darts/#forecasting-models
-        # Les cas où des valeurs futures sont connues ou des valeurs statisques sont utilisées ne sont pas traitées dans ce cadre mais à travers les 'fit_params'
+        # Gestion des covariables temporelles (past_covariates)
         if X is not None:
-            self.covariates_ = TimeSeries.from_dataframe(X)
+            # Transformation identique pour X si nécessaire
+            if isinstance(X.index, pd.MultiIndex):
+                entity_levels_x = X.index.names[:-1]
+                X_multivariate = X.unstack(level=list(range(len(entity_levels_x))))
+                X_processed = X_multivariate
+            else:
+                X_processed = X
+                
+            self.covariates_ = TimeSeries.from_dataframe(X_processed)
             fit_params['past_covariates'] = self.covariates_
 
         # Entraînement du modèle
@@ -240,19 +263,18 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
     def predict(self, X: Union[pd.Series, pd.DataFrame]) -> pd.Series:
         """Generate forecasts using the fitted darts model.
 
-        For panel data with MultiIndex, only the last level (temporal) is
-        kept for darts prediction, but the original index structure is
-        preserved in the output by re-aligning predictions based on dates.
+        For panel data with MultiIndex, converts to multivariate format before
+        prediction, then restacks to original panel structure. The user is
+        responsible for ensuring X matches the training data structure.
 
         Args:
             X: Covariates for the prediction period as DataFrame with
-                DatetimeIndex, or DataFrame with target prediction dates.
-                The index defines the time points for which predictions
-                are generated.
+                DatetimeIndex or MultiIndex, or DataFrame with target prediction
+                dates. The index defines the time points and entities for which
+                predictions are generated.
 
         Returns:
-            Predicted values as pandas Series with DatetimeIndex matching
-            the input period.
+            Predicted values as pandas Series with index matching input X.
 
         Raises:
             ImportError: If darts package is not installed.
@@ -272,14 +294,20 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
                 predictions = adapter.predict(X_future)
                 print(predictions.head())
 
-            Predictions with covariates::
+            Panel data predictions::
 
-                # Fit with covariates
-                adapter.fit(X_train, y_train)
+                # After fitting on panel data
+                adapter.fit(None, y_train)  # y_train has (entity, date) MultiIndex
 
-                # Predict using future covariates
-                # X_test must have same columns as X_train
-                predictions = adapter.predict(X_test)
+                # Create prediction index matching training structure
+                entities = ['store_1', 'store_2']
+                future_dates = pd.date_range('2020-04-01', periods=30, freq='D')
+                X_future = pd.DataFrame(
+                    index=pd.MultiIndex.from_product([entities, future_dates])
+                )
+
+                # Get predictions with same MultiIndex structure
+                predictions = adapter.predict(X_future)
         """
         # Lazy import of darts
         try:
@@ -291,40 +319,49 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
                 "or: pip install darts"
             ) from e
 
-        # Stockage de l'index original pour le réappariement final
+        # Stockage de l'index original pour reconstruction finale
         original_index = X.index
+        is_panel = isinstance(X.index, pd.MultiIndex)
 
-        # Réinitialisation de l'index pour ne garder que le niveau temporel (dernier niveau du MultiIndex)
-        if isinstance(X.index, pd.MultiIndex):
-            X_reset = X.droplevel(list(range(X.index.nlevels - 1)))
-            # Extraction des dates du dernier niveau de l'index original
-            dates_original = X.index.get_level_values(-1)
+        # Transformation des panel data en multivarié si nécessaire
+        if is_panel:
+            # Extraction des niveaux d'entités
+            entity_levels = list(range(X.index.nlevels - 1))
+            # Unstacking pour transformer en multivarié
+            X_multivariate = X.unstack(level=entity_levels)
+            X_processed = X_multivariate
         else:
-            X_reset = X
-            dates_original = X.index
+            X_processed = X
 
-        # Prédiction en utilisant les covariables sans décaler l'horizon
+        # Prédiction avec covariables
         pred_series = self.model.predict(
             n=0,
-            past_covariates=TimeSeries.from_dataframe(X_reset)
+            past_covariates=TimeSeries.from_dataframe(X_processed)
         )
 
-        # Conversion TimeSeries → pandas Series
-        pred_values = pred_series.pd_series()
 
-        # Réappariement avec l'index original basé sur les dates
-        # Création d'un mapping date -> valeur prédite
-        pred_dict = dict(zip(pred_values.index, pred_values.values))
-        
-        if isinstance(original_index, pd.MultiIndex):
-            # Alignement des valeurs prédites avec l'index original via les dates
-            aligned_values = dates_original.map(pred_dict)
-            # Reconstruction de la Series avec l'index original
-            result = pd.Series(aligned_values.values, index=original_index, name=pred_values.name)
+        # Conversion TimeSeries → DataFrame/Series pandas
+        if pred_series.n_components > 1:
+            # Résultat multivarié : conversion en DataFrame
+            pred_df = pred_series.pd_dataframe()
         else:
-            # Cas simple : alignement direct sur l'index original
-            aligned_values = dates_original.map(pred_dict)
-            result = pd.Series(aligned_values.values, index=original_index, name=pred_values.name)
+            # Résultat univarié : conversion en Series
+            pred_df = pred_series.pd_series().to_frame()
+
+        # Reconstruction de la structure d'index originale pour panel data
+        if is_panel:
+            # Restacking pour recréer le MultiIndex (entités, dates)
+            pred_stacked = pred_df.stack(level=list(range(pred_df.columns.nlevels)))
+            # Réindexation pour correspondre exactement à l'index original
+            result = pred_stacked.reindex(original_index)
+        else:
+            # Série simple : conversion en Series si nécessaire
+            if isinstance(pred_df, pd.DataFrame):
+                result = pred_df.iloc[:, 0]
+            else:
+                result = pred_df
+            # Réindexation pour correspondre à l'index original
+            result = result.reindex(original_index)
 
         return result
 
