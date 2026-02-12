@@ -9,7 +9,7 @@ import pandas as pd
 from typing import Any, Optional, Union
 # Sklearn
 from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.metrics import r2_score
+from sklearn.utils.validation import check_is_fitted
 
 
 # Wrapper permettant l'intégration des modèles du package "darts" dans un syntaxe "sklearn-like"
@@ -138,6 +138,10 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         If y is None, treats X as the target series (univariate case).
         If y is provided, X is treated as past covariates.
 
+        For panel data with MultiIndex, only the last level (temporal) is
+        kept for darts compatibility. All other levels are dropped. The user
+        is responsible for proper data preparation.
+
         Args:
             X: Past covariates as DataFrame or target series if y is None.
                 Must have DatetimeIndex or compatible index.
@@ -196,9 +200,20 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         if y is None:
             y, X = X, None
 
+        # Réinitialisation de l'index pour ne garder que le niveau temporel (dernier niveau du MultiIndex)
+        # Cela permet de traiter les données de panel comme une seule série temporelle
+        if isinstance(y.index, pd.MultiIndex):
+            # Suppression de tous les niveaux sauf le dernier (temporel)
+            y_reset = y.droplevel(list(range(y.index.nlevels - 1)))
+            X_reset = X.droplevel(list(range(X.index.nlevels - 1))) if X is not None else None
+        else:
+            # Série temporelle simple : pas de modification
+            y_reset = y
+            X_reset = X
+            
         # Conversion de la série cible en TimeSeries darts
         self.series_ = TimeSeries.from_dataframe(
-            pd.DataFrame({'value': y}),
+            pd.DataFrame({'value': y_reset}),
             value_cols='value'
         )
 
@@ -224,6 +239,10 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
     # Méthode de prédiction
     def predict(self, X: Union[pd.Series, pd.DataFrame]) -> pd.Series:
         """Generate forecasts using the fitted darts model.
+
+        For panel data with MultiIndex, only the last level (temporal) is
+        kept for darts prediction, but the original index structure is
+        preserved in the output by re-aligning predictions based on dates.
 
         Args:
             X: Covariates for the prediction period as DataFrame with
@@ -272,66 +291,143 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
                 "or: pip install darts"
             ) from e
 
+        # Stockage de l'index original pour le réappariement final
+        original_index = X.index
+
+        # Réinitialisation de l'index pour ne garder que le niveau temporel (dernier niveau du MultiIndex)
+        if isinstance(X.index, pd.MultiIndex):
+            X_reset = X.droplevel(list(range(X.index.nlevels - 1)))
+            # Extraction des dates du dernier niveau de l'index original
+            dates_original = X.index.get_level_values(-1)
+        else:
+            X_reset = X
+            dates_original = X.index
+
         # Prédiction en utilisant les covariables sans décaler l'horizon
         pred_series = self.model.predict(
             n=0,
-            past_covariates=TimeSeries.from_dataframe(X)
+            past_covariates=TimeSeries.from_dataframe(X_reset)
         )
 
         # Conversion TimeSeries → pandas Series
-        return pred_series.pd_series()
+        pred_values = pred_series.pd_series()
 
-    # Méthode de caclul de métriques
-    def score(
-        self,
-        X: Union[pd.Series, pd.DataFrame],
-        y: pd.Series,
-        sample_weight: Optional[pd.Series] = None
-    ) -> float:
-        """Calculate R² score for the model predictions.
+        # Réappariement avec l'index original basé sur les dates
+        # Création d'un mapping date -> valeur prédite
+        pred_dict = dict(zip(pred_values.index, pred_values.values))
+        
+        if isinstance(original_index, pd.MultiIndex):
+            # Alignement des valeurs prédites avec l'index original via les dates
+            aligned_values = dates_original.map(pred_dict)
+            # Reconstruction de la Series avec l'index original
+            result = pd.Series(aligned_values.values, index=original_index, name=pred_values.name)
+        else:
+            # Cas simple : alignement direct sur l'index original
+            aligned_values = dates_original.map(pred_dict)
+            result = pd.Series(aligned_values.values, index=original_index, name=pred_values.name)
 
-        This method is required for GridSearchCV compatibility and follows
-        sklearn convention where higher values are better.
+        return result
+
+    # Méthode d'extraction des paramètres
+    def get_params(self, deep: bool = True) -> dict:
+        """Get parameters for GridSearchCV compatibility.
+
+        Model parameters are prefixed with 'model__' to enable
+        nested parameter tuning in GridSearchCV.
 
         Args:
-            X: Covariates for prediction period or DataFrame with prediction dates.
-            y: True target values.
-            sample_weight: Sample weights for scoring. Defaults to None.
+            deep: If True, return parameters of sub-objects.
 
         Returns:
-            R² score (coefficient of determination). Returns 1.0 for perfect
-            predictions, can be negative for very poor predictions.
+            Parameter dictionary with 'model' and model sub-parameters.
 
         Examples:
-            Evaluating model performance::
+            Getting parameters::
 
-                from sklearn.model_selection import train_test_split
+                from darts.models import LinearRegressionModel
+                from tsforecast.adapters import DartsAdapter
 
-                # Split data
-                y_train, y_test = y[:80], y[80:]
+                model = LinearRegressionModel(lags=5)
+                adapter = DartsAdapter(model=model)
 
-                # Fit and score
-                adapter.fit(None, y_train)
-                r2 = adapter.score(
-                    pd.DataFrame(index=y_test.index),
-                    y_test
-                )
-                print(f"R² score: {r2:.3f}")
+                # Get all parameters
+                params = adapter.get_params(deep=True)
+                print(params)
+                # {'model': LinearRegressionModel(...), 'model__lags': 5, ...}
 
-            Using with cross-validation::
+            Using with GridSearchCV::
 
-                from sklearn.model_selection import cross_val_score
+                from sklearn.model_selection import GridSearchCV
 
-                scores = cross_val_score(
-                    adapter,
-                    X,
-                    y,
-                    cv=5,
-                    scoring='r2'
-                )
-                print(f"Mean R²: {scores.mean():.3f} (+/- {scores.std():.3f})")
+                param_grid = {
+                    'model__lags': [3, 5, 7],
+                    'model__output_chunk_length': [1, 3]
+                }
+                grid = GridSearchCV(adapter, param_grid, cv=3)
         """
-        # Calcul des prédictions
-        y_pred = self.predict(X)
-        # Calcul de la métrique
-        return r2_score(y, y_pred, sample_weight=sample_weight)
+        # Initialisation du dictionnaire des paramètres
+        params = {'model': self.model}
+
+        # Extraction des paramètres du modèle
+        if deep and hasattr(self.model, 'get_params'):
+            # Ajout des paramètres du modèle avec le préfixe 'model__'
+            model_params = self.model.get_params(deep=True)
+            params.update({f'model__{k}': v for k, v in model_params.items()})
+
+        return params
+
+    # Méthode d'initialisation des paramètres
+    def set_params(self, **params: Any) -> "DartsAdapter":
+        """Set parameters for GridSearchCV compatibility.
+
+        Model parameters should be prefixed with 'model__' for
+        nested parameter setting in GridSearchCV.
+
+        Args:
+            **params: Parameters to set (model params must have 'model__' prefix).
+
+        Returns:
+            self: The adapter instance with updated parameters.
+
+        Examples:
+            Setting parameters directly::
+
+                adapter = DartsAdapter(model=LinearRegressionModel())
+
+                # Set adapter parameter
+                adapter.set_params(model=LinearRegressionModel(lags=10))
+
+                # Set nested model parameter
+                adapter.set_params(model__lags=7)
+
+            Used internally by GridSearchCV::
+
+                # GridSearchCV automatically uses set_params
+                param_grid = {'model__lags': [3, 5, 7]}
+                grid = GridSearchCV(adapter, param_grid, cv=3)
+                grid.fit(X, y)
+        """
+        # Séparation des paramètres de l'adapter et du modèle
+        adapter_params = {}
+        model_params = {}
+
+        # Parcours des paramètres
+        for key, value in params.items():
+            if key.startswith('model__'):
+                # Paramètre du modèle
+                model_params[key.replace('model__', '')] = value
+            else:
+                # Paramètre de l'adapter
+                adapter_params[key] = value
+
+        # Application des paramètres de l'adapter
+        for key, value in adapter_params.items():
+            setattr(self, key, value)
+
+        # Application des paramètres du modèle
+        if model_params and hasattr(self.model, 'set_params'):
+            self.model.set_params(**model_params)
+
+        return self
+        
+    
