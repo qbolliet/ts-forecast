@@ -1440,7 +1440,7 @@ wheels = [
 [[package]]
 name = "opera"
 version = "0.0.1"
-source = { git = "https://github.com/Dralliag/opera-python.git#9f8203363ba75206e9beb02002e3420037456200" }
+source = { git = "https://github.com/Dralliag/opera-python.git?rev=develop#9f8203363ba75206e9beb02002e3420037456200" }
 dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
@@ -2402,6 +2402,7 @@ adapters-all = [
     { name = "darts" },
     { name = "hierarchicalforecast" },
     { name = "opera" },
+    { name = "sktime" },
 ]
 adapters-darts = [
     { name = "darts" },
@@ -2411,6 +2412,9 @@ adapters-hierarchical = [
 ]
 adapters-opera = [
     { name = "opera" },
+]
+adapters-sktime = [
+    { name = "sktime" },
 ]
 
 [package.dev-dependencies]
@@ -2436,12 +2440,13 @@ requires-dist = [
     { name = "hierarchicalforecast", marker = "extra == 'adapters-hierarchical'", specifier = ">=1.3.1,<2" },
     { name = "joblib", specifier = ">=1.5.1,<2" },
     { name = "numpy", specifier = ">=2.3.1,<3" },
-    { name = "opera", marker = "extra == 'adapters-opera'", git = "https://github.com/Dralliag/opera-python.git" },
+    { name = "opera", marker = "extra == 'adapters-opera'", git = "https://github.com/Dralliag/opera-python.git?rev=develop" },
     { name = "pandas", specifier = ">=2.3.1,<3" },
     { name = "scikit-learn", specifier = ">=1.7.0,<2" },
-    { name = "ts-forecast", extras = ["adapters-darts", "adapters-hierarchical", "adapters-opera"], marker = "extra == 'adapters-all'" },
+    { name = "sktime", marker = "extra == 'adapters-sktime'", specifier = ">=0.40.1,<1" },
+    { name = "ts-forecast", extras = ["adapters-sktime", "adapters-darts", "adapters-hierarchical", "adapters-opera"], marker = "extra == 'adapters-all'" },
 ]
-provides-extras = ["adapters-darts", "adapters-hierarchical", "adapters-opera", "adapters-all"]
+provides-extras = ["adapters-sktime", "adapters-darts", "adapters-hierarchical", "adapters-opera", "adapters-all"]
 
 [package.metadata.requires-dev]
 adapters = [{ name = "ts-forecast", extras = ["adapters-all"] }]
@@ -2450,7 +2455,7 @@ dev = [
     { name = "matplotlib", specifier = ">=3.10.5,<4" },
     { name = "pytest", specifier = ">=8.4.1,<9" },
     { name = "seaborn", specifier = ">=0.13.2,<0.14" },
-    { name = "sktime", specifier = ">=0.40.1" },
+    { name = "sktime", specifier = ">=0.40.1,<1" },
 ]
 docs = [
     { name = "mkdocs", specifier = ">=1.6.1,<2" },
