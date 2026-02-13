@@ -19,111 +19,95 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
     """Sklearn-compatible adapter for darts GlobalForecastingModel.
 
     This adapter wraps any GlobalForecastingModel from the darts library,
-    allowing it to be used in sklearn pipelines and with sklearn tools like
-    GridSearchCV and cross_val_score.
+    enforcing a pure regression paradigm: y[t] = f(X[t]). Auto-regression
+    on the target series is disabled, and covariates are passed as
+    ``future_covariates`` with ``lags_future_covariates=[0]`` so that darts
+    uses X[t] to predict y[t] without requiring temporal continuity with
+    the training period.
 
-    The adapter handles conversion between pandas Series/DataFrames and darts
-    TimeSeries objects, and supports both univariate and multivariate forecasting
-    with past covariates.
+    This design eliminates gap-related issues in cross-validation setups
+    where a temporal gap exists between training and test periods (e.g.
+    due to publication delays or prediction horizons). The user is
+    responsible for aligning X and y upstream (e.g. via ``X.shift(-horizon)``).
+
+    At fit time, the adapter automatically overrides the following darts
+    model parameters:
+
+    - ``lags=None`` (no auto-regression on target)
+    - ``lags_past_covariates=None`` (covariates are not treated as past)
+    - ``lags_future_covariates=[0]`` (y[t] predicted from X[t])
+    - ``output_chunk_length`` (set to training length for one-shot prediction)
 
     Args:
         model: An instantiated GlobalForecastingModel from darts (e.g.,
-            LinearRegressionModel, NaiveDrift, ExponentialSmoothing, etc.).
+            LinearRegressionModel, RandomForest, LightGBMModel, etc.).
 
     Attributes:
         model: The wrapped darts GlobalForecastingModel instance.
         series_: The darts TimeSeries created from training target data.
-        covariates_: The darts TimeSeries for past covariates (if provided).
+        covariates_: The darts TimeSeries for future covariates (if provided).
 
     Raises:
         ImportError: If darts package is not installed.
 
     Examples:
-        Basic univariate forecasting::
+        Basic usage with sklearn cross-validation::
 
             import pandas as pd
-            from tsforecast.adapters import DartsAdapter
-            from darts.models import NaiveDrift
-
-            # Create time series data
-            dates = pd.date_range('2020-01-01', periods=100, freq='D')
-            y = pd.Series(range(100), index=dates)
-
-            # Initialize and fit
-            model = NaiveDrift()
-            adapter = DartsAdapter(model=model)
-            adapter.fit(None, y[:80])
-
-            # Predict - X represents the covariates timeframe
-            # For simple forecasting, pass DataFrame with target dates
-            X_future = pd.DataFrame(index=dates[80:])
-            predictions = adapter.predict(X_future)
-
-        With past covariates::
-
-            from darts.models import LinearRegressionModel
             import numpy as np
+            from tsforecast.adapters import DartsAdapter
+            from darts.models import LinearRegressionModel
 
-            # Create covariates (e.g., weather features)
-            X = pd.DataFrame({
-                'temperature': np.random.randn(100),
-                'humidity': np.random.randn(100)
-            }, index=dates)
+            # Upstream preprocessing: shift X to align with horizon
+            X = X.shift(-horizon)
 
-            # Fit with covariates
-            model = LinearRegressionModel(lags=10)
-            adapter = DartsAdapter(model=model)
-            adapter.fit(X[:80], y[:80])
+            # Wrap darts model (no need to configure lags)
+            adapter = DartsAdapter(model=LinearRegressionModel())
+            adapter.fit(X_train, y_train)
+            predictions = adapter.predict(X_test)
 
-            # Predict with future covariates
-            predictions = adapter.predict(X[80:])
+            # Score works with any sklearn-compatible cross-validation
+            r2 = adapter.score(X_test, y_test)
 
         Using with GridSearchCV::
 
             from sklearn.model_selection import GridSearchCV
-            from darts.models import LinearRegressionModel
 
-            # Create base model
-            base_model = LinearRegressionModel(lags=10)
-            adapter = DartsAdapter(model=base_model)
-
-            # Define parameter grid for the wrapped model
-            # Note: Use 'model__' prefix for nested parameters
+            adapter = DartsAdapter(model=LinearRegressionModel())
             param_grid = {
-                'model__lags': [5, 10, 15],
-                'model__output_chunk_length': [1, 3, 5]
+                'model__output_chunk_length': [1, 3, 5],
             }
-
-            # GridSearchCV will clone and fit multiple models
-            grid_search = GridSearchCV(
-                adapter,
-                param_grid,
-                cv=3,
-                scoring='neg_mean_squared_error'
-            )
-            grid_search.fit(X_train, y_train)
-            print(f"Best parameters: {grid_search.best_params_}")
+            grid_search = GridSearchCV(adapter, param_grid, cv=cv)
+            grid_search.fit(X, y)
     """
     # Initialisation
     def __init__(self, model: Any) -> None:
         """Initialize the DartsAdapter.
 
+        This adapter enforces a pure regression paradigm: y[t] = f(X[t]).
+        Auto-regression on target (lags) is disabled, and X is treated as
+        future_covariates so that darts can access covariate values at
+        prediction time without requiring temporal continuity with the
+        training period.
+
+        The preprocessing (horizon shift, publication delays, etc.) must be
+        handled upstream by the user before calling fit/predict.
+
         Args:
             model: An instantiated GlobalForecastingModel from darts.
+                The adapter will override ``lags``, ``lags_past_covariates``,
+                ``lags_future_covariates`` and ``output_chunk_length`` at fit
+                time to enforce the sklearn-like regression paradigm.
 
         Examples:
-            Creating an adapter with different models::
+            Basic usage (y[t] predicted from X[t])::
 
-                from darts.models import NaiveDrift, ExponentialSmoothing
+                from darts.models import LinearRegressionModel
                 from tsforecast.adapters import DartsAdapter
 
-                # Simple baseline model
-                adapter1 = DartsAdapter(model=NaiveDrift())
-
-                # Exponential smoothing
-                adapter2 = DartsAdapter(
-                    model=ExponentialSmoothing(seasonal_periods=7)
-                )
+                adapter = DartsAdapter(model=LinearRegressionModel())
+                adapter.fit(X_train, y_train)
+                predictions = adapter.predict(X_test)
         """
         self.model = model
 
@@ -136,20 +120,26 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
     ) -> "DartsAdapter":
         """Fit the darts model on time series data.
 
-        If y is None, treats X as the target series (univariate case).
-        If y is provided, X is treated as past covariates.
+        Enforces a pure regression paradigm: the model learns to predict
+        y[t] from X[t] (and optional lags), without auto-regression on the
+        target series. X is passed to darts as ``future_covariates``.
+
+        The adapter automatically overrides the following model parameters:
+
+        - ``lags=None`` (no auto-regression)
+        - ``lags_past_covariates=None`` (X is not treated as past covariates)
+        - ``lags_future_covariates=[0]`` (y[t] predicted from X[t])
+        - ``output_chunk_length`` (set to the training series length)
 
         For panel data with MultiIndex, only the last level (temporal) is
-        kept for darts compatibility. All other levels are dropped. The user
-        is responsible for proper data preparation.
+        kept for darts compatibility. All other levels are dropped.
 
         Args:
-            X: Past covariates as DataFrame or target series if y is None.
-                Must have DatetimeIndex or compatible index.
-            y: Target time series to forecast. If None, X is used as target.
+            X: Covariates as DataFrame with DatetimeIndex or MultiIndex.
+                Treated as future_covariates by darts.
+            y: Target time series to forecast. If None, X is used as target
+                and no covariates are provided.
             **fit_params: Additional parameters passed to model.fit().
-                Common parameters include 'future_covariates' for models
-                that support them.
 
         Returns:
             self: The fitted adapter instance.
@@ -159,31 +149,21 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
             ValueError: If data format is invalid or model cannot be fit.
 
         Examples:
-            Univariate fitting::
-
-                import pandas as pd
-                from tsforecast.adapters import DartsAdapter
-                from darts.models import ExponentialSmoothing
-
-                dates = pd.date_range('2020-01-01', periods=100, freq='D')
-                y = pd.Series(range(100), index=dates)
-
-                adapter = DartsAdapter(model=ExponentialSmoothing())
-                # X is None, y is the target
-                adapter.fit(None, y)
-
-            Fitting with past covariates::
+            Fitting with covariates::
 
                 from darts.models import LinearRegressionModel
+                from tsforecast.adapters import DartsAdapter
                 import numpy as np
+                import pandas as pd
 
+                dates = pd.date_range('2020-01-01', periods=100, freq='MS')
                 X = pd.DataFrame({
                     'feature1': np.random.randn(100),
                     'feature2': np.random.randn(100)
                 }, index=dates)
+                y = pd.Series(np.random.randn(100), index=dates)
 
-                adapter = DartsAdapter(model=LinearRegressionModel(lags=5))
-                # X contains covariates, y is the target
+                adapter = DartsAdapter(model=LinearRegressionModel())
                 adapter.fit(X, y)
         """
         # Lazy import of darts
@@ -235,7 +215,20 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
             y_processed,
         )
 
-        # Gestion des covariables temporelles (past_covariates)
+        # Réinstanciation du modèle avec les paramètres forcés pour le paradigme régresseur pur
+        # Darts ne supporte pas set_params : on réinstancie la classe avec les paramètres modifiés
+        # (même approche que ForecastingModel.gridsearch)
+        model_class = type(self.model)
+        model_params = self.model.model_params
+        forced_params = {
+            'lags': None,
+            'lags_past_covariates': None,
+            'lags_future_covariates': [0],
+            'output_chunk_length': len(y_processed),
+        }
+        self.model = model_class(**{**model_params, **forced_params})
+
+        # Gestion des covariables (traitées comme future_covariates)
         if X is not None:
             # Transformation identique pour X si nécessaire
             if isinstance(X.index, pd.MultiIndex):
@@ -244,9 +237,9 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
                 X_processed = X_multivariate
             else:
                 X_processed = X
-                
+
             self.covariates_ = TimeSeries.from_dataframe(X_processed)
-            fit_params['past_covariates'] = self.covariates_
+            fit_params['future_covariates'] = self.covariates_
 
         # Entraînement du modèle
         self.model.fit(self.series_, **fit_params)
@@ -263,15 +256,18 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
     def predict(self, X: Union[pd.Series, pd.DataFrame]) -> pd.Series:
         """Generate forecasts using the fitted darts model.
 
+        Computes ``n`` automatically as the number of time steps between the
+        end of the training series and the last date in X. X is passed to
+        darts as ``future_covariates``, which only need to cover the
+        prediction window (no continuity with training data required).
+
         For panel data with MultiIndex, converts to multivariate format before
-        prediction, then restacks to original panel structure. The user is
-        responsible for ensuring X matches the training data structure.
+        prediction, then restacks to original panel structure.
 
         Args:
             X: Covariates for the prediction period as DataFrame with
-                DatetimeIndex or MultiIndex, or DataFrame with target prediction
-                dates. The index defines the time points and entities for which
-                predictions are generated.
+                DatetimeIndex or MultiIndex. The temporal index defines the
+                time points for which predictions are generated.
 
         Returns:
             Predicted values as pandas Series with index matching input X.
@@ -283,31 +279,8 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         Examples:
             Generating predictions::
 
-                # After fitting the model
-                adapter.fit(None, y_train)
-
-                # Create DataFrame for prediction period
-                future_dates = pd.date_range('2020-04-01', periods=30, freq='D')
-                X_future = pd.DataFrame(index=future_dates)
-
-                # Get predictions
-                predictions = adapter.predict(X_future)
-                print(predictions.head())
-
-            Panel data predictions::
-
-                # After fitting on panel data
-                adapter.fit(None, y_train)  # y_train has (entity, date) MultiIndex
-
-                # Create prediction index matching training structure
-                entities = ['store_1', 'store_2']
-                future_dates = pd.date_range('2020-04-01', periods=30, freq='D')
-                X_future = pd.DataFrame(
-                    index=pd.MultiIndex.from_product([entities, future_dates])
-                )
-
-                # Get predictions with same MultiIndex structure
-                predictions = adapter.predict(X_future)
+                adapter.fit(X_train, y_train)
+                predictions = adapter.predict(X_test)
         """
         # Lazy import of darts
         try:
@@ -333,11 +306,29 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         else:
             X_processed = X
 
-        # Prédiction avec covariables
-        pred_series = self.model.predict(
-            n=0,
-            past_covariates=TimeSeries.from_dataframe(X_processed)
-        )
+        # Calcul automatique du nombre de pas de prédiction (n)
+        # n = nombre de pas entre la fin de la série d'entraînement et la dernière date de X
+        freq = self.series_.freq
+        last_train_date = self.series_.end_time()
+        last_test_date = X_processed.index.max()
+        n = len(pd.date_range(
+            start=last_train_date + freq,
+            end=last_test_date,
+            freq=freq
+        ))
+
+        # Construction des arguments de prédiction
+        predict_kwargs = {'n': n}
+
+        # Passage des covariables comme future_covariates
+        # Seule la couverture de la période de prédiction est requise
+        if X is not None and hasattr(self, 'covariates_'):
+            predict_kwargs['future_covariates'] = TimeSeries.from_dataframe(
+                X_processed
+            )
+
+        # Prédiction
+        pred_series = self.model.predict(**predict_kwargs)
 
 
         # Conversion TimeSeries → DataFrame/Series pandas
@@ -369,14 +360,15 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
     def get_params(self, deep: bool = True) -> dict:
         """Get parameters for GridSearchCV compatibility.
 
-        Model parameters are prefixed with 'model__' to enable
-        nested parameter tuning in GridSearchCV.
+        Returns adapter-level parameters (``model``) and, if ``deep=True``,
+        model sub-parameters prefixed with ``model__``. Sub-parameters are
+        extracted from the darts ``model_params`` attribute.
 
         Args:
             deep: If True, return parameters of sub-objects.
 
         Returns:
-            Parameter dictionary with 'model' and model sub-parameters.
+            Parameter dictionary.
 
         Examples:
             Getting parameters::
@@ -384,31 +376,19 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
                 from darts.models import LinearRegressionModel
                 from tsforecast.adapters import DartsAdapter
 
-                model = LinearRegressionModel(lags=5)
-                adapter = DartsAdapter(model=model)
-
-                # Get all parameters
+                adapter = DartsAdapter(model=LinearRegressionModel())
                 params = adapter.get_params(deep=True)
-                print(params)
-                # {'model': LinearRegressionModel(...), 'model__lags': 5, ...}
-
-            Using with GridSearchCV::
-
-                from sklearn.model_selection import GridSearchCV
-
-                param_grid = {
-                    'model__lags': [3, 5, 7],
-                    'model__output_chunk_length': [1, 3]
-                }
-                grid = GridSearchCV(adapter, param_grid, cv=3)
+                # {'model': LinearRegressionModel(...),
+                #  'model__lags': ..., ...}
         """
-        # Initialisation du dictionnaire des paramètres
-        params = {'model': self.model}
+        # Paramètres de l'adapter
+        params = {
+            'model': self.model,
+        }
 
-        # Extraction des paramètres du modèle
-        if deep and hasattr(self.model, 'get_params'):
-            # Ajout des paramètres du modèle avec le préfixe 'model__'
-            model_params = self.model.get_params(deep=True)
+        # Extraction des paramètres du modèle via l'attribut darts model_params
+        if deep and hasattr(self.model, 'model_params'):
+            model_params = self.model.model_params
             params.update({f'model__{k}': v for k, v in model_params.items()})
 
         return params
@@ -417,11 +397,16 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
     def set_params(self, **params: Any) -> "DartsAdapter":
         """Set parameters for GridSearchCV compatibility.
 
-        Model parameters should be prefixed with 'model__' for
-        nested parameter setting in GridSearchCV.
+        Model parameters should be prefixed with ``model__`` for nested
+        parameter setting. Since darts models do not support in-place
+        parameter mutation, the model is reinstantiated with the updated
+        parameters (same approach as ``ForecastingModel.gridsearch``).
 
         Args:
-            **params: Parameters to set (model params must have 'model__' prefix).
+            **params: Parameters to set. Use ``model__`` prefix for darts
+                model parameters (e.g. ``model__output_chunk_length=5``).
+                Use ``model`` (without prefix) to replace the entire model
+                instance.
 
         Returns:
             self: The adapter instance with updated parameters.
@@ -431,18 +416,11 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
 
                 adapter = DartsAdapter(model=LinearRegressionModel())
 
-                # Set adapter parameter
+                # Remplacement complet du modèle
                 adapter.set_params(model=LinearRegressionModel(lags=10))
 
-                # Set nested model parameter
-                adapter.set_params(model__lags=7)
-
-            Used internally by GridSearchCV::
-
-                # GridSearchCV automatically uses set_params
-                param_grid = {'model__lags': [3, 5, 7]}
-                grid = GridSearchCV(adapter, param_grid, cv=3)
-                grid.fit(X, y)
+                # Modification d'un paramètre du modèle (réinstanciation)
+                adapter.set_params(model__output_chunk_length=5)
         """
         # Séparation des paramètres de l'adapter et du modèle
         adapter_params = {}
@@ -461,10 +439,10 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         for key, value in adapter_params.items():
             setattr(self, key, value)
 
-        # Application des paramètres du modèle
-        if model_params and hasattr(self.model, 'set_params'):
-            self.model.set_params(**model_params)
+        # Réinstanciation du modèle darts avec les paramètres modifiés
+        if model_params and hasattr(self.model, 'model_params'):
+            model_class = type(self.model)
+            current_params = self.model.model_params
+            self.model = model_class(**{**current_params, **model_params})
 
         return self
-        
-    
