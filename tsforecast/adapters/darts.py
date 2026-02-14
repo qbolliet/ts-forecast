@@ -36,7 +36,7 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
     - ``lags=None`` (no auto-regression on target)
     - ``lags_past_covariates=None`` (covariates are not treated as past)
     - ``lags_future_covariates=[0]`` (y[t] predicted from X[t])
-    - ``output_chunk_length`` (set to training length for one-shot prediction)
+    - ``output_chunk_length=1`` (each prediction is independent)
 
     Args:
         model: An instantiated GlobalForecastingModel from darts (e.g.,
@@ -129,7 +129,7 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         - ``lags=None`` (no auto-regression)
         - ``lags_past_covariates=None`` (X is not treated as past covariates)
         - ``lags_future_covariates=[0]`` (y[t] predicted from X[t])
-        - ``output_chunk_length`` (set to the training series length)
+        - ``output_chunk_length=1`` (each prediction is independent)
 
         For panel data with MultiIndex, only the last level (temporal) is
         kept for darts compatibility. All other levels are dropped.
@@ -218,13 +218,17 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         # Réinstanciation du modèle avec les paramètres forcés pour le paradigme régresseur pur
         # Darts ne supporte pas set_params : on réinstancie la classe avec les paramètres modifiés
         # (même approche que ForecastingModel.gridsearch)
+        # - lags=None : désactivation de l'auto-régression
+        # - lags_past_covariates=None : désactivation des past_covariates
+        # - lags_future_covariates=[0] : y[t] = f(X[t])
+        # - output_chunk_length=1 : chaque prédiction est indépendante
         model_class = type(self.model)
         model_params = self.model.model_params
         forced_params = {
             'lags': None,
             'lags_past_covariates': None,
             'lags_future_covariates': [0],
-            'output_chunk_length': len(y_processed),
+            'output_chunk_length': 1,
         }
         self.model = model_class(**{**model_params, **forced_params})
 
@@ -258,8 +262,13 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
 
         Computes ``n`` automatically as the number of time steps between the
         end of the training series and the last date in X. X is passed to
-        darts as ``future_covariates``, which only need to cover the
-        prediction window (no continuity with training data required).
+        darts as ``future_covariates``.
+
+        If a temporal gap exists between the training period and X (e.g. due
+        to cross-validation with ``gap > 0``), the missing covariate dates
+        are filled with zeros. The corresponding predictions are discarded
+        during the final reindexing step, so the fill values have no effect
+        on the returned result.
 
         For panel data with MultiIndex, converts to multivariate format before
         prediction, then restacks to original panel structure.
@@ -321,10 +330,18 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         predict_kwargs = {'n': n}
 
         # Passage des covariables comme future_covariates
-        # Seule la couverture de la période de prédiction est requise
+        # Création d'un index continu couvrant la période complète (gap + test)
+        # Les dates du gap sont remplies avec 0 (valeurs ignorées car les
+        # prédictions correspondantes sont écartées par le reindex final)
         if X is not None and hasattr(self, 'covariates_'):
+            full_index = pd.date_range(
+                start=last_train_date + freq,
+                end=last_test_date,
+                freq=freq
+            )
+            X_full = X_processed.reindex(full_index, fill_value=0)
             predict_kwargs['future_covariates'] = TimeSeries.from_dataframe(
-                X_processed
+                X_full
             )
 
         # Prédiction
