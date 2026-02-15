@@ -46,7 +46,7 @@ def calculate_applicable_delay(
     Args:
         publication_delays: DataFrame returned by compare_and_detect_delays()
             containing columns: observation_date, download_date, frequency,
-            period_start, period_end, reference_point, release_delay, unit
+            period_start, period_end, reference_point, delay, unit
         target_reference_point: Reference point for delay calculation ('start' or 'end')
         target_frequency: Target frequency for delay calculation (applied to all indicators).
             Examples: 'monthly', 'M', 'quarterly', 'Q', etc.
@@ -168,7 +168,7 @@ def _validate_columns(df: pd.DataFrame) -> None:
         'period_start',
         'period_end',
         'reference_point',
-        'release_delay',
+        'delay',
         'unit'
     ]
 
@@ -246,7 +246,7 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
         row: Row from delays DataFrame containing:
             - period_start, period_end: Original period boundaries
             - reference_point: Original reference ('start' or 'end')
-            - release_delay: Numeric delay value
+            - delay: Numeric delay value
             - unit: Time unit ('days', 'seconds', 'microseconds')
             - target_frequency_normalized: Target frequency
             - current_frequency_normalized: Current frequency
@@ -267,7 +267,7 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
         ...     'period_start': pd.Timestamp('2024-01-01'),
         ...     'period_end': pd.Timestamp('2024-03-31'),
         ...     'reference_point': 'end',
-        ...     'release_delay': 45,
+        ...     'delay': 45,
         ...     'unit': 'days',
         ...     'target_frequency_normalized': 'M',
         ...     'current_frequency_normalized': 'Q'
@@ -278,7 +278,7 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
         # Converted delay: May 15 - Mar 1 = 75 days
     """
     # Reconstruction de la date de téléchargement originale
-    # download_date = reference_date + release_delay
+    # download_date = reference_date + delay
     if row['reference_point'] == 'start':
         original_reference_date = row['period_start']
     else:
@@ -286,7 +286,7 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
 
     # Conversion du délai en secondes pour créer un timedelta en utilisant la fonction utilitaire
     delay_seconds = convert_duration(
-        value=row['release_delay'],
+        value=row['delay'],
         from_duration=row['unit'],
         to_duration='s',
         rounding=None

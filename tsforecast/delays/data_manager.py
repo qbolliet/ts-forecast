@@ -42,6 +42,16 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
 
     Returns:
         DataFrame containing detected observations with publication delay information
+        It contains the following columns:
+        - 'observation_date': The date of the observation
+        - 'column': The column name
+        - 'download_date': Date when data was downloaded
+        - 'frequency': Detected frequency of the data
+        - 'period_start': Start boundary of the period
+        - 'period_end': End boundary of the period
+        - 'reference_point': Reference point used ('start' or 'end')
+        - 'delay': Calculated publication delay (ceil-rounded)
+        - 'unit': Unit of the delay value
 
     Raises:
         ValueError: If invalid parameters are provided
@@ -72,7 +82,7 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
     )
 
     # Fonction de calcul des délais associés aux observations nouvellement publiées
-    new_observations = _calculate_release_delays(
+    new_observations = _calculate_publication_delays(
         new_observations=new_observations,
         new_data=new_data,
         download_date=download_date,
@@ -234,7 +244,7 @@ def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[p
 
 
 # Fonction de calcul des délais de publication
-def _calculate_release_delays(new_observations: pd.DataFrame,
+def _calculate_publication_delays(new_observations: pd.DataFrame,
                                 new_data: pd.DataFrame,
                                 download_date: datetime,
                                 reference_point: Literal['start', 'end'],
@@ -264,7 +274,7 @@ def _calculate_release_delays(new_observations: pd.DataFrame,
         - 'period_start': Start boundary of the period
         - 'period_end': End boundary of the period
         - 'reference_point': Reference point used ('start' or 'end')
-        - 'release_delay': Calculated publication delay (ceil-rounded)
+        - 'delay': Calculated publication delay (ceil-rounded)
         - 'unit': Unit of the delay value
 
     Raises:
@@ -331,13 +341,13 @@ def _calculate_release_delays(new_observations: pd.DataFrame,
     # Conversion selon l'unité spécifiée
     # Timedelta n'a que pour attributs "day", "second", "microsecond"
     if unit in ["D", "day"]:
-        publication_delays["release_delay"] = np.ceil(delays_timedelta.dt.total_seconds() / 86400)
+        publication_delays["delay"] = np.ceil(delays_timedelta.dt.total_seconds() / 86400)
         publication_delays["unit"] = "day"
     elif unit in ["s", "second"]:
-        publication_delays["release_delay"] = np.ceil(delays_timedelta.dt.total_seconds())
+        publication_delays["delay"] = np.ceil(delays_timedelta.dt.total_seconds())
         publication_delays["unit"] = "second"
     elif unit in ["us", "microsecond"]:
-        publication_delays["release_delay"] = np.ceil(delays_timedelta.dt.total_seconds() * 1_000_000)
+        publication_delays["delay"] = np.ceil(delays_timedelta.dt.total_seconds() * 1_000_000)
         publication_delays["unit"] = "microsecond"
     else:
         raise ValueError(f"Unit must be one of 'us', 's', 'D', 'microsecond', 'second', 'day', got {unit}") 
