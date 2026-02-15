@@ -267,9 +267,6 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                 # Ajout au dictionnaire des variables à shift
                 self.shift_params[col] = {'n_periods': result['n_periods'], 'frequency': self.detected_frequencies_[col]}
 
-        print(self.shift_params)
-
-        print(self.mask_params)
         return self
 
     # Méthode de transformation des données
