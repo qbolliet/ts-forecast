@@ -16,9 +16,9 @@ from ..utils.duration import to_code as duration_to_code, convert_duration
 # Fonction de calcul du délai applicable
 def calculate_applicable_delay(
     publication_delays: pd.DataFrame,
-    target_reference_point: Literal['start', 'end'],
-    target_frequency: Union[str, Dict[str, str]],
-    target_unit: Optional[Literal['us', 's', 'D', 'microsecond', 'second', 'day']] = None,
+    reference_point: Literal['start', 'end'],
+    frequency: Union[str, Dict[str, str]],
+    unit: Optional[Literal['us', 's', 'D', 'microsecond', 'second', 'day']] = None,
     indicators: Optional[List[str]] = None,
     aggregate_by_panel: bool = False,
     aggregation_method: Union[str, callable] = 'median'
@@ -47,10 +47,10 @@ def calculate_applicable_delay(
         publication_delays: DataFrame returned by compare_and_detect_delays()
             containing columns: observation_date, download_date, frequency,
             period_start, period_end, reference_point, delay, unit
-        target_reference_point: Reference point for delay calculation ('start' or 'end')
-        target_frequency: Target frequency for delay calculation (applied to all indicators).
+        reference_point: Reference point for delay calculation ('start' or 'end')
+        frequency: Target frequency for delay calculation (applied to all indicators).
             Examples: 'monthly', 'M', 'quarterly', 'Q', etc.
-        target_unit: Unit for output delays. If None, uses the unit from input data.
+        unit: Unit for output delays. If None, uses the unit from input data.
             Options: 'us'/'microsecond', 's'/'second', 'D'/'day'
         indicators: List of indicators to calculate delays for. If None, uses all
             indicators found in the data.
@@ -64,10 +64,10 @@ def calculate_applicable_delay(
         DataFrame with calculated applicable delays, indexed by indicator
         (or by panel_entity and indicator if aggregate_by_panel=True).
         Contains columns:
-        - applicable_delay: The calculated delay value
+        - delay: The calculated delay value
         - unit: Unit of the delay
-        - target_frequency: The target frequency used
-        - target_reference_point: The target reference point used
+        - frequency: The target frequency used
+        - reference_point: The target reference point used
         - n_observations: Number of observations used in aggregation
         - aggregation_method: The aggregation method used
 
@@ -78,17 +78,17 @@ def calculate_applicable_delay(
         >>> # Calculate monthly delay from start for quarterly data
         >>> applicable = calculate_applicable_delay(
         ...     publication_delays=delays_df,
-        ...     target_reference_point='start',
-        ...     target_frequency='monthly',
+        ...     reference_point='start',
+        ...     frequency='monthly',
         ...     indicators=['GDP', 'Unemployment'],
         ...     aggregation_method='median'
         ... )
-        
+
         >>> # Calculate with panel-level aggregation
         >>> applicable = calculate_applicable_delay(
         ...     publication_delays=delays_df,
-        ...     target_reference_point='end',
-        ...     target_frequency='quarterly',
+        ...     reference_point='end',
+        ...     frequency='quarterly',
         ...     aggregate_by_panel=True,
         ...     aggregation_method='mean'
         ... )
@@ -97,8 +97,8 @@ def calculate_applicable_delay(
     _validate_columns(publication_delays)
 
     # Validation des arguments
-    if target_reference_point not in ['start', 'end']:
-        raise ValueError("target_reference_point must be 'start' or 'end'")
+    if reference_point not in ['start', 'end']:
+        raise ValueError("reference_point must be 'start' or 'end'")
     
     # Copie indépendante des données
     delays = publication_delays.copy()
@@ -113,26 +113,26 @@ def calculate_applicable_delay(
             raise ValueError(f"No data found for specified indicators: {indicators}")
     
     # Création du mapping indicateur -> fréquence cible
-    if isinstance(target_frequency, str):
+    if isinstance(frequency, str):
         # Fréquence unique pour tous les indicateurs
         unique_indicators = delays.index.get_level_values(indicator_level_name).unique()
-        target_freq_map = {ind: target_frequency for ind in unique_indicators}
-    elif isinstance(target_frequency, dict):
-        target_freq_map = target_frequency.copy()
+        target_freq_map = {ind: frequency for ind in unique_indicators}
+    elif isinstance(frequency, dict):
+        target_freq_map = frequency.copy()
     else:
-        raise TypeError(f"'target_frequency' should be a string or a dict, git a {type(target_frequency).__name__}")
+        raise TypeError(f"'frequency' should be a string or a dict, git a {type(frequency).__name__}")
     
     # Conversion des délais au point de référence et à la fréquence cibles
     delays = _convert_to_target_frequency_and_reference(
         delays=delays,
         target_freq_map=target_freq_map,
-        target_reference_point=target_reference_point,
+        target_reference_point=reference_point,
         indicator_level_name=indicator_level_name
     )
     
     # Conversion de l'unité si nécessaire
-    if target_unit is not None:
-        delays = _convert_delay_unit(delays, target_unit)
+    if unit is not None:
+        delays = _convert_delay_unit(delays, unit)
     
     # Agrégation des délais
     result = _aggregate_delays(
@@ -140,7 +140,7 @@ def calculate_applicable_delay(
         indicator_level_name=indicator_level_name,
         aggregate_by_panel=aggregate_by_panel,
         aggregation_method=aggregation_method,
-        target_reference_point=target_reference_point,
+        target_reference_point=reference_point,
         target_freq_map=target_freq_map
     )
     
@@ -442,7 +442,7 @@ def _aggregate_delays(
     agg_result = delays.groupby(level=group_levels).agg({
         'converted_delay': aggregation_method,
         'unit': 'first',  # L'unité doit être la même pour tous
-        'target_frequency': 'first'  # La fréquence cible doit être la même pour chaque groupe
+        'target_frequency': 'first'  # La fréquence cible doit être la même pour chaque groupe (sera renommée en 'frequency')
     })
     
     # Comptage du nombre d'observations
@@ -450,18 +450,18 @@ def _aggregate_delays(
     agg_result['n_observations'] = n_obs
     
     # Renommage de la colonne du délai
-    agg_result = agg_result.rename(columns={'converted_delay': 'applicable_delay'})
-    
+    agg_result = agg_result.rename(columns={'converted_delay': 'delay', 'target_frequency': 'frequency'})
+
     # Ajout des métadonnées
-    agg_result['target_reference_point'] = target_reference_point
+    agg_result['reference_point'] = target_reference_point
     agg_result['aggregation_method'] = str(aggregation_method) if isinstance(aggregation_method, str) else aggregation_method.__name__
-    
+
     # Réorganisation des colonnes
     column_order = [
-        'applicable_delay',
+        'delay',
         'unit',
-        'target_frequency',
-        'target_reference_point',
+        'frequency',
+        'reference_point',
         'n_observations',
         'aggregation_method'
     ]

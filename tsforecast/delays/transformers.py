@@ -70,7 +70,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         ...     'delay': [45.0, 30.0],
         ...     'unit': ['D', 'D'],
         ...     'reference_point': ['end', 'end'],
-        ...     'target_frequency': ['M', 'M']
+        ...     'frequency': ['M', 'M']
         ... })
         >>>
         >>> # Create transformer (parameters inferred from DataFrame)
@@ -203,7 +203,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         
         # Conversion des delays en dictionnaire si DataFrame
         if isinstance(self.delays, pd.DataFrame):
-            delays_dict = dict(zip(self.delays['column'], self.delays['applicable_delay']))
+            delays_dict = dict(zip(self.delays['column'], self.delays['delay']))
         else:
             delays_dict = self.delays
 
@@ -408,20 +408,20 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                     zip(df_unit['column'], df_unit['unit'])
                 )
 
-            # Inférence de 'target_reference_point' à partir de la colonne 'target_reference_point'
-            if 'target_reference_point' in self.delays.columns:
-                # Stockage sous la forme d'un dictionnaire de l'association entre les variables et lde point de référence
-                df_reference_point = self.delays[['column', 'target_reference_point']].drop_duplicates(subset=['column'])
+            # Inférence de 'reference_point' à partir de la colonne 'reference_point'
+            if 'reference_point' in self.delays.columns:
+                # Stockage sous la forme d'un dictionnaire de l'association entre les variables et le point de référence
+                df_reference_point = self.delays[['column', 'reference_point']].drop_duplicates(subset=['column'])
                 inferred['reference_point'] = dict(
-                    zip(df_reference_point['column'], df_reference_point['target_reference_point'])
+                    zip(df_reference_point['column'], df_reference_point['reference_point'])
                 )
 
-            # Inférence de 'target_frequency' à partir de la colonne 'target_frequency'
-            if 'target_frequency' in self.delays.columns:
+            # Inférence de 'target_frequency' à partir de la colonne 'frequency'
+            if 'frequency' in self.delays.columns:
                 # Stockage sous la forme d'un dictionnaire de l'association entre les variables et la fréquence
-                df_frequency = self.delays[['column', 'target_frequency']].drop_duplicates(subset=['column'])
+                df_frequency = self.delays[['column', 'frequency']].drop_duplicates(subset=['column'])
                 inferred['target_frequency'] = dict(
-                    zip(df_frequency['column'], df_frequency['target_frequency'])
+                    zip(df_frequency['column'], df_frequency['frequency'])
                 )
 
         return inferred
@@ -808,10 +808,10 @@ def create_delay_transformer_factory(
         Callable[[tuple], Literal['shift', 'mask']]
     ] = 'shift',
     prediction_date: Union[str, datetime] = 'today',
-    delay_col: str = 'applicable_delay',
+    delay_col: str = 'delay',
     unit_col: str = 'unit',
-    reference_point_col: str = 'target_reference_point',
-    target_frequency_col: str = 'target_frequency',
+    reference_point_col: str = 'reference_point',
+    target_frequency_col: str = 'frequency',
     default_transformer_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Callable[[tuple], PublicationDelayTransformer]:
     """Create a transformer factory from a publication delays DataFrame.
@@ -836,12 +836,12 @@ def create_delay_transformer_factory(
             Defaults to 0 (first level).
         variable_level: Index level name or position for variables.
             Defaults to -1 (last level).
-        delay_col: Column name for delay values. Defaults to 'applicable_delay'.
+        delay_col: Column name for delay values. Defaults to 'delay'.
         unit_col: Column name for delay units. Defaults to 'unit'.
         reference_point_col: Column name for reference point.
-            Defaults to 'target_reference_point'.
+            Defaults to 'reference_point'.
         target_frequency_col: Column name for target frequency.
-            Defaults to 'target_frequency'.
+            Defaults to 'frequency'.
         default_transformer_kwargs: Additional kwargs passed to all
             PublicationDelayTransformer instances.
 
@@ -1126,10 +1126,10 @@ def prepare_entity_kwargs_from_delays(
         Literal['shift', 'mask'],
         Dict[Union[tuple, str], Literal['shift', 'mask']]
     ] = 'shift',
-    delay_col: str = 'applicable_delay',
+    delay_col: str = 'delay',
     unit_col: str = 'unit',
-    reference_point_col: str = 'target_reference_point',
-    target_frequency_col: str = 'target_frequency'
+    reference_point_col: str = 'reference_point',
+    target_frequency_col: str = 'frequency'
 ) -> Dict[tuple, Dict[str, Any]]:
     """Prepare entity_kwargs dict from a publication delays DataFrame.
 
