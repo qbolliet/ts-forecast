@@ -25,6 +25,7 @@ from ..panel.utils import get_unique_panel_entities
 from .detector import FrequencyDetector, detect_frequency
 from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .imputation_window import ImputationWindowCalculator, ImputationScope
+from ..delays.data_manager import compare_and_detect_delays
 
 
 # Type aliases
@@ -67,7 +68,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             in a MultiIndex structure (Entity, Frequency, Date) for panel or
             (Frequency, Date) for time series.
         delays: Publication delays DataFrame with columns:
-            variable, delay, unit, reference_point.
+            column, delay, unit, reference_point.
         impute_delayed_values: Whether to impute values affected by publication delays.
         on_frequency_mismatch: How to handle target_frequency higher than data ('error'/'warn').
         attrition_threshold: Minimum ratio of columns with data (0-1) for extended window.
@@ -86,7 +87,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         p1_window_: Tuple (start, end) of the P1 window where all series have data.
         training_window_: Tuple (start, end) of the extended training window.
         frequency_progression_: Dict mapping variables to their frequency stages.
-        inferred_delays_: Delays inferred from NaN patterns (if impute_delayed_values=True).
+        inferred_delays_: DataFrame with delays inferred from data using compare_and_detect_delays
+            (if impute_delayed_values=True and delays=None).
         additive_transformer_: Fitted additive transformer.
         is_panel_: Whether data is panel data.
         feature_columns_: X columns (features).
@@ -157,7 +159,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 delays. Default is False. If True and delays=None, attempts to infer
                 delays from trailing NaN patterns.
             delays: Publication delays DataFrame with columns:
-                - variable: Variable name
+                - column: Column name
                 - delay: Delay value
                 - unit: Delay unit ('D', 's', etc.)
                 - reference_point: 'start' or 'end'
@@ -195,7 +197,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Validation des délais de publication
         if delays is not None:
-            required_cols = ['variable', 'delay', 'unit', 'reference_point']
+            required_cols = ['column', 'delay', 'unit', 'reference_point']
             missing_cols = set(required_cols) - set(delays.columns)
             if missing_cols:
                 raise ValueError(
@@ -1069,54 +1071,37 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             'base_estimator': estimator,
         }
 
-    def _infer_delays_from_nan_patterns(self, X: pd.DataFrame) -> Dict[str, float]:
-        """Infer publication delays from trailing NaN patterns.
+    def _infer_delays_from_data(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Infer publication delays from data using compare_and_detect_delays.
 
         Args:
             X: Input DataFrame.
 
         Returns:
-            Dictionary mapping variable names to inferred delays (in periods).
+            DataFrame with delay information from compare_and_detect_delays
+            (columns: column, delay, unit, reference_point, observation_date, etc.).
         """
-        inferred_delays: Dict[str, float] = {}
-
-        for col in X.columns:
-            if col in (self.panel_cols or []):
-                continue
-
-            series = X[col]
-            # Compter les NaN trailing
-            trailing_nan_count = 0
-            for val in series.iloc[::-1]:
-                if pd.isna(val):
-                    trailing_nan_count += 1
-                else:
-                    break
-
-            if trailing_nan_count > 0:
-                inferred_delays[col] = float(trailing_nan_count)
-
-        return inferred_delays
-
-    def _create_delays_df(self) -> pd.DataFrame:
-        """Create delays DataFrame from inferred delays.
-
-        Returns:
-            DataFrame with delay information.
-        """
-        if not self.inferred_delays_:
-            return pd.DataFrame(columns=['variable', 'delay', 'unit', 'reference_point'])
-
-        records = []
-        for variable, delay in self.inferred_delays_.items():
-            records.append({
-                'variable': variable,
-                'delay': delay,
-                'unit': 'periods',  # Délai en nombre de périodes
-                'reference_point': 'end',
-            })
-
-        return pd.DataFrame(records)
+        # Utilisation de compare_and_detect_delays avec existing_data=None
+        # pour identifier les observations les plus récentes
+        try:
+            delays_df = compare_and_detect_delays(
+                new_data=X,
+                existing_data=None,
+                download_date=None,  # Utilise la date actuelle
+                detection_mode='new_only',
+                reference_point='end',
+                delay_unit='D',  # Par défaut en jours
+                time_col=self.time_col,
+                panel_cols=self.panel_cols
+            )
+            return delays_df
+        except Exception as e:
+            warnings.warn(
+                f"Failed to infer delays from data: {e}. "
+                f"No delays will be inferred.",
+                UserWarning
+            )
+            return pd.DataFrame(columns=['column', 'delay', 'unit', 'reference_point'])
 
     # Méthode d'entraînement
     def _fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
@@ -1240,9 +1225,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Inférence des délais si nécessaire
         if self.impute_delayed_values and self.delays is None:
-            self.inferred_delays_ = self._infer_delays_from_nan_patterns(X)
+            self.inferred_delays_ = self._infer_delays_from_data(X)
         else:
-            self.inferred_delays_ = {}
+            self.inferred_delays_ = pd.DataFrame()
 
         # Stockage de la matrice de provenance (sera mise à jour pendant transform)
         self.imputation_provenance_ = self._provenance_tracker.get_provenance_matrix()
@@ -1809,16 +1794,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         result = X.copy()
 
         # Utiliser les délais fournis ou inférés
-        delays_to_use = self.delays if self.delays is not None else self._create_delays_df()
+        delays_to_use = self.delays if self.delays is not None else self.inferred_delays_
 
         if delays_to_use.empty:
             return result
 
         for _, row in delays_to_use.iterrows():
-            variable = row['variable']
+            column = row['column']
             delay = row['delay']
 
-            if variable not in result.columns:
+            if column not in result.columns:
                 continue
 
             # Identifier les positions affectées par le délai
@@ -1828,17 +1813,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 continue
 
             delayed_idx = result.index[-n_delay:]
-            missing_mask = result.loc[delayed_idx, variable].isna()
+            missing_mask = result.loc[delayed_idx, column].isna()
 
             if not missing_mask.any():
                 continue
 
             # Imputation des valeurs retardées
-            model_info = self.imputation_models_.get(variable)
+            model_info = self.imputation_models_.get(column)
 
             if model_info is None or model_info == 'interpolate_fallback':
                 # Interpolation linéaire
-                result[variable] = result[variable].interpolate(
+                result[column] = result[column].interpolate(
                     method='linear', limit_direction='both'
                 )
             else:
@@ -1856,10 +1841,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                             )
                         else:
                             predictions = model_info['model'].predict(X_features)
-                        result.loc[missing_idx, variable] = predictions
+                        result.loc[missing_idx, column] = predictions
                     except Exception as e:
                         warnings.warn(
-                            f"Failed to impute delayed values for '{variable}': {e}"
+                            f"Failed to impute delayed values for '{column}': {e}"
                         )
 
         return result
