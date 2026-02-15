@@ -123,7 +123,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     def __init__(
         self,
         target_frequency: Union[str, Dict[Union[str, tuple], str]],
-        estimator: Union[BaseEstimator, Dict[str, BaseEstimator]],
+        estimator: Optional[Union[BaseEstimator, Dict[str, BaseEstimator]]]=None,
         additive_transformer: Optional[TransformerMixin] = None,
         cascade_refitting: bool = True,
         keep_lower_frequencies: bool = True,
@@ -145,7 +145,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 Must not be higher than the lowest frequency in the data.
             estimator: Estimator(s) for prediction. Can be:
                 - Single estimator: Applied to all variables
-                - Dict[variable_name, estimator]: Variable-specific models
+                - Dict[variable_name, estimator]: Variable-specific models, a model associated to '__default__' key can be provided
             additive_transformer: Transformer to make data additive before imputation
                 (e.g., log transformer, differencing). Must support fit_transform()
                 and inverse_transform(). If None, data is assumed to already be additive.
@@ -656,7 +656,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     entity = key[:-1] if len(key) > 2 else key[0]
                     col = key[-1]
                 else:
-                    # Cas dégénéré: pas de tuple (ne devrait pas arriver pour panel)
+                    # Cas dégénéré: pas de tuple (ne devrait pas arriver pour des données de panel)
                     entity = None
                     col = key
 
@@ -753,11 +753,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             return impute_vars
 
         # Cas de données de panel
-        # Étape 1: Regrouper les variables par nom unique
+        # Étape 1: Regroupement des variables par nom unique
         # Cela permet de déterminer quelles variables sont présentes dans plusieurs entités
+        # Initialisation des dictionnaire résultats
         var_to_entities: Dict[str, List[Tuple]] = {}
         var_to_frequencies: Dict[str, List[float]] = {}
 
+        # Parcours des variables à imputer
         for key in impute_vars:
             if isinstance(key, tuple):
                 # Extraction du nom de variable (dernier élément)
@@ -777,32 +779,42 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             freq_order = get_frequency_order(freq)
             var_to_frequencies[var_name].append(freq_order)
 
-        # Étape 2: Calculer les métriques de tri par variable
+        # Étape 2: Calcul des métriques de tri par variable
         # - Fréquence représentative (médiane des fréquences par entité)
+        # - Fréquence la plus faible (maximimum des ordres de fréquences par entité)
+        # - Fréquence moyenne (plus sensible aux valeurs extrêmes)
         # - Nombre d'entités affectées
-        var_metrics: List[Tuple[str, float, int]] = []
+        # Initialisation de la liste 
+        var_metrics: List[Tuple[str, float, int, float, int]] = []
 
-        for var_name in var_to_entities:
-            # Fréquence représentative: médiane des ordres de fréquence
+        # Parcours des variables
+        for var_name in var_to_entities.keys():
+            # Fréquence représentative: médiane des ordres de fréquence sur l'ensemble des entités
             freq_orders = var_to_frequencies[var_name]
             representative_freq = np.median(freq_orders)
+            # Fréquence minimale
+            min_freq = np.max(freq_orders)
+            # Fréquence moyenne
+            mean_freq = np.mean(freq_orders)
 
             # Nombre d'entités
             n_entities = len(var_to_entities[var_name])
 
-            var_metrics.append((var_name, representative_freq, n_entities))
+            var_metrics.append((var_name, representative_freq, min_freq, mean_freq, n_entities))
 
-        # Étape 3: Trier les variables
+        # Étape 3: Tri des variables
         # Critère 1: Fréquence la plus basse d'abord (ordre numérique le plus élevé)
         # Critère 2: Moins d'entités d'abord (en cas d'égalité de fréquence)
-        var_metrics.sort(key=lambda x: (-x[1], x[2]))  # -freq pour décroissant, +entities pour croissant
+        var_metrics.sort(key=lambda x: (-x[1], -x[2], -x[3], x[4]))  # -freq médiane pour décroissant, -freq minimale pour décroissant, -freq moyenne pour décroissant, +entities pour croissant
 
-        # Étape 4: Construire la liste finale ordonnée
+        # Étape 4: Construction de la liste finale ordonnée
         # Pour chaque variable, on ajoute toutes ses clés (entité, variable)
         # triées par fréquence locale
+        # Initialisation de la 
         ordered_impute_vars = []
 
-        for var_name, _, _ in var_metrics:
+        # Parcours des variables
+        for var_name, _, _, _, _ in var_metrics:
             # Récupération des clés pour cette variable
             var_keys = var_to_entities[var_name]
 
@@ -816,6 +828,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         return ordered_impute_vars
 
+    # Méthode auxiliaire d'extraction de l'estimateur associé à une variable
     def _get_estimator_for_variable(self, variable: str) -> Optional[BaseEstimator]:
         """Get the appropriate estimator for a variable.
 
@@ -825,18 +838,24 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Cloned estimator for the variable, or None if no estimator available.
         """
+        # Cas où l'estimateur n'est pas spécifié
         if self.estimator is None:
             return None
 
+        # Cas où un estimateur est fourni pour différentes variables
         if isinstance(self.estimator, dict):
+            # Extraction de l'estimateur
             est = self.estimator.get(variable)
             if est is None:
                 # Fallback vers l'estimateur par défaut s'il existe
                 est = self.estimator.get('__default__')
+            # Clonage de l'estimateur
             return clone(est) if est is not None else None
 
+        # Clonage de l'estimateur
         return clone(self.estimator)
 
+    # Méthode auxiliaire d'agrégation des variables à fréquence élevée à la fréquence cible
     def _aggregate_to_target(
         self, X: pd.DataFrame, columns: List[str]
     ) -> pd.DataFrame:
@@ -849,13 +868,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             DataFrame with aggregated columns.
         """
+        # Retourne le jeu de données original si aucune colonne n'est spécifiée
         if not columns:
             return X
 
+        # Copie du jeu de données
         result = X.copy()
+        # Normalisation de la fréquence cible
         target_freq = normalize_frequency(self.target_frequency)
 
+        # Parcours des colonnes
         for col in columns:
+            # Ignore les colonnes qui ne sont pas présentes dans le jeu de données
             if col not in X.columns:
                 continue
 
@@ -865,10 +889,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
 
             # Réindexation sur l'index original
+            # /!\ Faire que la fill method dépande de la position dans la string frequency
             result[col] = aggregated.reindex(X.index, method='ffill')
 
         return result
 
+    # Méthode auxilaire d'interpolation à la fréquence cible
     def _interpolate_to_target(
         self, X: pd.DataFrame, columns: List[str]
     ) -> pd.DataFrame:
@@ -881,26 +907,34 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             DataFrame with interpolated columns.
         """
+        # Retourne le jeu de données original si aucune colonne n'est spécifiée
         if not columns:
             return X
 
+        # Copie du jeu de données
         result = X.copy()
+        # Normalisation de la fréquence
         target_freq = normalize_frequency(self.target_frequency)
 
+        # Parcours des colonnes
         for col in columns:
+            # Ignore les colonnes qui ne sont pas présentes dans le jeu de données
             if col not in X.columns:
                 continue
 
             # Interpolation linéaire vers la fréquence cible
+            # /!\ Faire que la fill method dépende de la position dans la string frequency
             interpolated = self._freq_converter.interpolate_to_higher_frequency(
                 X[col], target_freq, method='linear', fill_method='ffill'
             )
 
             # Réindexation sur l'index original
+            # /!\ Faire que la fill method dépende de la position dans la string frequency
             result[col] = interpolated.reindex(X.index, method='ffill')
 
         return result
 
+    # Méthode auxilaire d'entraînement des modèles d'imputation
     def _fit_imputation_models(
         self, X: pd.DataFrame, y: Optional[pd.Series] = None
     ) -> Dict[str, Any]:
@@ -913,12 +947,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Dictionary mapping variable names to fitted models.
         """
+        # Initialisation du dictionnaire résultat
         models: Dict[str, Any] = {}
 
+        # Parcours des variables 
         for variable in self.imputation_order_:
+            # Extraction de l'estimateur associé à la variable
             estimator = self._get_estimator_for_variable(variable)
+            # Cas où l'estimateur n'est pas spécifié
             if estimator is None:
-                # Pas de modèle disponible, utiliser interpolation comme fallback
+                # Pas de modèle disponible, utilisation de l'interpolation linaire comme fallback
                 warnings.warn(
                     f"No estimator available for variable '{variable}', "
                     f"using linear interpolation as fallback"
@@ -931,7 +969,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 c for c in X.columns
                 if c != variable and c not in (self.panel_cols or [])
             ]
-
+            # Interpolation si aucune feature n'est disponible pour prédire la variable
             if not feature_cols:
                 warnings.warn(
                     f"No features available for imputing '{variable}', "
@@ -942,6 +980,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
             # Masque des observations non-NaN pour la variable cible
             mask = X[variable].notna()
+            # Séparation du X et du y
             X_train = X.loc[mask, feature_cols]
             y_train = X.loc[mask, variable]
 
@@ -954,6 +993,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 continue
 
             # Imputation simple des NaN dans les features
+            # /!\ Faire un test en supprimant ou remplacer par un Imputer sklearn
             X_train = X_train.fillna(X_train.mean())
 
             # Entraînement global
@@ -972,6 +1012,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         return models
 
+    # Méthode auxiliaire d'entraînement d'un modèle par entité
     def _fit_models_per_entity(
         self,
         X: pd.DataFrame,
@@ -990,11 +1031,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Dictionary with entity-specific models.
         """
+        # Initialisation du dictionnaire des modèles associés à chaque entité
         entity_models: Dict[str, Any] = {}
 
         # Groupement par entité
         for entity_id, group in X.groupby(self.panel_cols):
+            # Masque des observations pour lesquelles la target n'est pas disponible
             mask = group[variable].notna()
+            # Séparation en X et y
             X_train = group.loc[mask, feature_cols]
             y_train = group.loc[mask, variable]
 
@@ -1006,8 +1050,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 continue
 
             # Imputation simple des NaN
+            # /!\ Faire un test en supprimant
             X_train = X_train.fillna(X_train.mean())
 
+            # Entraînement d'un modèle spécifiquement sur chaque entité
             try:
                 entity_estimator = clone(estimator)
                 entity_estimator.fit(X_train, y_train)
@@ -1186,7 +1232,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             if col in X_work.columns:
                 self._provenance_tracker.mark_aggregated(col, X_work.index)
 
-        # Entraînement des modèles d'imputation avec la nouvelle logique de cascade
+        # Entraînement des modèles d'imputation avec la logique de cascade
         self.imputation_models_ = self._fit_cascade_imputation_models(X_work, y)
 
         # Initialisation de la progression des fréquences
