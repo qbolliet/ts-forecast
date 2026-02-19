@@ -84,7 +84,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         imputation_models_: Fitted imputation models per variable.
         imputation_provenance_: DataFrame tracking origin of each value
             ('original', 'model_on_true', 'model_on_mixed', 'aggregated').
-        p1_window_: Tuple (start, end) of the P1 window where all series have data.
+        imputation_window_: Tuple (start, end) of the P1 window where all series have data.
         training_window_: Tuple (start, end) of the extended training window.
         frequency_progression_: Dict mapping variables to their frequency stages.
         inferred_delays_: DataFrame with delays inferred from data using compare_and_detect_delays
@@ -1172,7 +1172,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self._provenance_tracker = ImputationProvenanceTracker()
         self._provenance_tracker.initialize(X_work, panel_cols=self.panel_cols)
 
-        # Calcul de la fenêtre P1 et de la fenêtre d'entraînement
+        # Calcul de la fenêtre d'imputation et de la fenêtre d'entraînement
+        # Initialisation du calculateur
         self._p1_calculator = ImputationWindowCalculator(
             attrition_threshold=self.attrition_threshold,
             imputation_scope=self.imputation_scope,
@@ -1180,28 +1181,37 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             exclude_delay_nans=True
         )
         try:
+            # Entrainement du calculateur
             self._p1_calculator.fit(X_work, delays=self.delays, panel_cols=self.panel_cols)
-            self.p1_window_ = (self._p1_calculator.p1_start_, self._p1_calculator.p1_end_)
+            # Calcul de la fenêtre d'imputation
+            self.imputation_window_ = (self._p1_calculator.p1_start_, self._p1_calculator.p1_end_)
+            # Calcul de la fenêtre d'entraînement
             self.training_window_ = (
                 self._p1_calculator.training_start_,
                 self._p1_calculator.training_end_
             )
         except ValueError as e:
-            # Si pas de fenêtre P1 valide, utiliser toutes les données
+            # Si pas de fenêtre d'imputation valide, utiliser toutes les données
             warnings.warn(
                 f"Could not calculate P1 window: {e}. Using all available data.",
                 UserWarning
             )
-            self.p1_window_ = (X_work.index.min(), X_work.index.max())
-            self.training_window_ = self.p1_window_
+            # Fenêtre d'imputation par défaut (ensemble de la période)
+            self.imputation_window_ = (X_work.index.min(), X_work.index.max())
+            # Fenêtre d'entraînement par défaut (ensemble de la période)
+            self.training_window_ = self.imputation_window_
 
         # Fit du transformer additif si fourni
         if self.additive_transformer is not None:
+            # Copie indépendante du transformer
             self.additive_transformer_ = clone(self.additive_transformer)
+            # Entraînement et transformation des données pour les rendre additives
             X_work = self.additive_transformer_.fit_transform(X)
+            # Extraction de la composante X si c'est un XYTransformer
             if isinstance(X_work, tuple):
                 X_work = X_work[0]  # Si c'est un XY transformer
         else:
+            # Copie indépendante des données si elles ne sont pas transformées
             self.additive_transformer_ = None
             X_work = X.copy()
 
