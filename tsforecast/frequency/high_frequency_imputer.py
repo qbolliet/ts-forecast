@@ -1071,6 +1071,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             'base_estimator': estimator,
         }
 
+    # Méthode d'inférence des délais depuis les données en argument
     def _infer_delays_from_data(self, X: pd.DataFrame) -> pd.DataFrame:
         """Infer publication delays from data using compare_and_detect_delays.
 
@@ -1152,9 +1153,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             self.effective_target_frequency = self.target_frequency
 
-        # Détection des fréquences
+        # Détection des fréquences des différentes colonnes
         self.detected_frequencies_ = detect_frequency(data=X_work)
-
+        # Vérification que les fréquences des colonnes ont bien pu être détectées
         if not self.detected_frequencies_:
             raise ValueError("Could not detect frequency for any column")
 
