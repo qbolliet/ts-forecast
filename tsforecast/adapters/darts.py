@@ -315,6 +315,10 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         else:
             X_processed = X
 
+        print("----------------------------------------------------------\n")
+        print("X_prcessed: \n")
+        print(X_processed.head())
+        
         # Calcul automatique du nombre de pas de prédiction (n)
         # n = nombre de pas entre la fin de la série d'entraînement et la dernière date de X
         freq = self.series_.freq
@@ -344,6 +348,10 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
                 X_full
             )
 
+        print("----------------------------------------------------------\n")
+        print("X_full: \n")
+        print(X_full.head())
+        
         # Prédiction
         pred_series = self.model.predict(**predict_kwargs)
 
@@ -351,11 +359,15 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         # Conversion TimeSeries → DataFrame/Series pandas
         if pred_series.n_components > 1:
             # Résultat multivarié : conversion en DataFrame
-            pred_df = pred_series.pd_dataframe()
+            pred_df = pred_series.to_dataframe()
         else:
             # Résultat univarié : conversion en Series
-            pred_df = pred_series.pd_series().to_frame()
+            pred_df = pred_series.to_series().to_frame()
 
+        print("----------------------------------------------------------\n")
+        print("pred_df: \n")
+        print(pred_df.head())
+        
         # Reconstruction de la structure d'index originale pour panel data
         if is_panel:
             # Restacking pour recréer le MultiIndex (entités, dates)
