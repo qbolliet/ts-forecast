@@ -25,14 +25,14 @@ from tsforecast.utils.frequency import (
 )
 from tsforecast.frequency import (
     detect_index_frequency,
-    detect_and_parse_index_frequency,
-    build_frequency_string
+    detect_and_parse_index_frequency
 )
 from tsforecast.utils.time import resolve_date, get_period_start, get_period_boundaries
 from tsforecast.utils.duration import convert_duration, normalize_duration, DurationConverter
 from ..frequency.detector import detect_frequency
 from ..panel import PanelwiseTransformer, normalize_entity_key
 from tsforecast.utils.validation import validate_temporal_data
+from tsforecast.utils.parse import build_frequency_string
 
 # Classe d'application des délais de publication
 class PublicationDelayTransformer(BaseEstimator, TransformerMixin):

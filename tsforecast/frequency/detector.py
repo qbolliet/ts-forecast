@@ -13,7 +13,7 @@ from pandas.tseries.frequencies import to_offset
 # Import des utilitaires de fréquence
 from ..utils.frequency import to_literal, get_frequency_order, normalize_frequency, FrequencyType, UserFrequencyType
 from ..panel.utils import normalize_entity_key
-from .parser import parse_frequency
+from ..utils.parse.utils import parse_frequency
 
 # Classe de détection de la fréquence d'une série temporelle
 class FrequencyDetector:

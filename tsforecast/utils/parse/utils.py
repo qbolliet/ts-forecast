@@ -10,8 +10,8 @@ import pandas as pd
 from typing import Tuple, Optional
 
 # Importation des modules du package
-from ..utils.frequency.utils import normalize_frequency, FrequencyType
-from ..utils.position import combine_frequency_position
+from ..frequency.utils import normalize_frequency, FrequencyType
+from ..position import combine_frequency_position
 
 # Fonction de parsing d'une chaîne de caractères contenant une fréquence
 def parse_frequency(frequency_str : str) -> Tuple[FrequencyType, str, str]:
