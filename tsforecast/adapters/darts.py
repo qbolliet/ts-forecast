@@ -8,6 +8,7 @@ to enable seamless integration with sklearn pipelines and tools like GridSearchC
 import numpy as np
 import pandas as pd
 from typing import Any, Optional, Union
+import warnings
 # Sklearn
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
@@ -230,6 +231,24 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
             'lags_future_covariates': [0],
             'output_chunk_length': 1,
         }
+        # Détection des paramètres qui seront écrasés
+        overridden = {
+            k: (model_params[k], v)
+            for k, v in forced_params.items()
+            if k in model_params and model_params[k] != v
+        }
+        if overridden:
+            details = ', '.join(
+                f"{k}={orig!r} → {new!r}" for k, (orig, new) in overridden.items()
+            )
+            warnings.warn(
+                f"DartsAdapter overrides the following model parameters to enforce "
+                f"the pure regression paradigm (y[t] = f(X[t])): {details}. "
+                f"Pass these values explicitly to suppress this warning.",
+                UserWarning,
+                stacklevel=2,
+            )
+        # Initialisation du modèle avec les bons paramètres
         self.model = model_class(**{**model_params, **forced_params})
 
         # Gestion des covariables (traitées comme future_covariates)
@@ -314,10 +333,6 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
             X_processed = X_multivariate
         else:
             X_processed = X
-
-        print("----------------------------------------------------------\n")
-        print("X_prcessed: \n")
-        print(X_processed.head())
         
         # Calcul automatique du nombre de pas de prédiction (n)
         # n = nombre de pas entre la fin de la série d'entraînement et la dernière date de X
@@ -347,10 +362,6 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
             predict_kwargs['future_covariates'] = TimeSeries.from_dataframe(
                 X_full
             )
-
-        print("----------------------------------------------------------\n")
-        print("X_full: \n")
-        print(X_full.head())
         
         # Prédiction
         pred_series = self.model.predict(**predict_kwargs)
@@ -363,15 +374,17 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
         else:
             # Résultat univarié : conversion en Series
             pred_df = pred_series.to_series().to_frame()
-
-        print("----------------------------------------------------------\n")
-        print("pred_df: \n")
-        print(pred_df.head())
         
         # Reconstruction de la structure d'index originale pour panel data
         if is_panel:
+            # Comptage de nombre de niveaux décrivant les entités du panel
+            n_entity_levels = pred_df.columns.nlevels  # 1 si (entity,), 2 si (region, entity), etc.
             # Restacking pour recréer le MultiIndex (entités, dates)
-            pred_stacked = pred_df.stack(level=list(range(pred_df.columns.nlevels)))
+            pred_stacked = pred_df.stack(level=list(range(n_entity_levels)))
+            # Réordonnancement des niveaux en mettant la date à la fin
+            new_order = list(range(1, n_entity_levels + 1)) + [0]
+            pred_stacked.index = pred_stacked.index.reorder_levels(new_order)
+            pred_stacked = pred_stacked.sort_index()
             # Réindexation pour correspondre exactement à l'index original
             result = pred_stacked.reindex(original_index)
         else:
