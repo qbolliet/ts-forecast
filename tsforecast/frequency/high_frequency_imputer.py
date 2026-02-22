@@ -21,7 +21,7 @@ from ..utils.frequency.utils import (
     is_higher_frequency,
     get_frequency_order,
 )
-from ..panel.utils import get_unique_panel_entities
+from ..panel.utils import get_unique_panel_entities, normalize_entity_key
 from .detector import FrequencyDetector, detect_frequency
 from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .imputation_window import ImputationWindowCalculator, ImputationScope
@@ -447,12 +447,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Raises:
             ValueError: If no valid frequencies found for the entity
         """
+        # Normalisation de l'entité
+        normalized_entity = normalize_entity_key(entity)
         # Extraction des fréquences pour cette entité
         entity_freqs = {}
-        for (ent, var), freq in detected_frequencies.items():
-            if ent == entity and freq is not None:
+        for key, freq in detected_frequencies.items():
+            # Extraction de la variable
+            var = key[-1]
+            # Extraction de l'entité
+            ent = normalize_entity_key(key[:-1])
+            if ent == normalized_entity and freq is not None:
                 entity_freqs[var] = freq
         
+        # Erreur si aucune fréquence n'est détectée
         if not entity_freqs:
             raise ValueError(f"No valid frequencies detected for entity '{entity}'")
         
@@ -1215,12 +1222,20 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             self.additive_transformer_ = None
             X_work = X.copy()
 
+        print(X_work.head())
+
         # Agrégation des variables haute fréquence
         aggregate_keys = [
             key for key, cat in self.variable_categories_.items() if cat == 'aggregate'
         ]
+
+        print(aggregate_keys)
+
         # Extraction des noms de colonnes uniquement (pour les données de panel)
         aggregate_cols = self._extract_column_names(aggregate_keys)
+
+        print(aggregate_cols)
+        
         X_work = self._aggregate_to_target(X_work, aggregate_cols)
 
         # Marquage des valeurs agrégées dans le tracker de provenance
