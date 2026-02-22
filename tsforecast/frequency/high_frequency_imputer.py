@@ -958,7 +958,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             mask = np.ones(len(X), dtype=bool)
             for i in range(n_entity_levels):
                 mask &= (index.get_level_values(i) == entity[i])
-                
+
             return mask
 
     # Méthode auxiliaire d'agrégation des variables à fréquence élevée à la fréquence cible
@@ -1464,6 +1464,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Stockage de la matrice de provenance (sera mise à jour pendant transform)
         self.imputation_provenance_ = self._provenance_tracker.get_provenance_matrix()
 
+    # Méthode auxiliaire d'extraction des noms de colonnes
+    # /!\ Peut sans doute être supprimé
     def _extract_column_names(
         self,
         keys: List[Union[str, Tuple]]
@@ -1485,6 +1487,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 column_names.add(key)
         return list(column_names)
 
+    # Méthode auxiliaire de
+    # /!\ A revoir, dans le cadre de keep_lower_frequencies, on devrait transisitonner progressivement toutes les variables vers la cible ?
     def _compute_frequency_progression(self) -> Dict[str, List[str]]:
         """Compute the frequency progression for each variable.
 
