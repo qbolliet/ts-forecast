@@ -864,84 +864,302 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Clonage de l'estimateur
         return clone(self.estimator)
 
+    # Regroupement des clés par entité et variable
+    def _group_keys_by_entity_and_variable(
+        self,
+        keys: List[Union[str, Tuple]]
+    ) -> Dict[tuple, List[str]]:
+        """Group variable keys by entity, extracting column names.
+
+        Args:
+            keys: List of (entity..., variable) tuples or plain column names.
+
+        Returns:
+            Dict mapping entity tuples to lists of column names.
+            For time series (non-panel), returns {(): [col_names]}.
+        """
+        # Initialisation du dictionnaire résultat
+        grouped: Dict[tuple, List[str]] = {}
+
+        # Parcours des clés
+        for key in keys:
+            if isinstance(key, tuple):
+                # Extraction de l'entité (tous les niveaux sauf le dernier)
+                entity = normalize_entity_key(key[:-1])
+                col = key[-1]
+            else:
+                # Séries temporelles : pas d'entité
+                entity = ()
+                col = key
+            # Ajout de l'entité
+            if entity not in grouped:
+                grouped[entity] = []
+            # Ajout de la colonne à l'entité
+            if col not in grouped[entity]:
+                grouped[entity].append(col)
+
+        return grouped
+
+    # Obtention de la fréquence cible pour une entité
+    def _get_entity_target_frequency(
+        self,
+        entity: tuple
+    ) -> str:
+        """Get the target frequency for a specific entity.
+
+        Args:
+            entity: Entity tuple (e.g., ('FR',) or ('FR', 'GDP')).
+
+        Returns:
+            Normalized target frequency string for the entity.
+        """
+        # Cas d'un dictionnaire de fréquences
+        if isinstance(self.effective_target_frequency, dict):
+            # Essai avec le tuple complet
+            freq = self.effective_target_frequency.get(entity)
+            if freq is None and len(entity) == 1:
+                # Essai avec l'entité extraite du tuple
+                freq = self.effective_target_frequency.get(entity[0])
+            # Cas d'erreur lorsque la fréquence n'est pas trouvée
+            if freq is None:
+                raise ValueError(
+                    f"No target frequency found for entity {entity}"
+                )
+            return freq
+
+        # Cas d'une fréquence unique (string)
+        return self.effective_target_frequency
+
+    # Obtention du masque booléen pour les lignes d'une entité
+    def _get_entity_mask(
+        self,
+        X: pd.DataFrame,
+        entity: tuple
+    ) -> np.ndarray:
+        """Get a boolean mask for rows belonging to a specific entity.
+
+        Args:
+            X: DataFrame with MultiIndex (entity levels + time level).
+            entity: Entity tuple to filter on.
+
+        Returns:
+            Boolean numpy array of shape (len(X),).
+        """
+        # Extraction de l'index des données
+        index = X.index
+        # Nombre de niveaux d'entité = nombre total de niveaux - 1 (dernier = temps)
+        n_entity_levels = index.nlevels - 1
+
+        if n_entity_levels == 1:
+            # Un seul niveau d'entité
+            return (index.get_level_values(0) == entity[0])
+        else:
+            # Plusieurs niveaux d'entité : combinaison de masques
+            mask = np.ones(len(X), dtype=bool)
+            for i in range(n_entity_levels):
+                mask &= (index.get_level_values(i) == entity[i])
+                
+            return mask
+
     # Méthode auxiliaire d'agrégation des variables à fréquence élevée à la fréquence cible
     def _aggregate_to_target(
-        self, X: pd.DataFrame, columns: List[str]
+        self, X: pd.DataFrame, aggregate_keys: List[Union[str, Tuple]]
     ) -> pd.DataFrame:
         """Aggregate high-frequency columns to target frequency.
 
+        For panel data, aggregation is performed per entity to respect
+        entity-specific target frequencies.
+
         Args:
             X: Input DataFrame.
-            columns: Columns to aggregate.
+            aggregate_keys: Variable keys to aggregate (column names or
+                (entity..., variable) tuples).
 
         Returns:
             DataFrame with aggregated columns.
         """
-        # Retourne le jeu de données original si aucune colonne n'est spécifiée
-        if not columns:
+        # Retourne le jeu de données original si aucune clé n'est spécifiée
+        if not aggregate_keys:
             return X
 
         # Copie du jeu de données
         result = X.copy()
-        # Normalisation de la fréquence cible
-        target_freq = normalize_frequency(self.target_frequency)
 
-        # Parcours des colonnes
-        for col in columns:
-            # Ignore les colonnes qui ne sont pas présentes dans le jeu de données
-            if col not in X.columns:
-                continue
+        # Cas séries temporelles : agrégation globale
+        if not self.is_panel_:
+            # Extraction des noms de colonnes
+            columns = self._extract_column_names(aggregate_keys)
+            
+            # Parcours des colonnes
+            for col in columns:
+                if col not in X.columns:
+                    continue
+                # Agrégation par somme (données additives)
+                aggregated = self._freq_converter.aggregate_to_lower_frequency(
+                    X[col], self.effective_target_frequency, method='sum'
+                )
+                # Réindexation sur l'index original
+                result[col] = aggregated.reindex(X.index)
 
-            # Agrégation par somme (données additives)
-            aggregated = self._freq_converter.aggregate_to_lower_frequency(
-                X[col], target_freq, method='sum'
-            )
+            # Suppression des lignes de Nan éventuellement introduites
+            result.dropna(axis=0, how='all', inplace=True)
 
-            # Réindexation sur l'index original
-            # /!\ Faire que la fill method dépande de la position dans la string frequency
-            result[col] = aggregated.reindex(X.index, method='ffill')
+            return result
+
+        # Cas panel : agrégation par entité
+        grouped = self._group_keys_by_entity_and_variable(aggregate_keys)
+
+        # Parcours des entités
+        for entity, cols in grouped.items():
+            # Fréquence cible pour cette entité
+            target_freq = self._get_entity_target_frequency(entity)
+            # Masque des lignes de cette entité
+            entity_mask = self._get_entity_mask(X, entity)
+
+            # Parcours des colonnes
+            for col in cols:
+                if col not in X.columns:
+                    continue
+
+                # Extraction de la série pour cette entité
+                entity_series = X.loc[entity_mask, col]
+                # Suppression des niveaux panel pour obtenir un DatetimeIndex
+                entity_series = entity_series.droplevel(
+                    list(range(X.index.nlevels - 1))
+                )
+
+                # Agrégation par somme (données additives)
+                aggregated = self._freq_converter.aggregate_to_lower_frequency(
+                    entity_series, target_freq, method='sum'
+                )
+
+                # Réindexation sur l'index temporel original de l'entité
+                reindexed = aggregated.reindex(entity_series.index)
+
+                # Réassignation dans le DataFrame résultat
+                result.loc[entity_mask, col] = reindexed.values
+
+        # Suppression des lignes de Nan éventuellement introduites
+        result.dropna(axis=0, how='all', inplace=True)
 
         return result
 
-    # Méthode auxilaire d'interpolation à la fréquence cible
+    # Méthode auxiliaire d'interpolation à la fréquence cible
     def _interpolate_to_target(
-        self, X: pd.DataFrame, columns: List[str]
+        self, X: pd.DataFrame, interpolate_keys: List[Union[str, Tuple]]
     ) -> pd.DataFrame:
         """Interpolate low-frequency columns to target frequency.
 
+        For panel data, interpolation is performed per entity to respect
+        entity-specific target frequencies.
+
         Args:
             X: Input DataFrame.
-            columns: Columns to interpolate.
+            interpolate_keys: Variable keys to interpolate (column names or
+                (entity..., variable) tuples).
 
         Returns:
             DataFrame with interpolated columns.
         """
-        # Retourne le jeu de données original si aucune colonne n'est spécifiée
-        if not columns:
+        # Retourne le jeu de données original si aucune clé n'est spécifiée
+        if not interpolate_keys:
             return X
 
         # Copie du jeu de données
         result = X.copy()
-        # Normalisation de la fréquence
-        target_freq = normalize_frequency(self.target_frequency)
 
-        # Parcours des colonnes
-        for col in columns:
-            # Ignore les colonnes qui ne sont pas présentes dans le jeu de données
-            if col not in X.columns:
-                continue
+        # Cas séries temporelles : interpolation globale
+        if not self.is_panel_:
+            # Extraction des noms de colonnes
+            columns = self._extract_column_names(interpolate_keys)
+            # Normalisation de la fréquence cible
+            target_freq = normalize_frequency(self.effective_target_frequency)
 
-            # Interpolation linéaire vers la fréquence cible
-            # /!\ Faire que la fill method dépende de la position dans la string frequency
-            interpolated = self._freq_converter.interpolate_to_higher_frequency(
-                X[col], target_freq, method='linear', fill_method='ffill'
-            )
+            # Parcours des colonnes
+            for col in columns:
+                if col not in X.columns:
+                    continue
+                # Interpolation linéaire vers la fréquence cible
+                # /!\ Faire que la fill method dépende de la position dans la string frequency
+                interpolated = self._freq_converter.interpolate_to_higher_frequency(
+                    X[col], target_freq, method='linear', fill_method='ffill'
+                )
+                # Réindexation sur l'index original
+                # /!\ Faire que la fill method dépende de la position dans la string frequency
+                result[col] = interpolated.reindex(X.index)
 
-            # Réindexation sur l'index original
-            # /!\ Faire que la fill method dépende de la position dans la string frequency
-            result[col] = interpolated.reindex(X.index, method='ffill')
+            return result
+
+        # Cas panel : interpolation par entité
+        grouped = self._group_keys_by_entity_and_variable(interpolate_keys)
+
+        for entity, cols in grouped.items():
+            # Fréquence cible pour cette entité
+            target_freq = self._get_entity_target_frequency(entity)
+            # Masque des lignes de cette entité
+            entity_mask = self._get_entity_mask(X, entity)
+
+            # Parcours des colonnes
+            for col in cols:
+                if col not in X.columns:
+                    continue
+
+                # Extraction de la série pour cette entité
+                entity_series = X.loc[entity_mask, col]
+                # Suppression des niveaux panel pour obtenir un DatetimeIndex
+                entity_series = entity_series.droplevel(
+                    list(range(X.index.nlevels - 1))
+                )
+
+                # Interpolation linéaire vers la fréquence cible
+                # /!\ Faire que la fill method dépende de la position dans la string frequency
+                interpolated = self._freq_converter.interpolate_to_higher_frequency(
+                    entity_series, target_freq, method='linear', fill_method='ffill'
+                )
+
+                # Réindexation sur l'index temporel original de l'entité
+                reindexed = interpolated.reindex(entity_series.index)
+
+                # Réassignation dans le DataFrame résultat
+                result.loc[entity_mask, col] = reindexed.values
 
         return result
+
+    # Marquage de la provenance des valeurs agrégées
+    def _mark_aggregated_provenance(
+        self,
+        tracker: ImputationProvenanceTracker,
+        X: pd.DataFrame,
+        aggregate_keys: List[Union[str, Tuple]]
+    ) -> None:
+        """Mark aggregated values in the provenance tracker.
+
+        For panel data, marks only the rows of the concerned entity.
+        For time series, marks the entire index.
+
+        Args:
+            tracker: Provenance tracker instance.
+            X: DataFrame with current data.
+            aggregate_keys: Variable keys that were aggregated.
+        """
+        if not aggregate_keys:
+            return
+
+        # Cas panel : marquage par entité
+        if self.is_panel_:
+            grouped = self._group_keys_by_entity_and_variable(aggregate_keys)
+            for entity, cols in grouped.items():
+                entity_mask = self._get_entity_mask(X, entity)
+                entity_index = X.index[entity_mask]
+                for col in cols:
+                    if col in X.columns:
+                        tracker.mark_aggregated(col, entity_index)
+        else:
+            # Cas séries temporelles : marquage global
+            columns = self._extract_column_names(aggregate_keys)
+            for col in columns:
+                if col in X.columns:
+                    tracker.mark_aggregated(col, X.index)
 
     # Méthode auxilaire d'entraînement des modèles d'imputation
     def _fit_imputation_models(
@@ -1222,29 +1440,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             self.additive_transformer_ = None
             X_work = X.copy()
 
-        print(X_work.head())
-
         # Agrégation des variables haute fréquence
         aggregate_keys = [
             key for key, cat in self.variable_categories_.items() if cat == 'aggregate'
         ]
-
-        print(aggregate_keys)
-
-        # Extraction des noms de colonnes uniquement (pour les données de panel)
-        aggregate_cols = self._extract_column_names(aggregate_keys)
-
-        print(aggregate_cols)
-        
-        X_work = self._aggregate_to_target(X_work, aggregate_cols)
+        X_work = self._aggregate_to_target(X_work, aggregate_keys)
 
         # Marquage des valeurs agrégées dans le tracker de provenance
-        for col in aggregate_cols:
-            if col in X_work.columns:
-                self._provenance_tracker.mark_aggregated(col, X_work.index)
+        self._mark_aggregated_provenance(self._provenance_tracker, X_work, aggregate_keys)
 
         # Entraînement des modèles d'imputation avec la logique de cascade
-        self.imputation_models_ = self._fit_cascade_imputation_models(X_work, y)
+        self.imputation_models_ = self._fit_cascade_imputation_models(X_work)
 
         # Initialisation de la progression des fréquences
         self.frequency_progression_ = self._compute_frequency_progression()
@@ -1315,8 +1521,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
     def _fit_cascade_imputation_models(
         self,
-        X: pd.DataFrame,
-        y: Optional[pd.Series] = None
+        X: pd.DataFrame
     ) -> Dict[Union[str, Tuple], Any]:
         """Fit imputation models using cascade algorithm.
 
@@ -1329,7 +1534,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         Args:
             X: Training data (already transformed).
-            y: Target variable (optional).
 
         Returns:
             Dictionary mapping variable identifiers to fitted models.
@@ -1570,13 +1774,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         aggregate_keys = [
             key for key, cat in self.variable_categories_.items() if cat == 'aggregate'
         ]
-        aggregate_cols = self._extract_column_names(aggregate_keys)
-        data_transformed = self._aggregate_to_target(data_transformed, aggregate_cols)
+        data_transformed = self._aggregate_to_target(data_transformed, aggregate_keys)
 
         # Marquage des valeurs agrégées
-        for col in aggregate_cols:
-            if col in data_transformed.columns:
-                transform_tracker.mark_aggregated(col, data_transformed.index)
+        self._mark_aggregated_provenance(transform_tracker, data_transformed, aggregate_keys)
 
         # Imputation cascadée
         data_transformed, intermediate_results = self._apply_cascading_imputation(
