@@ -952,93 +952,6 @@ class FrequencyConverter(TemporalConverter):
         """
         return isinstance(data.index, pd.MultiIndex) and data.index.nlevels >= 2
 
-    # Méthode auxiliaire d'application du resampling pour les données de panel
-    def _apply_panel_resample(self,
-                             data: Union[pd.Series, pd.DataFrame],
-                             target_freq: str,
-                             method: str,
-                             operation: Literal['upsample', 'downsample'],
-                             limit: Union[int, str, None] = None,
-                             limit_direction: Optional[str] = None,
-                             limit_area: Optional[str] = None,
-                             target_position: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
-        """Apply resampling to panel data by grouping on panel levels.
-
-        Args:
-            data: Panel data with MultiIndex (panel_levels + time_level)
-            target_freq: Target frequency
-            method: Conversion method
-            operation: Type of operation ('upsample' or 'downsample')
-            limit: Maximum number of consecutive NaN to fill (upsampling only)
-            limit_direction: Direction for NaN filling (upsampling only)
-            limit_area: Restriction area for NaN filling (upsampling only)
-            target_position: Target frequency position (upsampling only)
-
-        Returns:
-            Resampled panel data
-        """
-        # Identification des niveaux de panel (tous sauf le dernier qui est le temps)
-        panel_levels = list(range(data.index.nlevels - 1))
-
-        # Groupement par entités de panel
-        grouped = data.groupby(level=panel_levels, group_keys=False)
-
-        # Application du resampling à chaque groupe
-        if operation == 'downsample':
-            # Application de l'agrégation
-            if isinstance(data, pd.Series):
-                resampled = grouped.apply(lambda x: x.droplevel(panel_levels).resample(target_freq).agg(method))
-            else:
-                resampled = grouped.apply(lambda x: x.droplevel(panel_levels).resample(target_freq).agg(method))
-        else:  # upsample
-            # Résolution des paramètres d'interpolation
-            resolved_limit = self._resolve_interpolation_limit(
-                limit=limit, source_freq=None, target_freq=target_freq
-            )
-            resolved_direction = self._resolve_limit_direction(
-                limit_direction=limit_direction,
-                target_position=target_position,
-                target_freq=target_freq
-            )
-
-            def upsample_group(x):
-                # Suppression des niveaux de panel pour le resampling
-                x_dropped = x.droplevel(panel_levels)
-
-                # Tentative de détection de la fréquence source pour le limit 'default'
-                nonlocal resolved_limit
-                if limit == 'default' and resolved_limit is None:
-                    group_source_freq = x_dropped.index.inferred_freq
-                    if group_source_freq:
-                        resolved_limit = self._resolve_interpolation_limit(
-                            limit='default',
-                            source_freq=group_source_freq,
-                            target_freq=target_freq
-                        )
-
-                # Application de asfreq
-                upsampled = x_dropped.asfreq(target_freq)
-
-                # Construction des arguments d'interpolation
-                interpolate_kwargs = {'method': method}
-                if resolved_limit is not None:
-                    interpolate_kwargs['limit'] = resolved_limit
-                if resolved_direction is not None:
-                    interpolate_kwargs['limit_direction'] = resolved_direction
-                if limit_area is not None:
-                    interpolate_kwargs['limit_area'] = limit_area
-
-                # Application de l'interpolation
-                valid_methods = {'linear', 'time', 'index', 'values', 'nearest',
-                                 'zero', 'slinear', 'quadratic', 'cubic'}
-                if method in valid_methods:
-                    upsampled = upsampled.interpolate(**interpolate_kwargs)
-                return upsampled
-
-            resampled = grouped.apply(upsample_group)
-
-        return resampled
-
     # Méthode auxiliaire d'alignement des indexes de différentes fréquences
     def _align_mixed_frequency_columns(self,
                                       base_data: pd.DataFrame,
@@ -1104,13 +1017,13 @@ class FrequencyConverter(TemporalConverter):
 
     # Méthode auxiliaire d'augmentation de la fréquence par interpolation
     def _upsample(self,
-                 data: Union[pd.Series, pd.DataFrame],
-                 target_freq: Union[FrequencyType, UserFrequencyType],
-                 method: str,
-                 limit: Union[int, str, None] = None,
-                 limit_direction: Optional[str] = None,
-                 limit_area: Optional[str] = None,
-                 target_position: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
+                data: Union[pd.Series, pd.DataFrame],
+                target_freq: Union[FrequencyType, UserFrequencyType],
+                method: str,
+                limit: Union[int, str, None] = None,
+                limit_direction: Optional[str] = None,
+                limit_area: Optional[str] = None,
+                target_position: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
         """Perform upsampling using asfreq and interpolation.
 
         Args:
@@ -1126,26 +1039,31 @@ class FrequencyConverter(TemporalConverter):
         Returns:
             Upsampled data
         """
-        # Vérification si les données sont de type panel (MultiIndex)
-        if self._is_panel_data(data):
-            return self._apply_panel_resample(
-                data, target_freq, method, 'upsample',
-                limit=limit, limit_direction=limit_direction,
-                limit_area=limit_area, target_position=target_position
-            )
-        else:
+        # Délégation directe pour les données sans panel
+        if not self._is_panel_data(data):
             return self.interpolate_to_higher_frequency(
                 data, target_freq, method,
                 limit=limit, limit_direction=limit_direction,
                 limit_area=limit_area, target_position=target_position
             )
 
+        # Données de panel : application par entité via groupby
+        panel_levels = list(range(data.index.nlevels - 1))
+        return data.groupby(level=panel_levels, group_keys=False).apply(
+            lambda x: self.interpolate_to_higher_frequency(
+                x.droplevel(panel_levels),
+                target_freq, method,
+                limit=limit, limit_direction=limit_direction,
+                limit_area=limit_area, target_position=target_position
+            )
+        )
+
     # Méthode auxiliaire de diminution de la fréquence par agrégation
     def _downsample(self,
-                   data: Union[pd.Series, pd.DataFrame],
-                   target_freq: Union[FrequencyType, UserFrequencyType],
-                   method: str,
-                   full_periods_only: bool = False) -> Union[pd.Series, pd.DataFrame]:
+                data: Union[pd.Series, pd.DataFrame],
+                target_freq: Union[FrequencyType, UserFrequencyType],
+                method: str,
+                full_periods_only: bool = False) -> Union[pd.Series, pd.DataFrame]:
         """Perform downsampling using resample and aggregation.
 
         Args:
@@ -1157,11 +1075,20 @@ class FrequencyConverter(TemporalConverter):
         Returns:
             Downsampled data
         """
-        # Vérification si les données sont de type panel (MultiIndex)
-        if self._is_panel_data(data):
-            return self._apply_panel_resample(data, target_freq, method, 'downsample')
-        else:
-            return self.aggregate_to_lower_frequency(data, target_freq, method, full_periods_only)
+        # Délégation directe pour les données sans panel
+        if not self._is_panel_data(data):
+            return self.aggregate_to_lower_frequency(
+                data, target_freq, method, full_periods_only
+            )
+
+        # Données de panel : application par entité via groupby
+        panel_levels = list(range(data.index.nlevels - 1))
+        return data.groupby(level=panel_levels, group_keys=False).apply(
+            lambda x: self.aggregate_to_lower_frequency(
+                x.droplevel(panel_levels),
+                target_freq, method, full_periods_only
+            )
+        )
 
     # Méthode auxiliaire d'extension de l'index pour l'upsampling
     def _extend_index_for_upsampling(self,
