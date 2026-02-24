@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.metrics import r2_score
 
+
 # Wrapper permettant l'intégration des modèles du package "hierarchicalforecast" dans un syntaxe "sklearn-like"
 # /!\ La méthode "score" (nécessaire pour GridSearchCV) et l'héritage de RegressorMixin font que l'on wrappe des régresseurs et non des classifieurs par défaut
 class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
@@ -308,7 +309,7 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
         reconcile_kwargs = {
             "Y_hat_df": Y_hat_df,
             "Y_df": self.Y_df_,
-            "S": self.S_df_,
+            "S_df": self.S_df_,
             "tags": self.tags_,
         }
 
@@ -326,46 +327,6 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
         Y_rec = self.hrec_.reconcile(**reconcile_kwargs)
 
         return Y_rec
-
-    # Méthode combinée d'entraînement et de prédiction
-    def fit_predict(self, X, y):
-        """Fit the adapter and reconcile forecasts in one step.
-
-        Convenience method that calls fit() followed by predict().
-
-        Args:
-            X: Base forecasts to reconcile (passed to predict).
-            y: Historical time series data (passed to fit).
-
-        Returns:
-            DataFrame containing reconciled forecasts.
-
-        Examples:
-            Convenient one-step reconciliation::
-
-                from hierarchicalforecast.methods import BottomUp
-                import pandas as pd
-
-                # Define hierarchy
-                spec = [['Country'], ['Country', 'State']]
-                adapter = HierarchicalForecastAdapter(
-                    reconcilers=[BottomUp()],
-                    spec=spec
-                )
-
-                # Fit and predict in one step
-                reconciled = adapter.fit_predict(X=base_forecasts, y=historical_data)
-
-            Equivalent to separate fit and predict::
-
-                # This:
-                reconciled = adapter.fit_predict(X=forecasts, y=history)
-
-                # Is equivalent to:
-                adapter.fit(None, history)
-                reconciled = adapter.predict(forecasts)
-        """
-        return self.fit(X=None, y=y).predict(X)
 
     # Méthode d'extraction d'informations sur la hiérarchie
     def get_hierarchy_info(self) -> Dict:
@@ -430,59 +391,3 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
             "levels": list(self.tags_.keys()),
             "tags": self.tags_,
         }
-
-    # Méthode de caclul de métriques
-    def score(
-        self,
-        X: Union[pd.Series, pd.DataFrame],
-        y: Union[pd.Series, pd.DataFrame],
-        sample_weight: Optional[Union[pd.Series, pd.DataFrame]] = None
-    ) -> float:
-        """Calculate R² score for reconciled forecasts.
-
-        This method is required for GridSearchCV compatibility and follows
-        sklearn convention where higher values are better.
-
-        Args:
-            X: Base forecasts to reconcile (passed to predict).
-            y: True target values to compare against reconciled forecasts.
-            sample_weight: Sample weights for scoring. Defaults to None.
-
-        Returns:
-            R² score (coefficient of determination). Returns 1.0 for perfect
-            predictions, can be negative for very poor predictions.
-
-        Raises:
-            RuntimeError: If called before fit().
-
-        Examples:
-            Evaluating reconciliation performance::
-
-                # Fit adapter on historical data
-                adapter.fit(None, y_train)
-
-                # Get base forecasts and true values for test period
-                y_reconciled = adapter.predict(y_hat_test)
-
-                # Calculate score
-                r2 = adapter.score(y_hat_test, y_test)
-                print(f"R² score: {r2:.3f}")
-
-            Using with cross-validation::
-
-                from sklearn.model_selection import cross_val_score
-
-                scores = cross_val_score(
-                    adapter,
-                    X_forecasts,
-                    y_true,
-                    cv=5,
-                    scoring='r2'
-                )
-                print(f"Mean R²: {scores.mean():.3f}")
-        """
-        # Obtention des prédictions réconciliées
-        y_pred = self.predict(X)
-
-        # Calcul du score R²
-        return r2_score(y, y_pred, sample_weight=sample_weight)
