@@ -10,6 +10,8 @@ from .detector import FrequencyDetector, detect_frequency, detect_dataset_freque
 from .high_frequency_imputer import HighFrequencyImputer
 from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .imputation_window import ImputationWindowCalculator, ImputationScope
+from .target_frequency_validator import TargetFrequencyValidator
+from .frequency_aligner import FrequencyAligner
 
 __all__ = [
     # Classes et fonctions principales
@@ -24,7 +26,10 @@ __all__ = [
     # Provenance tracking
     'ImputationProvenanceTracker',
     'ProvenanceType',
-    # P1 window calculation
+    # Imputation window calculation
     'ImputationWindowCalculator',
-    'ImputationScope'
+    'ImputationScope',
+    # Validation et alignement
+    'TargetFrequencyValidator',
+    'FrequencyAligner',
 ]
