@@ -17,6 +17,7 @@ from ..utils.frequency.utils import (
 from ..panel.utils import normalize_entity_key
 
 
+# Classe de validation de la fréquence cible au regard des fréquences détectées
 class TargetFrequencyValidator:
     """Validate target frequencies against detected data frequencies.
 
@@ -37,7 +38,7 @@ class TargetFrequencyValidator:
         >>> result
         'M'
     """
-
+    # Méthode de validation de la fréquence cible
     def validate(
         self,
         target_frequency: Union[str, Dict],
@@ -68,18 +69,22 @@ class TargetFrequencyValidator:
         Raises:
             ValueError: If mismatch found and on_frequency_mismatch='error'.
         """
+        # Distinction suivant la structure
         if not is_panel:
+            # Cas de séries temporelles
             return self._validate_timeseries(
                 target_frequency, detected_frequencies, on_frequency_mismatch
             )
         else:
+            # Cas de données de panel
             return self._validate_panel(
                 target_frequency, detected_frequencies, entities, on_frequency_mismatch
             )
 
+    # Méthode auxiliaire de validation de la fréquence cible dans le cas de données de séries temporelles
     def _validate_timeseries(
         self,
-        target_frequency: Union[str, Dict],
+        target_frequency: str,
         detected_frequencies: Dict[str, str],
         on_frequency_mismatch: Literal['error', 'warn'],
     ) -> str:
@@ -126,6 +131,7 @@ class TargetFrequencyValidator:
 
         return target_frequency
 
+    # Méthode auxiliaire de validation de la fréquence cible dans le cas de données de panel
     def _validate_panel(
         self,
         target_frequency: Union[str, Dict],
@@ -168,9 +174,12 @@ class TargetFrequencyValidator:
                 )
 
         # Validation de chaque fréquence cible par entité
+        # Initialisation de la liste des entités invalides
         invalid_entities = []
+        # Initialisation du dictionnaire des fréquences ajustées
         adjusted_freqs = {}
 
+        # Parcours des entités
         for entity in (entities or []):
             # Extraction de la fréquence cible
             if isinstance(target_frequency, dict):
@@ -178,15 +187,21 @@ class TargetFrequencyValidator:
             else:
                 target_freq = target_frequency
 
+            # Vérification que la fréquence cible n'est pas plus élevée que la fréquence la plus élevée pour l'entité
             try:
+                # Extraction de la fréquence la plus élevée de l'entité
                 highest_freq = self._get_highest_frequency_entity(
                     entity, detected_frequencies
                 )
 
+                # Vérification que la fréquence cible n'est pas plus élevée que la fréquence la plus élevée pour l'entité
                 if is_higher_frequency(target_freq, highest_freq):
+                    # Ajout aux fréquences invalides
                     invalid_entities.append((entity, target_freq, highest_freq))
+                    # Ajustement de la fréquence cible à la fréquence la plus élevée de l'entité
                     adjusted_freqs[entity] = highest_freq
                 else:
+                    # Ajustement à l'identique
                     adjusted_freqs[entity] = target_freq
 
             except ValueError as e:
@@ -195,6 +210,7 @@ class TargetFrequencyValidator:
 
         # Traitement des entités invalides
         if invalid_entities:
+            # Construction du message d'erreur
             error_msg = (
                 f"Target frequencies are higher than highest frequencies for "
                 f"{len(invalid_entities)} entities:\n"
@@ -218,6 +234,7 @@ class TargetFrequencyValidator:
 
         return adjusted_freqs
 
+    # Méthode auxiliaire d'extraction de la fréquence la plus élevée d'un jeu de données de séries temporelles
     def _get_highest_frequency_timeseries(
         self,
         detected_frequencies: Dict[str, str],
@@ -245,13 +262,15 @@ class TargetFrequencyValidator:
                 freq_orders[freq] = get_frequency_order(freq)
             except ValueError:
                 continue
-
+        
+        # Cas au aucun ordre ne peut être extrait
         if not freq_orders:
             raise ValueError("Could not determine frequency order for detected frequencies")
 
         # Retour de la fréquence avec l'ordre le plus bas
         return min(freq_orders.keys(), key=lambda x: freq_orders[x])
 
+    # Méthode auxilaiire d'extraction de la fréquence la plus élvée d'une entité
     def _get_highest_frequency_entity(
         self,
         entity: Union[str, tuple],
@@ -273,13 +292,16 @@ class TargetFrequencyValidator:
         normalized_entity = normalize_entity_key(entity)
         # Extraction des fréquences pour cette entité
         entity_freqs = {}
+        # Parcours des fréquences détectées
         for key, freq in detected_frequencies.items():
             var = key[-1]
             ent = normalize_entity_key(key[:-1])
             if ent == normalized_entity and freq is not None:
                 entity_freqs[var] = freq
-
+        
+        # Cas où aucune fréquence est détectée pour l'entité
         if not entity_freqs:
             raise ValueError(f"No valid frequencies detected for entity '{entity}'")
 
+        # Extraction de la fréquence la plus élevée parmi les fréquences de l'entité
         return self._get_highest_frequency_timeseries(entity_freqs)
