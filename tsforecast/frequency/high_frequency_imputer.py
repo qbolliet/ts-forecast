@@ -1075,8 +1075,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.effective_target_frequency_ = self._target_freq_validator.validate(
             target_frequency=self.effective_target_frequency_,
             detected_frequencies=self.detected_frequencies_,
-            is_panel=self.is_panel_,
-            entities=self.entities_,
             on_frequency_mismatch=self.on_frequency_mismatch,
         )
 

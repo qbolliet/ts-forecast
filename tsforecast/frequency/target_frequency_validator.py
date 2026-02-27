@@ -26,14 +26,16 @@ class TargetFrequencyValidator:
     and panel data. When a mismatch is found, either raises an error or
     adjusts the target frequency depending on ``on_frequency_mismatch``.
 
+    The data structure (time series vs panel) and the list of entities are
+    inferred automatically from the keys of ``detected_frequencies``:
+    tuple keys indicate panel data, string keys indicate time series.
+
     Examples:
         >>> validator = TargetFrequencyValidator()
         >>> detected = {'col_a': 'M', 'col_b': 'Q'}
         >>> result = validator.validate(
         ...     target_frequency='M',
         ...     detected_frequencies=detected,
-        ...     is_panel=False,
-        ...     entities=None,
         ... )
         >>> result
         'M'
@@ -43,22 +45,20 @@ class TargetFrequencyValidator:
         self,
         target_frequency: Union[str, Dict],
         detected_frequencies: Dict,
-        is_panel: bool,
-        entities: Optional[List],
         on_frequency_mismatch: Literal['error', 'warn'] = 'error',
     ) -> Union[str, Dict]:
         """Validate target frequency against detected frequencies.
 
-        Delegates to ``_validate_timeseries`` or ``_validate_panel``
-        depending on whether the data is panel data.
+        Infers whether the data is panel (tuple keys) or time series (string
+        keys) from ``detected_frequencies``, then delegates to
+        ``_validate_timeseries`` or ``_validate_panel`` accordingly.
 
         Args:
             target_frequency: Target frequency (str for TS, dict for panel).
             detected_frequencies: Dict mapping variable keys to detected
-                frequency strings (column names for TS, (entity..., var)
-                tuples for panel).
-            is_panel: Whether the data is panel data.
-            entities: List of unique entity tuples (panel only).
+                frequency strings. For time series, keys are column name
+                strings. For panel, keys are ``(entity..., var)`` tuples as
+                produced by ``detect_dataset_frequency``.
             on_frequency_mismatch: How to handle mismatches:
                 - 'error': Raise ValueError (default)
                 - 'warn': Warn and adjust to highest available
@@ -67,8 +67,13 @@ class TargetFrequencyValidator:
             Validated (possibly adjusted) target frequency.
 
         Raises:
-            ValueError: If mismatch found and on_frequency_mismatch='error'.
+            ValueError: If detected_frequencies is empty, if a mismatch is
+                found and on_frequency_mismatch='error', or if the keys have
+                an inconsistent format (mixed tuple/string keys).
         """
+        # Inférence de la structure (panel ou séries temporelles) et des entités
+        is_panel, entities = self._infer_structure(detected_frequencies)
+
         # Distinction suivant la structure
         if not is_panel:
             # Cas de séries temporelles
@@ -80,6 +85,54 @@ class TargetFrequencyValidator:
             return self._validate_panel(
                 target_frequency, detected_frequencies, entities, on_frequency_mismatch
             )
+
+    # Méthode auxiliaire d'inférence de la structure (panel ou séries temporelles) et des entités
+    def _infer_structure(
+        self,
+        detected_frequencies: Dict,
+    ) -> Tuple[bool, Optional[List]]:
+        """Infer data structure and entity list from detected_frequencies keys.
+
+        Panel data produces tuple keys of the form ``(entity..., var)`` as
+        returned by ``detect_dataset_frequency``. Time series data produces
+        plain string keys (column names).
+
+        Args:
+            detected_frequencies: Dict mapping variable keys to frequencies.
+
+        Returns:
+            Tuple ``(is_panel, entities)`` where ``entities`` is ``None`` for
+            time series data and a list of entity tuples for panel data.
+
+        Raises:
+            ValueError: If detected_frequencies is empty (structure cannot be
+                determined) or if keys have an inconsistent format.
+        """
+        # Cas d'un dictionnaire vide : structure indéterminable
+        if not detected_frequencies:
+            raise ValueError(
+                "detected_frequencies is empty: cannot infer data structure "
+                "(time series vs panel)."
+            )
+
+        # Classification des clés
+        tuple_keys = [k for k in detected_frequencies if isinstance(k, tuple)]
+        string_keys = [k for k in detected_frequencies if isinstance(k, str)]
+
+        # Vérification de la cohérence du format des clés
+        if tuple_keys and string_keys:
+            raise ValueError(
+                "detected_frequencies contains mixed key types (both str and tuple). "
+                "Expected either all string keys (time series) or all tuple keys (panel)."
+            )
+
+        # Cas des séries temporelles (clés string)
+        if not tuple_keys:
+            return False, None
+
+        # Cas panel : extraction des entités uniques (tous les niveaux sauf le dernier = variable)
+        entities = list({k[:-1] for k in tuple_keys})
+        return True, entities
 
     # Méthode auxiliaire de validation de la fréquence cible dans le cas de données de séries temporelles
     def _validate_timeseries(
@@ -136,27 +189,28 @@ class TargetFrequencyValidator:
         self,
         target_frequency: Union[str, Dict],
         detected_frequencies: Dict[Tuple, str],
-        entities: Optional[List],
+        entities: List,
         on_frequency_mismatch: Literal['error', 'warn'],
-    ) -> Union[str, Dict]:
+    ) -> Dict:
         """Validate target frequency for panel data.
 
         Args:
             target_frequency: Target frequency dict mapping entities to
-                frequencies, or a single string.
+                frequencies, or a single string applied to all entities.
             detected_frequencies: Dict mapping (entity..., var) to frequency.
-            entities: List of unique entity tuples.
+            entities: List of unique entity tuples inferred from
+                detected_frequencies keys.
             on_frequency_mismatch: Mismatch handling strategy.
 
         Returns:
             Validated (possibly adjusted) target frequency dict.
 
         Raises:
-            ValueError: If entities are missing or frequency mismatch with
-                on_frequency_mismatch='error'.
+            ValueError: If entities are missing from target_frequency dict
+                or frequency mismatch with on_frequency_mismatch='error'.
         """
         # Vérification que toutes les entités ont une fréquence cible
-        if entities is not None and isinstance(target_frequency, dict):
+        if isinstance(target_frequency, dict):
             missing_entities = set(entities) - set(target_frequency.keys())
             if missing_entities:
                 raise ValueError(
@@ -180,7 +234,7 @@ class TargetFrequencyValidator:
         adjusted_freqs = {}
 
         # Parcours des entités
-        for entity in (entities or []):
+        for entity in entities:
             # Extraction de la fréquence cible
             if isinstance(target_frequency, dict):
                 target_freq = target_frequency[entity]
@@ -262,7 +316,7 @@ class TargetFrequencyValidator:
                 freq_orders[freq] = get_frequency_order(freq)
             except ValueError:
                 continue
-        
+
         # Cas au aucun ordre ne peut être extrait
         if not freq_orders:
             raise ValueError("Could not determine frequency order for detected frequencies")
@@ -270,16 +324,18 @@ class TargetFrequencyValidator:
         # Retour de la fréquence avec l'ordre le plus bas
         return min(freq_orders.keys(), key=lambda x: freq_orders[x])
 
-    # Méthode auxilaiire d'extraction de la fréquence la plus élvée d'une entité
+    # Méthode auxiliaire d'extraction de la fréquence la plus élevée d'une entité
     def _get_highest_frequency_entity(
         self,
-        entity: Union[str, tuple],
+        entity: tuple,
         detected_frequencies: Dict[Tuple, str],
     ) -> str:
         """Get the highest frequency for a specific entity in panel data.
 
         Args:
-            entity: Entity identifier.
+            entity: Entity identifier tuple (e.g. ``('FR',)`` or
+                ``('FR', 'EU')``), matching the ``key[:-1]`` format of
+                detected_frequencies keys.
             detected_frequencies: Dict mapping (entity..., var) to frequency.
 
         Returns:
@@ -298,7 +354,7 @@ class TargetFrequencyValidator:
             ent = normalize_entity_key(key[:-1])
             if ent == normalized_entity and freq is not None:
                 entity_freqs[var] = freq
-        
+
         # Cas où aucune fréquence est détectée pour l'entité
         if not entity_freqs:
             raise ValueError(f"No valid frequencies detected for entity '{entity}'")
