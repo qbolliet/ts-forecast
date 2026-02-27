@@ -252,23 +252,6 @@ class FrequencyConverter(TemporalConverter):
         else:
             raise ValueError("Data must be a pandas Series or DataFrame")
             
-    # Nombre approximatif de périodes par an pour chaque fréquence de base
-    _APPROX_PERIODS_PER_YEAR = {
-        'Y': 1,
-        'Q': 4,
-        'M': 12,
-        'SM': 24,
-        'W': 52,
-        'B': 252,
-        'D': 365,
-        'h': 8760,
-        'min': 525600,
-        's': 31536000,
-        'ms': 31536000000,
-        'us': 31536000000000,
-        'ns': 31536000000000000,
-    }
-
     # Implémentation de la méthode abstraite get_conversion_factor de TemporalConverter
     def get_conversion_factor(self, from_unit: str, to_unit: str) -> float:
         """Get approximate conversion factor between two frequencies.
@@ -278,10 +261,6 @@ class FrequencyConverter(TemporalConverter):
         ``to_unit`` period (when ``to_unit`` is lower frequency) or the
         inverse (when ``to_unit`` is higher frequency).
 
-        Note: Frequency conversion factors are approximate and depend on the
-        specific time periods involved. This method provides rough estimates
-        based on average periods per year.
-
         Args:
             from_unit: Source frequency (e.g., 'daily', 'D', 'monthly', 'M').
             to_unit: Target frequency (e.g., 'monthly', 'M', 'quarterly', 'Q').
@@ -289,7 +268,7 @@ class FrequencyConverter(TemporalConverter):
         Returns:
             Approximate conversion factor. When converting from a higher
             frequency to a lower one the factor is >= 1 (e.g., daily→monthly
-            ≈ 30.42). When converting from lower to higher the factor is < 1.
+            ≈ 30). When converting from lower to higher the factor is < 1.
 
         Raises:
             ValueError: If frequencies are not supported
@@ -297,13 +276,13 @@ class FrequencyConverter(TemporalConverter):
         Examples:
             >>> converter = FrequencyConverter()
             >>> converter.get_conversion_factor('daily', 'monthly')
-            30.416666666666668
+            30.0
             >>> converter.get_conversion_factor('monthly', 'quarterly')
             3.0
             >>> converter.get_conversion_factor('quarterly', 'monthly')
             0.3333333333333333
         """
-        # Normalisation des fréquences
+        # Normalisation des fréquences de base (sans positions S/E)
         from_freq = normalize_frequency(from_unit)
         to_freq = normalize_frequency(to_unit)
 
@@ -311,25 +290,12 @@ class FrequencyConverter(TemporalConverter):
         if from_freq == to_freq:
             return 1.0
 
-        # Récupération des périodes par an
-        from_periods = self._APPROX_PERIODS_PER_YEAR.get(from_freq)
-        to_periods = self._APPROX_PERIODS_PER_YEAR.get(to_freq)
-
-        if from_periods is None:
-            raise ValueError(
-                f"Unsupported source frequency '{from_unit}' "
-                f"(normalized: '{from_freq}') for conversion factor calculation"
-            )
-        if to_periods is None:
-            raise ValueError(
-                f"Unsupported target frequency '{to_unit}' "
-                f"(normalized: '{to_freq}') for conversion factor calculation"
-            )
-
-        # factor = periods_per_year[from] / periods_per_year[to]
-        # Ex: daily→monthly = 365/12 ≈ 30.42
-        # Ex: monthly→quarterly = 12/4 = 3.0
-        return float(from_periods) / float(to_periods)
+        # Délégation au DurationConverter avec arguments inversés :
+        # DurationConverter.get_conversion_factor(a, b) = durée(a) / durée(b)
+        # = "combien de b dans un a"
+        # On veut : "combien de from_freq dans un to_freq" = durée(to) / durée(from)
+        # → on passe (to_freq, from_freq)
+        return self._duration_converter.get_conversion_factor(to_freq, from_freq)
 
     # Méthode d'agrégation à une fréquence plus faible
     def aggregate_to_lower_frequency(self,
