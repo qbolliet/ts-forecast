@@ -769,21 +769,28 @@ def detect_dataset_frequency(df: pd.DataFrame,
 
 # Fonction de détection de la fréquence d'un index
 def detect_index_frequency(
-    index: pd.DatetimeIndex
-) -> FrequencyType:
-    """Detect and parse DatetimeIndex frequency into components.
+    index: Union[pd.DatetimeIndex, pd.MultiIndex]
+) -> Union[FrequencyType, Dict[Tuple, FrequencyType]]:
+    """Detect and parse DatetimeIndex or MultiIndex frequency into components.
 
-    Analyzes a DatetimeIndex to detect its frequency and parses it into
+    For a DatetimeIndex, analyzes the frequency and parses it into
     three components: the base frequency code, the position indicator
     (S for start, E for end), and an optional suffix (e.g., DEC for
     quarterly data anchored to December).
 
+    For a MultiIndex with dates as the last level, detects frequency
+    for each unique entity (combination of non-date levels) and returns
+    a dictionary mapping entity keys to their frequencies.
+
     Args:
-        index: DatetimeIndex to analyze. Must have at least 2 observations
-            and a regular frequency pattern.
+        index: DatetimeIndex or MultiIndex to analyze. For MultiIndex,
+            the last level must be a DatetimeIndex. Must have at least 2
+            observations and a regular frequency pattern.
 
     Returns:
-        Tuple of (frequency_code, position, suffix) where:
+        For DatetimeIndex: Tuple of (frequency_code, position, suffix)
+        For MultiIndex: Dict mapping entity keys (tuple) to
+            (frequency_code, position, suffix) tuples.
         - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
         - position: Position indicator ('S' for start, 'E' for end, or None)
         - suffix: Anchor suffix (e.g., 'DEC', 'JAN', or None)
@@ -794,47 +801,70 @@ def detect_index_frequency(
 
     Examples:
         >>> import pandas as pd
-        >>> # Daily frequency
+        >>> # DatetimeIndex - Daily frequency
         >>> dates = pd.date_range('2024-01-01', periods=10, freq='D')
-        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
-        >>> (freq, pos, suffix)
+        >>> detect_index_frequency(dates)
         ('D', None, None)
         >>>
-        >>> # Monthly start
-        >>> dates = pd.date_range('2024-01-01', periods=5, freq='MS')
-        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
-        >>> (freq, pos, suffix)
-        ('M', 'S', None)
-        >>>
-        >>> # Quarterly end with December anchor
-        >>> dates = pd.date_range('2024-01-31', periods=4, freq='QE-DEC')
-        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
-        >>> (freq, pos, suffix)
-        ('Q', 'E', 'DEC')
+        >>> # MultiIndex panel data
+        >>> idx = pd.MultiIndex.from_product([
+        ...     ['entity_1', 'entity_2'],
+        ...     pd.date_range('2024-01-01', periods=5, freq='MS')
+        ... ], names=['entity', 'date'])
+        >>> detect_index_frequency(idx)
+        {('entity_1',): ('M', 'S', None), ('entity_2',): ('M', 'S', None)}
     """
-    # Inférence de l'index
-    freq = index.inferred_freq
+    # Vérification du type d'index : MultiIndex ou DatetimeIndex
+    if isinstance(index, pd.MultiIndex):
+        # Traitement du MultiIndex avec date au dernier niveau
+        result = {}
+        date_level_idx = index.nlevels - 1
+        
+        # Extraction des entités uniques (n-1 premiers niveaux)
+        entity_index = index.droplevel(date_level_idx)
+        
+        for entity_key in entity_index.unique():
+            # Création du masque pour cette entité
+            mask = entity_index == entity_key
+            # Extraction du DatetimeIndex pour cette entité
+            dates = index.get_level_values(date_level_idx)[mask]
+            # Appel récursif pour déterminer la fréquence
+            freq = detect_index_frequency(dates)
+            result[entity_key] = freq
+        
+        return result
+    else:
+        # Traitement du DatetimeIndex (comportement inchangé)
+        # Inférence de la fréquence de l'index
+        freq = index.inferred_freq
+        # Parsing de la fréquence
+        return normalize_frequency(frequency=freq, return_format='base')
 
-    # Parsing de la fréquence
-    return normalize_frequency(frequency=freq, return_format='base')
 
 # Fonction de détection de la fréquence associée à un index
 def detect_and_parse_index_frequency(
-    index: pd.DatetimeIndex
-) -> Tuple[str, Optional[str], Optional[str]]:
-    """Detect and parse DatetimeIndex frequency into components.
+    index: Union[pd.DatetimeIndex, pd.MultiIndex]
+) -> Union[Tuple[str, Optional[str], Optional[str]], Dict[Tuple, Tuple[str, Optional[str], Optional[str]]]]:
+    """Detect and parse DatetimeIndex or MultiIndex frequency into components.
 
-    Analyzes a DatetimeIndex to detect its frequency and parses it into
+    For a DatetimeIndex, analyzes the frequency and parses it into
     three components: the base frequency code, the position indicator
     (S for start, E for end), and an optional suffix (e.g., DEC for
     quarterly data anchored to December).
 
+    For a MultiIndex with dates as the last level, detects frequency
+    for each unique entity (combination of non-date levels) and returns
+    a dictionary mapping entity keys to their parsed frequencies.
+
     Args:
-        index: DatetimeIndex to analyze. Must have at least 2 observations
-            and a regular frequency pattern.
+        index: DatetimeIndex or MultiIndex to analyze. For MultiIndex,
+            the last level must be a DatetimeIndex. Must have at least 2
+            observations and a regular frequency pattern.
 
     Returns:
-        Tuple of (frequency_code, position, suffix) where:
+        For DatetimeIndex: Tuple of (frequency_code, position, suffix)
+        For MultiIndex: Dict mapping entity keys (tuple) to
+            (frequency_code, position, suffix) tuples.
         - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
         - position: Position indicator ('S' for start, 'E' for end, or None)
         - suffix: Anchor suffix (e.g., 'DEC', 'JAN', or None)
@@ -845,29 +875,44 @@ def detect_and_parse_index_frequency(
 
     Examples:
         >>> import pandas as pd
-        >>> # Daily frequency
-        >>> dates = pd.date_range('2024-01-01', periods=10, freq='D')
-        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
-        >>> (freq, pos, suffix)
-        ('D', None, None)
-        >>>
-        >>> # Monthly start
+        >>> # DatetimeIndex - Monthly start
         >>> dates = pd.date_range('2024-01-01', periods=5, freq='MS')
-        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
-        >>> (freq, pos, suffix)
+        >>> detect_and_parse_index_frequency(dates)
         ('M', 'S', None)
         >>>
-        >>> # Quarterly end with December anchor
-        >>> dates = pd.date_range('2024-01-31', periods=4, freq='QE-DEC')
-        >>> freq, pos, suffix = detect_and_parse_frequency(dates)
-        >>> (freq, pos, suffix)
-        ('Q', 'E', 'DEC')
+        >>> # MultiIndex panel data with multiple entities
+        >>> idx = pd.MultiIndex.from_product([
+        ...     ['country_A', 'country_B'],
+        ...     pd.date_range('2024-01-31', periods=4, freq='QE-DEC')
+        ... ], names=['country', 'date'])
+        >>> detect_and_parse_index_frequency(idx)
+        {('country_A',): ('Q', 'E', 'DEC'), ('country_B',): ('Q', 'E', 'DEC')}
     """
-    # Inférence de la fréquence de l'index
-    freq = index.inferred_freq
-
-    # Parsing de la fréquence
-    return parse_frequency(frequency_str=freq)
+    # Vérification du type d'index : MultiIndex ou DatetimeIndex
+    if isinstance(index, pd.MultiIndex):
+        # Traitement du MultiIndex avec date au dernier niveau
+        result = {}
+        date_level_idx = index.nlevels - 1
+        
+        # Extraction des entités uniques (n-1 premiers niveaux)
+        entity_index = index.droplevel(date_level_idx)
+        
+        for entity_key in entity_index.unique():
+            # Création du masque pour cette entité
+            mask = entity_index == entity_key
+            # Extraction du DatetimeIndex pour cette entité
+            dates = index.get_level_values(date_level_idx)[mask]
+            # Appel récursif pour déterminer la fréquence parsée
+            freq = detect_and_parse_index_frequency(dates)
+            result[entity_key] = freq
+        
+        return result
+    else:
+        # Traitement du DatetimeIndex (comportement inchangé)
+        # Inférence de la fréquence de l'index
+        freq = index.inferred_freq
+        # Parsing de la fréquence
+        return parse_frequency(frequency_str=freq)
 
 # Fonction auxiliaire d'extraction de la fréquence la plus haute d'un dictionnaire de fréquences
 def _get_highest_frequency(frequency_map: Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]) -> Optional[Union[FrequencyType, UserFrequencyType]]:
