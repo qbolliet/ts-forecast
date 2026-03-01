@@ -1,83 +1,101 @@
 """Imputation window calculation for mixed frequency imputation.
 
 This module provides the ImputationWindowCalculator class to compute the
-temporal window where all series have real (non-NaN) values, and extend
-this window based on attrition threshold and imputation scope parameters.
+temporal window where all series have real (non-NaN) values using a
+multi-frequency coverage matrix approach, and to extend this window based
+on attrition threshold and imputation scope parameters.
 """
 # Importation des modules
 # Modules de base
 import warnings
-from typing import Dict, List, Literal, Optional, Union, Tuple, Set
+from typing import Dict, List, Literal, Optional, Union, Tuple, cast
+
 # Manipulation de données
 import numpy as np
 import pandas as pd
 
+# Modules du package
+from .detector import detect_dataset_frequency, detect_index_frequency, detect_and_parse_index_frequency
+from ..panel.utils import get_unique_panel_entities
+from ..utils.frequency.utils import get_frequency_order
+from ..utils.position.utils import combine_frequency_position
+from ..utils.time.utils import get_period_start, get_period_end
 
 # Type pour le scope d'imputation
 ImputationScope = Literal['strict', 'extended_backward', 'extended_forward', 'extended_both']
 
 
+# Classe de calcul de la fenêtre d'imputation à partir des couvertures multi-fréquences
 class ImputationWindowCalculator:
-    """Calculate the strict window and extended training windows for imputation.
+    """Calculate the imputation window and extended training windows for imputation.
 
-    The imputation window (formerly "P1 window") is defined as the temporal
-    interval where ALL series in the dataset have real (non-NaN) values.
-    This class also handles extending the window based on attrition thresholds
-    and imputation scope settings.
+    The strict imputation window is the temporal interval where ALL series
+    in the dataset have data (directly or via sub-period coverage). A
+    quarterly observation, for example, is considered to cover all
+    high-frequency sub-periods (e.g., months) within that quarter.
 
-    The calculator accounts for publication delays by optionally excluding
-    trailing NaN values that are attributable to delays rather than missing data.
+    The class builds a boolean coverage matrix at the highest detected
+    frequency, then derives attrition (fraction of columns covered) at
+    each date. The strict window is where attrition equals 1.0. The
+    extended window grows backward or forward as long as attrition meets
+    the specified threshold.
+
+    For panel data (MultiIndex with entity levels + time level), windows
+    are computed independently per entity.
 
     Attributes:
-        imputation_window_start_: Start timestamp of the strict window.
-        imputation_window_end_: End timestamp of the strict window.
-        training_start_: Start timestamp of the extended training window.
-        training_end_: End timestamp of the extended training window.
-        column_coverage_: Dict mapping column names to their coverage timestamps.
-        attrition_by_date_: Series showing ratio of columns with data per date.
+        imputation_window_start_: Start of the strict window. Scalar for
+            time series, Dict[tuple, Timestamp] for panel.
+        imputation_window_end_: End of the strict window. Same type.
+        training_start_: Start of the training window (scope-dependent).
+            Same type as imputation_window_start_.
+        training_end_: End of the training window. Same type.
+        attrition_by_date_: Ratio of columns covered per high-freq date.
+            pd.Series for time series, Dict[tuple, pd.Series] for panel.
+        index_freq_: Detected highest frequency. str for time series,
+            Dict[tuple, str] for panel.
+        column_coverage_: Dict mapping column names to (start, end)
+            coverage timestamps. Only populated for time series data.
 
     Examples:
         >>> import pandas as pd
         >>> import numpy as np
-        >>> dates = pd.date_range('2023-01-01', periods=12, freq='M')
+        >>> dates = pd.date_range('2023-01-31', periods=12, freq='ME')
         >>> data = pd.DataFrame({
         ...     'var1': [np.nan, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, np.nan],
         ...     'var2': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
-        ...     'var3': [np.nan, np.nan, 1, 2, 3, 4, 5, 6, 7, 8, np.nan, np.nan]
         ... }, index=dates)
-        >>> calc = ImputationWindowCalculator(
-        ...     attrition_threshold=0.5, imputation_scope='extended_both'
-        ... )
+        >>> calc = ImputationWindowCalculator(imputation_scope='extended_both')
         >>> calc.fit(data)
-        >>> print(f"Window: {calc.imputation_window_start_} to {calc.imputation_window_end_}")
-        >>> print(f"Training: {calc.training_start_} to {calc.training_end_}")
+        >>> print(calc.imputation_window_start_, calc.imputation_window_end_)
     """
 
+    # Initialisation
     def __init__(
         self,
         attrition_threshold: float = 0.5,
         imputation_scope: ImputationScope = 'strict',
         min_columns: int = 2,
-        exclude_delay_nans: bool = True
     ):
         """Initialize the ImputationWindowCalculator.
 
         Args:
-            attrition_threshold: Minimum percentage of columns that must have
-                non-null values for a date to be included in the extended window.
-                Value between 0 and 1. Default 0.5 (50%).
-            imputation_scope: How to extend the imputation window for training:
-                - 'strict': Use only the imputation window (all series have data)
-                - 'extended_backward': Extend backwards where threshold is met
-                - 'extended_forward': Extend forwards where threshold is met
-                - 'extended_both': Extend in both directions
-            min_columns: Minimum number of columns required to have data.
-                Default 2. Used to ensure meaningful imputation.
-            exclude_delay_nans: If True, trailing NaN values that appear to be
-                due to publication delays are excluded from coverage calculation.
+            attrition_threshold: Minimum fraction of columns that must have
+                coverage for a date to be included in the extended window.
+                Value between 0 and 1. Default 0.5.
+            imputation_scope: How to determine the imputation window:
+                - 'strict': Only dates where all columns have coverage.
+                - 'extended_backward': Extend before the strict window
+                  where attrition >= threshold.
+                - 'extended_forward': Extend after the strict window
+                  where attrition >= threshold.
+                - 'extended_both': Extend in both directions.
+            min_columns: Minimum number of data columns required.
+                Must be at least 2. Default 2.
 
         Raises:
-            ValueError: If attrition_threshold not in [0, 1] or invalid scope.
+            ValueError: If attrition_threshold not in [0, 1], invalid
+                imputation_scope, or min_columns < 2.
         """
         # Validation des paramètres
         if not 0 <= attrition_threshold <= 1:
@@ -96,359 +114,461 @@ class ImputationWindowCalculator:
         self.attrition_threshold = attrition_threshold
         self.imputation_scope = imputation_scope
         self.min_columns = min_columns
-        self.exclude_delay_nans = exclude_delay_nans
 
-        # Attributs calculés (initialisés à None)
-        self.imputation_window_start_: Optional[pd.Timestamp] = None
-        self.imputation_window_end_: Optional[pd.Timestamp] = None
-        self.training_start_: Optional[pd.Timestamp] = None
-        self.training_end_: Optional[pd.Timestamp] = None
-        self.column_coverage_: Optional[Dict[str, Tuple[pd.Timestamp, pd.Timestamp]]] = None
-        self.attrition_by_date_: Optional[pd.Series] = None
-        self._data_columns: Optional[List[str]] = None
+        # Attributs calculés — scalaires pour TS, dict par entité pour panel
+        self.imputation_window_start_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
+        self.imputation_window_end_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
+        self.attrition_by_date_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
+        self.index_freq_: Optional[Union[str, Dict[tuple, Optional[str]]]] = None
+        self.column_coverage_: Optional[Dict[str, Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]]] = None
+
+        # Attributs internes
+        self._detected_frequencies: Optional[Dict] = None
+        self._is_panel: bool = False
         self._is_fitted: bool = False
 
-    # -------------------------------------------------------------------------
-    # Propriétés rétrocompatibles (deprecated)
-    # -------------------------------------------------------------------------
-    @property
-    def p1_start_(self) -> Optional[pd.Timestamp]:
-        """Start of imputation window (deprecated, use imputation_window_start_)."""
-        warnings.warn(
-            "p1_start_ is deprecated, use imputation_window_start_ instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.imputation_window_start_
+    # Méthode d'entraînement du calculateur
+    def fit(self, data: pd.DataFrame) -> 'ImputationWindowCalculator':
+        """Calculate the imputation and training windows from data.
 
-    @p1_start_.setter
-    def p1_start_(self, value: Optional[pd.Timestamp]) -> None:
-        self.imputation_window_start_ = value
-
-    @property
-    def p1_end_(self) -> Optional[pd.Timestamp]:
-        """End of imputation window (deprecated, use imputation_window_end_)."""
-        warnings.warn(
-            "p1_end_ is deprecated, use imputation_window_end_ instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.imputation_window_end_
-
-    @p1_end_.setter
-    def p1_end_(self, value: Optional[pd.Timestamp]) -> None:
-        self.imputation_window_end_ = value
-
-    # -------------------------------------------------------------------------
-    # Fit
-    # -------------------------------------------------------------------------
-    def fit(
-        self,
-        data: pd.DataFrame,
-        delays: Optional[pd.DataFrame] = None,
-        panel_cols: Optional[List[str]] = None
-    ) -> 'ImputationWindowCalculator':
-        """Calculate the imputation window and extended training window from data.
+        Detects column frequencies, builds a coverage matrix at the
+        highest detected frequency, then computes the strict window
+        (all columns covered) and the scope-extended training window.
 
         Args:
-            data: DataFrame with DatetimeIndex containing the series to analyze.
-            delays: Optional DataFrame with publication delay information.
-                Expected columns: 'variable', 'delay', 'unit', 'reference_point'.
-                If provided and exclude_delay_nans=True, trailing NaNs due to
-                delays are excluded from the coverage calculation.
-            panel_cols: List of column names identifying panel entities.
-                These columns are excluded from window calculation.
+            data: DataFrame with DatetimeIndex (time series) or MultiIndex
+                where the last level is time and earlier levels identify
+                panel entities.
 
         Returns:
             self: The fitted calculator.
 
         Raises:
-            ValueError: If data is invalid, has insufficient columns, or no
-                imputation window exists.
+            ValueError: If data is invalid, has too few columns, or no
+                valid imputation window exists.
 
         Examples:
-            >>> calculator = ImputationWindowCalculator()
-            >>> calculator.fit(data)
-            >>> print(calculator.imputation_window_start_, calculator.imputation_window_end_)
+            >>> calc = ImputationWindowCalculator()
+            >>> calc.fit(data)
+            >>> print(calc.imputation_window_start_, calc.imputation_window_end_)
         """
         # Validation des données d'entrée
         if not isinstance(data, pd.DataFrame):
             raise ValueError(f"data must be a pandas DataFrame, got {type(data).__name__}")
         if data.empty:
             raise ValueError("data cannot be empty")
-
-        # Vérification de l'index temporel
         if not isinstance(data.index, (pd.DatetimeIndex, pd.MultiIndex)):
             raise ValueError("data must have a DatetimeIndex or MultiIndex with datetime level")
 
-        # Détermination des colonnes de données (exclusion des colonnes de panel)
-        if panel_cols:
-            self._data_columns = [col for col in data.columns if col not in panel_cols]
+        # Détection du type de données (panel ou séries temporelles)
+        self._is_panel = isinstance(data.index, pd.MultiIndex)
+
+        # Vérification du nombre minimal de colonnes
+        if len(data.columns) < self.min_columns:
+            raise ValueError(
+                f"Data has {len(data.columns)} columns, but min_columns={self.min_columns}"
+            )
+
+        # Détection des fréquences par colonne (et par entité pour panel)
+        self._detected_frequencies = detect_dataset_frequency(data)
+        # Détection de la fréquence de l'index
+        self.index_freq_ = detect_index_frequency(data.index)
+
+        # Calcul des fenêtres selon le type de données
+        if self._is_panel:
+            self._fit_panel(data)
         else:
-            self._data_columns = list(data.columns)
+            self._fit_ts(data)
 
-        # Vérification du nombre minimum de colonnes
-        if len(self._data_columns) < self.min_columns:
-            raise ValueError(
-                f"Data has {len(self._data_columns)} columns, but min_columns={self.min_columns}"
+        self._is_fitted = True
+        return self
+
+    # Méthode auxiliaire d'estimation de la fenêtre sur des données de séries temporelles
+    def _fit_ts(self, data: pd.DataFrame) -> None:
+        """Compute windows for time series data (DatetimeIndex)."""
+        # Fréquence la plus élevée parmi toutes les colonnes
+        valid_freqs = [f for f in self._detected_frequencies.values() if f is not None]
+        if not valid_freqs:
+            raise ValueError("Cannot detect any column frequency in the data")
+        
+        # Calcul de la fenêtre pour l'unique entité TS
+        result = self._compute_window(data, self._detected_frequencies, self.index_freq_)
+
+        # Valorisation des attributs
+        self.imputation_window_start_ = result['imputation_start']
+        self.imputation_window_end_ = result['imputation_end']
+        self.attrition_by_date_ = result['attrition']
+        self.column_coverage_ = result['column_coverage']
+
+    # Méthode auxiliaire d'estimation de la fenêtre sur des données de panel
+    def _fit_panel(self, data: pd.DataFrame) -> None:
+        """Compute per-entity windows for panel data (MultiIndex)."""
+        # Extraction des entités des données
+        entities = get_unique_panel_entities(data)
+
+        # Initialisation des dictionnaires de résultats
+        self.imputation_window_start_ = {}
+        self.imputation_window_end_ = {}
+        self.attrition_by_date_ = {}
+        self.column_coverage_ = {}
+
+        # Parcours des entités
+        for entity in entities:
+            # Extraction du sous-DataFrame de l'entité avec index temporel simple
+            entity_row_mask = self._get_entity_row_mask(data, entity)
+            entity_df = data[entity_row_mask].copy()
+            entity_df.index = entity_df.index.get_level_values(-1)
+
+            # Fréquences des colonnes pour cette entité
+            col_freqs = {
+                col: self._detected_frequencies.get(entity + (col,))
+                for col in data.columns
+            }
+
+            # Cas où la fréquence de l'index n'a pas pu être identifié
+            if self.index_freq_[entity] is None:
+                self.imputation_window_start_[entity] = None
+                self.imputation_window_end_[entity] = None
+                self.attrition_by_date_[entity] = None
+                continue
+            
+            # Calcul de la fenêtre d'imputation
+            result = self._compute_window(entity_df, col_freqs, self.index_freq_[entity])
+
+            # Complétion des dictionnaires
+            self.imputation_window_start_[entity] = result['imputation_start']
+            self.imputation_window_end_[entity] = result['imputation_end']
+            self.attrition_by_date_[entity] = result['attrition']
+            self.column_coverage_ = result['column_coverage']
+
+        # Vérification qu'au moins une entité a une fenêtre valide
+        valid_starts = [v for v in self.imputation_window_start_.values() if v is not None]
+        if not valid_starts:
+            raise ValueError("No imputation window found for any entity in the panel")
+
+    # Méthode auxiliaire permettant d'extraire des observations relatives à une entité du panel
+    def _get_entity_row_mask(self, data: pd.DataFrame, entity: tuple) -> np.ndarray:
+        """Build a boolean row mask selecting the given entity from panel data.
+
+        Args:
+            data: Panel DataFrame with MultiIndex.
+            entity: Normalized entity key tuple.
+
+        Returns:
+            Boolean numpy array of length len(data).
+        """
+        # Initialisation du masque
+        mask = np.ones(len(data), dtype=bool)
+        # Parcours des éléments définissant l'entité
+        for i, val in enumerate(entity):
+            # Mise à jour du masque
+            mask &= (data.index.get_level_values(i) == val)
+        return mask
+
+    # Méthode auxiliaire de la fenêtre pour une série temporelle
+    def _compute_window(
+        self,
+        df: pd.DataFrame,
+        col_freqs: Dict[str, Optional[str]],
+        index_freq: str,
+    ) -> Dict:
+        """Compute the imputation and training windows for one entity.
+
+        Args:
+            df: DataFrame with simple DatetimeIndex for the entity.
+            col_freqs: Dict mapping column names to detected frequencies.
+            index_freq: Highest (most granular) frequency for this
+                entity, used as the reference grid frequency.
+
+        Returns:
+            Dict with keys: 'imputation_start', 'imputation_end',
+            'attrition', 'column_coverage'.
+        """
+        # Initialisation du dictionnaire résultat par défaut
+        _none_result = {
+            'imputation_start': None, 'imputation_end': None,
+            'attrition': None, 'column_coverage': None,
+        }
+
+        # Construction de la grille haute fréquence de référence
+        grid = self._build_index_freq_grid(df, col_freqs, index_freq)
+
+        # Cas où la grille est vide
+        if grid is None or len(grid) == 0:
+            return _none_result
+
+        # Construction de la matrice de couverture booléenne
+        coverage_matrix = self._build_coverage_matrix(df, col_freqs, grid, index_freq)
+
+        # Calcul de l'attrition (proportion de colonnes couvertes par date)
+        attrition = coverage_matrix.mean(axis=1)
+
+        # Extraction de la couverture par colonne (premier/dernier True dans la grille)
+        column_coverage = {}
+        for col in coverage_matrix.columns:
+            col_bool = np.asarray(coverage_matrix[col], dtype=bool)
+            covered_grid_dates = grid[col_bool]
+            if len(covered_grid_dates) > 0:
+                column_coverage[col] = (covered_grid_dates[0], covered_grid_dates[-1])
+            else:
+                column_coverage[col] = (None, None)
+
+        # Détermination de la fenêtre stricte (attrition == 1.0)
+        # Utilisation d'un seuil légèrement inférieur à 1.0 pour les erreurs d'arrondis
+        strict_mask = attrition >= (1.0 - 1e-10)
+        strict_indices = np.where(np.asarray(strict_mask, dtype=bool))[0]
+
+        # Cas où pour aucune période l'ensemble des variables sont disponibles simultanément
+        if len(strict_indices) == 0:
+            warnings.warn(
+                "There is no period in the DataFrame where all the variables are available.",
+                UserWarning
             )
 
-        # Extraction du DataFrame avec uniquement les colonnes de données
-        data_subset = data[self._data_columns]
+        # Initialisation des bornes à celles de la période stricte
+        window_start = grid[strict_indices[0]]
+        window_end = grid[strict_indices[-1]]
 
-        # Calcul de la couverture temporelle par colonne
-        self.column_coverage_ = self._compute_column_coverage(data_subset, delays)
+        # Calcul de la fenêtre d'entraînement selon imputation_scope
+        if self.imputation_scope in ('extended_backward', 'extended_both'):
+            window_start = self._extend_backward(attrition, window_start)
 
-        # Calcul de l'attrition par date
-        self.attrition_by_date_ = self._compute_attrition_by_date(data_subset, delays)
-
-        # Calcul de la fenêtre d'imputation (intersection complète)
-        self.imputation_window_start_, self.imputation_window_end_ = self._compute_imputation_window()
-
-        # Vérification de l'existence de la fenêtre
-        if self.imputation_window_start_ is None or self.imputation_window_end_ is None:
-            raise ValueError(
-                "No imputation window found: there is no time range where all series have data"
-            )
-
-        # Vérification que la fenêtre n'est pas trop courte
-        if self.imputation_window_start_ == self.imputation_window_end_:
+        if self.imputation_scope in ('extended_forward', 'extended_both'):
+            window_end = self._extend_forward(attrition, window_end)
+        
+        # Cas où la fenêtre ne contient qu'une seule observation
+        if window_start == window_end:
             warnings.warn(
                 "Imputation window contains only one observation. Consider relaxing "
                 "constraints or using a different imputation_scope.",
                 UserWarning
             )
+        
+        # Vérification de la contiguïté de la fenêtre stricte
+        if len(strict_indices) > 1:
+            gaps = np.diff(strict_indices)
+            if np.any(gaps > 1):
+                warnings.warn(
+                    "The strict imputation window is not contiguous: there are gaps where "
+                    "not all columns have data. Reporting [first, last] bounds.",
+                    UserWarning
+                )
 
-        # Calcul de la fenêtre d'entraînement étendue
-        self.training_start_, self.training_end_ = self._compute_training_window()
+        return {
+            'imputation_start': window_start,
+            'imputation_end': window_end,
+            'attrition': attrition,
+            'column_coverage': column_coverage,
+        }
 
-        # Marquage comme ajusté
-        self._is_fitted = True
-
-        return self
-
-    # -------------------------------------------------------------------------
-    # Méthodes privées de calcul
-    # -------------------------------------------------------------------------
-    def _compute_column_coverage(
+    # Construction de la grille à l'indice de la fréquence pour le calcul de la couverture
+    def _build_index_freq_grid(
         self,
-        data: pd.DataFrame,
-        delays: Optional[pd.DataFrame] = None
-    ) -> Dict[str, Tuple[pd.Timestamp, pd.Timestamp]]:
-        """Compute the temporal coverage for each column.
+        df: pd.DataFrame,
+        col_freqs: Dict[str, Optional[str]],
+        index_freq: str,
+    ) -> Optional[pd.DatetimeIndex]:
+        """Build the reference high-frequency date grid for coverage computation.
+
+        The grid spans from the earliest period start to the latest period
+        end across all non-NaN observations. Period boundaries are computed
+        using get_period_start/get_period_end, so a quarterly observation
+        expands the grid to cover all three constituent months.
 
         Args:
-            data: DataFrame to analyze.
-            delays: Optional delay information.
+            df: Entity sub-DataFrame with simple DatetimeIndex.
+            col_freqs: Dict mapping column names to frequencies.
+            index_freq: Highest (most granular) frequency code.
 
         Returns:
-            Dict mapping column names to (start, end) coverage timestamps.
+            pd.DatetimeIndex grid, or None if no data.
         """
-        coverage = {}
+        # Calcul des bornes de la grille en étendant chaque observation sur la période qu'elle couvre
+        # Initialisation des listes de début et de fin de période
+        expanded_starts = []
+        expanded_ends = []
 
-        # Extraction de l'index temporel
-        if isinstance(data.index, pd.MultiIndex):
-            time_index = data.index.get_level_values(-1)
-        else:
-            time_index = data.index
+        # Parcours des colonnes du jeu de données
+        for col in df.columns:
+            # Extraction de la fréquence de 
+            col_freq = col_freqs.get(col) or index_freq
+            # Extraction des observations valides (i.e. non null)
+            valid = df[col].dropna()
+            if len(valid) == 0:
+                continue
+            # Parcours des dates de l'index
+            for d in valid.index:
+                # Extraction des débuts et fin de période
+                expanded_starts.append(pd.Timestamp(get_period_start(d, col_freq)))
+                expanded_ends.append(pd.Timestamp(get_period_end(d, col_freq)))
 
-        for col in data.columns:
-            series = data[col]
-            non_null_mask = series.notna()
+        # Cas au la liste est vide
+        if not expanded_starts:
+            return None
 
-            # Exclusion des NaN dus aux délais si demandé
-            if self.exclude_delay_nans and delays is not None:
-                non_null_mask = self._exclude_delay_nans(series, delays, non_null_mask)
+        # Initialisation de des dates de début et de fin de grille
+        # Début de la grille
+        grid_start = min(expanded_starts)
+        # Fin de la grille
+        # get_period_end est exclusif (borne supérieure exclue)
+        # pd.date_range avec cette borne inclura jusqu'au dernier point avant cette date
+        grid_end_exclusive = max(expanded_ends)
 
-            if non_null_mask.any():
-                valid_dates = time_index[non_null_mask]
-                coverage[col] = (valid_dates.min(), valid_dates.max())
-            else:
-                coverage[col] = (None, None)
+        # Détection de la position (S/E) à partir des colonnes à la fréquence la plus élevée
+        # Extraction des colonnes à haute fréquence
+        hf_cols = [col for col in df.columns if col_freqs.get(col) == index_freq]
+        # Initialisation de la position
+        hf_pos = 'E'  # convention par défaut : fin de période
+        if hf_cols:
+            # Extraction des dates
+            hf_dates = df[hf_cols[0]].dropna().index
+            if len(hf_dates) >= 2:
+                # Détection de la position
+                try:
+                    _, pos, _ = detect_and_parse_index_frequency(
+                        cast(pd.DatetimeIndex, hf_dates)
+                    )
+                    if pos is not None:
+                        hf_pos = pos
+                except Exception:
+                    pass
+
+        # Construction de l'offset pandas complet (fréquence + position)
+        try:
+            grid_offset = combine_frequency_position(
+                index_freq, hf_pos  # type: ignore[arg-type]
+            )
+        except Exception:
+            grid_offset = index_freq
+
+        # Génération de la grille
+        try:
+            grid = pd.date_range(start=grid_start, end=grid_end_exclusive, freq=grid_offset)
+        except Exception:
+            # Fallback sans position si l'offset est invalide
+            try:
+                grid = pd.date_range(start=grid_start, end=grid_end_exclusive, freq=index_freq)
+            except Exception:
+                return None
+
+        return grid
+
+    # Méthode auxiliaire de construction de la matrice de couverture
+    def _build_coverage_matrix(
+        self,
+        df: pd.DataFrame,
+        col_freqs: Dict[str, Optional[str]],
+        grid: pd.DatetimeIndex,
+        index_freq: str,
+    ) -> pd.DataFrame:
+        """Build the boolean coverage matrix at the high-frequency grid.
+
+        Each cell (date, column) is True if the column has a non-NaN
+        observation whose period contains that grid date.
+
+        Args:
+            df: Entity sub-DataFrame with simple DatetimeIndex.
+            col_freqs: Dict mapping column names to frequencies.
+            grid: Reference high-frequency DatetimeIndex.
+            index_freq: Highest (most granular) frequency code.
+
+        Returns:
+            Boolean DataFrame with grid as index and columns as columns.
+        """
+        # Initialisation de la matrice de couverture
+        coverage = pd.DataFrame(False, index=grid, columns=df.columns)
+
+        for col in entity_df.columns:
+            col_freq = col_freqs.get(col) or index_freq
+            valid = entity_df[col].dropna()
+            if len(valid) == 0:
+                continue
+
+            col_mask = np.zeros(len(grid), dtype=bool)
+            for d in valid.index:
+                p_start = pd.Timestamp(get_period_start(d, col_freq))  # type: ignore[arg-type]
+                p_end = pd.Timestamp(get_period_end(d, col_freq))  # type: ignore[arg-type]
+                # Convention [p_start, p_end) : p_end est exclusif
+                col_mask |= np.asarray((grid >= p_start) & (grid < p_end), dtype=bool)
+
+            coverage[col] = col_mask
 
         return coverage
 
-    def _exclude_delay_nans(
+    def _extend_backward(
         self,
-        series: pd.Series,
-        delays: pd.DataFrame,
-        mask: pd.Series
-    ) -> pd.Series:
-        """Exclude trailing NaN values attributable to publication delays.
+        attrition: pd.Series,
+        window_start: pd.Timestamp,
+    ) -> pd.Timestamp:
+        """Extend the window start backward where attrition meets threshold.
+
+        The extension searches only before window_start. The upper bound
+        of the backward extension region is window_start itself.
 
         Args:
-            series: Series to analyze.
-            delays: DataFrame with delay information.
-            mask: Current non-null mask.
+            attrition: Attrition series on the high-freq grid.
+            window_start: Current strict window start (upper limit of extension).
 
         Returns:
-            Updated mask excluding delay-related NaN positions.
+            New (earlier or equal) start timestamp.
         """
-        col_name = series.name
-        col_delay = delays[delays['variable'] == col_name]
-
-        if col_delay.empty:
-            return mask
-
-        delay_value = col_delay.iloc[0]['delay']
-        delay_unit = col_delay.iloc[0].get('unit', 'periods')
-        ref_point = col_delay.iloc[0].get('reference_point', 'end')
-
-        if delay_unit == 'periods' and ref_point == 'end':
-            n_delay = int(delay_value)
-            if n_delay > 0 and len(series) > n_delay:
-                pass
-
-        return mask
-
-    def _compute_attrition_by_date(
-        self,
-        data: pd.DataFrame,
-        delays: Optional[pd.DataFrame] = None
-    ) -> pd.Series:
-        """Compute the ratio of columns with data at each date.
-
-        Args:
-            data: DataFrame to analyze.
-            delays: Optional delay information.
-
-        Returns:
-            Series indexed by date with ratio of columns having data.
-        """
-        non_null_counts = data.notna().sum(axis=1)
-        total_columns = len(data.columns)
-        return non_null_counts / total_columns
-
-    def _compute_imputation_window(self) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-        """Compute the imputation window (where all series have data).
-
-        Returns:
-            Tuple (start, end), or (None, None) if no window exists.
-        """
-        if not self.column_coverage_:
-            return None, None
-
-        starts = []
-        ends = []
-
-        for col, (start, end) in self.column_coverage_.items():
-            if start is None or end is None:
-                return None, None
-            starts.append(start)
-            ends.append(end)
-
-        # Intersection : début = max des débuts, fin = min des fins
-        window_start = max(starts)
-        window_end = min(ends)
-
-        if window_start > window_end:
-            return None, None
-
-        return window_start, window_end
-
-    # Alias rétrocompatible (deprecated)
-    def _compute_p1_window(self) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-        """Compute the imputation window (deprecated, use _compute_imputation_window)."""
-        warnings.warn(
-            "_compute_p1_window is deprecated, use _compute_imputation_window instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self._compute_imputation_window()
-
-    def _compute_training_window(self) -> Tuple[pd.Timestamp, pd.Timestamp]:
-        """Compute the extended training window based on imputation_scope.
-
-        Returns:
-            Tuple (start, end) of the training window.
-        """
-        training_start = self.imputation_window_start_
-        training_end = self.imputation_window_end_
-
-        if self.imputation_scope == 'strict':
-            return training_start, training_end
-
-        if self.imputation_scope in ('extended_backward', 'extended_both'):
-            training_start = self._extend_window_backward()
-
-        if self.imputation_scope in ('extended_forward', 'extended_both'):
-            training_end = self._extend_window_forward()
-
-        return training_start, training_end
-
-    def _extend_window_backward(self) -> pd.Timestamp:
-        """Extend the window backward where attrition threshold is met.
-
-        Returns:
-            New start timestamp.
-        """
-        if self.attrition_by_date_ is None:
-            return self.imputation_window_start_
-
-        before = self.attrition_by_date_[
-            self.attrition_by_date_.index < self.imputation_window_start_
-        ]
-
+        before = attrition[attrition.index < window_start]
         if before.empty:
-            return self.imputation_window_start_
+            return window_start
+        valid = before[before >= self.attrition_threshold]
+        if valid.empty:
+            return window_start
+        return valid.index.min()
 
-        valid_dates = before[before >= self.attrition_threshold]
+    def _extend_forward(
+        self,
+        attrition: pd.Series,
+        window_end: pd.Timestamp,
+    ) -> pd.Timestamp:
+        """Extend the window end forward where attrition meets threshold.
 
-        if valid_dates.empty:
-            return self.imputation_window_start_
+        The extension searches only after window_end. The lower bound
+        of the forward extension region is window_end itself.
 
-        # Extension jusqu'à la date la plus ancienne respectant le seuil
-        sorted_dates = valid_dates.sort_index(ascending=False)
-
-        extended_start = self.imputation_window_start_
-        for date in sorted_dates.index:
-            extended_start = date
-
-        return sorted_dates.index[-1]
-
-    def _extend_window_forward(self) -> pd.Timestamp:
-        """Extend the window forward where attrition threshold is met.
+        Args:
+            attrition: Attrition series on the high-freq grid.
+            window_end: Current strict window end (lower limit of extension).
 
         Returns:
-            New end timestamp.
+            New (later or equal) end timestamp.
         """
-        if self.attrition_by_date_ is None:
-            return self.imputation_window_end_
-
-        after = self.attrition_by_date_[
-            self.attrition_by_date_.index > self.imputation_window_end_
-        ]
-
+        after = attrition[attrition.index > window_end]
         if after.empty:
-            return self.imputation_window_end_
-
-        valid_dates = after[after >= self.attrition_threshold]
-
-        if valid_dates.empty:
-            return self.imputation_window_end_
-
-        return valid_dates.index[-1]
+            return window_end
+        valid = after[after >= self.attrition_threshold]
+        if valid.empty:
+            return window_end
+        return valid.index.max()
 
     # -------------------------------------------------------------------------
     # Masques publics
     # -------------------------------------------------------------------------
+
     def get_training_mask(
         self,
         data: pd.DataFrame,
-        column: Optional[str] = None
+        column: Optional[str] = None,
     ) -> pd.Series:
         """Get a boolean mask for observations in the training window.
+
+        The training window is the scope-extended window (or the strict
+        window when imputation_scope='strict').
 
         Args:
             data: DataFrame to create mask for.
             column: Optional column name. If provided, also filters for
-                non-null values.
+                non-null values in that column.
 
         Returns:
-            Boolean Series indicating observations in the training window.
+            Boolean Series aligned with data.index.
 
         Raises:
-            ValueError: If calculator not fitted.
+            ValueError: If calculator not fitted or column not found.
 
         Examples:
             >>> mask = calculator.get_training_mask(data)
@@ -457,29 +577,35 @@ class ImputationWindowCalculator:
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
-        if isinstance(data.index, pd.MultiIndex):
-            time_index = data.index.get_level_values(-1)
-        else:
-            time_index = data.index
+        if column is not None and column not in data.columns:
+            raise ValueError(f"Column '{column}' not found in data")
 
+        if self._is_panel:
+            return self._get_panel_temporal_mask(
+                data, use_training=True, column=column
+            )
+
+        # Cas séries temporelles
+        time_index = data.index
         mask = (time_index >= self.training_start_) & (time_index <= self.training_end_)
         mask = pd.Series(mask, index=data.index)
 
         if column is not None:
-            if column not in data.columns:
-                raise ValueError(f"Column '{column}' not found in data")
             mask = mask & data[column].notna()
 
         return mask
 
     def get_imputation_window_mask(self, data: pd.DataFrame) -> pd.Series:
-        """Get a boolean mask for observations in the imputation window.
+        """Get a boolean mask for observations in the strict imputation window.
+
+        The strict window is the period where all columns have data
+        (attrition == 1.0), independent of imputation_scope.
 
         Args:
             data: DataFrame to create mask for.
 
         Returns:
-            Boolean Series indicating observations in the imputation window.
+            Boolean Series aligned with data.index.
 
         Raises:
             ValueError: If calculator not fitted.
@@ -487,26 +613,63 @@ class ImputationWindowCalculator:
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
-        if isinstance(data.index, pd.MultiIndex):
-            time_index = data.index.get_level_values(-1)
-        else:
-            time_index = data.index
+        if self._is_panel:
+            return self._get_panel_temporal_mask(data, use_training=False)
 
+        # Cas séries temporelles
+        time_index = data.index
         mask = (
             (time_index >= self.imputation_window_start_)
             & (time_index <= self.imputation_window_end_)
         )
         return pd.Series(mask, index=data.index)
 
-    # Alias rétrocompatible (deprecated)
-    def get_p1_mask(self, data: pd.DataFrame) -> pd.Series:
-        """Get mask for imputation window (deprecated, use get_imputation_window_mask)."""
-        warnings.warn(
-            "get_p1_mask is deprecated, use get_imputation_window_mask instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.get_imputation_window_mask(data)
+    def _get_panel_temporal_mask(
+        self,
+        data: pd.DataFrame,
+        use_training: bool,
+        column: Optional[str] = None,
+    ) -> pd.Series:
+        """Build a temporal mask for panel data using per-entity windows.
+
+        Args:
+            data: Panel DataFrame with MultiIndex.
+            use_training: If True, use training window; otherwise strict window.
+            column: Optional column for additional non-null filtering.
+
+        Returns:
+            Boolean Series aligned with data.index.
+        """
+        from ..panel.utils import get_unique_panel_entities
+
+        combined = pd.Series(False, index=data.index)
+        entities = get_unique_panel_entities(data)
+        time_vals = data.index.get_level_values(-1)
+
+        training_start_map = cast(Dict, self.training_start_)
+        training_end_map = cast(Dict, self.training_end_)
+        window_start_map = cast(Dict, self.imputation_window_start_)
+        window_end_map = cast(Dict, self.imputation_window_end_)
+
+        for entity in entities:
+            if use_training:
+                t_start = training_start_map.get(entity)
+                t_end = training_end_map.get(entity)
+            else:
+                t_start = window_start_map.get(entity)
+                t_end = window_end_map.get(entity)
+
+            if t_start is None or t_end is None:
+                continue
+
+            entity_row_mask = self._get_entity_row_mask(data, entity)
+            temporal_mask = (time_vals >= t_start) & (time_vals <= t_end)
+            combined = combined | (entity_row_mask & temporal_mask)
+
+        if column is not None:
+            combined = combined & data[column].notna()
+
+        return combined
 
     def get_mask_at_frequency(
         self,
@@ -514,56 +677,57 @@ class ImputationWindowCalculator:
         frequency: str,
         column: Optional[str] = None,
     ) -> pd.Series:
-        """Get imputation window mask resampled to a given frequency.
+        """Get the strict imputation window mask resampled to a lower frequency.
 
-        Useful when you need the imputation window at a frequency different
-        from the data's native frequency (e.g., checking if quarterly
-        observations fall inside a monthly-defined window).
+        A lower-frequency period is included in the mask only if ALL its
+        high-frequency sub-periods fall within the imputation window
+        (uses the 'all' aggregation method via FrequencyConverter).
+
+        Only supported for time series data (DatetimeIndex). For panel
+        data, raises ValueError.
 
         Args:
-            data: DataFrame to create mask for.
-            frequency: Target frequency for the mask (e.g., 'M', 'Q', 'D').
+            data: DataFrame with simple DatetimeIndex.
+            frequency: Target (lower) frequency offset string (e.g., 'QE', 'Y').
             column: Optional column name for additional non-null filtering.
 
         Returns:
-            Boolean Series at the target frequency indicating which periods
-            fall within the imputation window.
+            Boolean Series at the target frequency.
 
         Raises:
-            ValueError: If calculator not fitted.
+            ValueError: If calculator not fitted or data has MultiIndex.
+
+        Examples:
+            >>> monthly_calc.fit(data)
+            >>> quarterly_mask = monthly_calc.get_mask_at_frequency(data, 'QE')
         """
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
-        # Extraction de l'index temporel
         if isinstance(data.index, pd.MultiIndex):
-            time_index = data.index.get_level_values(-1)
-        else:
-            time_index = data.index
+            raise ValueError(
+                "get_mask_at_frequency is not supported for panel data (MultiIndex). "
+                "Use get_imputation_window_mask per entity instead."
+            )
 
-        # Création du masque à la fréquence d'origine
+        from ..utils.frequency.converter import FrequencyConverter
+
+        # Construction du masque booléen à la fréquence native
+        time_index = data.index
         mask = (
             (time_index >= self.imputation_window_start_)
             & (time_index <= self.imputation_window_end_)
         )
-        mask_series = pd.Series(mask.values, index=time_index)
+        mask_series = pd.Series(mask.astype(int), index=time_index)
 
         if column is not None and column in data.columns:
-            col_values = data[column]
-            if isinstance(data.index, pd.MultiIndex):
-                col_values = col_values.copy()
-                col_values.index = time_index
-            mask_series = mask_series & col_values.notna()
+            mask_series = mask_series & data[column].notna().astype(int)
 
-        # Rééchantillonnage à la fréquence cible (tout le groupe est True
-        # seulement si au moins une observation est dans la fenêtre)
-        from pandas.tseries.frequencies import to_offset
-        resampled = mask_series.resample(to_offset(frequency)).max()
+        # Agrégation vers la fréquence cible : True seulement si toutes les sous-périodes le sont
+        converter = FrequencyConverter()
+        resampled = converter.aggregate_to_lower_frequency(mask_series, frequency, method='all')
 
-        # Remplacement des NaN par False
-        resampled = resampled.fillna(False).astype(bool)
-
-        return resampled
+        return pd.Series(resampled.fillna(False), dtype=bool)
 
     def get_entity_training_mask(
         self,
@@ -573,12 +737,13 @@ class ImputationWindowCalculator:
     ) -> pd.Series:
         """Get training mask for a specific entity in panel data.
 
-        Combines the temporal training window with an entity-level filter.
+        Combines the temporal training window (per-entity aware) with an
+        entity-level row filter.
 
         Args:
             data: Full panel DataFrame.
             entity_mask: Boolean array selecting rows for the entity of
-                interest (typically from ``FrequencyAligner.get_entity_mask``).
+                interest (e.g., from FrequencyAligner.get_entity_mask).
             column: Optional column name for additional non-null filtering.
 
         Returns:
@@ -590,73 +755,27 @@ class ImputationWindowCalculator:
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
-        # Masque temporel de la fenêtre d'entraînement
         training_mask = self.get_training_mask(data, column=column)
-
-        # Combinaison avec le masque d'entité
         entity_series = pd.Series(entity_mask, index=data.index)
         return training_mask & entity_series
 
-    # -------------------------------------------------------------------------
-    # Info et repr
-    # -------------------------------------------------------------------------
-    def get_window_info(self) -> Dict[str, Union[pd.Timestamp, int, float]]:
-        """Get summary information about calculated windows.
-
-        Returns:
-            Dictionary with window information.
-
-        Raises:
-            ValueError: If calculator not fitted.
-        """
-        if not self._is_fitted:
-            raise ValueError("Calculator not fitted. Call fit() first.")
-
-        p1_duration = None
-        training_duration = None
-
-        if self.attrition_by_date_ is not None:
-            p1_mask = (
-                (self.attrition_by_date_.index >= self.imputation_window_start_)
-                & (self.attrition_by_date_.index <= self.imputation_window_end_)
-            )
-            p1_duration = p1_mask.sum()
-
-            training_mask = (
-                (self.attrition_by_date_.index >= self.training_start_)
-                & (self.attrition_by_date_.index <= self.training_end_)
-            )
-            training_duration = training_mask.sum()
-
-        return {
-            'imputation_window_start': self.imputation_window_start_,
-            'imputation_window_end': self.imputation_window_end_,
-            'imputation_window_duration': p1_duration,
-            'training_start': self.training_start_,
-            'training_end': self.training_end_,
-            'training_duration': training_duration,
-            'attrition_threshold': self.attrition_threshold,
-            'imputation_scope': self.imputation_scope,
-            'n_columns': len(self._data_columns) if self._data_columns else 0,
-            # Rétrocompatibilité
-            'p1_start': self.imputation_window_start_,
-            'p1_end': self.imputation_window_end_,
-            'p1_duration': p1_duration,
-        }
 
     def get_columns_with_coverage(
         self,
         start: pd.Timestamp,
-        end: pd.Timestamp
+        end: pd.Timestamp,
     ) -> List[str]:
-        """Get list of columns that have coverage for a given time range.
+        """Get list of columns that have coverage in a given time range.
+
+        Only supported for time series data. Uses the first and last dates
+        where the column contributes True values to the coverage matrix.
 
         Args:
-            start: Start of the time range.
-            end: End of the time range.
+            start: Start of the query range.
+            end: End of the query range.
 
         Returns:
-            List of column names with data in the specified range.
+            List of column names with coverage overlapping [start, end].
 
         Raises:
             ValueError: If calculator not fitted.
@@ -664,26 +783,15 @@ class ImputationWindowCalculator:
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
-        columns_with_coverage = []
+        if self.column_coverage_ is None:
+            return []
 
+        columns_with_coverage = []
         for col, (col_start, col_end) in self.column_coverage_.items():
             if col_start is None or col_end is None:
                 continue
+            # Chevauchement si col_start <= end ET col_end >= start
             if col_start <= end and col_end >= start:
                 columns_with_coverage.append(col)
 
         return columns_with_coverage
-
-    def __repr__(self) -> str:
-        """String representation of the calculator."""
-        if not self._is_fitted:
-            return (
-                f"ImputationWindowCalculator(attrition_threshold={self.attrition_threshold}, "
-                f"imputation_scope='{self.imputation_scope}', not fitted)"
-            )
-
-        return (
-            f"ImputationWindowCalculator("
-            f"window=[{self.imputation_window_start_}, {self.imputation_window_end_}], "
-            f"training=[{self.training_start_}, {self.training_end_}])"
-        )

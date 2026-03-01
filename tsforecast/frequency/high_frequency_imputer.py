@@ -1089,12 +1089,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             attrition_threshold=self.attrition_threshold,
             imputation_scope=self.imputation_scope,
             min_columns=2,
-            exclude_delay_nans=True
         )
         try:
-            self._imputation_window_calc.fit(
-                X_work, delays=self.delays, panel_cols=self.panel_cols
-            )
+            self._imputation_window_calc.fit(X_work)
             self.imputation_window_ = (
                 self._imputation_window_calc.imputation_window_start_,
                 self._imputation_window_calc.imputation_window_end_
