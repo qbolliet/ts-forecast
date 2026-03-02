@@ -478,23 +478,30 @@ class ImputationWindowCalculator:
         # Initialisation de la matrice de couverture
         coverage = pd.DataFrame(False, index=grid, columns=df.columns)
 
-        for col in entity_df.columns:
+        # Parcours des colonnes
+        for col in df.columns:
+            # Extraction de la fréquence des colonnes
             col_freq = col_freqs.get(col) or index_freq
-            valid = entity_df[col].dropna()
+            # Extraction des observations non nulles
+            valid = df[col].dropna()
             if len(valid) == 0:
                 continue
-
+            # Initialisation du masque de la colonne
             col_mask = np.zeros(len(grid), dtype=bool)
+            # Parcours des dates associées aux observations non nulles
             for d in valid.index:
-                p_start = pd.Timestamp(get_period_start(d, col_freq))  # type: ignore[arg-type]
-                p_end = pd.Timestamp(get_period_end(d, col_freq))  # type: ignore[arg-type]
+                # Détermination des bornes de la période
+                p_start = pd.Timestamp(get_period_start(d, col_freq))
+                p_end = pd.Timestamp(get_period_end(d, col_freq))
                 # Convention [p_start, p_end) : p_end est exclusif
+                # Mise à jour du mask
                 col_mask |= np.asarray((grid >= p_start) & (grid < p_end), dtype=bool)
-
+            # Ajout du masque associé à la colonne
             coverage[col] = col_mask
 
         return coverage
 
+    # Méthode auxiliaire d'extension de la fenêtre d'imputation avant le début de la période stricte
     def _extend_backward(
         self,
         attrition: pd.Series,
@@ -512,14 +519,20 @@ class ImputationWindowCalculator:
         Returns:
             New (earlier or equal) start timestamp.
         """
+        # Extraction des observations de la série d'attrition antérieures au début de la fenêtre stricte
         before = attrition[attrition.index < window_start]
+        # Si le début de la fenêtre stricte correspond au début de la série, la borne est inchangée
         if before.empty:
             return window_start
+        # Extraction des observations pour lesquelles l'attrition est supérieure au seuil
         valid = before[before >= self.attrition_threshold]
+        # Si aucune observation n'a une attrition supérieure au seuil, la borne stricte est conservée
         if valid.empty:
             return window_start
+        # Retourne le minimum des observations valides
         return valid.index.min()
 
+    # Méthode auxiliaire d'extension de la fenêtre d'imputation après la fin de la période stricte
     def _extend_forward(
         self,
         attrition: pd.Series,
@@ -537,63 +550,19 @@ class ImputationWindowCalculator:
         Returns:
             New (later or equal) end timestamp.
         """
+        # Extraction des observations de la série d'attrition postérieures à la fin de la fenêtre stricte
         after = attrition[attrition.index > window_end]
+        # Si la fin de la fenêtre stricte correspond à la fin de la série, la borne est inchangée
         if after.empty:
             return window_end
+        # Extraction des observations pour lesquelles l'attrition est supérieure au seuil
         valid = after[after >= self.attrition_threshold]
+        # Si aucune observation n'a une attrition supérieure au seuil, la borne stricte est conservée
         if valid.empty:
             return window_end
+        # Retourne le maximum des observations valides
         return valid.index.max()
 
-    # -------------------------------------------------------------------------
-    # Masques publics
-    # -------------------------------------------------------------------------
-
-    def get_training_mask(
-        self,
-        data: pd.DataFrame,
-        column: Optional[str] = None,
-    ) -> pd.Series:
-        """Get a boolean mask for observations in the training window.
-
-        The training window is the scope-extended window (or the strict
-        window when imputation_scope='strict').
-
-        Args:
-            data: DataFrame to create mask for.
-            column: Optional column name. If provided, also filters for
-                non-null values in that column.
-
-        Returns:
-            Boolean Series aligned with data.index.
-
-        Raises:
-            ValueError: If calculator not fitted or column not found.
-
-        Examples:
-            >>> mask = calculator.get_training_mask(data)
-            >>> train_data = data[mask]
-        """
-        if not self._is_fitted:
-            raise ValueError("Calculator not fitted. Call fit() first.")
-
-        if column is not None and column not in data.columns:
-            raise ValueError(f"Column '{column}' not found in data")
-
-        if self._is_panel:
-            return self._get_panel_temporal_mask(
-                data, use_training=True, column=column
-            )
-
-        # Cas séries temporelles
-        time_index = data.index
-        mask = (time_index >= self.training_start_) & (time_index <= self.training_end_)
-        mask = pd.Series(mask, index=data.index)
-
-        if column is not None:
-            mask = mask & data[column].notna()
-
-        return mask
 
     def get_imputation_window_mask(self, data: pd.DataFrame) -> pd.Series:
         """Get a boolean mask for observations in the strict imputation window.
@@ -729,37 +698,7 @@ class ImputationWindowCalculator:
 
         return pd.Series(resampled.fillna(False), dtype=bool)
 
-    def get_entity_training_mask(
-        self,
-        data: pd.DataFrame,
-        entity_mask: np.ndarray,
-        column: Optional[str] = None,
-    ) -> pd.Series:
-        """Get training mask for a specific entity in panel data.
-
-        Combines the temporal training window (per-entity aware) with an
-        entity-level row filter.
-
-        Args:
-            data: Full panel DataFrame.
-            entity_mask: Boolean array selecting rows for the entity of
-                interest (e.g., from FrequencyAligner.get_entity_mask).
-            column: Optional column name for additional non-null filtering.
-
-        Returns:
-            Boolean Series indicating training observations for the entity.
-
-        Raises:
-            ValueError: If calculator not fitted.
-        """
-        if not self._is_fitted:
-            raise ValueError("Calculator not fitted. Call fit() first.")
-
-        training_mask = self.get_training_mask(data, column=column)
-        entity_series = pd.Series(entity_mask, index=data.index)
-        return training_mask & entity_series
-
-
+    # Méthode d'extrction de la couverture associée à chaque série
     def get_columns_with_coverage(
         self,
         start: pd.Timestamp,
@@ -780,14 +719,19 @@ class ImputationWindowCalculator:
         Raises:
             ValueError: If calculator not fitted.
         """
+        # Vérification que le calculateur est estimé
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
+        # Cas où la couverture des colonnes n'es
         if self.column_coverage_ is None:
             return []
 
+        # Initialisation de la liste résultat
         columns_with_coverage = []
+        # Parcours des colonnes
         for col, (col_start, col_end) in self.column_coverage_.items():
+            # Identification des colonnes avec une couverture non nulle
             if col_start is None or col_end is None:
                 continue
             # Chevauchement si col_start <= end ET col_end >= start
