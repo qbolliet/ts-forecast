@@ -15,6 +15,7 @@ from ..abc.converter import TemporalConverter
 from .normalizer import FrequencyType, UserFrequencyType
 from .utils import normalize_frequency, is_higher_frequency, get_frequency_order
 from ..validation import validate_temporal_data
+from ..parse import parse_frequency
 
 # Import de l'utilitaire de gestion des positions
 from ..position.normalizer import PeriodPositionNormalizer
@@ -218,7 +219,6 @@ class FrequencyConverter(TemporalConverter):
                     limit=limit,
                     limit_direction=limit_direction,
                     limit_area=limit_area,
-                    target_position=final_position
                 )
             else:
                 return self._downsample(
@@ -405,8 +405,7 @@ class FrequencyConverter(TemporalConverter):
                                       method: InterpolationMethod = 'linear',
                                       limit: Union[int, str, None] = None,
                                       limit_direction: Optional[Literal['forward', 'backward', 'both']] = None,
-                                      limit_area: Optional[Literal['inside', 'outside']] = None,
-                                      target_position: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
+                                      limit_area: Optional[Literal['inside', 'outside']] = None) -> Union[pd.Series, pd.DataFrame]:
         """Interpolate data to a higher frequency using asfreq.
 
         Args:
@@ -426,9 +425,6 @@ class FrequencyConverter(TemporalConverter):
                 fills only NaN surrounded by valid values, ``'outside'`` fills
                 only NaN outside valid values. See
                 :meth:`pandas.DataFrame.interpolate` for details.
-            target_position: Position of the target frequency (``'S'``,
-                ``'E'``, ``'start'``, ``'end'``). Used to infer the default
-                ``limit_direction`` when not explicitly provided.
 
         Returns:
             Interpolated time series data
@@ -442,6 +438,8 @@ class FrequencyConverter(TemporalConverter):
             >>> len(daily) > len(monthly_series)
             True
         """
+        # Extraction de la position
+        _, target_position, _ = parse_frequency(frequency_str=target_freq)
         # Validation que target_freq est un offset pandas valide
         # On ne normalise plus la fréquence pour préserver la position (S/E)
         try:
@@ -1022,8 +1020,7 @@ class FrequencyConverter(TemporalConverter):
                 method: str,
                 limit: Union[int, str, None] = None,
                 limit_direction: Optional[str] = None,
-                limit_area: Optional[str] = None,
-                target_position: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
+                limit_area: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
         """Perform upsampling using asfreq and interpolation.
 
         Args:
@@ -1034,7 +1031,6 @@ class FrequencyConverter(TemporalConverter):
                 ``'default'``, or None)
             limit_direction: Direction for NaN filling
             limit_area: Restriction area for NaN filling
-            target_position: Target frequency position
 
         Returns:
             Upsampled data
@@ -1044,7 +1040,7 @@ class FrequencyConverter(TemporalConverter):
             return self.interpolate_to_higher_frequency(
                 data, target_freq, method,
                 limit=limit, limit_direction=limit_direction,
-                limit_area=limit_area, target_position=target_position
+                limit_area=limit_area
             )
 
         # Données de panel : application par entité via groupby
@@ -1054,7 +1050,7 @@ class FrequencyConverter(TemporalConverter):
                 x.droplevel(panel_levels),
                 target_freq, method,
                 limit=limit, limit_direction=limit_direction,
-                limit_area=limit_area, target_position=target_position
+                limit_area=limit_area
             )
         )
 
