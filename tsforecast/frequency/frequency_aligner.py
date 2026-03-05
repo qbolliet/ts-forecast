@@ -16,7 +16,7 @@ from ..utils.frequency.utils import normalize_frequency, is_higher_frequency
 from ..panel.utils import normalize_entity_key
 
 # Détection de la fréquence de l'index
-from .detector import detect_index_frequency
+from .detector import detect_index_frequency, detect_dataset_frequency
 
 
 # Classe d'alignement des fréquences de jeu de données avec des fréquences cibles
@@ -404,51 +404,31 @@ class FrequencyAligner:
         aggregate_keys: List[Union[str, Tuple]] = []
         interpolate_keys: List[Union[str, Tuple]] = []
 
-        # Cas séries temporelles : une seule fréquence source pour tout le jeu de données
-        if not is_panel:
-            # Détection de la fréquence de l'index
-            # A revoir pour détecter la fréquence de chaque colonne à partir de 
-            source_freq = detect_index_frequency(df.index)
-            # Orientation de la conversion selon la relation entre les fréquences
+        # Détection des fréquences sources (col → freq pour TS, (entité, col) → freq pour panel)
+        freq_map = detect_dataset_frequency(df)
+
+        # Classification des clés selon la relation fréquence source / fréquence cible
+        for key in keys:
+            # Extraction de la colonne
+            col = key[-1] if isinstance(key, tuple) else key
+            # Vérification que la colonne est dans le jeu de données
+            if col not in df.columns:
+                continue
+            # Clé de lookup : nom de colonne pour TS, tuple complet pour panel
+            lookup_key = key if is_panel and isinstance(key, tuple) else col
+            # Extraction de la fréquence source
+            source_freq = freq_map.get(lookup_key)
+            # Fréquence cible : globale pour TS, par entité pour panel
+            entity = key[:-1] if is_panel and isinstance(key, tuple) else ()
+            key_target = self.get_entity_target_frequency(entity, target_frequency)
+            # Orientation de la conversion
             if source_freq and is_higher_frequency(
-                normalize_frequency(target_frequency),
+                normalize_frequency(key_target),
                 normalize_frequency(source_freq),
             ):
-                interpolate_keys = list(keys)
+                interpolate_keys.append(key)
             else:
-                aggregate_keys = list(keys)
-
-        # Cas panel : orientation déterminée par entité
-        else:
-            # Regroupement des clés par entité
-            grouped = self.group_keys_by_entity_and_variable(keys)
-
-            # Parcours des entités
-            for entity, cols in grouped.items():
-                # Reconstruction des clés complètes (entité + colonne)
-                entity_keys: List[Union[str, Tuple]] = [
-                    entity + (col,) if entity else col for col in cols
-                ]
-
-                # Extraction de la fréquence cible et du masque de l'entité
-                entity_target = self.get_entity_target_frequency(entity, target_frequency)
-                entity_mask = self.get_entity_mask(df, entity)
-
-                # Détection de la fréquence source depuis l'index temporel de l'entité
-                # /!\ Idem
-                entity_time_index = pd.DatetimeIndex(
-                    df.loc[entity_mask].index.get_level_values(-1)
-                )
-                source_freq = detect_index_frequency(entity_time_index)
-
-                # Orientation de la conversion pour cette entité
-                if source_freq and is_higher_frequency(
-                    normalize_frequency(entity_target),
-                    normalize_frequency(source_freq),
-                ):
-                    interpolate_keys.extend(entity_keys)
-                else:
-                    aggregate_keys.extend(entity_keys)
+                aggregate_keys.append(key)
 
         # Application des conversions
         result = df
