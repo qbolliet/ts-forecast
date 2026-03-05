@@ -406,14 +406,12 @@ class FrequencyAligner:
 
         # Cas séries temporelles : une seule fréquence source pour tout le jeu de données
         if not is_panel:
+            # Détection de la fréquence de l'index
+            # A revoir pour détecter la fréquence de chaque colonne à partir de 
             source_freq = detect_index_frequency(df.index)
-            target_freq_str = (
-                target_frequency if isinstance(target_frequency, str)
-                else next(iter(target_frequency.values()))
-            )
             # Orientation de la conversion selon la relation entre les fréquences
             if source_freq and is_higher_frequency(
-                normalize_frequency(target_freq_str),
+                normalize_frequency(target_frequency),
                 normalize_frequency(source_freq),
             ):
                 interpolate_keys = list(keys)
@@ -437,6 +435,7 @@ class FrequencyAligner:
                 entity_mask = self.get_entity_mask(df, entity)
 
                 # Détection de la fréquence source depuis l'index temporel de l'entité
+                # /!\ Idem
                 entity_time_index = pd.DatetimeIndex(
                     df.loc[entity_mask].index.get_level_values(-1)
                 )
