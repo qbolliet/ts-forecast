@@ -12,6 +12,7 @@ from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .imputation_window import ImputationWindowCalculator, ImputationScope
 from .target_frequency_validator import TargetFrequencyValidator
 from .frequency_aligner import FrequencyAligner
+from .regularizer import IndexRegularizer, is_regular, regularize
 
 __all__ = [
     # Classes et fonctions principales
@@ -32,4 +33,8 @@ __all__ = [
     # Validation et alignement
     'TargetFrequencyValidator',
     'FrequencyAligner',
+    # Régularisation d'index
+    'IndexRegularizer',
+    'is_regular',
+    'regularize',
 ]
