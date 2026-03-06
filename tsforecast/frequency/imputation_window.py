@@ -17,9 +17,10 @@ import pandas as pd
 # Modules du package
 from .detector import detect_dataset_frequency, detect_index_frequency, detect_and_parse_index_frequency
 from ..panel.utils import get_unique_panel_entities
-from ..utils.frequency.utils import get_frequency_order
+from ..utils.frequency.utils import is_higher_frequency
 from ..utils.position.utils import combine_frequency_position
 from ..utils.time.utils import get_period_start, get_period_end
+from ..utils.frequency.converter import FrequencyConverter
 
 # Type pour le scope d'imputation
 ImputationScope = Literal['strict', 'extended_backward', 'extended_forward', 'extended_both']
@@ -649,147 +650,114 @@ class ImputationWindowCalculator:
         return new_mask
 
     # Méthode d'extraction du masque booléen de la fenêtre d'imputation stricte
-    def get_imputation_window_mask(self, data: pd.DataFrame) -> pd.Series:
-        """Get a boolean mask for observations in the strict imputation window.
+    def get_imputation_window_mask(
+        self,
+    ) -> Union[pd.Series, Dict[tuple, Optional[pd.Series]]]:
+        """Get the boolean mask identifying the strict imputation window.
 
-        The imputation window is the period where more than threshold % 
-        of the columns have data. The mask is
-        derived from imputation_window_mask_ fitted on the high-frequency
-        grid; it is reindexed to data.index, with unmatched timestamps
-        filled as False.
-
-        Args:
-            data: DataFrame to create mask for.
+        Returns the imputation window mask as fitted on the high-frequency
+        grid. For time series data, returns a single
+        boolean Series indexed on the high-frequency grid. For panel data,
+        returns a dict mapping each entity tuple to its boolean mask Series.
 
         Returns:
-            Boolean Series aligned with data.index.
+            Boolean Series (time series) or dict mapping entity tuples to
+            boolean Series (panel).
 
         Raises:
             ValueError: If calculator not fitted.
         """
+        # Vérification de l'entraînement du calculateur
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
-        if self._is_panel:
-            return self._get_panel_temporal_mask(data, use_training=False)
+        return self.imputation_window_mask_
 
-        # Réindexation du masque stocké vers l'index des données
-        return self.imputation_window_mask_.reindex(data.index, fill_value=False)
-
-    # Méthode de construction du masque temporel pour les données de panel
-    def _get_panel_temporal_mask(
-        self,
-        data: pd.DataFrame,
-        use_training: bool,
-        column: Optional[str] = None,
-    ) -> pd.Series:
-        """Build a temporal mask for panel data using per-entity window masks.
-
-        For each entity, the stored boolean imputation mask is reindexed to the entity's timestamps
-        in data.index.
-
-        Args:
-            data: Panel DataFrame with MultiIndex.
-            use_training: If True, use training_window_mask_; otherwise
-                use imputation_window_mask_.
-            column: Optional column for additional non-null filtering.
-
-        Returns:
-            Boolean Series aligned with data.index.
-        """
-        from ..panel.utils import get_unique_panel_entities
-
-        # Initialisation du masque résultat
-        combined = pd.Series(False, index=data.index)
-        entities = get_unique_panel_entities(data)
-        time_vals = data.index.get_level_values(-1)
-
-        # Sélection du dictionnaire de masques selon le type de fenêtre
-        mask_map = cast(
-            Dict,
-            self.training_window_mask_ if use_training else self.imputation_window_mask_,
-        )
-
-        # Parcours des entités du panel
-        for entity in entities:
-            entity_row_mask = self._get_entity_row_mask(data, entity)
-
-            # Réindexation du masque de l'entité vers ses timestamps dans data
-            entity_mask = mask_map.get(entity)
-            if entity_mask is None:
-                continue
-            entity_time_vals = time_vals[entity_row_mask]
-            entity_temporal = entity_mask.reindex(entity_time_vals, fill_value=False).values
-
-            # Injection du masque de l'entité dans le résultat global
-            combined_values = combined.values.copy()
-            combined_values[entity_row_mask] = combined_values[entity_row_mask] | entity_temporal
-            combined = pd.Series(combined_values, index=data.index)
-
-        if column is not None:
-            combined = combined & data[column].notna()
-
-        return combined
 
     # Méthode de conversion du masque d'imputation vers une fréquence inférieure
     def get_mask_at_frequency(
         self,
-        data: pd.DataFrame,
-        frequency: str,
-        column: Optional[str] = None,
-    ) -> pd.Series:
+        frequency: Union[str, Dict[tuple, str]],
+    ) -> Union[pd.Series, Dict[tuple, Optional[pd.Series]]]:
         """Get the strict imputation window mask resampled to a lower frequency.
 
-        A lower-frequency period is included in the mask only if ALL its
-        high-frequency sub-periods fall within the imputation window.
+        A lower-frequency period is True if and only if all its high-frequency
+        sub-periods fall within the imputation window. The conversion sums the
+        boolean mask (cast to int) at the target frequency, divides by the
+        conversion factor between source and target frequencies, takes the
+        floor, and casts to bool.
 
-        The base boolean mask is derived from imputation_window_mask_ by
-        reindexing to data.index. Only supported for time series data
-        (DatetimeIndex). For panel data, raises ValueError.
+        For panel data, the conversion factor is computed independently per
+        entity, as each entity may have a different source frequency.
 
         Args:
-            data: DataFrame with simple DatetimeIndex at the high frequency.
             frequency: Target (lower) frequency offset string (e.g., 'QE',
-                'Y').
-            column: Optional column name for additional non-null filtering.
+                'YE') or dictionnary entity -> frequency string.
 
         Returns:
-            Boolean Series at the target frequency.
+            Boolean Series at the target frequency (time series), or dict
+            mapping each entity tuple to a boolean Series at the target
+            frequency (panel).
 
         Raises:
-            ValueError: If calculator not fitted or data has MultiIndex.
+            ValueError: If calculator not fitted.
 
         Examples:
             >>> monthly_calc.fit(data)
-            >>> quarterly_mask = monthly_calc.get_mask_at_frequency(data, 'QE')
+            >>> quarterly_mask = monthly_calc.get_mask_at_frequency('QE')
         """
+        # Vérification de l'entraînement du calculateur
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
-        if isinstance(data.index, pd.MultiIndex):
-            raise ValueError(
-                "get_mask_at_frequency is not supported for panel data (MultiIndex). "
-                "Use get_imputation_window_mask per entity instead."
-            )
+        # Initialisation du convertisseur de fréquence
+        converter = FrequencyConverter()
 
-        from ..utils.frequency.converter import FrequencyConverter
+        # Cas des données de panel
+        if self._is_panel:
+            # Conversion par entité (facteur de conversion potentiellement différent)
+            result: Dict[tuple, Optional[pd.Series]] = {}
+            for entity, entity_mask in self.imputation_window_mask_.items():
+                # Entité sans masque valide
+                if entity_mask is None:
+                    result[entity] = None
+                    continue
 
-        # Réindexation du masque stocké vers l'index des données
-        mask_series = (
-            self.imputation_window_mask_
-            .reindex(data.index, fill_value=False)
-            .astype(int)
+                # Fréquence source de l'entité
+                source_freq = self.index_freq_[entity]
+                if source_freq is None:
+                    result[entity] = None
+                    continue
+                
+                # Fréquence cible de l'entité
+                target_freq = frequency[entity] if isinstance(frequency, dict) else frequency
+                
+                # Vérification que la fréquence source est plus élevée que la fréquence cible
+                if not is_higher_frequency(source_freq, target_freq):
+                    raise ValueError(f"Index mask frequency : {source_freq} should be higher than frequency : {target_freq}")
+
+                # Agrégation par somme à la fréquence cible
+                mask_int = entity_mask.astype(int)
+                summed = converter.aggregate_to_lower_frequency(
+                    mask_int, target_freq, method='sum'
+                )
+
+                # Facteur de conversion spécifique à l'entité et conversion en booléen
+                factor = converter.get_conversion_factor(source_freq, target_freq)
+                result[entity] = np.floor(summed / factor).astype(bool)
+
+            return result
+
+        # Cas des données de séries temporelles
+        # Agrégation par somme à la fréquence cible
+        mask_int = self.imputation_window_mask_.astype(int)
+        summed = converter.aggregate_to_lower_frequency(
+            mask_int, frequency, method='sum'
         )
 
-        # Application du filtre colonne optionnel
-        if column is not None and column in data.columns:
-            mask_series = mask_series & data[column].notna().astype(int)
-
-        # Agrégation vers la fréquence cible : True seulement si toutes les sous-périodes le sont
-        converter = FrequencyConverter()
-        resampled = converter.aggregate_to_lower_frequency(mask_series, frequency, method='all')
-
-        return pd.Series(resampled.fillna(False), dtype=bool)
+        # Facteur de conversion et conversion en booléen
+        factor = converter.get_conversion_factor(self.index_freq_, frequency)
+        return np.floor(summed / factor).astype(bool)
 
     # Méthode d'extraction de la couverture associée à chaque série
     def get_columns_with_coverage(
