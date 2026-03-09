@@ -10,7 +10,7 @@ import numpy as np
 from typing import Dict, List, Optional, Union
 
 # Import des utilitaires internes
-from .detector import FrequencyDetector, detect_frequency, _get_highest_frequency, detect_and_parse_index_frequency
+from .detector import FrequencyDetector, detect_frequency, _get_highest_frequency, detect_index_frequency
 from ..utils.frequency import to_pandas_freq, normalize_frequency, FrequencyType, UserFrequencyType
 
 
@@ -299,9 +299,9 @@ class IndexRegularizer:
             # Préservation de la position start/end (ex: 'MS' reste 'MS')
             return normalize_frequency(target_frequency, return_format='full')
 
-        # Auto-détection via detect_and_parse_index_frequency pour préserver la position
+        # Auto-détection via detect_index_frequency pour préserver la position
         try:
-            parsed = detect_and_parse_index_frequency(data.index)
+            parsed = detect_index_frequency(data.index, return_format='components')
             # parsed = (base, position, suffix)  ex: ('M', 'S', None) → 'MS'
             base, position, suffix = parsed
             freq_str = base
@@ -434,7 +434,7 @@ class IndexRegularizer:
             else:
                 # Détection de la fréquence la plus haute sur l'ensemble du panel
                 try:
-                    parsed = detect_and_parse_index_frequency(data.index)
+                    parsed = detect_index_frequency(data.index, return_format='components')
                     if isinstance(parsed, dict):
                         # Conversion des tuples parsés en fréquences string
                         freq_map = {}

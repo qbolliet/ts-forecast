@@ -10,6 +10,7 @@ from tsforecast.frequency.detector import (
     FrequencyDetector,
     detect_frequency,
     detect_dataset_frequency,
+    detect_index_frequency,
     _get_highest_frequency
 )
 
@@ -94,15 +95,50 @@ class TestFrequencyDetectorTimeSeriesFrequency:
         with pytest.raises(ValueError, match="only 1 non-null observations"):
             detector.detect_time_series_frequency(series)
 
-    def test_literal_frequency(self):
-        """Test retour de la fréquence en format littéral."""
+    def test_return_format_base(self):
+        """Test retour au format base."""
         dates = pd.date_range('2023-01-01', periods=10, freq='D')
         series = pd.Series(range(10), index=dates)
 
         detector = FrequencyDetector()
-        freq = detector.detect_time_series_frequency(series, literal=True)
+        freq = detector.detect_time_series_frequency(series, return_format='base')
 
-        assert freq == 'daily'
+        assert freq == 'D'
+
+    def test_return_format_with_position(self):
+        """Test retour au format with_position."""
+        dates = pd.date_range('2023-01-01', periods=10, freq='MS')
+        series = pd.Series(range(10), index=dates)
+
+        detector = FrequencyDetector()
+        freq = detector.detect_time_series_frequency(series, return_format='with_position')
+
+        assert freq == 'MS'
+
+    def test_return_format_full(self):
+        """Test retour au format full."""
+        dates = pd.date_range('2023-01-01', periods=10, freq='QE-DEC')
+        series = pd.Series(range(10), index=dates)
+
+        detector = FrequencyDetector()
+        freq = detector.detect_time_series_frequency(series, return_format='full')
+
+        # Le format full doit inclure le suffixe
+        assert freq is not None
+        assert 'Q' in freq
+
+    def test_return_format_components(self):
+        """Test retour au format components."""
+        dates = pd.date_range('2023-01-01', periods=10, freq='MS')
+        series = pd.Series(range(10), index=dates)
+
+        detector = FrequencyDetector()
+        freq = detector.detect_time_series_frequency(series, return_format='components')
+
+        assert isinstance(freq, tuple)
+        assert len(freq) == 3
+        assert freq[0] == 'M'
+        assert freq[1] == 'S'
 
 
 class TestFrequencyDetectorMultiIndex:
@@ -469,3 +505,87 @@ class TestGetHighestFrequency:
 
         # Weekly (W) est plus granulaire que Monthly (M)
         assert highest == 'W'
+
+
+class TestDetectIndexFrequencyReturnFormat:
+    """Tests for detect_index_frequency with return_format parameter."""
+
+    def test_base_format(self):
+        """Test format base pour detect_index_frequency."""
+        dates = pd.date_range('2023-01-01', periods=10, freq='MS')
+        freq = detect_index_frequency(dates, return_format='base')
+
+        assert freq == 'M'
+
+    def test_with_position_format(self):
+        """Test format with_position pour detect_index_frequency."""
+        dates = pd.date_range('2023-01-01', periods=10, freq='MS')
+        freq = detect_index_frequency(dates, return_format='with_position')
+
+        assert freq == 'MS'
+
+    def test_full_format(self):
+        """Test format full pour detect_index_frequency."""
+        dates = pd.date_range('2023-03-31', periods=8, freq='QE-DEC')
+        freq = detect_index_frequency(dates, return_format='full')
+
+        assert freq is not None
+        assert 'Q' in str(freq)
+
+    def test_components_format(self):
+        """Test format components pour detect_index_frequency."""
+        dates = pd.date_range('2023-01-01', periods=10, freq='MS')
+        freq = detect_index_frequency(dates, return_format='components')
+
+        assert isinstance(freq, tuple)
+        assert len(freq) == 3
+        assert freq[0] == 'M'
+        assert freq[1] == 'S'
+
+    def test_components_format_quarterly(self):
+        """Test format components pour fréquence trimestrielle."""
+        dates = pd.date_range('2023-03-31', periods=8, freq='QE-DEC')
+        freq = detect_index_frequency(dates, return_format='components')
+
+        assert isinstance(freq, tuple)
+        assert len(freq) == 3
+        assert freq[0] == 'Q'
+        assert freq[1] == 'E'
+        assert freq[2] == 'DEC'
+
+    def test_components_format_daily(self):
+        """Test format components pour fréquence journalière."""
+        dates = pd.date_range('2023-01-01', periods=10, freq='D')
+        freq = detect_index_frequency(dates, return_format='components')
+
+        assert isinstance(freq, tuple)
+        assert freq[0] == 'D'
+
+    def test_multiindex_with_return_format(self):
+        """Test detect_index_frequency avec MultiIndex et return_format."""
+        idx = pd.MultiIndex.from_product([
+            ['entity_1', 'entity_2'],
+            pd.date_range('2024-01-01', periods=5, freq='MS')
+        ], names=['entity', 'date'])
+
+        # Format base
+        result_base = detect_index_frequency(idx, return_format='base')
+        assert isinstance(result_base, dict)
+        # La clé peut être un string ou un tuple selon le nombre de niveaux
+        first_key = list(result_base.keys())[0]
+        assert result_base[first_key] == 'M'
+
+        # Format components
+        result_comp = detect_index_frequency(idx, return_format='components')
+        assert isinstance(result_comp, dict)
+        first_key = list(result_comp.keys())[0]
+        assert result_comp[first_key][0] == 'M'
+        assert result_comp[first_key][1] == 'S'
+
+    def test_default_format_is_base(self):
+        """Test que le format par défaut est 'base'."""
+        dates = pd.date_range('2023-01-01', periods=10, freq='MS')
+        freq_default = detect_index_frequency(dates)
+        freq_base = detect_index_frequency(dates, return_format='base')
+
+        assert freq_default == freq_base

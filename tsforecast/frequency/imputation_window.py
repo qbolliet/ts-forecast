@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 # Modules du package
-from .detector import detect_dataset_frequency, detect_index_frequency, detect_and_parse_index_frequency
+from .detector import detect_dataset_frequency, detect_index_frequency
 from ..panel.utils import get_unique_panel_entities
 from ..utils.frequency.utils import is_higher_frequency
 from ..utils.position.utils import combine_frequency_position
@@ -486,8 +486,9 @@ class ImputationWindowCalculator:
             if len(hf_dates) >= 2:
                 # Détection de la position
                 try:
-                    _, pos, _ = detect_and_parse_index_frequency(
-                        cast(pd.DatetimeIndex, hf_dates)
+                    _, pos, _ = detect_index_frequency(
+                        cast(pd.DatetimeIndex, hf_dates),
+                        return_format='components'
                     )
                     if pos is not None:
                         hf_pos = pos

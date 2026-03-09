@@ -7,7 +7,7 @@ in time series and panel data, with primary reliance on pandas.infer_freq.
 # Module de base
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, Union, Tuple, List
+from typing import Dict, Literal, Optional, Union, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
 # Import des utilitaires de fréquence
@@ -43,7 +43,11 @@ class FrequencyDetector:
         self.min_observations = min_observations
 
     # Méthode de détection d'une série temporelle simple
-    def detect_time_series_frequency(self, series: pd.Series, literal: bool=False) -> Optional[Union[FrequencyType, UserFrequencyType]]:
+    def detect_time_series_frequency(
+        self,
+        series: pd.Series,
+        return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
+    ) -> Optional[Union[FrequencyType, UserFrequencyType]]:
         """Detect the frequency of a single time series with DatetimeIndex.
 
         This method primarily uses pandas.infer_freq with extensions for frequencies
@@ -52,10 +56,14 @@ class FrequencyDetector:
 
         Args:
             series: Time series data with datetime index
-            literal: Boolean indicating whether to return explicit literal frequency expression
+            return_format: Output format for the detected frequency:
+                - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
+                - 'with_position': Frequency with position (e.g. 'MS', 'QE')
+                - 'full': Full pandas frequency string (e.g. 'QE-DEC')
+                - 'components': Tuple of (base, position, suffix)
 
         Returns:
-            Detected frequency as user-friendly string, or None if detection fails
+            Detected frequency in the requested format, or None if detection fails
 
         Raises:
             ValueError: If series has insufficient non-null observations or invalid index
@@ -66,7 +74,7 @@ class FrequencyDetector:
             >>> series = pd.Series([1, 2, np.nan, 4, 5], index=dates)
             >>> detector = FrequencyDetector()
             >>> detector.detect_time_series_frequency(series)
-            'daily'
+            'D'
         """
         # Suppression des valeurs manquantes pour la détection
         clean_series = series.dropna()
@@ -95,26 +103,19 @@ class FrequencyDetector:
         # Utilisation principale de pandas.infer_freq
         try:
             inferred_freq = pd.infer_freq(time_index)
-            # Normalisation
-            inferred_freq = normalize_frequency(frequency=inferred_freq, return_format='base')
-            if inferred_freq and literal:
-                # Conversion vers le format littéral
-                return to_literal(inferred_freq)
-            elif inferred_freq:
-                return inferred_freq
+            # Normalisation au format demandé
+            result = normalize_frequency(frequency=inferred_freq, return_format=return_format)
+            if result:
+                return result
         except Exception:
             # En cas d'erreur avec infer_freq, continuer avec la détection manuelle
             pass
 
-        # Extension pour les fréquences non supportées par infer_freq
-        extended_freq = self._extend_infer_freq(time_index, literal)
-        # Normalisation
-        extended_freq = normalize_frequency(frequency=extended_freq, return_format='base')
-        if extended_freq and literal:
-            # Conversion vers le format littéral
-            return to_literal(extended_freq)
-        elif extended_freq:
-            return extended_freq
+        # Extension pour les fréquences non supportées par infer_freq (retourne des codes bruts)
+        extended_freq = self._extend_infer_freq(time_index)
+        if extended_freq:
+            # Normalisation au format demandé
+            return normalize_frequency(frequency=extended_freq, return_format=return_format)
 
         return None
 
@@ -134,12 +135,16 @@ class FrequencyDetector:
         return pd.Series(series.values, index=time_index)
 
     # Méthode auxiliaire d'extraction de la fréquence d'une colonne
-    def _detect_column_frequency(self, series: pd.Series, literal: bool) -> Optional[Union[FrequencyType, UserFrequencyType]]:
+    def _detect_column_frequency(
+        self,
+        series: pd.Series,
+        return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
+    ) -> Optional[Union[FrequencyType, UserFrequencyType]]:
         """Detect the frequency of a column (with automatic MultiIndex handling).
 
         Args:
             series: Series for which to detect the frequency
-            literal: Boolean indicating whether to return explicit literal frequency expression
+            return_format: Output format for the detected frequency
 
         Returns:
             Detected frequency or None if failed/insufficient observations
@@ -148,13 +153,17 @@ class FrequencyDetector:
             # Si la série a un MultiIndex, extraire la série temporelle simple
             if isinstance(series.index, pd.MultiIndex):
                 series = self._extract_time_series_from_multiindex(series)
-            return self.detect_time_series_frequency(series, literal)
+            return self.detect_time_series_frequency(series, return_format)
         except ValueError:
             # Pas assez d'observations, retourner None
             return None
 
     # Méthode de détection de la fréquence d'une série (simple ou avec MultiIndex)
-    def detect_frequency(self, series: pd.Series, literal: bool=False) -> Optional[Union[FrequencyType, UserFrequencyType, Dict[tuple, Union[FrequencyType, UserFrequencyType]]]]:
+    def detect_frequency(
+        self,
+        series: pd.Series,
+        return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
+    ) -> Optional[Union[FrequencyType, UserFrequencyType, Dict[tuple, Union[FrequencyType, UserFrequencyType]]]]:
         """Detect the frequency of a series (simple or with MultiIndex for panel data).
 
         This method handles both simple time series and panel data with MultiIndex.
@@ -163,7 +172,11 @@ class FrequencyDetector:
 
         Args:
             series: Time series data with DatetimeIndex or MultiIndex
-            literal: Boolean indicating whether to return explicit literal frequency expression
+            return_format: Output format for the detected frequency:
+                - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
+                - 'with_position': Frequency with position (e.g. 'MS', 'QE')
+                - 'full': Full pandas frequency string (e.g. 'QE-DEC')
+                - 'components': Tuple of (base, position, suffix)
 
         Returns:
             - For simple series: Detected frequency as string, or None if detection fails
@@ -192,7 +205,7 @@ class FrequencyDetector:
         """
         # Cas d'une série temporelle simple
         if not isinstance(series.index, pd.MultiIndex):
-            return self.detect_time_series_frequency(series, literal)
+            return self.detect_time_series_frequency(series, return_format)
 
         # Cas d'une série avec MultiIndex (panel data)
         n_levels = series.index.nlevels
@@ -215,7 +228,7 @@ class FrequencyDetector:
 
             # Extraction de la série temporelle simple et détection de la fréquence
             temp_series = self._extract_time_series_from_multiindex(group_series)
-            freq = self._detect_column_frequency(temp_series, literal)
+            freq = self._detect_column_frequency(temp_series, return_format)
 
             if freq:
                 frequency_map[panel_id] = freq
@@ -259,8 +272,14 @@ class FrequencyDetector:
         return panel_cols_final, panel_in_index
 
     # Méthode de détection des fréquences d'un jeu de données de panel
-    def _detect_panel_frequencies(self, df: pd.DataFrame, panel_cols: List[str], panel_in_index: bool,
-                                  time_col: Optional[str], literal: bool) -> Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]:
+    def _detect_panel_frequencies(
+        self,
+        df: pd.DataFrame,
+        panel_cols: List[str],
+        panel_in_index: bool,
+        time_col: Optional[str],
+        return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
+    ) -> Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]:
         """Detect frequencies for a panel DataFrame.
 
         Args:
@@ -268,7 +287,7 @@ class FrequencyDetector:
             panel_cols: List of panel columns
             panel_in_index: True if panel is in the index
             time_col: Name of the time column (or None if in the index)
-            literal: Boolean indicating whether to return explicit literal frequency expression
+            return_format: Output format for the detected frequency
 
         Returns:
             Dictionary mapping (panel_id, column) to frequencies
@@ -290,7 +309,7 @@ class FrequencyDetector:
                         simple_series = self._extract_time_series_from_multiindex(series_with_multiindex)
 
                         # Détection de la fréquence
-                        freq = self._detect_column_frequency(simple_series, literal)
+                        freq = self._detect_column_frequency(simple_series, return_format)
                         if freq:
                             frequency_map[panel_id + (col,)] = freq
         else:
@@ -303,21 +322,25 @@ class FrequencyDetector:
                 for col in df.columns:
                     if col not in panel_cols and col != time_col:
                         # Détection de la fréquence
-                        freq = self._detect_column_frequency(group_df[col], literal)
+                        freq = self._detect_column_frequency(group_df[col], return_format)
                         if freq:
                             frequency_map[panel_id + (col,)] = freq
 
         return frequency_map
 
     # Méthode auxiliaire de détection des fréquences pour les jeux de données qui sont des séries temporelles
-    def _detect_time_series_frequencies(self, df: pd.DataFrame, time_col: Optional[str],
-                                   literal: bool) -> Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]:
+    def _detect_time_series_frequencies(
+        self,
+        df: pd.DataFrame,
+        time_col: Optional[str],
+        return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
+    ) -> Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]:
         """Detect frequencies for a simple DataFrame (non-panel).
 
         Args:
             df: DataFrame
             time_col: Name of the time column (or None if in the index)
-            literal: Boolean indicating whether to return explicit literal frequency expression
+            return_format: Output format for the detected frequency
 
         Returns:
             Dictionary mapping column (or panel_id, column) to frequencies
@@ -329,7 +352,7 @@ class FrequencyDetector:
         for col in df.columns:
             if col != time_col:
                 # Détection de la fréquence (peut retourner un dict si la colonne a un MultiIndex)
-                freq_result = self.detect_frequency(df[col], literal)
+                freq_result = self.detect_frequency(df[col], return_format)
 
                 # Si le résultat est un dictionnaire (colonne avec MultiIndex)
                 if isinstance(freq_result, dict):
@@ -345,11 +368,13 @@ class FrequencyDetector:
         return frequency_map
 
     # Méthode de détection de la fréquence d'un jeu de données
-    def detect_dataset_frequency(self,
-                               df: pd.DataFrame,
-                               time_col: Optional[str] = None,
-                               panel_cols: Optional[List[str]] = None,
-                               literal: bool = False) -> Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]:
+    def detect_dataset_frequency(
+        self,
+        df: pd.DataFrame,
+        time_col: Optional[str] = None,
+        panel_cols: Optional[List[str]] = None,
+        return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
+    ) -> Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]:
         """Detect frequencies for all series in a dataset.
 
         This method handles both simple DataFrames and panel data. Panel structure can be
@@ -360,7 +385,11 @@ class FrequencyDetector:
             time_col: Name of the time column (if None, uses index)
             panel_cols: List of columns identifying panel dimensions. If None and index is
                 MultiIndex with at least 2 levels, automatically extracts panel structure
-            literal: Boolean indicating whether to return explicit literal frequency expression
+            return_format: Output format for the detected frequency:
+                - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
+                - 'with_position': Frequency with position (e.g. 'MS', 'QE')
+                - 'full': Full pandas frequency string (e.g. 'QE-DEC')
+                - 'components': Tuple of (base, position, suffix)
 
         Returns:
             Dictionary mapping column names (or (panel_id, column) tuples) to frequencies
@@ -397,9 +426,9 @@ class FrequencyDetector:
 
         # Détection des fréquences selon le type de structure
         if is_panel:
-            return self._detect_panel_frequencies(df, panel_cols, panel_in_index, time_col, literal)
+            return self._detect_panel_frequencies(df, panel_cols, panel_in_index, time_col, return_format)
         else:
-            return self._detect_time_series_frequencies(df, time_col, literal)
+            return self._detect_time_series_frequencies(df, time_col, return_format)
 
     # Méthode de validation de la consistence de la fréquence un jeu de données
     def validate_frequency_consistency(self,
@@ -449,7 +478,7 @@ class FrequencyDetector:
         return True, most_common
 
     # Méthode d'extension de la détection des fréquences au delà de ce que supporte infer_freq
-    def _extend_infer_freq(self, time_index: pd.DatetimeIndex, literal: bool = False) -> Optional[Union[FrequencyType, UserFrequencyType]]:
+    def _extend_infer_freq(self, time_index: pd.DatetimeIndex) -> Optional[FrequencyType]:
         """Extend frequency detection for frequencies not supported by pandas.infer_freq.
 
         This method provides custom detection for frequencies like quarterly, business daily,
@@ -458,10 +487,9 @@ class FrequencyDetector:
 
         Args:
             time_index: Sorted datetime index
-            literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
-            Extended frequency detection result in pandas format or None
+            Raw frequency code in pandas format or None
 
         Notes:
             Returns pandas frequency codes ('D', 'B', 'W', 'SM', 'M', 'Q', 'Y', 'h', 'min', 's')
@@ -484,95 +512,92 @@ class FrequencyDetector:
             return None
 
         modal_diff = mode_diff[0]
-        
+
         # Conversion en secondes pour une détection plus précise
         modal_seconds = modal_diff.total_seconds()
-        
+
         # Détection des fréquences infra-journalières
         if modal_seconds < 86400:  # Moins d'un jour
-            return self._detect_intraday_frequency(modal_seconds=modal_seconds, literal=literal)
+            return self._detect_intraday_frequency(modal_seconds=modal_seconds)
         else:
             # Conversion en jours pour les fréquences >= journalières
             modal_days = modal_diff.days
-            return self._detect_day_frequency(time_index=time_index, modal_days=modal_days, literal=literal)
+            return self._detect_day_frequency(time_index=time_index, modal_days=modal_days)
 
     # Méthode auxiliaire de détection des basses fréquences en jours
-    def _detect_day_frequency(self, time_index: pd.DatetimeIndex, modal_days: float, literal: bool = False) -> Optional[Union[FrequencyType, UserFrequencyType]]:
+    def _detect_day_frequency(self, time_index: pd.DatetimeIndex, modal_days: float) -> Optional[FrequencyType]:
         """Detect day-level frequencies (daily, weekly, monthly, quarterly, annual).
 
         Args:
             time_index: Sorted datetime index
             modal_days: Modal time difference in days between consecutive observations
-            literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
-            Detected frequency or None if no match found
+            Raw frequency code or None if no match found
         """
         # Détection basée sur le nombre de jours modal
         if modal_days == 1:
             # Distinction entre jours calendaires et jours ouvrés
-            return self._detect_daily_frequency(time_index=time_index, literal=literal)
+            return self._detect_daily_frequency(time_index=time_index)
         elif modal_days == 7:
-            return to_literal('W') if literal else 'W'
+            return 'W'
         elif 13 <= modal_days <= 16:
             # Fréquence semi-mensuelle (environ 2 fois par mois)
-            return self._detect_semi_monthly_frequency(time_index=time_index, literal=literal)
+            return self._detect_semi_monthly_frequency(time_index=time_index)
         elif 28 <= modal_days <= 31:
-            return to_literal('M') if literal else 'M'
+            return 'M'
         elif 89 <= modal_days <= 92:
-            return to_literal('Q') if literal else 'Q'
+            return 'Q'
         elif 365 <= modal_days <= 366:
-            return to_literal('Y') if literal else 'Y'
+            return 'Y'
 
         return None
 
     # Méthode de détection des fréquences infrajournalières
-    def _detect_intraday_frequency(self, modal_seconds: float, literal: bool = False) -> Optional[Union[FrequencyType, UserFrequencyType]]:
+    def _detect_intraday_frequency(self, modal_seconds: float) -> Optional[FrequencyType]:
         """Detect intraday frequency (hourly, minute, second).
 
         Args:
             modal_seconds: Modal time difference in seconds
-            literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
-            Pandas frequency code for intraday frequency or None
+            Raw pandas frequency code for intraday frequency or None
 
         Notes:
             Detects hourly ('h'), minute ('min'), and second ('s') frequencies.
         """
         # Tolérance de 5% pour gérer les petites variations
         tolerance = 0.05
-        
+
         # Fréquence horaire
         if abs(modal_seconds - 3600) / 3600 < tolerance:
-            return to_literal('h') if literal else 'h'
-        
+            return 'h'
+
         # Fréquence par minute
         if abs(modal_seconds - 60) / 60 < tolerance:
-            return to_literal('min') if literal else 'min'
-        
+            return 'min'
+
         # Fréquence par seconde
         if abs(modal_seconds - 1) / 1 < tolerance:
-            return to_literal('s') if literal else 's'
-        
+            return 's'
+
         # Sous-seconde (millisecondes, microsecondes, nanosecondes)
         if modal_seconds < 1:
             if modal_seconds >= 0.001:
-                return to_literal('ms') if literal else 'ms'
+                return 'ms'
             elif modal_seconds >= 0.000001:
-                return to_literal('us') if literal else 'us'
+                return 'us'
             else:
-                return to_literal('ns') if literal else 'ns'
-        
+                return 'ns'
+
         return None
 
     # Méthode auxiliaire de détection des fréquences journalières
-    def _detect_daily_frequency(self, time_index: pd.DatetimeIndex, literal: bool = False) -> Union[FrequencyType, UserFrequencyType]:
+    def _detect_daily_frequency(self, time_index: pd.DatetimeIndex) -> FrequencyType:
         """Detect whether daily frequency is calendar daily or business daily.
 
         Args:
             time_index: Sorted datetime index
-            literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
             'D' for calendar daily or 'B' for business daily
@@ -582,26 +607,25 @@ class FrequencyDetector:
         """
         # Vérification des jours de la semaine (0=lundi, 6=dimanche)
         weekdays = time_index.dayofweek
-        
+
         # Si tous les jours sont des jours ouvrés (0-4), c'est probablement business daily
         if all(day < 5 for day in weekdays):
             # Vérification supplémentaire: pas de week-ends dans la période
             date_range = pd.date_range(time_index.min(), time_index.max(), freq='D')
             weekend_dates = date_range[date_range.dayofweek >= 5]
-            
+
             # Si la période couvre des week-ends mais qu'ils sont absents, c'est business daily
             if len(weekend_dates) > 0:
-                return to_literal('B') if literal else 'B'
-        
+                return 'B'
+
         return 'D'
 
     # Méthode auxiliaire de détection des fréquences semi-mensuelles
-    def _detect_semi_monthly_frequency(self, time_index: pd.DatetimeIndex, literal: bool=False) -> Optional[Union[FrequencyType, UserFrequencyType]]:
+    def _detect_semi_monthly_frequency(self, time_index: pd.DatetimeIndex) -> Optional[FrequencyType]:
         """Detect semi-monthly frequency (twice per month).
 
         Args:
             time_index: Sorted datetime index
-            literal: Boolean indicating whether to return explicit literal frequency expression
 
         Returns:
             'SM' if semi-monthly frequency is detected, None otherwise
@@ -609,21 +633,21 @@ class FrequencyDetector:
         Notes:
             Checks if dates correspond to bi-monthly occurrences
             (typically 1st and 15th of the month, or beginning and middle of the month).
-        """    
+        """
         # Extraction des jours du mois
         days = time_index.day
-        
+
         # Vérification si les dates sont regroupées autour de 2 moments du mois
         # Typiquement début (1-5) et milieu (15-20) du mois
         early_month = sum(1 <= d <= 5 for d in days)
         mid_month = sum(13 <= d <= 18 for d in days)
-        
+
         total_dates = len(days)
-        
+
         # Si environ la moitié des dates sont en début et l'autre moitié en milieu
         if (early_month > total_dates * 0.4 and mid_month > total_dates * 0.4):
-            return to_literal('SM') if literal else 'SM'
-        
+            return 'SM'
+
         return None
 
 
@@ -635,7 +659,7 @@ _detector = FrequencyDetector()
 def detect_frequency(data: Union[pd.Series, pd.DataFrame],
                     time_col: Optional[str] = None,
                     panel_cols: Optional[List[str]] = None,
-                    literal: bool = False,
+                    return_format: Literal['base', 'with_position', 'full', 'components'] = 'base',
                     check_consistency: bool = False,
                     consistency_mode: str = 'modal',
                     strict: bool = True) -> Optional[Union[FrequencyType, UserFrequencyType, Dict]]:
@@ -649,7 +673,11 @@ def detect_frequency(data: Union[pd.Series, pd.DataFrame],
         data: Time series data (Series or DataFrame) with datetime index or MultiIndex
         time_col: Name of the time column (if None, uses index). Only for DataFrame.
         panel_cols: List of columns identifying panel dimensions. Only for DataFrame.
-        literal: Boolean indicating whether to return explicit literal frequency expression
+        return_format: Output format for the detected frequency:
+            - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
+            - 'with_position': Frequency with position (e.g. 'MS', 'QE')
+            - 'full': Full pandas frequency string (e.g. 'QE-DEC')
+            - 'components': Tuple of (base, position, suffix)
         check_consistency: If True, check frequency consistency across panel groups or columns
         consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
             - 'modal': Returns the most common frequency (default)
@@ -694,7 +722,7 @@ def detect_frequency(data: Union[pd.Series, pd.DataFrame],
             raise ValueError("time_col and panel_cols parameters are only valid for DataFrame inputs")
 
         # Détection de la fréquence (peut retourner un dict pour MultiIndex)
-        freq_result = _detector.detect_frequency(data, literal)
+        freq_result = _detector.detect_frequency(data, return_format)
 
         # Si check_consistency demandé et résultat est un dict (MultiIndex détecté)
         if check_consistency and isinstance(freq_result, dict):
@@ -718,7 +746,7 @@ def detect_frequency(data: Union[pd.Series, pd.DataFrame],
             df=data,
             time_col=time_col,
             panel_cols=panel_cols,
-            literal=literal,
+            return_format=return_format,
             check_consistency=check_consistency,
             consistency_mode=consistency_mode,
             strict=strict
@@ -731,7 +759,7 @@ def detect_frequency(data: Union[pd.Series, pd.DataFrame],
 def detect_dataset_frequency(df: pd.DataFrame,
                            time_col: Optional[str] = None,
                            panel_cols: Optional[List[str]] = None,
-                           literal: bool = False,
+                           return_format: Literal['base', 'with_position', 'full', 'components'] = 'base',
                            check_consistency: bool = False,
                            consistency_mode: str = 'modal',
                            strict: bool = True) -> Union[Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]], FrequencyType, UserFrequencyType]:
@@ -741,7 +769,11 @@ def detect_dataset_frequency(df: pd.DataFrame,
         df: DataFrame containing time series data
         time_col: Name of the time column (if None, uses index)
         panel_cols: List of columns identifying panel dimensions
-        literal: Boolean indicating whether to return explicit literal frequency expression
+        return_format: Output format for the detected frequency:
+            - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
+            - 'with_position': Frequency with position (e.g. 'MS', 'QE')
+            - 'full': Full pandas frequency string (e.g. 'QE-DEC')
+            - 'components': Tuple of (base, position, suffix)
         check_consistency: If True, check the frequency consistency across columns
         consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
             - 'modal': Returns the most common frequency (default)
@@ -752,7 +784,7 @@ def detect_dataset_frequency(df: pd.DataFrame,
         Dictionary mapping column names (or (panel_id, column) tuples) to frequencies or consistent frequency
     """
     # Détection des fréquences
-    frequency_map = _detector.detect_dataset_frequency(df, time_col, panel_cols, literal)
+    frequency_map = _detector.detect_dataset_frequency(df, time_col, panel_cols, return_format)
     # Vérification de la consistence des fréquences si demandé
     if check_consistency :
         if consistency_mode == 'modal':
@@ -769,14 +801,14 @@ def detect_dataset_frequency(df: pd.DataFrame,
 
 # Fonction de détection de la fréquence d'un index
 def detect_index_frequency(
-    index: Union[pd.DatetimeIndex, pd.MultiIndex]
+    index: Union[pd.DatetimeIndex, pd.MultiIndex],
+    return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
 ) -> Union[FrequencyType, Dict[Tuple, FrequencyType]]:
-    """Detect and parse DatetimeIndex or MultiIndex frequency into components.
+    """Detect and parse DatetimeIndex or MultiIndex frequency.
 
-    For a DatetimeIndex, analyzes the frequency and parses it into
-    three components: the base frequency code, the position indicator
-    (S for start, E for end), and an optional suffix (e.g., DEC for
-    quarterly data anchored to December).
+    For a DatetimeIndex, analyzes the frequency and returns it in the
+    requested format. With 'components' format, returns a tuple of
+    (base, position, suffix).
 
     For a MultiIndex with dates as the last level, detects frequency
     for each unique entity (combination of non-date levels) and returns
@@ -786,14 +818,15 @@ def detect_index_frequency(
         index: DatetimeIndex or MultiIndex to analyze. For MultiIndex,
             the last level must be a DatetimeIndex. Must have at least 2
             observations and a regular frequency pattern.
+        return_format: Output format for the detected frequency:
+            - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
+            - 'with_position': Frequency with position (e.g. 'MS', 'QE')
+            - 'full': Full pandas frequency string (e.g. 'QE-DEC')
+            - 'components': Tuple of (base, position, suffix)
 
     Returns:
-        For DatetimeIndex: Tuple of (frequency_code, position, suffix)
-        For MultiIndex: Dict mapping entity keys (tuple) to
-            (frequency_code, position, suffix) tuples.
-        - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
-        - position: Position indicator ('S' for start, 'E' for end, or None)
-        - suffix: Anchor suffix (e.g., 'DEC', 'JAN', or None)
+        For DatetimeIndex: Frequency in the requested format
+        For MultiIndex: Dict mapping entity keys (tuple) to frequencies.
 
     Raises:
         ValueError: If frequency cannot be detected or if the index has
@@ -804,7 +837,12 @@ def detect_index_frequency(
         >>> # DatetimeIndex - Daily frequency
         >>> dates = pd.date_range('2024-01-01', periods=10, freq='D')
         >>> detect_index_frequency(dates)
-        ('D', None, None)
+        'D'
+        >>>
+        >>> # With components format
+        >>> dates = pd.date_range('2024-01-01', periods=5, freq='MS')
+        >>> detect_index_frequency(dates, return_format='components')
+        ('M', 'S', None)
         >>>
         >>> # MultiIndex panel data
         >>> idx = pd.MultiIndex.from_product([
@@ -812,17 +850,17 @@ def detect_index_frequency(
         ...     pd.date_range('2024-01-01', periods=5, freq='MS')
         ... ], names=['entity', 'date'])
         >>> detect_index_frequency(idx)
-        {('entity_1',): ('M', 'S', None), ('entity_2',): ('M', 'S', None)}
+        {('entity_1',): 'M', ('entity_2',): 'M'}
     """
     # Vérification du type d'index : MultiIndex ou DatetimeIndex
     if isinstance(index, pd.MultiIndex):
         # Traitement du MultiIndex avec date au dernier niveau
         result = {}
         date_level_idx = index.nlevels - 1
-        
+
         # Extraction des entités uniques (n-1 premiers niveaux)
         entity_index = index.droplevel(date_level_idx)
-        
+
         # Parcours des entités
         for entity_key in entity_index.unique():
             # Création du masque pour cette entité
@@ -830,90 +868,17 @@ def detect_index_frequency(
             # Extraction du DatetimeIndex pour cette entité
             dates = index.get_level_values(date_level_idx)[mask]
             # Appel récursif pour déterminer la fréquence
-            freq = detect_index_frequency(dates)
+            freq = detect_index_frequency(dates, return_format=return_format)
             result[entity_key] = freq
-        
+
         return result
     else:
-        # Traitement du DatetimeIndex (comportement inchangé)
+        # Traitement du DatetimeIndex
         # Inférence de la fréquence de l'index
         freq = index.inferred_freq
-        # Parsing de la fréquence
-        return normalize_frequency(frequency=freq, return_format='base')
+        # Normalisation au format demandé
+        return normalize_frequency(frequency=freq, return_format=return_format)
 
-
-# Fonction de détection de la fréquence associée à un index
-def detect_and_parse_index_frequency(
-    index: Union[pd.DatetimeIndex, pd.MultiIndex]
-) -> Union[Tuple[str, Optional[str], Optional[str]], Dict[Tuple, Tuple[str, Optional[str], Optional[str]]]]:
-    """Detect and parse DatetimeIndex or MultiIndex frequency into components.
-
-    For a DatetimeIndex, analyzes the frequency and parses it into
-    three components: the base frequency code, the position indicator
-    (S for start, E for end), and an optional suffix (e.g., DEC for
-    quarterly data anchored to December).
-
-    For a MultiIndex with dates as the last level, detects frequency
-    for each unique entity (combination of non-date levels) and returns
-    a dictionary mapping entity keys to their parsed frequencies.
-
-    Args:
-        index: DatetimeIndex or MultiIndex to analyze. For MultiIndex,
-            the last level must be a DatetimeIndex. Must have at least 2
-            observations and a regular frequency pattern.
-
-    Returns:
-        For DatetimeIndex: Tuple of (frequency_code, position, suffix)
-        For MultiIndex: Dict mapping entity keys (tuple) to
-            (frequency_code, position, suffix) tuples.
-        - frequency_code: Pandas frequency indicator ('D', 'M', 'Q', etc.)
-        - position: Position indicator ('S' for start, 'E' for end, or None)
-        - suffix: Anchor suffix (e.g., 'DEC', 'JAN', or None)
-
-    Raises:
-        ValueError: If frequency cannot be detected or if the index has
-            insufficient observations (<2) or irregular spacing.
-
-    Examples:
-        >>> import pandas as pd
-        >>> # DatetimeIndex - Monthly start
-        >>> dates = pd.date_range('2024-01-01', periods=5, freq='MS')
-        >>> detect_and_parse_index_frequency(dates)
-        ('M', 'S', None)
-        >>>
-        >>> # MultiIndex panel data with multiple entities
-        >>> idx = pd.MultiIndex.from_product([
-        ...     ['country_A', 'country_B'],
-        ...     pd.date_range('2024-01-31', periods=4, freq='QE-DEC')
-        ... ], names=['country', 'date'])
-        >>> detect_and_parse_index_frequency(idx)
-        {('country_A',): ('Q', 'E', 'DEC'), ('country_B',): ('Q', 'E', 'DEC')}
-    """
-    # Vérification du type d'index : MultiIndex ou DatetimeIndex
-    if isinstance(index, pd.MultiIndex):
-        # Traitement du MultiIndex avec date au dernier niveau
-        result = {}
-        date_level_idx = index.nlevels - 1
-        
-        # Extraction des entités uniques (n-1 premiers niveaux)
-        entity_index = index.droplevel(date_level_idx)
-        
-        for entity_key in entity_index.unique():
-            # Création du masque pour cette entité
-            mask = entity_index == entity_key
-            # Extraction du DatetimeIndex pour cette entité
-            dates = index.get_level_values(date_level_idx)[mask]
-            # Appel récursif pour déterminer la fréquence parsée
-            freq = detect_and_parse_index_frequency(dates)
-            result[entity_key] = freq
-        
-        return result
-    else:
-        # Traitement du DatetimeIndex (comportement inchangé)
-        # Inférence de la fréquence de l'index
-        freq = index.inferred_freq
-        # Parsing de la fréquence
-        return parse_frequency(frequency_str=freq)
 
 # Fonction auxiliaire d'extraction de la fréquence la plus haute d'un dictionnaire de fréquences
 def _get_highest_frequency(frequency_map: Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]) -> Optional[Union[FrequencyType, UserFrequencyType]]:

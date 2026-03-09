@@ -25,7 +25,6 @@ from tsforecast.utils.frequency import (
 )
 from tsforecast.frequency import (
     detect_index_frequency,
-    detect_and_parse_index_frequency
 )
 from tsforecast.utils.time import resolve_date, get_period_start, get_period_boundaries
 from tsforecast.utils.duration import convert_duration, normalize_duration, DurationConverter
@@ -1306,7 +1305,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_index_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_index_frequency(X.index, return_format='components')
 
         return self
 
@@ -1331,7 +1330,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_index_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_index_frequency(X.index, return_format='components')
 
         # Branchement selon le type de données
         return self._shift_by_periods(data=X, n_periods=self.n_periods)
@@ -1359,7 +1358,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_index_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_index_frequency(X.index, return_format='components')
 
         # Branchement selon le type de données (shift opposé)
         return self._shift_by_periods(data=X, n_periods=-self.n_periods,)
@@ -1616,7 +1615,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_index_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_index_frequency(X.index, return_format='components')
 
         return self
 
@@ -1641,7 +1640,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_and_parse_index_frequency(X.index)
+        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_index_frequency(X.index, return_format='components')
     
         return self._mask_n_obs_per_period(X)
 
