@@ -823,6 +823,7 @@ def detect_index_frequency(
         # Extraction des entités uniques (n-1 premiers niveaux)
         entity_index = index.droplevel(date_level_idx)
         
+        # Parcours des entités
         for entity_key in entity_index.unique():
             # Création du masque pour cette entité
             mask = entity_index == entity_key
