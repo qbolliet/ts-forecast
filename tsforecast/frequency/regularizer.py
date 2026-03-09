@@ -88,7 +88,7 @@ class IndexRegularizer:
 
         # Série temporelle simple (DatetimeIndex)
         if not isinstance(data.index, pd.MultiIndex):
-            return self._is_regular_single(data.index)
+            return self._is_regular_ts(data.index)
 
         # Panel (MultiIndex)
         return self._is_regular_panel(data, per_entity)
@@ -153,7 +153,7 @@ class IndexRegularizer:
                 # Impossible de détecter la fréquence → retour inchangé
                 result = data
             else:
-                result = self._regularize_single(data, freq)
+                result = self._regularize_ts(data, freq)
         else:
             # Panel
             result = self._regularize_panel(data, per_entity, target_frequency)
@@ -209,7 +209,7 @@ class IndexRegularizer:
 
     # Méthode auxiliaire de détection de la régularité d'une série temporelle
     @staticmethod
-    def _is_regular_single(index: pd.DatetimeIndex) -> bool:
+    def _is_regular_ts(index: pd.DatetimeIndex) -> bool:
         """Check regularity of a single DatetimeIndex.
 
         Args:
@@ -244,30 +244,43 @@ class IndexRegularizer:
         """
         # Extraction du niveau lié à la date
         date_level = data.index.nlevels - 1
-        
+        # Extraction des entités
         entity_index = data.index.droplevel(date_level)
+
+        # Initialisation du dictionnaire résultat
         results: Dict[tuple, bool] = {}
+        # Initialisation de la collection des fréquences détectées
         detected_freqs = set()
 
+        # Parcours des entités
         for entity_key in entity_index.unique():
+            # Masque correspondant aux obserbations de l'entité
             mask = entity_index == entity_key
+            # Extraction des dates de l'entité
             dates = data.index.get_level_values(date_level)[mask]
+            
+            # Vérification de la régularité des dates
+            regular = self._is_regular_ts(dates)
 
-            regular = self._is_regular_single(dates)
+            # Construction de la clé associée à l'entité et complétion des résultats
             key = entity_key if isinstance(entity_key, tuple) else (entity_key,)
             results[key] = regular
 
+            # Détection de la fréquence
             if regular:
                 detected_freqs.add(pd.infer_freq(dates))
 
+        # Cas où l'on attend des résultats par entité
         if per_entity:
             return results
 
-        # Global : toutes régulières ET même fréquence
+        # Cas où l'on attend un résultat global
+        # On vérifie que toutes les entités sont régulières et possèdent la même fréquence
         all_regular = all(results.values())
         same_freq = len(detected_freqs) <= 1
         return all_regular and same_freq
 
+    # Méthode auxiliaire de détection de la fréquence d'une série temporelle
     def _resolve_frequency_ts(
         self,
         data: Union[pd.Series, pd.DataFrame],
@@ -360,7 +373,8 @@ class IndexRegularizer:
             # End position
             return f"{normalized}E"
 
-    def _regularize_single(
+    # Méthode de régularisation d'une série temporelle
+    def _regularize_ts(
         self,
         data: Union[pd.Series, pd.DataFrame],
         target_frequency: str,
@@ -377,14 +391,18 @@ class IndexRegularizer:
         Returns:
             Reindexed data with NaN for filled gaps.
         """
+        # Création de l'index à la nouvelle fréquence
         new_index = pd.date_range(
             start=data.index.min(),
             end=data.index.max(),
             freq=target_frequency,
         )
+        # Ajout du nom de l'index
         new_index.name = data.index.name
+        # Réindexation des données
         return data.reindex(new_index)
 
+    # Méthode auxiliaire de régularisation de données de panel
     def _regularize_panel(
         self,
         data: Union[pd.Series, pd.DataFrame],
@@ -402,7 +420,9 @@ class IndexRegularizer:
         Returns:
             Regularized panel data.
         """
+        # Extraction du niveau des dates
         date_level = data.index.nlevels - 1
+        # Extraction des entités
         entity_index = data.index.droplevel(date_level)
         entity_keys = entity_index.unique()
 
@@ -485,7 +505,7 @@ class IndexRegularizer:
                 continue
 
             # Régularisation
-            regularized = self._regularize_single(entity_data, freq)
+            regularized = self._regularize_ts(entity_data, freq)
 
             # Reconstruction du MultiIndex
             key = entity_key if isinstance(entity_key, tuple) else (entity_key,)
@@ -518,6 +538,7 @@ _regularizer = IndexRegularizer()
 #  Fonctions utilitaires                                              #
 # ------------------------------------------------------------------ #
 
+# Fonction indiquant si un index est régulier
 def is_regular(
     data: Union[pd.Series, pd.DataFrame],
     time_col: Optional[str] = None,
@@ -545,7 +566,7 @@ def is_regular(
     """
     return _regularizer.is_regular(data, time_col, panel_cols, per_entity)
 
-
+# Fonction de régularisation d'un index
 def regularize(
     data: Union[pd.Series, pd.DataFrame],
     time_col: Optional[str] = None,
