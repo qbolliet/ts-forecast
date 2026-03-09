@@ -29,7 +29,6 @@ from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .imputation_window import ImputationWindowCalculator, ImputationScope
 from .target_frequency_validator import TargetFrequencyValidator
 from .frequency_aligner import FrequencyAligner
-from ..delays.data_manager import compare_and_detect_delays
 
 
 # Type aliases
@@ -950,6 +949,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             DataFrame with delay information.
         """
+        # Import différé pour éviter l'import circulaire avec delays.data_manager
+        from ..delays.data_manager import compare_and_detect_delays
+
         try:
             delays_df = compare_and_detect_delays(
                 new_data=X,
