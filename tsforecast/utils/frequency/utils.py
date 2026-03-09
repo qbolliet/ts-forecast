@@ -5,6 +5,7 @@ import pandas as pd
 
 # Importation des modules du package
 from .normalizer import FrequencyNormalizer, FrequencyType, UserFrequencyType
+from ..parse.utils import parse_frequency
 
 # Instance globale pour faciliter l'utilisation
 _normalizer = FrequencyNormalizer()
@@ -67,19 +68,34 @@ def normalize_frequency(
         return _normalizer.normalize(frequency)
 
     elif return_format == 'components':
-        # Décomposition complète
-        return _normalizer.decompose_frequency(frequency)
+        # Décomposition complète via parse_frequency
+        try:
+            base, position, suffix = parse_frequency(frequency)
+            normalized_base = _normalizer.normalize(base)
+            return (normalized_base, position, suffix)
+        except ValueError:
+            # Fallback pour les noms littéraux ('daily', 'monthly', etc.)
+            normalized_base = _normalizer.normalize(frequency)
+            return (normalized_base, None, None)
 
     elif return_format == 'with_position':
         # Base + position si présente
-        base, position, _ = _normalizer.decompose_frequency(frequency)
-        if position:
-            return f"{base}{position}"
-        return base
+        try:
+            base, position, _ = parse_frequency(frequency)
+            normalized_base = _normalizer.normalize(base)
+            if position:
+                return f"{normalized_base}{position}"
+            return normalized_base
+        except ValueError:
+            return _normalizer.normalize(frequency)
 
     elif return_format == 'full':
         # Validation + retour de la chaîne complète
-        _normalizer.decompose_frequency(frequency)  # Validation
+        try:
+            base, _, _ = parse_frequency(frequency)
+            _normalizer.normalize(base)  # Validation seulement
+        except ValueError:
+            _normalizer.normalize(frequency)  # Validation via normalize
         return frequency
 
     else:

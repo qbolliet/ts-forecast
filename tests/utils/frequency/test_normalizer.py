@@ -102,14 +102,6 @@ class TestFrequencyNormalizerComplexStrings:
         assert normalizer.normalize('W-SUN') == 'W'
         assert normalizer.normalize('W-MON') == 'W'
 
-    def test_extract_base_frequency_direct(self, normalizer):
-        """Test _extract_base_frequency() method directly."""
-        assert normalizer._extract_base_frequency('QE-DEC') == 'Q'
-        assert normalizer._extract_base_frequency('MS') == 'M'
-        assert normalizer._extract_base_frequency('AS-JAN') == 'Y'
-        assert normalizer._extract_base_frequency('invalid') is None
-        assert normalizer._extract_base_frequency('123') is None
-
 
 class TestFrequencyNormalizerEdgeCases:
     """Test edge cases and error handling."""
@@ -332,71 +324,6 @@ class TestDeprecatedAliasNormalization:
         assert normalizer.validate('AE') is True
         assert normalizer.validate('AS-JAN') is True
 
-
-class TestFrequencyDecomposition:
-    """Test decompose_frequency() method."""
-
-    @pytest.fixture
-    def normalizer(self):
-        """Create a FrequencyNormalizer instance for testing."""
-        return FrequencyNormalizer()
-
-    def test_decompose_simple_frequencies(self, normalizer):
-        """Test decomposition of simple frequencies."""
-        assert normalizer.decompose_frequency('D') == ('D', None, None)
-        assert normalizer.decompose_frequency('M') == ('M', None, None)
-        assert normalizer.decompose_frequency('Q') == ('Q', None, None)
-        assert normalizer.decompose_frequency('Y') == ('Y', None, None)
-        assert normalizer.decompose_frequency('W') == ('W', None, None)
-        assert normalizer.decompose_frequency('B') == ('B', None, None)
-
-    def test_decompose_position_strings(self, normalizer):
-        """Test decomposition of position strings."""
-        assert normalizer.decompose_frequency('MS') == ('M', 'S', None)
-        assert normalizer.decompose_frequency('ME') == ('M', 'E', None)
-        assert normalizer.decompose_frequency('QS') == ('Q', 'S', None)
-        assert normalizer.decompose_frequency('QE') == ('Q', 'E', None)
-        assert normalizer.decompose_frequency('YS') == ('Y', 'S', None)
-        assert normalizer.decompose_frequency('YE') == ('Y', 'E', None)
-
-    def test_decompose_anchor_strings(self, normalizer):
-        """Test decomposition of anchor strings."""
-        assert normalizer.decompose_frequency('QE-DEC') == ('Q', 'E', 'DEC')
-        assert normalizer.decompose_frequency('QS-JAN') == ('Q', 'S', 'JAN')
-        assert normalizer.decompose_frequency('YS-MAR') == ('Y', 'S', 'MAR')
-        assert normalizer.decompose_frequency('W-SUN') == ('W', None, 'SUN')
-
-    def test_decompose_a_normalization(self, normalizer):
-        """Test that 'A' is normalized to 'Y' in decomposition."""
-        assert normalizer.decompose_frequency('A') == ('Y', None, None)
-        assert normalizer.decompose_frequency('AS') == ('Y', 'S', None)
-        assert normalizer.decompose_frequency('AE') == ('Y', 'E', None)
-        assert normalizer.decompose_frequency('AS-JAN') == ('Y', 'S', 'JAN')
-        assert normalizer.decompose_frequency('AE-DEC') == ('Y', 'E', 'DEC')
-
-    def test_decompose_literal_names(self, normalizer):
-        """Test decomposition of literal names."""
-        assert normalizer.decompose_frequency('daily') == ('D', None, None)
-        assert normalizer.decompose_frequency('monthly') == ('M', None, None)
-        assert normalizer.decompose_frequency('quarterly') == ('Q', None, None)
-        assert normalizer.decompose_frequency('annual') == ('Y', None, None)
-
-    def test_decompose_invalid_frequency(self, normalizer):
-        """Test that invalid frequencies raise ValueError."""
-        with pytest.raises(ValueError, match="Cannot parse"):
-            normalizer.decompose_frequency('invalid_freq')
-
-        # 'XYZ' matches regex but is unsupported, so raises different error
-        with pytest.raises(ValueError, match="Unsupported frequency base"):
-            normalizer.decompose_frequency('XYZ')
-
-    def test_decompose_invalid_type(self, normalizer):
-        """Test that non-string input raises ValueError."""
-        with pytest.raises(ValueError, match="must be a string"):
-            normalizer.decompose_frequency(123)
-
-        with pytest.raises(ValueError, match="must be a string"):
-            normalizer.decompose_frequency(None)
 
 
 class TestNormalizeFrequencyReturnFormats:

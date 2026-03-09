@@ -10,7 +10,7 @@ import pandas as pd
 from typing import Tuple, Optional
 
 # Importation des modules du package
-from ..frequency.utils import normalize_frequency, FrequencyType
+from ..frequency.utils import FrequencyType
 from ..position import combine_frequency_position
 
 # Fonction de parsing d'une chaîne de caractères contenant une fréquence
@@ -123,6 +123,8 @@ def build_frequency_string(
         >>> build_frequency_string('W')
         'W'
     """
+    from ..frequency.utils import normalize_frequency
+
     # Fréquence de base
     base_freq = normalize_frequency(frequency=frequency)
 

@@ -4,13 +4,15 @@ This module provides the FrequencyNormalizer class to handle different frequency
 representations including pandas frequency codes, DateOffsets, and user-friendly names.
 """
 # Importation des modules
-import re
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
-from typing import Union, Literal, Tuple, Optional
+from typing import Union, Literal
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
+
+# Import de l'utilitaire du package
+from ..parse.utils import parse_frequency
 
 # Types supportés pour les fréquences
 FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'T', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'A', 'Y']
@@ -78,44 +80,6 @@ class FrequencyNormalizer(TemporalNormalizer):
             'Y': 11
         }
 
-    # Méthode auxiliaire d'extraction de la fréquence de base
-    def _extract_base_frequency(self, freq_string: str) -> Union[FrequencyType, None]:
-        """Extract base frequency from complex pandas frequency string.
-
-        Handles pandas DateOffset strings with positions and anchors:
-        - Position suffixes: 'MS', 'ME', 'QS', 'QE', 'AS', 'AE'
-        - Anchor suffixes: 'QE-DEC', 'QS-JAN', 'AS-MAR'
-
-        Args:
-            freq_string: Complex pandas frequency string
-
-        Returns:
-            Base frequency code if successful, None otherwise
-
-        Examples:
-            >>> normalizer = FrequencyNormalizer()
-            >>> normalizer._extract_base_frequency('QE-DEC')
-            'Q'
-            >>> normalizer._extract_base_frequency('MS')
-            'M'
-            >>> normalizer._extract_base_frequency('AS-JAN')
-            'Y'
-        """
-        # Pattern: [FREQ_BASE][S|E]?[-ANCHOR]?
-        match = re.match(r"^([A-Z]+?)([SE])?(-(.*?))?$", freq_string)
-
-        if not match:
-            return None
-
-        # Extraction de la fréquence de base (premier groupe)
-        base = match.group(1)
-
-        # Vérification que la base extraite est valide
-        if base in self._pandas_to_literal:
-            return base
-
-        return None
-
     # Méthode de normalisation de l'expression de la fréquence
     def normalize(self, value: Union[FrequencyType, UserFrequencyType]) -> FrequencyType:
         """Normalize any frequency representation to pandas frequency code.
@@ -153,14 +117,19 @@ class FrequencyNormalizer(TemporalNormalizer):
         if value in self._pandas_to_literal:
             return value
 
-        # Conversion du nom littéral en pandas
+        # Conversion du nom littéral en pandas (avec résolution d'alias)
         if value in self._literal_to_pandas:
-            return self._literal_to_pandas[value]
+            code = self._literal_to_pandas[value]
+            return code
 
-        # Tentative d'extraction de la fréquence de base
-        base_freq = self._extract_base_frequency(value)
-        if base_freq is not None:
-            return base_freq
+        # Tentative d'extraction de la fréquence de base via parse_frequency
+        try:
+            base, _, _ = parse_frequency(value)
+            # Récursion seulement si la base est différente de la valeur d'entrée (évite boucle infinie)
+            if base != value:
+                return self.normalize(base)
+        except ValueError:
+            pass
 
         # Renvoie une erreur si le code est inconnu
         raise ValueError(
@@ -168,67 +137,6 @@ class FrequencyNormalizer(TemporalNormalizer):
             f"Supported frequencies: {list(self._literal_to_pandas.keys())} "
             f"or pandas codes: {list(self._pandas_to_literal.keys())}"
         )
-
-    # Méthode de décomposition d'une fréquence en ses composants
-    def decompose_frequency(self, freq_string: str) -> Tuple[str, Optional[str], Optional[str]]:
-        """Decompose frequency into (base, position, anchor) components.
-
-        This method parses complex pandas frequency strings and extracts all
-        components while normalizing the base frequency.
-
-        Args:
-            freq_string: Frequency string to decompose
-
-        Returns:
-            Tuple of (base_frequency, position, anchor):
-            - base_frequency: Normalized base code ('Q', 'M', 'Y', etc.)
-            - position: Position suffix ('S' for start, 'E' for end) or None
-            - anchor: Anchor suffix ('DEC', 'JAN', 'SUN', etc.) or None
-
-        Raises:
-            ValueError: If frequency format is invalid or base is unsupported
-
-        Examples:
-            >>> normalizer = FrequencyNormalizer()
-            >>> normalizer.decompose_frequency('QE-DEC')
-            ('Q', 'E', 'DEC')
-            >>> normalizer.decompose_frequency('MS')
-            ('M', 'S', None)
-            >>> normalizer.decompose_frequency('D')
-            ('D', None, None)
-            >>> normalizer.decompose_frequency('YS-JAN')
-            ('Y', 'S', 'JAN')
-            >>> normalizer.decompose_frequency('monthly')
-            ('M', None, None)
-        """
-        # Validation du type
-        if not isinstance(freq_string, str):
-            raise ValueError(f"Frequency must be a string, got {type(freq_string)}")
-
-        # Pattern: [FREQ_BASE][S|E]?[-ANCHOR]?
-        match = re.match(r"^([A-Z]+?)([SE])?(-(.*?))?$", freq_string)
-
-        if not match:
-            # Fallback: try normalizing as simple frequency or literal name
-            try:
-                base = self.normalize(freq_string)
-                return (base, None, None)
-            except ValueError:
-                raise ValueError(f"Cannot parse frequency string: {freq_string}")
-
-        # Extraction des composants
-        base = match.group(1)
-        position = match.group(2)  # 'S', 'E' or None
-        anchor = match.group(4)     # 'DEC', 'JAN', etc. or None
-
-        # Validation que la base est supportée
-        if base not in self._pandas_to_literal:
-            raise ValueError(
-                f"Unsupported frequency base: {base}. "
-                f"Supported codes: {list(self._pandas_to_literal.keys())}"
-            )
-
-        return (base, position, anchor)
 
     # Méthode de conversion en nom littéraire
     def to_literal(self, frequency: FrequencyType) -> UserFrequencyType:
