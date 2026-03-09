@@ -36,6 +36,7 @@ class IndexRegularizer:
         4
     """
 
+    # Initialisation
     def __init__(self, min_observations: int = 2):
         """Initialize the IndexRegularizer.
 
@@ -43,13 +44,12 @@ class IndexRegularizer:
             min_observations: Minimum number of observations required for
                 frequency detection.
         """
+        # Instanciation des attributs
         self.min_observations = min_observations
+        # Initialisation d'un détecteur de fréquence
         self._detector = FrequencyDetector(min_observations=min_observations)
 
-    # ------------------------------------------------------------------ #
-    #  Détection de la régularité                                         #
-    # ------------------------------------------------------------------ #
-
+    #  Méthode de détection de la régularité
     def is_regular(
         self,
         data: Union[pd.Series, pd.DataFrame],
@@ -83,7 +83,7 @@ class IndexRegularizer:
             >>> IndexRegularizer().is_regular(series)
             True
         """
-        # Préparation : copie de travail + mise en index si nécessaire
+        # Préparation des données : copie et mise en index si nécessaire
         data = self._prepare_data(data, time_col, panel_cols)
 
         # Série temporelle simple (DatetimeIndex)
@@ -93,10 +93,7 @@ class IndexRegularizer:
         # Panel (MultiIndex)
         return self._is_regular_panel(data, per_entity)
 
-    # ------------------------------------------------------------------ #
-    #  Régularisation                                                     #
-    # ------------------------------------------------------------------ #
-
+    #  Méthode de régularisation
     def regularize(
         self,
         data: Union[pd.Series, pd.DataFrame],
@@ -150,6 +147,7 @@ class IndexRegularizer:
 
         # Série temporelle simple
         if not isinstance(data.index, pd.MultiIndex):
+            # Détection de la fréquence de la série temporelle
             freq = self._resolve_frequency_ts(data, target_frequency)
             if freq is None:
                 # Impossible de détecter la fréquence → retour inchangé
@@ -173,10 +171,7 @@ class IndexRegularizer:
 
         return result
 
-    # ------------------------------------------------------------------ #
-    #  Helpers privés                                                     #
-    # ------------------------------------------------------------------ #
-
+    # Méthode auxiliaire de préparation des données
     def _prepare_data(
         self,
         data: Union[pd.Series, pd.DataFrame],
@@ -193,20 +188,26 @@ class IndexRegularizer:
         Returns:
             Copy of data with DatetimeIndex or MultiIndex(entities..., date).
         """
+        # Copie indépendante du jeu de données
         data = data.copy()
 
         # Construction de l'index à partir des colonnes spécifiées
         if time_col is not None or panel_cols is not None:
+            # Initialisation de la liste des colonnes à placer en index
             idx_cols = []
+            # Ajout des colonnes de panel si spécifiées
             if panel_cols is not None:
                 idx_cols.extend(panel_cols)
+            # Ajout de la colonne de temps si spécifiées
             if time_col is not None:
                 idx_cols.append(time_col)
+            # Création de l'index
             if idx_cols:
                 data = data.set_index(idx_cols)
 
         return data
 
+    # Méthode auxiliaire de détection de la régularité d'une série temporelle
     @staticmethod
     def _is_regular_single(index: pd.DatetimeIndex) -> bool:
         """Check regularity of a single DatetimeIndex.
@@ -217,13 +218,16 @@ class IndexRegularizer:
         Returns:
             True if ``pd.infer_freq`` succeeds.
         """
+        # Vérification qu'il y a au moins deux observations pour déterminer la fréquence
         if len(index) < 2:
             return False
+        # Inférence de la fréquence avec pandas (possible que lorsque l'index est régulier)
         try:
             return pd.infer_freq(index) is not None
         except (TypeError, ValueError):
             return False
 
+    # Méthode auxiliaire de vérification de la régularité d'un panel
     def _is_regular_panel(
         self,
         data: Union[pd.Series, pd.DataFrame],
@@ -238,7 +242,9 @@ class IndexRegularizer:
         Returns:
             Dict or bool.
         """
+        # Extraction du niveau lié à la date
         date_level = data.index.nlevels - 1
+        
         entity_index = data.index.droplevel(date_level)
         results: Dict[tuple, bool] = {}
         detected_freqs = set()
