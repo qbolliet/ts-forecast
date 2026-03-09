@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Union
 
 # Import des utilitaires internes
 from .detector import FrequencyDetector, detect_frequency, _get_highest_frequency, detect_index_frequency
-from ..utils.frequency import to_pandas_freq, normalize_frequency, FrequencyType, UserFrequencyType
+from ..utils.frequency import normalize_frequency
 
 
 # Classe de régularisation d'index temporel
@@ -91,7 +91,7 @@ class IndexRegularizer:
             return self._is_regular_ts(data.index)
 
         # Panel (MultiIndex)
-        return self._is_regular_panel(data, per_entity)
+        return self._is_regular_panel(data.index, per_entity)
 
     #  Méthode de régularisation
     def regularize(
@@ -100,7 +100,6 @@ class IndexRegularizer:
         time_col: Optional[str] = None,
         panel_cols: Optional[List[str]] = None,
         per_entity: bool = False,
-        target_frequency: Optional[str] = None,
     ) -> Union[pd.Series, pd.DataFrame]:
         """Regularize the temporal index by filling gaps with NaN rows.
 
@@ -115,8 +114,6 @@ class IndexRegularizer:
             per_entity: For panel data — if True, the target frequency is
                 detected independently per entity; if False, a single global
                 frequency is used for every entity.
-            target_frequency: Explicit target frequency (e.g. ``'MS'``,
-                ``'monthly'``). If None, the frequency is auto-detected.
 
         Returns:
             Regularized data with the same type as the input.
@@ -148,7 +145,7 @@ class IndexRegularizer:
         # Série temporelle simple
         if not isinstance(data.index, pd.MultiIndex):
             # Détection de la fréquence de la série temporelle
-            freq = self._resolve_frequency_ts(data, target_frequency)
+            freq = self._resolve_frequency_ts(data)
             if freq is None:
                 # Impossible de détecter la fréquence → retour inchangé
                 result = data
@@ -156,7 +153,7 @@ class IndexRegularizer:
                 result = self._regularize_ts(data, freq)
         else:
             # Panel
-            result = self._regularize_panel(data, per_entity, target_frequency)
+            result = self._regularize_panel(data, per_entity)
 
         # Restauration de time_col en colonne si nécessaire
         if had_time_col:
@@ -230,22 +227,22 @@ class IndexRegularizer:
     # Méthode auxiliaire de vérification de la régularité d'un panel
     def _is_regular_panel(
         self,
-        data: Union[pd.Series, pd.DataFrame],
+        index: pd.MultiIndex,
         per_entity: bool,
     ) -> Union[bool, Dict[tuple, bool]]:
         """Check regularity for panel data (MultiIndex).
 
         Args:
-            data: Panel data with MultiIndex.
+            index: MultiIndex of the panel data.
             per_entity: Return per-entity dict or global bool.
 
         Returns:
             Dict or bool.
         """
         # Extraction du niveau lié à la date
-        date_level = data.index.nlevels - 1
+        date_level = index.nlevels - 1
         # Extraction des entités
-        entity_index = data.index.droplevel(date_level)
+        entity_index = index.droplevel(date_level)
 
         # Initialisation du dictionnaire résultat
         results: Dict[tuple, bool] = {}
@@ -257,7 +254,7 @@ class IndexRegularizer:
             # Masque correspondant aux obserbations de l'entité
             mask = entity_index == entity_key
             # Extraction des dates de l'entité
-            dates = data.index.get_level_values(date_level)[mask]
+            dates = index.get_level_values(date_level)[mask]
             
             # Vérification de la régularité des dates
             regular = self._is_regular_ts(dates)
@@ -284,94 +281,76 @@ class IndexRegularizer:
     def _resolve_frequency_ts(
         self,
         data: Union[pd.Series, pd.DataFrame],
-        target_frequency: Optional[str],
     ) -> Optional[str]:
         """Resolve the pandas frequency string for a time series.
 
+        Auto-detects the frequency using ``detect_index_frequency`` and
+        ``detect_frequency`` with ``return_format='full'``.
+
         Args:
             data: Time series data.
-            target_frequency: User-supplied frequency or None.
 
         Returns:
             Pandas-compatible frequency string, or None.
         """
-        if target_frequency is not None:
-            # Préservation de la position start/end (ex: 'MS' reste 'MS')
-            return normalize_frequency(target_frequency, return_format='full')
-
-        # Auto-détection via detect_index_frequency pour préserver la position
+        # Détection via detect_index_frequency
         try:
-            parsed = detect_index_frequency(data.index, return_format='components')
-            # parsed = (base, position, suffix)  ex: ('M', 'S', None) → 'MS'
-            base, position, suffix = parsed
-            freq_str = base
-            if position:
-                freq_str += position
-            if suffix:
-                freq_str += f"-{suffix}"
-            return freq_str
+            return detect_index_frequency(data.index, return_format='full')
         except (ValueError, TypeError):
             pass
 
-        # Fallback : détection par colonnes puis highest
+        # Fallback : détection par colonnes via detect_frequency
         try:
-            base_freq = None
             if isinstance(data, pd.DataFrame):
-                freq_map = detect_frequency(data)
+                freq_map = detect_frequency(data, return_format='full')
                 if isinstance(freq_map, dict):
-                    highest = _get_highest_frequency(freq_map)
-                    if highest:
-                        base_freq = highest
+                    self._validate_consistent_positions(freq_map)
+                    return _get_highest_frequency(freq_map)
             elif isinstance(data, pd.Series):
-                freq = detect_frequency(data)
+                freq = detect_frequency(data, return_format='full')
                 if freq is not None and not isinstance(freq, dict):
-                    base_freq = freq
-
-            if base_freq is not None:
-                # Ajout de la position start/end inférée depuis les dates
-                return self._add_position_from_dates(base_freq, data.index)
+                    return freq
         except (ValueError, TypeError):
             pass
 
         return None
 
+    # Méthode auxiliaire de validation de l'ensemble des positions
     @staticmethod
-    def _add_position_from_dates(base_freq: str, index: pd.DatetimeIndex) -> str:
-        """Infer start/end position from actual dates and build a pandas freq string.
-
-        For frequencies that distinguish start vs end (M, Q, Y), checks whether
-        dates fall on the first day of the period (→ start) or last day (→ end).
+    def _validate_consistent_positions(freq_map: dict) -> None:
+        """Validate that all frequencies share the same period position.
 
         Args:
-            base_freq: Base frequency code (e.g. 'M', 'Q', 'Y').
-            index: DatetimeIndex to inspect.
+            freq_map: Dictionary mapping keys to full frequency strings.
 
-        Returns:
-            Pandas frequency string with position (e.g. 'MS', 'QE', 'ME').
+        Raises:
+            ValueError: If mixed positions (start/end) are detected.
         """
-        normalized = normalize_frequency(base_freq)
+        if not freq_map:
+            return
 
-        # Fréquences qui nécessitent une distinction start/end
-        position_freqs = {'M', 'Q', 'Y', 'A'}
-        if normalized not in position_freqs:
-            return to_pandas_freq(base_freq)
-
-        # Vérification : les dates tombent-elles en début de période ?
-        dates = index
-        if isinstance(index, pd.MultiIndex):
-            dates = index.get_level_values(-1)
-
-        if len(dates) == 0:
-            return to_pandas_freq(base_freq)
-
-        all_first_day = all(d.day == 1 for d in dates)
-
-        if all_first_day:
-            # Start position
-            return f"{normalized}S"
-        else:
-            # End position
-            return f"{normalized}E"
+        # Extraction des positions via normalize_frequency
+        # Initialisation du dictionnaire des positions
+        positions = {}
+        # Parcours des fréquences
+        for key, freq_str in freq_map.items():
+            try:
+                # Extraction des positions
+                _, position, _ = normalize_frequency(freq_str, return_format='components')
+                # Ajout au dictionnaire
+                if position is not None:
+                    positions[key] = position
+            except (ValueError, TypeError):
+                continue
+        
+        # Unicisation des positions
+        unique_positions = set(positions.values())
+        # Erreur si les positions ne sont pas uniques
+        if len(unique_positions) > 1:
+            raise ValueError(
+                f"Mixed positions detected: {positions}. "
+                f"All series must use the same position (start or end)."
+            )
 
     # Méthode de régularisation d'une série temporelle
     def _regularize_ts(
@@ -407,7 +386,6 @@ class IndexRegularizer:
         self,
         data: Union[pd.Series, pd.DataFrame],
         per_entity: bool,
-        target_frequency: Optional[str],
     ) -> Union[pd.Series, pd.DataFrame]:
         """Regularize panel data entity by entity.
 
@@ -415,7 +393,6 @@ class IndexRegularizer:
             data: Panel data with MultiIndex.
             per_entity: If True, detect frequency per entity; if False, use a
                 single global frequency for all entities.
-            target_frequency: User-supplied target or None.
 
         Returns:
             Regularized panel data.
@@ -429,57 +406,56 @@ class IndexRegularizer:
         # Fréquence globale (si per_entity=False)
         global_freq = None
         if not per_entity:
-            if target_frequency is not None:
-                global_freq = normalize_frequency(target_frequency, return_format='full')
-            else:
-                # Détection de la fréquence la plus haute sur l'ensemble du panel
-                try:
-                    parsed = detect_index_frequency(data.index, return_format='components')
-                    if isinstance(parsed, dict):
-                        # Conversion des tuples parsés en fréquences string
-                        freq_map = {}
-                        for k, (base, position, suffix) in parsed.items():
-                            f = base
-                            if position:
-                                f += position
-                            if suffix:
-                                f += f"-{suffix}"
-                            freq_map[k] = f
-                        global_freq = _get_highest_frequency(freq_map)
-                    else:
-                        base, position, suffix = parsed
-                        global_freq = base
-                        if position:
-                            global_freq += position
-                        if suffix:
-                            global_freq += f"-{suffix}"
-                except (ValueError, TypeError):
-                    pass
+            # Détection de la fréquence la plus haute sur l'ensemble du panel
+            try:
+                # Détection de la fréquence
+                parsed = detect_index_frequency(data.index, return_format='full')
+                if isinstance(parsed, dict):
+                    # Unicisation de la position
+                    self._validate_consistent_positions(parsed)
+                    # Extraction de la fréquence la plus élevée
+                    global_freq = _get_highest_frequency(parsed)
+                else:
+                    global_freq = parsed
+            except (ValueError, TypeError):
+                pass
 
-                # Fallback : détection par entité puis fréquence la plus haute
-                if global_freq is None:
-                    entity_freqs = {}
-                    for ek in entity_keys:
-                        m = entity_index == ek
-                        dates = data.index.get_level_values(date_level)[m]
-                        entity_data_tmp = data[m]
-                        if isinstance(entity_data_tmp, pd.DataFrame):
-                            entity_data_tmp = entity_data_tmp.copy()
-                            entity_data_tmp.index = dates
-                        else:
-                            entity_data_tmp = pd.Series(entity_data_tmp.values, index=dates)
-                        f = self._resolve_frequency_ts(entity_data_tmp, None)
-                        if f is not None:
-                            key = ek if isinstance(ek, tuple) else (ek,)
-                            entity_freqs[key] = f
-                    if entity_freqs:
-                        global_freq = _get_highest_frequency(entity_freqs)
+            # Fallback : détection par entité puis fréquence la plus haute
+            if global_freq is None:
+                # Initialisation du dictionnaire des fréquences par entité
+                entity_freqs = {}
+                # Parcours des entités
+                for entity_key in entity_keys:
+                    # Création du masque de l'index correspondant à l'entité
+                    mask = entity_index == entity_key
+                    # Extraction des dates de l'entité
+                    dates = data.index.get_level_values(date_level)[mask]
+                    # Extraction des données de l'entité
+                    entity_data_tmp = data[mask]
+                    # Construction de la série temporelle de l'entité
+                    if isinstance(entity_data_tmp, pd.DataFrame):
+                        entity_data_tmp = entity_data_tmp.copy()
+                        entity_data_tmp.index = dates
+                    else:
+                        entity_data_tmp = pd.Series(entity_data_tmp.values, index=dates)
+                    # Détection de la série temporelle de l'entité
+                    entity_freq = self._resolve_frequency_ts(entity_data_tmp)
+                    # Ajout au dictionnaire
+                    if entity_freq is not None:
+                        key = entity_key if isinstance(entity_key, tuple) else (entity_key,)
+                        entity_freqs[key] = entity_freq
+                # Extraction de la fréquence la plus élevée
+                if entity_freqs:
+                    self._validate_consistent_positions(entity_freqs)
+                    global_freq = _get_highest_frequency(entity_freqs)
 
         # Régularisation par entité
         parts = []
         level_names = data.index.names
 
+        # Parcours par entité
         for entity_key in entity_keys:
+            # Création du masque par entité
             mask = entity_index == entity_key
             subset = data[mask]
 
@@ -495,7 +471,7 @@ class IndexRegularizer:
 
             # Résolution de la fréquence pour cette entité
             if per_entity:
-                freq = self._resolve_frequency_ts(entity_data, target_frequency)
+                freq = self._resolve_frequency_ts(entity_data)
             else:
                 freq = global_freq
 
@@ -517,6 +493,7 @@ class IndexRegularizer:
 
             new_mi = pd.MultiIndex.from_arrays(arrays, names=level_names)
 
+            # Attribution de l'index
             if isinstance(regularized, pd.DataFrame):
                 regularized.index = new_mi
             else:
@@ -572,7 +549,6 @@ def regularize(
     time_col: Optional[str] = None,
     panel_cols: Optional[List[str]] = None,
     per_entity: bool = False,
-    target_frequency: Optional[str] = None,
 ) -> Union[pd.Series, pd.DataFrame]:
     """Regularize the temporal index by filling gaps with NaN rows.
 
@@ -583,7 +559,6 @@ def regularize(
         time_col: Column containing timestamps.
         panel_cols: Panel entity columns.
         per_entity: Detect frequency per entity (panel only).
-        target_frequency: Explicit target frequency.
 
     Returns:
         Regularized data.
@@ -595,4 +570,4 @@ def regularize(
         >>> len(result)
         3
     """
-    return _regularizer.regularize(data, time_col, panel_cols, per_entity, target_frequency)
+    return _regularizer.regularize(data, time_col, panel_cols, per_entity)
