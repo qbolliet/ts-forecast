@@ -5,7 +5,9 @@ including pandas frequency codes, DateOffsets, and user-friendly frequency names
 """
 # Import de la classe et fonctions depuis le module spécialisé
 from .normalizer import (
-    FrequencyNormalizer,
+    FrequencyNormalizer
+)
+from .types import (
     FrequencyType,
     UserFrequencyType
 )

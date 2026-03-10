@@ -4,7 +4,8 @@ from typing import Union, Literal, Tuple, Optional
 import pandas as pd
 
 # Importation des modules du package
-from .normalizer import FrequencyNormalizer, FrequencyType, UserFrequencyType
+from .normalizer import FrequencyNormalizer
+from .types import FrequencyType, UserFrequencyType
 from ..parse.utils import parse_frequency
 
 # Instance globale pour faciliter l'utilisation

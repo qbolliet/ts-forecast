@@ -10,7 +10,7 @@ import pandas as pd
 from typing import Tuple, Optional
 
 # Importation des modules du package
-from ..frequency.utils import FrequencyType
+from ..frequency.types import FrequencyType
 from ..position import combine_frequency_position
 
 # Fonction de parsing d'une chaîne de caractères contenant une fréquence

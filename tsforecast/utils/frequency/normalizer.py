@@ -6,19 +6,14 @@ representations including pandas frequency codes, DateOffsets, and user-friendly
 # Importation des modules
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
-from typing import Union, Literal
+from typing import Union
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
 
 # Import de l'utilitaire du package
+from .types import FrequencyType, UserFrequencyType
 from ..parse.utils import parse_frequency
-
-# Types supportés pour les fréquences
-FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'T', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'A', 'Y']
-UserFrequencyType = Literal[
-    'daily', 'weekly', 'monthly', 'quarterly', 'annual', 'business_daily'
-]
 
 
 # Classe de normalisation des fréquences
