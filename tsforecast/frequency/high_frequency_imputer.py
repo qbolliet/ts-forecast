@@ -29,6 +29,7 @@ from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .imputation_window import ImputationWindowCalculator, ImputationScope
 from .target_frequency_validator import TargetFrequencyValidator
 from .frequency_aligner import FrequencyAligner
+from .regularizer import IndexRegularizer
 
 
 # Type aliases
@@ -74,7 +75,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             column, delay, unit, reference_point.
         impute_delayed_values: Whether to impute values affected by publication delays.
         on_frequency_mismatch: How to handle target_frequency higher than data ('error'/'warn').
-        attrition_threshold: Minimum ratio of columns with data (0-1) for extended window.
+        coverage_threshold: Minimum ratio of columns with data (0-1) for extended window.
         imputation_scope: Training window scope ('strict', 'extended_backward',
             'extended_forward', 'extended_both').
         train_on_partial_coverage: If True, use imputed values for training outside P1.
@@ -126,7 +127,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         ...     estimator=LinearRegression(),
         ...     cascade_refitting=True,
         ...     imputation_scope='extended_both',
-        ...     attrition_threshold=0.5
+        ...     coverage_threshold=0.5
         ... )
         >>> imputed = imputer.fit_transform(df)
         >>>
@@ -144,7 +145,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         impute_delayed_values: bool = False,
         delays: Optional[pd.DataFrame] = None,
         on_frequency_mismatch: Literal['error', 'warn'] = 'error',
-        attrition_threshold: float = 0.5,
+        coverage_threshold: float = 0.5,
         imputation_scope: ImputationScope = 'strict',
         train_on_partial_coverage: bool = False,
         train_on_partial_fit_order: Literal['random', 'cv'] = 'random',
@@ -179,7 +180,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 column, delay, unit, reference_point.
             on_frequency_mismatch: How to handle target_frequency higher than
                 data frequencies ('error'/'warn').
-            attrition_threshold: Minimum percentage of columns (0-1) that
+            coverage_threshold: Minimum percentage of columns (0-1) that
                 must have non-null values for extended training window.
             imputation_scope: Training window scope.
             train_on_partial_coverage: If True, use imputed values for
@@ -219,9 +220,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 f"on_frequency_mismatch must be 'error' or 'warn', "
                 f"got '{on_frequency_mismatch}'"
             )
-        if not 0 <= attrition_threshold <= 1:
+        if not 0 <= coverage_threshold <= 1:
             raise ValueError(
-                f"attrition_threshold must be between 0 and 1, got {attrition_threshold}"
+                f"coverage_threshold must be between 0 and 1, got {coverage_threshold}"
             )
         valid_scopes = ('strict', 'extended_backward', 'extended_forward', 'extended_both')
         if imputation_scope not in valid_scopes:
@@ -243,7 +244,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.keep_lower_frequencies = keep_lower_frequencies
         self.impute_delayed_values = impute_delayed_values
         self.on_frequency_mismatch = on_frequency_mismatch
-        self.attrition_threshold = attrition_threshold
+        self.coverage_threshold = coverage_threshold
         self.imputation_scope = imputation_scope
         self.train_on_partial_coverage = train_on_partial_coverage
         self.train_on_partial_fit_order = train_on_partial_fit_order
@@ -252,6 +253,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Validation des paramètres d'entrée
     # -------------------------------------------------------------------------
+    # Méthode auxiliaire de validation du format de la fréquence cible
     def _validate_target_frequency_format(
         self,
         target_frequency: Union[str, Dict[Union[str, tuple], str]]
@@ -269,29 +271,40 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             ValueError: If target_frequency format is invalid or contains
                 invalid frequencies.
         """
+        # Distinction suivant le type de la fréquence cible
+        # Cas où la fréquence cible est une chaîne de caractères
         if isinstance(target_frequency, str):
+            # Normalisation
             try:
-                return normalize_frequency(target_frequency)
+                return normalize_frequency(target_frequency, return_format="base")
             except ValueError as e:
                 raise ValueError(f"Invalid target_frequency '{target_frequency}': {e}")
-
+        
+        # Cas où la fréquence cible est un dictionnaire
         elif isinstance(target_frequency, dict):
+            # Vérification que le dictionnaire est non vide
             if not target_frequency:
                 raise ValueError("target_frequency dict cannot be empty")
+            
+            # Initialisation des dictionnaires de fréquences valides et invalides
             validated_freqs = {}
             invalid_freqs = {}
 
+            # Parcours des fréquences associées à chaque entité
             for entity, freq in target_frequency.items():
+                # Vérification que la fréquence est une chaîne de caractères
                 if not isinstance(freq, str):
                     raise ValueError(
                         f"Frequency for entity '{entity}' must be a string, "
                         f"got {type(freq).__name__}"
                     )
+                # Normalisation
                 try:
                     validated_freqs[entity] = normalize_frequency(freq)
                 except ValueError as e:
                     invalid_freqs[entity] = str(e)
 
+            # Construction du message d'erreur s'il existe des fréquences invalides
             if invalid_freqs:
                 error_msg = "Invalid frequencies in target_frequency dict:\n"
                 for entity, error in invalid_freqs.items():
@@ -305,6 +318,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 f"got {type(target_frequency).__name__}"
             )
 
+    # Méthode auxiliaire de validation de l'estimateur
     def _validate_estimator(
         self,
         estimator: Optional[Union[BaseEstimator, Dict[str, BaseEstimator]]]
@@ -317,35 +331,46 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Raises:
             ValueError: If estimator lacks required methods.
         """
+        # Cas où l'estimateur n'est pas spécifié
         if estimator is None:
             return
-
+        
+        # Distinction suivant le type de l'estimateur
+        # Cas où il s'agit d'un dictionnaire
         if isinstance(estimator, dict):
+            # Vérification que le dictionnaire est non vide
             if not estimator:
                 raise ValueError("estimator dict cannot be empty")
+            # Parcours des éléments du dictionnaire
             for var_name, est in estimator.items():
+                # Vérification qu'il possède la méthode "fit"
                 if not hasattr(est, 'fit') or not callable(getattr(est, 'fit')):
                     raise ValueError(
                         f"Estimator for '{var_name}' must have a 'fit' method, "
                         f"got {type(est).__name__}"
                     )
+                # Vérification qu'il possède la méthode "predict"
                 if not hasattr(est, 'predict') or not callable(getattr(est, 'predict')):
                     raise ValueError(
                         f"Estimator for '{var_name}' must have a 'predict' method, "
                         f"got {type(est).__name__}"
                     )
+        # Cas où il s'agit d'un estimateur
         else:
+            # Vérification qu'il possède la méthode "fit"
             if not hasattr(estimator, 'fit') or not callable(getattr(estimator, 'fit')):
                 raise ValueError(
                     f"estimator must have a 'fit' method, "
                     f"got {type(estimator).__name__}"
                 )
+            # Vérification qu'il possède la méthode "predict"
             if not hasattr(estimator, 'predict') or not callable(getattr(estimator, 'predict')):
                 raise ValueError(
                     f"estimator must have a 'predict' method, "
                     f"got {type(estimator).__name__}"
                 )
 
+    # Méthode auxiliaire de validation du transformer
     def _validate_additive_transformer(
         self,
         transformer: TransformerMixin
@@ -358,13 +383,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Raises:
             ValueError: If transformer lacks required methods.
         """
+        # Liste des méthodes requises
         required_methods = ['fit', 'transform', 'inverse_transform']
+        # Initialisation de la liste des méthodes manquantes
         missing_methods = []
 
+        # Parcours des méthodes requises
         for method_name in required_methods:
+            # Vérification que le transformer possède la méthode en attribut
             if not hasattr(transformer, method_name) or not callable(getattr(transformer, method_name)):
                 missing_methods.append(method_name)
 
+        # Construction du message d'erreur si des méthodes sont manquantes
         if missing_methods:
             raise ValueError(
                 f"additive_transformer must have methods: {', '.join(required_methods)}. "
@@ -373,39 +403,57 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
 
     # -------------------------------------------------------------------------
-    # Propriétés composées (lazy)
+    # Propriétés composées
     # -------------------------------------------------------------------------
+    # Instance du validateur de la fréquence cible
     @property
     def _target_freq_validator(self) -> TargetFrequencyValidator:
         """Lazy initialization of target frequency validator."""
+        # Initialisation si l'attribut n'existe pas déjà
         if not hasattr(self, '_target_freq_validator_cache'):
             self._target_freq_validator_cache = TargetFrequencyValidator()
         return self._target_freq_validator_cache
 
+    # Instance de l'aligneur de fréquence
     @property
     def _freq_aligner(self) -> FrequencyAligner:
         """Lazy initialization of frequency aligner."""
+        # Initialisation si l'attribut n'existe pas déjà
         if not hasattr(self, '_freq_aligner_cache'):
             self._freq_aligner_cache = FrequencyAligner()
         return self._freq_aligner_cache
 
+    # Instance du détecteur de fréquence
     @property
     def _freq_detector(self) -> FrequencyDetector:
         """Lazy initialization of frequency detector."""
+        # Initialisation si l'attribut n'existe pas déjà
         if not hasattr(self, '_freq_detector_cache'):
             self._freq_detector_cache = FrequencyDetector()
         return self._freq_detector_cache
 
+    # Instance du convertisseur de fréquence
     @property
     def _freq_converter(self) -> FrequencyConverter:
         """Lazy initialization of frequency converter."""
+        # Initialisation si l'attribut n'existe pas déjà
         if not hasattr(self, '_freq_converter_cache'):
             self._freq_converter_cache = FrequencyConverter()
         return self._freq_converter_cache
+    
+    # Instance du convertisseur de fréquence
+    @property
+    def _index_regularizer(self) -> IndexRegularizer:
+        """Lazy initialization of index regularizer."""
+        # Initialisation si l'attribut n'existe pas déjà
+        if not hasattr(self, '_index_regularizer_cache'):
+            self._index_regularizer_cache = IndexRegularizer()
+        return self._index_regularizer_cache
 
     # -------------------------------------------------------------------------
-    # Méthodes auxiliaires (restées dans la classe)
+    # Méthodes auxiliaires
     # -------------------------------------------------------------------------
+    # Méthode auxiliaire de classification des variables suivant qu'elles doivent être agrégées, imputées ou rester inchangées
     def _classify_variables(
         self
     ) -> Dict[Union[str, Tuple], VariableCategory]:
@@ -417,10 +465,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             - 'impute': Lower frequency than target, needs imputation
             - 'target_freq': Already at target frequency
         """
+        # Initialisation du dictionnaire contenant les catégories
         categories: Dict[Union[str, Tuple], VariableCategory] = {}
 
+        # Distinction des données de panel et de séries temporelles
+        # Cas des données de panel
         if self.is_panel_:
+            # Parcours des fréquences détectées
             for key, freq in self.detected_frequencies_.items():
+                # Extraction de la colonne et de l'entité
                 if isinstance(key, tuple):
                     entity = key[:-1] if len(key) > 2 else key[0]
                     col = key[-1]
@@ -428,40 +481,62 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     entity = None
                     col = key
 
+                # Extraction de la fréquence cible associée à l'entité
                 if isinstance(self.effective_target_frequency_, dict):
+                    # Normalisation de l'entité sous forme de tuple
                     entity_key = entity if isinstance(entity, tuple) else (entity,)
+                    # Extraction de la fréquence
                     target_freq = self.effective_target_frequency_.get(entity_key)
+                    # Si la fréquence est nulle, tentative d'extraction avec la clé brute
                     if target_freq is None:
                         target_freq = self.effective_target_frequency_.get(entity)
                 else:
                     target_freq = self.effective_target_frequency_
 
+                # Vérification que la fréquence cible est spécifiée
                 if target_freq is None:
                     continue
-
+                
+                # Normalisation de la fréquence détectée
                 freq_normalized = normalize_frequency(freq)
+                # Normalisation de la fréquenc cible
                 target_normalized = normalize_frequency(target_freq)
 
+                # Comparaison des fréquences
                 if is_higher_frequency(freq, target_freq):
+                    # Agrégation si la fréquence cible est plus faible que la fréquence source
                     categories[key] = 'aggregate'
                 elif freq_normalized == target_normalized:
+                    # Cas d'égalité
                     categories[key] = 'target_freq'
                 else:
+                    # Imputation si la fréquence cible est plus élevée que la fréquence source
                     categories[key] = 'impute'
+        # Cas des séries temporelles
         else:
+            # Parcours des fréquences détectées
             for col, freq in self.detected_frequencies_.items():
+                # Normalisation de la fréquence source
                 freq_normalized = normalize_frequency(freq)
+                # Normalisation de la fréquence cible
                 target_normalized = normalize_frequency(self.effective_target_frequency_)
 
+                # Comparaison des fréquences
                 if is_higher_frequency(freq, self.effective_target_frequency_):
+                    # Agrégation si la fréquence cible est plus faible que la fréquence source
                     categories[col] = 'aggregate'
                 elif freq_normalized == target_normalized:
+                    # Cas d'égalité
                     categories[col] = 'target_freq'
                 else:
+                    # Imputation si la fréquence cible est plus élevée que la fréquence source
                     categories[col] = 'impute'
 
         return categories
 
+    # Méthode auxiliaire de classification des variables par rapport à une fréquence cible
+    # /!\ Regarder si cela fait sens que dans la méthode précédente les clés du dictionnaire soient les variables / entités X variable et ici les statuts
+    # /!\ Voir la méthode précédente ne pourrait pas être un cas particulier de celle-ci
     def _classify_variables_at_frequency(
         self,
         prediction_frequency: Union[str, Dict],
@@ -476,52 +551,79 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Dict with keys 'aggregate', 'impute', 'target_freq', each
             containing a list of variable keys.
         """
+        # Initialisation du dictionnaire résultat
         result: Dict[str, List[Union[str, Tuple]]] = {
             'aggregate': [], 'impute': [], 'target_freq': []
         }
 
+        # Distinction suivant la structure des données
+        # Données de panel
         if self.is_panel_:
+            # Parcours des fréquences détectées
             for key, freq in self.detected_frequencies_.items():
+                # Extraction de la colonne et de l'entité
                 if isinstance(key, tuple):
                     entity = key[:-1] if len(key) > 2 else key[0]
                 else:
                     entity = None
 
+                # Extraction de la fréquence cible associée à l'entité
                 if isinstance(prediction_frequency, dict):
+                    # Normalisation de l'entité sous forme de tuple
                     entity_key = entity if isinstance(entity, tuple) else (entity,)
+                    # Extraction de la fréquence 
                     pred_freq = prediction_frequency.get(entity_key)
+                    # Si la fréquence est nulle, tentative d'extraction avec la clé brute
                     if pred_freq is None:
                         pred_freq = prediction_frequency.get(entity)
                 else:
                     pred_freq = prediction_frequency
 
+                # Vérification que la fréquence cible est spécifiée
                 if pred_freq is None:
                     continue
-
+                
+                # Normalisation de la fréquence détectée
                 freq_normalized = normalize_frequency(freq)
+                # Normalisation de la fréquence cible
                 pred_normalized = normalize_frequency(pred_freq)
 
+                # Comparaison des fréquences
                 if is_higher_frequency(freq, pred_freq):
+                    # Agrégation si la fréquence cible est plus faible que la fréquence source
                     result['aggregate'].append(key)
                 elif freq_normalized == pred_normalized:
+                    # Cas d'égalité
                     result['target_freq'].append(key)
                 else:
+                    # Imputation si la fréquence cible est plus élevée que la fréquence source
                     result['impute'].append(key)
+        # Cas des séries temporelles
         else:
-            pred_freq = prediction_frequency if isinstance(prediction_frequency, str) else list(prediction_frequency.values())[0]
+            # Cas d'erreur si la fréquence cible est un dictionnaire dans ce cas
+            if not isinstance(prediction_frequency, str):
+                raise TypeError("'prediction_frequency' should be a string when applied to time series")
+            # Parcours des fréquences détectées
             for col, freq in self.detected_frequencies_.items():
+                # Normalisation de la fréquence source
                 freq_normalized = normalize_frequency(freq)
-                pred_normalized = normalize_frequency(pred_freq)
+                # Normalisation de la fréquence cible
+                pred_normalized = normalize_frequency(prediction_frequency)
 
-                if is_higher_frequency(freq, pred_freq):
+                # Comparaison des fréquences
+                if is_higher_frequency(freq, prediction_frequency):
+                    # Agrégation si la fréquence cible est plus faible que la fréquence source
                     result['aggregate'].append(col)
                 elif freq_normalized == pred_normalized:
+                    # Cas d'égalité
                     result['target_freq'].append(col)
                 else:
+                    # Imputation si la fréquence cible est plus élevée que la fréquence source
                     result['impute'].append(col)
 
         return result
 
+    # Méthode auxiliaire de détermination de l'ordre d'imputation des variables suivant leur fréquence
     def _determine_imputation_order(
         self
     ) -> List[Union[str, Tuple]]:
@@ -534,57 +636,84 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Ordered list of variable identifiers to impute.
         """
+        # Extraction des variables à imputer de la liste
+        # /!\ Est ce que ce genre d'opérations sur les valeurs du dictionnaire ne donne pas envie de le formater comme le résultat de "_classify_variables_at_frequency"
         impute_vars = [
             key for key, cat in self.variable_categories_.items() if cat == 'impute'
         ]
 
+        # Cas où il n'y a pas de variables à imputer
         if not impute_vars:
             return []
 
+        # Distinction suivant la structure des données
+        # Cas de données de séries temporelles
         if not self.is_panel_:
+            # Tri avec les fréquences les plus faibles en premier
             impute_vars.sort(
                 key=lambda col: get_frequency_order(
-                    self.detected_frequencies_.get(col, 'D')
+                    self.detected_frequencies_[col]
                 ),
                 reverse=True,
             )
             return impute_vars
+        # Cas de données de panel
+        else :
+            # Initialisation du dictionnaire associant une variable à la liste de ses entités
+            var_to_entities: Dict[str, List[Tuple]] = {}
+            # Initialisation du dictionnaire associant une variable à la liste de ses fréquences
+            var_to_frequencies: Dict[str, List[float]] = {}
 
-        # Panel : regroupement par variable
-        var_to_entities: Dict[str, List[Tuple]] = {}
-        var_to_frequencies: Dict[str, List[float]] = {}
+            # Parcours des variables à imputer
+            for key in impute_vars:
+                # Extraction du nom de la variable de la clé
+                var_name = key[-1] if isinstance(key, tuple) else key
+                # Ajout de la variable si elle ne fait pas déjà partie des clés des dictionnaires
+                if var_name not in var_to_entities:
+                    var_to_entities[var_name] = []
+                    var_to_frequencies[var_name] = []
+                # Ajout de l'entité
+                var_to_entities[var_name].append(key)
+                # Extraction de la fréquence détectée
+                freq = self.detected_frequencies_[key]
+                # Ajout de l'ordre de la fréquence
+                var_to_frequencies[var_name].append(get_frequency_order(freq))
 
-        for key in impute_vars:
-            var_name = key[-1] if isinstance(key, tuple) else key
-            if var_name not in var_to_entities:
-                var_to_entities[var_name] = []
-                var_to_frequencies[var_name] = []
-            var_to_entities[var_name].append(key)
-            freq = self.detected_frequencies_.get(key, 'D')
-            var_to_frequencies[var_name].append(get_frequency_order(freq))
+            # Initialisation de la liste des métriques sur lesquelles trier les données
+            var_metrics: List[Tuple[str, float, float, int]] = []
+            # Parcours des variables
+            for var_name in var_to_entities:
+                # Extraction des ordres des fréquences associées à la variable
+                freq_orders = var_to_frequencies[var_name]
+                # Calcul de métriques sur l'ordre des fréquences
+                # Fréquence médiane
+                representative_freq = np.median(freq_orders)
+                # Fréquence la plus faible
+                min_freq = np.max(freq_orders)
+                # Nombre d'entités associées à la variable
+                n_entities = len(var_to_entities[var_name])
+                var_metrics.append((var_name, representative_freq, min_freq, n_entities))
 
-        var_metrics: List[Tuple[str, float, float, float, int]] = []
-        for var_name in var_to_entities:
-            freq_orders = var_to_frequencies[var_name]
-            representative_freq = np.median(freq_orders)
-            min_freq = np.max(freq_orders)
-            mean_freq = np.mean(freq_orders)
-            n_entities = len(var_to_entities[var_name])
-            var_metrics.append((var_name, representative_freq, min_freq, mean_freq, n_entities))
+            # Tri des variables suivant les métriques (d'abord les fréquences les plus faibles, puis celles ayant le moins d'entités)
+            var_metrics.sort(key=lambda x: (-x[1], -x[2], x[3]))
 
-        var_metrics.sort(key=lambda x: (-x[1], -x[2], -x[3], x[4]))
+            # Initialisation de la liste de l'ordre des variables à imputer
+            ordered_impute_vars = []
+            # Parcours des variables ordonnées
+            for var_name, _, _, _, _ in var_metrics:
+                # Extraction des entités liées à la variable
+                var_keys = var_to_entities[var_name]
+                # Tri par fréquence décroissante au sein des entité
+                var_keys.sort(
+                    key=lambda k: get_frequency_order(self.detected_frequencies_[k]),
+                    reverse=True
+                )
+                # Ajout aux variables à imputer
+                ordered_impute_vars.extend(var_keys)
 
-        ordered_impute_vars = []
-        for var_name, _, _, _, _ in var_metrics:
-            var_keys = var_to_entities[var_name]
-            var_keys.sort(
-                key=lambda k: get_frequency_order(self.detected_frequencies_.get(k, 'D')),
-                reverse=True
-            )
-            ordered_impute_vars.extend(var_keys)
+            return ordered_impute_vars
 
-        return ordered_impute_vars
-
+    # Méthode auxiliaire de détermination de l'ordre d'imputation par validation croisée
     def _determine_variable_order_cv(
         self,
         X: pd.DataFrame,
@@ -603,12 +732,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Ordered list, easiest variables first.
         """
+        # Vérification qu'il y a au moins deux variables à ordonner
         if len(impute_vars) <= 1:
             return impute_vars
 
+        # Initialisation de la liste associant un score à chaque variable / entité X variable
         scored_vars: List[Tuple[Union[str, Tuple], float]] = []
 
+        # Parcours des variables à imputer
         for var_key in impute_vars:
+            # Extraction du nom de la variable de la clé
             var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
 
             # Préparation des données d'entraînement dans la fenêtre stricte
@@ -617,39 +750,48 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             else:
                 mask = pd.Series(True, index=X.index)
 
-            mask = mask & X[var_name].notna()
+            # Extraction des colonnes de features
             feature_cols = [c for c in X.columns if c != var_name and c not in (self.panel_cols or [])]
 
+            # Score infini si la série est univariée
             if not feature_cols:
                 scored_vars.append((var_key, float('inf')))
                 continue
-
-            X_sub = X.loc[mask, feature_cols].fillna(X.loc[mask, feature_cols].mean())
+            
+            # Séparation en X et y
+            X_sub = X.loc[mask, feature_cols]
             y_sub = X.loc[mask, var_name]
 
             # Fallback si < 10 observations
             if len(X_sub) < 10:
                 scored_vars.append((var_key, get_frequency_order(
-                    self.detected_frequencies_.get(var_key, 'D')
+                    self.detected_frequencies_[var_key]
                 )))
                 continue
 
             # CV 5-fold avec MAPE
+            # Extraction de l'estimateur
             estimator = self._get_estimator_for_variable(var_name)
+            # Score infini si l'estimateur n'est pas spécifié
             if estimator is None:
                 scored_vars.append((var_key, float('inf')))
                 continue
-
-            kf = KFold(n_splits=min(5, len(X_sub)), shuffle=True, random_state=42)
+            
+            # Initialisation de la KFold
+            kf = KFold(n_splits=5, shuffle=True, random_state=42)
+            # Initialisation de la liste des scores
             mapes = []
+            # Parcours des sous-ensembles d'entraînement et de validation
             for train_idx, val_idx in kf.split(X_sub):
+                # Extraction des observations d'entraînement et de validation
                 X_train, X_val = X_sub.iloc[train_idx], X_sub.iloc[val_idx]
                 y_train, y_val = y_sub.iloc[train_idx], y_sub.iloc[val_idx]
+                # Estimation et prédiction sur la validation
                 try:
                     est = clone(estimator)
                     est.fit(X_train, y_train)
                     preds = est.predict(X_val)
-                    # Éviter division par zéro
+                    # Évite la division par zéro
                     non_zero = y_val != 0
                     if non_zero.sum() > 0:
                         mapes.append(mean_absolute_percentage_error(
@@ -657,14 +799,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         ))
                 except Exception:
                     mapes.append(float('inf'))
-
+            # Moyenne des erreurs
             avg_mape = np.mean(mapes) if mapes else float('inf')
+            # Ajout à la liste des scores
             scored_vars.append((var_key, avg_mape))
 
         # Tri par MAPE croissant (variables les plus faciles en premier)
         scored_vars.sort(key=lambda x: x[1])
         return [v for v, _ in scored_vars]
 
+    # Méthode auxiliaire d'extraction de l'estimateur associé à une variable
     def _get_estimator_for_variable(self, variable: str) -> Optional[BaseEstimator]:
         """Get the appropriate estimator for a variable.
 
@@ -674,15 +818,20 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Cloned estimator for the variable, or None if no estimator available.
         """
+        # Cas où l'estimateur n'est pas spécifié
         if self.estimator is None:
             return None
 
+        # Cas où l'estimateur est un dictionnaire
         if isinstance(self.estimator, dict):
             est = self.estimator.get(variable)
+            # Si pas spécifié, extraction de l'estimateur par défaut
             if est is None:
                 est = self.estimator.get('__default__')
+            # Clonage de l'estimateur
             return clone(est) if est is not None else None
-
+        
+        # Clonage de l'estimateur
         return clone(self.estimator)
 
     def _build_frequency_prediction_list(
@@ -1088,7 +1237,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # PHASE 1 — Imputation window
         # =================================================================
         self._imputation_window_calc = ImputationWindowCalculator(
-            attrition_threshold=self.attrition_threshold,
+            coverage_threshold=self.coverage_threshold,
             imputation_scope=self.imputation_scope,
             min_columns=2,
         )
