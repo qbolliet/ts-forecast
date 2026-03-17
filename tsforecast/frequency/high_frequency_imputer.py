@@ -919,7 +919,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
     # Méthode auxiliaire de préparation des données d'entraînement du modèle d'imputation
     # /!\ Revoir le nom de l'argument X_work
-    # /!\ Voir si on n'appelle pas la méthode à tord plusieurs fois 
+    # /!\ Voir si on n'appelle pas la méthode à tord plusieurs fois sur des données de panel et s'il ne serait pas préférable d'extraire d'abord les noms de variables de la clé pour l'appeler une seule fois par variable
     def _prepare_training_data(
         self,
         X_work: pd.DataFrame,
