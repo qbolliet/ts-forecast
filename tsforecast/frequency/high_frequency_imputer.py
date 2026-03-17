@@ -834,6 +834,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Clonage de l'estimateur
         return clone(self.estimator)
 
+    # Méthode auxiliaire de construction de la liste des fréquences auxquelles réaliser une prédiction pour atteindre la fréquence cible
     def _build_frequency_prediction_list(
         self,
     ) -> List[Union[str, Dict]]:
@@ -853,56 +854,72 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """
         # Cas simple : pas de cascade ni de fréquences intermédiaires
         if not self.cascade_refitting and not self.keep_lower_frequencies:
-            if self.is_panel_:
-                return [self.effective_target_frequency_]
-            else:
-                return [self.effective_target_frequency_]
-
-        # Construction de la liste des fréquences uniques à imputer
-        impute_freqs = set()
-        for key, cat in self.variable_categories_.items():
-            if cat == 'impute':
-                freq = self.detected_frequencies_.get(key, 'D')
-                impute_freqs.add(normalize_frequency(freq))
-
-        if not impute_freqs:
-            # Rien à imputer, juste la fréquence cible
-            if self.is_panel_:
-                return [self.effective_target_frequency_]
+            # Retourne directement la fréquence cible
             return [self.effective_target_frequency_]
-
-        # Tri des fréquences de la plus basse (order élevé) à la plus haute
-        sorted_freqs = sorted(impute_freqs, key=get_frequency_order, reverse=True)
-
-        # Ajout de la fréquence cible si pas déjà présente
-        if not self.is_panel_:
-            target_norm = normalize_frequency(self.effective_target_frequency_)
-            if target_norm not in sorted_freqs:
-                sorted_freqs.append(target_norm)
-            return sorted_freqs
+        # Cas où il faut conserver des fréquences plus faibles
         else:
-            # Panel : on retourne des dicts
-            freq_list = []
-            for freq in sorted_freqs:
-                freq_dict = {}
-                for entity in (self.entities_ or []):
-                    freq_dict[entity] = freq
-                freq_list.append(freq_dict)
+            # Construction de la liste des fréquences uniques à imputer (qui correspondent aux fréquences plus faibles que la fréquence cible)
+            # Initialisation de l'ensemble des fréquences à imputer
+            impute_freqs = set()
+            # Parcours des variables
+            for key, cat in self.variable_categories_.items():
+                # Sléection des variables à imputer (à fréquence plus faible que la fréquence cible)
+                if cat == 'impute':
+                    # Extraction de la fréquence
+                    freq = self.detected_frequencies_[key]
+                    # Ajout à la liste
+                    impute_freqs.add(normalize_frequency(freq, return_format='base'))
 
-            # Ajout de la fréquence cible
-            target_freq = self.effective_target_frequency_
-            if isinstance(target_freq, dict):
-                # Vérifier si déjà présent
-                target_freqs_set = set(normalize_frequency(f) for f in target_freq.values())
-                if not target_freqs_set.issubset(impute_freqs):
-                    freq_list.append(target_freq)
+            # Retourne la fréquence cible s'il n'y a rien à imputer
+            if not impute_freqs:
+                return [self.effective_target_frequency_]
+
+            # Tri des fréquences de la plus basse (order élevé) à la plus haute
+            sorted_freqs = sorted(impute_freqs, key=get_frequency_order, reverse=True)
+
+            # Cas des séries temporelles
+            if not self.is_panel_:
+                # Ajout de la fréquence cible si pas déjà présente
+                target_norm = normalize_frequency(self.effective_target_frequency_, return_format='base')
+                if target_norm not in sorted_freqs:
+                    sorted_freqs.append(target_norm)
+                return sorted_freqs
+            # Cas des données de panel
             else:
-                if normalize_frequency(target_freq) not in impute_freqs:
-                    freq_dict = {entity: target_freq for entity in (self.entities_ or [])}
+                # Panel : on retourne des dictionnaires homogènes suivant la fréquence à prédire
+                # Initialisation de la liste résultat
+                freq_list = []
+                # Parcours des fréquences
+                for freq in sorted_freqs:
+                    # Initialisation du dictionnaire pour la fréquence
+                    freq_dict = {}
+                    # Parcours des entités
+                    for entity in self.effective_target_frequency_.keys():
+                        # Ajout de la fréquence si la fréquence cible est supérieure ou égale à la fréquence cible
+                        if is_higher_frequency(self.effective_target_frequency_[entity], freq) or (normalize_frequency(self.effective_target_frequency_, return_format='base') == freq):
+                            freq_dict[entity] = freq
+                    # Ajout du dictionnaire à la liste
                     freq_list.append(freq_dict)
 
-            return freq_list
+                # Ajout de la fréquence cible
+                # Distinction suivant son type (devrait normalement être un dictionnaire pour des données de panel)
+                if isinstance(self.effective_target_frequency_, dict):
+                    # Extraction des fréquences cibles qui ne sont pas déjà présentes
+                    missing_target_freqs = set(normalize_frequency(target_freq, return_format='base') for target_freq in self.effective_target_frequency_.values()) - set()
+                    if missing_target_freqs:
+                        freq_dict = {entity: target_freq for entity, target_freq in self.effective_target_frequency_.items() if target_freq in missing_target_freqs }
+                        freq_list.append(freq_dict)
+                else:
+                    # Création d'un dictionnaire avec la fréquence cible pour chaque entité
+                    if normalize_frequency(self.effective_target_frequency_, return_format='base') not in impute_freqs:
+                        freq_dict = {entity: self.effective_target_frequency_ for entity in (self.entities_ or [])}
+                        freq_list.append(freq_dict)
 
+                return freq_list
+
+    # Méthode auxiliaire de préparation des données d'entraînement du modèle d'imputation
+    # /!\ Revoir le nom de l'argument X_work
+    # /!\ Voir si on n'appelle pas la méthode à tord plusieurs fois 
     def _prepare_training_data(
         self,
         X_work: pd.DataFrame,
@@ -923,6 +940,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Tuple of (X_train, y_train, scale_factor).
         """
+        # Extraction du nom de la variable
         var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
 
         # Détermination des colonnes de features
@@ -983,6 +1001,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         return X_train, y_train, scale_factor
 
+    # Méthode auxiliaire d'application du facteur de mise à l'échelle aux données
     def _apply_frequency_scaling(
         self,
         X_train: pd.DataFrame,
@@ -999,14 +1018,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Tuple of (scaled_X_train, scaled_y_train).
         """
+        # Retourne les données inchangées si le facteur est égal à 1
         if scale_factor == 1.0:
             return X_train, y_train
 
-        y_scaled = y_train / scale_factor
+        # Mise à l'échelle si demandé
         if self.scale_features:
             X_scaled = X_train / scale_factor
+            y_scaled = y_train / scale_factor
         else:
             X_scaled = X_train
+            y_scaled = y_train
 
         return X_scaled, y_scaled
 
