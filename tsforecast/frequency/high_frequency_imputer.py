@@ -943,20 +943,30 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Extraction du nom de la variable
         var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
 
+        # Affichage de vérification
+        print(var_name)
+        print(X_work.head())
+        print(cascade_imputed.head())
+
         # Détermination des colonnes de features
         feature_cols = [
             c for c in X_work.columns
-            if c != var_name and c not in (self.panel_cols or [])
+            if c != var_name
         ]
 
+        # Si la série est univariée, renvoie des éléments vides
         if not feature_cols:
             return pd.DataFrame(), pd.Series(dtype=float), 1.0
 
         # Masque d'entraînement : fenêtre d'entraînement + valeurs non-null pour y
         if hasattr(self, '_imputation_window_calc') and self._imputation_window_calc._is_fitted:
-            training_mask = self._imputation_window_calc.get_training_mask(
-                X_work, column=var_name
-            )
+            # Extraction du mask d'imputation
+            training_mask = self._imputation_window_calc.get_imputation_window_mask()
+            # Hybridation avec la période de disponibilité de y
+            # /!\ Que se passe-t-il lorsque X_work a un niveau de panel supplémentaire lié aux fréquences quand "keep_lower_frequencies"=True ou "cascade_refitting"=True
+            # /!\ Peut-être faire une version de la méthode avec des données en argument et que l'on peut réentrainer, il n'y a pas besoin de vérifier que le caluclateur est fitted dans ce cas
+            # /!\ une autre option serait d'instancier une nouvelle classe et de l'entrainer sur X_work
+            training_mask &= X_work[var_name].notna()
         else:
             training_mask = X_work[var_name].notna()
 
@@ -966,13 +976,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 original_mask = self._provenance_tracker.get_mask(
                     ProvenanceType.ORIGINAL, column=var_name
                 )
+                # /!\ Vérifier la compatibilité des index
                 training_mask = training_mask & original_mask
 
         # Ajout des données de cascade si cascade_refitting=True
         if self.cascade_refitting and cascade_imputed is not None:
+            # Parcours des colonnes
             for col in feature_cols:
                 if col in cascade_imputed.columns:
-                    # Remplir les NaN de X_work avec les valeurs imputées
+                    # Remplissage les NaN de X_work avec les valeurs imputées
                     null_mask = X_work[col].isna()
                     X_work.loc[null_mask, col] = cascade_imputed.loc[
                         null_mask & cascade_imputed[col].notna(), col
@@ -982,20 +994,23 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X_train = X_work.loc[training_mask, feature_cols]
         y_train = X_work.loc[training_mask, var_name]
 
-        # Calcul du facteur de scaling
-        detected_freq = self.detected_frequencies_.get(var_key, 'D')
+        # Calcul du facteur de mise à l'échelle
+        # Extraction de la fréquence de prédiction s'il s'agit d'un dictionnaire
         if isinstance(pred_freq, dict):
             if isinstance(var_key, tuple):
+                # Création des deux systèmes de clé
                 entity = var_key[:-1] if len(var_key) > 2 else var_key[0]
                 entity_key = entity if isinstance(entity, tuple) else (entity,)
-                pf = pred_freq.get(entity_key) or pred_freq.get(entity, 'D')
+                # Extraction de la fréquence
+                pf = pred_freq.get(entity_key) or pred_freq.get(entity)
             else:
                 pf = list(pred_freq.values())[0]
         else:
             pf = pred_freq
 
+        # Calcul du facteur de mise à l'échelle
         scale_factor = self._freq_converter.get_conversion_factor(
-            normalize_frequency(detected_freq),
+            normalize_frequency(self.detected_frequencies_[var_key]),
             normalize_frequency(pf)
         )
 
@@ -1032,6 +1047,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         return X_scaled, y_scaled
 
+    # Méthode auxiliaire de détermination des échantillons de prédiction
     def _determine_prediction_samples(
         self,
         X_work: pd.DataFrame,
@@ -1052,26 +1068,33 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             List of (index, feature_cols) tuples, ordered from most
             features to fewest.
         """
-        # Observations manquantes dans la fenêtre d'imputation
+        # Détection des observations manquantes de la variable à prédire dans la fenêtre d'imputation
         missing_in_window = imputation_mask & X_work[var_name].isna()
+        
+        # Retourne une liste vide s'il n'y a aucune observation à imputer
         if not missing_in_window.any():
             return []
 
+        # Extraction des features
         feature_cols = [
             c for c in X_work.columns
-            if c != var_name and c not in (self.panel_cols or [])
+            if c != var_name
         ]
-
+        # Extraction des index à imputer
         missing_idx = X_work.index[missing_in_window]
 
         # Regroupement par pattern de covariables disponibles
         groups: Dict[tuple, List] = {}
+        # Parcours des index
         for idx in missing_idx:
+            # Extraction des features dispobibles pour l'index
             available = tuple(
                 col for col in feature_cols if pd.notna(X_work.at[idx, col])
             )
+            # Ajout de la clé au dictionnaire si elle n'existe pas déjà
             if available not in groups:
                 groups[available] = []
+            # Ajout de l'index
             groups[available].append(idx)
 
         # Tri par nombre de covariables décroissant
@@ -1081,6 +1104,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         return result
 
+    # Méthode auxiliaire de notation de la provenance des variables agrégées
     def _mark_aggregated_provenance(
         self,
         tracker: ImputationProvenanceTracker,
@@ -1111,6 +1135,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 if col in X.columns:
                     tracker.mark_aggregated(col, X.index)
 
+    # /!\ Voir s'il ne faut pas supprimer cette méthode et se reposer uniquement sur le imputation_scope pour imputer les variables sujettes à délais de publication
     def _infer_delays_from_data(self, X: pd.DataFrame) -> pd.DataFrame:
         """Infer publication delays from data.
 
@@ -1669,6 +1694,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         return combined
 
+    # /!\ Revoir s'il ne faut pas supprimer cette méthode et utiliser seulement le imputation_scope
     def _impute_delayed_values(self, X: pd.DataFrame) -> pd.DataFrame:
         """Impute values affected by publication delays.
 
@@ -1729,6 +1755,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Transformation inverse
     # -------------------------------------------------------------------------
+    # Méthode auxiliaire de transformation inverse
+    # /!\ A revoir car il faut utiliser le provenance tracker (l'inversion de l'additive transformer doit être faite dans la transformation à la fin)
     def _inverse_transform(
         self,
         X: pd.DataFrame,
