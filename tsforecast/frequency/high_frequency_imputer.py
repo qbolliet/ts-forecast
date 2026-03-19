@@ -1274,6 +1274,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Construction du jeu de données de travail
         if y is not None:
+            # Concaténation de X et y si y spécifié
+            # Vérification que X et y ont la même longueur
             if len(X) != len(y):
                 raise ValueError("X and y should be of equal length")
             X_work = pd.concat([X, y.to_frame()], axis=1)
