@@ -1118,20 +1118,32 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             X: DataFrame with current data.
             aggregate_keys: Variable keys that were aggregated.
         """
+        # Ne fait rien si aucune clé d'agrégation n'est fournie
         if not aggregate_keys:
             return
 
+        # Distinction suivant la structure des données
+        # Cas de données de panel
         if self.is_panel_:
+            # Regroupement des clés par entités
             grouped = self._freq_aligner.group_keys_by_entity_and_variable(aggregate_keys)
+            # Parcours des entités et de leurs colonnes associées
             for entity, cols in grouped.items():
+                # Extraction des observations liées à l'entité
                 entity_mask = self._freq_aligner.get_entity_mask(X, entity)
                 entity_index = X.index[entity_mask]
+                # Parcours des colonnes
                 for col in cols:
+                    # Marquage comme agrégé
                     if col in X.columns:
                         tracker.mark_aggregated(col, entity_index)
+        # Cas de données de séries temporelles
         else:
+            # Extraction des noms de colonne des tuples
             columns = self._freq_aligner.extract_column_names(aggregate_keys)
+            # Parcours des colonnes
             for col in columns:
+                # Marquage comme aggrégé
                 if col in X.columns:
                     tracker.mark_aggregated(col, X.index)
 
@@ -1168,6 +1180,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
             return pd.DataFrame(columns=['column', 'delay', 'unit', 'reference_point'])
 
+    # Méthode auxiliaire de regroupement des variables à imputer par fréquence
     def _group_variables_by_frequency(self) -> Dict[int, List[Union[str, Tuple]]]:
         """Group variables to impute by frequency level.
 
@@ -1175,39 +1188,57 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Dict mapping frequency level (int) to list of variable keys.
             Lower frequency = higher level number.
         """
+        # Initialisation du dictionnaire résultat associant à chaque fréquence une liste de variables / entité X variable
+        # Chaque fréquence sera représentée par son ordre
+        # /!\ Voir si on ne peut pas faire en sorte que les clés soient les fréquences détectées mais qu'elles soient ordonnées par frequency_order ?
         freq_groups: Dict[int, List[Union[str, Tuple]]] = {}
 
+        # Parcours des clés désignant les variables à imputer
         for var_key in self.imputation_order_:
-            freq = self.detected_frequencies_.get(var_key, 'D')
+            # Détection de la fréquence associée
+            freq = self.detected_frequencies_[var_key]
+            # Extraction de l'ordre associé à la fréquence
             freq_order = int(get_frequency_order(freq))
 
+            # Ajout de l'ordre au dictionnaire résultat s'il n'existe pas déjà
             if freq_order not in freq_groups:
                 freq_groups[freq_order] = []
+            # Ajout de la clé à la liste des variables à cette fréquence
             freq_groups[freq_order].append(var_key)
 
+        # Tri du dictionnaire par ordre
         return dict(sorted(freq_groups.items(), reverse=True))
 
+    # Méthode auxiliaire d'imputation de l'évolution de la fréquence d'une variable au gré de ses imputations
+    # /!\ Peut-être supprimer
     def _compute_frequency_progression(self) -> Dict[str, List[str]]:
         """Compute the frequency progression for each variable.
 
         Returns:
             Dict mapping variable names to list of frequency stages.
         """
+        # Initialisation du dictionnaire résultat
         progression = {}
 
+        # Parcours des variables à imputer
         for key in self.imputation_order_:
+            # Extraction du nom de la variable
             var_name = key[-1] if isinstance(key, tuple) else key
-            source_freq = self.detected_frequencies_.get(key, 'D')
+            # Extraction de la fréquence source
+            source_freq = self.detected_frequencies_[key]
 
+            # Extraction de la fréquence cible
             if self.is_panel_ and isinstance(key, tuple):
                 entity = key[:-1] if len(key) > 2 else key[0]
                 if isinstance(self.effective_target_frequency_, dict):
-                    target_freq = self.effective_target_frequency_.get(entity, 'D')
+                    target_freq = self.effective_target_frequency_[entity]
                 else:
                     target_freq = self.effective_target_frequency_
             else:
                 target_freq = self.effective_target_frequency_
 
+            # Ajout de la progression associée à la variable
+            # /!\ Etrange car ce n'est pas forcément la même par entité, j'ai l'impression qu'on ne garde ici que la première occurence
             if var_name not in progression:
                 progression[var_name] = [source_freq, target_freq]
 
@@ -1216,6 +1247,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Fit
     # -------------------------------------------------------------------------
+    # Méthode auxiliaire d'entraînement
     def _fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
         """Learn transformation parameters from X and y.
 

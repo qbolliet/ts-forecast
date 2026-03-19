@@ -44,6 +44,7 @@ class FrequencyAligner:
         self._freq_converter = FrequencyConverter()
 
     # Méthode de regroupement des variables par entité
+    # /!\ Peut être détacher cette méthode dans une fonction utilitaire ?
     def group_keys_by_entity_and_variable(
         self,
         keys: List[Union[str, Tuple]],
@@ -116,6 +117,7 @@ class FrequencyAligner:
         return target_frequency
 
     # Méthode de construction du masque des observations associées à une entité
+    # /!\ Peut être mettre cette méthode dans une fonction auxuliaire d'un module utilitaire
     def get_entity_mask(
         self,
         X: pd.DataFrame,
@@ -447,6 +449,7 @@ class FrequencyAligner:
         return result
 
     # Méthode d'extraction des noms de colonnes
+    # /!\ Mettre dans une fonction auxiliaire d'un module d'utilitaire ? ou dans le detector car cela sert de preprocessing
     def extract_column_names(
         self,
         keys: List[Union[str, Tuple]],
