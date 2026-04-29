@@ -302,8 +302,16 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
                 "Call 'fit' with appropriate arguments before using 'predict'."
             )
 
-        # Convertion de l'index en colonnes
-        Y_hat_df = self._convert_index_to_columns(X)
+        # Détection du format d'entrée : plat (unique_id + ds déjà présents) ou MultiIndex
+        if (
+            isinstance(X, pd.DataFrame)
+            and self.id_col in X.columns
+            and self.time_col in X.columns
+        ):
+            Y_hat_df = X
+        else:
+            # Conversion de l'index en colonnes
+            Y_hat_df = self._convert_index_to_columns(X)
 
         # Construction des arguments pour reconcile à partir des attributs
         reconcile_kwargs = {
