@@ -214,7 +214,7 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
 
         # Extraction du niveau de l'index correspondant aux dates
         datetime_level = self._find_datetime_level(df.index)
-        
+
         if datetime_level is None:
             raise ValueError(
                 "Could not identify a datetime level in the index. "
@@ -330,7 +330,7 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
             # Mémorisation du nom de la colonne cible pour une utilisation ultérieure
             self._target_col_ = y.name if y.name is not None else "y"
             # Conversion en DataFrame
-            y = y.to_frame(name=target_col)
+            y = y.to_frame(name=self._target_col_)
         else:
             raise TypeError(f"'y' should be a pandas.Series")
 
@@ -338,32 +338,33 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
         df_y, non_date_cols, date_col_name = self._index_to_flat(y)
         self._non_date_cols_ = non_date_cols
 
-        # Jointure des variables exogènes de X si fourni
-        if X is not None:
-            if not self.exog_vars:
-                warnings.warn(
-                    "X was provided but 'exog_vars' is None or empty. "
-                    "Specify the exogenous columns and their aggregation "
-                    "functions via the 'exog_vars' constructor parameter."
-                )
-            else :
-                # Conversion de l'index de X en colonnes plates
-                df_x, _, _ = self._index_to_flat(
-                    X if isinstance(X, pd.DataFrame) else X.to_frame()
-                )
-    
-                # Extraction des colonnes de jointure et des colonnes exogènes disponibles
-                join_keys = [_TIME_COL] + non_date_cols
-                exog_cols = [c for c in self.exog_vars if c in df_x.columns]
-                df_x = df_x[[c for c in join_keys + exog_cols if c in df_x.columns]]
-    
-                # Jointure à gauche sur df_y pour conserver toutes les observations d'entraînement
-                df_y = df_y.merge(df_x, on=join_keys, how="left")
+        # Jointure des variables exogènes de X si fourni.
+        # Si exog_vars est None, X est ignoré silencieusement (compatibilité
+        # avec les Pipelines sklearn qui transmettent toujours X à chaque étape).
+        if X is not None and self.exog_vars:
+            # Conversion de l'index de X en colonnes plates
+            df_x, _, _ = self._index_to_flat(
+                X if isinstance(X, pd.DataFrame) else X.to_frame()
+            )
+
+            # Extraction des colonnes de jointure et des colonnes exogènes disponibles
+            join_keys = [_TIME_COL] + non_date_cols
+            exog_cols = [c for c in self.exog_vars if c in df_x.columns]
+            df_x = df_x[[c for c in join_keys + exog_cols if c in df_x.columns]]
+
+            # Jointure à gauche sur df_y pour conserver toutes les observations d'entraînement
+            df_y = df_y.merge(df_x, on=join_keys, how="left")
+        elif X is not None:
+            warnings.warn(
+                "X was provided but 'exog_vars' is None or empty. "
+                "Specify the exogenous columns and their aggregation "
+                "functions via the 'exog_vars' constructor parameter."
+            )
 
         # Sélection de la fonction d'agrégation selon le type de hiérarchie
         if self._is_temporal_hierarchy:
             # Résolution du nom du niveau temporel (valeur par défaut si non fourni)
-            effective_id_time_col = (
+            self._effective_id_time_col_ = (
                 self.id_time_col if self.id_time_col is not None else "temporal_id"
             )
             # Pré-construction du unique_id requise par aggregate_temporal.
@@ -377,8 +378,6 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
             else:
                 # Série temporelle simple (DatetimeIndex) : unique_id constant = nom de la cible
                 df_y[_ID_COL] = target_col
-
-            # Agrégation
             self.Y_df_, self.S_df_, self.tags_ = aggregate_temporal(
                 df=df_y,
                 spec=self.spec,
@@ -386,8 +385,8 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
                 sparse_s=self.sparse_s,
                 id_col=_ID_COL,
                 time_col=_TIME_COL,
-                id_time_col=effective_id_time_col,
-                target_cols=(target_col,),
+                id_time_col=self._effective_id_time_col_,
+                target_cols=(self._target_col_,),
                 aggregation_type=self.aggregation_type,
             )
         else:
@@ -399,7 +398,7 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
                 id_col=_ID_COL,
                 time_col=_TIME_COL,
                 id_time_col=self.id_time_col,
-                target_cols=(target_col,),
+                target_cols=(self._target_col_,),
             )
 
         # Création de l'objet de réconciliation
@@ -475,13 +474,60 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
             df_flat = df_flat.drop(columns=non_date_cols)
             Y_hat_df = df_flat
 
-        # Construction des arguments pour la réconciliation
-        reconcile_kwargs = {
-            "Y_hat_df": Y_hat_df,
-            "Y_df": self.Y_df_,
-            "S_df": self.S_df_,
-            "tags": self.tags_,
-        }
+        # Construction des arguments pour la réconciliation.
+        # Les hiérarchies temporelles et cross-sectionnelles ont des interfaces
+        # distinctes dans reconcile :
+        # - Cross-sectionnel : Y_df requis, id_col='unique_id' dans S_df
+        # - Temporel : Y_df=None, temporal=True, id_col='unique_id' (entité),
+        #   id_time_col=effective_id_time_col_ (niveau temporel dans S_df et Y_hat)
+        if self._is_temporal_hierarchy:
+            #from hierarchicalforecast.utils import aggregate_temporal
+
+            # S_df dépend de la longueur de l'horizon de prévision et ne peut
+            # pas être réutilisé tel quel depuis l'entraînement. On le reconstruit
+            # à partir des lignes bottom-level de Y_hat_df en utilisant une cible
+            # fictive (la structure de S ne dépend que des dates et du spec).
+            #id_time_col = self._effective_id_time_col_
+            #bottom_level = min(self.spec, key=lambda k: self.spec[k])
+            #bottom_prefix = bottom_level + "-"
+            #Y_hat_bottom = Y_hat_df[
+            #    Y_hat_df[id_time_col].str.startswith(bottom_prefix)
+            #][[_ID_COL, _TIME_COL]].copy()
+            #Y_hat_bottom[self._target_col_] = 1.0  # cible factice : seule la structure de S importe
+
+            #_, S_df_pred, tags_pred = aggregate_temporal(
+            #    df=Y_hat_bottom,
+            #    spec=self.spec,
+            #    id_col=_ID_COL,
+            #    time_col=_TIME_COL,
+            #    id_time_col=id_time_col,
+            #    target_cols=(self._target_col_,),
+            #    aggregation_type=self.aggregation_type,
+            #)
+
+            #reconcile_kwargs = {
+            #    "Y_hat_df": Y_hat_df,
+            #    "Y_df": None,
+            #    "S_df": S_df_pred,
+            #    "tags": tags_pred,
+            #    "temporal": True,
+            #    "id_col": _ID_COL,
+            #    "id_time_col": id_time_col,
+            #}
+            reconcile_kwargs = {
+                "Y_hat_df": Y_hat_df,
+                "Y_df": None,
+                "S_df": self.S_df_,
+                "tags": self.tags_,
+                "temporal": True,
+            }
+        else:
+            reconcile_kwargs = {
+                "Y_hat_df": Y_hat_df,
+                "Y_df": self.Y_df_,
+                "S_df": self.S_df_,
+                "tags": self.tags_,
+            }
 
         # Ajout des arguments optionnels de prédiction probabiliste
         if self.level is not None:
