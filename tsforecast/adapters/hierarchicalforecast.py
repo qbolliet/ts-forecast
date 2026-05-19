@@ -16,66 +16,101 @@ from sklearn.base import BaseEstimator, RegressorMixin
 # Constantes internes correspondant aux conventions de hierarchicalforecast
 _ID_COL = "unique_id"
 _TIME_COL = "ds"
+_DEFAULT_ID_TIME_COL = "temporal_id"
 
 
 # Wrapper permettant l'intégration des modèles du package "hierarchicalforecast" dans une syntaxe "sklearn-like"
-# /!\ La méthode "score" (nécessaire pour GridSearchCV) et l'héritage de RegressorMixin font que l'on wrappe des régresseurs et non des classifieurs par défaut
+# /!\ L'héritage de RegressorMixin fournit une méthode score() par défaut basée sur R²,
+#     que l'on surcharge pour la rendre cohérente avec la sortie multi-colonnes de reconcile
 class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
-    """Adapter for hierarchicalforecast reconciliation with sklearn-like API.
+    """sklearn-compatible adapter for hierarchicalforecast reconciliation.
 
-    This adapter wraps the hierarchicalforecast library's aggregation and
-    reconciliation functionality, allowing users to work with pandas DataFrames
-    that have datetime or MultiIndex indices directly, without manually
-    constructing the ``unique_id`` strings expected by hierarchicalforecast.
+    The ``reconcile`` method of ``hierarchicalforecast`` is conceptually a
+    ``fit_predict``: it both fits the reconciler internally and produces
+    reconciled forecasts in a single call. To respect the sklearn split
+    between training-time state and prediction-time computation, the
+    adapter splits the workflow as follows:
 
-    The ``unique_id`` is built internally by joining the non-date index level
-    values with ``"/"``. Aggregate-level rows in the prediction DataFrame
-    should therefore use an empty string ``""`` for any index level that is
-    absent at that aggregation depth (see ``predict`` for details).
+    - ``fit(X, y)`` calls :func:`~hierarchicalforecast.utils.aggregate` (or
+      :func:`~hierarchicalforecast.utils.aggregate_temporal`) on ``y`` to
+      derive the summing matrix ``S``, the level ``tags`` and the
+      training-time reference frame ``Y_df``. These quantities depend only
+      on the hierarchy structure and on the insample values, not on the
+      out-of-sample forecasts that will be reconciled. When ``X`` is
+      provided, its insample base-forecast columns are joined into ``Y_df``
+      so that reconcilers requiring ``y_hat_insample``
+      (``MinTrace('mint_shrink' | 'mint_cov' | 'wls_var')``, ``ERM``) can
+      access them.
+    - ``predict(X)`` reconciles out-of-sample base forecasts. The summing
+      matrix is reused from ``fit`` for cross-sectional hierarchies; for
+      temporal hierarchies, it depends on the prediction horizon and is
+      rebuilt from ``X`` itself before calling ``reconcile``.
 
-    Note:
-        ``id_col``, ``time_col``, and ``target_cols`` are not constructor
-        parameters: they are handled automatically. The unique-id column is
-        always ``"unique_id"``, the time column is always ``"ds"``, and the
-        target column is inferred from the name of the ``y`` argument in
-        ``fit``.
+    Both ``X`` and ``y`` use pandas indices to encode entity and time
+    information; no manual construction of ``id_col``, ``time_col``, 
+    and ``target_cols``, ``unique_id`` / ``ds`` strings is required.
 
     Args:
-        reconcilers: List of instantiated reconciliation method objects from
-            ``hierarchicalforecast.methods`` (e.g., ``BottomUp()``,
-            ``MinTrace()``).
-        spec: Hierarchy specification. Either a list of lists of column names
-            for cross-sectional hierarchies (used with ``aggregate``), or a
-            dict mapping temporal level names to aggregation factors (used
-            with ``aggregate_temporal``). Lists must be ordered from the most
-            aggregated level to the most granular (bottom) level.
+        reconcilers: List of instantiated reconciliation method objects
+            from ``hierarchicalforecast.methods`` (e.g., ``BottomUp()``,
+            ``MinTrace(method='ols')``).
+        spec: Hierarchy specification.
+
+            - **Cross-sectional**: list of lists of index-level names
+              ordered from the most aggregated level to the bottom level
+              (forwarded to ``aggregate``).
+            - **Temporal**: dict mapping temporal level names to the
+              number of bottom-level timesteps in the aggregation
+              (forwarded to ``aggregate_temporal``).
+
         exog_vars: Dictionary specifying how to aggregate exogenous variables.
             Keys are column names present in the ``X`` DataFrame passed to
             ``fit``; values are aggregation functions (``"sum"``, ``"mean"``)
             or lists of such functions.
-        sparse_s: If ``True``, return the summing matrix ``S`` as a sparse
-            matrix.
-        id_time_col: Name of the column used for temporal hierarchy
-            identifiers inside ``aggregate_temporal``. Only relevant when
-            ``spec`` is a dict (temporal hierarchy). Defaults to
-            ``"temporal_id"`` if ``None``.
-        aggregation_type: Temporal aggregation strategy (``"local"`` or
-            ``"global"``). Only used when ``spec`` is a dict.
-        level: Confidence levels for prediction intervals (e.g.,
-            ``[80, 95]``).
-        intervals_method: Method for computing prediction intervals. One of
+        sparse_s: Whether to return the summing matrix as a sparse
+            ``SMatrix``. Forwarded to ``aggregate`` / ``aggregate_temporal``.
+        id_time_col: Name of the temporal-id column used by
+            ``aggregate_temporal`` and ``reconcile``. Only relevant for
+            temporal hierarchies. Defaults to ``"temporal_id"``.
+        aggregation_type: Temporal aggregation strategy, ``"local"`` or
+            ``"global"``. Only relevant for temporal hierarchies.
+        level: Confidence levels for probabilistic reconciliation, e.g.
+            ``[80, 95]``.
+        intervals_method: Sampler for prediction intervals, one of
             ``"normality"``, ``"bootstrap"``, ``"permbu"``.
-        num_samples: Number of samples for probabilistic reconciliation.
-            If positive, returns probabilistic coherent samples.
+        num_samples: Number of probabilistic coherent samples returned by
+            ``reconcile``. Defaults to ``-1`` (no sampling).
+        is_balanced: Whether the training set is balanced. Forwarded to
+            ``reconcile``; setting it to ``True`` speeds reconciliation up
+            when applicable.
 
     Attributes:
-        Y_df_: DataFrame containing aggregated time series after ``fit``.
-        S_df_: DataFrame containing the summing matrix after ``fit``.
-        tags_: Dictionary mapping hierarchy levels to their ``unique_id``
-            values.
-        hrec_: ``HierarchicalReconciliation`` instance created during
-            ``fit``.
+        Y_df_: Aggregated training DataFrame, optionally enriched with
+            insample base forecasts joined from ``X``.
+        S_df_: Summing matrix derived during ``fit``. Reused at prediction
+            time for cross-sectional hierarchies; for temporal
+            hierarchies, this is the *training-set* version and is
+            **not** reused during ``predict``.
+        tags_: Mapping from level name to the array of identifiers
+            (``unique_id`` for cross-sectional, ``temporal_id`` for
+            temporal) belonging to that level.
+        hrec_: Underlying ``HierarchicalReconciliation`` instance.
 
+    Note:
+        For the cross-sectional case, ``predict`` accepts ``X`` containing
+        only bottom-level forecasts (and exogenous variables eventually): aggregate-level rows are computed
+        automatically by summation along the spec. To preserve
+        level-specific upstream forecasts (e.g., a dedicated model at each
+        hierarchy level), pass ``X`` with rows
+        already present at every level -- empty strings ``""`` in the
+        index encode the levels that do not apply at the aggregate depth.
+
+        For the temporal case, ``predict`` expects a mapping
+        ``{level_name: DataFrame}`` so that each temporal level can carry
+        its own forecasts. A single DataFrame
+        is also accepted: it is then treated as the bottom-level forecasts
+        and upper temporal levels are auto-aggregated by summation.
+        
     Examples:
         Cross-sectional hierarchy without exogenous variables::
 
@@ -134,6 +169,7 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
         level: Optional[List[float]] = None,
         intervals_method: Optional[str] = None,
         num_samples: int = -1,
+        is_balanced: bool = False,
     ):
         # Initialisation des attributs à partir des arguments
         self.reconcilers = reconcilers
@@ -145,13 +181,28 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
         self.level = level
         self.intervals_method = intervals_method
         self.num_samples = num_samples
+        self.is_balanced = is_balanced
 
+    # ------------------------------------------------------------------
+    # Propriétés et méthodes utilitaires
+    # ------------------------------------------------------------------
+    
     # Le type de hiérarchie dépend du type de l'argument "spec" : dictionnaire pour une agrégation temporelle, liste sinon
     @property
     def _is_temporal_hierarchy(self) -> bool:
         """Check if spec defines a temporal hierarchy."""
         return isinstance(self.spec, dict)
 
+    # Nom du niveau bottom de la hiérarchie
+    @property
+    def _bottom_level_name(self) -> str:
+        """Return the name of the bottom (most granular) hierarchy level."""
+        if self._is_temporal:
+            # Le niveau bottom temporel est celui dont le facteur d'agrégation est minimal
+            return min(self.spec, key=lambda k: self.spec[k])
+        # Niveau bottom cross-section : dernière liste du spec
+        return "/".join(self.spec[-1])
+    
     # Méthode auxiliaire de détection du niveau du datetime dans l'index
     # /!\ Voir si on ne peut pas hybrider cette méthode avec les méthodes de validation dans utils/validation 
     def _find_datetime_level(self, index: pd.Index) -> Optional[int]:
@@ -162,7 +213,7 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
         returned if it is datetime-typed.
 
         Args:
-            index: pandas Index or MultiIndex to analyze.
+            index: pandas ``Index`` or ``MultiIndex``.
 
         Returns:
             Index position of the datetime level, or ``None`` if not found.
@@ -186,35 +237,32 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
     ) -> Tuple[pd.DataFrame, List[str], str]:
         """Reset the index of a hierarchical DataFrame to flat columns.
 
-        Transforms a DataFrame whose index encodes entity and time information
-        into the flat column format expected by hierarchicalforecast's
-        ``aggregate`` functions. The datetime level is always renamed to
+        Transforms a DataFrame whose index encodes entity and time
+        information into the flat column format expected by
+        ``hierarchicalforecast``. The datetime level is always renamed to
         ``"ds"``; unnamed index levels are assigned placeholder names
         ``"level_i"``.
 
         Args:
-            df: DataFrame with a DatetimeIndex (time series) or MultiIndex
-                where the last level is the date.
+            df: DataFrame with a ``DatetimeIndex`` (time series) or a
+                ``MultiIndex`` whose last level is the date.
 
         Returns:
-            Tuple of:
-                - ``df_flat``: DataFrame with the full index reset to columns
-                  and the date column renamed to ``"ds"``.
-                - ``non_date_cols``: Ordered list of column names that
-                  originated from non-date index levels (entity and hierarchy
-                  levels). Empty for a simple DatetimeIndex.
-                - ``date_col_name``: Original name of the datetime level
-                  before renaming to ``"ds"``.
+            Tuple of ``(df_flat, non_date_cols)``:
+
+            - ``df_flat``: DataFrame with the index reset to columns and
+              the date column renamed to ``"ds"``.
+            - ``non_date_cols``: Ordered list of non-date index level
+              names.
 
         Raises:
-            ValueError: If no datetime level can be identified in the index.
+            ValueError: If no datetime level can be identified.
         """
         # Copie indépendante pour éviter toute modification en place du jeu de données original
         df = df.copy()
 
         # Extraction du niveau de l'index correspondant aux dates
         datetime_level = self._find_datetime_level(df.index)
-
         if datetime_level is None:
             raise ValueError(
                 "Could not identify a datetime level in the index. "
@@ -251,7 +299,7 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
         if date_col_name != _TIME_COL:
             df = df.rename(columns={date_col_name: _TIME_COL})
 
-        return df, non_date_cols, date_col_name
+        return df, non_date_cols
 
     # Méthode de construction du "unique_id" à partir des colonnes non-date
     def _build_unique_id_series(
@@ -259,10 +307,9 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
     ) -> pd.Series:
         """Build the ``unique_id`` column from non-date column values.
 
-        For each row, joins the non-empty, non-null values of the specified
-        columns with ``"/"``. Rows at an aggregate hierarchy level should use
-        an empty string ``""`` for any column that does not apply at that
-        depth; those empty parts are silently omitted from the identifier.
+        For each row, joins the non-empty values of the specified columns
+        with ``"/"``. Empty strings ``""`` are silently omitted so that
+        aggregate-level rows naturally produce shorter identifiers.
 
         Args:
             df: Flat DataFrame (index already reset) containing ``non_date_cols``.
@@ -278,21 +325,273 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
                 ("DE", "Total", "")  -> "DE/Total"
                 ("DE", "Total", "B") -> "DE/Total/B"
         """
-        def _row_to_id(row: pd.Series) -> str:
-            # Filtrage des valeurs nulles ou vides avant la concaténation
-            parts = []
-            # Parcours des colonnes qui ne sont pas des dates
-            for col in non_date_cols:
-                # Extraction de la valeur
-                val = row[col]
-                # Construction de l'id unique
-                is_nan = isinstance(val, float) and np.isnan(val)
-                if val is not None and not is_nan and str(val) != "":
-                    parts.append(str(val))
-            return "/".join(parts)
+        # Récupération des colonnes en tant que tableau de chaînes de caractères
+        arr = df[non_date_cols].astype(str).to_numpy()
 
-        return df.apply(_row_to_id, axis=1)
+        # Définition des marqueurs de valeur "absente" (chaîne vide ou NaN converti)
+        nan_markers = {"nan", "None", "<NA>", ""}
 
+        # Construction ligne-à-ligne avec filtrage des valeurs absentes
+        def _join_row(row):
+            return "/".join(v for v in row if v not in nan_markers)
+
+        return pd.Series([_join_row(row) for row in arr], index=df.index)
+
+    # ------------------------------------------------------------------
+    # Préparation des prédictions in-sample / out-of-sample
+    # ------------------------------------------------------------------
+
+    # Conversion d'une entrée X (Series, DataFrame ou dict) en DataFrame plat
+    # Retourne (df_plat, non_date_cols, model_cols, df_temporal_levels)
+    def _prepare_forecasts_flat(
+        self,
+        X: Union[pd.Series, pd.DataFrame, Dict[str, Union[pd.Series, pd.DataFrame]]],
+        non_date_cols_reference: List[str],
+    ) -> Tuple[pd.DataFrame, List[str], Optional[Dict[str, pd.DataFrame]]]:
+        """Convert ``X`` into the flat format expected by hierarchicalforecast.
+
+        Handles three input shapes uniformly:
+
+        - ``Series`` (a single model) → DataFrame with one model column.
+        - ``DataFrame`` (one or several models) → kept as-is.
+        - ``dict`` mapping temporal level name to ``Series``/``DataFrame``
+          (temporal hierarchy only) → each entry is treated as the
+          forecasts at the given temporal level.
+
+        Args:
+            X: User-facing base-forecast input.
+            non_date_cols_reference: Non-date index level names observed
+                during ``fit``. Used to detect index-level mismatches.
+
+        Returns:
+            Tuple ``(df_flat, model_cols, by_level)``:
+
+            - ``df_flat``: Flat DataFrame with ``unique_id``, ``ds`` and
+              one column per model. ``temporal_id`` is included only when
+              ``by_level`` is non-empty.
+            - ``model_cols``: List of model column names.
+            - ``by_level``: For temporal inputs given as a dict, mapping
+              ``level_name -> flat sub-DataFrame``. ``None`` otherwise.
+        """
+        # Cas spécifique du dictionnaire (hiérarchie temporelle multi-niveaux)
+        if isinstance(X, dict):
+            if not self._is_temporal:
+                raise TypeError(
+                    "Dict input is only supported for temporal hierarchies."
+                )
+            # Vérification de la cohérence des clés avec le spec
+            unknown = set(X.keys()) - set(self.spec.keys())
+            if unknown:
+                raise ValueError(
+                    f"Unknown temporal levels in X: {sorted(unknown)}. "
+                    f"Expected levels from spec: {sorted(self.spec.keys())}."
+                )
+            # Conversion récursive de chaque niveau
+            by_level = {}
+            for level_name, df_level in X.items():
+                df_flat_level, _, _ = self._prepare_forecasts_flat(
+                    df_level, non_date_cols_reference
+                )
+                by_level[level_name] = df_flat_level
+            # Extraction des colonnes de modèle communes
+            model_cols = [
+                c
+                for c in next(iter(by_level.values())).columns
+                if c not in (_ID_COL, _TIME_COL)
+            ]
+            # Concaténation en un seul DataFrame
+            df_flat = pd.concat(by_level.values(), ignore_index=True)
+            return df_flat, model_cols, by_level
+
+        # Conversion Series → DataFrame
+        if isinstance(X, pd.Series):
+            name = X.name if X.name is not None else "y_hat"
+            X = X.to_frame(name=name)
+
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError(
+                f"X must be a Series, DataFrame, or dict (temporal only); "
+                f"got {type(X).__name__}."
+            )
+
+        # Conversion de l'index en colonnes plates
+        df_flat, non_date_cols = self._index_to_flat(X)
+
+        # Construction du unique_id à partir des colonnes non-date (hors série temporelle simple)
+        if non_date_cols:
+            df_flat[_ID_COL] = self._build_unique_id_series(df_flat, non_date_cols)
+            df_flat = df_flat.drop(columns=non_date_cols)
+        else:
+            # Cas dégénéré d'une série temporelle simple
+            df_flat[_ID_COL] = self._target_col_
+
+        # Identification des colonnes de modèles (toutes sauf identifiants)
+        # /!\ Voir si'il ne faut pas également exclure les variables exogènes
+        model_cols = [c for c in df_flat.columns if c not in (_ID_COL, _TIME_COL)]
+
+        return df_flat, model_cols, None
+
+    # Calcul automatique des prédictions aux niveaux supérieurs par sommation
+    def _autoaggregate_cross_sectional(
+        self, df_flat: pd.DataFrame, model_cols: List[str]
+    ) -> pd.DataFrame:
+        """Auto-aggregate bottom-level forecasts to all hierarchy levels.
+
+        For each upper level in the spec, the predictions are summed over
+        the bottom-level rows that belong to the corresponding aggregate.
+        Existing rows for an upper level (matched by ``unique_id``) are
+        preserved unchanged.
+
+        Args:
+            df_flat: Flat DataFrame with ``unique_id``, ``ds`` and
+                ``model_cols``.
+            model_cols: Columns to aggregate.
+
+        Returns:
+            DataFrame containing rows at every level of the cross-sectional
+            spec.
+        """
+        # Récupération des identifiants existants pour ne pas les écraser
+        existing_ids = set(df_flat[_ID_COL].unique())
+        all_levels_dfs = [df_flat]
+
+        # Itération sur tous les niveaux du spec à l'exception du niveau bottom
+        for level_cols in self.spec[:-1]:
+            # Identifiants attendus à ce niveau, déduits de tags_
+            level_name = "/".join(level_cols)
+            target_ids = set(self.tags_[level_name])
+            missing_ids = target_ids - existing_ids
+            if not missing_ids:
+                continue
+
+            # Mapping unique_id bottom → unique_id agrégé via le préfixe du chemin
+            depth = len(level_cols)
+            bottom_ids = self.tags_[self._bottom_level_name]
+            agg_id_for_bottom = {
+                bid: "/".join(bid.split("/")[:depth]) for bid in bottom_ids
+            }
+
+            # Sommation des prédictions au niveau agrégé
+            df_bottom = df_flat[df_flat[_ID_COL].isin(bottom_ids)].copy()
+            df_bottom[_ID_COL] = df_bottom[_ID_COL].map(agg_id_for_bottom)
+            df_agg = (
+                df_bottom.groupby([_ID_COL, _TIME_COL], as_index=False)[model_cols]
+                .sum()
+            )
+            # Filtrage des identifiants déjà présents
+            df_agg = df_agg[df_agg[_ID_COL].isin(missing_ids)]
+            all_levels_dfs.append(df_agg)
+            existing_ids = existing_ids.union(missing_ids)
+
+        # Concaténation des DataFrames de niveau agrégé et de niveau bottom
+        return pd.concat(all_levels_dfs, ignore_index=True)
+
+    # Construction de la matrice S et des tags pour la hiérarchie temporelle out-of-sample
+    def _build_temporal_s_for_prediction(
+        self,
+        df_flat_bottom: pd.DataFrame,
+    ) -> Tuple[pd.DataFrame, Dict, pd.DataFrame]:
+        """Rebuild ``S``, ``tags`` and Y_hat at all temporal levels.
+
+        For temporal hierarchies, the summing matrix depends on the
+        prediction horizon, so it must be re-derived from the
+        out-of-sample bottom-level data on each call.
+
+        Args:
+            df_flat_bottom: Flat DataFrame of bottom-level out-of-sample
+                forecasts with ``unique_id``, ``ds`` and one column per
+                model.
+
+        Returns:
+            Tuple ``(S_pred, tags_pred, Y_hat_all_levels)`` where
+            ``Y_hat_all_levels`` contains the bottom-level forecasts
+            extended with auto-aggregated rows at every upper temporal
+            level.
+        """
+        # Importation différée pour éviter une dépendance dure
+        from hierarchicalforecast.utils import aggregate_temporal
+
+        # Détection des colonnes de modèles
+        model_cols = [
+            c for c in df_flat_bottom.columns if c not in (_ID_COL, _TIME_COL)
+        ]
+
+        # Agrégation temporelle des prédictions bottom-level vers tous les niveaux
+        # /!\ aggregate_temporal somme les target_cols selon le spec, ce qui produit
+        #     les prédictions agrégées attendues pour les niveaux supérieurs.
+        Y_hat_all_levels, S_pred, tags_pred = aggregate_temporal(
+            df=df_flat_bottom,
+            spec=self.spec,
+            sparse_s=self.sparse_s,
+            id_col=_ID_COL,
+            time_col=_TIME_COL,
+            id_time_col=self._effective_id_time_col_,
+            target_cols=tuple(model_cols),
+            aggregation_type=self.aggregation_type,
+        )
+
+        return S_pred, tags_pred, Y_hat_all_levels
+
+    # Construction du Y_hat_df temporel à partir d'un dictionnaire par niveau
+    def _build_temporal_y_hat_from_dict(
+        self,
+        by_level: Dict[str, pd.DataFrame],
+        S_pred: pd.DataFrame,
+        tags_pred: Dict,
+    ) -> pd.DataFrame:
+        """Combine per-level forecasts into a single Y_hat_df with temporal_id.
+
+        Each entry of ``by_level`` provides forecasts at one temporal
+        aggregation. The ``temporal_id`` of each row is recovered by
+        sorting the dates within each ``unique_id`` and assigning the
+        position-based identifier expected by hierarchicalforecast
+        (``"<level>-<k>"``).
+
+        Args:
+            by_level: Mapping ``temporal_level_name -> flat DataFrame``
+                with ``unique_id``, ``ds`` and model columns.
+            S_pred: Summing matrix produced by aggregate_temporal on the
+                bottom-level forecasts (used to discover the temporal_id
+                of each row).
+            tags_pred: Tags produced by aggregate_temporal.
+
+        Returns:
+            Single DataFrame with columns ``unique_id``,
+            ``temporal_id``, ``ds`` and the model columns, ready to be
+            passed as ``Y_hat_df`` to ``reconcile``.
+        """
+        # Récupération du nom de la colonne d'identifiant temporel
+        id_time = self._effective_id_time_col_
+
+        # Reconstruction du mapping (unique_id, ds) → temporal_id par niveau
+        # /!\ aggregate_temporal trie chronologiquement à l'intérieur de chaque entité
+        per_level_dfs = []
+        for level_name, df_lvl in by_level.items():
+            ids_for_level = tags_pred.get(level_name)
+            if ids_for_level is None:
+                raise ValueError(
+                    f"Level '{level_name}' not present in tags built from "
+                    f"the bottom-level out-of-sample data."
+                )
+
+            # Tri chronologique par entité pour aligner les temporal_id
+            df_sorted = df_lvl.sort_values([_ID_COL, _TIME_COL]).reset_index(drop=True)
+            # Attribution du temporal_id par position dans chaque entité
+            df_sorted[id_time] = df_sorted.groupby(_ID_COL).cumcount().map(
+                lambda k: f"{level_name}-{k + 1}"
+            )
+            per_level_dfs.append(df_sorted)
+
+        # Concaténation et réordonnancement des colonnes
+        Y_hat_df = pd.concat(per_level_dfs, ignore_index=True)
+        id_cols = [_ID_COL, id_time, _TIME_COL]
+        model_cols = [c for c in Y_hat_df.columns if c not in id_cols]
+        return Y_hat_df[id_cols + model_cols]
+
+    # ------------------------------------------------------------------
+    # API sklearn : fit / predict / score
+    # ------------------------------------------------------------------
+    
     # Méthode d'entraînement
     def fit(self, X, y):
         """Fit the hierarchical reconciliation adapter.
