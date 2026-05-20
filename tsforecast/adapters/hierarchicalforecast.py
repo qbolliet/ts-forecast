@@ -624,17 +624,21 @@ class HierarchicalForecastAdapter(BaseEstimator, RegressorMixin):
         from hierarchicalforecast.core import HierarchicalReconciliation
         from hierarchicalforecast.utils import aggregate, aggregate_temporal
 
-        # Conversion de la Series en DataFrame avec conservation du nom de la colonne cible
-        if isinstance(y, pd.Series):
-            # Mémorisation du nom de la colonne cible pour une utilisation ultérieure
-            self._target_col_ = y.name if y.name is not None else "y"
-            # Conversion en DataFrame
-            y = y.to_frame(name=self._target_col_)
-        else:
-            raise TypeError(f"'y' should be a pandas.Series")
+        # Conversion des entrées DataFrame mono-colonne en Series
+        if isinstance(y, pd.DataFrame) and y.shape[1] == 1:
+            y = y.iloc[:, 0]
+        if not isinstance(y, pd.Series):
+            raise TypeError(
+                "y must be a pandas Series or single-column DataFrame; "
+                f"got {type(y).__name__}."
+            )
+
+        # Mémorisation du nom de la colonne cible
+        self._target_col_ = y.name if y.name is not None else "y"
+        df_y = y.to_frame(name=self._target_col_)
 
         # Conversion de l'index de y en colonnes plates
-        df_y, non_date_cols, date_col_name = self._index_to_flat(y)
+        df_y, non_date_cols = self._index_to_flat(df_y)
         self._non_date_cols_ = non_date_cols
 
         # Jointure des variables exogènes de X si fourni.
