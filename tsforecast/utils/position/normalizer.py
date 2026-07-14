@@ -4,8 +4,9 @@ This module provides the PeriodPositionNormalizer class to handle different peri
 position representations (start vs end of period) for time series data.
 """
 # Importation des modules
-from typing import Union, Literal, Tuple
+from typing import Union, Literal, Optional, Tuple
 import re
+import warnings
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
@@ -256,7 +257,7 @@ class PeriodPositionNormalizer(TemporalNormalizer):
     def combine_frequency_position(
         self,
         frequency: str,
-        position: Union[PositionType, UserPositionType]
+        position: Optional[Union[PositionType, UserPositionType]]
     ) -> str:
         """Combine frequency and position into pandas DateOffset string.
 
@@ -276,15 +277,21 @@ class PeriodPositionNormalizer(TemporalNormalizer):
             >>> normalizer.combine_frequency_position('D', 'end')
             'D'
         """
-        # Normalisation de la position
-        position_code = self.normalize(position)
-
-        # Si la fréquence ne supporte pas les positions, retourner la fréquence telle quelle
+        
+        # Si la fréquence ne supporte pas les positions, retourne la fréquence telle quelle
         if frequency not in self._position_aware_frequencies:
             return frequency
-
-        # Combinaison de la fréquence et de la position
-        return f"{frequency}{position_code}"
+        else:
+            # Si la position n'est pas spécifié, retourne la fréquence telle quelle
+            if position is None:
+                # Warning
+                warnings.warn(f"No 'position' specified with 'frequency' : '{frequency}'")
+                return frequency
+            else:
+                # Normalisation de la position
+                position_code = self.normalize(position)
+                # Combinaison de la fréquence et de la position
+                return f"{frequency}{position_code}"
 
     # Méthode de conversion d'une position vers son opposé
     def flip_position(self, position: Union[PositionType, UserPositionType]) -> PositionType:
