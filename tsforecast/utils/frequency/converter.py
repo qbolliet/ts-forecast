@@ -154,64 +154,60 @@ class FrequencyConverter(TemporalConverter):
         # Validation des paramètres d'entrée
         data = self._validate_conversion_params(data=data, target_freq=target_freq, time_col=time_col, panel_cols=panel_cols)
 
+        # Cas des données de panel (MultiIndex) : traitement entité par entité
+        if self._is_panel_data(data):
+            return self._convert_panel_frequency(
+                data=data,
+                target_freq=target_freq,
+                method=method,
+                alignment_method=alignment_method,
+                target_position=target_position,
+                full_periods_only=full_periods_only,
+                limit=limit,
+                limit_direction=limit_direction,
+                limit_area=limit_area,
+            )
+
         # Cas 1: Traitement des Series
         if isinstance(data, pd.Series):
             # Import local pour éviter l'import circulaire
             from ...frequency.detector import detect_frequency
 
             # Détection de la fréquence actuelle (avec position et anchor)
-            detected_freq = detect_frequency(data=data, literal=False)
+            detected_freq = detect_frequency(data=data, return_format='components')
+
+            # Cas où aucune fréquence n'a pu être détectée
             if not detected_freq:
                 raise ValueError("Cannot detect current frequency of the data")
-
-            # Extraction de la fréquence de base et de la position en utilisant le normalisateur
-            from .utils import normalize_frequency
-            current_freq_base, source_position, _ = normalize_frequency(
-                detected_freq,
-                return_format='components'
-            )
+            # Parsing des composants
+            else :
+                source_freq_base, source_position, _ = detected_freq
 
             # Normalisation de la fréquence cible (doit être str pour Series)
             if isinstance(target_freq, dict):
                 raise ValueError("target_freq must be a string for Series input")
-
-            # Décomposition de la fréquence cible si elle contient déjà une position
-            target_freq_base, target_pos_in_arg = self._position_normalizer.decompose_offset(target_freq)
-
-            # Normalisation de la fréquence de base cible
-            target_freq_normalized = normalize_frequency(target_freq_base)
-
-            # Détermination de la position cible selon la priorité :
-            # 1. target_position explicite (argument)
-            # 2. Position dans target_freq si spécifiée (target_pos_in_arg != 'E' ou explicitement dans target_freq)
-            # 3. Position source si identifiable (source_position)
-            # 4. Convention par défaut 'E'
-            if target_position is not None:
-                # Cas 1: position explicitement fournie en argument
-                final_position = self._position_normalizer.normalize(target_position)
-            elif target_freq != target_freq_base:
-                # Cas 2: la target_freq contient déjà une position (ex: 'MS', 'QE')
-                final_position = target_pos_in_arg
-            else:
-                # Cas 3: préserver la position source si identifiable, sinon 'E'
-                final_position = source_position if source_position is not None else 'E'
+            else :
+                if target_position is None :
+                    target_freq_base, target_position, _ = normalize_frequency(target_freq, return_format='components')
+                else :
+                    target_freq_base = normalize_frequency(target_freq, return_format='base')
 
             # Construction de la fréquence cible complète avec position
             target_freq_with_position = self._position_normalizer.combine_frequency_position(
-                target_freq_normalized,
-                final_position
+                target_freq_base,
+                target_position
             )
 
             # Si les fréquences sont identiques (base + position), retourner les données telles quelles
-            current_freq_with_position = self._position_normalizer.combine_frequency_position(
-                normalize_frequency(current_freq_base),
+            source_freq_with_position = self._position_normalizer.combine_frequency_position(
+                source_freq_base,
                 source_position
             )
-            if current_freq_with_position == target_freq_with_position:
+            if source_freq_with_position == target_freq_with_position:
                 return data
 
             # Détermination de la direction de conversion
-            if is_higher_frequency(target_freq_normalized, current_freq_base):
+            if is_higher_frequency(target_freq_base, source_freq_base):
                 return self._upsample(
                     data=data,
                     target_freq=target_freq_with_position,
@@ -231,7 +227,7 @@ class FrequencyConverter(TemporalConverter):
         # Cas 2: Traitement des DataFrames
         elif isinstance(data, pd.DataFrame):
             # Construction du frequency_map complet
-            frequency_map = self._build_frequency_map(data=data, target_freq=target_freq)
+            frequency_map = self._build_frequency_map(data=data, target_freq=target_freq, target_position=target_position)
 
             # Groupement des conversions identiques pour optimisation
             grouped_conversions = self._group_conversions_by_operation(frequency_map=frequency_map, method=method)
@@ -334,6 +330,9 @@ class FrequencyConverter(TemporalConverter):
             ...     monthly_series, 'QE', 'sum', full_periods_only=True
             ... )
         """
+        # Importation de la fonction de détection de fréquences
+        from tsforecast.frequency.detector import detect_index_frequency
+
         # Validation que target_freq est un offset pandas valide
         # On ne normalise plus la fréquence pour préserver la position (S/E)
         try:
@@ -369,12 +368,7 @@ class FrequencyConverter(TemporalConverter):
         # Masquage des périodes incomplètes si demandé
         if full_periods_only:
             # Détection de la fréquence source
-            source_freq = data.index.inferred_freq
-            if not source_freq:
-                try:
-                    source_freq = pd.infer_freq(data.index)
-                except Exception:
-                    source_freq = None
+            source_freq = detect_index_frequency(index=data.index, return_format='full')
 
             if source_freq:
                 # Extraction des fréquences de base pour le calcul du facteur
@@ -405,7 +399,8 @@ class FrequencyConverter(TemporalConverter):
                                       method: InterpolationMethod = 'linear',
                                       limit: Union[int, str, None] = None,
                                       limit_direction: Optional[Literal['forward', 'backward', 'both']] = None,
-                                      limit_area: Optional[Literal['inside', 'outside']] = None) -> Union[pd.Series, pd.DataFrame]:
+                                      limit_area: Optional[Literal['inside', 'outside']] = None,
+                                      source_freq: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
         """Interpolate data to a higher frequency using asfreq.
 
         Args:
@@ -425,6 +420,10 @@ class FrequencyConverter(TemporalConverter):
                 fills only NaN surrounded by valid values, ``'outside'`` fills
                 only NaN outside valid values. See
                 :meth:`pandas.DataFrame.interpolate` for details.
+            source_freq: Source frequency of the data. If None, it is inferred
+                from the index. Provide it explicitly when the index frequency
+                differs from the variable's own frequency (e.g. a quarterly
+                variable carried on a monthly index).
 
         Returns:
             Interpolated time series data
@@ -438,6 +437,9 @@ class FrequencyConverter(TemporalConverter):
             >>> len(daily) > len(monthly_series)
             True
         """
+        # Importation de la fonction de détection de fréquence
+        from tsforecast.frequency.detector import detect_index_frequency
+
         # Extraction de la position
         _, target_position, _ = parse_frequency(frequency_str=target_freq)
         # Validation que target_freq est un offset pandas valide
@@ -447,14 +449,9 @@ class FrequencyConverter(TemporalConverter):
         except Exception as e:
             raise ValueError(f"Invalid target frequency '{target_freq}': {e}")
 
-        # Détection de la fréquence source à partir de l'index
-        source_freq = data.index.inferred_freq
+        # Détection de la fréquence source à partir de l'index, sauf si elle est fournie explicitement
         if not source_freq:
-            # Tentative de déduction à partir de l'index
-            try:
-                source_freq = pd.infer_freq(data.index)
-            except Exception:
-                source_freq = None
+           source_freq = detect_index_frequency(index=data.index, return_format='full')
 
         # Si on peut détecter la fréquence source, on étend l'index pour inclure toutes les périodes
         if source_freq:
@@ -616,7 +613,7 @@ class FrequencyConverter(TemporalConverter):
         for dataset in datasets:
             freq = detect_frequency(data=dataset, time_col=None,
                            panel_cols= None,
-                           literal=False,
+                           return_format='with_position',
                            check_consistency=True,
                            strict=False)
             if freq:
@@ -683,22 +680,33 @@ class FrequencyConverter(TemporalConverter):
             except ValueError as e:
                 raise ValueError(f"Invalid target frequency: {e}")
         elif isinstance(target_freq, dict):
-            # Validation pour dictionnaire
-            if isinstance(data, pd.Series):
-                raise ValueError("Dictionary target_freq is only valid for DataFrame inputs")
+            # Détection de la structure de panel (entités en MultiIndex)
+            is_panel = isinstance(data.index, pd.MultiIndex) and data.index.nlevels >= 2
 
-            # Vérification que toutes les clés existent dans les colonnes
-            data_cols = set(data.columns)
-            if panel_cols:
-                data_cols -= set(panel_cols)
+            # Un dictionnaire n'est autorisé que pour un DataFrame ou un panel (Series MultiIndex)
+            if isinstance(data, pd.Series) and not is_panel:
+                raise ValueError("Dictionary target_freq is only valid for DataFrame or panel inputs")
 
-            target_cols = set(target_freq.keys())
-            missing_cols = target_cols - data_cols
-            if missing_cols:
+            # Colonnes disponibles (hors colonnes de panel)
+            if isinstance(data, pd.DataFrame):
+                data_cols = set(data.columns)
+                if panel_cols:
+                    data_cols -= set(panel_cols)
+            else:
+                data_cols = set()
+
+            # Distinction entre dictionnaire par colonne et dictionnaire par entité
+            target_keys = set(target_freq.keys())
+            # Dictionnaire par colonne : toutes les clés désignent des colonnes existantes
+            keys_are_columns = bool(data_cols) and target_keys <= data_cols
+
+            # Hors du cas panel, une clé qui n'est pas une colonne est invalide
+            if not keys_are_columns and not is_panel:
+                missing_cols = target_keys - data_cols
                 raise ValueError(f"Columns in target_freq not found in data: {missing_cols}")
 
-            # Validation de chaque fréquence cible
-            for col, freq in target_freq.items():
+            # Validation de chaque fréquence cible (clé = colonne ou entité)
+            for key, freq in target_freq.items():
                 try:
                     # Décomposition de la fréquence pour extraire la base et la position
                     freq_base, freq_pos = self._position_normalizer.decompose_offset(freq)
@@ -708,7 +716,7 @@ class FrequencyConverter(TemporalConverter):
                     if freq_pos and not self._position_normalizer.validate(freq_pos):
                         raise ValueError(f"Invalid position '{freq_pos}' in frequency '{freq}'")
                 except ValueError as e:
-                    raise ValueError(f"Invalid target frequency for column '{col}': {e}")
+                    raise ValueError(f"Invalid target frequency for key '{key}': {e}")
         else:
             raise ValueError("target_freq must be a string or dictionary")
 
@@ -719,13 +727,133 @@ class FrequencyConverter(TemporalConverter):
                 overlap = set(panel_cols) & set(target_freq.keys())
                 if overlap:
                     raise ValueError(f"Panel columns cannot be in target_freq: {overlap}")
-        
+
         return data
 
-    # Méthode auxiliaire de construction d'un mapping associant à chaque colonne la 
+    # Méthode auxiliaire de conversion des données de panel entité par entité
+    def _convert_panel_frequency(self,
+                                 data: Union[pd.Series, pd.DataFrame],
+                                 target_freq: Union[str, Dict[str, str]],
+                                 method: str,
+                                 alignment_method: str,
+                                 target_position: Optional[str],
+                                 full_periods_only: bool,
+                                 limit: Union[int, Literal['default'], None],
+                                 limit_direction: Optional[str],
+                                 limit_area: Optional[str]) -> Union[pd.Series, pd.DataFrame]:
+        """Convert panel (MultiIndex) data to target frequency, entity by entity.
+
+        Each entity is converted independently on a simple DatetimeIndex, so the
+        conversion direction (up/down sampling) is resolved per ``(entity, column)``
+        from each entity's own source frequency. This preserves entity-specific
+        target frequencies when ``target_freq`` is an ``{entity: freq}`` mapping.
+
+        Args:
+            data: Panel data with a MultiIndex (entity levels + time level).
+            target_freq: Target frequency (str, {col: freq}, or {entity: freq}).
+            method: Aggregation or interpolation method.
+            alignment_method: Method to align indexes for mixed frequencies.
+            target_position: Optional target position.
+            full_periods_only: If True, incomplete periods produce NaN (downsampling).
+            limit: Maximum consecutive NaN to fill (upsampling).
+            limit_direction: Direction for NaN filling (upsampling).
+            limit_area: Restriction area for NaN filling (upsampling).
+
+        Returns:
+            Converted panel data with a MultiIndex combining each entity with its
+            converted time index.
+        """
+        # Import local pour éviter les imports circulaires
+        from ...panel.utils import get_unique_panel_entities, get_entity_mask
+
+        # Colonnes disponibles (None pour une Series)
+        columns = list(data.columns) if isinstance(data, pd.DataFrame) else None
+        # Niveaux d'entité (tous sauf le dernier, temporel)
+        entity_levels = list(range(data.index.nlevels - 1))
+        # Noms des niveaux de l'index d'origine
+        index_names = data.index.names
+
+        # Accumulation des résultats par entité
+        converted_parts = []
+
+        # Parcours des entités du panel
+        for entity in get_unique_panel_entities(data):
+            # Masque des observations de l'entité
+            entity_mask = get_entity_mask(data, entity)
+            # Extraction du sous-jeu de l'entité avec un index temporel simple
+            entity_data = data.loc[entity_mask].droplevel(entity_levels)
+
+            # Résolution de la fréquence cible propre à l'entité
+            entity_target = self._resolve_panel_target(target_freq, entity, columns)
+
+            # Conversion sur l'index simple (chemin non-panel, direction par colonne)
+            converted = self.convert_frequency(
+                data=entity_data,
+                target_freq=entity_target,
+                method=method,
+                alignment_method=alignment_method,
+                target_position=target_position,
+                full_periods_only=full_periods_only,
+                limit=limit,
+                limit_direction=limit_direction,
+                limit_area=limit_area,
+            )
+
+            # Reconstruction de l'index MultiIndex en réattachant l'entité
+            new_index = pd.MultiIndex.from_tuples(
+                [(*entity, time) for time in converted.index],
+                names=index_names,
+            )
+            converted = converted.copy()
+            converted.index = new_index
+
+            converted_parts.append(converted)
+
+        # Cas où aucune entité n'a pu être convertie
+        if not converted_parts:
+            return data
+
+        # Concaténation des entités et tri de l'index
+        result = pd.concat(converted_parts)
+        result = result.sort_index()
+
+        return result
+
+    # Méthode auxiliaire de résolution de la fréquence cible d'une entité de panel
+    def _resolve_panel_target(self,
+                              target_freq: Union[str, Dict[str, str]],
+                              entity: tuple,
+                              columns: Optional[List[str]]) -> Union[str, Dict[str, str]]:
+        """Resolve the target frequency applicable to a given panel entity.
+
+        Args:
+            target_freq: Target specification (str, {col: freq}, or {entity: freq}).
+            entity: Entity tuple.
+            columns: Available data columns (None for Series inputs).
+
+        Returns:
+            A frequency string (for str or {entity: freq} inputs) or a
+            {col: freq} dict (for per-column inputs) applicable to the entity.
+        """
+        # Import local pour éviter les imports circulaires
+        from ...panel.utils import get_entity_target_frequency
+
+        # Cas d'une chaîne : même cible pour toutes les entités et colonnes
+        if not isinstance(target_freq, dict):
+            return target_freq
+
+        # Dictionnaire par colonne : toutes les clés désignent des colonnes existantes
+        if columns is not None and set(target_freq.keys()) <= set(columns):
+            return target_freq
+
+        # Sinon, dictionnaire par entité : résolution vers une fréquence unique
+        return get_entity_target_frequency(entity, target_freq)
+
+    # Méthode auxiliaire de construction d'un mapping associant à chaque colonne la
     def _build_frequency_map(self,
                             data: pd.DataFrame,
-                            target_freq: Union[str, Dict[str, str]]) -> Dict[str, Tuple[str, str]]:
+                            target_freq: Union[str, Dict[str, str]],
+                            target_position: Optional[str]) -> Dict[str, Tuple[str, str]]:
         """Build complete frequency map for DataFrame conversion.
 
         Args:
@@ -735,29 +863,35 @@ class FrequencyConverter(TemporalConverter):
         Returns:
             Dictionary mapping column names to (source_freq, target_freq) tuples
         """
-        # Détection des fréquences actuelles pour chaque colonne
-        current_frequencies = self._detect_column_frequencies(data=data, columns=list(data.columns))
+        # Import local pour éviter l'import circulaire
+        from ...frequency.detector import detect_dataset_frequency
+
+        # Détection des fréquences source de chaque colonne (index simple → {col: freq})
+        # detect_dataset_frequency gère la détection par colonne et la normalisation
+        current_frequencies = detect_dataset_frequency(data, return_format='with_position')
 
         # Construction du frequency_map
         frequency_map = {}
 
         if isinstance(target_freq, str):
             # Même fréquence cible pour toutes les colonnes
-            # Décomposition pour gérer les positions S/E
-            target_freq_base, target_freq_pos = self._position_normalizer.decompose_offset(target_freq)
-            target_freq_normalized = normalize_frequency(target_freq_base)
-            # Reconstruction avec position si présente
-            if target_freq_pos and target_freq_pos != 'E':
-                target_freq_full = self._position_normalizer.combine_frequency_position(target_freq_normalized, target_freq_pos)
-            else:
-                target_freq_full = target_freq_normalized
+            if target_position is None :
+                target_freq_base, target_position, _ = normalize_frequency(target_freq, return_format='components')
+            else :
+                target_freq_base = normalize_frequency(target_freq, return_format='base')
+
+            # Construction de la fréquence cible complète avec position
+            target_freq_with_position = self._position_normalizer.combine_frequency_position(
+                target_freq_base,
+                target_position
+            )
 
             for col in list(data.columns):
                 # Extraction de la fréquence de la colonne
                 current_freq = current_frequencies.get(col)
                 # Création de l'association pour la colonne
                 if current_freq:
-                    frequency_map[col] = (current_freq, target_freq_full)
+                    frequency_map[col] = (current_freq, target_freq_with_position)
         else:
             # Fréquences cibles spécifiques par colonne
             for col, target in target_freq.items():
@@ -765,50 +899,20 @@ class FrequencyConverter(TemporalConverter):
                 current_freq = current_frequencies.get(col)
                 # Création de l'association pour la colonne
                 if current_freq:
-                    # Décomposition pour gérer les positions S/E
-                    target_base, target_pos = self._position_normalizer.decompose_offset(target)
-                    target_freq_normalized = normalize_frequency(target_base)
-                    # Reconstruction avec position si présente
-                    if target_pos and target_pos != 'E':
-                        target_freq_full = self._position_normalizer.combine_frequency_position(target_freq_normalized, target_pos)
-                    else:
-                        target_freq_full = target_freq_normalized
+                    # Fréquence cible avec position
+                    if target_position is None :
+                        target_freq_base, target_position, _ = normalize_frequency(target_freq, return_format='components')
+                    else :
+                        target_freq_base = normalize_frequency(target_freq, return_format='base')
 
-                    frequency_map[col] = (current_freq, target_freq_full)
+                    # Construction de la fréquence cible complète avec position
+                    target_freq_with_position = self._position_normalizer.combine_frequency_position(
+                        target_freq_base,
+                        target_position
+                    )
+                    frequency_map[col] = (current_freq, target_freq_with_position)
 
         return frequency_map
-
-    # Méthode auxiliaire de détection des fréquences de colonnes
-    def _detect_column_frequencies(self,
-                                  data: pd.DataFrame,
-                                  columns: List[str]) -> Dict[str, str]:
-        """Detect frequencies for specified columns in DataFrame.
-
-        Args:
-            data: Input DataFrame
-            columns: List of columns to detect frequencies for
-
-        Returns:
-            Dictionary mapping column names to detected frequencies
-        """
-        # Import local pour éviter l'import circulaire
-        from ...frequency.detector import detect_frequency
-
-        # Initialisation du dictionnaire résultat
-        frequencies = {}
-        # Parcours des colonnes
-        for col in columns:
-            try:
-                # Détection de la fréquence
-                freq = detect_frequency(data=data[col], literal=False)
-                # Association à la colonne
-                if freq:
-                    frequencies[col] = freq
-            except Exception:
-                # Si la détection échoue pour une colonne, continuer
-                continue
-
-        return frequencies
 
     # Méthode auxiliaire de groupement des conversions par opération
     def _group_conversions_by_operation(self,
