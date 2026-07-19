@@ -1,7 +1,32 @@
 # Importation des modules
 # Modules de base
+import numpy as np
 import pandas as pd
-from typing import List, Union
+from typing import Dict, List, Tuple, Union
+
+# Fonction de détection de la structure de panel
+def is_panel_data(data: Union[pd.DataFrame, pd.Series]) -> bool:
+    """Check if data has a MultiIndex (panel) structure with 2+ levels.
+
+    Panel data is identified by a MultiIndex whose first n-1 levels represent
+    entities and whose last level represents time.
+
+    Args:
+        data: Input data (DataFrame or Series).
+
+    Returns:
+        True if data has a MultiIndex with at least 2 levels, False otherwise.
+
+    Examples:
+        >>> idx = pd.MultiIndex.from_tuples(
+        ...     [('FR', '2023-01'), ('FR', '2023-02')], names=['entity', 'date']
+        ... )
+        >>> is_panel_data(pd.Series([1, 2], index=idx))
+        True
+        >>> is_panel_data(pd.Series([1, 2], index=pd.date_range('2023', periods=2)))
+        False
+    """
+    return isinstance(data.index, pd.MultiIndex) and data.index.nlevels >= 2
 
 # Fonction de normalisation de l'entité du panel
 def normalize_entity_key(key) -> tuple:
@@ -43,5 +68,180 @@ def get_unique_panel_entities(panel_data: Union[pd.DataFrame, pd.Series]) -> Lis
     
     # Normalisation des clés d'entité
     normalized_entities = [normalize_entity_key(entity) for entity in unique_entities]
-    
+
     return normalized_entities
+
+# Fonction de regroupement des variables par entité
+def group_keys_by_entity_and_variable(
+    keys: List[Union[str, Tuple]],
+) -> Dict[tuple, List[str]]:
+    """Group variable keys by entity, extracting column names.
+
+    Args:
+        keys: List of (entity..., variable) tuples or plain column names.
+
+    Returns:
+        Dict mapping entity tuples to lists of column names.
+        For time series (non-panel), returns {(): [col_names]}.
+
+    Examples:
+        >>> group_keys_by_entity_and_variable([('FR', 'gdp'), ('FR', 'cpi'), ('DE', 'gdp')])
+        {('FR',): ['gdp', 'cpi'], ('DE',): ['gdp']}
+        >>> group_keys_by_entity_and_variable(['gdp', 'cpi'])
+        {(): ['gdp', 'cpi']}
+    """
+    # Initialisation du dictionnaire résultat
+    grouped: Dict[tuple, List[str]] = {}
+
+    # Parcours des clés
+    for key in keys:
+        # Distinction suivant le type de la clé
+        if isinstance(key, tuple):
+            # Extraction de l'entité et de la colonne de la clé
+            entity = normalize_entity_key(key[:-1])
+            col = key[-1]
+        else:
+            # Cas où il n'y a pas d'entité
+            entity = ()
+            col = key
+        # Initialisation de l'entité si elle n'existe pas déjà
+        if entity not in grouped:
+            grouped[entity] = []
+        # Ajout de la colonne à l'entité
+        if col not in grouped[entity]:
+            grouped[entity].append(col)
+
+    return grouped
+
+# Fonction de construction du masque des observations associées à une entité
+def get_entity_mask(
+    X: Union[pd.DataFrame, pd.Series],
+    entity: tuple,
+) -> np.ndarray:
+    """Get a boolean mask for rows belonging to a specific entity.
+
+    Args:
+        X: DataFrame or Series with MultiIndex (entity levels + time level).
+        entity: Entity tuple to filter on.
+
+    Returns:
+        Boolean numpy array of shape (len(X),).
+    """
+    # Extraction de l'index
+    index = X.index
+    # Extraction des niveaux associés aux entités
+    n_entity_levels = index.nlevels - 1
+
+    # Cas où les entités sont sur un seul niveau
+    if n_entity_levels == 1:
+        return (index.get_level_values(0) == entity[0])
+    else:
+        # Construction d'un masque pour les entités multi-niveaux
+        # Initialisation du masque
+        mask = np.ones(len(X), dtype=bool)
+        # Parcours des niveaux associés aux entités
+        for i in range(n_entity_levels):
+            # Mise à jour du masque
+            mask &= (index.get_level_values(i) == entity[i])
+        return mask
+
+# Fonction d'extraction de la fréquence cible d'une entité
+def get_entity_target_frequency(
+    entity: tuple,
+    target_frequency: Union[str, Dict],
+) -> str:
+    """Get the target frequency for a specific entity.
+
+    Args:
+        entity: Entity tuple (e.g., ('FR',) or ('FR', 'GDP')).
+        target_frequency: Either a single frequency string or a dict
+            mapping entities to frequencies.
+
+    Returns:
+        Target frequency string for the entity.
+
+    Raises:
+        ValueError: If no target frequency found for the entity.
+
+    Examples:
+        >>> get_entity_target_frequency(('FR',), 'M')
+        'M'
+        >>> get_entity_target_frequency(('FR',), {'FR': 'M', 'DE': 'Q'})
+        'M'
+    """
+    # Cas où la fréquence cible est un dictionnaire
+    if isinstance(target_frequency, dict):
+        # Extraction de la fréquence cible
+        freq = target_frequency.get(entity)
+        # Recherche en extrayant l'entité du tuple
+        if freq is None and len(entity) == 1:
+            freq = target_frequency.get(entity[0])
+        # Cas où la fréquence n'est pas trouvée
+        if freq is None:
+            raise ValueError(
+                f"No target frequency found for entity {entity}"
+            )
+        return freq
+    # Dans le cas où la fréquence cible est une chaîne de caractère, elle s'applique à toutes les entités
+    return target_frequency
+
+# Fonction de résolution des fréquences cibles par colonne pour une entité
+def resolve_entity_column_frequencies(
+    entity: tuple,
+    columns: List[str],
+    target_frequency: Union[str, Dict],
+) -> Dict[str, str]:
+    """Resolve the target frequency of each column for a given panel entity.
+
+    Supports a target specification whose keys may be mixed: an
+    ``(entity..., column)`` tuple, an ``(entity...)`` tuple, or a plain column
+    name. For each column the most specific key wins, following the precedence
+    ``(entity, column)`` > ``(entity,)`` > ``column``. Columns without any
+    matching key are omitted from the result (they are meant to be left
+    unchanged by the caller).
+
+    Args:
+        entity: Entity tuple (e.g., ``('FR',)`` or ``('FR', 'sector1')``).
+        columns: Column names to resolve a frequency for.
+        target_frequency: Either a single frequency string (applied to every
+            column) or a dict mapping mixed keys to frequencies.
+
+    Returns:
+        Dict mapping each covered column to its resolved frequency string.
+        Columns with no matching key are absent from the dict.
+
+    Examples:
+        >>> resolve_entity_column_frequencies(('FR',), ['gdp', 'cpi'], 'M')
+        {'gdp': 'M', 'cpi': 'M'}
+        >>> resolve_entity_column_frequencies(
+        ...     ('FR',), ['gdp', 'cpi'],
+        ...     {('FR', 'gdp'): 'Q', ('FR',): 'M'}
+        ... )
+        {'gdp': 'Q', 'cpi': 'M'}
+        >>> resolve_entity_column_frequencies(
+        ...     ('DE',), ['gdp', 'cpi'], {'cpi': 'ME'}
+        ... )
+        {'cpi': 'ME'}
+    """
+    # Cas d'une chaîne : même fréquence pour toutes les colonnes
+    if not isinstance(target_frequency, dict):
+        return {col: target_frequency for col in columns}
+
+    # Résolution par colonne selon la précédence (entité,col) > (entité,) > col
+    resolved: Dict[str, str] = {}
+    for col in columns:
+        # Clé la plus spécifique : entité + colonne
+        entity_col_key = (*entity, col)
+        if entity_col_key in target_frequency:
+            resolved[col] = target_frequency[entity_col_key]
+        # Clé d'entité (tuple), avec repli sur le scalaire si entité mono-niveau
+        elif entity in target_frequency:
+            resolved[col] = target_frequency[entity]
+        elif len(entity) == 1 and entity[0] in target_frequency:
+            resolved[col] = target_frequency[entity[0]]
+        # Clé de colonne globale
+        elif col in target_frequency:
+            resolved[col] = target_frequency[col]
+        # Sinon : colonne non couverte, omise (laissée inchangée)
+
+    return resolved

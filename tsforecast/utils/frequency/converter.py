@@ -17,8 +17,16 @@ from .utils import normalize_frequency, is_higher_frequency, get_frequency_order
 from ..validation import validate_temporal_data
 from ..parse import parse_frequency
 
-# Import de l'utilitaire de gestion des positions
-from ..position.normalizer import PeriodPositionNormalizer
+# Import des utilitaires de gestion des positions
+from ..position.utils import (
+    combine_frequency_position,
+    decompose_offset,
+    normalize_position,
+    validate_position,
+)
+
+# Import des utilitaires de panel
+from ...panel.utils import is_panel_data
 
 # Types pour les méthodes d'agrégation et d'interpolation
 AggregationMethod = Literal['mean', 'sum', 'first', 'last', 'min', 'max', 'median', 'std', 'count']
@@ -43,9 +51,6 @@ class FrequencyConverter(TemporalConverter):
     # Initialisation
     def __init__(self):
         """Initialize the FrequencyConverter."""
-        # Initialisation du normalisateur de positions pour gérer les positions S/E
-        self._position_normalizer = PeriodPositionNormalizer()
-
         # Initialisation du convertisseur de durées pour les facteurs de conversion
         from ..duration.converter import DurationConverter
         self._duration_converter = DurationConverter()
@@ -155,7 +160,7 @@ class FrequencyConverter(TemporalConverter):
         data = self._validate_conversion_params(data=data, target_freq=target_freq, time_col=time_col, panel_cols=panel_cols)
 
         # Cas des données de panel (MultiIndex) : traitement entité par entité
-        if self._is_panel_data(data):
+        if is_panel_data(data):
             return self._convert_panel_frequency(
                 data=data,
                 target_freq=target_freq,
@@ -193,13 +198,13 @@ class FrequencyConverter(TemporalConverter):
                     target_freq_base = normalize_frequency(target_freq, return_format='base')
 
             # Construction de la fréquence cible complète avec position
-            target_freq_with_position = self._position_normalizer.combine_frequency_position(
+            target_freq_with_position = combine_frequency_position(
                 target_freq_base,
                 target_position
             )
 
             # Si les fréquences sont identiques (base + position), retourner les données telles quelles
-            source_freq_with_position = self._position_normalizer.combine_frequency_position(
+            source_freq_with_position = combine_frequency_position(
                 source_freq_base,
                 source_position
             )
@@ -563,12 +568,12 @@ class FrequencyConverter(TemporalConverter):
         position = target_position
         if position is None:
             # Extraction de la position depuis la fréquence cible
-            _, extracted_pos = self._position_normalizer.decompose_offset(target_freq)
+            _, extracted_pos = decompose_offset(target_freq)
             position = extracted_pos
 
         # Normalisation et conversion en direction
         if position is not None:
-            normalized_pos = self._position_normalizer.normalize(position)
+            normalized_pos = normalize_position(position)
             if normalized_pos == 'S':
                 return 'forward'
             elif normalized_pos == 'E':
@@ -671,17 +676,17 @@ class FrequencyConverter(TemporalConverter):
             # Validation de la fréquence en décomposant d'abord pour gérer les positions S/E
             try:
                 # Décomposition de la fréquence pour extraire la base et la position
-                freq_base, freq_pos = self._position_normalizer.decompose_offset(target_freq)
+                freq_base, freq_pos = decompose_offset(target_freq)
                 # Normalisation de la fréquence de base uniquement
                 normalize_frequency(freq_base)
                 # Validation de la position si elle est spécifiée et non-default
-                if freq_pos and not self._position_normalizer.validate(freq_pos):
+                if freq_pos and not validate_position(freq_pos):
                     raise ValueError(f"Invalid position '{freq_pos}' in target frequency '{target_freq}'")
             except ValueError as e:
                 raise ValueError(f"Invalid target frequency: {e}")
         elif isinstance(target_freq, dict):
             # Détection de la structure de panel (entités en MultiIndex)
-            is_panel = isinstance(data.index, pd.MultiIndex) and data.index.nlevels >= 2
+            is_panel = is_panel_data(data)
 
             # Un dictionnaire n'est autorisé que pour un DataFrame ou un panel (Series MultiIndex)
             if isinstance(data, pd.Series) and not is_panel:
@@ -695,25 +700,30 @@ class FrequencyConverter(TemporalConverter):
             else:
                 data_cols = set()
 
-            # Distinction entre dictionnaire par colonne et dictionnaire par entité
-            target_keys = set(target_freq.keys())
-            # Dictionnaire par colonne : toutes les clés désignent des colonnes existantes
-            keys_are_columns = bool(data_cols) and target_keys <= data_cols
+            # Hors du cas panel : seules des clés de colonnes (str) existantes sont autorisées
+            if not is_panel:
+                # Rejet des clés tuple (entité / (entité, colonne)) sans structure de panel
+                non_column_keys = {k for k in target_freq if not isinstance(k, str)}
+                if non_column_keys:
+                    raise ValueError(
+                        f"Tuple keys in target_freq are only valid for panel inputs: {non_column_keys}"
+                    )
+                # Vérification que les colonnes désignées existent
+                missing_cols = set(target_freq.keys()) - data_cols
+                if missing_cols:
+                    raise ValueError(f"Columns in target_freq not found in data: {missing_cols}")
+            # En panel, les clés peuvent être une colonne (str), une entité (tuple) ou un
+            # couple (entité..., colonne) (tuple) : aucune contrainte de sous-ensemble
 
-            # Hors du cas panel, une clé qui n'est pas une colonne est invalide
-            if not keys_are_columns and not is_panel:
-                missing_cols = target_keys - data_cols
-                raise ValueError(f"Columns in target_freq not found in data: {missing_cols}")
-
-            # Validation de chaque fréquence cible (clé = colonne ou entité)
+            # Validation de chaque fréquence cible (clé = colonne, entité ou (entité, colonne))
             for key, freq in target_freq.items():
                 try:
                     # Décomposition de la fréquence pour extraire la base et la position
-                    freq_base, freq_pos = self._position_normalizer.decompose_offset(freq)
+                    freq_base, freq_pos = decompose_offset(freq)
                     # Normalisation de la fréquence de base uniquement
                     normalize_frequency(freq_base)
                     # Validation de la position si elle est spécifiée et non-default
-                    if freq_pos and not self._position_normalizer.validate(freq_pos):
+                    if freq_pos and not validate_position(freq_pos):
                         raise ValueError(f"Invalid position '{freq_pos}' in frequency '{freq}'")
                 except ValueError as e:
                     raise ValueError(f"Invalid target frequency for key '{key}': {e}")
@@ -786,6 +796,11 @@ class FrequencyConverter(TemporalConverter):
             # Résolution de la fréquence cible propre à l'entité
             entity_target = self._resolve_panel_target(target_freq, entity, columns)
 
+            # Cas d'une entité sans aucune colonne ciblée : conservation telle quelle
+            if isinstance(entity_target, dict) and not entity_target:
+                converted_parts.append(data.loc[entity_mask])
+                continue
+
             # Conversion sur l'index simple (chemin non-panel, direction par colonne)
             converted = self.convert_frequency(
                 data=entity_data,
@@ -826,28 +841,37 @@ class FrequencyConverter(TemporalConverter):
                               columns: Optional[List[str]]) -> Union[str, Dict[str, str]]:
         """Resolve the target frequency applicable to a given panel entity.
 
+        Supports mixed dict keys: ``(entity..., column)`` tuples, ``(entity...)``
+        tuples, or plain column names, with precedence
+        ``(entity, column)`` > ``(entity,)`` > ``column`` (see
+        :func:`resolve_entity_column_frequencies`).
+
         Args:
-            target_freq: Target specification (str, {col: freq}, or {entity: freq}).
+            target_freq: Target specification (str or dict with mixed keys).
             entity: Entity tuple.
             columns: Available data columns (None for Series inputs).
 
         Returns:
-            A frequency string (for str or {entity: freq} inputs) or a
-            {col: freq} dict (for per-column inputs) applicable to the entity.
+            A frequency string (for str inputs or Series entities) or a
+            ``{col: freq}`` dict (for DataFrame entities). Columns not covered by
+            the mapping are omitted from the dict (left unchanged by the caller).
         """
         # Import local pour éviter les imports circulaires
-        from ...panel.utils import get_entity_target_frequency
+        from ...panel.utils import (
+            get_entity_target_frequency,
+            resolve_entity_column_frequencies,
+        )
 
         # Cas d'une chaîne : même cible pour toutes les entités et colonnes
         if not isinstance(target_freq, dict):
             return target_freq
 
-        # Dictionnaire par colonne : toutes les clés désignent des colonnes existantes
-        if columns is not None and set(target_freq.keys()) <= set(columns):
-            return target_freq
+        # Cas Series (pas de colonnes) : résolution vers une fréquence unique par entité
+        if columns is None:
+            return get_entity_target_frequency(entity, target_freq)
 
-        # Sinon, dictionnaire par entité : résolution vers une fréquence unique
-        return get_entity_target_frequency(entity, target_freq)
+        # Cas DataFrame : résolution par colonne selon la précédence de spécificité
+        return resolve_entity_column_frequencies(entity, columns, target_freq)
 
     # Méthode auxiliaire de construction d'un mapping associant à chaque colonne la
     def _build_frequency_map(self,
@@ -876,14 +900,15 @@ class FrequencyConverter(TemporalConverter):
         if isinstance(target_freq, str):
             # Même fréquence cible pour toutes les colonnes
             if target_position is None :
-                target_freq_base, target_position, _ = normalize_frequency(target_freq, return_format='components')
+                target_freq_base, resolved_position, _ = normalize_frequency(target_freq, return_format='components')
             else :
                 target_freq_base = normalize_frequency(target_freq, return_format='base')
+                resolved_position = target_position
 
             # Construction de la fréquence cible complète avec position
-            target_freq_with_position = self._position_normalizer.combine_frequency_position(
+            target_freq_with_position = combine_frequency_position(
                 target_freq_base,
-                target_position
+                resolved_position
             )
 
             for col in list(data.columns):
@@ -897,20 +922,24 @@ class FrequencyConverter(TemporalConverter):
             for col, target in target_freq.items():
                 # Extraction de la fréquence de la colonne
                 current_freq = current_frequencies.get(col)
-                # Création de l'association pour la colonne
-                if current_freq:
-                    # Fréquence cible avec position
-                    if target_position is None :
-                        target_freq_base, target_position, _ = normalize_frequency(target_freq, return_format='components')
-                    else :
-                        target_freq_base = normalize_frequency(target_freq, return_format='base')
+                # Ignore les colonnes absentes du jeu de données ou sans fréquence détectée
+                if not current_freq:
+                    continue
 
-                    # Construction de la fréquence cible complète avec position
-                    target_freq_with_position = self._position_normalizer.combine_frequency_position(
-                        target_freq_base,
-                        target_position
-                    )
-                    frequency_map[col] = (current_freq, target_freq_with_position)
+                # Résolution de la position cible propre à la colonne (variable locale
+                # pour ne pas propager la position d'une colonne à la suivante)
+                if target_position is None :
+                    col_freq_base, col_position, _ = normalize_frequency(target, return_format='components')
+                else :
+                    col_freq_base = normalize_frequency(target, return_format='base')
+                    col_position = target_position
+
+                # Construction de la fréquence cible complète avec position
+                col_target_with_position = combine_frequency_position(
+                    col_freq_base,
+                    col_position
+                )
+                frequency_map[col] = (current_freq, col_target_with_position)
 
         return frequency_map
 
@@ -1011,48 +1040,40 @@ class FrequencyConverter(TemporalConverter):
                 else:
                     converted_columns[col] = converted[col]
 
-        # Vérification si toutes les colonnes ont la même fréquence cible
-        unique_target_freqs = set()
-        for (source_freq, target_freq, conv_method) in grouped_conversions.keys():
-            unique_target_freqs.add(target_freq)
+        # Cas où aucune colonne n'a été convertie (ex: fréquence source == cible partout)
+        if not converted_columns:
+            return data
 
-        # Si une seule fréquence cible, pas besoin d'alignement complexe
-        if len(unique_target_freqs) == 1:
+        # Colonnes présentes mais non converties (à préserver telles quelles)
+        non_converted_cols = [col for col in data.columns if col not in columns_to_convert]
+
+        # Vérification si toutes les colonnes converties ont la même fréquence cible
+        unique_target_freqs = {target_freq for (_, target_freq, _) in grouped_conversions.keys()}
+
+        # Chemin simple : une seule fréquence cible et aucune colonne à préserver
+        if len(unique_target_freqs) == 1 and not non_converted_cols:
             # Reconstruction simple du DataFrame
             result = pd.DataFrame(index=list(converted_columns.values())[0].index)
             for col, conv_series in converted_columns.items():
                 result[col] = conv_series
-            return result
+            # Préservation de l'ordre original des colonnes
+            return result[[col for col in data.columns if col in result.columns]]
 
-        # Sinon, utilisation de la méthode d'alignement pour les fréquences mixtes
+        # Sinon : alignement des fréquences mixtes et/ou conservation des colonnes non converties
+        if non_converted_cols:
+            base_data = data[non_converted_cols].copy()
         else:
-            # Création d'un DataFrame de base avec les colonnes non converties
-            non_converted_cols = [col for col in data.columns if col not in columns_to_convert]
-            if non_converted_cols:
-                base_data = data[non_converted_cols].copy()
-            else:
-                base_data = pd.DataFrame(index=data.index)
+            base_data = pd.DataFrame(index=data.index)
 
-            # Alignement des colonnes converties
-            result = self._align_mixed_frequency_columns(
-                base_data=base_data,
-                converted_columns=converted_columns,
-                alignment_method=alignment_method
-            )
+        # Alignement des colonnes converties (et réattachement des colonnes non converties)
+        result = self._align_mixed_frequency_columns(
+            base_data=base_data,
+            converted_columns=converted_columns,
+            alignment_method=alignment_method
+        )
 
-            return result
-
-    # Méthode auxiliaire de détection du MultiIndex pour les données de panel
-    def _is_panel_data(self, data: Union[pd.Series, pd.DataFrame]) -> bool:
-        """Check if data has MultiIndex structure for panel data.
-
-        Args:
-            data: Input data
-
-        Returns:
-            True if data has MultiIndex with 2+ levels
-        """
-        return isinstance(data.index, pd.MultiIndex) and data.index.nlevels >= 2
+        # Préservation de l'ordre original des colonnes
+        return result[[col for col in data.columns if col in result.columns]]
 
     # Méthode auxiliaire d'alignement des indexes de différentes fréquences
     def _align_mixed_frequency_columns(self,
@@ -1140,7 +1161,7 @@ class FrequencyConverter(TemporalConverter):
             Upsampled data
         """
         # Délégation directe pour les données sans panel
-        if not self._is_panel_data(data):
+        if not is_panel_data(data):
             return self.interpolate_to_higher_frequency(
                 data, target_freq, method,
                 limit=limit, limit_direction=limit_direction,
@@ -1176,7 +1197,7 @@ class FrequencyConverter(TemporalConverter):
             Downsampled data
         """
         # Délégation directe pour les données sans panel
-        if not self._is_panel_data(data):
+        if not is_panel_data(data):
             return self.aggregate_to_lower_frequency(
                 data, target_freq, method, full_periods_only
             )
