@@ -113,6 +113,34 @@ def group_keys_by_entity_and_variable(
 
     return grouped
 
+# Fonction d'extraction des noms de colonnes à partir des clés de variables
+def extract_column_names(
+    keys: List[Union[str, Tuple]],
+) -> List[str]:
+    """Extract unique column names from variable keys.
+
+    Args:
+        keys: List of variable identifiers (column names or
+            (entity..., column) tuples).
+
+    Returns:
+        List of unique column names.
+
+    Examples:
+        >>> sorted(extract_column_names([('FR', 'gdp'), ('DE', 'gdp'), 'cpi']))
+        ['cpi', 'gdp']
+    """
+    # Initialisation des noms de colonnes
+    column_names = set()
+    # Parcours des clés
+    for key in keys:
+        # Cas où la clé est un tuple : extraction du dernier élément
+        if isinstance(key, tuple):
+            column_names.add(key[-1])
+        else:
+            column_names.add(key)
+    return list(column_names)
+
 # Fonction de construction du masque des observations associées à une entité
 def get_entity_mask(
     X: Union[pd.DataFrame, pd.Series],

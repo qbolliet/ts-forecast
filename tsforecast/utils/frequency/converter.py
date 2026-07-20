@@ -2,6 +2,15 @@
 
 This module provides the FrequencyConverter class to handle conversions between
 different time frequencies using pandas built-in functionality (asfreq and resample).
+
+FrequencyConverter is the generic conversion engine, consistent with the other
+converters of the package (DurationConverter, PeriodPositionConverter): the
+output index always carries the target frequency (or the union of the target
+indexes when converting columns to mixed frequencies). For building
+training/prediction datasets whose original index must be preserved or
+densified (as required by the HighFrequencyImputer), see
+:class:`tsforecast.frequency.frequency_aligner.FrequencyAligner`, which
+delegates the actual conversions to this class.
 """
 # Importation des modules
 import pandas as pd
@@ -13,7 +22,7 @@ from ..abc.converter import TemporalConverter
 
 # Import des utilitaires de fréquence
 from .normalizer import FrequencyType, UserFrequencyType
-from .utils import normalize_frequency, is_higher_frequency, get_frequency_order
+from .utils import normalize_frequency, is_higher_frequency
 from ..validation import validate_temporal_data
 from ..parse import parse_frequency
 
@@ -107,6 +116,14 @@ class FrequencyConverter(TemporalConverter):
         to use upsampling (asfreq) or downsampling (resample) based on the
         frequency relationship. Supports both Series and DataFrame with flexible
         target frequency specification.
+
+        The output index carries the target frequency. With a dict
+        ``target_freq``, the output index is the union of the target indexes of
+        the converted columns: the source index disappears as soon as every
+        column is converted, and only columns absent from the dict (or whose
+        source frequency already matches the target) keep their original dates
+        in the union. NaN introduced by the mixed-frequency union are filled
+        according to ``alignment_method``.
 
         Args:
             data: Time series data to convert (Series or DataFrame)
@@ -220,6 +237,7 @@ class FrequencyConverter(TemporalConverter):
                     limit=limit,
                     limit_direction=limit_direction,
                     limit_area=limit_area,
+                    source_freq=source_freq_with_position,
                 )
             else:
                 return self._downsample(
@@ -455,8 +473,12 @@ class FrequencyConverter(TemporalConverter):
             raise ValueError(f"Invalid target frequency '{target_freq}': {e}")
 
         # Détection de la fréquence source à partir de l'index, sauf si elle est fournie explicitement
+        # La détection peut échouer (index court ou irrégulier) : repli sur asfreq dans ce cas
         if not source_freq:
-           source_freq = detect_index_frequency(index=data.index, return_format='full')
+            try:
+                source_freq = detect_index_frequency(index=data.index, return_format='full')
+            except ValueError:
+                source_freq = None
 
         # Si on peut détecter la fréquence source, on étend l'index pour inclure toutes les périodes
         if source_freq:
@@ -580,69 +602,6 @@ class FrequencyConverter(TemporalConverter):
                 return 'backward'
 
         return None
-
-    # Méthode d'alignement des fréquences du plusieurs jeux de données
-    def align_frequencies(self,
-                        *datasets: Union[pd.Series, pd.DataFrame],
-                        target_freq: Optional[str] = None,
-                        method: str = 'mean') -> tuple:
-        """Align multiple datasets to the same frequency.
-
-        Args:
-            *datasets: Variable number of time series datasets
-            target_freq: Target frequency (if None, uses the highest common frequency)
-            method: Conversion method to use
-
-        Returns:
-            Tuple of aligned datasets
-
-        Examples:
-            >>> import pandas as pd
-            >>> converter = FrequencyConverter()
-            >>> daily_dates = pd.date_range('2023-01-01', periods=5, freq='D')
-            >>> monthly_dates = pd.date_range('2023-01-01', periods=2, freq='M')
-            >>> daily_data = pd.Series(range(5), index=daily_dates)
-            >>> monthly_data = pd.Series([10, 20], index=monthly_dates)
-            >>> aligned = converter.align_frequencies(daily_data, monthly_data, target_freq='monthly')
-            >>> len(aligned) == 2
-            True
-        """
-        if not datasets:
-            return tuple()
-
-        # Import local pour éviter l'import circulaire
-        from ...frequency.detector import detect_frequency
-
-        # Détection des fréquences actuelles
-        current_freqs = []
-        for dataset in datasets:
-            freq = detect_frequency(data=dataset, time_col=None,
-                           panel_cols= None,
-                           return_format='with_position',
-                           check_consistency=True,
-                           strict=False)
-            if freq:
-                current_freqs.append(freq)
-
-        if not current_freqs:
-            raise ValueError("Cannot detect frequency for any dataset")
-
-        # Détermination de la fréquence cible si non spécifiée
-        if target_freq is None:
-            # Utilisation de la fréquence la plus basse (moins granulaire)
-            freq_orders = {}
-            for freq in set(current_freqs):
-                freq_orders[freq] = get_frequency_order(freq)
-
-            target_freq = max(freq_orders.keys(), key=lambda x: freq_orders[x])
-
-        # Conversion de tous les datasets vers la fréquence cible
-        aligned_datasets = []
-        for dataset in datasets:
-            aligned = self.convert_frequency(dataset, target_freq, method=method)
-            aligned_datasets.append(aligned)
-
-        return tuple(aligned_datasets)
 
     # Méthode auxiliaire de validation des paramètres
     def _validate_conversion_params(self,
@@ -1019,11 +978,12 @@ class FrequencyConverter(TemporalConverter):
 
             # Détermination de la direction de conversion (basée sur les fréquences de base)
             if is_higher_frequency(target_base, source_base):
-                # Upsampling
+                # Upsampling (la fréquence source du groupe est déjà détectée)
                 converted = self._upsample(
                     data=subset, target_freq=target_freq,
                     method=conv_method, limit=limit,
-                    limit_direction=limit_direction, limit_area=limit_area
+                    limit_direction=limit_direction, limit_area=limit_area,
+                    source_freq=source_freq
                 )
             else:
                 # Downsampling
@@ -1063,7 +1023,9 @@ class FrequencyConverter(TemporalConverter):
         if non_converted_cols:
             base_data = data[non_converted_cols].copy()
         else:
-            base_data = pd.DataFrame(index=data.index)
+            # Toutes les colonnes sont converties : l'index source ne doit pas
+            # survivre dans l'union — l'index de sortie est l'union des index cibles
+            base_data = pd.DataFrame(index=data.index[:0])
 
         # Alignement des colonnes converties (et réattachement des colonnes non converties)
         result = self._align_mixed_frequency_columns(
@@ -1129,9 +1091,9 @@ class FrequencyConverter(TemporalConverter):
 
             # Application de la méthode d'alignement
             if alignment_method == 'ffill':
-                result[col] = result[col].fillna(method='ffill')
+                result[col] = result[col].ffill()
             elif alignment_method == 'bfill':
-                result[col] = result[col].fillna(method='bfill')
+                result[col] = result[col].bfill()
             elif alignment_method == 'nearest':
                 result[col] = result[col].interpolate(method='nearest')
             # 'none' ne fait rien, garde les NaN
@@ -1145,7 +1107,8 @@ class FrequencyConverter(TemporalConverter):
                 method: str,
                 limit: Union[int, str, None] = None,
                 limit_direction: Optional[str] = None,
-                limit_area: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
+                limit_area: Optional[str] = None,
+                source_freq: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
         """Perform upsampling using asfreq and interpolation.
 
         Args:
@@ -1156,6 +1119,8 @@ class FrequencyConverter(TemporalConverter):
                 ``'default'``, or None)
             limit_direction: Direction for NaN filling
             limit_area: Restriction area for NaN filling
+            source_freq: Source frequency already detected by the caller
+                (avoids a second detection, which can fail on short indexes)
 
         Returns:
             Upsampled data
@@ -1165,7 +1130,7 @@ class FrequencyConverter(TemporalConverter):
             return self.interpolate_to_higher_frequency(
                 data, target_freq, method,
                 limit=limit, limit_direction=limit_direction,
-                limit_area=limit_area
+                limit_area=limit_area, source_freq=source_freq
             )
 
         # Données de panel : application par entité via groupby
@@ -1175,7 +1140,7 @@ class FrequencyConverter(TemporalConverter):
                 x.droplevel(panel_levels),
                 target_freq, method,
                 limit=limit, limit_direction=limit_direction,
-                limit_area=limit_area
+                limit_area=limit_area, source_freq=source_freq
             )
         )
 
