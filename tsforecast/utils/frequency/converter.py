@@ -489,8 +489,18 @@ class FrequencyConverter(TemporalConverter):
                 target_freq=target_freq
             )
 
+            # Ré-ancrage de l'index source sur la position cible : sans cela, une
+            # source en position 'S' (ex. QS → 2024-01-01) n'intersecte pas une
+            # grille cible en position 'E' (ex. ME → 2024-01-31) et la
+            # réindexation perdrait toutes les observations
+            anchored = data.copy()
+            anchored.index = self._reanchor_index_to_target(
+                index=data.index,
+                target_freq=target_freq
+            )
+
             # Réindexation des données sur l'index étendu
-            upsampled = data.reindex(extended_index)
+            upsampled = anchored.reindex(extended_index)
         else:
             # Fallback : utilisation de asfreq si la fréquence source n'est pas détectable
             upsampled = data.asfreq(target_freq)
@@ -525,6 +535,55 @@ class FrequencyConverter(TemporalConverter):
             return upsampled.interpolate(**interpolate_kwargs)
         else:
             raise ValueError(f"Unsupported aggregation method: {method}, should be in {valid_methods}")
+
+    # Méthode auxiliaire de ré-ancrage de l'index source sur la position cible
+    def _reanchor_index_to_target(self,
+                                  index: pd.DatetimeIndex,
+                                  target_freq: str) -> pd.DatetimeIndex:
+        """Re-stamp source timestamps on the target frequency position.
+
+        Each source timestamp is mapped to the period of the target base
+        frequency that contains it, then re-stamped at the target position
+        (start or end). The underlying sub-period is preserved: only the
+        start/end convention changes, so a value dated 2024-01-01 on a ``QS``
+        index becomes 2024-01-31 when the target is ``ME``.
+
+        This is a no-op when the source and target positions already agree.
+
+        Args:
+            index: Source datetime index
+            target_freq: Target frequency string, with optional position
+
+        Returns:
+            Re-anchored DatetimeIndex, or the original index if the target
+            frequency cannot be decomposed into a base and a position
+
+        Examples:
+            >>> converter = FrequencyConverter()
+            >>> qs_index = pd.date_range('2024-01-01', periods=2, freq='QS')
+            >>> converter._reanchor_index_to_target(qs_index, 'ME')
+            DatetimeIndex(['2024-01-31', '2024-04-30'], dtype='datetime64[ns]', freq=None)
+        """
+        # Décomposition de la fréquence cible
+        target_base, target_pos, _ = normalize_frequency(
+            target_freq,
+            return_format='components'
+        )
+
+        # Convention du package en l'absence de position explicite
+        target_pos = target_pos if target_pos is not None else 'E'
+        how = 'start' if normalize_position(target_pos) == 'S' else 'end'
+
+        # Ré-ancrage période par période, avec repli sur l'index d'origine si la
+        # fréquence de base n'est pas convertible en Period (ex. fréquences
+        # irrégulières ou multiples non supportés)
+        try:
+            periods = index.to_period(target_base)
+            reanchored = periods.to_timestamp(how=how).normalize()
+        except (ValueError, AttributeError):
+            return index
+
+        return pd.DatetimeIndex(reanchored)
 
     # Méthode auxiliaire de résolution de la valeur par défaut de limit
     def _resolve_interpolation_limit(self,
