@@ -23,7 +23,7 @@ from ..utils.frequency.utils import (
     is_higher_frequency,
     get_frequency_order,
 )
-from ..panel.utils import get_unique_panel_entities, normalize_entity_key
+from ..panel.utils import is_panel_data, get_unique_panel_entities, normalize_entity_key
 from .detector import FrequencyDetector, detect_frequency
 from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .imputation_window import ImputationWindowCalculator, ImputationScope
@@ -700,7 +700,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Initialisation de la liste de l'ordre des variables à imputer
             ordered_impute_vars = []
             # Parcours des variables ordonnées
-            for var_name, _, _, _, _ in var_metrics:
+            for var_name, _, _, _ in var_metrics:
                 # Extraction des entités liées à la variable
                 var_keys = var_to_entities[var_name]
                 # Tri par fréquence décroissante au sein des entité
@@ -1270,7 +1270,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         self.feature_columns_ = list(X.columns)
         self.target_column_ = y.name if y is not None else None
-        self.is_panel_ = bool(self.panel_cols) or isinstance(X.index, pd.MultiIndex)
+        self.is_panel_ = bool(self.panel_cols) or is_panel_data(data=X)
 
         # Construction du jeu de données de travail
         if y is not None:
@@ -1328,10 +1328,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 self._imputation_window_calc.imputation_window_start_,
                 self._imputation_window_calc.imputation_window_end_
             )
-            self.training_window_ = (
-                self._imputation_window_calc.training_start_,
-                self._imputation_window_calc.training_end_
-            )
         except ValueError as e:
             warnings.warn(
                 f"Could not calculate imputation window: {e}. Using all available data.",
@@ -1342,7 +1338,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             else:
                 time_idx = X_work.index
             self.imputation_window_ = (time_idx.min(), time_idx.max())
-            self.training_window_ = self.imputation_window_
 
         # =================================================================
         # PHASE 2 — Additive transformer
