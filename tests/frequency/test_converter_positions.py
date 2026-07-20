@@ -305,3 +305,140 @@ class TestExtendIndexForUpsampling:
 
         # L'index devrait être retourné tel quel
         assert len(extended) >= len(index), "Should return original or extended index"
+
+
+class TestCrossPositionUpsampling:
+    """Tests pour l'upsampling entre positions source et cible divergentes.
+
+    Régression : l'index étendu est construit à la position cible alors que les
+    données portent la position source. Sans ré-ancrage, l'intersection des deux
+    index est vide (ex. QS 2024-01-01 vs ME 2024-01-31) et la réindexation perd
+    toutes les observations, produisant une série intégralement NaN.
+    """
+
+    @pytest.fixture
+    def converter(self):
+        """Fixture pour créer une instance de FrequencyConverter."""
+        return FrequencyConverter()
+
+    def test_qs_to_me_does_not_produce_all_nan(self, converter):
+        """Test que l'upsampling QS -> ME conserve les valeurs sources."""
+        # Série trimestrielle en position start
+        qs_series = pd.Series(
+            [100.0, 200.0, 300.0, 400.0],
+            index=pd.date_range('2024-01-01', periods=4, freq='QS')
+        )
+
+        # Interpolation vers mensuel en position end
+        result = converter.interpolate_to_higher_frequency(
+            qs_series, 'ME', method='linear', limit='default'
+        )
+
+        # L'index cible couvre bien les 12 mois de l'année
+        assert len(result) == 12, f"Expected 12 months, got {len(result)}"
+        # Toutes les dates sont en fin de mois
+        assert all(d == d + pd.offsets.MonthEnd(0) for d in result.index), \
+            "All dates should be month-end"
+        # Régression principale : la série n'est pas intégralement NaN
+        assert not result.isna().all(), "Result should not be entirely NaN"
+
+    def test_qs_to_me_preserves_source_values_on_anchor_months(self, converter):
+        """Test que chaque valeur source est ré-estampillée sur le bon mois."""
+        # Série trimestrielle en position start
+        qs_series = pd.Series(
+            [100.0, 200.0, 300.0, 400.0],
+            index=pd.date_range('2024-01-01', periods=4, freq='QS')
+        )
+
+        # Interpolation vers mensuel en position end
+        result = converter.interpolate_to_higher_frequency(
+            qs_series, 'ME', method='linear', limit='default'
+        )
+
+        # La sous-période est préservée : janvier reste janvier, avril reste avril,
+        # seule la convention start/end change
+        assert result.loc['2024-01-31'] == 100.0
+        assert result.loc['2024-04-30'] == 200.0
+        assert result.loc['2024-07-31'] == 300.0
+        assert result.loc['2024-10-31'] == 400.0
+
+    def test_qe_to_ms_preserves_source_values_on_anchor_months(self, converter):
+        """Test le cas symétrique : position source end vers position cible start."""
+        # Série trimestrielle en position end
+        qe_series = pd.Series(
+            [100.0, 200.0, 300.0, 400.0],
+            index=pd.date_range('2024-03-31', periods=4, freq='QE')
+        )
+
+        # Interpolation vers mensuel en position start
+        result = converter.interpolate_to_higher_frequency(
+            qe_series, 'MS', method='linear', limit='default'
+        )
+
+        # Couverture complète et valeurs ancrées sur les mois d'origine
+        assert len(result) == 12, f"Expected 12 months, got {len(result)}"
+        assert not result.isna().all(), "Result should not be entirely NaN"
+        assert result.loc['2024-03-01'] == 100.0
+        assert result.loc['2024-06-01'] == 200.0
+        assert result.loc['2024-09-01'] == 300.0
+        assert result.loc['2024-12-01'] == 400.0
+
+    def test_matching_positions_still_interpolate(self, converter):
+        """Test de non-régression du cas nominal (positions concordantes)."""
+        # Série trimestrielle en position start vers mensuel en position start
+        qs_series = pd.Series(
+            [100.0, 200.0, 300.0, 400.0],
+            index=pd.date_range('2024-01-01', periods=4, freq='QS')
+        )
+
+        # Interpolation vers mensuel en position start
+        result = converter.interpolate_to_higher_frequency(
+            qs_series, 'MS', method='linear', limit='default'
+        )
+
+        # Les valeurs sources restent en place, sans décalage
+        assert len(result) == 12, f"Expected 12 months, got {len(result)}"
+        assert result.loc['2024-01-01'] == 100.0
+        assert result.loc['2024-04-01'] == 200.0
+        assert result.loc['2024-10-01'] == 400.0
+
+    # Tests unitaires de la méthode de ré-ancrage
+
+    def test_reanchor_start_to_end(self, converter):
+        """Test le ré-ancrage d'un index start vers une position end."""
+        # Index trimestriel en position start
+        qs_index = pd.date_range('2024-01-01', periods=4, freq='QS')
+
+        # Ré-ancrage sur la grille mensuelle en position end
+        reanchored = converter._reanchor_index_to_target(qs_index, 'ME')
+
+        # Chaque date est déplacée en fin du mois qui la contenait
+        expected = pd.DatetimeIndex(
+            ['2024-01-31', '2024-04-30', '2024-07-31', '2024-10-31']
+        )
+        assert list(reanchored) == list(expected)
+
+    def test_reanchor_end_to_start(self, converter):
+        """Test le ré-ancrage d'un index end vers une position start."""
+        # Index trimestriel en position end
+        qe_index = pd.date_range('2024-03-31', periods=4, freq='QE')
+
+        # Ré-ancrage sur la grille mensuelle en position start
+        reanchored = converter._reanchor_index_to_target(qe_index, 'MS')
+
+        # Chaque date est déplacée au début du mois qui la contenait
+        expected = pd.DatetimeIndex(
+            ['2024-03-01', '2024-06-01', '2024-09-01', '2024-12-01']
+        )
+        assert list(reanchored) == list(expected)
+
+    def test_reanchor_is_noop_for_matching_position(self, converter):
+        """Test que le ré-ancrage ne modifie pas un index déjà bien positionné."""
+        # Index trimestriel en position start
+        qs_index = pd.date_range('2024-01-01', periods=4, freq='QS')
+
+        # Ré-ancrage vers une cible de même position
+        reanchored = converter._reanchor_index_to_target(qs_index, 'MS')
+
+        # Les dates sont inchangées
+        assert list(reanchored) == list(qs_index)
