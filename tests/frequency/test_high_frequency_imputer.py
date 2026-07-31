@@ -6,6 +6,7 @@ focusing on edge cases, panel data handling, and delay management.
 import pytest
 import pandas as pd
 import numpy as np
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
@@ -879,7 +880,10 @@ class TestScaleAnnualToMonthly:
         )
         _fit_transform_quiet(imputer, annual_over_monthly)
 
-        model_info = imputer.imputation_models_['variable_annuelle']
+        # Étape unique (pas de fréquence intermédiaire) : une seule clé d'étape
+        stage_key, = imputer.model_fitting_order_
+        assert stage_key[1] == 'variable_annuelle'
+        model_info = imputer.imputation_models_[stage_key]
         assert model_info['scale_factor'] == 12.0
 
     def test_annual_imputations_at_monthly_scale(self, mixed_freq_timeseries):
@@ -945,13 +949,6 @@ class TestOutputKeepsSourceIndex:
 class TestModelsKeyedByStage:
     """§2.3 : imputation_models_ ne doit pas être écrasé d'une étape à l'autre."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="§2.3 high_frequency_imputer_review.md : imputation_models_ est "
-               "indexé par var_key seul ; une variable imputée à deux étapes de "
-               "cascade (ex. balance_commerciale_annuelle à 'Q' puis 'M') voit son "
-               "second modèle écraser le premier.",
-    )
     def test_models_keyed_by_stage(self, mixed_freq_timeseries):
         """Une variable imputée à deux étapes -> deux modèles distincts."""
         imputer = HighFrequencyImputer(
@@ -960,19 +957,42 @@ class TestModelsKeyedByStage:
             cascade_refitting=True,
             keep_lower_frequencies=True,
         )
-        imputer.fit(mixed_freq_timeseries)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(mixed_freq_timeseries)
 
         # balance_commerciale_annuelle est imputée à l'étape 'Q' puis 'M'
         stage_entries = [
-            entry for pred_freq, var_key in imputer.model_fitting_order_
+            (freq_label, imputer.imputation_models_[stage_key])
+            for stage_key in imputer.model_fitting_order_
+            for freq_label, var_key in [stage_key]
             if var_key == 'balance_commerciale_annuelle'
-            for entry in [(pred_freq, imputer.imputation_models_.get(var_key))]
         ]
-        assert len(stage_entries) == 2
+        assert [freq_label for freq_label, _ in stage_entries] == ['Q', 'M']
 
+        # Deux modèles réellement distincts (cascade_refitting=True)
         models = [info['model'] for _, info in stage_entries if isinstance(info, dict)]
         assert len(models) == 2
         assert models[0] is not models[1]
+
+        # Facteurs d'échelle propres à chaque étape : 4 trimestres puis 12 mois
+        scales = [info['scale_factor'] for _, info in stage_entries]
+        assert scales == [4.0, 12.0]
+
+    def test_registry_size_matches_fitting_order(self, mixed_freq_timeseries):
+        """Chaque étape enregistrée possède son entrée de registre."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(mixed_freq_timeseries)
+
+        assert len(imputer.imputation_models_) == len(imputer.model_fitting_order_)
+        assert list(imputer.imputation_models_) == imputer.model_fitting_order_
 
 
 class TestPanelSingleFitPerVariable:
@@ -995,9 +1015,10 @@ class TestPanelSingleFitPerVariable:
         )
         imputer.fit(mixed_freq_panel)
 
+        # Clés d'étape (freq_label, (entité, variable)) de la variable annuelle
         balance_keys = [
             key for key in imputer.imputation_models_
-            if isinstance(key, tuple) and key[-1] == 'balance_commerciale_annuelle'
+            if isinstance(key[1], tuple) and key[1][-1] == 'balance_commerciale_annuelle'
         ]
         # Les 3 entités partagent le même modèle global : un seul objet distinct
         model_ids = {
@@ -1148,3 +1169,217 @@ class TestInputNotMutated:
             imputer.fit_transform(data)
 
         pd.testing.assert_frame_equal(data, reference)
+
+
+class _FitCountingEstimator(BaseEstimator, RegressorMixin):
+    """Linear regression counting its fits, across clones.
+
+    ``_get_estimator_for_variable`` clones the estimator before every fit:
+    an instance counter would never be seen again by the test. The counter
+    is therefore held by the class, which cloning preserves.
+    """
+
+    # Compteur partagé par toutes les instances, clones compris
+    n_fits = 0
+
+    def __init__(self):
+        pass
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the shared fit counter."""
+        cls.n_fits = 0
+
+    def fit(self, X, y):
+        """Fit the wrapped linear regression and count the call."""
+        type(self).n_fits += 1
+        self._model = LinearRegression().fit(X, y)
+        return self
+
+    def predict(self, X):
+        """Delegate to the wrapped linear regression."""
+        return self._model.predict(X)
+
+
+@pytest.fixture
+def annual_quarterly_over_monthly():
+    """Annual and quarterly variables, both additive over a dense monthly one.
+
+    Six years of month-start dates. ``covariable_mensuelle`` is dense;
+    ``variable_trimestrielle`` carries, at each quarter-start month, the sum
+    of the three monthly values of the quarter; ``variable_annuelle``
+    carries in January the sum of the twelve monthly values of the year.
+    Both low-frequency variables are imputable at every cascade stage below
+    their own frequency, which makes the fit count observable:
+    stages ``['Y', 'Q', 'M']``, three (stage, variable) couples.
+    """
+    dates = pd.date_range('2018-01-01', periods=72, freq='MS')
+    rng = np.random.default_rng(1)
+
+    monthly = pd.Series(10.0 + rng.normal(0, 0.5, len(dates)), index=dates)
+
+    quarterly = pd.Series(np.nan, index=dates)
+    for _, block in monthly.groupby([monthly.index.year, monthly.index.quarter]):
+        quarterly.loc[block.index[0]] = block.sum()
+
+    annual = pd.Series(np.nan, index=dates)
+    for _, block in monthly.groupby(monthly.index.year):
+        annual.loc[block.index[0]] = block.sum()
+
+    data = pd.DataFrame({
+        'covariable_mensuelle': monthly,
+        'variable_trimestrielle': quarterly,
+        'variable_annuelle': annual,
+    })
+    data.index.name = 'date'
+    return data
+
+
+class TestFitCountByCascadeRefitting:
+    """§5.2 : le nombre de fits est piloté par `cascade_refitting`."""
+
+    @staticmethod
+    def _fitted_entries(imputer):
+        """Registry entries holding a real model (no interpolation fallback)."""
+        return [
+            info for info in imputer.imputation_models_.values()
+            if isinstance(info, dict)
+        ]
+
+    def _run(self, data, cascade_refitting):
+        """Fit on the fixture with the spying estimator, fallbacks forbidden.
+
+        ``train_on_partial_coverage=True`` neutralises the still-open defect
+        §2.8: the 'Y' stage marks every higher-frequency column as
+        aggregated, which empties the ORIGINAL training mask of the
+        quarterly variable and sends it to the interpolation fallback. The
+        fit count would then no longer be observable.
+        """
+        _FitCountingEstimator.reset()
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=_FitCountingEstimator(),
+            cascade_refitting=cascade_refitting,
+            keep_lower_frequencies=True,
+            train_on_partial_coverage=True,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(data)
+
+        # La fixture est construite pour qu'aucune variable ne se replie
+        assert len(self._fitted_entries(imputer)) == len(imputer.model_fitting_order_)
+        return imputer
+
+    def test_single_fit_per_variable_without_refitting(
+        self, annual_quarterly_over_monthly
+    ):
+        """cascade_refitting=False : un fit par variable imputable, pas par étape."""
+        imputer = self._run(annual_quarterly_over_monthly, cascade_refitting=False)
+
+        # Trois étapes enregistrées ('Q' et 'M' pour l'annuelle, 'M' pour la
+        # trimestrielle) mais seulement deux variables imputables
+        assert len(imputer.model_fitting_order_) == 3
+        assert _FitCountingEstimator.n_fits == 2
+
+        # Le modèle de l'annuelle est partagé par ses deux étapes, seul le
+        # facteur d'échelle suit l'étape
+        annual_entries = [
+            imputer.imputation_models_[key]
+            for key in imputer.model_fitting_order_
+            if key[1] == 'variable_annuelle'
+        ]
+        assert len(annual_entries) == 2
+        assert annual_entries[0]['model'] is annual_entries[1]['model']
+        assert [info['scale_factor'] for info in annual_entries] == [4.0, 12.0]
+        # Le facteur cuit dans le modèle reste celui de l'étape d'entraînement
+        assert {info['fit_scale_factor'] for info in annual_entries} == {4.0}
+
+    def test_one_fit_per_stage_with_refitting(self, annual_quarterly_over_monthly):
+        """cascade_refitting=True : un fit par couple (étape, variable)."""
+        imputer = self._run(annual_quarterly_over_monthly, cascade_refitting=True)
+
+        assert len(imputer.model_fitting_order_) == 3
+        assert _FitCountingEstimator.n_fits == 3
+
+        # Chaque étape a son propre modèle, entraîné pour son propre facteur
+        annual_entries = [
+            imputer.imputation_models_[key]
+            for key in imputer.model_fitting_order_
+            if key[1] == 'variable_annuelle'
+        ]
+        assert annual_entries[0]['model'] is not annual_entries[1]['model']
+        for info in annual_entries:
+            assert info['fit_scale_factor'] == info['scale_factor']
+
+    def test_reused_model_predicts_at_stage_scale(self, annual_quarterly_over_monthly):
+        """Le modèle réutilisé est ramené à l'échelle de l'étape courante.
+
+        Le facteur d'échelle est cuit dans le modèle (`y_train` en est divisé
+        au fit) : réutilisé tel quel à l'étape 'M', un modèle entraîné à
+        l'étape 'Q' rendrait des valeurs trimestrielles, trois fois trop
+        grandes pour un mois.
+        """
+        data = annual_quarterly_over_monthly
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        result_single_stage = _fit_transform_quiet(imputer, data)
+
+        imputer_cascade = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=True,
+        )
+        result_cascade = _fit_transform_quiet(imputer_cascade, data)
+        target_level = result_cascade.xs('target', level='frequency')
+
+        # Les imputations mensuelles de l'annuelle sont au même niveau que
+        # celles obtenues sans étape intermédiaire
+        missing = data['variable_annuelle'].isna()
+        direct = result_single_stage.loc[missing, 'variable_annuelle']
+        cascaded = target_level.loc[missing, 'variable_annuelle']
+
+        assert cascaded.median() == pytest.approx(direct.median(), rel=0.1)
+
+
+class TestReplaySymmetry:
+    """§2.3 : le replay de `transform` reproduit celui de `fit_transform`."""
+
+    @pytest.mark.parametrize('cascade_refitting', [False, True])
+    @pytest.mark.parametrize('keep_lower_frequencies', [False, True])
+    def test_fit_transform_equals_transform(
+        self, mixed_freq_timeseries, cascade_refitting, keep_lower_frequencies
+    ):
+        """Séries temporelles : fit_transform puis transform donnent le même résultat."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=cascade_refitting,
+            keep_lower_frequencies=keep_lower_frequencies,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            fitted = imputer.fit_transform(mixed_freq_timeseries)
+            replayed = imputer.transform(mixed_freq_timeseries)
+
+        pd.testing.assert_frame_equal(fitted, replayed)
+
+    def test_panel_fit_transform_equals_transform(self, mixed_freq_panel):
+        """Panel : les labels d'étape par entité se rejouent à l'identique."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            fitted = imputer.fit_transform(mixed_freq_panel)
+            replayed = imputer.transform(mixed_freq_panel)
+
+        pd.testing.assert_frame_equal(fitted, replayed)

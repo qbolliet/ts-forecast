@@ -67,7 +67,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             - Dict[variable_name, estimator]: Variable-specific models
         additive_transformer: Transformer to make data additive before imputation.
         cascade_refitting: If True, refit models using imputed values after each
-            frequency stage for cascade imputation.
+            frequency stage for cascade imputation. Drives the number of fits:
+            one ``estimator.fit`` per (stage, variable imputable at that stage)
+            when True, one per imputable variable when False — the model is
+            then reused at the following stages, only its ``scale_factor``
+            changing, predictions being rescaled accordingly.
         keep_lower_frequencies: If True, output includes all intermediate frequencies
             in a MultiIndex structure (Entity, Frequency, Date) for panel or
             (Frequency, Date) for time series.
@@ -94,9 +98,21 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         variable_categories_: Category per (entity, variable) tuple:
             'aggregate', 'impute', or 'target_freq'.
         imputation_order_: Ordered list of variables for cascading imputation.
-        imputation_models_: Fitted imputation models per variable.
-        model_fitting_order_: List of (pred_freq, var_key) tuples recording the
-            exact order in which models were fitted, for replay during transform.
+        imputation_models_: Fitted imputation models, keyed by cascade stage:
+            ``stage_key = (freq_label, var_key)`` where ``freq_label`` is
+            :meth:`_freq_label` of the stage frequency (the frequency string
+            for a time series, a frozenset of the entity -> frequency items
+            for a panel) and ``var_key`` the variable key (column name, or
+            ``(entity..., column)``). A variable imputed at two stages
+            therefore holds two distinct entries. Each value is either
+            ``'interpolate_fallback'`` or a dict with keys ``model``,
+            ``feature_cols``, ``scale_factor`` (sub-period count of the
+            stage), ``fit_scale_factor`` (the one baked into the model at
+            fit time), ``pred_freq`` and ``trained_on_imputed``.
+        model_fitting_order_: List of those same ``stage_key`` tuples, in the
+            exact order in which stages were registered, for replay during
+            transform. ``len(imputation_models_) == len(model_fitting_order_)``
+            after any fit.
         freq_prediction_list_: Ordered list of the prediction frequencies
             (cascade stages) built at fit time. ``transform`` replays exactly
             these stages, rebuilding each stage frame from the input data via
@@ -177,8 +193,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 fit_transform() and inverse_transform(). If None, data is
                 assumed to already be additive.
             cascade_refitting: If True, refit models using imputed values after
-                each frequency stage. Enables more accurate imputation in
-                later stages.
+                each frequency stage — one fit per (stage, variable imputable
+                at that stage). Enables more accurate imputation in later
+                stages. If False, each imputable variable is fitted once, at
+                the first stage where it is imputable, then reused at the
+                following stages with the scale factor of the stage.
             keep_lower_frequencies: If True, output includes all intermediate
                 frequencies in a MultiIndex structure. If False, only target
                 frequency is returned.
@@ -842,6 +861,138 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Clonage de l'estimateur
         return clone(self.estimator)
 
+    # Méthode auxiliaire de construction d'un label hashable pour une fréquence de prédiction
+    @staticmethod
+    def _freq_label(pred_freq: Union[str, Dict]) -> Union[str, frozenset]:
+        """Build a hashable, canonical label for a prediction frequency.
+
+        Panel stages carry a dict entity -> frequency, which cannot be used
+        as a dictionary key: it is turned into a frozenset of its items,
+        canonical whatever the insertion order.
+
+        Args:
+            pred_freq: Prediction frequency of a cascade stage (str for a
+                time series, dict entity -> frequency for a panel).
+
+        Returns:
+            The frequency string itself, or a frozenset of the dict items.
+
+        Examples:
+            >>> HighFrequencyImputer._freq_label('M')
+            'M'
+            >>> HighFrequencyImputer._freq_label({('France',): 'M'})
+            frozenset({(('France',), 'M')})
+        """
+        # Les dictionnaires par entité ne sont pas hashables
+        if isinstance(pred_freq, dict):
+            return frozenset(pred_freq.items())
+        return pred_freq
+
+    # Méthode auxiliaire de calcul du facteur de mise à l'échelle d'une étape
+    def _stage_scale_factor(
+        self,
+        var_key: Union[str, Tuple],
+        pred_freq: Union[str, Dict],
+    ) -> float:
+        """Count the stage sub-periods held by one period of the variable.
+
+        The scale factor is the number of prediction-frequency (high)
+        sub-periods in one period of the variable's own detected (low)
+        frequency — 12 for a yearly variable predicted monthly. The
+        calendar count is exact where the duration ratio of
+        ``get_conversion_factor`` would give 12.17.
+
+        Args:
+            var_key: Variable key (column name, or ``(entity..., column)``).
+            pred_freq: Prediction frequency of the stage.
+
+        Returns:
+            Number of stage sub-periods per variable period.
+        """
+        # Extraction de la fréquence de prédiction s'il s'agit d'un dictionnaire
+        if isinstance(pred_freq, dict):
+            if isinstance(var_key, tuple):
+                # Création des deux systèmes de clé
+                entity = var_key[:-1] if len(var_key) > 2 else var_key[0]
+                entity_key = entity if isinstance(entity, tuple) else (entity,)
+                # Extraction de la fréquence
+                pf = pred_freq.get(entity_key) or pred_freq.get(entity)
+            else:
+                pf = list(pred_freq.values())[0]
+        else:
+            pf = pred_freq
+
+        return self._freq_converter.count_subperiods(
+            self.detected_frequencies_[var_key],
+            pf,
+        )
+
+    # Méthode auxiliaire de récupération du modèle déjà entraîné pour une variable
+    def _model_for_var(
+        self,
+        var_key: Union[str, Tuple],
+    ) -> Optional[Dict[str, Any]]:
+        """Find the model already fitted for a variable, whatever the stage.
+
+        Backs the ``cascade_refitting=False`` regime (review §5.2): a
+        variable is fitted once, at the first stage where it is imputable,
+        then reused at the following stages. Fallback entries
+        (``'interpolate_fallback'``, plain strings) are ignored so that a
+        variable which could not be fitted at an earlier stage still gets
+        its chance at a later one.
+
+        Args:
+            var_key: Variable key (column name, or ``(entity..., column)``).
+
+        Returns:
+            The most recently registered model entry for the variable, or
+            None when none was ever fitted.
+        """
+        # Parcours du registre sur la composante var_key de la clé d'étape
+        found: Optional[Dict[str, Any]] = None
+        for stage_key, model_info in self.imputation_models_.items():
+            if stage_key[1] == var_key and isinstance(model_info, dict):
+                found = model_info
+
+        return found
+
+    # Méthode auxiliaire de prédiction à l'échelle de l'étape
+    def _stage_predictions(
+        self,
+        model_info: Dict[str, Any],
+        X_features: pd.DataFrame,
+    ) -> np.ndarray:
+        """Predict at the scale of the stage the entry was registered for.
+
+        The scale factor is baked into the model at fit time (``y_train``
+        is divided by it), never applied at prediction time. A model reused
+        across stages (``cascade_refitting=False``) therefore predicts at
+        the scale of the stage it was fitted on, and its output must be
+        brought back to the current stage: a yearly variable fitted at the
+        quarterly stage predicts quarterly values, three times the monthly
+        ones expected at the monthly stage.
+
+        Args:
+            model_info: Registry entry of the stage, holding the fitted
+                model, its ``fit_scale_factor`` and the stage
+                ``scale_factor``.
+            X_features: Features to predict on, at the stage frequency.
+
+        Returns:
+            Predictions at the scale of the stage.
+        """
+        # Prédiction brute, à l'échelle de l'étape d'entraînement
+        predictions = model_info['model'].predict(X_features)
+
+        # Report de l'échelle d'entraînement vers celle de l'étape : le rapport
+        # vaut 1.0 pour un modèle entraîné pour l'étape courante
+        stage_scale = model_info.get('scale_factor')
+        fit_scale = model_info.get('fit_scale_factor', stage_scale)
+        if not stage_scale or not fit_scale or stage_scale == fit_scale:
+            return predictions
+
+        return predictions * (fit_scale / stage_scale)
+
     # Méthode auxiliaire de construction de la liste des fréquences auxquelles réaliser une prédiction pour atteindre la fréquence cible
     def _build_frequency_prediction_list(
         self,
@@ -1063,29 +1214,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X_train = X_features.loc[training_mask, feature_cols]
         y_train = y_source.loc[training_mask]
 
-        # Calcul du facteur de mise à l'échelle
-        # Extraction de la fréquence de prédiction s'il s'agit d'un dictionnaire
-        if isinstance(pred_freq, dict):
-            if isinstance(var_key, tuple):
-                # Création des deux systèmes de clé
-                entity = var_key[:-1] if len(var_key) > 2 else var_key[0]
-                entity_key = entity if isinstance(entity, tuple) else (entity,)
-                # Extraction de la fréquence
-                pf = pred_freq.get(entity_key) or pred_freq.get(entity)
-            else:
-                pf = list(pred_freq.values())[0]
-        else:
-            pf = pred_freq
-
         # Calcul du facteur de mise à l'échelle : nombre de sous-périodes de la
         # fréquence de prédiction (haute) dans une période de la fréquence
         # détectée de la variable (basse) — ex. variable annuelle prédite au
-        # mensuel : 12. Le comptage calendaire est exact là où le ratio de
-        # durées de get_conversion_factor donnerait 12.17
-        scale_factor = self._freq_converter.count_subperiods(
-            self.detected_frequencies_[var_key],
-            pf,
-        )
+        # mensuel : 12
+        scale_factor = self._stage_scale_factor(var_key, pred_freq)
 
         # Facteurs propres à chaque covariable : une colonne agrégée à f_var
         # totalise autant d'observations que sa fréquence en compte dans une
@@ -1551,6 +1684,23 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # 5d. Pour chaque variable à imputer
             for var_key in ordered_impute_keys:
                 var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
+                # Clé d'étape : un même couple (étape, variable) ne peut être
+                # entraîné qu'une fois, et une variable imputée à deux étapes
+                # obtient deux entrées distinctes
+                stage_key = (self._freq_label(pred_freq), var_key)
+
+                # Sans réentraînement, un seul fit par variable : les étapes
+                # suivantes réutilisent le modèle avec le facteur de l'étape
+                if not self.cascade_refitting:
+                    base = self._model_for_var(var_key)
+                    if base is not None:
+                        self.imputation_models_[stage_key] = {
+                            **base,
+                            'scale_factor': self._stage_scale_factor(var_key, pred_freq),
+                            'pred_freq': pred_freq,
+                        }
+                        self.model_fitting_order_.append(stage_key)
+                        continue
 
                 estimator = self._get_estimator_for_variable(var_name)
                 if estimator is None:
@@ -1558,8 +1708,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         f"No estimator available for variable '{var_name}', "
                         f"using linear interpolation as fallback"
                     )
-                    self.imputation_models_[var_key] = 'interpolate_fallback'
-                    self.model_fitting_order_.append((pred_freq, var_key))
+                    self.imputation_models_[stage_key] = 'interpolate_fallback'
+                    self.model_fitting_order_.append(stage_key)
                     continue
 
                 # Préparation des données d'entraînement
@@ -1572,8 +1722,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         f"Not enough training data for variable '{var_name}', "
                         f"using linear interpolation as fallback"
                     )
-                    self.imputation_models_[var_key] = 'interpolate_fallback'
-                    self.model_fitting_order_.append((pred_freq, var_key))
+                    self.imputation_models_[stage_key] = 'interpolate_fallback'
+                    self.model_fitting_order_.append(stage_key)
                     continue
 
                 # 5e. Frequency scaling
@@ -1594,18 +1744,21 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                 # Repli si le jeu d'entraînement est trop petit ou sans covariable exploitable
                 if len(X_train_scaled) < 2 or X_train_scaled.shape[1] == 0:
-                    self.imputation_models_[var_key] = 'interpolate_fallback'
-                    self.model_fitting_order_.append((pred_freq, var_key))
+                    self.imputation_models_[stage_key] = 'interpolate_fallback'
+                    self.model_fitting_order_.append(stage_key)
                     continue
 
                 # 5f. Fit du modèle + stockage metadata
                 feature_cols = list(X_train_scaled.columns)
                 try:
                     estimator.fit(X_train_scaled, y_train_scaled)
-                    self.imputation_models_[var_key] = {
+                    self.imputation_models_[stage_key] = {
                         'model': estimator,
                         'feature_cols': feature_cols,
                         'scale_factor': scale_factor,
+                        # Facteur cuit dans le modèle : y_train en a été divisé.
+                        # Il ne bouge plus, quand "scale_factor" suit l'étape
+                        'fit_scale_factor': scale_factor,
                         'pred_freq': pred_freq,
                         'trained_on_imputed': (
                             self.train_on_partial_coverage
@@ -1617,13 +1770,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         f"Failed to fit model for variable '{var_name}': {e}. "
                         f"Using linear interpolation as fallback"
                     )
-                    self.imputation_models_[var_key] = 'interpolate_fallback'
+                    self.imputation_models_[stage_key] = 'interpolate_fallback'
 
-                self.model_fitting_order_.append((pred_freq, var_key))
+                self.model_fitting_order_.append(stage_key)
 
                 # 5g. Cascade refitting : application des prédictions intermédiaires
                 if self.cascade_refitting:
-                    model_info = self.imputation_models_.get(var_key)
+                    model_info = self.imputation_models_.get(stage_key)
                     if model_info and model_info != 'interpolate_fallback':
                         # Valeurs manquantes de la colonne d'origine : une variable n'est
                         # jamais prédite là où ses propres imputations antérieures ont été
@@ -1635,7 +1788,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                             try:
                                 # Les prédictions sont déjà à l'échelle de la fréquence
                                 # de prédiction : aucune remise à l'échelle inverse
-                                preds = model_info['model'].predict(X_predict)
+                                preds = self._stage_predictions(model_info, X_predict)
                                 # Cascade intra-étape : les variables suivantes de l'étape
                                 # voient les valeurs imputées
                                 X_stage.loc[missing_mask, var_name] = preds
@@ -1743,27 +1896,29 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 transform_tracker, X_stage, aggregate_keys
             )
 
-            # Extraction des variables entraînées à cette étape
+            # Extraction des étapes d'entraînement associées à cette fréquence
+            stage_label = self._freq_label(pred_freq)
             stage_keys = [
-                key for stage_freq, key in self.model_fitting_order_
-                if stage_freq == pred_freq
+                key for key in self.model_fitting_order_
+                if key[0] == stage_label
             ]
 
             # Stockage du résultat intermédiaire si keep_lower_frequencies
             # Seules les étapes ayant produit au moins un modèle constituent un niveau
             if self.keep_lower_frequencies and stage_keys:
-                freq_label = (
+                level_label = (
                     str(pred_freq) if isinstance(pred_freq, str)
                     else str(list(pred_freq.values())[0]) if pred_freq else 'unknown'
                 )
-                intermediate_results[freq_label] = X_stage.copy()
+                intermediate_results[level_label] = X_stage.copy()
 
             # Parcours des variables imputées à cette étape
-            for var_key in stage_keys:
+            for stage_key in stage_keys:
+                freq_label, var_key = stage_key
                 var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
 
                 # Récupérer model_info
-                model_info = self.imputation_models_.get(var_key)
+                model_info = self.imputation_models_.get(stage_key)
 
                 if model_info is None or model_info == 'interpolate_fallback':
                     # Le repli n'alimente pas imputed_store : le fit n'en produit aucune
@@ -1789,15 +1944,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 X_features = X_features.fillna(X_features.mean())
 
                 try:
-                    model = model_info['model']
                     # Les prédictions sont déjà à l'échelle de la fréquence de
                     # prédiction : aucune remise à l'échelle inverse
-                    predictions = model.predict(X_features)
-                    # Cascade intra-étape puis alimentation des étapes suivantes
+                    predictions = self._stage_predictions(model_info, X_features)
+                    # Cascade intra-étape : le frame de l'étape porte le résultat
                     X_stage.loc[missing_mask, var_name] = predictions
-                    imputed_store[var_key] = pd.Series(
-                        predictions, index=X_stage.index[missing_mask]
-                    )
+                    # Alimentation des étapes suivantes, symétrique du bloc 5g du
+                    # fit : sans réentraînement, les covariables des étapes
+                    # suivantes restent celles vues à l'entraînement
+                    if self.cascade_refitting:
+                        imputed_store[var_key] = pd.Series(
+                            predictions, index=X_stage.index[missing_mask]
+                        )
 
                     # Marquage provenance
                     trained_on_imputed = model_info.get('trained_on_imputed', False)
@@ -1932,7 +2090,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             if not missing_mask.any():
                 continue
 
-            model_info = self.imputation_models_.get(column)
+            # Le registre est indexé par étape : recherche sur la composante variable
+            model_info = self._model_for_var(column)
 
             if model_info is None or model_info == 'interpolate_fallback':
                 result[column] = result[column].interpolate(
@@ -1948,7 +2107,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     try:
                         # Les prédictions sont déjà à l'échelle de la fréquence de
                         # prédiction : aucune remise à l'échelle inverse
-                        predictions = model_info['model'].predict(X_features)
+                        predictions = self._stage_predictions(model_info, X_features)
                         result.loc[missing_idx, column] = predictions
                     except Exception as e:
                         warnings.warn(

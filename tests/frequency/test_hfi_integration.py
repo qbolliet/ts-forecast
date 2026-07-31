@@ -13,8 +13,11 @@ Ce script est le filet de sécurité qui précède toute correction de
 `high_frequency_imputer_review.md` (§7) pour le diagnostic complet. Les tests
 marqués ``xfail(strict=True)`` documentent le comportement **souhaité** (pas
 le comportement actuel bogué) et référencent la section de la revue
-concernée ; ils doivent tomber un par un au fil des correctifs. Aucune
-modification du code de production n'a été faite pour ce filet de sécurité.
+concernée ; ils doivent tomber un par un au fil des correctifs.
+
+Correctifs déjà appliqués et couverts sans ``xfail`` : §2.1 (facteur
+d'échelle), §2.2 / §5.1 (frames d'étape) et §2.3 / §5.2 (registre de modèles
+indexé par étape).
 """
 import warnings
 
@@ -39,11 +42,6 @@ ALL_SCENARIOS = [
     ('mixed_freq_panel', True, False),
     ('mixed_freq_panel', True, True),
 ]
-
-# Sous-ensemble des scénarios en une seule étape de cascade (pas d'agrégation
-# intermédiaire) : utilisé par _mark_model_registry (§2.3, bug indépendant du
-# registre de modèles, toujours ouvert).
-SINGLE_STAGE = {(name, False, False) for name in ('mixed_freq_timeseries', 'mixed_freq_panel')}
 
 
 def _scenario_id(param: tuple) -> str:
@@ -97,21 +95,6 @@ def hfi_scenario(request):
     }
 
 
-def _mark_model_registry(param: tuple):
-    """xfail unless single-stage (§2.3: registry overwritten across cascade stages)."""
-    if param in SINGLE_STAGE:
-        return pytest.param(param, id=_scenario_id(param))
-    return pytest.param(
-        param, id=_scenario_id(param),
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="§2.3 high_frequency_imputer_review.md : imputation_models_ est "
-                   "indexé par var_key seul, une variable imputée à deux étapes de "
-                   "cascade écrase son propre modèle de la première étape.",
-        ),
-    )
-
-
 KEEP_LOWER_SCENARIOS = [p for p in ALL_SCENARIOS if p[2] is True]
 
 
@@ -145,7 +128,7 @@ class TestRowCountAndCoverage:
 class TestModelRegistry:
     """§2.3 : chaque étape de fit doit obtenir sa propre entrée de registre."""
 
-    @pytest.mark.parametrize('param', [_mark_model_registry(p) for p in ALL_SCENARIOS])
+    @pytest.mark.parametrize('param', ALL_SCENARIOS, ids=_scenario_id)
     def test_one_registry_entry_per_fitting_order_entry(self, request, param):
         """imputation_models_ doit contenir autant d'entrées que model_fitting_order_."""
         dataset_name, cascade_refitting, keep_lower_frequencies = param
