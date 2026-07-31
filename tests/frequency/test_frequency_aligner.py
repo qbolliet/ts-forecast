@@ -60,6 +60,39 @@ class TestAggregateToTarget:
         # La colonne non agrégée est inchangée
         pd.testing.assert_series_equal(result['y'], monthly_df['y'])
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="§2.2a high_frequency_imputer_review.md : aggregate_to_target labellise "
+               "avec la fréquence base non ancrée ('Q' = alias déprécié de fin de "
+               "trimestre), qui ne retombe jamais sur un index ancré en début de mois "
+               "(MS) : la colonne agrégée est entièrement perdue.",
+    )
+    def test_aggregate_labels_land_on_source_index(self, aligner):
+        """Agrégation M->Q d'un index MS : labels sur QS, reindex sans perte."""
+        dates = pd.date_range('2023-01-01', periods=8, freq='MS')
+        df = pd.DataFrame({'x': np.ones(len(dates))}, index=dates)
+
+        result = aligner.aggregate_to_target(df, ['x'], 'Q', is_panel=False)
+
+        # Le résultat ne doit pas être vide : les labels doivent atterrir sur l'index MS
+        assert len(result) > 0
+        assert result['x'].notna().any()
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="§2.2b high_frequency_imputer_review.md : le dropna(axis=0, how='all') "
+               "final supprime les lignes des périodes incomplètes, alors qu'une "
+               "méthode d'alignement ne doit pas changer le nombre de lignes.",
+    )
+    def test_aggregate_preserves_row_count(self, aligner):
+        """aggregate_to_target ne supprime aucune ligne (contrat d'alignement)."""
+        dates = pd.date_range('2023-01-01', periods=8, freq='MS')
+        df = pd.DataFrame({'x': np.ones(len(dates))}, index=dates)
+
+        result = aligner.aggregate_to_target(df, ['x'], 'QS', is_panel=False)
+
+        assert len(result) == len(df)
+
     def test_panel_same_index_contract(self, aligner):
         """En panel, le contrat d'index est respecté entité par entité."""
         dates = pd.date_range('2023-01-31', periods=6, freq='ME')

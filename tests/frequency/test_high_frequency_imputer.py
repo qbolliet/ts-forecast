@@ -787,3 +787,190 @@ class TestHighFrequencyImputerSklearnCompatibility:
         assert cloned.target_frequency == 'M'
         # L'estimateur peut être le même objet ou un clone selon sklearn
         assert cloned.estimator is not None
+
+
+# =============================================================================
+# Tests ciblés de non-régression (cf. high_frequency_imputer_review.md §7)
+# =============================================================================
+# Utilisent les fixtures `mixed_freq_timeseries` / `mixed_freq_panel` de
+# tests/frequency/conftest.py, qui reproduisent les jeux de données du
+# notebook `notebooks/2 - QB - Mixed frequencies.ipynb`. Les tests marqués
+# xfail(strict=True) documentent le comportement souhaité (pas le
+# comportement actuel bogué) et référencent la section de la revue.
+import warnings
+
+
+def _fit_transform_quiet(imputer, data):
+    """Run fit_transform while silencing the (expected, unrelated) warnings."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return imputer.fit_transform(data.copy())
+
+
+class TestScaleAnnualToMonthly:
+    """§2.1 : le facteur d'échelle annuel -> mensuel est inversé et approximatif."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="§2.1 high_frequency_imputer_review.md : get_conversion_factor est "
+               "appelé dans le mauvais sens et le scaling n'est appliqué qu'au fit "
+               "(pas au predict), produisant des valeurs mensuelles imputées "
+               "~150x trop grandes en magnitude pour une variable annuelle.",
+    )
+    def test_scale_annual_to_monthly(self, mixed_freq_timeseries):
+        """balance_commerciale_annuelle imputée mensuellement reste à l'échelle mensuelle.
+
+        Reproduction empirique exacte du scénario de la revue §2.1 :
+        cascade_refitting=False, keep_lower_frequencies=False, séries
+        temporelles. Les vraies valeurs annuelles sont entre -28 et -9 ;
+        une valeur mensuelle additive plausible (annuel/12) est de l'ordre
+        de quelques unités, pas de plusieurs centaines.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        original = mixed_freq_timeseries['balance_commerciale_annuelle']
+        imputed_months = result['balance_commerciale_annuelle'][original.isna()]
+
+        # Écart-type des vraies valeurs annuelles : borne raisonnable pour une
+        # valeur mensuelle additive (annuel / 12), avec une marge large
+        annual_scale = original.dropna().abs().max()
+        assert (imputed_months.abs() < annual_scale).all()
+
+
+class TestOutputKeepsSourceIndex:
+    """§2.2 : la cascade d'agrégation ne doit pas détruire l'index d'origine."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="§2.2 high_frequency_imputer_review.md : chaque étape de la cascade "
+               "réagrège le frame déjà agrégé de l'étape précédente au lieu des "
+               "données d'origine, détruisant les lignes non-ancrées (79 -> 26).",
+    )
+    def test_output_keeps_monthly_index(self, mixed_freq_timeseries):
+        """cascade_refitting=True : la sortie garde les 79 dates mensuelles."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        assert len(result) == len(mixed_freq_timeseries)
+        pd.testing.assert_index_equal(
+            result.index.sort_values(), mixed_freq_timeseries.index.sort_values()
+        )
+
+
+class TestModelsKeyedByStage:
+    """§2.3 : imputation_models_ ne doit pas être écrasé d'une étape à l'autre."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="§2.3 high_frequency_imputer_review.md : imputation_models_ est "
+               "indexé par var_key seul ; une variable imputée à deux étapes de "
+               "cascade (ex. balance_commerciale_annuelle à 'Q' puis 'M') voit son "
+               "second modèle écraser le premier.",
+    )
+    def test_models_keyed_by_stage(self, mixed_freq_timeseries):
+        """Une variable imputée à deux étapes -> deux modèles distincts."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+        )
+        imputer.fit(mixed_freq_timeseries)
+
+        # balance_commerciale_annuelle est imputée à l'étape 'Q' puis 'M'
+        stage_entries = [
+            entry for pred_freq, var_key in imputer.model_fitting_order_
+            if var_key == 'balance_commerciale_annuelle'
+            for entry in [(pred_freq, imputer.imputation_models_.get(var_key))]
+        ]
+        assert len(stage_entries) == 2
+
+        models = [info['model'] for _, info in stage_entries if isinstance(info, dict)]
+        assert len(models) == 2
+        assert models[0] is not models[1]
+
+
+class TestPanelSingleFitPerVariable:
+    """§2.4 : un panel ne doit pas réentraîner le même modèle global par entité."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="§2.4 high_frequency_imputer_review.md : ordered_impute_keys contient "
+               "une clé (entité, variable) par entité et le modèle global (entraîné "
+               "sur tout le panel) est réentraîné une fois par entité au lieu d'une "
+               "seule fois par variable.",
+    )
+    def test_panel_single_fit_per_variable(self, mixed_freq_panel):
+        """3 entités, 1 variable annuelle -> 1 seul fit par étape."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        imputer.fit(mixed_freq_panel)
+
+        balance_keys = [
+            key for key in imputer.imputation_models_
+            if isinstance(key, tuple) and key[-1] == 'balance_commerciale_annuelle'
+        ]
+        # Les 3 entités partagent le même modèle global : un seul objet distinct
+        model_ids = {
+            id(imputer.imputation_models_[key]['model'])
+            for key in balance_keys
+            if isinstance(imputer.imputation_models_[key], dict)
+        }
+        assert len(model_ids) == 1
+
+
+class TestNoImputationWithoutCovariates:
+    """§2.7 : fillna(mean) fabrique des prédictions là où aucune covariable n'existe."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="§2.7 high_frequency_imputer_review.md : les NaN des features de "
+               "prédiction sont remplacés par la moyenne des lignes à prédire, "
+               "produisant des valeurs même aux dates où AUCUNE covariable n'a "
+               "jamais été observée (_determine_prediction_samples existe mais "
+               "n'est jamais appelée).",
+    )
+    def test_no_imputation_outside_window_without_covariates(self):
+        """Aucune valeur imputée là où aucune covariable n'existe."""
+        dates = pd.date_range('2020-01-01', periods=30, freq='MS')
+        df = pd.DataFrame(index=dates)
+        df.index.name = 'date'
+
+        # Covariable totalement absente les 10 premiers mois, puis présente
+        covariate = np.full(30, np.nan)
+        covariate[10:] = np.linspace(1, 20, 20)
+        df['covariate'] = covariate
+
+        # Variable trimestrielle à imputer au mensuel
+        target = np.full(30, np.nan)
+        for i in range(0, 30, 3):
+            target[i] = 100 + i
+        df['target_var'] = target
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, df)
+
+        # Mois 1 à 9 : la covariable n'a jamais existé, aucune imputation ne
+        # devrait y avoir lieu
+        never_covered = result['target_var'].iloc[1:10]
+        assert never_covered.isna().all()
