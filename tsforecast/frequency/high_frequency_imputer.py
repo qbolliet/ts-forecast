@@ -943,11 +943,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Extraction du nom de la variable
         var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
 
-        # Affichage de vérification
-        print(var_name)
-        print(X_work.head())
-        print(cascade_imputed.head())
-
         # Détermination des colonnes de features
         feature_cols = [
             c for c in X_work.columns
@@ -961,7 +956,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Masque d'entraînement : fenêtre d'entraînement + valeurs non-null pour y
         if hasattr(self, '_imputation_window_calc') and self._imputation_window_calc._is_fitted:
             # Extraction du mask d'imputation
-            training_mask = self._imputation_window_calc.get_imputation_window_mask()
+            training_mask = self._imputation_window_calc.get_imputation_window_mask(X_work)
             # Hybridation avec la période de disponibilité de y
             # /!\ Que se passe-t-il lorsque X_work a un niveau de panel supplémentaire lié aux fréquences quand "keep_lower_frequencies"=True ou "cascade_refitting"=True
             # /!\ Peut-être faire une version de la méthode avec des données en argument et que l'on peut réentrainer, il n'y a pas besoin de vérifier que le caluclateur est fitted dans ce cas
@@ -1229,9 +1224,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
             # Extraction de la fréquence cible
             if self.is_panel_ and isinstance(key, tuple):
-                entity = key[:-1] if len(key) > 2 else key[0]
+                # Normalisation de l'entité sous forme de tuple
+                entity_key = normalize_entity_key(key[:-1])
                 if isinstance(self.effective_target_frequency_, dict):
-                    target_freq = self.effective_target_frequency_[entity]
+                    target_freq = (
+                        self.effective_target_frequency_.get(entity_key)
+                        or self.effective_target_frequency_.get(entity_key[0])
+                    )
                 else:
                     target_freq = self.effective_target_frequency_
             else:

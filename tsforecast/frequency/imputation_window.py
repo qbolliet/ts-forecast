@@ -720,6 +720,7 @@ class ImputationWindowCalculator:
 
 
     # Méthode de conversion du masque d'imputation vers une fréquence inférieure
+    # /!\ Voir si dans le cas de données de panel, plutôt que de retourner comme masque un dictionnaire Dict[entity, Series], il n'est pas préférable de retourner une séries avec un multiIndex, ce qui permettrait d'utiliser convert_frequency ici
     def get_mask_at_frequency(
         self,
         frequency: Union[str, Dict[tuple, str]],
