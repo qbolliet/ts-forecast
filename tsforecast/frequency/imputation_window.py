@@ -827,49 +827,13 @@ class ImputationWindowCalculator:
         )
 
         # Comparaison au nombre de sous-périodes attendues : une période cible
-        # n'est retenue que si elle est intégralement couverte
-        expected = self._count_subperiods(summed.index, source_freq, target_freq)
+        # n'est retenue que si elle est intégralement couverte. Le comptage est
+        # délégué au convertisseur, seul dépositaire de la logique de comptage
+        # des sous-périodes (cf. FrequencyConverter.count_subperiods)
+        expected = self._converter.count_subperiods_per_period(
+            summed.index, target_freq, source_freq
+        )
         return pd.Series(np.asarray(summed) >= expected, index=summed.index)
-
-    # Méthode auxiliaire de comptage des sous-périodes contenues dans chaque période cible
-    def _count_subperiods(
-        self,
-        target_index: pd.DatetimeIndex,
-        source_freq: str,
-        target_freq: str,
-    ) -> np.ndarray:
-        """Count the source sub-periods contained in each target period.
-
-        The count is derived from pandas Period arithmetic so that calendar
-        irregularities are respected: February contains 28 daily sub-periods
-        and a year contains 12 monthly ones, where the average conversion
-        factor of FrequencyConverter would give 30 and 12.17 respectively.
-        Falls back on that factor when the frequency bases cannot be
-        expressed as pandas Periods.
-
-        Args:
-            target_index: Index of the aggregated series, at target frequency.
-            source_freq: Frequency of the original (higher-frequency) grid.
-            target_freq: Target (lower) frequency.
-
-        Returns:
-            Integer array of expected sub-period counts, aligned on
-            ``target_index``.
-        """
-        # Extraction des fréquences de base (sans position S/E ni ancrage)
-        source_base = normalize_frequency(source_freq, return_format='base')
-        target_base = normalize_frequency(target_freq, return_format='base')
-
-        # Comptage exact, période cible par période cible
-        try:
-            return np.array([
-                len(pd.period_range(start=p.start_time, end=p.end_time, freq=source_base))
-                for p in target_index.to_period(target_base)
-            ])
-        except (ValueError, AttributeError):
-            # Repli sur le facteur moyen si les bases ne sont pas convertibles en Period
-            factor = self._converter.get_conversion_factor(source_freq, target_freq)
-            return np.full(len(target_index), int(round(factor)))
 
     # Méthode d'extraction de la couverture associée à chaque série
     def get_columns_with_coverage(

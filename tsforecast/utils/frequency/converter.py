@@ -13,6 +13,7 @@ densified (as required by the HighFrequencyImputer), see
 delegates the actual conversions to this class.
 """
 # Importation des modules
+import numpy as np
 import pandas as pd
 from typing import Union, Optional, Literal, Dict, Tuple, List
 from pandas.tseries.frequencies import to_offset
@@ -57,6 +58,19 @@ class FrequencyConverter(TemporalConverter):
         >>> len(monthly)
         1
     """
+    # Table des nombres de sous-périodes calendaires (clé : fréquence basse,
+    # fréquence haute). Les paires emboîtées (Y/Q/M, W/D) y sont exactes ; les
+    # autres (jours dans un mois, semaines dans une année) portent la valeur
+    # conventionnelle, aucune valeur exacte constante n'existant. Dans les deux
+    # cas la table corrige le ratio de durées, inexact par construction
+    # (365/30 = 12.17 mois dans une année).
+    _CALENDAR_SUBPERIODS: Dict[Tuple[str, str], int] = {
+        ('Y', 'Q'): 4, ('Y', 'M'): 12, ('Y', 'SM'): 24, ('Y', 'W'): 52, ('Y', 'D'): 365,
+        ('Q', 'M'): 3, ('Q', 'SM'): 6, ('Q', 'W'): 13, ('Q', 'D'): 91,
+        ('M', 'SM'): 2, ('M', 'D'): 30,
+        ('W', 'D'): 7,
+    }
+
     # Initialisation
     def __init__(self):
         """Initialize the FrequencyConverter."""
@@ -315,6 +329,122 @@ class FrequencyConverter(TemporalConverter):
         # On veut : "combien de from_freq dans un to_freq" = durée(to) / durée(from)
         # → on passe (to_freq, from_freq)
         return self._duration_converter.get_conversion_factor(to_freq, from_freq)
+
+    # Méthode de comptage des sous-périodes d'une période basse fréquence
+    def count_subperiods(self, low_freq: str, high_freq: str) -> float:
+        """Count the high_freq sub-periods contained in one low_freq period.
+
+        Unlike :meth:`get_conversion_factor`, which derives the ratio from
+        average durations (365/30 = 12.17 months in a year), this method
+        returns the calendar count expected by additive transformations: a
+        yearly total is split over exactly 12 months, not 12.17. Frequency
+        pairs absent from the calendar table fall back on the duration
+        ratio.
+
+        The count returned here is index-free, hence constant: for pairs
+        whose exact count varies from one period to the next (days in a
+        month, weeks in a year), it is the conventional value. Use
+        :meth:`count_subperiods_per_period` when the target periods are
+        known and the exact count matters.
+
+        Args:
+            low_freq: Lower (less granular) frequency, e.g. 'Y'.
+            high_freq: Higher (more granular) frequency, e.g. 'M'.
+
+        Returns:
+            Number of high-frequency sub-periods per low-frequency period,
+            e.g. 12.0 for ('Y', 'M'). Returns 1.0 when both frequencies are
+            equal, and a fraction when the arguments are swapped (a quarter
+            holds 0.25 year).
+
+        Raises:
+            ValueError: If either frequency is not supported.
+
+        Examples:
+            >>> converter = FrequencyConverter()
+            >>> converter.count_subperiods('Y', 'M')
+            12.0
+            >>> converter.count_subperiods('Q', 'M')
+            3.0
+            >>> converter.count_subperiods('M', 'M')
+            1.0
+            >>> converter.count_subperiods('annual', 'quarterly')
+            4.0
+            >>> converter.count_subperiods('Q', 'Y')
+            0.25
+        """
+        # Normalisation des fréquences de base (sans positions S/E ni ancrage)
+        low = normalize_frequency(low_freq, return_format='base')
+        high = normalize_frequency(high_freq, return_format='base')
+
+        # Même fréquence : une seule sous-période
+        if low == high:
+            return 1.0
+
+        # Recherche dans la table calendaire
+        exact = self._CALENDAR_SUBPERIODS.get((low, high))
+        if exact is not None:
+            return float(exact)
+
+        # Recherche de la paire inverse : un appel « à l'envers » (fréquence
+        # haute en premier) répond par la fraction de période correspondante
+        inverted = self._CALENDAR_SUBPERIODS.get((high, low))
+        if inverted is not None:
+            return 1.0 / float(inverted)
+
+        # Repli sur le ratio de durées : « combien de high dans un low »
+        return self.get_conversion_factor(high, low)
+
+    # Méthode de comptage des sous-périodes, période cible par période cible
+    def count_subperiods_per_period(
+        self,
+        target_index: pd.DatetimeIndex,
+        low_freq: str,
+        high_freq: str,
+    ) -> np.ndarray:
+        """Count the high_freq sub-periods of each period of an index.
+
+        Where :meth:`count_subperiods` returns a single conventional count,
+        this method exploits the concrete periods carried by
+        ``target_index`` to count exactly: February holds 28 daily
+        sub-periods and January 31, where the constant count would give 30
+        for both. Falls back on :meth:`count_subperiods` when the frequency
+        bases cannot be expressed as pandas Periods.
+
+        Args:
+            target_index: Index at the low frequency, one entry per target
+                period.
+            low_freq: Frequency of ``target_index`` (lower, less granular).
+            high_freq: Higher (more granular) frequency to count.
+
+        Returns:
+            Array of sub-period counts aligned on ``target_index``.
+
+        Raises:
+            ValueError: If either frequency is not supported.
+
+        Examples:
+            >>> converter = FrequencyConverter()
+            >>> index = pd.date_range('2023-01-31', periods=3, freq='ME')
+            >>> converter.count_subperiods_per_period(index, 'M', 'D')
+            array([31., 28., 31.])
+            >>> index = pd.date_range('2023-12-31', periods=1, freq='YE')
+            >>> converter.count_subperiods_per_period(index, 'Y', 'M')
+            array([12.])
+        """
+        # Normalisation des fréquences de base (sans positions S/E ni ancrage)
+        low = normalize_frequency(low_freq, return_format='base')
+        high = normalize_frequency(high_freq, return_format='base')
+
+        # Comptage exact, période cible par période cible
+        try:
+            return np.array([
+                float(len(pd.period_range(start=p.start_time, end=p.end_time, freq=high)))
+                for p in target_index.to_period(low)
+            ])
+        except (ValueError, AttributeError):
+            # Repli sur le comptage constant si les bases ne sont pas des Periods
+            return np.full(len(target_index), self.count_subperiods(low, high))
 
     # Méthode d'agrégation à une fréquence plus faible
     def aggregate_to_lower_frequency(self,

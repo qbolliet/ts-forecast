@@ -83,8 +83,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             train_on_partial_coverage is True:
             - 'random': Sort by frequency level then entity count (default)
             - 'cv': Use cross-validation to impute easiest variables first
-        scale_features: If True, divide X_train by the frequency conversion
-            factor when scaling y_train during training.
+        scale_features: If True, divide X_train by the number of sub-periods
+            as well as y_train, which is always divided. Set it to True when
+            the training covariates were aggregated by summation to the
+            variable's frequency, so that both sides of the model are
+            expressed at the sub-period scale used at prediction time.
 
     Attributes:
         detected_frequencies_: Detected frequency per variable or (entity, variable).
@@ -193,8 +196,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             train_on_partial_fit_order: Order for variable imputation:
                 - 'random': By frequency level then entity count (default)
                 - 'cv': Cross-validation to find easiest variables first
-            scale_features: If True, divide X_train by the frequency
-                conversion factor alongside y_train.
+            scale_features: If True, divide X_train by the number of
+                sub-periods alongside y_train, which is always divided.
             time_col: Name of the time column (if in columns not index).
             panel_cols: List of column names identifying panel entities.
         """
@@ -979,8 +982,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X_original: pd.DataFrame,
         var_key: Union[str, Tuple],
         pred_freq: Union[str, Dict],
-    ) -> Tuple[pd.DataFrame, pd.Series, float]:
-        """Prepare X_train, y_train and scale factor for a variable.
+    ) -> Tuple[pd.DataFrame, pd.Series, float, pd.Series]:
+        """Prepare X_train, y_train and scale factors for a variable.
 
         Covariates are **aggregated to the variable's own frequency**
         ``f_var`` (and not merely sampled at the variable's anchor dates):
@@ -1004,8 +1007,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             pred_freq: Prediction frequency of the stage.
 
         Returns:
-            Tuple of (X_train, y_train, scale_factor), where X_train holds
-            the covariates aggregated to the variable's own frequency.
+            Tuple of (X_train, y_train, scale_factor, feature_factors),
+            where X_train holds the covariates aggregated to the variable's
+            own frequency, scale_factor is the number of prediction-frequency
+            sub-periods per variable period, and feature_factors is the
+            per-covariate sub-period count used to bring each aggregated
+            column back to the scale it carries at prediction time.
         """
         # Extraction du nom de la variable
         var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
@@ -1018,7 +1025,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Si la série est univariée, renvoie des éléments vides
         if not feature_cols:
-            return pd.DataFrame(), pd.Series(dtype=float), 1.0
+            return pd.DataFrame(), pd.Series(dtype=float), 1.0, pd.Series(dtype=float)
 
         # Valeurs d'origine de la variable : jamais enrichies de ses propres imputations
         y_source = X_original[var_name]
@@ -1070,13 +1077,66 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             pf = pred_freq
 
-        # Calcul du facteur de mise à l'échelle
-        scale_factor = self._freq_converter.get_conversion_factor(
-            normalize_frequency(self.detected_frequencies_[var_key]),
-            normalize_frequency(pf)
+        # Calcul du facteur de mise à l'échelle : nombre de sous-périodes de la
+        # fréquence de prédiction (haute) dans une période de la fréquence
+        # détectée de la variable (basse) — ex. variable annuelle prédite au
+        # mensuel : 12. Le comptage calendaire est exact là où le ratio de
+        # durées de get_conversion_factor donnerait 12.17
+        scale_factor = self._freq_converter.count_subperiods(
+            self.detected_frequencies_[var_key],
+            pf,
         )
 
-        return X_train, y_train, scale_factor
+        # Facteurs propres à chaque covariable : une colonne agrégée à f_var
+        # totalise autant d'observations que sa fréquence en compte dans une
+        # période de f_var, et non systématiquement scale_factor
+        feature_factors = self._covariate_subperiod_counts(
+            X_train.columns, f_var, scale_factor
+        )
+
+        return X_train, y_train, scale_factor, feature_factors
+
+    # Méthode auxiliaire de comptage des sous-périodes propres à chaque covariable
+    def _covariate_subperiod_counts(
+        self,
+        columns: pd.Index,
+        f_var: str,
+        default: float,
+    ) -> pd.Series:
+        """Count how many observations each covariate contributes per period.
+
+        A covariate aggregated by summation to the variable's frequency
+        ``f_var`` totals as many observations as its own frequency holds in
+        one ``f_var`` period: 12 for a monthly covariate within a year, but
+        only 4 for a quarterly one. Dividing every column by the same
+        ``scale_factor`` would therefore leave the coarser covariates three
+        times above the scale they carry at prediction time.
+
+        Args:
+            columns: Covariate columns of the training frame.
+            f_var: Frequency of the variable being imputed.
+            default: Fallback count for covariates whose frequency is
+                unknown (typically the stage scale factor).
+
+        Returns:
+            Series of sub-period counts indexed by column name.
+        """
+        # Table nom de colonne -> fréquence détectée, tous panels confondus
+        column_frequencies = {
+            (key[-1] if isinstance(key, tuple) else key): freq
+            for key, freq in self.detected_frequencies_.items()
+        }
+
+        # Comptage colonne par colonne, avec repli sur le facteur de l'étape
+        counts = {}
+        for column in columns:
+            f_col = column_frequencies.get(column)
+            try:
+                counts[column] = self._freq_converter.count_subperiods(f_var, f_col)
+            except (ValueError, TypeError):
+                counts[column] = default
+
+        return pd.Series(counts, dtype=float)
 
     # Méthode auxiliaire d'application du facteur de mise à l'échelle aux données
     def _apply_frequency_scaling(
@@ -1084,30 +1144,48 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X_train: pd.DataFrame,
         y_train: pd.Series,
         scale_factor: float,
+        feature_factors: Optional[pd.Series] = None,
     ) -> Tuple[pd.DataFrame, pd.Series]:
-        """Apply frequency scaling to training data.
+        """Scale training data to the prediction-frequency scale.
+
+        The target is always divided by the number of sub-periods so the
+        model directly predicts values at the prediction frequency.
+        Features are divided too when scale_features=True (i.e. when they
+        were aggregated by summation to the variable's low frequency), each
+        one by its own sub-period count when ``feature_factors`` is given.
+
+        Because the model already returns sub-period values, predictions
+        must never be multiplied back by the scale factor.
 
         Args:
-            X_train: Training features.
-            y_train: Training target.
-            scale_factor: Conversion factor.
+            X_train: Training features (aggregated at the variable's frequency).
+            y_train: Training target (at the variable's low frequency).
+            scale_factor: Number of prediction-frequency sub-periods per
+                variable-frequency period (e.g. 12 for yearly -> monthly).
+            feature_factors: Per-covariate sub-period counts indexed by
+                column name. Defaults to ``scale_factor`` for every column,
+                which only holds when all covariates share the prediction
+                frequency.
 
         Returns:
-            Tuple of (scaled_X_train, scaled_y_train).
+            Tuple of (scaled X_train, scaled y_train).
         """
-        # Retourne les données inchangées si le facteur est égal à 1
+        # Retour direct si aucune mise à l'échelle n'est nécessaire
         if scale_factor == 1.0:
             return X_train, y_train
 
-        # Mise à l'échelle si demandé
-        if self.scale_features:
-            X_scaled = X_train / scale_factor
-            y_scaled = y_train / scale_factor
-        else:
-            X_scaled = X_train
-            y_scaled = y_train
+        # La cible est TOUJOURS ramenée à l'échelle d'une sous-période
+        y_scaled = y_train / scale_factor
 
-        return X_scaled, y_scaled
+        # Les features ne le sont que si elles ont été agrégées par somme,
+        # chacune par le nombre d'observations qu'elle y a contribuées
+        if not self.scale_features:
+            return X_train, y_scaled
+        if feature_factors is None:
+            return X_train / scale_factor, y_scaled
+
+        divisors = feature_factors.reindex(X_train.columns).fillna(scale_factor)
+        return X_train / divisors, y_scaled
 
     # Méthode auxiliaire de détermination des échantillons de prédiction
     def _determine_prediction_samples(
@@ -1485,7 +1563,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     continue
 
                 # Préparation des données d'entraînement
-                X_train, y_train, scale_factor = self._prepare_training_data(
+                X_train, y_train, scale_factor, feature_factors = self._prepare_training_data(
                     X_stage, X_work, var_key, pred_freq
                 )
 
@@ -1500,7 +1578,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                 # 5e. Frequency scaling
                 X_train_scaled, y_train_scaled = self._apply_frequency_scaling(
-                    X_train, y_train, scale_factor
+                    X_train, y_train, scale_factor, feature_factors
                 )
 
                 # Imputation simple des NaN dans les features
@@ -1555,9 +1633,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                             X_predict = X_stage.loc[missing_mask, feature_cols]
                             X_predict = X_predict.fillna(X_predict.mean())
                             try:
+                                # Les prédictions sont déjà à l'échelle de la fréquence
+                                # de prédiction : aucune remise à l'échelle inverse
                                 preds = model_info['model'].predict(X_predict)
-                                # Inverse scaling
-                                preds = preds * scale_factor
                                 # Cascade intra-étape : les variables suivantes de l'étape
                                 # voient les valeurs imputées
                                 X_stage.loc[missing_mask, var_name] = preds
@@ -1707,15 +1785,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     continue
 
                 feature_cols = model_info.get('feature_cols', [])
-                scale_factor = model_info.get('scale_factor', 1.0)
                 X_features = X_stage.loc[missing_mask, feature_cols]
                 X_features = X_features.fillna(X_features.mean())
 
                 try:
                     model = model_info['model']
+                    # Les prédictions sont déjà à l'échelle de la fréquence de
+                    # prédiction : aucune remise à l'échelle inverse
                     predictions = model.predict(X_features)
-                    # Inverse scaling : multiplier par scale_factor
-                    predictions = predictions * scale_factor
                     # Cascade intra-étape puis alimentation des étapes suivantes
                     X_stage.loc[missing_mask, var_name] = predictions
                     imputed_store[var_key] = pd.Series(
@@ -1863,15 +1940,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 )
             else:
                 feature_cols = model_info.get('feature_cols', [])
-                scale_factor = model_info.get('scale_factor', 1.0)
                 missing_idx = delayed_idx[missing_mask.values]
                 X_features = result.loc[missing_idx, feature_cols]
 
                 if not X_features.empty:
                     X_features = X_features.fillna(X_features.mean())
                     try:
+                        # Les prédictions sont déjà à l'échelle de la fréquence de
+                        # prédiction : aucune remise à l'échelle inverse
                         predictions = model_info['model'].predict(X_features)
-                        predictions = predictions * scale_factor
                         result.loc[missing_idx, column] = predictions
                     except Exception as e:
                         warnings.warn(

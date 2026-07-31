@@ -807,24 +807,88 @@ def _fit_transform_quiet(imputer, data):
         return imputer.fit_transform(data.copy())
 
 
-class TestScaleAnnualToMonthly:
-    """§2.1 : le facteur d'échelle annuel -> mensuel est inversé et approximatif."""
+@pytest.fixture
+def annual_over_monthly():
+    """Annual variable perfectly explained by an additive monthly covariate.
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="§2.1 high_frequency_imputer_review.md : get_conversion_factor est "
-               "appelé dans le mauvais sens et le scaling n'est appliqué qu'au fit "
-               "(pas au predict), produisant des valeurs mensuelles imputées "
-               "~150x trop grandes en magnitude pour une variable annuelle.",
+    Six years of month-start dates. ``covariable_mensuelle`` is dense and
+    fluctuates around ``A / 12`` (A = 120); ``variable_annuelle`` is NaN
+    everywhere except in January, where it carries the sum of the twelve
+    monthly values of the year. The additive relation is therefore exact:
+    a correctly scaled imputation must return monthly values summing back
+    to the annual total.
+    """
+    A = 120.0
+    dates = pd.date_range('2018-01-01', periods=72, freq='MS')
+    rng = np.random.default_rng(0)
+
+    monthly = pd.Series(A / 12 + rng.normal(0, 0.5, len(dates)), index=dates)
+    annual = pd.Series(np.nan, index=dates)
+    # La valeur annuelle est portée par janvier, ancre de la période
+    for _, block in monthly.groupby(monthly.index.year):
+        annual.loc[block.index[0]] = block.sum()
+
+    data = pd.DataFrame(
+        {'covariable_mensuelle': monthly, 'variable_annuelle': annual}
     )
-    def test_scale_annual_to_monthly(self, mixed_freq_timeseries):
-        """balance_commerciale_annuelle imputée mensuellement reste à l'échelle mensuelle.
+    data.index.name = 'date'
+    return data
 
-        Reproduction empirique exacte du scénario de la revue §2.1 :
-        cascade_refitting=False, keep_lower_frequencies=False, séries
-        temporelles. Les vraies valeurs annuelles sont entre -28 et -9 ;
-        une valeur mensuelle additive plausible (annuel/12) est de l'ordre
-        de quelques unités, pas de plusieurs centaines.
+
+class TestScaleAnnualToMonthly:
+    """§2.1 : sens, exactitude et symétrie fit/predict du facteur d'échelle."""
+
+    def test_scale_annual_to_monthly(self, annual_over_monthly):
+        """Les 12 valeurs mensuelles imputées somment à la valeur annuelle A.
+
+        Test d'acceptation du correctif §2.1 : le modèle apprend à prédire
+        directement une valeur de sous-période (y_train divisé par 12), les
+        covariables agrégées sont ramenées à la même échelle, et les
+        prédictions ne sont jamais re-multipliées. Une erreur de sens du
+        facteur donne 144*A, une double division A/12.
+
+        Le mois d'ancre conserve le total annuel d'origine (défaut §2.6,
+        hors périmètre de ce correctif) : la somme des douze sous-périodes
+        est donc reconstituée depuis la moyenne des mois imputés.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, annual_over_monthly)
+
+        original = annual_over_monthly['variable_annuelle']
+        imputed = result['variable_annuelle'][original.isna()]
+        assert imputed.notna().all()
+
+        # Reconstitution de la somme des 12 sous-périodes de chaque année
+        for year, annual_value in original.dropna().groupby(original.dropna().index.year):
+            months = imputed[imputed.index.year == year]
+            reconstructed = months.mean() * 12
+            assert reconstructed == pytest.approx(annual_value.iloc[0], rel=0.05)
+
+    def test_scale_factor_is_exact_subperiod_count(self, annual_over_monthly):
+        """Le facteur stocké vaut 12 (comptage calendaire), pas 12.17 ni 0.0822."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        _fit_transform_quiet(imputer, annual_over_monthly)
+
+        model_info = imputer.imputation_models_['variable_annuelle']
+        assert model_info['scale_factor'] == 12.0
+
+    def test_annual_imputations_at_monthly_scale(self, mixed_freq_timeseries):
+        """Sur la fixture, l'annuel imputé est à l'échelle mensuelle (annuel/12).
+
+        Reproduction du scénario mesuré dans la revue §2.1
+        (cascade_refitting=False, keep_lower_frequencies=False) : les vraies
+        valeurs annuelles sont entre -28 et -9, la cible mensuelle additive
+        est donc de l'ordre de -1.6, quand la classe produisait -330.
         """
         imputer = HighFrequencyImputer(
             target_frequency='M',
@@ -835,12 +899,28 @@ class TestScaleAnnualToMonthly:
         result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
 
         original = mixed_freq_timeseries['balance_commerciale_annuelle']
-        imputed_months = result['balance_commerciale_annuelle'][original.isna()]
+        imputed = result['balance_commerciale_annuelle'][original.isna()].dropna()
+        expected = original.mean() / 12
 
-        # Écart-type des vraies valeurs annuelles : borne raisonnable pour une
-        # valeur mensuelle additive (annuel / 12), avec une marge large
-        annual_scale = original.dropna().abs().max()
-        assert (imputed_months.abs() < annual_scale).all()
+        # Le niveau central des imputations est celui d'une valeur mensuelle ;
+        # la dispersion individuelle relève des défauts §2.7 et §4.5
+        assert imputed.median() == pytest.approx(expected, abs=abs(expected))
+
+    def test_quarterly_imputations_at_monthly_scale(self, mixed_freq_timeseries):
+        """Idem pour la variable trimestrielle : cible = trimestriel / 3."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        original = mixed_freq_timeseries['pib_trimestriel']
+        imputed = result['pib_trimestriel'][original.isna()].dropna()
+        expected = original.mean() / 3
+
+        assert imputed.median() == pytest.approx(expected, rel=0.1)
 
 
 class TestOutputKeepsSourceIndex:
