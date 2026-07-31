@@ -968,3 +968,103 @@ class TestNoImputationWithoutCovariates:
         # devrait y avoir lieu
         never_covered = result['target_var'].iloc[1:10]
         assert never_covered.isna().all()
+
+
+# Colonnes denses (fréquence de l'index) des fixtures de référence
+DENSE_COLUMNS = ['production_industrielle', 'inflation_ipc', 'taux_chomage']
+
+
+def _assert_dense_columns_untouched(result, source):
+    """Assert observed values of the dense columns survive the cascade unchanged."""
+    for col in DENSE_COLUMNS:
+        observed = source[col].notna()
+        pd.testing.assert_series_equal(
+            result.loc[observed[observed].index, col],
+            source.loc[observed, col],
+            check_names=False,
+            check_freq=False,
+        )
+
+
+class TestStageFramesRebuiltFromOriginal:
+    """§5.1 : chaque étape est reconstruite depuis les données d'origine.
+
+    Avant le refactoring, `_transform` réagrégeait `data_transformed` sur
+    lui-même à chaque changement de fréquence de prédiction : à l'étape 'M',
+    les colonnes mensuelles denses portaient encore les sommes trimestrielles
+    figées à l'étape 'Q' (26 valeurs non-NaN au lieu de 78).
+    """
+
+    def test_stage_frames_keep_original_monthly_values(self, mixed_freq_timeseries):
+        """cascade_refitting=True : les colonnes mensuelles gardent leurs valeurs."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        _assert_dense_columns_untouched(result, mixed_freq_timeseries)
+
+    def test_intermediate_stage_does_not_contaminate_target_level(
+        self, mixed_freq_timeseries
+    ):
+        """keep_lower_frequencies=True : le niveau cible n'hérite pas de l'étape 'Q'."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        target_level = result.xs('target', level='frequency')
+
+        _assert_dense_columns_untouched(target_level, mixed_freq_timeseries)
+
+
+class TestInputNotMutated:
+    """§5.1 : ni `fit` ni `transform` ne doivent modifier les données d'entrée."""
+
+    @pytest.mark.parametrize('cascade_refitting', [False, True])
+    def test_fit_transform_does_not_mutate_input(
+        self, mixed_freq_timeseries, cascade_refitting
+    ):
+        """Séries temporelles : X est identique avant et après fit/transform."""
+        data = mixed_freq_timeseries
+        reference = data.copy()
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=cascade_refitting,
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(data)
+            pd.testing.assert_frame_equal(data, reference)
+
+            imputer.transform(data)
+            pd.testing.assert_frame_equal(data, reference)
+
+            imputer.fit_transform(data)
+        pd.testing.assert_frame_equal(data, reference)
+
+    def test_panel_fit_transform_does_not_mutate_input(self, mixed_freq_panel):
+        """Panel : X est identique avant et après fit_transform."""
+        data = mixed_freq_panel
+        reference = data.copy()
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit_transform(data)
+
+        pd.testing.assert_frame_equal(data, reference)

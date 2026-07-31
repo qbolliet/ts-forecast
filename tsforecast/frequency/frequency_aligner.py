@@ -157,6 +157,42 @@ class FrequencyAligner:
         except Exception:
             return target_frequency
 
+    # Méthode auxiliaire de sélection de la série à resampler
+    @staticmethod
+    def _observed_series_for_aggregation(series: pd.Series) -> pd.Series:
+        """Select the series to resample: observed values when they are regular.
+
+        Aggregating the observed values only (instead of the full series) lets
+        the converter detect the variable's own frequency rather than the
+        index frequency — decisive for sparse variables (a quarterly variable
+        carried on a monthly index would otherwise be seen as a monthly series
+        with two thirds of its observations missing, and every period would be
+        masked by ``full_periods_only``).
+
+        The restriction is applied only when the observed dates form a regular
+        index: otherwise the variable has holes of its own and the index
+        frequency remains the only usable reference.
+
+        Args:
+            series: Column to aggregate, possibly sparse.
+
+        Returns:
+            The observed values when they are regularly spaced, the original
+            series otherwise.
+        """
+        # Restriction aux valeurs observées
+        observed = series.dropna()
+        # Série vide : aucune restriction possible
+        if observed.empty:
+            return series
+        # Vérification de la régularité de l'index des observations
+        try:
+            inferred = observed.index.inferred_freq
+        except (ValueError, TypeError):
+            inferred = None
+        # Repli sur la série complète si les observations sont irrégulières
+        return observed if inferred is not None else series
+
     # Méthode d'aggrégation des données à une fréquence cible
     def aggregate_to_target(
         self,
@@ -175,6 +211,13 @@ class FrequencyAligner:
         are reindexed onto it (NaN outside period boundaries and for
         incomplete periods); callers that want to compact the result must do
         so explicitly.
+
+        The source frequency is detected from each variable's **observed
+        values**, not from the index: only the non-NaN observations are
+        resampled, so a quarterly variable carried on a monthly index is
+        aggregated as quarterly (4 sub-periods per year) instead of being
+        treated as an incomplete monthly series (which would mask every
+        period as NaN under ``full_periods_only``).
 
         Args:
             df: Input DataFrame.
@@ -205,9 +248,15 @@ class FrequencyAligner:
                 # Vérification que la colonne est dans le jeu de données
                 if col not in df.columns:
                     continue
+                # Restriction aux valeurs observées : la fréquence source doit être
+                # celle de la variable, pas celle de l'index
+                observed = self._observed_series_for_aggregation(df[col])
+                # Colonne sans aucune observation : laissée telle quelle
+                if observed.dropna().empty:
+                    continue
                 # Aggrégation à la fréquence cible
                 aggregated = self._freq_converter.aggregate_to_lower_frequency(
-                    df[col], target_offset, method='sum', full_periods_only=True
+                    observed, target_offset, method='sum', full_periods_only=True
                 )
                 # Reproduction de l'index original
                 result[col] = aggregated.reindex(df.index)
@@ -240,9 +289,15 @@ class FrequencyAligner:
                 target_offset = self._target_offset_for_index(
                     entity_series.index, entity_target
                 )
+                # Restriction aux valeurs observées : la fréquence source doit être
+                # celle de la variable, pas celle de l'index
+                observed = self._observed_series_for_aggregation(entity_series)
+                # Colonne sans aucune observation pour l'entité : laissée telle quelle
+                if observed.dropna().empty:
+                    continue
                 # Agrégation à la fréquence souhaitée
                 aggregated = self._freq_converter.aggregate_to_lower_frequency(
-                    entity_series, target_offset, method='sum', full_periods_only=True
+                    observed, target_offset, method='sum', full_periods_only=True
                 )
                 # Réindexation à l'index temporel original
                 reindexed = aggregated.reindex(entity_series.index)

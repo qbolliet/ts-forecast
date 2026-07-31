@@ -97,6 +97,45 @@ class TestAggregateToTarget:
         # Les labels agrégés doivent atterrir sur l'index MS d'origine
         assert result['x'].notna().any()
 
+    def test_aggregate_sparse_column_uses_variable_frequency(self, aligner):
+        """Une colonne trimestrielle portée par un index mensuel s'agrège à l'année.
+
+        La fréquence source doit être détectée sur les valeurs observées de la
+        variable (4 trimestres par an) et non sur l'index (12 mois par an) :
+        sinon `full_periods_only` masque toutes les périodes et la colonne
+        agrégée devient intégralement NaN.
+        """
+        dates = pd.date_range('2020-01-01', periods=24, freq='MS')
+        quarterly = pd.Series(np.nan, index=dates)
+        quarterly[quarterly.index.month.isin([1, 4, 7, 10])] = 10.0
+        df = pd.DataFrame({'gdp': quarterly, 'dense': np.ones(len(dates))}, index=dates)
+
+        result = aligner.aggregate_to_target(df, ['gdp'], 'Y', is_panel=False)
+
+        # Somme des 4 trimestres, portée par le 1er janvier de chaque année complète
+        expected_labels = pd.DatetimeIndex(['2020-01-01', '2021-01-01'])
+        assert result.loc[expected_labels, 'gdp'].tolist() == [40.0, 40.0]
+        # Aucune valeur ailleurs, et l'index reste intact
+        assert result['gdp'].notna().sum() == 2
+        pd.testing.assert_index_equal(result.index, df.index)
+
+    def test_aggregate_sparse_irregular_column_falls_back_to_index(self, aligner):
+        """Observations irrégulières : repli sur la fréquence de l'index sans erreur."""
+        dates = pd.date_range('2020-01-01', periods=12, freq='MS')
+        values = np.arange(12, dtype=float)
+        values[[2, 7]] = np.nan
+        df = pd.DataFrame({'x': values}, index=dates)
+
+        result = aligner.aggregate_to_target(df, ['x'], 'Q', is_panel=False)
+
+        # Index préservé et sémantique full_periods_only inchangée : les
+        # trimestres amputés d'un mois (T1 et T3) restent NaN
+        pd.testing.assert_index_equal(result.index, df.index)
+        assert np.isnan(result.loc[pd.Timestamp('2020-01-01'), 'x'])
+        assert np.isnan(result.loc[pd.Timestamp('2020-07-01'), 'x'])
+        assert result.loc[pd.Timestamp('2020-04-01'), 'x'] == 12.0
+        assert result.loc[pd.Timestamp('2020-10-01'), 'x'] == 30.0
+
     def test_panel_same_index_contract(self, aligner):
         """En panel, le contrat d'index est respecté entité par entité."""
         dates = pd.date_range('2023-01-31', periods=6, freq='ME')
