@@ -41,8 +41,8 @@ ALL_SCENARIOS = [
 ]
 
 # Sous-ensemble des scénarios en une seule étape de cascade (pas d'agrégation
-# intermédiaire) : c'est le seul cas non affecté par le bug d'agrégation
-# destructive §2.2 (cf. HighFrequencyImputer._build_frequency_prediction_list).
+# intermédiaire) : utilisé par _mark_model_registry (§2.3, bug indépendant du
+# registre de modèles, toujours ouvert).
 SINGLE_STAGE = {(name, False, False) for name in ('mixed_freq_timeseries', 'mixed_freq_panel')}
 
 
@@ -97,21 +97,6 @@ def hfi_scenario(request):
     }
 
 
-def _mark_row_preservation(param: tuple):
-    """xfail unless the scenario is single-stage (§2.2: destructive cascade)."""
-    if param in SINGLE_STAGE:
-        return pytest.param(param, id=_scenario_id(param))
-    return pytest.param(
-        param, id=_scenario_id(param),
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="§2.2 high_frequency_imputer_review.md : l'agrégation en cascade "
-                   "détruit les lignes de l'index d'origine dès qu'il y a plus d'une "
-                   "étape (cascade_refitting=True ou keep_lower_frequencies=True).",
-        ),
-    )
-
-
 def _mark_model_registry(param: tuple):
     """xfail unless single-stage (§2.3: registry overwritten across cascade stages)."""
     if param in SINGLE_STAGE:
@@ -133,7 +118,7 @@ KEEP_LOWER_SCENARIOS = [p for p in ALL_SCENARIOS if p[2] is True]
 class TestRowCountAndCoverage:
     """§2.2 : l'agrégation en cascade ne doit ni dupliquer ni supprimer de lignes."""
 
-    @pytest.mark.parametrize('param', [_mark_row_preservation(p) for p in ALL_SCENARIOS])
+    @pytest.mark.parametrize('param', ALL_SCENARIOS, ids=_scenario_id)
     def test_target_level_matches_source_index(self, request, param):
         """Le niveau cible de la sortie couvre exactement l'index des données source."""
         dataset_name, cascade_refitting, keep_lower_frequencies = param
@@ -144,7 +129,7 @@ class TestRowCountAndCoverage:
 
         assert _index_as_set(target_frame.index) == _index_as_set(data.index)
 
-    @pytest.mark.parametrize('param', [_mark_row_preservation(p) for p in ALL_SCENARIOS])
+    @pytest.mark.parametrize('param', ALL_SCENARIOS, ids=_scenario_id)
     def test_target_level_has_no_fully_nan_column(self, request, param):
         """Aucune colonne du niveau cible n'est intégralement NaN."""
         dataset_name, cascade_refitting, keep_lower_frequencies = param

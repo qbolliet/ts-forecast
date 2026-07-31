@@ -846,12 +846,6 @@ class TestScaleAnnualToMonthly:
 class TestOutputKeepsSourceIndex:
     """§2.2 : la cascade d'agrégation ne doit pas détruire l'index d'origine."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="§2.2 high_frequency_imputer_review.md : chaque étape de la cascade "
-               "réagrège le frame déjà agrégé de l'étape précédente au lieu des "
-               "données d'origine, détruisant les lignes non-ancrées (79 -> 26).",
-    )
     def test_output_keeps_monthly_index(self, mixed_freq_timeseries):
         """cascade_refitting=True : la sortie garde les 79 dates mensuelles."""
         imputer = HighFrequencyImputer(

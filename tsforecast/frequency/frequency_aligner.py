@@ -27,6 +27,7 @@ import pandas as pd
 # Utilitaires du package
 from ..utils.frequency.converter import FrequencyConverter
 from ..utils.frequency.utils import normalize_frequency, is_higher_frequency
+from ..utils.position.utils import combine_frequency_position
 from ..panel.utils import (
     get_unique_panel_entities,
     group_keys_by_entity_and_variable,
@@ -36,7 +37,7 @@ from ..panel.utils import (
 )
 
 # Détection de la fréquence de l'index
-from .detector import detect_frequency, detect_dataset_frequency
+from .detector import detect_frequency, detect_dataset_frequency, detect_index_frequency
 
 
 # Classe d'alignement des fréquences de jeu de données avec des fréquences cibles
@@ -126,6 +127,36 @@ class FrequencyAligner:
         """
         return get_entity_mask(X, entity)
 
+    # Méthode auxiliaire de construction d'un offset positionné comme l'index source
+    def _target_offset_for_index(
+        self,
+        index: pd.DatetimeIndex,
+        target_frequency: str,
+    ) -> str:
+        """Build a pandas offset for target_frequency anchored like the index.
+
+        Detects whether the source index is anchored at period start or end
+        and combines that position with the target frequency, so that
+        aggregated labels land on dates that exist in the source index.
+
+        Args:
+            index: Source DatetimeIndex.
+            target_frequency: Base target frequency (e.g. 'Q').
+
+        Returns:
+            Pandas offset alias (e.g. 'QS' for a month-start index).
+        """
+        # Détection de la position (début/fin) de l'index source
+        try:
+            _, position, _ = detect_index_frequency(index, return_format='components')
+        except Exception:
+            position = None
+        # Combinaison fréquence cible + position détectée (défaut : début)
+        try:
+            return combine_frequency_position(target_frequency, position or 'S')
+        except Exception:
+            return target_frequency
+
     # Méthode d'aggrégation des données à une fréquence cible
     def aggregate_to_target(
         self,
@@ -139,6 +170,12 @@ class FrequencyAligner:
         For panel data, aggregation is performed per entity to respect
         entity-specific target frequencies.
 
+        Contract: this method never changes the number or order of rows —
+        the output index is always identical to ``df``'s. Aggregated values
+        are reindexed onto it (NaN outside period boundaries and for
+        incomplete periods); callers that want to compact the result must do
+        so explicitly.
+
         Args:
             df: Input DataFrame.
             aggregate_keys: Variable keys to aggregate (column names or
@@ -147,7 +184,7 @@ class FrequencyAligner:
             is_panel: Whether the data is panel data.
 
         Returns:
-            DataFrame with aggregated columns.
+            DataFrame with aggregated columns, indexed exactly like ``df``.
         """
         # Cas où les clés d'aggrégation ne sont pas spécifiées
         if not aggregate_keys:
@@ -160,6 +197,9 @@ class FrequencyAligner:
         if not is_panel:
             # Extraction des colonnes des tuples
             columns = self.extract_column_names(aggregate_keys)
+            # Offset ancré comme l'index source, pour que les labels agrégés
+            # retombent sur des dates présentes dans l'index d'origine
+            target_offset = self._target_offset_for_index(df.index, target_frequency)
             # Parcours des colonnes
             for col in columns:
                 # Vérification que la colonne est dans le jeu de données
@@ -167,12 +207,10 @@ class FrequencyAligner:
                     continue
                 # Aggrégation à la fréquence cible
                 aggregated = self._freq_converter.aggregate_to_lower_frequency(
-                    df[col], target_frequency, method='sum', full_periods_only=True
+                    df[col], target_offset, method='sum', full_periods_only=True
                 )
                 # Reproduction de l'index original
                 result[col] = aggregated.reindex(df.index)
-            # Suppression des lignes de Nan
-            result.dropna(axis=0, how='all', inplace=True)
             return result
 
         # Cas panel : agrégation par entité
@@ -185,30 +223,32 @@ class FrequencyAligner:
             entity_target = self.get_entity_target_frequency(entity, target_frequency)
             # Création du masque des observations de l'entité
             entity_mask = self.get_entity_mask(df, entity)
-            
+
             # Parcours des colonnes
             for col in cols:
                 # Cas où la colonne n'est pas présente dans le jeu de données
                 if col not in df.columns:
                     continue
-                
+
                 # Extraction des observations de l'entité pour la colonne d'intérêt
                 entity_series = df.loc[entity_mask, col]
                 # Suppression des niveaux afférents à l'entité
                 entity_series = entity_series.droplevel(
                     list(range(df.index.nlevels - 1))
                 )
+                # Offset ancré comme l'index de l'entité
+                target_offset = self._target_offset_for_index(
+                    entity_series.index, entity_target
+                )
                 # Agrégation à la fréquence souhaitée
                 aggregated = self._freq_converter.aggregate_to_lower_frequency(
-                    entity_series, entity_target, method='sum', full_periods_only=True
+                    entity_series, target_offset, method='sum', full_periods_only=True
                 )
                 # Réindexation à l'index temporel original
                 reindexed = aggregated.reindex(entity_series.index)
                 # Ajout au DataFrame résultat
                 result.loc[entity_mask, col] = reindexed.values
 
-        # Suppression des lignes de Nan
-        result.dropna(axis=0, how='all', inplace=True)
         return result
 
 
