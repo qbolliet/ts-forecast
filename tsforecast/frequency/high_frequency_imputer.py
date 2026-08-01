@@ -44,12 +44,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     approach that respects frequency hierarchies and tracks value provenance:
 
     1. Making data additive via a user-provided transformer
-    2. Computing the imputation window (where all series have true values)
+    2. Computing the imputation window (where all series have true values),
+       optionally extended forward to cover delayed series ends
+       (imputation_scope='extended_forward' + coverage_threshold)
     3. Aggregating high-frequency variables to lower frequencies
     4. Cascading imputation from lowest to highest frequency
     5. Optionally refitting models with imputed values (cascade_refitting)
-    6. Handling publication delays if provided
-    7. Tracking provenance of each imputed value
+    6. Tracking provenance of each imputed value
 
     The cascade algorithm processes variables by frequency level, from lowest (e.g., quarterly)
     to highest (e.g., daily). At each level:
@@ -80,9 +81,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             identified via effective_target_frequency_. If False, the
             output is the plain frame of the last cascade stage (target
             frequency), with no frequency level in its index.
-        delays: Publication delays DataFrame with columns:
-            column, delay, unit, reference_point.
-        impute_delayed_values: Whether to impute values affected by publication delays.
+        delays: Deprecated. Publication delays are now handled by
+            imputation_scope='extended_forward' combined with
+            coverage_threshold, which extends the training window to cover
+            delayed series ends directly (review §2.9). Still structurally
+            validated at init for backward compatibility, but never
+            consumed at fit/transform time.
+        impute_delayed_values: Deprecated. If True, emits a
+            DeprecationWarning at fit time and otherwise has no effect: use
+            imputation_scope='extended_forward' (with coverage_threshold)
+            instead, which handles delayed series ends through the standard
+            extended-window mechanism.
         on_frequency_mismatch: How to handle target_frequency higher than data ('error'/'warn').
         coverage_threshold: Minimum ratio of columns with data (0-1) for extended window.
         imputation_scope: Training window scope ('strict', 'extended_backward',
@@ -173,8 +182,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             all series have data.
         training_window_: Tuple (start, end) of the extended training window.
         frequency_progression_: Dict mapping variables to their frequency stages.
-        inferred_delays_: DataFrame with delays inferred from data using
-            compare_and_detect_delays (if impute_delayed_values=True and delays=None).
         additive_transformer_: Fitted additive transformer.
         is_panel_: Whether data is panel data.
         feature_columns_: X columns (features).
@@ -255,10 +262,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 target level is identified via effective_target_frequency_,
                 not by a dedicated 'target' label). If False, only the
                 target frequency is returned as a plain frame.
-            impute_delayed_values: Whether to impute values affected by
-                publication delays. Default is False.
-            delays: Publication delays DataFrame with columns:
-                column, delay, unit, reference_point.
+            impute_delayed_values: Deprecated. If True, emits a
+                DeprecationWarning at fit time and otherwise has no effect:
+                use imputation_scope='extended_forward' (with
+                coverage_threshold) instead, which extends the training
+                window to cover delayed series ends through the standard
+                extended-window mechanism. Default is False.
+            delays: Deprecated. Publication delays are now handled by
+                imputation_scope='extended_forward' combined with
+                coverage_threshold. Still structurally validated at init
+                for backward compatibility, but never consumed at
+                fit/transform time.
             on_frequency_mismatch: How to handle target_frequency higher than
                 data frequencies ('error'/'warn').
             coverage_threshold: Minimum percentage of columns (0-1) that
@@ -2014,39 +2028,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 column, model_index, trained_on_imputed=trained_on_imputed
             )
 
-    # /!\ Voir s'il ne faut pas supprimer cette méthode et se reposer uniquement sur le imputation_scope pour imputer les variables sujettes à délais de publication
-    def _infer_delays_from_data(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Infer publication delays from data.
-
-        Args:
-            X: Input DataFrame.
-
-        Returns:
-            DataFrame with delay information.
-        """
-        # Import différé pour éviter l'import circulaire avec delays.data_manager
-        from ..delays.data_manager import compare_and_detect_delays
-
-        try:
-            delays_df = compare_and_detect_delays(
-                new_data=X,
-                existing_data=None,
-                download_date=None,
-                detection_mode='new_only',
-                reference_point='end',
-                delay_unit='D',
-                time_col=self.time_col,
-                panel_cols=self.panel_cols
-            )
-            return delays_df
-        except Exception as e:
-            warnings.warn(
-                f"Failed to infer delays from data: {e}. "
-                f"No delays will be inferred.",
-                UserWarning
-            )
-            return pd.DataFrame(columns=['column', 'delay', 'unit', 'reference_point'])
-
     # Méthode auxiliaire de regroupement des variables à imputer par fréquence
     def _group_variables_by_frequency(self) -> Dict[int, List[Union[str, Tuple]]]:
         """Group variables to impute by frequency level.
@@ -2497,10 +2478,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         self.frequency_progression_ = self._compute_frequency_progression()
 
-        if self.impute_delayed_values and self.delays is None:
-            self.inferred_delays_ = self._infer_delays_from_data(X)
-        else:
-            self.inferred_delays_ = pd.DataFrame()
+        if self.impute_delayed_values:
+            warnings.warn(
+                "impute_delayed_values is deprecated and has no effect: publication "
+                "delays are now handled by imputation_scope='extended_forward' "
+                "combined with coverage_threshold, which imputes delayed series ends "
+                "directly from the extended training window (review §2.9).",
+                DeprecationWarning
+            )
 
         # Attribut distinct de celui écrit par "_transform" (review §2.8.1) :
         # sans cela, un "fit_transform" perdrait la trace du fit, écrasée par
@@ -2721,18 +2706,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             data_transformed = X_stage
             final_stage_label = freq_label
 
-        # 4. Imputer valeurs retardées si demandé
-        if self.impute_delayed_values:
-            data_transformed = self._impute_delayed_values(data_transformed)
-            stage_frames[final_stage_label] = data_transformed
-
-        # 5. Construire sortie MultiIndex si keep_lower_frequencies
+        # 4. Construire sortie MultiIndex si keep_lower_frequencies
         if self.keep_lower_frequencies and stage_frames:
             data_result = self._build_multifreq_output(stage_frames)
         else:
             data_result = stage_frames[final_stage_label]
 
-        # 6. Mise à jour de la provenance : une matrice par niveau de
+        # 5. Mise à jour de la provenance : une matrice par niveau de
         # fréquence, empilée avec la même structure d'index que
         # "data_result" (§2.8.4), quand keep_lower_frequencies=True ; sinon
         # la seule matrice au niveau cible, comme avant
@@ -2741,7 +2721,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             self.imputation_provenance_ = transform_tracker.get_provenance_matrix()
 
-        # 7. Scission X et y
+        # 6. Scission X et y
         if y is not None and y_col_name in data_result.columns:
             y_transformed = data_result[y_col_name]
             X_transformed = data_result.drop(columns=[y_col_name])
@@ -2815,71 +2795,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         combined = combined.drop(columns=['_frequency_level'])
 
         return combined
-
-    # /!\ Revoir s'il ne faut pas supprimer cette méthode et utiliser seulement le imputation_scope
-    def _impute_delayed_values(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Impute values affected by publication delays.
-
-        Args:
-            X: DataFrame with imputed values.
-
-        Returns:
-            DataFrame with delayed values imputed.
-        """
-        result = X.copy()
-        delays_to_use = self.delays if self.delays is not None else self.inferred_delays_
-
-        if delays_to_use.empty:
-            return result
-
-        for _, row in delays_to_use.iterrows():
-            column = row['column']
-            delay = row['delay']
-
-            if column not in result.columns:
-                continue
-
-            n_delay = int(delay)
-            if n_delay <= 0:
-                continue
-
-            delayed_idx = result.index[-n_delay:]
-            missing_mask = result.loc[delayed_idx, column].isna()
-
-            if not missing_mask.any():
-                continue
-
-            # Le registre est indexé par étape : recherche sur la composante variable
-            model_info = self._model_for_var(column)
-
-            if model_info is None or model_info == 'interpolate_fallback':
-                result[column] = result[column].interpolate(
-                    method='linear', limit_direction='both'
-                )
-            else:
-                missing_idx = delayed_idx[missing_mask.values]
-
-                if len(missing_idx) > 0:
-                    # Prédiction sur les seules dates portant au moins une
-                    # covariable, complétées par les moyennes du jeu
-                    # d'entraînement (§2.7). Aucune restriction à la fenêtre
-                    # d'imputation ici : cette méthode existe précisément pour
-                    # traiter les fins de série situées au-delà
-                    rows_mask = pd.Series(
-                        result.index.isin(missing_idx), index=result.index
-                    )
-                    try:
-                        predictions = self._predict_stage_values(
-                            model_info, result, rows_mask,
-                            context=f"delayed values of '{column}'"
-                        )
-                        result.loc[predictions.index, column] = predictions
-                    except Exception as e:
-                        warnings.warn(
-                            f"Failed to impute delayed values for '{column}': {e}"
-                        )
-
-        return result
 
     # -------------------------------------------------------------------------
     # Transformation inverse

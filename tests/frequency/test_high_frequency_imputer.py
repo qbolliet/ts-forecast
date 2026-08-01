@@ -454,62 +454,16 @@ class TestHighFrequencyImputerPanelData:
 
 
 class TestHighFrequencyImputerDelays:
-    """Tests for publication delay handling."""
+    """§2.9 : `delays`/`impute_delayed_values` sont dépréciés au profit de
+    `imputation_scope='extended_forward'` + `coverage_threshold`, qui gère
+    nativement les fins de série retardées (revue §2.9)."""
 
-    def test_delays_from_dataframe(self):
-        """Test gestion des délais depuis DataFrame."""
-        delays_df = pd.DataFrame({
-            'variable': ['target'],
-            'delay': [2],
-            'unit': ['periods'],
-            'reference_point': ['end']
-        })
-
+    def test_impute_delayed_values_true_emits_deprecation_warning(self):
+        """`impute_delayed_values=True` avertit à `fit` mais reste un no-op."""
         imputer = HighFrequencyImputer(
             target_frequency='M',
             estimator=LinearRegression(),
-            delays=delays_df,
-            impute_delayed_values=True
-        )
-
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({
-            'feature': range(12),
-            'target': list(range(10)) + [np.nan, np.nan]  # 2 dernières valeurs NaN
-        }, index=dates)
-
-        imputer.fit(df)
-        result = imputer.transform(df)
-
-        # Les valeurs retardées devraient être imputées
-        assert isinstance(result, pd.DataFrame)
-
-    def test_delays_inferred_from_nan(self):
-        """Test inférence des délais depuis les NaN trailing."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            estimator=LinearRegression(),
-            impute_delayed_values=True  # delays=None -> inférence
-        )
-
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({
-            'feature': range(12),
-            'target': list(range(9)) + [np.nan, np.nan, np.nan]  # 3 NaN trailing
-        }, index=dates)
-
-        imputer.fit(df)
-
-        # Vérifier que les délais ont été inférés
-        assert 'target' in imputer.inferred_delays_
-        assert imputer.inferred_delays_['target'] == 3.0
-
-    def test_impute_delayed_values_false(self):
-        """Test que impute_delayed_values=False ne touche pas aux fins de période."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            estimator=LinearRegression(),
-            impute_delayed_values=False
+            impute_delayed_values=True,
         )
 
         dates = pd.date_range('2023-01-01', periods=12, freq='M')
@@ -518,10 +472,79 @@ class TestHighFrequencyImputerDelays:
             'target': list(range(10)) + [np.nan, np.nan]
         }, index=dates)
 
-        imputer.fit(df)
+        with pytest.warns(DeprecationWarning, match="extended_forward"):
+            imputer.fit(df)
 
-        # Les délais ne devraient pas être inférés
-        assert imputer.inferred_delays_ == {}
+        # L'ancien attribut d'inférence de délais n'existe plus
+        assert not hasattr(imputer, 'inferred_delays_')
+
+    def test_impute_delayed_values_false_emits_no_warning(self):
+        """`impute_delayed_values=False` (défaut) : aucun avertissement émis."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            impute_delayed_values=False,
+        )
+
+        dates = pd.date_range('2023-01-01', periods=12, freq='M')
+        df = pd.DataFrame({
+            'feature': range(12),
+            'target': list(range(10)) + [np.nan, np.nan]
+        }, index=dates)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', DeprecationWarning)
+            imputer.fit(df)  # ne doit pas lever
+
+    def test_delayed_series_end_covered_by_extended_forward(self):
+        """Fin de série retardée (3 derniers points NaN) couverte par la
+        fenêtre étendue et effectivement imputée.
+
+        Remplace le comportement de l'ancien `_impute_delayed_values`, qui
+        interprétait le délai comme un nombre de LIGNES : ici, les 3
+        derniers trimestres de `variable_trimestrielle` ne sont pas encore
+        publiés. La couverture des autres colonnes (2 covariables mensuelles
+        denses sur 3 colonnes, soit 2/3) dépasse `coverage_threshold` à ces
+        dates : `imputation_scope='extended_forward'` doit donc les inclure
+        dans la fenêtre d'entraînement étendue, et le modèle doit les
+        imputer.
+        """
+        dates = pd.date_range('2018-01-01', periods=72, freq='MS')
+        rng = np.random.default_rng(11)
+
+        monthly = pd.Series(30.0 + rng.normal(0, 2.0, len(dates)), index=dates)
+        monthly_2 = pd.Series(10.0 + rng.normal(0, 1.0, len(dates)), index=dates)
+        quarterly = pd.Series(np.nan, index=dates)
+        for _, block in monthly.groupby(monthly.index.to_period('Q')):
+            quarterly.loc[block.index[0]] = block.sum()
+
+        # Publication retardée : les 3 derniers trimestres ne sont pas
+        # encore publiés (et non un simple dernier point)
+        delayed_anchors = quarterly.dropna().index[-3:]
+        quarterly.loc[delayed_anchors] = np.nan
+
+        data = pd.DataFrame({
+            'covariable_mensuelle': monthly,
+            'covariable_mensuelle_2': monthly_2,
+            'variable_trimestrielle': quarterly,
+        })
+        data.index.name = 'date'
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+            imputation_scope='extended_forward',
+        )
+        result = _fit_transform_quiet(imputer, data)
+
+        window = imputer._imputation_window_calc.get_imputation_window_mask(data)
+
+        # Les dates d'ancrage retardées sont dans la fenêtre étendue...
+        assert all(bool(window.get(date, False)) for date in delayed_anchors)
+        # ...et effectivement imputées : plus aucun NaN là où le trimestre a
+        # été vidé
+        assert result.loc[delayed_anchors, 'variable_trimestrielle'].notna().all()
 
 
 class TestHighFrequencyImputerAdditiveTransformer:
