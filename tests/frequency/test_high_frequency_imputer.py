@@ -1452,3 +1452,408 @@ class TestReplaySymmetry:
             replayed = imputer.transform(mixed_freq_panel)
 
         pd.testing.assert_frame_equal(fitted, replayed)
+
+
+# ---------------------------------------------------------------------------
+# §2.6 — Désagrégation des valeurs d'ancre et recalage additif
+# ---------------------------------------------------------------------------
+from tsforecast.frequency.provenance import (
+    ImputationProvenanceTracker,
+    ProvenanceType,
+)
+
+
+def _period_keys(index, freq):
+    """Build the period key of each row, entity included for a panel."""
+    if isinstance(index, pd.MultiIndex):
+        periods = index.get_level_values(-1).to_period(freq)
+        return pd.Series(list(zip(index.droplevel(-1), periods)), index=index)
+    return pd.Series(list(index.to_period(freq)), index=index)
+
+
+def _assert_period_totals(result, original, column, freq):
+    """Assert every fully-imputed observed period sums to its observed total.
+
+    Returns the number of periods actually checked, so that a test cannot
+    pass vacuously on an empty set of periods.
+    """
+    observed = original[column].dropna()
+    totals = observed.groupby(_period_keys(observed.index, freq)).sum()
+
+    keys = _period_keys(result.index, freq)
+    sums = result[column].groupby(keys).sum()
+    complete = result[column].groupby(keys).apply(lambda s: s.notna().all())
+
+    checked = 0
+    for period_key, observed_total in totals.items():
+        # Périodes partiellement prédites : hors contrainte
+        if period_key not in sums.index or not complete.get(period_key, False):
+            continue
+        assert sums[period_key] == pytest.approx(observed_total, abs=1e-8), (
+            f"period {period_key} of '{column}' sums to {sums[period_key]}, "
+            f"expected {observed_total}"
+        )
+        checked += 1
+
+    assert checked > 0, f"no period of '{column}' could be checked"
+    return checked
+
+
+@pytest.fixture
+def quarterly_over_monthly():
+    """Quarterly variable carried by an additive monthly covariate.
+
+    Month-start dates over six years. ``covariable_mensuelle`` is dense;
+    ``variable_trimestrielle`` is NaN except on the first month of each
+    quarter, where it holds the sum of the three monthly values — the same
+    additive setup as :func:`annual_over_monthly`, one frequency step up.
+    """
+    dates = pd.date_range('2018-01-01', periods=72, freq='MS')
+    rng = np.random.default_rng(7)
+
+    monthly = pd.Series(30.0 + rng.normal(0, 2.0, len(dates)), index=dates)
+    quarterly = pd.Series(np.nan, index=dates)
+    # La valeur trimestrielle est portée par le premier mois, ancre de la période
+    for _, block in monthly.groupby(monthly.index.to_period('Q')):
+        quarterly.loc[block.index[0]] = block.sum()
+
+    data = pd.DataFrame(
+        {'covariable_mensuelle': monthly, 'variable_trimestrielle': quarterly}
+    )
+    data.index.name = 'date'
+    return data
+
+
+class TestPeriodTotalsEnforced:
+    """§2.6 : la somme des sous-périodes égale la valeur basse fréquence observée."""
+
+    def test_period_totals_enforced_time_series(self, quarterly_over_monthly):
+        """Chaque trimestre entièrement imputé somme à la valeur observée (1e-8)."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, quarterly_over_monthly)
+
+        checked = _assert_period_totals(
+            result, quarterly_over_monthly, 'variable_trimestrielle', 'Q'
+        )
+        assert checked >= 20
+
+    def test_period_totals_enforced_on_reference_dataset(self, mixed_freq_timeseries):
+        """Le jeu de référence du notebook : PIB trimestriel et balance annuelle."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        _assert_period_totals(result, mixed_freq_timeseries, 'pib_trimestriel', 'Q')
+        _assert_period_totals(
+            result, mixed_freq_timeseries, 'balance_commerciale_annuelle', 'Y'
+        )
+
+    def test_period_totals_enforced_panel(self, mixed_freq_panel):
+        """Panel : le recalage est fait par entité, aucun bloc ne les mélange."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_panel)
+
+        checked = _assert_period_totals(
+            result, mixed_freq_panel, 'pib_trimestriel', 'Q'
+        )
+        # Trois entités : le nombre de blocs vérifiés les couvre toutes
+        assert checked >= 3 * 20
+
+    def test_anchor_no_longer_carries_period_total(self, quarterly_over_monthly):
+        """Aucune date-ancre ne conserve le total de sa période basse fréquence."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, quarterly_over_monthly)
+
+        anchors = quarterly_over_monthly['variable_trimestrielle'].dropna()
+        imputed_at_anchors = result.loc[anchors.index, 'variable_trimestrielle']
+
+        # L'ancre a été retirée et réimputée : plus aucune valeur d'origine
+        assert not np.isclose(imputed_at_anchors, anchors, atol=1e-9).any()
+        # Série positive : aucune sous-période ne dépasse le total de sa période
+        keys = _period_keys(result.index, 'Q')
+        totals = result['variable_trimestrielle'].groupby(keys).transform('sum')
+        assert (result['variable_trimestrielle'] <= totals + 1e-8).all()
+
+    def test_period_without_observation_not_rescaled(self, mixed_freq_timeseries):
+        """Fin de série retardée : aucun recalage, prédictions brutes conservées.
+
+        Le dernier trimestre du jeu de référence a été vidé (délai de
+        publication) : sans valeur observée aucune contrainte n'est
+        imposable, et les cellules gardent une provenance MODEL_ON_*.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        observed = mixed_freq_timeseries['pib_trimestriel'].dropna()
+        observed_periods = set(observed.index.to_period('Q'))
+        provenance = imputer.imputation_provenance_['pib_trimestriel']
+
+        # Au moins une période de la grille est dépourvue de valeur observée
+        unobserved = [
+            date for date in provenance.index
+            if date.to_period('Q') not in observed_periods
+        ]
+        assert unobserved
+        assert all(
+            provenance.loc[date] in (
+                ProvenanceType.MODEL_ON_TRUE, ProvenanceType.MODEL_ON_MIXED
+            )
+            for date in unobserved
+        )
+
+
+class TestRescaleToPeriodTotalsUnit:
+    """§2.6 : cas dégénérés de `_rescale_to_period_totals`, testés directement."""
+
+    @staticmethod
+    def _imputer():
+        return HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+
+    def test_partial_period_not_rescaled(self):
+        """Une période dont une sous-période est NaN n'est jamais recalée."""
+        imputer = self._imputer()
+        index = pd.date_range('2020-01-01', periods=6, freq='MS')
+        membership = pd.Series(list(index.to_period('Q')), index=index)
+        predictions = pd.Series([1.0, 2.0, np.nan, 4.0, 5.0, 6.0], index=index)
+        y_original = pd.Series(
+            [30.0, np.nan, np.nan, 60.0, np.nan, np.nan], index=index
+        )
+
+        rescaled, mask = imputer._rescale_to_period_totals(
+            predictions, y_original, membership
+        )
+
+        # Q1 incomplet : inchangé et non marqué
+        assert not mask.iloc[:3].any()
+        pd.testing.assert_series_equal(rescaled.iloc[:3], predictions.iloc[:3])
+        # Q2 complet : recalé sur 60
+        assert mask.iloc[3:].all()
+        assert rescaled.iloc[3:].sum() == pytest.approx(60.0, abs=1e-8)
+
+    def test_zero_sum_block_warns_and_keeps_predictions(self):
+        """Somme nulle avec total observé non nul : avertissement, pas de recalage."""
+        imputer = self._imputer()
+        index = pd.date_range('2020-01-01', periods=3, freq='MS')
+        membership = pd.Series(list(index.to_period('Q')), index=index)
+        predictions = pd.Series([1.0, -1.0, 0.0], index=index)
+        y_original = pd.Series([30.0, np.nan, np.nan], index=index)
+
+        with pytest.warns(UserWarning, match='sum to zero'):
+            rescaled, mask = imputer._rescale_to_period_totals(
+                predictions, y_original, membership
+            )
+
+        assert not mask.any()
+        pd.testing.assert_series_equal(rescaled, predictions)
+
+    def test_opposite_sign_block_rescales_with_warning(self):
+        """Signe opposé : la contrainte est imposée et un avertissement est émis."""
+        imputer = self._imputer()
+        index = pd.date_range('2020-01-01', periods=3, freq='MS')
+        membership = pd.Series(list(index.to_period('Q')), index=index)
+        predictions = pd.Series([2.0, 3.0, 5.0], index=index)
+        y_original = pd.Series([-30.0, np.nan, np.nan], index=index)
+
+        with pytest.warns(UserWarning, match='flipped'):
+            rescaled, mask = imputer._rescale_to_period_totals(
+                predictions, y_original, membership
+            )
+
+        assert mask.all()
+        assert rescaled.sum() == pytest.approx(-30.0, abs=1e-8)
+        # Le profil a bien changé de signe
+        assert (rescaled < 0).all()
+
+    def test_zero_observed_total_is_rescaled(self):
+        """Total observé nul : recalage exact, toutes les sous-périodes à zéro."""
+        imputer = self._imputer()
+        index = pd.date_range('2020-01-01', periods=3, freq='MS')
+        membership = pd.Series(list(index.to_period('Q')), index=index)
+        predictions = pd.Series([2.0, 3.0, 5.0], index=index)
+        y_original = pd.Series([0.0, np.nan, np.nan], index=index)
+
+        rescaled, mask = imputer._rescale_to_period_totals(
+            predictions, y_original, membership
+        )
+
+        assert mask.all()
+        assert rescaled.sum() == pytest.approx(0.0, abs=1e-8)
+
+    def test_period_membership_panel_separates_entities(self, mixed_freq_panel):
+        """Panel : deux entités ne partagent jamais une clé de période."""
+        imputer = self._imputer()
+        imputer.is_panel_ = True
+        membership = imputer._period_membership(mixed_freq_panel.index, 'Q')
+
+        # La clé porte l'entité en plus de la période
+        entities = {key[0] for key in membership.dropna()}
+        assert len(entities) == 3
+        # Chaque clé ne regroupe que des lignes d'une seule entité
+        for _, block in membership.groupby(membership):
+            assert block.index.droplevel(-1).nunique() == 1
+
+    def test_period_membership_restricted_to_group_entities(self, mixed_freq_panel):
+        """Fréquences hétérogènes : seules les entités du groupe sont recalées."""
+        imputer = self._imputer()
+        imputer.is_panel_ = True
+        membership = imputer._period_membership(
+            mixed_freq_panel.index, 'Q', entities=[('France',)]
+        )
+
+        # Les lignes des autres entités sont hors périmètre
+        assert {key[0] for key in membership.dropna()} == {('France',)}
+        assert 0 < membership.notna().sum() < len(membership)
+
+        # Le masque de désagrégation couvre exactement les mêmes lignes
+        mask = imputer._disaggregation_mask(
+            mixed_freq_panel, {'entities': [('France',)]}, 'pib_trimestriel'
+        )
+        assert mask.sum() == membership.notna().sum()
+
+
+class TestEnforcePeriodTotalsParameter:
+    """§2.6 : le paramètre ne pilote que la contrainte, jamais le retrait d'ancre."""
+
+    def test_enforce_period_totals_false_keeps_raw_predictions(
+        self, quarterly_over_monthly
+    ):
+        """enforce_period_totals=False : échelle homogène mais somme libre."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+            enforce_period_totals=False,
+        )
+        result = _fit_transform_quiet(imputer, quarterly_over_monthly)
+
+        # L'ancre est retirée même sans contrainte : c'est la correction du bug
+        anchors = quarterly_over_monthly['variable_trimestrielle'].dropna()
+        imputed_at_anchors = result.loc[anchors.index, 'variable_trimestrielle']
+        assert not np.isclose(imputed_at_anchors, anchors, atol=1e-9).any()
+
+        # Aucune cellule n'est marquée DISAGGREGATED
+        provenance = imputer.imputation_provenance_['variable_trimestrielle']
+        assert not (provenance == ProvenanceType.DISAGGREGATED).any()
+        assert (provenance == ProvenanceType.MODEL_ON_TRUE).any()
+
+    def test_default_is_option_one(self):
+        """La valeur par défaut applique bien l'Option 1 de la revue."""
+        imputer = HighFrequencyImputer(target_frequency='M')
+        assert imputer.enforce_period_totals is True
+        assert imputer.get_params()['enforce_period_totals'] is True
+
+
+class TestInterpolateFallbackRescaled:
+    """§2.6 : le repli par interpolation est désagrégé lui aussi."""
+
+    def test_interpolate_fallback_is_rescaled(self, quarterly_over_monthly):
+        """Sans estimateur, la colonne interpolée somme quand même aux totaux."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=None,
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, quarterly_over_monthly)
+
+        # Le repli a bien été emprunté
+        assert any(
+            info == 'interpolate_fallback'
+            for info in imputer.imputation_models_.values()
+        )
+        _assert_period_totals(
+            result, quarterly_over_monthly, 'variable_trimestrielle', 'Q'
+        )
+
+        # Les métadonnées de groupe existent même pour un repli
+        assert set(imputer.stage_groups_) == set(imputer.model_fitting_order_)
+
+
+class TestDisaggregationProvenance:
+    """§2.6 : la matrice de provenance distingue les trois catégories."""
+
+    def test_provenance_distinguishes_disaggregated(self, mixed_freq_timeseries):
+        """ORIGINAL, DISAGGREGATED et MODEL_ON_* coexistent dans la matrice."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        present = set(imputer.imputation_provenance_.stack().unique())
+        assert ProvenanceType.ORIGINAL in present
+        assert ProvenanceType.DISAGGREGATED in present
+        assert present & {ProvenanceType.MODEL_ON_TRUE, ProvenanceType.MODEL_ON_MIXED}
+
+        # Les ancres désagrégées ne sont plus déclarées originales
+        anchors = mixed_freq_timeseries['pib_trimestriel'].dropna().index
+        assert (
+            imputer.imputation_provenance_.loc[anchors, 'pib_trimestriel']
+            == ProvenanceType.DISAGGREGATED
+        ).all()
+
+    def test_provenance_statistics_sum_to_cell_count(self, mixed_freq_timeseries):
+        """Somme des catégories + non-imputées == nombre de cellules."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        tracker = ImputationProvenanceTracker()
+        tracker.provenance_matrix_ = imputer.imputation_provenance_
+        stats = tracker.compute_statistics()['overall']
+
+        total = sum(stats[prov.value] for prov in ProvenanceType)
+        total += stats['not_imputed']
+        assert total == imputer.imputation_provenance_.size
+
+    def test_training_mask_accepts_disaggregated_cells(self, mixed_freq_timeseries):
+        """Une variable désagrégée à une étape reste entraînable à la suivante.
+
+        Non-régression : le masque d'entraînement de `_prepare_training_data`
+        se restreint aux cellules ORIGINAL quand train_on_partial_coverage
+        est False ; les ancres devenant DISAGGREGATED, il doit les accepter
+        aussi, sinon tout bascule en repli dès la seconde étape.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+            train_on_partial_coverage=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        # La variable annuelle est imputée à plus d'une étape : aucune de ses
+        # entrées de registre ne doit être tombée en repli
+        annual_stages = [
+            key for key in imputer.model_fitting_order_
+            if (key[1][0] if isinstance(key[1], tuple) else key[1])
+            == 'balance_commerciale_annuelle'
+        ]
+        assert len(annual_stages) >= 2
+        assert all(
+            imputer.imputation_models_[key] != 'interpolate_fallback'
+            for key in annual_stages
+        )

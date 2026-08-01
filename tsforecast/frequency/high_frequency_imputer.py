@@ -97,6 +97,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             the training covariates were aggregated by summation to the
             variable's frequency, so that both sides of the model are
             expressed at the sub-period scale used at prediction time.
+        enforce_period_totals: If True (default), the sub-periods predicted
+            for one period of a lower-frequency variable are rescaled
+            proportionally so that they sum back to the value observed for
+            that period (review §2.6, option 1). Only the additive
+            constraint is optional: an imputed variable is ALWAYS predicted
+            over its whole period, anchor dates included, so that its column
+            never mixes the low-frequency total with sub-period values. Set
+            it to False to keep the raw model output, homogeneous in scale
+            but free of any additive constraint. Periods that are only
+            partly predicted, that hold no observation, or whose predictions
+            sum to zero are never rescaled.
 
     Attributes:
         detected_frequencies_: Detected frequency per variable or (entity, variable).
@@ -126,13 +137,26 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             exact order in which stages were registered, for replay during
             transform. ``len(imputation_models_) == len(model_fitting_order_)``
             after any fit.
+        stage_groups_: Metadata of each ``stage_key``, needed at replay time
+            and populated for EVERY registered stage, interpolation fallbacks
+            included (their ``imputation_models_`` entry is a bare string and
+            carries none). Each value is a dict with keys ``var_name``,
+            ``f_var`` (the group's normalized source frequency, which drives
+            the disaggregation periods) and ``entities`` (the entity tuples
+            of the group, None for a time series).
         freq_prediction_list_: Ordered list of the prediction frequencies
             (cascade stages) built at fit time. ``transform`` replays exactly
             these stages, rebuilding each stage frame from the input data via
             :meth:`_build_stage_frame`, so that fit and transform work on
             identical stage frames for identical data.
         imputation_provenance_: DataFrame tracking origin of each value
-            ('original', 'model_on_true', 'model_on_mixed', 'aggregated').
+            ('original', 'model_on_true', 'model_on_mixed', 'aggregated',
+            'disaggregated'). Single-level matrix: it describes the LAST
+            state of the replay, hence the target-frequency level. With
+            keep_lower_frequencies=True the data of a lower level does keep
+            its original anchor values, but this matrix reports them as
+            'disaggregated' — per-frequency-level provenance remains open
+            (review §2.8.4).
         imputation_window_: Tuple (start, end) of the imputation window where
             all series have data.
         training_window_: Tuple (start, end) of the extended training window.
@@ -187,6 +211,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         train_on_partial_coverage: bool = False,
         train_on_partial_fit_order: Literal['random', 'cv'] = 'random',
         scale_features: bool = True,
+        enforce_period_totals: bool = True,
         time_col: Optional[str] = None,
         panel_cols: Optional[List[str]] = None,
     ):
@@ -234,6 +259,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 - 'cv': Cross-validation to find easiest variables first
             scale_features: If True, divide X_train by the number of
                 sub-periods alongside y_train, which is always divided.
+            enforce_period_totals: If True (default), rescale the sub-periods
+                predicted for one period of a lower-frequency variable so
+                that they sum back to the value observed for that period
+                (review §2.6, option 1). Independently of this flag, an
+                imputed variable is always predicted over its whole period —
+                anchor dates included — so that its column never mixes the
+                low-frequency total with sub-period values. False keeps the
+                raw model output, without any additive constraint.
             time_col: Name of the time column (if in columns not index).
             panel_cols: List of column names identifying panel entities.
         """
@@ -293,6 +326,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.train_on_partial_coverage = train_on_partial_coverage
         self.train_on_partial_fit_order = train_on_partial_fit_order
         self.scale_features = scale_features
+        self.enforce_period_totals = enforce_period_totals
 
     # -------------------------------------------------------------------------
     # Validation des paramètres d'entrée
@@ -991,6 +1025,274 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             pf,
         )
 
+    # -------------------------------------------------------------------------
+    # Désagrégation des valeurs basse fréquence (revue §2.6)
+    # -------------------------------------------------------------------------
+    # Méthode auxiliaire d'appartenance des dates à leur période basse fréquence
+    def _period_membership(
+        self,
+        index: pd.Index,
+        f_var: str,
+        entities: Optional[List[tuple]] = None,
+    ) -> pd.Series:
+        """Map each date of a grid to the low-frequency period holding it.
+
+        The reference frequency is always the variable's own DETECTED
+        frequency, never the frequency of the cascade stage: a yearly
+        variable imputed at the quarter then at the month is rescaled on
+        its yearly total at both stages.
+
+        Args:
+            index: Index of the stage frame — DatetimeIndex for a time
+                series, MultiIndex ``(entity..., date)`` for a panel.
+            f_var: Detected frequency of the variable (any representation:
+                ``'Q'``, ``'QS'``, ``'quarterly'``...).
+            entities: Entity tuples the disaggregation is restricted to
+                (panel only). Rows of other entities get NaN and are never
+                rescaled. None means every row.
+
+        Returns:
+            Series indexed like ``index``, holding a ``pd.Period`` for a
+            time series and an ``(entity_tuple, Period)`` pair for a panel —
+            two entities never share a rescaling block. NaN marks the rows
+            excluded from the disaggregation.
+
+        Examples:
+            >>> # imputer._period_membership(monthly_index, 'Q').iloc[:3].tolist()
+            >>> # [Period('2018Q1'), Period('2018Q1'), Period('2018Q1')]
+        """
+        # Normalisation en base de fréquence : seule forme acceptée par to_period
+        base = normalize_frequency(f_var, return_format='base')
+
+        # Cas des séries temporelles : la période suffit à identifier le bloc
+        if not isinstance(index, pd.MultiIndex):
+            return pd.Series(list(index.to_period(base)), index=index, dtype=object)
+
+        # Cas des données de panel : l'entité fait partie de la clé de bloc
+        periods = index.get_level_values(-1).to_period(base)
+        entity_index = index.droplevel(-1)
+        entity_tuples = [
+            key if isinstance(key, tuple) else (key,)
+            for key in entity_index
+        ]
+        membership = pd.Series(
+            list(zip(entity_tuples, periods)), index=index, dtype=object
+        )
+
+        # Restriction aux entités du groupe : les autres lignes ne sont pas recalées
+        if entities is not None:
+            wanted = {
+                normalize_entity_key(entity) for entity in entities
+            }
+            outside = [entity not in wanted for entity in entity_tuples]
+            membership[outside] = np.nan
+
+        return membership
+
+    # Méthode auxiliaire de recalage additif des prédictions sur les totaux observés
+    def _rescale_to_period_totals(
+        self,
+        predictions: pd.Series,
+        y_original: pd.Series,
+        period_membership: pd.Series,
+        context: str = '',
+    ) -> Tuple[pd.Series, pd.Series]:
+        """Rescale predictions so each period sums to its observed total.
+
+        Implements the additive constraint of review §2.6 (option 1): the
+        sub-periods predicted for one period of a lower-frequency variable
+        are multiplied by ``observed total / predicted total``, so that the
+        column carries a genuine disaggregation of the observation instead
+        of a free-floating prediction.
+
+        A period is left untouched — raw predictions kept — when it is only
+        partly predicted (at least one NaN sub-period, typically a period
+        straddling the edge of the grid), when it holds no observation at
+        all (delayed series end), or when its predictions sum to zero while
+        the observed total does not. A period whose predicted total has the
+        opposite sign of its observed total IS rescaled, the constraint
+        taking precedence, but every sub-period then flips sign: a warning
+        is emitted.
+
+        Args:
+            predictions: Predicted sub-period values, indexed like the stage
+                frame rows they were produced for.
+            y_original: Original column of the variable, at its own
+                frequency (anchor dates non-null, the rest NaN). Read from
+                the untouched input frame, never from a stage frame.
+            period_membership: Output of :meth:`_period_membership`, aligned
+                on the stage frame index.
+            context: Label used in warning messages, e.g. "'pib' at stage M".
+
+        Returns:
+            Tuple of (rescaled predictions, boolean mask of the cells that
+            were actually rescaled). The mask drives the DISAGGREGATED
+            provenance marking: cells left out keep a MODEL_ON_* provenance.
+
+        Examples:
+            >>> # A quarter observed at 2800 with predictions summing to 1400
+            >>> # comes back doubled, and sums to 2800 exactly.
+        """
+        # Totaux observés par période basse fréquence : une observation par
+        # période en principe, la somme reste le choix additif si l'index en
+        # porte plusieurs
+        observed = y_original.dropna()
+        observed_periods = period_membership.reindex(observed.index)
+        period_totals: Dict[Any, float] = {}
+        for value, period_key in zip(observed.to_numpy(), observed_periods.to_numpy()):
+            # Observations hors du périmètre de désagrégation (NaN)
+            if period_key is None or isinstance(period_key, float):
+                continue
+            period_totals[period_key] = period_totals.get(period_key, 0.0) + float(value)
+
+        # Initialisation du résultat et du masque des cellules recalées
+        rescaled = predictions.copy()
+        rescaled_mask = pd.Series(False, index=predictions.index)
+
+        # Regroupement positionnel des lignes prédites par période, en une seule
+        # passe : un test d'égalité sur une Series de tuples aurait une sémantique
+        # de diffusion ambiguë selon la longueur des clés
+        membership = period_membership.reindex(predictions.index)
+        rows_by_period: Dict[Any, List[int]] = {}
+        for position, period_key in enumerate(membership.to_numpy()):
+            # Lignes hors du périmètre de désagrégation (NaN)
+            if period_key is None or isinstance(period_key, float):
+                continue
+            rows_by_period.setdefault(period_key, []).append(position)
+
+        # Recensement des cas dégénérés pour un avertissement agrégé
+        zero_sum_periods: List[Any] = []
+        flipped_periods: List[Any] = []
+
+        # Recalage additif : les prédictions de chaque période basse fréquence
+        # sont ajustées pour que leur somme égale la valeur observée
+        for period_key, period_value in period_totals.items():
+            positions = rows_by_period.get(period_key)
+            if not positions:
+                continue
+            block = predictions.iloc[positions]
+
+            # Périodes partiellement prédites : aucune contrainte imposable
+            if not block.notna().all():
+                continue
+
+            total = block.sum()
+
+            # Somme nulle : le ratio est indéfini, prédictions brutes conservées
+            if total == 0:
+                if period_value != 0:
+                    zero_sum_periods.append(period_key)
+                continue
+
+            # Application du ratio de recalage
+            rescaled.iloc[positions] = block * (period_value / total)
+            rescaled_mask.iloc[positions] = True
+
+            # Signe opposé : la contrainte est imposée mais le profil est inversé
+            if period_value != 0 and np.sign(total) != np.sign(period_value):
+                flipped_periods.append(period_key)
+
+        # Avertissements agrégés (un par variable et par étape, pas par période)
+        suffix = f" for {context}" if context else ""
+        if zero_sum_periods:
+            warnings.warn(
+                f"Additive rescaling skipped{suffix}: predictions sum to zero for "
+                f"{len(zero_sum_periods)} period(s) with a non-zero observed total "
+                f"(e.g. {zero_sum_periods[0]}). Raw predictions kept, their period "
+                f"totals do not match the observations.",
+                UserWarning
+            )
+        if flipped_periods:
+            warnings.warn(
+                f"Additive rescaling flipped the predicted profile{suffix} for "
+                f"{len(flipped_periods)} period(s) (e.g. {flipped_periods[0]}): the "
+                f"predictions sum to the opposite sign of the observed total. Period "
+                f"totals are exact but every sub-period changed sign.",
+                UserWarning
+            )
+
+        return rescaled, rescaled_mask
+
+    # Méthode auxiliaire d'application de la contrainte additive à une étape
+    def _apply_period_totals(
+        self,
+        values: pd.Series,
+        X_input: pd.DataFrame,
+        stage_group: Optional[Dict[str, Any]],
+        context: str = '',
+    ) -> Tuple[pd.Series, pd.Series]:
+        """Enforce the additive period constraint on one stage's values.
+
+        Single entry point of the disaggregation: builds the period
+        membership from the group's source frequency then delegates the
+        rescaling. A no-op returning an all-False mask when
+        ``enforce_period_totals`` is False or when the group metadata is
+        missing — the caller then marks the cells MODEL_ON_* as before.
+
+        Args:
+            values: Values produced for the variable at this stage (model
+                predictions or interpolation fallback), indexed like the
+                stage frame rows they cover.
+            X_input: Untouched input frame of the replay, holding the
+                variable's original low-frequency observations.
+            stage_group: Entry of :attr:`stage_groups_` for the stage key.
+            context: Label used in warning messages.
+
+        Returns:
+            Tuple of (values, boolean mask of the disaggregated cells).
+        """
+        # Sortie immédiate si la contrainte est désactivée ou non applicable
+        if not self.enforce_period_totals or stage_group is None:
+            return values, pd.Series(False, index=values.index)
+
+        var_name = stage_group['var_name']
+        if var_name not in X_input.columns:
+            return values, pd.Series(False, index=values.index)
+
+        # Construction de l'appartenance aux périodes de la fréquence source
+        period_membership = self._period_membership(
+            X_input.index, stage_group['f_var'], stage_group.get('entities')
+        )
+
+        return self._rescale_to_period_totals(
+            values, X_input[var_name], period_membership, context=context
+        )
+
+    # Méthode auxiliaire de construction du masque des lignes à désagréger
+    def _disaggregation_mask(
+        self,
+        X_input: pd.DataFrame,
+        stage_group: Optional[Dict[str, Any]],
+        var_name: str,
+    ) -> pd.Series:
+        """Build the mask of rows a variable is disaggregated on at a stage.
+
+        Unlike the historical ``X_input[var_name].isna()``, this mask covers
+        the ANCHOR dates too: the whole period is predicted and the
+        low-frequency total is overwritten, which is what keeps the column
+        from mixing two scales (review §2.6). For a panel the mask is
+        restricted to the entities of the fitted group.
+
+        Args:
+            X_input: Untouched input frame of the replay.
+            stage_group: Entry of :attr:`stage_groups_` for the stage key.
+            var_name: Column being imputed.
+
+        Returns:
+            Boolean Series aligned on ``X_input.index``.
+        """
+        # Cas des séries temporelles : toute la grille est concernée
+        entities = stage_group.get('entities') if stage_group else None
+        if not self.is_panel_ or not entities:
+            return pd.Series(True, index=X_input.index)
+
+        # Cas des données de panel : restriction aux entités du groupe
+        mask = np.zeros(len(X_input), dtype=bool)
+        for entity in entities:
+            mask |= self._freq_aligner.get_entity_mask(X_input, entity)
+
+        return pd.Series(mask, index=X_input.index)
+
     # Méthode auxiliaire de récupération du modèle déjà entraîné pour une variable
     def _model_for_var(
         self,
@@ -1260,8 +1562,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Restriction aux données originales si train_on_partial_coverage=False
         if not self.train_on_partial_coverage:
             if hasattr(self, '_provenance_tracker'):
+                # DISAGGREGATED est admis au même titre qu'ORIGINAL : les dates-ancres
+                # d'une variable désagrégée à une étape antérieure changent de
+                # provenance (revue §2.6) alors que "y_source" reste lu dans les
+                # données d'origine — les exclure viderait le masque à l'étape
+                # suivante et enverrait tout en repli
                 original_mask = self._provenance_tracker.get_mask(
-                    ProvenanceType.ORIGINAL, column=var_name
+                    [ProvenanceType.ORIGINAL, ProvenanceType.DISAGGREGATED],
+                    column=var_name
                 )
                 # /!\ Vérifier la compatibilité des index
                 training_mask = training_mask & original_mask
@@ -1453,6 +1761,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     ) -> None:
         """Mark aggregated values in the provenance tracker.
 
+        Only the cells that actually CARRY an aggregate are marked: an
+        aggregation to a lower frequency leaves the sub-period rows empty,
+        and marking them too (review §2.8.2) would claim NaN cells were
+        aggregated — and, since aggregation runs at every stage, would erase
+        the ORIGINAL provenance of every dense column.
+
         Args:
             tracker: Provenance tracker instance.
             X: DataFrame with current data.
@@ -1474,18 +1788,58 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 entity_index = X.index[entity_mask]
                 # Parcours des colonnes
                 for col in cols:
-                    # Marquage comme agrégé
+                    # Marquage comme agrégé des seules cellules porteuses d'un agrégat
                     if col in X.columns:
-                        tracker.mark_aggregated(col, entity_index)
+                        marked = entity_index[X.loc[entity_index, col].notna()]
+                        if len(marked) > 0:
+                            tracker.mark_aggregated(col, marked)
         # Cas de données de séries temporelles
         else:
             # Extraction des noms de colonne des tuples
             columns = self._freq_aligner.extract_column_names(aggregate_keys)
             # Parcours des colonnes
             for col in columns:
-                # Marquage comme aggrégé
+                # Marquage comme agrégé des seules cellules porteuses d'un agrégat
                 if col in X.columns:
-                    tracker.mark_aggregated(col, X.index)
+                    marked = X.index[X[col].notna()]
+                    if len(marked) > 0:
+                        tracker.mark_aggregated(col, marked)
+
+    # Méthode auxiliaire de marquage des cellules imputées à une étape
+    @staticmethod
+    def _mark_imputed_cells(
+        tracker: ImputationProvenanceTracker,
+        column: str,
+        index: pd.Index,
+        disaggregated_mask: pd.Series,
+        trained_on_imputed: bool,
+    ) -> None:
+        """Mark imputed cells, splitting disaggregated ones from model ones.
+
+        A cell belonging to a period whose sub-periods were rescaled onto an
+        observed total is DISAGGREGATED — it carries a real observation,
+        spread out. Any other imputed cell keeps its MODEL_ON_* provenance.
+
+        Args:
+            tracker: Provenance tracker to write into.
+            column: Column being imputed.
+            index: Index of every cell that received a value.
+            disaggregated_mask: Boolean mask, aligned on ``index``, of the
+                cells produced by a rescaled disaggregation.
+            trained_on_imputed: Whether the model saw imputed values at fit
+                time (drives MODEL_ON_MIXED vs MODEL_ON_TRUE).
+        """
+        # Cellules recalées sur un total observé
+        disaggregated_index = index[disaggregated_mask.to_numpy()]
+        if len(disaggregated_index) > 0:
+            tracker.mark_disaggregated(column, disaggregated_index)
+
+        # Cellules restantes : prédictions du modèle sans contrainte additive
+        model_index = index[~disaggregated_mask.to_numpy()]
+        if len(model_index) > 0:
+            tracker.mark_model_imputed(
+                column, model_index, trained_on_imputed=trained_on_imputed
+            )
 
     # /!\ Voir s'il ne faut pas supprimer cette méthode et se reposer uniquement sur le imputation_scope pour imputer les variables sujettes à délais de publication
     def _infer_delays_from_data(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -1716,6 +2070,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         self.imputation_models_ = OrderedDict()
         self.model_fitting_order_ = []
+        # Métadonnées de groupe par clé d'étape : le replay en a besoin pour
+        # désagréger (fréquence source, entités concernées), y compris sur les
+        # replis dont l'entrée de registre est une simple chaîne
+        self.stage_groups_ = OrderedDict()
         # Conservation de la liste des étapes : le replay de "_transform" la rejoue à l'identique
         self.freq_prediction_list_ = freq_prediction_list
         # Imputations déjà réalisées, par nom de variable : elles alimentent les
@@ -1790,6 +2148,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 # entraîné qu'une fois, et une variable imputée à deux étapes
                 # obtient deux entrées distinctes
                 stage_key = (self._freq_label(pred_freq), group_key)
+
+                # Métadonnées du groupe, enregistrées avant tout branchement :
+                # le replay en a besoin même quand l'étape finit en repli
+                self.stage_groups_[stage_key] = {
+                    'var_name': var_name,
+                    'f_var': freq_norm,
+                    'entities': (
+                        [normalize_entity_key(k[:-1]) for k in var_keys]
+                        if self.is_panel_ and isinstance(var_keys[0], tuple)
+                        else None
+                    ),
+                }
+                stage_group = self.stage_groups_[stage_key]
 
                 # Sans réentraînement, un seul fit par variable : les étapes
                 # suivantes réutilisent le modèle avec le facteur de l'étape
@@ -1882,39 +2253,48 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 if self.cascade_refitting:
                     model_info = self.imputation_models_.get(stage_key)
                     if model_info and model_info != 'interpolate_fallback':
-                        # Valeurs manquantes de la colonne d'origine : une variable n'est
-                        # jamais prédite là où ses propres imputations antérieures ont été
-                        # injectées dans le frame d'étape
-                        missing_mask = X_work[var_name].isna()
-                        if missing_mask.any():
-                            X_predict = X_stage.loc[missing_mask, feature_cols]
+                        # Lignes désagrégées : toute la grille du groupe, dates-ancres
+                        # comprises, pour que la colonne ne mélange pas le total de la
+                        # période basse fréquence et des valeurs de sous-période (§2.6)
+                        predict_mask = self._disaggregation_mask(
+                            X_work, stage_group, var_name
+                        )
+                        if predict_mask.any():
+                            X_predict = X_stage.loc[predict_mask, feature_cols]
                             X_predict = X_predict.fillna(X_predict.mean())
                             try:
                                 # Les prédictions sont déjà à l'échelle de la fréquence
                                 # de prédiction : aucune remise à l'échelle inverse
-                                preds = self._stage_predictions(model_info, X_predict)
+                                preds = pd.Series(
+                                    self._stage_predictions(model_info, X_predict),
+                                    index=X_stage.index[predict_mask]
+                                )
+                                # Contrainte additive : la somme des sous-périodes de
+                                # chaque période égale la valeur observée
+                                preds, disagg_mask = self._apply_period_totals(
+                                    preds, X_work, stage_group,
+                                    context=f"'{var_name}' at stage "
+                                            f"{self._stage_frequency_label(pred_freq)}"
+                                )
                                 # Cascade intra-étape : les variables suivantes de l'étape
                                 # voient les valeurs imputées
-                                X_stage.loc[missing_mask, var_name] = preds
+                                X_stage.loc[predict_mask, var_name] = preds
                                 # Alimentation du magasin d'imputations pour les étapes
                                 # suivantes (jamais X_work), par nom de variable : les
                                 # imputations déjà déposées par un autre groupe de la
                                 # même variable (fréquences hétérogènes selon l'entité)
                                 # sont préservées
-                                new_imputed = pd.Series(
-                                    preds, index=X_stage.index[missing_mask]
-                                )
                                 existing_imputed = imputed_store.get(var_name)
                                 imputed_store[var_name] = (
-                                    new_imputed if existing_imputed is None
-                                    else existing_imputed.combine_first(new_imputed)
+                                    preds if existing_imputed is None
+                                    else existing_imputed.combine_first(preds)
                                 )
 
-                                # Marquage provenance
-                                self._provenance_tracker.mark_model_imputed(
-                                    var_name,
-                                    X_stage.index[missing_mask],
-                                    trained_on_imputed=model_info.get('trained_on_imputed', False)
+                                # Marquage provenance : DISAGGREGATED sur les cellules
+                                # effectivement recalées, MODEL_ON_* sur les autres
+                                self._mark_imputed_cells(
+                                    self._provenance_tracker, var_name, preds.index,
+                                    disagg_mask, model_info.get('trained_on_imputed', False)
                                 )
                             except Exception as e:
                                 warnings.warn(
@@ -2032,15 +2412,34 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 _, group_key = stage_key
                 var_name = group_key[0] if isinstance(group_key, tuple) else group_key
 
-                # Récupérer model_info
+                # Récupérer model_info et les métadonnées de groupe (présentes
+                # même pour les replis, contrairement au registre de modèles)
                 model_info = self.imputation_models_.get(stage_key)
+                stage_group = (getattr(self, 'stage_groups_', None) or {}).get(stage_key)
+                stage_context = f"'{var_name}' at stage {freq_label}"
 
                 if model_info is None or model_info == 'interpolate_fallback':
                     # Le repli n'alimente pas imputed_store : le fit n'en produit aucune
                     # valeur, les frames d'étape resteraient asymétriques
                     if var_name in X_stage.columns:
+                        # L'ancre sert de point d'appui à l'interpolation, puis le
+                        # recalage proportionnel la ramène à l'échelle de la
+                        # sous-période : sans cela la colonne repliée garderait le
+                        # mélange d'échelles du §2.6
                         X_stage[var_name] = X_stage[var_name].interpolate(
                             method='linear', limit_direction='both'
+                        )
+                        predict_mask = self._disaggregation_mask(
+                            X_input, stage_group, var_name
+                        )
+                        rescaled, disagg_mask = self._apply_period_totals(
+                            X_stage.loc[predict_mask, var_name], X_input,
+                            stage_group, context=stage_context
+                        )
+                        X_stage.loc[predict_mask, var_name] = rescaled
+                        self._mark_imputed_cells(
+                            transform_tracker, var_name, rescaled.index,
+                            disagg_mask, False
                         )
                     continue
 
@@ -2048,22 +2447,33 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 if var_name not in X_stage.columns:
                     continue
 
-                # Valeurs manquantes de la colonne d'origine : une variable n'est jamais
-                # prédite là où ses propres imputations antérieures ont été injectées
-                missing_mask = X_input[var_name].isna()
-                if not missing_mask.any():
+                # Lignes désagrégées : toute la grille du groupe, dates-ancres
+                # comprises, pour que la colonne ne mélange pas le total de la période
+                # basse fréquence et des valeurs de sous-période (§2.6)
+                predict_mask = self._disaggregation_mask(
+                    X_input, stage_group, var_name
+                )
+                if not predict_mask.any():
                     continue
 
                 feature_cols = model_info.get('feature_cols', [])
-                X_features = X_stage.loc[missing_mask, feature_cols]
+                X_features = X_stage.loc[predict_mask, feature_cols]
                 X_features = X_features.fillna(X_features.mean())
 
                 try:
                     # Les prédictions sont déjà à l'échelle de la fréquence de
                     # prédiction : aucune remise à l'échelle inverse
-                    predictions = self._stage_predictions(model_info, X_features)
+                    predictions = pd.Series(
+                        self._stage_predictions(model_info, X_features),
+                        index=X_stage.index[predict_mask]
+                    )
+                    # Contrainte additive : la somme des sous-périodes de chaque
+                    # période égale la valeur observée
+                    predictions, disagg_mask = self._apply_period_totals(
+                        predictions, X_input, stage_group, context=stage_context
+                    )
                     # Cascade intra-étape : le frame de l'étape porte le résultat
-                    X_stage.loc[missing_mask, var_name] = predictions
+                    X_stage.loc[predict_mask, var_name] = predictions
                     # Alimentation des étapes suivantes, symétrique du bloc 5g du
                     # fit : sans réentraînement, les covariables des étapes
                     # suivantes restent celles vues à l'entraînement. Clé par nom
@@ -2071,21 +2481,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     # groupe de la même variable (fréquences hétérogènes selon
                     # l'entité) sont préservées
                     if self.cascade_refitting:
-                        new_imputed = pd.Series(
-                            predictions, index=X_stage.index[missing_mask]
-                        )
                         existing_imputed = imputed_store.get(var_name)
                         imputed_store[var_name] = (
-                            new_imputed if existing_imputed is None
-                            else existing_imputed.combine_first(new_imputed)
+                            predictions if existing_imputed is None
+                            else existing_imputed.combine_first(predictions)
                         )
 
-                    # Marquage provenance
-                    trained_on_imputed = model_info.get('trained_on_imputed', False)
-                    transform_tracker.mark_model_imputed(
-                        var_name,
-                        X_stage.index[missing_mask],
-                        trained_on_imputed=trained_on_imputed
+                    # Marquage provenance : DISAGGREGATED sur les cellules
+                    # effectivement recalées, MODEL_ON_* sur les autres
+                    self._mark_imputed_cells(
+                        transform_tracker, var_name, predictions.index,
+                        disagg_mask, model_info.get('trained_on_imputed', False)
                     )
                 except Exception as e:
                     warnings.warn(

@@ -23,11 +23,15 @@ class ProvenanceType(str, Enum):
         MODEL_ON_TRUE: Value was imputed by a model trained exclusively on true values.
         MODEL_ON_MIXED: Value was imputed by a model trained on a mix of true and imputed values.
         AGGREGATED: Value was obtained by aggregating true values from higher frequency.
+        DISAGGREGATED: Value is one sub-period of a lower-frequency observation that
+            was spread over its whole period, the sub-periods being rescaled so that
+            they sum back to the observed total.
     """
     ORIGINAL = 'original'
     MODEL_ON_TRUE = 'model_on_true'
     MODEL_ON_MIXED = 'model_on_mixed'
     AGGREGATED = 'aggregated'
+    DISAGGREGATED = 'disaggregated'
 
 
 # Classe de suivi de la provenance des valeurs imputées
@@ -183,6 +187,28 @@ class ImputationProvenanceTracker:
             >>> tracker.mark_aggregated('daily_var', monthly_index)
         """
         self.mark_imputed(column, index, ProvenanceType.AGGREGATED)
+
+    def mark_disaggregated(
+        self,
+        column: str,
+        index: Union[pd.Timestamp, pd.DatetimeIndex, slice]
+    ) -> None:
+        """Mark specific values as obtained through disaggregation.
+
+        Convenience method for marking values as DISAGGREGATED, i.e. the
+        sub-periods of a lower-frequency observation spread over its whole
+        period and rescaled so that they sum back to the observed total.
+        Unlike MODEL_ON_*, this provenance carries a guarantee: the block of
+        sub-periods it belongs to adds up exactly to a true observation.
+
+        Args:
+            column: Name of the column containing the disaggregated values.
+            index: Index location(s) of the disaggregated value(s).
+
+        Examples:
+            >>> tracker.mark_disaggregated('quarterly_var', monthly_index)
+        """
+        self.mark_imputed(column, index, ProvenanceType.DISAGGREGATED)
 
     def mark_model_imputed(
         self,

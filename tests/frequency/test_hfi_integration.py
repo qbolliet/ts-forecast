@@ -18,9 +18,11 @@ concernée ; ils doivent tomber un par un au fil des correctifs.
 Correctifs déjà appliqués et couverts sans ``xfail`` : §2.1 (facteur
 d'échelle), §2.2 / §5.1 (frames d'étape), §2.3 / §5.2 (registre de modèles
 indexé par étape), §2.4 (déduplication des fits panel, voir
-`test_high_frequency_imputer.py::TestPanelSingleFitPerVariable`) et §2.5
+`test_high_frequency_imputer.py::TestPanelSingleFitPerVariable`), §2.5
 (sortie multi-fréquences : niveaux reconstruits après imputation, plus de
-label 'target' dupliqué).
+label 'target' dupliqué) et §2.6 (désagrégation des valeurs d'ancre et
+recalage additif, voir
+`test_high_frequency_imputer.py::TestPeriodTotalsEnforced`).
 """
 import warnings
 
