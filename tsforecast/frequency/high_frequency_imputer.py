@@ -24,7 +24,7 @@ from ..utils.frequency.utils import (
     get_frequency_order,
 )
 from ..panel.utils import is_panel_data, get_unique_panel_entities, normalize_entity_key
-from .detector import FrequencyDetector, detect_frequency
+from .detector import FrequencyDetector, detect_frequency, detect_index_frequency
 from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .imputation_window import ImputationWindowCalculator, ImputationScope
 from .target_frequency_validator import TargetFrequencyValidator
@@ -117,6 +117,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             but free of any additive constraint. Periods that are only
             partly predicted, that hold no observation, or whose predictions
             sum to zero are never rescaled.
+        restore_original_values: If True, ``inverse_transform`` refills the
+            cells that were non-NaN in the input of the last ``transform``
+            with their exact original values, on top of the provenance-based
+            restoration (review §2.10). Needed to recover the anchor dates
+            of a lower-frequency variable: they carry a true observation in
+            the input, but the target level of the output spreads them over
+            their period, so their provenance there is DISAGGREGATED and the
+            ORIGINAL mask alone sets them back to NaN. Default is False,
+            which keeps ``inverse_transform`` a pure function of the
+            transformed frame and its provenance.
 
     Attributes:
         detected_frequencies_: Detected frequency per variable or (entity, variable).
@@ -188,6 +198,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         target_column_: y column if provided.
         effective_target_frequency_: Actual target frequency used after validation.
         entities_: Unique entities in panel data.
+        _source_frequency_label_: Frequency label of the index seen at fit
+            time, in the very format used for the ``frequency`` level of a
+            multi-frequency output. ``inverse_transform`` keeps that level
+            and drops the others (review §2.10). None when the index
+            frequency could not be detected — the target level is then used
+            instead.
+        _original_X_ / _original_y_: Snapshot of the input of the LAST
+            ``transform`` call, overwritten at each call. ``transform`` is
+            therefore stateful: it records what it was given so that
+            ``inverse_transform`` can restore the source index, its names
+            and — when ``restore_original_values=True`` — the original
+            values themselves.
 
     Examples:
         >>> import pandas as pd
@@ -231,6 +253,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         train_on_partial_fit_order: Literal['random', 'cv'] = 'random',
         scale_features: bool = True,
         enforce_period_totals: bool = True,
+        restore_original_values: bool = False,
         time_col: Optional[str] = None,
         panel_cols: Optional[List[str]] = None,
     ):
@@ -293,6 +316,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 anchor dates included — so that its column never mixes the
                 low-frequency total with sub-period values. False keeps the
                 raw model output, without any additive constraint.
+            restore_original_values: If True, ``inverse_transform`` refills
+                every cell that was non-NaN in the input of the last
+                ``transform`` with its exact original value, recovering in
+                particular the anchor dates of the lower-frequency variables
+                (DISAGGREGATED at the target level, hence dropped by the
+                ORIGINAL mask). Default is False.
             time_col: Name of the time column (if in columns not index).
             panel_cols: List of column names identifying panel entities.
         """
@@ -353,6 +382,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.train_on_partial_fit_order = train_on_partial_fit_order
         self.scale_features = scale_features
         self.enforce_period_totals = enforce_period_totals
+        self.restore_original_values = restore_original_values
 
     # -------------------------------------------------------------------------
     # Validation des paramètres d'entrée
@@ -2146,6 +2176,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             self.entities_ = None
 
+        # Label de fréquence de l'index d'entrée : il identifie, à l'inversion,
+        # le niveau à conserver dans une sortie multi-fréquences (§2.10). Le
+        # passage par "_stage_frequency_label" garantit le même format de label
+        # que celui porté par le niveau "frequency" de la sortie
+        try:
+            index_freq = detect_index_frequency(X_work.index, return_format='base')
+            self._source_frequency_label_ = self._stage_frequency_label(index_freq)
+        except (ValueError, TypeError):
+            # Index irrégulier ou trop court : le repli sur le niveau cible suffit
+            self._source_frequency_label_ = None
+
         # Expansion de target_frequency en dict si panel + string
         if self.is_panel_ and isinstance(self.target_frequency, str) and self.entities_:
             self.effective_target_frequency_ = {
@@ -2509,6 +2550,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         :meth:`_fit` — so fit and transform work on identical stage frames
         for identical data. The input frame itself is never modified.
 
+        Note:
+            This method is stateful: it snapshots its input in
+            ``_original_X_`` / ``_original_y_`` and rewrites
+            ``imputation_provenance_``, both overwritten at each call.
+            :meth:`_inverse_transform` reads them back to restore the source
+            index and the original values, and therefore always inverts the
+            LAST transform.
+
         Args:
             X: Features to transform.
             y: Targets to transform (optional).
@@ -2521,6 +2570,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if not isinstance(X, pd.DataFrame):
             raise ValueError(f"X must be a pandas DataFrame, got {type(X).__name__}")
 
+        # Mémorisation de l'entrée du DERNIER transform : la transformation
+        # inverse y lit l'index source, ses noms de niveaux et, sur demande
+        # (restore_original_values), les valeurs d'origine exactes (§2.10).
+        # Cet instantané est donc écrasé à chaque appel de transform
         self._original_X_ = X.copy()
         self._original_y_ = y.copy() if y is not None else None
 
@@ -2799,25 +2852,221 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Transformation inverse
     # -------------------------------------------------------------------------
+    # Méthode auxiliaire de sélection du niveau de fréquence à inverser
+    def _select_inverse_frequency_level(
+        self,
+        data: pd.DataFrame,
+        provenance: pd.DataFrame,
+    ) -> Optional[str]:
+        """Pick the frequency level to keep when inverting a stacked output.
+
+        The level of the source index (``_source_frequency_label_``) is the
+        one to keep: it is where the values sit at the granularity of the
+        data given to ``fit`` (review §2.10). It may be missing when the
+        index frequency could not be detected, or when it never was a
+        cascade stage; the target level is then the best proxy, being the
+        only level always produced.
+
+        Args:
+            data: Frame to invert, possibly carrying a ``frequency`` level.
+            provenance: Provenance matrix of the last transform, possibly
+                carrying a ``frequency`` level too — both are stacked or
+                not depending on ``keep_lower_frequencies``.
+
+        Returns:
+            The frequency label to keep, or None when neither frame carries
+            a frequency level (nothing to select).
+        """
+        # Recensement des labels disponibles, côté données comme côté provenance
+        available = []
+        for frame in (data, provenance):
+            if self._has_frequency_level(frame):
+                available.extend(
+                    frame.index.get_level_values('frequency').unique().tolist()
+                )
+        if not available:
+            return None
+
+        # Priorité au niveau de l'index source
+        if self._source_frequency_label_ is not None:
+            if self._source_frequency_label_ in available:
+                return self._source_frequency_label_
+
+        # Repli sur le niveau cible, toujours produit par la cascade
+        target_label = self._stage_frequency_label(self.effective_target_frequency_)
+        if target_label in available:
+            return target_label
+
+        # Dernier repli : le dernier niveau empilé, avec avertissement
+        warnings.warn(
+            f"Neither the source frequency level "
+            f"({self._source_frequency_label_}) nor the target one "
+            f"({target_label}) is present in the data to invert. "
+            f"Falling back on the last stacked level '{available[-1]}'."
+        )
+        return available[-1]
+
+    # Méthode auxiliaire de vérification de la présence du niveau de fréquence
+    @staticmethod
+    def _has_frequency_level(frame: pd.DataFrame) -> bool:
+        """Tell whether a frame carries the multi-frequency ``frequency`` level.
+
+        Args:
+            frame: Frame to inspect.
+
+        Returns:
+            True if its index is a MultiIndex holding a ``frequency`` level.
+        """
+        return (
+            isinstance(frame.index, pd.MultiIndex)
+            and 'frequency' in (frame.index.names or [])
+        )
+
+    # Méthode auxiliaire de suppression du niveau de fréquence
+    def _drop_frequency_level(
+        self,
+        frame: pd.DataFrame,
+        label: Optional[str],
+    ) -> pd.DataFrame:
+        """Reduce a stacked frame to one frequency level and restore its index.
+
+        Panel and time series are handled the same way: the level is
+        addressed by NAME, never by position. The index names of the
+        remaining levels are restored from the last transform input, the
+        stacking having renamed them (``['entity', 'frequency', 'date']``).
+
+        Args:
+            frame: Frame to reduce, stacked or not.
+            label: Frequency label to keep (see
+                :meth:`_select_inverse_frequency_level`). None leaves the
+                frame untouched.
+
+        Returns:
+            The frame restricted to ``label``, without the frequency level,
+            or the frame itself when it carries no such level.
+        """
+        # Frame déjà à un seul niveau de fréquence
+        if label is None or not self._has_frequency_level(frame):
+            return frame
+
+        # Extraction du niveau demandé (absent du frame : rien à extraire)
+        if label not in frame.index.get_level_values('frequency'):
+            return frame
+        reduced = frame.xs(label, level='frequency')
+
+        # Restauration des noms de niveaux de l'index source, l'empilement
+        # les ayant remplacés par ('entity', 'frequency', 'date')
+        source = getattr(self, '_original_X_', None)
+        if source is not None:
+            source_names = list(source.index.names)
+            if len(source_names) == reduced.index.nlevels:
+                reduced = reduced.rename_axis(source_names)
+
+        return reduced
+
+    # Méthode auxiliaire de restauration des valeurs d'origine exactes
+    def _restore_original_values(
+        self,
+        data_result: pd.DataFrame,
+        y_col_name: Optional[str],
+    ) -> pd.DataFrame:
+        """Refill the cells observed in the last transform input.
+
+        Backs ``restore_original_values=True`` (review §2.10): the ORIGINAL
+        mask alone drops the anchor dates of a lower-frequency variable,
+        which the target level holds as DISAGGREGATED even though the input
+        carried a true observation there.
+
+        Args:
+            data_result: Frame restored from the provenance mask, at the
+                source index.
+            y_col_name: Column name given to y in the working frame, so
+                that the snapshot of y is realigned on it.
+
+        Returns:
+            The frame with every cell observed in the snapshot set back to
+            its original value.
+        """
+        # Reconstruction de l'instantané de l'entrée du dernier transform
+        snapshot = self._original_X_
+        if self._original_y_ is not None and y_col_name is not None:
+            snapshot = pd.concat(
+                [snapshot, self._original_y_.to_frame(name=y_col_name)], axis=1
+            )
+
+        # Restriction aux colonnes et à l'index communs : la sortie inverse
+        # peut porter d'autres colonnes (variables ajoutées) ou un index réduit
+        common_cols = [c for c in data_result.columns if c in snapshot.columns]
+        if not common_cols:
+            return data_result
+        aligned = snapshot[common_cols].reindex(index=data_result.index)
+
+        # Les valeurs observées priment sur celles restaurées par la provenance
+        data_result = data_result.copy()
+        data_result[common_cols] = aligned.combine_first(data_result[common_cols])
+        return data_result
+
     # Méthode auxiliaire de transformation inverse
-    # /!\ A revoir car il faut utiliser le provenance tracker (l'inversion de l'additive transformer doit être faite dans la transformation à la fin)
     def _inverse_transform(
         self,
         X: pd.DataFrame,
         y: Optional[pd.Series] = None
     ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.Series]]:
-        """Inverse transform X and optionally y.
+        """Restore the original data structure from an imputed dataset.
 
-        Note: Disaggregation from lower to higher frequency is lossy.
+        Mirror of :meth:`_transform`, driven by the provenance matrix of the
+        LAST transform (``imputation_provenance_``) rather than by the fit
+        one: an ``inverse_transform`` following a ``transform`` on new data
+        must undo what that very call produced (review §2.10). Steps:
+
+        1. If the input carries a frequency level
+           (``keep_lower_frequencies=True``), keep only the level matching
+           the frequency of the source index and restore its index names.
+        2. Set back to NaN every cell whose provenance is not ORIGINAL.
+        3. Apply the additive transformer inverse LAST, mirroring
+           ``transform``, which applies it first.
+
+        Note:
+            Step 2 drops the anchor dates of the lower-frequency variables:
+            the target level spreads them over their period, so their
+            provenance there is DISAGGREGATED — they are readable as
+            ORIGINAL on their own frequency level, or restorable exactly
+            with ``restore_original_values=True``. Disaggregation from a
+            lower to a higher frequency stays lossy in any case: the
+            sub-period values themselves cannot be recovered.
 
         Args:
-            X: Transformed features.
+            X: Transformed features, as returned by ``transform``.
             y: Transformed targets (optional).
 
         Returns:
             X_original if y is None.
             (X_original, y_original) if y is provided.
+
+        Raises:
+            ValueError: If ``transform`` was never called: the provenance
+                matrix it writes is what identifies the imputed cells.
+
+        Examples:
+            >>> imputer = HighFrequencyImputer(target_frequency='M')
+            >>> transformed = imputer.fit_transform(df)
+            >>> restored = imputer.inverse_transform(transformed)
+            >>> restored.index.equals(df.index)
+            True
+            >>> # Imputed cells are back to NaN, observed ones are unchanged
+            >>> restored['pib_trimestriel'].isna().sum() >= df['pib_trimestriel'].isna().sum()
+            True
         """
+        # 0. Garde : la provenance du dernier transform est indispensable
+        if not hasattr(self, 'imputation_provenance_'):
+            raise ValueError(
+                "inverse_transform requires a previous call to transform: the "
+                "provenance matrix of the last transform (imputation_provenance_) "
+                "identifies the cells to set back to NaN. Call transform(X) or "
+                "fit_transform(X) first."
+            )
+
+        # Concaténation X / y, symétrique de "_transform"
         y_col_name = None
         if y is not None:
             y_col_name = y.name if y.name is not None else '__target__'
@@ -2825,6 +3074,29 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             data_work = X.copy()
 
+        provenance = self.imputation_provenance_
+
+        # 1. Suppression du niveau de fréquence éventuel, sur les données ET
+        # sur la provenance : chacune peut le porter ou non, selon la valeur
+        # de keep_lower_frequencies au dernier transform
+        level_label = self._select_inverse_frequency_level(data_work, provenance)
+        data_work = self._drop_frequency_level(data_work, level_label)
+        provenance = self._drop_frequency_level(provenance, level_label)
+
+        # 2. Restauration des NaN pour toute cellule non originale
+        original_mask = (provenance == ProvenanceType.ORIGINAL).reindex(
+            index=data_work.index, columns=data_work.columns
+        )
+        # Colonnes hors périmètre de la provenance (identifiants de panel) :
+        # jamais masquées, elles ne portent aucune valeur imputée
+        untracked = [c for c in data_work.columns if c not in provenance.columns]
+        if untracked:
+            original_mask[untracked] = True
+        original_mask = original_mask.fillna(False).astype(bool)
+        data_work = data_work.where(original_mask)
+
+        # 3. Inversion de la transformation additive, en DERNIER (miroir de
+        # transform, qui l'applique en premier)
         if self.additive_transformer_ is not None:
             if hasattr(self.additive_transformer_, 'inverse_transform'):
                 try:
@@ -2841,6 +3113,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             data_result = data_work
 
+        # 4. Restauration optionnelle des valeurs d'origine exactes
+        if self.restore_original_values:
+            data_result = self._restore_original_values(data_result, y_col_name)
+
+        # 5. Scission X et y, symétrique de "_transform"
         if y is not None and y_col_name in data_result.columns:
             y_original = data_result[y_col_name]
             X_original = data_result.drop(columns=[y_col_name])

@@ -628,8 +628,11 @@ class TestHighFrequencyImputerInverseTransform:
         transformed = imputer.transform(df)
         inverse = imputer.inverse_transform(transformed)
 
-        # Sans transformation additive, devrait retourner les données telles quelles
-        pd.testing.assert_frame_equal(transformed, inverse)
+        # Rien à imputer ici : toutes les cellules sont ORIGINAL, l'inverse
+        # redonne donc les données d'entrée, à l'index source (§2.10)
+        pd.testing.assert_frame_equal(
+            inverse, df, check_dtype=False, check_freq=False
+        )
 
 
 class TestHighFrequencyImputerXYInterface:
@@ -2216,3 +2219,194 @@ class TestProvenancePerFrequencyLevel:
         total = sum(stats[prov.value] for prov in ProvenanceType)
         total += stats['not_imputed']
         assert total == imputer.imputation_provenance_.size
+
+
+# ---------------------------------------------------------------------------
+# §2.10 — inverse_transform piloté par la provenance
+# ---------------------------------------------------------------------------
+def _target_level(imputer, frame):
+    """Restrict a (possibly stacked) frame to the target frequency level."""
+    if not isinstance(frame.index, pd.MultiIndex):
+        return frame
+    if 'frequency' not in (frame.index.names or []):
+        return frame
+    target_label = imputer._stage_frequency_label(imputer.effective_target_frequency_)
+    return frame.xs(target_label, level='frequency')
+
+
+class TestInverseTransformRestoresOriginal:
+    """§2.10 : `inverse_transform` défait réellement `transform`.
+
+    Avant le correctif, la méthode n'inversait que l'`additive_transformer` :
+    `inverse_transform(transform(X)).equals(transform(X))` valait `True`. Elle
+    doit désormais ramener la sortie à l'index source, remettre à NaN toute
+    cellule dont la provenance n'est pas ORIGINAL, et n'appliquer l'inverse
+    additif qu'en dernier.
+    """
+
+    def test_inverse_transform_restores_nans(self, mixed_freq_timeseries):
+        """NaN partout où la provenance n'est pas ORIGINAL, valeurs intactes ailleurs."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+        transformed = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+        inverse = imputer.inverse_transform(transformed)
+
+        provenance = _target_level(imputer, imputer.imputation_provenance_)
+        original_mask = provenance == ProvenanceType.ORIGINAL
+
+        values = _target_level(imputer, transformed)
+
+        # Des cellules imputées existent bien : le test serait vide sinon
+        assert (~original_mask).any().any()
+        # Toute cellule non ORIGINAL est revenue à NaN
+        assert inverse.where(~original_mask).isna().all().all()
+        # Les cellules ORIGINAL traversent l'inversion sans être touchées
+        pd.testing.assert_frame_equal(
+            inverse.where(original_mask),
+            values.where(original_mask),
+            check_dtype=False,
+            check_freq=False,
+        )
+        # Et celles que `transform` a conservées portent bien la valeur
+        # observée à l'entrée. Le masque est intersecté avec les cellules
+        # non-NaN de la sortie : hors fenêtre d'imputation, `transform` vide
+        # volontairement le périmètre de désagrégation d'une variable
+        # imputée (§2.6/§2.7) sans en changer la provenance
+        kept_mask = original_mask & values.notna()
+        pd.testing.assert_frame_equal(
+            inverse.where(kept_mask),
+            mixed_freq_timeseries.where(kept_mask),
+            check_dtype=False,
+            check_freq=False,
+        )
+
+    def test_inverse_transform_returns_source_index(self, mixed_freq_timeseries):
+        """Avec keep_lower_frequencies=True, la sortie retrouve l'index de X."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+        transformed = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+        # Le transformé porte bien un niveau de fréquence à retirer
+        assert 'frequency' in transformed.index.names
+
+        inverse = imputer.inverse_transform(transformed)
+
+        assert inverse.index.equals(mixed_freq_timeseries.index)
+        assert inverse.index.names == mixed_freq_timeseries.index.names
+
+    def test_inverse_transform_panel_returns_source_index(self, mixed_freq_panel):
+        """Panel : l'index (country, date) est restauré, niveaux et noms compris."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+        transformed = _fit_transform_quiet(imputer, mixed_freq_panel)
+        inverse = imputer.inverse_transform(transformed)
+
+        assert inverse.index.names == mixed_freq_panel.index.names
+        assert set(inverse.index) == set(mixed_freq_panel.index)
+
+    def test_inverse_transform_panel_restores_nans(self, mixed_freq_panel):
+        """Panel : le masque ORIGINAL est appliqué entité par entité."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+        transformed = _fit_transform_quiet(imputer, mixed_freq_panel)
+        inverse = imputer.inverse_transform(transformed)
+
+        provenance = _target_level(imputer, imputer.imputation_provenance_)
+        provenance = provenance.rename_axis(mixed_freq_panel.index.names)
+        original_mask = provenance == ProvenanceType.ORIGINAL
+
+        assert (~original_mask).any().any()
+        assert inverse.where(~original_mask).isna().all().all()
+
+    def test_inverse_transform_without_frequency_level(self, mixed_freq_timeseries):
+        """keep_lower_frequencies=False : rien à désempiler, masque appliqué tel quel."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        transformed = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+        inverse = imputer.inverse_transform(transformed)
+
+        original_mask = imputer.imputation_provenance_ == ProvenanceType.ORIGINAL
+
+        assert inverse.index.equals(mixed_freq_timeseries.index)
+        assert inverse.where(~original_mask).isna().all().all()
+
+    def test_inverse_transform_roundtrip_with_log_transformer(self, annual_over_monthly):
+        """Aller-retour exact (1e-8) sur les cellules ORIGINAL avec un log additif."""
+        from sklearn.preprocessing import FunctionTransformer
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            additive_transformer=FunctionTransformer(
+                func=np.log1p, inverse_func=np.expm1
+            ),
+            keep_lower_frequencies=True,
+        )
+        transformed = _fit_transform_quiet(imputer, annual_over_monthly)
+        inverse = imputer.inverse_transform(transformed)
+
+        provenance = _target_level(imputer, imputer.imputation_provenance_)
+        original_mask = provenance == ProvenanceType.ORIGINAL
+
+        restored = inverse.where(original_mask)
+        expected = annual_over_monthly.where(original_mask)
+        assert original_mask.any().any()
+        assert (restored - expected).abs().max().max() < 1e-8
+
+    def test_inverse_transform_without_transform_raises(self, mixed_freq_timeseries):
+        """Sans `transform` préalable, l'inversion échoue avec un message explicite."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(mixed_freq_timeseries.copy())
+
+        with pytest.raises(ValueError, match='requires a previous call to transform'):
+            imputer.inverse_transform(mixed_freq_timeseries.copy())
+
+    def test_restore_original_values_recovers_anchors(self, mixed_freq_timeseries):
+        """`restore_original_values=True` récupère les ancres DISAGGREGATED."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+            imputation_scope='extended_forward',
+        )
+        transformed = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        provenance = _target_level(imputer, imputer.imputation_provenance_)
+        anchors = mixed_freq_timeseries['pib_trimestriel'].dropna().index
+        disaggregated = anchors[
+            (provenance.loc[anchors, 'pib_trimestriel'] == ProvenanceType.DISAGGREGATED)
+            .to_numpy()
+        ]
+        assert len(disaggregated) > 0
+
+        # Par défaut, ces ancres sont perdues : leur provenance n'est pas ORIGINAL
+        default_inverse = imputer.inverse_transform(transformed)
+        assert default_inverse.loc[disaggregated, 'pib_trimestriel'].isna().all()
+
+        # Avec le paramètre explicite, elles retrouvent leur valeur observée
+        imputer.set_params(restore_original_values=True)
+        restored = imputer.inverse_transform(transformed)
+        pd.testing.assert_series_equal(
+            restored.loc[disaggregated, 'pib_trimestriel'],
+            mixed_freq_timeseries.loc[disaggregated, 'pib_trimestriel'],
+            check_freq=False,
+        )
