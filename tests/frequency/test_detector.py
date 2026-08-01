@@ -3,6 +3,7 @@
 This module tests the FrequencyDetector class and related functions,
 focusing on edge cases with MultiIndex, unsorted data, and consistency checks.
 """
+import warnings
 import pytest
 import pandas as pd
 import numpy as np
@@ -172,6 +173,21 @@ class TestFrequencyDetectorMultiIndex:
         assert freq['A'] == 'D'
         assert freq['B'] == 'D'
 
+    def test_series_with_2level_multiindex_emits_no_future_warning(self):
+        """§4.6 : un panel à un seul niveau (2 niveaux d'index au total) ne
+        déclenche plus le FutureWarning pandas sur `groupby(level=[...])`
+        (liste de longueur 1)."""
+        idx = pd.MultiIndex.from_arrays([
+            ['A', 'A', 'A', 'B', 'B', 'B'],
+            pd.date_range('2023-01-01', periods=3, freq='D').tolist() * 2
+        ], names=['panel_id', 'date'])
+        series = pd.Series([1, 2, 3, 4, 5, 6], index=idx)
+
+        detector = FrequencyDetector()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', FutureWarning)
+            detector.detect_frequency(series)  # ne doit pas lever
+
     def test_series_with_3level_multiindex(self):
         """Test détection avec MultiIndex à 3 niveaux."""
         # Création d'un MultiIndex avec 2 identifiants de panel et date
@@ -253,6 +269,22 @@ class TestFrequencyDetectorMultiIndex:
 
         with pytest.raises(ValueError, match="at least 2 levels"):
             detector.detect_frequency(series)
+
+    def test_dataframe_single_level_panel_emits_no_future_warning(self):
+        """§4.6 : `detect_dataset_frequency` sur un DataFrame panel à un seul
+        niveau (`groupby(level=panel_cols)` avec une liste de longueur 1) ne
+        déclenche plus le FutureWarning pandas."""
+        idx = pd.MultiIndex.from_arrays([
+            ['A', 'A', 'A', 'B', 'B', 'B'],
+            pd.date_range('2023-01-01', periods=3, freq='D').tolist() * 2
+        ], names=['panel_id', 'date'])
+        df = pd.DataFrame({'x': range(6)}, index=idx)
+
+        detector = FrequencyDetector()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', FutureWarning)
+            freq_map = detector.detect_dataset_frequency(df)  # ne doit pas lever
+        assert freq_map == {('A', 'x'): 'D', ('B', 'x'): 'D'}
 
 
 class TestDetectFrequencyWrapper:

@@ -223,8 +223,13 @@ class FrequencyDetector:
         panel_levels = list(range(n_levels - 1))
         frequency_map = {}
 
-        # Groupby sur les niveaux de panel et détection pour chaque groupe
-        for panel_values, group_series in series.groupby(level=panel_levels):
+        # Groupby sur les niveaux de panel et détection pour chaque groupe.
+        # Un niveau UNIQUE est passé sous forme scalaire (et non liste de
+        # longueur 1) pour éviter le FutureWarning pandas sur l'itération
+        # (les clés resteraient sinon promues en tuples dans une version
+        # future) ; le comportement (clé scalaire) est inchangé
+        groupby_levels = panel_levels[0] if len(panel_levels) == 1 else panel_levels
+        for panel_values, group_series in series.groupby(level=groupby_levels):
             # Création de l'identifiant du panel normalisé
             panel_id = normalize_entity_key(panel_values)
 
@@ -303,8 +308,12 @@ class FrequencyDetector:
         frequency_map = {}
 
         if panel_in_index:
-            # Groupby par niveaux d'index
-            for panel_values, group_df in df.groupby(level=panel_cols):
+            # Groupby par niveaux d'index. Un niveau UNIQUE est passé sous
+            # forme scalaire (et non liste de longueur 1) pour éviter le
+            # FutureWarning pandas sur l'itération ; le comportement (clé
+            # scalaire) est inchangé
+            groupby_levels = panel_cols[0] if len(panel_cols) == 1 else panel_cols
+            for panel_values, group_df in df.groupby(level=groupby_levels):
                 # Création de l'identifiant du panel
                 panel_id = normalize_entity_key(panel_values)
 

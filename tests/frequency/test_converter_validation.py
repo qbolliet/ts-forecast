@@ -188,3 +188,37 @@ class TestDurationConverterIntegration:
         # Test direct du ratio Y→M
         ratio_y_to_m = converter._duration_converter.get_conversion_factor('Y', 'M')
         assert ratio_y_to_m == 12.0, f"Expected 12.0, got {ratio_y_to_m}"
+
+
+class TestModernizedResampleAliases:
+    """§4.6 : les alias bruts dépréciés par pandas ('Y', 'A', 'Q', 'M') sont
+    modernisés ('YE', 'YE', 'QE', 'ME') avant tout resample/asfreq, sans
+    changer l'ancrage ni le résultat."""
+
+    @pytest.fixture
+    def converter(self):
+        return FrequencyConverter()
+
+    @pytest.mark.parametrize("bare,modern", [('Y', 'YE'), ('A', 'YE'), ('Q', 'QE'), ('M', 'ME')])
+    def test_aggregate_bare_alias_emits_no_future_warning(self, converter, bare, modern):
+        """L'alias brut ne déclenche plus de FutureWarning pandas et produit
+        le même résultat que son équivalent moderne."""
+        import warnings
+
+        dates = pd.date_range('2023-01-01', periods=400, freq='D')
+        series = pd.Series(range(400), index=dates)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', FutureWarning)
+            result_bare = converter.aggregate_to_lower_frequency(series, bare, method='sum')
+
+        result_modern = converter.aggregate_to_lower_frequency(series, modern, method='sum')
+        pd.testing.assert_series_equal(result_bare, result_modern)
+
+    def test_positioned_alias_left_untouched(self, converter):
+        """Un alias déjà positionné ('QS') n'est pas altéré."""
+        dates = pd.date_range('2023-01-01', periods=400, freq='D')
+        series = pd.Series(range(400), index=dates)
+
+        result = converter.aggregate_to_lower_frequency(series, 'QS', method='sum')
+        assert result.index.freqstr.startswith('QS')

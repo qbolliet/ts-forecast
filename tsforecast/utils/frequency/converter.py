@@ -13,6 +13,7 @@ densified (as required by the HighFrequencyImputer), see
 delegates the actual conversions to this class.
 """
 # Importation des modules
+import re
 import numpy as np
 import pandas as pd
 from typing import Any, Union, Optional, Literal, Dict, Tuple, List
@@ -41,6 +42,42 @@ from ...panel.utils import is_panel_data
 # Types pour les méthodes d'agrégation et d'interpolation
 AggregationMethod = Literal['mean', 'sum', 'first', 'last', 'min', 'max', 'median', 'std', 'count', 'all', 'any']
 InterpolationMethod = Literal['linear', 'time', 'index', 'values', 'nearest', 'zero', 'slinear', 'quadratic', 'cubic']
+
+# Alias de fréquence de fin de période dépréciés par pandas (>= 2.2) au profit
+# de leur équivalent explicite ('Y'/'A' -> 'YE', 'Q' -> 'QE', 'M' -> 'ME').
+# Ne concerne PAS pd.Period/PeriodIndex, qui utilisent toujours les bases
+# nues : seules les fréquences destinées à resample/asfreq/date_range doivent
+# être modernisées
+_DEPRECATED_PERIOD_END_ALIASES = {'Y': 'YE', 'A': 'YE', 'Q': 'QE', 'M': 'ME'}
+
+
+# Fonction de modernisation d'un alias de fréquence déprécié
+def _modernize_resample_freq(freq: str) -> str:
+    """Replace deprecated bare period-end aliases with their modern form.
+
+    Args:
+        freq: Frequency string about to be handed to
+            ``resample``/``asfreq``/``date_range`` (e.g. 'Q', 'ME', '2Y').
+
+    Returns:
+        ``freq`` unchanged, except its base is replaced when it is one of
+        the deprecated bare aliases ('Y', 'A', 'Q', 'M'). Semantically a
+        no-op: those bare aliases already meant end-of-period in pandas.
+
+    Examples:
+        >>> _modernize_resample_freq('Q')
+        'QE'
+        >>> _modernize_resample_freq('QS')
+        'QS'
+        >>> _modernize_resample_freq('D')
+        'D'
+    """
+    match = re.fullmatch(r'(\d*)([A-Za-z]+)((?:-[A-Za-z]+)?)', freq)
+    if not match:
+        return freq
+    multiplier, base, anchor = match.groups()
+    modern_base = _DEPRECATED_PERIOD_END_ALIASES.get(base, base)
+    return f"{multiplier}{modern_base}{anchor}"
 
 
 # Classe de conversion d'une fréquence dans une autre
@@ -500,6 +537,10 @@ class FrequencyConverter(TemporalConverter):
         # Importation de la fonction de détection de fréquences
         from tsforecast.frequency.detector import detect_index_frequency
 
+        # Modernisation des alias dépréciés ('Y'/'A'/'Q'/'M' -> 'YE'/'YE'/'QE'/'ME')
+        # avant tout resample, sans changer la position (S/E) déjà préservée
+        target_freq = _modernize_resample_freq(target_freq)
+
         # Validation que target_freq est un offset pandas valide
         # On ne normalise plus la fréquence pour préserver la position (S/E)
         try:
@@ -684,6 +725,10 @@ class FrequencyConverter(TemporalConverter):
         """
         # Importation de la fonction de détection de fréquence
         from tsforecast.frequency.detector import detect_index_frequency
+
+        # Modernisation des alias dépréciés ('Y'/'A'/'Q'/'M' -> 'YE'/'YE'/'QE'/'ME')
+        # avant tout resample/asfreq/date_range, sans changer la position (S/E)
+        target_freq = _modernize_resample_freq(target_freq)
 
         # Extraction de la position
         _, target_position, _ = parse_frequency(frequency_str=target_freq)

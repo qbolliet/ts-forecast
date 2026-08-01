@@ -2439,3 +2439,127 @@ class TestNoStrictImputationWindowWarns:
 
         with pytest.warns(UserWarning, match="No strict imputation window"):
             imputer.fit(df)
+
+
+class TestTrainOnPartialFitOrderRenamed:
+    """§4.6 : `train_on_partial_fit_order='random'` est renommé en
+    `'frequency'` (le tri n'a jamais été aléatoire) ; `'random'` reste un
+    alias déprécié qui se comporte à l'identique."""
+
+    def _fit_data(self):
+        dates = pd.date_range('2018-01-01', periods=24, freq='MS')
+        rng = np.random.default_rng(7)
+        monthly = pd.Series(10.0 + rng.normal(0, 1.0, len(dates)), index=dates)
+        quarterly = pd.Series(np.nan, index=dates)
+        for _, block in monthly.groupby(monthly.index.to_period('Q')):
+            quarterly.loc[block.index[0]] = block.sum()
+        return pd.DataFrame({'monthly_var': monthly, 'quarterly_var': quarterly})
+
+    def test_random_emits_deprecation_warning(self):
+        """`train_on_partial_fit_order='random'` avertit dès l'init."""
+        with pytest.warns(DeprecationWarning, match="train_on_partial_fit_order"):
+            HighFrequencyImputer(
+                target_frequency='M',
+                estimator=LinearRegression(),
+                train_on_partial_coverage=True,
+                train_on_partial_fit_order='random',
+            )
+
+    def test_frequency_emits_no_deprecation_warning(self):
+        """La nouvelle valeur par défaut 'frequency' n'avertit pas."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', DeprecationWarning)
+            HighFrequencyImputer(
+                target_frequency='M',
+                estimator=LinearRegression(),
+                train_on_partial_coverage=True,
+                train_on_partial_fit_order='frequency',
+            )  # ne doit pas lever
+
+    def test_default_is_frequency(self):
+        """La valeur par défaut du paramètre est désormais 'frequency'."""
+        imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+        assert imputer.train_on_partial_fit_order == 'frequency'
+
+    def test_random_behaves_like_frequency(self):
+        """'random' et 'frequency' produisent le même résultat de fit/transform."""
+        data = self._fit_data()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer_random = HighFrequencyImputer(
+                target_frequency='M',
+                estimator=LinearRegression(),
+                train_on_partial_coverage=True,
+                train_on_partial_fit_order='random',
+                keep_lower_frequencies=False,
+            )
+            result_random = imputer_random.fit_transform(data.copy())
+
+        imputer_frequency = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            train_on_partial_coverage=True,
+            train_on_partial_fit_order='frequency',
+            keep_lower_frequencies=False,
+        )
+        result_frequency = imputer_frequency.fit_transform(data.copy())
+
+        pd.testing.assert_frame_equal(result_random, result_frequency)
+
+
+class TestClassifyVariablesUnification:
+    """§5.5 : `_classify_variables` délègue désormais à
+    `_classify_variables_at_frequency(effective_target_frequency_)` et doit
+    donc renvoyer un contenu identique."""
+
+    def test_same_content_time_series(self):
+        """Séries temporelles : même contenu pour les deux méthodes."""
+        imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+
+        dates = pd.date_range('2023-01-01', periods=31, freq='D')
+        df = pd.DataFrame({
+            'daily_var': range(31),
+            'monthly_var': [1] * 31,
+        }, index=dates)
+        imputer.fit(df)
+
+        assert imputer._classify_variables() == imputer._classify_variables_at_frequency(
+            imputer.effective_target_frequency_
+        )
+
+    def test_same_content_panel(self):
+        """Panel : même contenu pour les deux méthodes."""
+        imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+
+        dates = pd.date_range('2023-01-01', periods=31, freq='D')
+        idx = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['entity', 'date'])
+        df = pd.DataFrame({
+            'daily_var': list(range(31)) * 2,
+            'monthly_var': [1] * 62,
+        }, index=idx)
+        imputer.fit(df)
+
+        assert imputer._classify_variables() == imputer._classify_variables_at_frequency(
+            imputer.effective_target_frequency_
+        )
+
+    def test_variable_categories_stays_key_to_category(self):
+        """`variable_categories_` reste au format clé -> catégorie, converti
+        trivialement depuis le format catégorie -> liste des deux méthodes
+        unifiées (consommateurs externes documentés)."""
+        imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+
+        # "monthly_var" n'a une valeur qu'aux fins de mois (NaN ailleurs) pour
+        # que sa fréquence détectée soit bien mensuelle malgré l'index journalier
+        dates = pd.date_range('2023-01-01', periods=90, freq='D')
+        monthly_var = pd.Series(np.nan, index=dates)
+        monthly_var.loc[dates.is_month_end] = range(dates.is_month_end.sum())
+        df = pd.DataFrame({
+            'daily_var': range(90),
+            'monthly_var': monthly_var,
+        }, index=dates)
+        imputer.fit(df)
+
+        assert imputer.variable_categories_['daily_var'] == 'aggregate'
+        assert imputer.variable_categories_['monthly_var'] == 'target_freq'
