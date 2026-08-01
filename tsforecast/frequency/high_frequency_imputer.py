@@ -151,14 +151,24 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             these stages, rebuilding each stage frame from the input data via
             :meth:`_build_stage_frame`, so that fit and transform work on
             identical stage frames for identical data.
-        imputation_provenance_: DataFrame tracking origin of each value
+        imputation_provenance_fit_: DataFrame tracking origin of each value
             ('original', 'model_on_true', 'model_on_mixed', 'aggregated',
-            'disaggregated'). Single-level matrix: it describes the LAST
-            state of the replay, hence the target-frequency level. With
-            keep_lower_frequencies=True the data of a lower level does keep
-            its original anchor values, but this matrix reports them as
-            'disaggregated' — per-frequency-level provenance remains open
-            (review §2.8.4).
+            'disaggregated') as seen at the end of ``fit``. Single-level
+            matrix, indexed like the fit input: ``fit`` never builds a
+            multi-frequency output, so there is no per-level breakdown to
+            produce here (contrast with ``imputation_provenance_`` below).
+        imputation_provenance_: Same categories as above, but reflecting the
+            LAST ``transform`` call — distinct from ``imputation_provenance_fit_``,
+            which ``transform`` never touches (review §2.8.1). With
+            ``keep_lower_frequencies=False`` this is a single matrix at the
+            target frequency. With ``keep_lower_frequencies=True`` it is
+            stacked exactly like the transformed output — MultiIndex
+            ``(frequency, date)`` for a time series, ``(entity, frequency,
+            date)`` for a panel, one row-block per cascade stage — so that a
+            cell's provenance always describes the value actually present at
+            that (frequency, date) in the output, instead of one single
+            level's provenance being reused (falsely) to describe every
+            level (review §2.8.4).
         imputation_window_: Tuple (start, end) of the imputation window where
             all series have data.
         training_window_: Tuple (start, end) of the extended training window.
@@ -1914,8 +1924,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Only the cells that actually CARRY an aggregate are marked: an
         aggregation to a lower frequency leaves the sub-period rows empty,
         and marking them too (review §2.8.2) would claim NaN cells were
-        aggregated — and, since aggregation runs at every stage, would erase
-        the ORIGINAL provenance of every dense column.
+        aggregated. Cells already marked ORIGINAL are excluded too: since
+        aggregation runs at every stage, a column that already held a true
+        observation at this index would otherwise have its ORIGINAL
+        provenance overwritten by AGGREGATED, even though nothing was
+        actually aggregated to obtain it (review §2.8.2).
 
         Args:
             tracker: Provenance tracker instance.
@@ -1938,9 +1951,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 entity_index = X.index[entity_mask]
                 # Parcours des colonnes
                 for col in cols:
-                    # Marquage comme agrégé des seules cellules porteuses d'un agrégat
+                    # Marquage comme agrégé des seules cellules porteuses d'un
+                    # agrégat, à l'exclusion de celles déjà ORIGINAL
                     if col in X.columns:
-                        marked = entity_index[X.loc[entity_index, col].notna()]
+                        candidate = entity_index[X.loc[entity_index, col].notna()]
+                        original_mask = tracker.get_mask(
+                            ProvenanceType.ORIGINAL, column=col
+                        ).reindex(candidate).fillna(False)
+                        marked = candidate[~original_mask]
                         if len(marked) > 0:
                             tracker.mark_aggregated(col, marked)
         # Cas de données de séries temporelles
@@ -1949,9 +1967,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             columns = self._freq_aligner.extract_column_names(aggregate_keys)
             # Parcours des colonnes
             for col in columns:
-                # Marquage comme agrégé des seules cellules porteuses d'un agrégat
+                # Marquage comme agrégé des seules cellules porteuses d'un
+                # agrégat, à l'exclusion de celles déjà ORIGINAL
                 if col in X.columns:
-                    marked = X.index[X[col].notna()]
+                    candidate = X.index[X[col].notna()]
+                    original_mask = tracker.get_mask(
+                        ProvenanceType.ORIGINAL, column=col
+                    ).reindex(candidate).fillna(False)
+                    marked = candidate[~original_mask]
                     if len(marked) > 0:
                         tracker.mark_aggregated(col, marked)
 
@@ -2455,7 +2478,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                                 )
 
                                 # Marquage provenance : DISAGGREGATED sur les cellules
-                                # effectivement recalées, MODEL_ON_* sur les autres
+                                # effectivement recalées, MODEL_ON_* sur les autres.
+                                # "preds.index" couvre toutes les entités du groupe, ce
+                                # qui est cohérent avec le modèle GLOBAL au panel (§2.4) :
+                                # marquer par "var_name" seul, sans restriction d'entité,
+                                # ne perd donc aucune information (review §2.8.3)
                                 self._mark_imputed_cells(
                                     self._provenance_tracker, var_name, preds.index,
                                     disagg_mask, model_info.get('trained_on_imputed', False)
@@ -2475,7 +2502,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             self.inferred_delays_ = pd.DataFrame()
 
-        self.imputation_provenance_ = self._provenance_tracker.get_provenance_matrix()
+        # Attribut distinct de celui écrit par "_transform" (review §2.8.1) :
+        # sans cela, un "fit_transform" perdrait la trace du fit, écrasée par
+        # celle du transform qui suit immédiatement
+        self.imputation_provenance_fit_ = self._provenance_tracker.get_provenance_matrix()
 
     # -------------------------------------------------------------------------
     # Transform
@@ -2542,6 +2572,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Frames d'étape APRÈS imputations, par label de fréquence réel (§2.5) :
         # alimenté après la boucle d'imputation de chaque étape, jamais avant
         stage_frames: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
+        # Instantané de la matrice de provenance par label de fréquence réel,
+        # capturé au même moment que "stage_frames" : "transform_tracker" est
+        # unique et continue d'être écrit aux étapes suivantes, donc sans cet
+        # instantané la provenance d'un niveau bas serait écrasée par celle
+        # d'une étape ultérieure (review §2.8.4)
+        provenance_frames: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
 
         for stage_idx, pred_freq in enumerate(self.freq_prediction_list_):
             # Classification des variables relative à pred_freq
@@ -2655,7 +2691,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         )
 
                     # Marquage provenance : DISAGGREGATED sur les cellules
-                    # effectivement recalées, MODEL_ON_* sur les autres
+                    # effectivement recalées, MODEL_ON_* sur les autres. Même
+                    # remarque qu'au fit (§2.8.3) : "predictions.index" couvre
+                    # toutes les entités du groupe, cohérent avec le modèle GLOBAL
                     self._mark_imputed_cells(
                         transform_tracker, var_name, predictions.index,
                         disagg_mask, model_info.get('trained_on_imputed', False)
@@ -2675,6 +2713,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # nécessaire à la sortie sans MultiIndex ci-dessous
             if stage_keys or is_final_stage:
                 stage_frames[freq_label] = X_stage.copy()
+                # Même instantané pour la provenance, capturé au même instant
+                # que le frame d'étape (§2.8.4)
+                provenance_frames[freq_label] = transform_tracker.get_provenance_matrix()
 
             # Le frame de la dernière étape porte le résultat à la fréquence cible
             data_transformed = X_stage
@@ -2691,8 +2732,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             data_result = stage_frames[final_stage_label]
 
-        # 6. Mise à jour de la provenance
-        self.imputation_provenance_ = transform_tracker.get_provenance_matrix()
+        # 6. Mise à jour de la provenance : une matrice par niveau de
+        # fréquence, empilée avec la même structure d'index que
+        # "data_result" (§2.8.4), quand keep_lower_frequencies=True ; sinon
+        # la seule matrice au niveau cible, comme avant
+        if self.keep_lower_frequencies and provenance_frames:
+            self.imputation_provenance_ = self._build_multifreq_output(provenance_frames)
+        else:
+            self.imputation_provenance_ = transform_tracker.get_provenance_matrix()
 
         # 7. Scission X et y
         if y is not None and y_col_name in data_result.columns:

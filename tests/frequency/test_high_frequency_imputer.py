@@ -2009,3 +2009,187 @@ class TestDisaggregationProvenance:
             imputer.imputation_models_[key] != 'interpolate_fallback'
             for key in annual_stages
         )
+
+
+class TestProvenanceFitVsTransform:
+    """§2.8.1 : `fit` et `transform` écrivent deux attributs distincts.
+
+    Avant le correctif, les deux écrivaient `imputation_provenance_` : un
+    `fit_transform` perdait systématiquement la trace laissée par le fit.
+    """
+
+    def test_fit_transform_keeps_both_traces(self, mixed_freq_timeseries):
+        """Les deux attributs existent, sont non vides, et peuvent différer."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+            imputation_scope='extended_forward',
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        assert hasattr(imputer, 'imputation_provenance_fit_')
+        assert hasattr(imputer, 'imputation_provenance_')
+        assert not imputer.imputation_provenance_fit_.empty
+        assert not imputer.imputation_provenance_.empty
+
+    def test_transform_does_not_touch_fit_trace(self, mixed_freq_timeseries):
+        """Un `transform` postérieur au fit laisse `imputation_provenance_fit_` intact."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+        fit_trace = imputer.imputation_provenance_fit_.copy()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.transform(mixed_freq_timeseries.copy())
+
+        pd.testing.assert_frame_equal(fit_trace, imputer.imputation_provenance_fit_)
+
+
+class TestAggregatedProvenanceExcludesOriginal:
+    """§2.8.2 : `AGGREGATED` ne recouvre ni les cellules NaN ni les ORIGINAL."""
+
+    def test_no_nan_cell_marked_aggregated(self, mixed_freq_timeseries):
+        """Aucune cellule restée NaN après agrégation n'est marquée AGGREGATED."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        aggregated_mask = imputer.imputation_provenance_ == ProvenanceType.AGGREGATED
+        still_nan = result.isna()
+        common_cols = aggregated_mask.columns.intersection(still_nan.columns)
+        assert not (aggregated_mask[common_cols] & still_nan[common_cols]).any().any()
+
+    def test_original_cell_never_downgraded_to_aggregated(self, mixed_freq_timeseries):
+        """Une cellule vraiment observée (ORIGINAL) n'est jamais requalifiée AGGREGATED."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        # Les variables mensuelles denses sont ORIGINAL sur toute leur
+        # couverture et n'ont jamais besoin d'être agrégées à l'échelle
+        # mensuelle cible : leur colonne ne doit contenir aucun AGGREGATED
+        for column in ('production_industrielle', 'inflation_ipc', 'taux_chomage'):
+            provenance = imputer.imputation_provenance_[column]
+            observed = mixed_freq_timeseries[column].dropna().index
+            observed_in_matrix = provenance.index.intersection(observed)
+            assert not (
+                provenance.loc[observed_in_matrix] == ProvenanceType.AGGREGATED
+            ).any()
+
+
+class TestProvenancePerFrequencyLevel:
+    """§2.8.4 : avec `keep_lower_frequencies=True`, la provenance suit chaque niveau.
+
+    Avant le correctif, `imputation_provenance_` restait une matrice à un
+    seul niveau (celui de la fréquence cible) même quand la sortie
+    empilait plusieurs fréquences : une date-ancre d'un niveau bas s'y
+    trouvait donc déclarée DISAGGREGATED, y compris pour le niveau où elle
+    porte encore la vraie observation d'origine.
+    """
+
+    def test_provenance_matches_output_multiindex_structure(self, mixed_freq_timeseries):
+        """La provenance porte le même MultiIndex (frequency, date) que la sortie."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        assert isinstance(imputer.imputation_provenance_.index, pd.MultiIndex)
+        assert imputer.imputation_provenance_.index.names == result.index.names
+        assert set(imputer.imputation_provenance_.index.get_level_values('frequency')) == (
+            set(result.index.get_level_values('frequency'))
+        )
+
+    def test_low_level_anchor_stays_original(self, mixed_freq_timeseries):
+        """Au niveau QUARTERLY, l'ancre du PIB reste ORIGINAL (pas DISAGGREGATED).
+
+        C'est précisément la valeur que la matrice à un seul niveau
+        (restreinte à la cible) déclarait faussement DISAGGREGATED.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        quarterly_label = imputer._stage_frequency_label('Q')
+        provenance_q = imputer.imputation_provenance_.xs(quarterly_label, level='frequency')
+
+        anchors = mixed_freq_timeseries['pib_trimestriel'].dropna().index
+        anchors_in_matrix = provenance_q.index.intersection(anchors)
+        assert len(anchors_in_matrix) > 0
+        assert (
+            provenance_q.loc[anchors_in_matrix, 'pib_trimestriel']
+            == ProvenanceType.ORIGINAL
+        ).all()
+
+    def test_target_level_anchor_is_disaggregated(self, mixed_freq_timeseries):
+        """Au niveau cible (mensuel), la même ancre est bien DISAGGREGATED."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+            imputation_scope='extended_forward',
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        target_label = imputer._stage_frequency_label(imputer.effective_target_frequency_)
+        provenance_target = imputer.imputation_provenance_.xs(target_label, level='frequency')
+
+        window = imputer._imputation_window_calc.get_imputation_window_mask(
+            mixed_freq_timeseries
+        )
+        anchors = mixed_freq_timeseries['pib_trimestriel'].dropna().index
+        anchors_in_window = anchors[window.reindex(anchors).fillna(False)]
+        assert len(anchors_in_window) > 0
+        assert (
+            provenance_target.loc[anchors_in_window, 'pib_trimestriel']
+            == ProvenanceType.DISAGGREGATED
+        ).all()
+
+    def test_panel_provenance_keeps_entity_and_frequency_levels(self, mixed_freq_panel):
+        """Panel : la provenance porte (entity, frequency, date), comme la sortie."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_panel)
+
+        assert imputer.imputation_provenance_.index.names == result.index.names
+        assert set(imputer.imputation_provenance_.index.get_level_values('entity')) == {
+            'France', 'Allemagne', 'Italie'
+        }
+
+    def test_provenance_statistics_sum_to_cell_count_multi_level(
+        self, mixed_freq_timeseries
+    ):
+        """`compute_statistics()` reste cohérente sur la matrice empilée par niveau."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        tracker = ImputationProvenanceTracker()
+        tracker.provenance_matrix_ = imputer.imputation_provenance_
+        stats = tracker.compute_statistics()['overall']
+
+        total = sum(stats[prov.value] for prov in ProvenanceType)
+        total += stats['not_imputed']
+        assert total == imputer.imputation_provenance_.size
