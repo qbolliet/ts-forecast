@@ -1486,6 +1486,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 target_norm = normalize_frequency(self.effective_target_frequency_, return_format='base')
                 if target_norm not in sorted_freqs:
                     sorted_freqs.append(target_norm)
+
+                # Filtrage des étapes sans variable à imputer : une étape n'est
+                # utile que s'il existe au moins une variable de fréquence
+                # strictement inférieure à imputer à cette étape
+                sorted_freqs = [
+                    f for f in sorted_freqs
+                    if self._classify_variables_at_frequency(f)['impute']
+                ]
                 return sorted_freqs
             # Cas des données de panel
             else:
@@ -1499,25 +1507,28 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     # Parcours des entités
                     for entity in self.effective_target_frequency_.keys():
                         # Ajout de la fréquence si la fréquence cible est supérieure ou égale à la fréquence cible
-                        if is_higher_frequency(self.effective_target_frequency_[entity], freq) or (normalize_frequency(self.effective_target_frequency_, return_format='base') == freq):
+                        if is_higher_frequency(self.effective_target_frequency_[entity], freq) or (normalize_frequency(self.effective_target_frequency_[entity], return_format='base') == freq):
                             freq_dict[entity] = freq
                     # Ajout du dictionnaire à la liste
                     freq_list.append(freq_dict)
 
-                # Ajout de la fréquence cible
-                # Distinction suivant son type (devrait normalement être un dictionnaire pour des données de panel)
-                if isinstance(self.effective_target_frequency_, dict):
-                    # Extraction des fréquences cibles qui ne sont pas déjà présentes
-                    missing_target_freqs = set(normalize_frequency(target_freq, return_format='base') for target_freq in self.effective_target_frequency_.values()) - set()
-                    if missing_target_freqs:
-                        freq_dict = {entity: target_freq for entity, target_freq in self.effective_target_frequency_.items() if target_freq in missing_target_freqs }
-                        freq_list.append(freq_dict)
-                else:
-                    # Création d'un dictionnaire avec la fréquence cible pour chaque entité
-                    if normalize_frequency(self.effective_target_frequency_, return_format='base') not in impute_freqs:
-                        freq_dict = {entity: self.effective_target_frequency_ for entity in (self.entities_ or [])}
-                        freq_list.append(freq_dict)
+                # Ajout de la fréquence cible pour les entités dont elle n'est pas déjà couverte
+                sorted_freq_set = set(sorted_freqs)
+                freq_dict = {
+                    entity: target_freq
+                    for entity, target_freq in self.effective_target_frequency_.items()
+                    if normalize_frequency(target_freq, return_format='base') not in sorted_freq_set
+                }
+                if freq_dict:
+                    freq_list.append(freq_dict)
 
+                # Filtrage des étapes sans variable à imputer : une étape n'est
+                # utile que s'il existe au moins une variable de fréquence
+                # strictement inférieure à imputer à cette étape
+                freq_list = [
+                    f for f in freq_list
+                    if self._classify_variables_at_frequency(f)['impute']
+                ]
                 return freq_list
 
     # Méthode auxiliaire de construction du frame d'une étape de prédiction
