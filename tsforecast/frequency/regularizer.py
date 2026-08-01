@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Union
 # Import des utilitaires internes
 from .detector import FrequencyDetector, detect_frequency, _get_highest_frequency, detect_index_frequency
 from ..utils.frequency import normalize_frequency
+from ..panel.utils import normalize_entity_key
 
 
 # Classe de régularisation d'index temporel
@@ -260,8 +261,8 @@ class IndexRegularizer:
             regular = self._is_regular_ts(dates)
 
             # Construction de la clé associée à l'entité et complétion des résultats
-            key = entity_key if isinstance(entity_key, tuple) else (entity_key,)
-            results[key] = regular
+            # Clé TOUJOURS normalisée en tuple, y compris à un seul niveau (§5.4)
+            results[normalize_entity_key(entity_key)] = regular
 
             # Détection de la fréquence
             if regular:
@@ -442,8 +443,7 @@ class IndexRegularizer:
                     entity_freq = self._resolve_frequency_ts(entity_data_tmp)
                     # Ajout au dictionnaire
                     if entity_freq is not None:
-                        key = entity_key if isinstance(entity_key, tuple) else (entity_key,)
-                        entity_freqs[key] = entity_freq
+                        entity_freqs[normalize_entity_key(entity_key)] = entity_freq
                 # Extraction de la fréquence la plus élevée
                 if entity_freqs:
                     self._validate_consistent_positions(entity_freqs)
@@ -484,7 +484,7 @@ class IndexRegularizer:
             regularized = self._regularize_ts(entity_data, freq)
 
             # Reconstruction du MultiIndex
-            key = entity_key if isinstance(entity_key, tuple) else (entity_key,)
+            key = normalize_entity_key(entity_key)
             n = len(regularized)
 
             # Niveaux d'entité

@@ -16,7 +16,12 @@ import pandas as pd
 
 # Modules du package
 from .detector import detect_dataset_frequency, detect_index_frequency
-from ..panel.utils import get_unique_panel_entities, is_panel_data, normalize_entity_key
+from ..panel.utils import (
+    get_entity_mask,
+    get_unique_panel_entities,
+    is_panel_data,
+    normalize_entity_key,
+)
 from ..utils.frequency.utils import is_higher_frequency, normalize_frequency
 from ..utils.position.utils import combine_frequency_position
 from ..utils.time.utils import get_period_start, get_period_end
@@ -54,6 +59,19 @@ class ImputationWindowCalculator:
     with a mask computed on their own data index; always go through
     :meth:`get_imputation_window_mask` (optionally passing ``data``), which
     reindexes/aligns the mask onto the caller's index.
+
+    For panel data, EVERY dict-valued attribute
+    (``imputation_window_start_``, ``imputation_window_end_``,
+    ``imputation_window_mask_``, ``coverage_by_date_``, ``column_coverage_``
+    and ``index_freq_``) is keyed by the entity **tuple**, even when the panel
+    has a single entity level: ``('France',)``, never ``'France'``. These are
+    exactly the keys returned by
+    :func:`tsforecast.panel.utils.get_unique_panel_entities`, so a consumer
+    can index them directly and a ``KeyError`` genuinely signals a bug rather
+    than a key-format mismatch (review §3.4/§5.4). Methods taking an entity
+    from the caller (:meth:`get_columns_with_coverage`,
+    :meth:`get_mask_at_frequency`) normalize it via ``normalize_entity_key``,
+    so scalars remain accepted at the public boundary only.
 
     Attributes:
         imputation_window_start_: Start of the strict imputation window
@@ -273,8 +291,12 @@ class ImputationWindowCalculator:
                 for col in data.columns
             }
 
-            # Extraction de la clé associée à l'entité
-            entity_key = entity[0] if len(entity)==1 else entity
+            # Clé d'entité TOUJOURS le tuple rendu par get_unique_panel_entities,
+            # y compris à un seul niveau : ('France',) et jamais 'France' (revue
+            # §3.4/§5.4). Toute déscalarisation ici obligerait chaque consommateur
+            # à un double lookup défensif, qui masque les incohérences au lieu de
+            # les faire échouer
+            entity_key = entity
 
             # Cas où la fréquence de l'index n'a pas pu être identifiée
             if self.index_freq_[entity_key] is None:
@@ -302,8 +324,11 @@ class ImputationWindowCalculator:
             raise ValueError("No imputation window found for any entity in the panel")
 
     # Méthode auxiliaire permettant d'extraire des observations relatives à une entité du panel
+    # Délégation à la fonction utilitaire partagée de tsforecast.panel.utils
     def _get_entity_row_mask(self, data: pd.DataFrame, entity: tuple) -> np.ndarray:
         """Build a boolean row mask selecting the given entity from panel data.
+
+        Thin wrapper over :func:`tsforecast.panel.utils.get_entity_mask`.
 
         Args:
             data: Panel DataFrame with MultiIndex.
@@ -312,13 +337,7 @@ class ImputationWindowCalculator:
         Returns:
             Boolean numpy array of length len(data).
         """
-        # Initialisation du masque
-        mask = np.ones(len(data), dtype=bool)
-        # Parcours des éléments définissant l'entité
-        for i, val in enumerate(entity):
-            # Mise à jour du masque
-            mask &= (data.index.get_level_values(i) == val)
-        return mask
+        return get_entity_mask(data, entity)
 
     # Méthode de calcul de la fenêtre d'imputation et d'entraînement pour une entité
     def _compute_window(
@@ -715,11 +734,9 @@ class ImputationWindowCalculator:
             for entity, entity_mask in (self.imputation_window_mask_ or {}).items():
                 if entity_mask is None:
                     continue
-                # Normalisation de la clé d'entité en tuple
-                entity_tuple = normalize_entity_key(entity)
-                # Sélection des lignes de l'entité
+                # Sélection des lignes de l'entité (clé garantie tuple, cf. §3.4)
                 rows = np.ones(len(index), dtype=bool)
-                for level_values, wanted in zip(entity_levels, entity_tuple):
+                for level_values, wanted in zip(entity_levels, entity):
                     rows &= (level_values == wanted)
                 # Alignement du masque de l'entité sur les dates de ses lignes
                 aligned = (
@@ -758,7 +775,9 @@ class ImputationWindowCalculator:
 
         Args:
             frequency: Target (lower) frequency offset string (e.g., 'QE',
-                'YE') or dictionnary entity -> frequency string.
+                'YE') or dictionnary entity -> frequency string. Entity keys
+                may be given in scalar form for a single-level panel: they
+                are normalized to tuples before lookup.
 
         Returns:
             Boolean Series at the target frequency (time series), or dict
@@ -786,12 +805,21 @@ class ImputationWindowCalculator:
                 target_freq=frequency,
             )
 
+        # Normalisation des clés du dictionnaire fourni par l'appelant : c'est la
+        # seule frontière où une clé scalaire peut encore entrer
+        if isinstance(frequency, dict):
+            frequency = {
+                normalize_entity_key(entity): freq
+                for entity, freq in frequency.items()
+            }
+
         # Cas des données de panel : conversion indépendante par entité, chacune
         # pouvant avoir sa propre fréquence source et sa propre fréquence cible
+        # (accès direct : les clés d'entité sont des tuples de bout en bout)
         return {
             entity: self._convert_mask_to_frequency(
                 mask=entity_mask,
-                source_freq=self.index_freq_.get(entity),
+                source_freq=self.index_freq_[entity],
                 target_freq=frequency[entity] if isinstance(frequency, dict) else frequency,
             )
             for entity, entity_mask in self.imputation_window_mask_.items()
@@ -873,19 +901,21 @@ class ImputationWindowCalculator:
         Args:
             start: Start of the query range.
             end: End of the query range.
-            entity: Panel entity key (tuple, or its normalized scalar form
-                for single-level entities). Ignored for time series data.
-                Required to get a List[str] result for panel data; if
-                omitted for panel data, a dict over all entities is
-                returned instead.
+            entity: Panel entity key, as a tuple — a scalar is accepted and
+                normalized, since it is a caller-supplied value. Ignored for
+                time series data. Required to get a List[str] result for
+                panel data; if omitted for panel data, a dict over all
+                entities is returned instead.
 
         Returns:
             List of column names with coverage overlapping [start, end]
             (time series, or panel with ``entity`` given). Dict mapping
-            each entity key to such a list (panel, ``entity`` omitted).
+            each entity key (always a tuple) to such a list (panel,
+            ``entity`` omitted).
 
         Raises:
             ValueError: If calculator not fitted.
+            KeyError: If ``entity`` is not one of the fitted panel entities.
         """
         # Vérification que le calculateur est estimé
         if not self._is_fitted:
@@ -898,8 +928,9 @@ class ImputationWindowCalculator:
         # Cas des données de panel : couverture par entité
         if self._is_panel:
             if entity is not None:
-                entity_key = entity[0] if len(entity) == 1 else entity
-                col_coverage = self.column_coverage_.get(entity_key)
+                # Normalisation de la clé fournie par l'appelant : les clés
+                # internes sont des tuples, y compris à un seul niveau (§3.4)
+                col_coverage = self.column_coverage_[normalize_entity_key(entity)]
                 return self._columns_with_coverage(col_coverage, start, end)
             return {
                 entity_key: self._columns_with_coverage(col_coverage, start, end)

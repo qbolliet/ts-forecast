@@ -23,7 +23,12 @@ from ..utils.frequency.utils import (
     is_higher_frequency,
     get_frequency_order,
 )
-from ..panel.utils import is_panel_data, get_unique_panel_entities, normalize_entity_key
+from ..panel.utils import (
+    is_panel_data,
+    get_unique_panel_entities,
+    normalize_entity_key,
+    split_variable_key,
+)
 from .detector import FrequencyDetector, detect_frequency, detect_index_frequency
 from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .imputation_window import ImputationWindowCalculator, ImputationScope
@@ -62,7 +67,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     Parameters:
         target_frequency: Target frequency for imputation. Can be:
             - str: Single frequency applied to all series/entities
-            - Dict[entity_id, str]: Entity-specific target frequencies for panel data
+            - Dict[entity_id, str]: Entity-specific target frequencies for
+              panel data. Entity keys may be written in scalar form
+              (``{'FR': 'M'}``); they are normalized to tuples at init (see
+              the key format contract below).
         estimator: Estimator(s) for prediction. Can be:
             - Single estimator: Applied to all variables
             - Dict[variable_name, estimator]: Variable-specific models
@@ -128,10 +136,26 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             which keeps ``inverse_transform`` a pure function of the
             transformed frame and its provenance.
 
+    Key format contract (panel data, review §3.4/§5.4):
+        There is ONE representation of an entity — the **tuple** — used
+        everywhere, including for a single entity level: ``('France',)``,
+        never ``'France'``. A variable key is the FLATTENED
+        ``(entity..., column)`` tuple produced by ``detect_frequency``; use
+        :func:`tsforecast.panel.utils.split_variable_key` to split it back
+        into ``(entity_tuple, column)``. Entity keys supplied by the user in
+        a ``target_frequency`` dict are normalized to tuples at init by
+        ``_validate_target_frequency_format``, so ``{'FR': 'M'}`` is stored
+        as ``{('FR',): 'M'}``. Consequently every internal lookup on
+        ``effective_target_frequency_``, ``detected_frequencies_`` or a stage
+        frequency dict is a SINGLE lookup: there is no defensive
+        scalar/tuple fallback left, and a ``KeyError`` is a real bug.
+
     Attributes:
-        detected_frequencies_: Detected frequency per variable or (entity, variable).
-        variable_categories_: Category per (entity, variable) tuple:
-            'aggregate', 'impute', or 'target_freq'.
+        detected_frequencies_: Detected frequency per variable — column name
+            for a time series, flattened ``(entity..., column)`` tuple for a
+            panel.
+        variable_categories_: Category per variable key (same key format as
+            detected_frequencies_): 'aggregate', 'impute', or 'target_freq'.
         imputation_order_: Ordered list of variables for cascading imputation.
         imputation_models_: Fitted imputation models, keyed by cascade stage:
             ``stage_key = (freq_label, group_key)`` where ``freq_label`` is
@@ -189,15 +213,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             level's provenance being reused (falsely) to describe every
             level (review §2.8.4).
         imputation_window_: Tuple (start, end) of the imputation window where
-            all series have data.
+            all series have data. For a panel, each element is a dict keyed
+            by entity TUPLE, straight from ``ImputationWindowCalculator``.
         training_window_: Tuple (start, end) of the extended training window.
         frequency_progression_: Dict mapping variables to their frequency stages.
         additive_transformer_: Fitted additive transformer.
         is_panel_: Whether data is panel data.
         feature_columns_: X columns (features).
         target_column_: y column if provided.
-        effective_target_frequency_: Actual target frequency used after validation.
-        entities_: Unique entities in panel data.
+        effective_target_frequency_: Actual target frequency used after
+            validation — a string for a time series, a dict keyed by entity
+            TUPLE for a panel (user-supplied scalar keys are normalized at
+            init, see the key format contract above).
+        entities_: Unique entities in panel data, as tuples.
         _source_frequency_label_: Frequency label of the index seen at fit
             time, in the very format used for the ``frequency`` level of a
             multi-frequency output. ``inverse_transform`` keeps that level
@@ -396,10 +424,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         Args:
             target_frequency: Target frequency (string or dict mapping
-                entities to frequencies).
+                entities to frequencies). Dict entity keys may be given in
+                scalar form for a single-level panel (``{'FR': 'M'}``).
 
         Returns:
-            Normalized target_frequency.
+            Normalized target_frequency. For a dict, BOTH sides are
+            normalized: the frequency values via ``normalize_frequency`` and
+            the entity keys into tuples via ``normalize_entity_key``, so that
+            ``{'FR': 'M'}`` becomes ``{('FR',): 'M'}``. This is the only place
+            where user-supplied entity keys enter the imputer, and every
+            downstream consumer then indexes ``effective_target_frequency_``
+            by tuple without any defensive fallback (review §5.4).
 
         Raises:
             ValueError: If target_frequency format is invalid or contains
@@ -432,9 +467,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         f"Frequency for entity '{entity}' must be a string, "
                         f"got {type(freq).__name__}"
                     )
-                # Normalisation
+                # Normalisation de la clé d'entité en tuple ET de la fréquence
                 try:
-                    validated_freqs[entity] = normalize_frequency(freq)
+                    validated_freqs[normalize_entity_key(entity)] = normalize_frequency(freq)
                 except ValueError as e:
                     invalid_freqs[entity] = str(e)
 
@@ -607,23 +642,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if self.is_panel_:
             # Parcours des fréquences détectées
             for key, freq in self.detected_frequencies_.items():
-                # Extraction de la colonne et de l'entité
-                if isinstance(key, tuple):
-                    entity = key[:-1] if len(key) > 2 else key[0]
-                    col = key[-1]
-                else:
-                    entity = None
-                    col = key
+                # Décomposition de la clé : entité toujours en tuple
+                entity, col = split_variable_key(key)
 
-                # Extraction de la fréquence cible associée à l'entité
+                # Extraction de la fréquence cible associée à l'entité : lookup
+                # UNIQUE, les clés sont des tuples de bout en bout (§5.4). Une
+                # absence signale une entité écartée par la validation (fréquence
+                # indétectable), pas un désaccord de format de clé
                 if isinstance(self.effective_target_frequency_, dict):
-                    # Normalisation de l'entité sous forme de tuple
-                    entity_key = entity if isinstance(entity, tuple) else (entity,)
-                    # Extraction de la fréquence
-                    target_freq = self.effective_target_frequency_.get(entity_key)
-                    # Si la fréquence est nulle, tentative d'extraction avec la clé brute
-                    if target_freq is None:
-                        target_freq = self.effective_target_frequency_.get(entity)
+                    target_freq = self.effective_target_frequency_.get(entity)
                 else:
                     target_freq = self.effective_target_frequency_
 
@@ -695,21 +722,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if self.is_panel_:
             # Parcours des fréquences détectées
             for key, freq in self.detected_frequencies_.items():
-                # Extraction de la colonne et de l'entité
-                if isinstance(key, tuple):
-                    entity = key[:-1] if len(key) > 2 else key[0]
-                else:
-                    entity = None
+                # Décomposition de la clé : entité toujours en tuple
+                entity, _ = split_variable_key(key)
 
-                # Extraction de la fréquence cible associée à l'entité
+                # Extraction de la fréquence cible associée à l'entité : lookup
+                # UNIQUE, les clés sont des tuples de bout en bout (§5.4). Une
+                # absence signale une entité hors de cette étape de cascade
+                # (cf. _build_frequency_prediction_list), pas un désaccord de
+                # format de clé
                 if isinstance(prediction_frequency, dict):
-                    # Normalisation de l'entité sous forme de tuple
-                    entity_key = entity if isinstance(entity, tuple) else (entity,)
-                    # Extraction de la fréquence 
-                    pred_freq = prediction_frequency.get(entity_key)
-                    # Si la fréquence est nulle, tentative d'extraction avec la clé brute
-                    if pred_freq is None:
-                        pred_freq = prediction_frequency.get(entity)
+                    pred_freq = prediction_frequency.get(entity)
                 else:
                     pred_freq = prediction_frequency
 
@@ -801,7 +823,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Parcours des variables à imputer
             for key in impute_vars:
                 # Extraction du nom de la variable de la clé
-                var_name = key[-1] if isinstance(key, tuple) else key
+                _, var_name = split_variable_key(key)
                 # Ajout de la variable si elle ne fait pas déjà partie des clés des dictionnaires
                 if var_name not in var_to_entities:
                     var_to_entities[var_name] = []
@@ -876,7 +898,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Parcours des variables à imputer
         for var_key in impute_vars:
             # Extraction du nom de la variable de la clé
-            var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
+            _, var_name = split_variable_key(var_key)
 
             # Préparation des données d'entraînement dans la fenêtre stricte
             if hasattr(self, '_imputation_window_calc') and self._imputation_window_calc._is_fitted:
@@ -1066,11 +1088,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Extraction de la fréquence de prédiction s'il s'agit d'un dictionnaire
         if isinstance(pred_freq, dict):
             if isinstance(var_key, tuple):
-                # Création des deux systèmes de clé
-                entity = var_key[:-1] if len(var_key) > 2 else var_key[0]
-                entity_key = entity if isinstance(entity, tuple) else (entity,)
-                # Extraction de la fréquence
-                pf = pred_freq.get(entity_key) or pred_freq.get(entity)
+                # Décomposition de la clé et accès DIRECT : la variable est
+                # imputée à cette étape, donc son entité y figure (§5.4)
+                entity, _ = split_variable_key(var_key)
+                pf = pred_freq[entity]
             else:
                 pf = list(pred_freq.values())[0]
         else:
@@ -1127,10 +1148,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Cas des données de panel : l'entité fait partie de la clé de bloc
         periods = index.get_level_values(-1).to_period(base)
         entity_index = index.droplevel(-1)
-        entity_tuples = [
-            key if isinstance(key, tuple) else (key,)
-            for key in entity_index
-        ]
+        # Normalisation en tuple : "droplevel" rend des scalaires pour un panel
+        # à un seul niveau d'entité
+        entity_tuples = [normalize_entity_key(key) for key in entity_index]
         membership = pd.Series(
             list(zip(entity_tuples, periods)), index=index, dtype=object
         )
@@ -1591,7 +1611,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             column back to the scale it carries at prediction time.
         """
         # Extraction du nom de la variable
-        var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
+        _, var_name = split_variable_key(var_key)
 
         # Détermination des colonnes de features
         feature_cols = [
@@ -1635,7 +1655,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Sélection des covariables strictement plus fréquentes que la variable
         feature_agg_keys = [
             key for key in self._classify_variables_at_frequency(f_var)['aggregate']
-            if (key[-1] if isinstance(key, tuple) else key) != var_name
+            if split_variable_key(key)[1] != var_name
         ]
         X_features = self._freq_aligner.aggregate_to_target(
             X_stage, feature_agg_keys, f_var, self.is_panel_
@@ -1687,7 +1707,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """
         # Table nom de colonne -> fréquence détectée, tous panels confondus
         column_frequencies = {
-            (key[-1] if isinstance(key, tuple) else key): freq
+            split_variable_key(key)[1]: freq
             for key, freq in self.detected_frequencies_.items()
         }
 
@@ -2100,22 +2120,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Parcours des variables à imputer
         for key in self.imputation_order_:
-            # Extraction du nom de la variable
-            var_name = key[-1] if isinstance(key, tuple) else key
+            # Décomposition de la clé : entité toujours en tuple
+            entity, var_name = split_variable_key(key)
             # Extraction de la fréquence source
             source_freq = self.detected_frequencies_[key]
 
-            # Extraction de la fréquence cible
-            if self.is_panel_ and isinstance(key, tuple):
-                # Normalisation de l'entité sous forme de tuple
-                entity_key = normalize_entity_key(key[:-1])
-                if isinstance(self.effective_target_frequency_, dict):
-                    target_freq = (
-                        self.effective_target_frequency_.get(entity_key)
-                        or self.effective_target_frequency_.get(entity_key[0])
-                    )
-                else:
-                    target_freq = self.effective_target_frequency_
+            # Extraction de la fréquence cible : accès DIRECT par tuple d'entité
+            # (§5.4) — le double lookup défensif qui existait ici est ce qui
+            # masquait le désaccord de format à l'origine du KeyError de §1.5
+            if self.is_panel_ and entity and isinstance(self.effective_target_frequency_, dict):
+                target_freq = self.effective_target_frequency_[entity]
             else:
                 target_freq = self.effective_target_frequency_
 
@@ -2330,7 +2344,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # "self._freq_aligner.get_entity_mask".
             vars_in_stage: "OrderedDict[Tuple[str, str], List[Union[str, Tuple]]]" = OrderedDict()
             for var_key in ordered_impute_keys:
-                var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
+                _, var_name = split_variable_key(var_key)
                 freq_norm = normalize_frequency(
                     self.detected_frequencies_[var_key], return_format='base'
                 )
@@ -2365,7 +2379,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     'var_name': var_name,
                     'f_var': freq_norm,
                     'entities': (
-                        [normalize_entity_key(k[:-1]) for k in var_keys]
+                        [split_variable_key(k)[0] for k in var_keys]
                         if self.is_panel_ and isinstance(var_keys[0], tuple)
                         else None
                     ),

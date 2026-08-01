@@ -42,6 +42,39 @@ def normalize_entity_key(key) -> tuple:
         return key
     return (key,)
 
+# Fonction de décomposition d'une clé de variable en (entité, colonne)
+def split_variable_key(key: Union[str, Tuple]) -> Tuple[tuple, str]:
+    """Split a variable key into its entity tuple and its column name.
+
+    A panel variable key is an ``(entity..., column)`` tuple, as produced by
+    ``detect_dataset_frequency``; a time series key is a plain column name.
+    The entity part is ALWAYS returned as a tuple — ``('FR',)`` for a
+    single-level panel, ``()`` for a time series — so callers never have to
+    branch on the number of entity levels, and the returned entity always
+    matches the keys of :func:`get_unique_panel_entities`.
+
+    Args:
+        key: Variable identifier: a column name, or an ``(entity..., column)``
+            tuple.
+
+    Returns:
+        Tuple ``(entity_tuple, column)``.
+
+    Examples:
+        >>> split_variable_key(('FR', 'gdp'))
+        (('FR',), 'gdp')
+        >>> split_variable_key(('FR', 'manufacturing', 'gdp'))
+        (('FR', 'manufacturing'), 'gdp')
+        >>> split_variable_key('gdp')
+        ((), 'gdp')
+    """
+    # Cas d'une clé de série temporelle : aucune entité
+    if not isinstance(key, tuple):
+        return (), key
+
+    # Cas d'une clé de panel : l'entité est toujours le préfixe de la clé
+    return tuple(key[:-1]), key[-1]
+
 # Fonction d'identification des unités d'un panel
 def get_unique_panel_entities(panel_data: Union[pd.DataFrame, pd.Series]) -> List[tuple]:
     """Extract unique entities from panel data.
@@ -95,15 +128,8 @@ def group_keys_by_entity_and_variable(
 
     # Parcours des clés
     for key in keys:
-        # Distinction suivant le type de la clé
-        if isinstance(key, tuple):
-            # Extraction de l'entité et de la colonne de la clé
-            entity = normalize_entity_key(key[:-1])
-            col = key[-1]
-        else:
-            # Cas où il n'y a pas d'entité
-            entity = ()
-            col = key
+        # Décomposition de la clé : entité toujours en tuple, () hors panel
+        entity, col = split_variable_key(key)
         # Initialisation de l'entité si elle n'existe pas déjà
         if entity not in grouped:
             grouped[entity] = []

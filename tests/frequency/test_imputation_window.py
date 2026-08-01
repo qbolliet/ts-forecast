@@ -7,8 +7,36 @@ comportement actuel bogué) et référencent la section de la revue concernée.
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.linear_model import LinearRegression
 
+from tsforecast.frequency.detector import detect_index_frequency
+from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
 from tsforecast.frequency.imputation_window import ImputationWindowCalculator
+from tsforecast.panel.utils import get_unique_panel_entities, split_variable_key
+
+
+# Fonction auxiliaire de construction d'un panel mixte à N niveaux d'entité
+def _make_panel(entities, n_periods=36):
+    """Build a two-column monthly panel indexed by the given entity tuples.
+
+    Args:
+        entities: List of entity tuples, all of the same length.
+        n_periods: Number of monthly dates per entity.
+
+    Returns:
+        Panel DataFrame with a MultiIndex (entity levels..., date).
+    """
+    dates = pd.date_range('2020-01-01', periods=n_periods, freq='MS')
+    n_levels = len(entities[0])
+    # Construction du MultiIndex (niveaux d'entité + date)
+    tuples = [(*entity, date) for entity in entities for date in dates]
+    names = [f'level_{i}' for i in range(n_levels)] + ['date']
+    idx = pd.MultiIndex.from_tuples(tuples, names=names)
+    n_rows = len(idx)
+    return pd.DataFrame({
+        'a': np.arange(n_rows, dtype=float),
+        'b': np.arange(n_rows, dtype=float) * 2,
+    }, index=idx)
 
 
 class TestGetImputationWindowMaskAlignment:
@@ -108,9 +136,140 @@ class TestColumnCoveragePanel:
         calc = ImputationWindowCalculator(coverage_threshold=0.5)
         calc.fit(df)
 
-        # Un dict par entité (une clé par entité, cf. convention existante de
-        # _fit_panel : scalaire pour un panel à un seul niveau -- §3.4, hors
-        # périmètre, normaliserait en tuple), pas un unique dict de colonnes
-        assert set(calc.column_coverage_.keys()) == {'A', 'B'}
+        # Un dict par entité (une clé par entité), pas un unique dict de colonnes.
+        # Les clés sont des tuples y compris à un seul niveau d'entité (§3.4).
+        assert set(calc.column_coverage_.keys()) == {('A',), ('B',)}
         for col_coverage in calc.column_coverage_.values():
             assert set(col_coverage.keys()) == {'a', 'b'}
+
+
+class TestEntityKeysAreAlwaysTuples:
+    """§3.4/§5.4 : une représentation UNIQUE des clés d'entité, le tuple.
+
+    Le tuple s'impose à tous les niveaux d'entité, y compris un seul :
+    ``('France',)`` et jamais ``'France'``. Sans cela, chaque consommateur doit
+    compenser par un double lookup défensif, et c'est ce masquage qui a laissé
+    passer le ``KeyError`` de §1.5.
+    """
+
+    # Attributs dict de ImputationWindowCalculator indexés par entité
+    ENTITY_KEYED_ATTRS = (
+        'imputation_window_start_',
+        'imputation_window_end_',
+        'imputation_window_mask_',
+        'coverage_by_date_',
+        'column_coverage_',
+        'index_freq_',
+    )
+
+    @pytest.mark.parametrize(
+        'entities',
+        [
+            pytest.param([('A',), ('B',)], id='one_entity_level'),
+            pytest.param([('A', 'x'), ('B', 'y')], id='two_entity_levels'),
+        ],
+    )
+    def test_entity_keys_are_always_tuples(self, entities):
+        """Tous les dicts du calculateur sont indexés par get_unique_panel_entities."""
+        df = _make_panel(entities)
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        calc.fit(df)
+
+        expected = set(get_unique_panel_entities(df))
+        # Les entités attendues sont bien des tuples, même à un seul niveau
+        assert expected == set(entities)
+
+        # Critère d'acceptation n°1 : mêmes clés que get_unique_panel_entities
+        for attr in self.ENTITY_KEYED_ATTRS:
+            keys = set(getattr(calc, attr))
+            assert keys == expected, f"{attr} indexé par {keys}, attendu {expected}"
+            # Aucune clé scalaire ne doit subsister pour un panel à 1 niveau
+            assert all(isinstance(key, tuple) for key in keys), attr
+
+    @pytest.mark.parametrize(
+        'entities',
+        [
+            pytest.param([('A',), ('B',)], id='one_entity_level'),
+            pytest.param([('A', 'x'), ('B', 'y')], id='two_entity_levels'),
+        ],
+    )
+    def test_detect_index_frequency_keys_are_tuples(self, entities):
+        """detect_index_frequency indexe par tuple, comme le promet sa docstring."""
+        df = _make_panel(entities)
+
+        result = detect_index_frequency(df.index)
+
+        assert set(result) == set(entities)
+        assert all(isinstance(key, tuple) for key in result)
+
+    @pytest.mark.parametrize(
+        'entities',
+        [
+            pytest.param([('A',), ('B',)], id='one_entity_level'),
+            pytest.param([('A', 'x'), ('B', 'y')], id='two_entity_levels'),
+        ],
+    )
+    def test_consumers_accept_the_tuple_key(self, entities):
+        """get_columns_with_coverage et get_mask_at_frequency acceptent le tuple."""
+        df = _make_panel(entities)
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        calc.fit(df)
+
+        entity = entities[0]
+        start = calc.imputation_window_start_[entity]
+        end = calc.imputation_window_end_[entity]
+
+        # Entité fournie : une liste de colonnes, pas un dict par entité
+        columns = calc.get_columns_with_coverage(start, end, entity=entity)
+        assert isinstance(columns, list)
+        assert set(columns) == {'a', 'b'}
+
+        # Entité omise : un dict indexé par tuple
+        per_entity = calc.get_columns_with_coverage(start, end)
+        assert set(per_entity) == set(entities)
+
+        # Masque à fréquence inférieure : dict indexé par tuple lui aussi
+        mask_at_year = calc.get_mask_at_frequency('YS')
+        assert set(mask_at_year) == set(entities)
+
+    def test_unknown_entity_raises_instead_of_silently_returning_empty(self):
+        """Une clé inconnue lève un KeyError : c'est un vrai bug, pas un repli."""
+        df = _make_panel([('A',), ('B',)])
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        calc.fit(df)
+        start = calc.imputation_window_start_[('A',)]
+        end = calc.imputation_window_end_[('A',)]
+
+        with pytest.raises(KeyError):
+            calc.get_columns_with_coverage(start, end, entity=('ZZ',))
+
+    def test_split_variable_key_normalizes_every_level(self):
+        """split_variable_key rend toujours un tuple d'entité, () hors panel."""
+        assert split_variable_key(('FR', 'gdp')) == (('FR',), 'gdp')
+        assert split_variable_key(('FR', 'manufacturing', 'gdp')) == (
+            ('FR', 'manufacturing'), 'gdp'
+        )
+        assert split_variable_key('gdp') == ((), 'gdp')
+
+    @pytest.mark.parametrize(
+        'entities',
+        [
+            pytest.param([('A',), ('B',)], id='one_entity_level'),
+            pytest.param([('A', 'x'), ('B', 'y')], id='two_entity_levels'),
+        ],
+    )
+    def test_imputer_normalizes_user_supplied_target_frequency_keys(self, entities):
+        """Les clés d'entité fournies par l'utilisateur sont normalisées en tuple."""
+        df = _make_panel(entities)
+        # Clés utilisateur volontairement "brutes" : scalaires quand c'est possible
+        user_keys = [
+            entity[0] if len(entity) == 1 else entity
+            for entity in entities
+        ]
+        imputer = HighFrequencyImputer(
+            target_frequency={key: 'M' for key in user_keys},
+            estimator=LinearRegression(),
+        )
+
+        assert set(imputer.target_frequency) == set(entities)
+        assert all(isinstance(key, tuple) for key in imputer.target_frequency)

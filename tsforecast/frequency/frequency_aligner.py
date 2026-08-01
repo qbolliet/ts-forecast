@@ -34,6 +34,7 @@ from ..panel.utils import (
     extract_column_names,
     get_entity_mask,
     get_entity_target_frequency,
+    split_variable_key,
 )
 
 # Détection de la fréquence de l'index
@@ -611,8 +612,8 @@ class FrequencyAligner:
 
         # Classification des clés selon la relation fréquence source / fréquence cible
         for key in keys:
-            # Extraction de la colonne
-            col = key[-1] if isinstance(key, tuple) else key
+            # Décomposition de la clé : entité toujours en tuple, () hors panel
+            entity, col = split_variable_key(key)
             # Vérification que la colonne est dans le jeu de données
             if col not in df.columns:
                 continue
@@ -621,8 +622,9 @@ class FrequencyAligner:
             # Extraction de la fréquence source
             source_freq = freq_map.get(lookup_key)
             # Fréquence cible : globale pour TS, par entité pour panel
-            entity = key[:-1] if is_panel and isinstance(key, tuple) else ()
-            key_target = self.get_entity_target_frequency(entity, target_frequency)
+            key_target = self.get_entity_target_frequency(
+                entity if is_panel else (), target_frequency
+            )
             # Orientation de la conversion
             if source_freq and is_higher_frequency(
                 normalize_frequency(key_target),

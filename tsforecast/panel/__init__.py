@@ -3,6 +3,7 @@ from .transformers import PanelwiseTransformer
 from .utils import (
     is_panel_data,
     normalize_entity_key,
+    split_variable_key,
     get_unique_panel_entities,
     group_keys_by_entity_and_variable,
     extract_column_names,
@@ -16,6 +17,7 @@ __all__ = [
     'PanelwiseTransformer',
     'is_panel_data',
     'normalize_entity_key',
+    'split_variable_key',
     'get_unique_panel_entities',
     'group_keys_by_entity_and_variable',
     'extract_column_names',

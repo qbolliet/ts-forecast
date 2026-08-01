@@ -180,7 +180,8 @@ class FrequencyDetector:
 
         Returns:
             - For simple series: Detected frequency as string, or None if detection fails
-            - For MultiIndex series: Dictionary mapping panel_id to frequencies
+            - For MultiIndex series: Dictionary mapping panel_id to frequencies.
+              Panel ids are ALWAYS tuples, even for a single entity level.
 
         Raises:
             ValueError: If series has insufficient non-null observations or invalid index
@@ -201,7 +202,7 @@ class FrequencyDetector:
             ... ], names=['panel_id', 'date'])
             >>> series = pd.Series([1, 2, 3, 4, 5, 6], index=idx)
             >>> detector.detect_frequency(series)
-            {'A': 'D', 'B': 'D'}
+            {('A',): 'D', ('B',): 'D'}
         """
         # Cas d'une série temporelle simple
         if not isinstance(series.index, pd.MultiIndex):
@@ -290,7 +291,12 @@ class FrequencyDetector:
             return_format: Output format for the detected frequency
 
         Returns:
-            Dictionary mapping (panel_id, column) to frequencies
+            Dictionary mapping FLATTENED ``(entity..., column)`` tuples to
+            frequencies: the entity part is spliced into the key rather than
+            nested, so a single-level panel yields ``('FR', 'gdp')`` and a
+            two-level panel ``('FR', 'manufacturing', 'gdp')``. Use
+            :func:`tsforecast.panel.utils.split_variable_key` to split a key
+            back into its ``(entity_tuple, column)`` parts.
         """
         # Initialisation du dictionnaire des fréquences
         frequency_map = {}
@@ -826,7 +832,10 @@ def detect_index_frequency(
 
     Returns:
         For DatetimeIndex: Frequency in the requested format
-        For MultiIndex: Dict mapping entity keys (tuple) to frequencies.
+        For MultiIndex: Dict mapping entity keys to frequencies. Entity keys
+            are ALWAYS tuples, even for a single entity level (``('FR',)``,
+            never ``'FR'``), so that they match the keys produced by
+            ``get_unique_panel_entities`` and ``detect_dataset_frequency``.
 
     Raises:
         ValueError: If frequency cannot be detected or if the index has
@@ -869,7 +878,9 @@ def detect_index_frequency(
             dates = index.get_level_values(date_level_idx)[mask]
             # Appel récursif pour déterminer la fréquence
             freq = detect_index_frequency(dates, return_format=return_format)
-            result[entity_key] = freq
+            # Clé d'entité TOUJOURS normalisée en tuple : "entity_index.unique()"
+            # rend des scalaires quand le panel n'a qu'un seul niveau d'entité
+            result[normalize_entity_key(entity_key)] = freq
 
         return result
     else:
