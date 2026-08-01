@@ -17,8 +17,10 @@ concernée ; ils doivent tomber un par un au fil des correctifs.
 
 Correctifs déjà appliqués et couverts sans ``xfail`` : §2.1 (facteur
 d'échelle), §2.2 / §5.1 (frames d'étape), §2.3 / §5.2 (registre de modèles
-indexé par étape) et §2.4 (déduplication des fits panel, voir
-`test_high_frequency_imputer.py::TestPanelSingleFitPerVariable`).
+indexé par étape), §2.4 (déduplication des fits panel, voir
+`test_high_frequency_imputer.py::TestPanelSingleFitPerVariable`) et §2.5
+(sortie multi-fréquences : niveaux reconstruits après imputation, plus de
+label 'target' dupliqué).
 """
 import warnings
 
@@ -66,13 +68,20 @@ def _run_hfi(data: pd.DataFrame, cascade_refitting: bool, keep_lower_frequencies
 
 
 def _target_level_frame(
+    imputer: HighFrequencyImputer,
     result: pd.DataFrame,
     keep_lower_frequencies: bool,
 ) -> pd.DataFrame:
-    """Extract the target-frequency level from a (possibly multi-freq) result."""
+    """Extract the target-frequency level from a (possibly multi-freq) result.
+
+    Since §2.5's fix, the target level keeps its real frequency label
+    (e.g. 'M') instead of the generic 'target' one, so it must be looked
+    up via `effective_target_frequency_` rather than a hardcoded label.
+    """
     if not keep_lower_frequencies:
         return result
-    return result.xs('target', level='frequency')
+    target_label = imputer._stage_frequency_label(imputer.effective_target_frequency_)
+    return result.xs(target_label, level='frequency')
 
 
 def _index_as_set(index: pd.Index) -> set:
@@ -109,7 +118,7 @@ class TestRowCountAndCoverage:
         data = request.getfixturevalue(dataset_name)
         imputer, result = _run_hfi(data, cascade_refitting, keep_lower_frequencies)
 
-        target_frame = _target_level_frame(result, keep_lower_frequencies)
+        target_frame = _target_level_frame(imputer, result, keep_lower_frequencies)
 
         assert _index_as_set(target_frame.index) == _index_as_set(data.index)
 
@@ -120,7 +129,7 @@ class TestRowCountAndCoverage:
         data = request.getfixturevalue(dataset_name)
         imputer, result = _run_hfi(data, cascade_refitting, keep_lower_frequencies)
 
-        target_frame = _target_level_frame(result, keep_lower_frequencies)
+        target_frame = _target_level_frame(imputer, result, keep_lower_frequencies)
         fully_nan_cols = [c for c in target_frame.columns if target_frame[c].isna().all()]
 
         assert fully_nan_cols == []
@@ -142,21 +151,7 @@ class TestModelRegistry:
 class TestMultiFrequencyOutput:
     """§2.5 : la sortie multi-fréquences ne doit pas dupliquer le dernier niveau."""
 
-    @pytest.mark.parametrize(
-        'param',
-        [
-            pytest.param(
-                p, id=_scenario_id(p),
-                marks=pytest.mark.xfail(
-                    strict=True,
-                    reason="§2.5 high_frequency_imputer_review.md : le frame final est "
-                           "ajouté deux fois, sous le label de fréquence réel ('M') et "
-                           "sous le label générique 'target', avec un contenu identique.",
-                ),
-            )
-            for p in KEEP_LOWER_SCENARIOS
-        ],
-    )
+    @pytest.mark.parametrize('param', KEEP_LOWER_SCENARIOS, ids=_scenario_id)
     def test_no_duplicate_target_label(self, request, param):
         """Le niveau 'target' ne doit pas coexister avec le label de fréquence réel."""
         dataset_name, cascade_refitting, keep_lower_frequencies = param

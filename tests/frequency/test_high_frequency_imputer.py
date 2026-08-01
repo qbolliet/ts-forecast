@@ -1083,7 +1083,8 @@ class TestPanelSingleFitPerVariable:
         # entrée, obtiennent des imputations identiques (à un bruit de somme
         # flottante près) -- ce qui n'était vrai qu'accessoirement avant la
         # déduplication (3 fits redondants mais mathématiquement identiques)
-        target_level = result.xs('target', level='frequency')
+        target_label = imputer._stage_frequency_label(imputer.effective_target_frequency_)
+        target_level = result.xs(target_label, level='frequency')
         annual_col = target_level['variable_annuelle']
         france = annual_col.xs('France', level='entity')
         allemagne = annual_col.xs('Allemagne', level='entity')
@@ -1184,7 +1185,8 @@ class TestStageFramesRebuiltFromOriginal:
         )
         result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
 
-        target_level = result.xs('target', level='frequency')
+        target_label = imputer._stage_frequency_label(imputer.effective_target_frequency_)
+        target_level = result.xs(target_label, level='frequency')
 
         _assert_dense_columns_untouched(target_level, mixed_freq_timeseries)
 
@@ -1400,7 +1402,10 @@ class TestFitCountByCascadeRefitting:
             keep_lower_frequencies=True,
         )
         result_cascade = _fit_transform_quiet(imputer_cascade, data)
-        target_level = result_cascade.xs('target', level='frequency')
+        target_label = imputer_cascade._stage_frequency_label(
+            imputer_cascade.effective_target_frequency_
+        )
+        target_level = result_cascade.xs(target_label, level='frequency')
 
         # Les imputations mensuelles de l'annuelle sont au même niveau que
         # celles obtenues sans étape intermédiaire

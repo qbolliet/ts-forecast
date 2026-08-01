@@ -72,9 +72,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             when True, one per imputable variable when False — the model is
             then reused at the following stages, only its ``scale_factor``
             changing, predictions being rescaled accordingly.
-        keep_lower_frequencies: If True, output includes all intermediate frequencies
-            in a MultiIndex structure (Entity, Frequency, Date) for panel or
-            (Frequency, Date) for time series.
+        keep_lower_frequencies: If True, output includes all intermediate
+            frequencies in a MultiIndex structure: (entity, frequency, date)
+            for panel data, (frequency, date) for time series. Every level,
+            including the target-frequency one, is labeled with its real
+            frequency string — never 'target' — so the target level is
+            identified via effective_target_frequency_. If False, the
+            output is the plain frame of the last cascade stage (target
+            frequency), with no frequency level in its index.
         delays: Publication delays DataFrame with columns:
             column, delay, unit, reference_point.
         impute_delayed_values: Whether to impute values affected by publication delays.
@@ -207,8 +212,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 the first stage where it is imputable, then reused at the
                 following stages with the scale factor of the stage.
             keep_lower_frequencies: If True, output includes all intermediate
-                frequencies in a MultiIndex structure. If False, only target
-                frequency is returned.
+                frequencies in a MultiIndex structure — (entity, frequency,
+                date) for panel data, (frequency, date) for time series —
+                every level labeled with its real frequency string (the
+                target level is identified via effective_target_frequency_,
+                not by a dedicated 'target' label). If False, only the
+                target frequency is returned as a plain frame.
             impute_delayed_values: Whether to impute values affected by
                 publication delays. Default is False.
             delays: Publication delays DataFrame with columns:
@@ -895,6 +904,53 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if isinstance(pred_freq, dict):
             return frozenset(pred_freq.items())
         return pred_freq
+
+    # Méthode auxiliaire de construction d'un label de fréquence lisible pour une étape
+    def _stage_frequency_label(self, pred_freq: Union[str, Dict]) -> str:
+        """Build a human-readable frequency label for a cascade stage.
+
+        Used both as the ``stage_frames`` key and as the value of the
+        ``frequency`` level in the multi-frequency output (see review
+        §2.5): every level, including the last (target) one, keeps its
+        real frequency label — no level is ever named ``'target'``. The
+        target level remains identifiable via ``effective_target_frequency_``.
+
+        Labeling rule for panel stages (``pred_freq`` a dict entity ->
+        frequency): if every entity of the stage shares the same
+        frequency, that shared frequency is the label; otherwise a
+        composite label lists each entity's frequency, sorted by entity
+        key for determinism.
+
+        Args:
+            pred_freq: Prediction frequency of the stage (str for a time
+                series, dict entity -> frequency for a panel).
+
+        Returns:
+            Frequency label string.
+
+        Examples:
+            >>> imputer._stage_frequency_label('M')
+            'M'
+            >>> imputer._stage_frequency_label({('FR',): 'Q', ('DE',): 'Q'})
+            'Q'
+            >>> imputer._stage_frequency_label({('FR',): 'Q', ('DE',): 'M'})
+            "('DE',)=M+('FR',)=Q"
+        """
+        # Cas d'une fréquence unique (séries temporelles)
+        if not isinstance(pred_freq, dict):
+            return str(pred_freq)
+
+        # Cas d'un panel : fréquence partagée par toutes les entités de l'étape
+        unique_freqs = {
+            normalize_frequency(freq, return_format='base')
+            for freq in pred_freq.values()
+        }
+        if len(unique_freqs) == 1:
+            return unique_freqs.pop()
+
+        # Fréquences hétérogènes : label composite, trié pour être déterministe
+        parts = sorted(f"{entity}={freq}" for entity, freq in pred_freq.items())
+        return "+".join(parts)
 
     # Méthode auxiliaire de calcul du facteur de mise à l'échelle d'une étape
     def _stage_scale_factor(
@@ -1939,9 +1995,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X_input = data_transformed
         # Imputations déjà réalisées, alimentant les covariables des étapes suivantes
         imputed_store: Dict[str, pd.Series] = {}
-        intermediate_results: Dict[str, pd.DataFrame] = {}
+        # Frames d'étape APRÈS imputations, par label de fréquence réel (§2.5) :
+        # alimenté après la boucle d'imputation de chaque étape, jamais avant
+        stage_frames: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
 
-        for pred_freq in self.freq_prediction_list_:
+        for stage_idx, pred_freq in enumerate(self.freq_prediction_list_):
             # Classification des variables relative à pred_freq
             var_classification = self._classify_variables_at_frequency(pred_freq)
             aggregate_keys = var_classification['aggregate']
@@ -1953,28 +2011,25 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
 
             # Extraction des étapes d'entraînement associées à cette fréquence
-            stage_label = self._freq_label(pred_freq)
+            registry_label = self._freq_label(pred_freq)
             stage_keys = [
                 key for key in self.model_fitting_order_
-                if key[0] == stage_label
+                if key[0] == registry_label
             ]
 
-            # Stockage du résultat intermédiaire si keep_lower_frequencies
-            # Seules les étapes ayant produit au moins un modèle constituent un niveau
-            if self.keep_lower_frequencies and stage_keys:
-                level_label = (
-                    str(pred_freq) if isinstance(pred_freq, str)
-                    else str(list(pred_freq.values())[0]) if pred_freq else 'unknown'
-                )
-                intermediate_results[level_label] = X_stage.copy()
+            # Label de fréquence réel de l'étape (jamais 'target', cf. §2.5)
+            freq_label = self._stage_frequency_label(pred_freq)
+            is_final_stage = stage_idx == len(self.freq_prediction_list_) - 1
 
             # Parcours des variables imputées à cette étape
             for stage_key in stage_keys:
                 # "group_key" est la variable seule, ou (variable, fréquence
                 # détectée) pour un panel hétérogène en fréquence (cf. §2.4) : la
                 # variable est toujours la première composante, contrairement aux
-                # anciennes clés (entité..., variable)
-                freq_label, group_key = stage_key
+                # anciennes clés (entité..., variable). Ne pas réutiliser le nom
+                # "freq_label" ici : il porte le label lisible de l'étape,
+                # utilisé après la boucle pour "stage_frames"
+                _, group_key = stage_key
                 var_name = group_key[0] if isinstance(group_key, tuple) else group_key
 
                 # Récupérer model_info
@@ -2041,20 +2096,27 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         method='linear', limit_direction='both'
                     )
 
+            # Stockage du frame d'étape APRÈS les imputations de l'étape (§2.5) :
+            # un niveau par étape ayant produit au moins un modèle, plus la
+            # dernière étape (fréquence cible) même sans imputation propre,
+            # nécessaire à la sortie sans MultiIndex ci-dessous
+            if stage_keys or is_final_stage:
+                stage_frames[freq_label] = X_stage.copy()
+
             # Le frame de la dernière étape porte le résultat à la fréquence cible
             data_transformed = X_stage
+            final_stage_label = freq_label
 
         # 4. Imputer valeurs retardées si demandé
         if self.impute_delayed_values:
             data_transformed = self._impute_delayed_values(data_transformed)
+            stage_frames[final_stage_label] = data_transformed
 
         # 5. Construire sortie MultiIndex si keep_lower_frequencies
-        if self.keep_lower_frequencies and intermediate_results:
-            data_result = self._build_multifreq_output(
-                data_transformed, intermediate_results
-            )
+        if self.keep_lower_frequencies and stage_frames:
+            data_result = self._build_multifreq_output(stage_frames)
         else:
-            data_result = data_transformed
+            data_result = stage_frames[final_stage_label]
 
         # 6. Mise à jour de la provenance
         self.imputation_provenance_ = transform_tracker.get_provenance_matrix()
@@ -2072,30 +2134,39 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     def _build_multifreq_output(
         self,
-        final_result: pd.DataFrame,
-        intermediate_results: Dict[str, pd.DataFrame]
+        stage_frames: "OrderedDict[str, pd.DataFrame]",
     ) -> pd.DataFrame:
-        """Build MultiIndex output with all frequency levels.
+        """Stack every useful cascade stage into one multi-frequency frame.
+
+        Backs ``keep_lower_frequencies=True`` (review §2.5). Each stage
+        frame is expected to already carry the imputations performed at
+        that stage — callers must populate ``stage_frames`` *after* the
+        imputation loop of a stage, never right after aggregation, or the
+        corresponding level would miss that stage's imputed values.
 
         Args:
-            final_result: Final DataFrame at target frequency.
-            intermediate_results: Dict mapping frequency labels to DataFrames.
+            stage_frames: Stage frames keyed by real frequency label (see
+                :meth:`_stage_frequency_label`), one entry per stage that
+                produced at least one imputation model, plus the final
+                (target-frequency) stage. Insertion order fixes the
+                stacking order and therefore the level order in the
+                output index.
 
         Returns:
-            DataFrame with MultiIndex:
-            - Time series: (Frequency, Date)
-            - Panel: (Entity, Frequency, Date)
+            DataFrame with a MultiIndex:
+            - Time series: ``(frequency, date)``
+            - Panel: ``(entity, frequency, date)``
+            Every level — including the target-frequency one — keeps its
+            real frequency label; no level is named ``'target'``. The
+            target level is identified via ``effective_target_frequency_``,
+            not via a dedicated label.
         """
         all_frames = []
 
-        for freq_label, df in intermediate_results.items():
+        for freq_label, df in stage_frames.items():
             df_copy = df.copy()
             df_copy['_frequency_level'] = freq_label
             all_frames.append(df_copy)
-
-        final_copy = final_result.copy()
-        final_copy['_frequency_level'] = 'target'
-        all_frames.append(final_copy)
 
         combined = pd.concat(all_frames, ignore_index=False)
 
