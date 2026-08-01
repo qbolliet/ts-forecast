@@ -2410,3 +2410,32 @@ class TestInverseTransformRestoresOriginal:
             mixed_freq_timeseries.loc[disaggregated, 'pib_trimestriel'],
             check_freq=False,
         )
+
+
+class TestNoStrictImputationWindowWarns:
+    """§3.6 : le fit avertit explicitement quand aucune fenêtre stricte n'existe.
+
+    Avant le correctif, seul `ValueError` était intercepté en PHASE 1 : quand le
+    calculateur "réussit" avec des bornes `None` (deux colonnes dont les périodes
+    de couverture ne se chevauchent jamais : aucune date ne couvre toutes les
+    variables), `fit` continuait silencieusement et tous les entraînements
+    finissaient un à un en `interpolate_fallback`, sans message global expliquant
+    pourquoi.
+
+    Note : pour un panel, `_fit_panel` lève déjà `ValueError` quand *toutes* les
+    entités sont sans fenêtre (cf. except ValueError plus haut en PHASE 1) ; la
+    branche dict de la vérification ci-dessous reste donc défensive pour ce cas
+    précis et n'est pas retestée séparément ici.
+    """
+
+    def test_no_strict_window_warns_time_series(self):
+        """Deux colonnes sans chevauchement de couverture : warning explicite."""
+        imputer = HighFrequencyImputer(target_frequency='M')
+
+        dates = pd.date_range('2023-01-01', periods=12, freq='ME')
+        df = pd.DataFrame(index=dates)
+        df['col1'] = [float(i) for i in range(6)] + [np.nan] * 6
+        df['col2'] = [np.nan] * 6 + [float(i) for i in range(6)]
+
+        with pytest.warns(UserWarning, match="No strict imputation window"):
+            imputer.fit(df)

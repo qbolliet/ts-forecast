@@ -44,6 +44,17 @@ class ImputationWindowCalculator:
     For panel data (MultiIndex with entity levels + time level), windows
     are computed independently per entity.
 
+    The internal high-frequency grid (used for ``imputation_window_mask_``,
+    ``coverage_by_date_``, etc.) can extend past the last date actually
+    present in the fitted data: it spans to the end of the last period
+    covered by a low-frequency observation, which may fall after the last
+    high-frequency row (e.g. a quarterly observation covers 3 months of
+    grid even if only the first month exists as a row). Consumers must
+    therefore never intersect this mask directly (e.g. via a bare ``&``)
+    with a mask computed on their own data index; always go through
+    :meth:`get_imputation_window_mask` (optionally passing ``data``), which
+    reindexes/aligns the mask onto the caller's index.
+
     Attributes:
         imputation_window_start_: Start of the strict imputation window
             (coverage == 1.0). Scalar for time series,
@@ -59,7 +70,10 @@ class ImputationWindowCalculator:
         index_freq_: Detected highest frequency. str for time series,
             Dict[tuple, Optional[str]] for panel.
         column_coverage_: Dict mapping column names to (start, end)
-            coverage timestamps. Only populated for time series data.
+            coverage timestamps, for time series data. For panel data,
+            Dict[tuple, Optional[Dict[str, Tuple]]] mapping each entity
+            key to its own per-column coverage dict (one entry per
+            entity, not just the last one fitted).
 
     Examples:
         >>> import pandas as pd
@@ -127,7 +141,11 @@ class ImputationWindowCalculator:
         # Attributs auxiliaires
         self.coverage_by_date_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
         self.index_freq_: Optional[Union[str, Dict[tuple, Optional[str]]]] = None
-        self.column_coverage_: Optional[Dict[str, Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]]] = None
+        # Dict[str, Tuple] pour TS ; Dict[tuple, Optional[Dict[str, Tuple]]] par entité pour panel
+        self.column_coverage_: Optional[Union[
+            Dict[str, Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]],
+            Dict[tuple, Optional[Dict[str, Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]]]],
+        ]] = None
 
         # Attributs internes
         self._detected_frequencies: Optional[Dict] = None
@@ -276,7 +294,7 @@ class ImputationWindowCalculator:
 
             # Complétion des attributs auxiliaires
             self.coverage_by_date_[entity_key] = result['coverage']
-            self.column_coverage_ = result['column_coverage']
+            self.column_coverage_[entity_key] = result['column_coverage']
 
         # Vérification qu'au moins une entité a une fenêtre valide
         valid_starts = [v for v in self.imputation_window_start_.values() if v is not None]
@@ -572,11 +590,12 @@ class ImputationWindowCalculator:
         coverage: pd.Series,
         mask: pd.Series,
     ) -> pd.Series:
-        """Extend a boolean window mask backward where coverage meets threshold.
+        """Extend a boolean window mask backward while coverage meets the threshold.
 
-        Searches for dates strictly before the earliest True date of the
-        mask where coverage >= coverage_threshold, and sets them to True
-        in the returned mask.
+        Extension is contiguous: walking backward from the window start,
+        it stops at the first date whose coverage falls below the
+        threshold — a date beyond a below-threshold gap is never
+        activated, even if its own coverage would otherwise qualify.
 
         Args:
             coverage: coverage series on the high-freq grid.
@@ -585,8 +604,8 @@ class ImputationWindowCalculator:
 
         Returns:
             New boolean pd.Series with additional True values prepended
-            where coverage meets the threshold. Returns an unchanged copy
-            if no extension is possible.
+            where coverage contiguously meets the threshold. Returns an
+            unchanged copy if no extension is possible.
         """
         # Identification de la borne de début actuelle du masque
         masked_dates = mask.index[mask]
@@ -594,20 +613,20 @@ class ImputationWindowCalculator:
             return mask.copy()
         window_start = masked_dates.min()
 
-        # Extraction des observations de la série d'coverage antérieures à la borne actuelle
-        before = coverage[coverage.index < window_start]
+        # Extraction des observations antérieures, de la plus récente à la plus ancienne
+        before = coverage[coverage.index < window_start].sort_index(ascending=False)
         # Si la borne actuelle correspond au début de la grille, le masque est inchangé
         if before.empty:
             return mask.copy()
-        # Extraction des observations pour lesquelles l'coverage dépasse le seuil
-        valid = before[before >= self.coverage_threshold]
-        # Si aucune observation ne satisfait le seuil, le masque est inchangé
-        if valid.empty:
-            return mask.copy()
 
-        # Extension du masque : activation des dates satisfaisant le seuil
+        # Extension contiguë : n_valid = position du premier point sous le seuil
+        # (ou la longueur totale si aucun point ne le viole)
+        below = (before < self.coverage_threshold).to_numpy()
+        n_valid = int(np.argmax(below)) if below.any() else len(before)
+
+        # Activation des dates contiguës satisfaisant le seuil (no-op si n_valid == 0)
         new_mask = mask.copy()
-        new_mask[valid.index] = True
+        new_mask[before.index[:n_valid]] = True
         return new_mask
 
     # Méthode auxiliaire d'extension du masque d'entraînement après la fin de la fenêtre stricte
@@ -616,11 +635,12 @@ class ImputationWindowCalculator:
         coverage: pd.Series,
         mask: pd.Series,
     ) -> pd.Series:
-        """Extend a boolean window mask forward where coverage meets threshold.
+        """Extend a boolean window mask forward while coverage meets the threshold.
 
-        Searches for dates strictly after the latest True date of the mask
-        where coverage >= coverage_threshold, and sets them to True in
-        the returned mask.
+        Extension is contiguous: walking forward from the window end, it
+        stops at the first date whose coverage falls below the threshold —
+        a date beyond a below-threshold gap is never activated, even if
+        its own coverage would otherwise qualify.
 
         Args:
             coverage: coverage series on the high-freq grid.
@@ -629,8 +649,8 @@ class ImputationWindowCalculator:
 
         Returns:
             New boolean pd.Series with additional True values appended
-            where coverage meets the threshold. Returns an unchanged copy
-            if no extension is possible.
+            where coverage contiguously meets the threshold. Returns an
+            unchanged copy if no extension is possible.
         """
         # Identification de la borne de fin actuelle du masque
         masked_dates = mask.index[mask]
@@ -638,20 +658,20 @@ class ImputationWindowCalculator:
             return mask.copy()
         window_end = masked_dates.max()
 
-        # Extraction des observations de la série d'coverage postérieures à la borne actuelle
-        after = coverage[coverage.index > window_end]
+        # Extraction des observations postérieures, de la plus ancienne à la plus récente
+        after = coverage[coverage.index > window_end].sort_index(ascending=True)
         # Si la borne actuelle correspond à la fin de la grille, le masque est inchangé
         if after.empty:
             return mask.copy()
-        # Extraction des observations pour lesquelles l'coverage dépasse le seuil
-        valid = after[after >= self.coverage_threshold]
-        # Si aucune observation ne satisfait le seuil, le masque est inchangé
-        if valid.empty:
-            return mask.copy()
 
-        # Extension du masque : activation des dates satisfaisant le seuil
+        # Extension contiguë : n_valid = position du premier point sous le seuil
+        # (ou la longueur totale si aucun point ne le viole)
+        below = (after < self.coverage_threshold).to_numpy()
+        n_valid = int(np.argmax(below)) if below.any() else len(after)
+
+        # Activation des dates contiguës satisfaisant le seuil (no-op si n_valid == 0)
         new_mask = mask.copy()
-        new_mask[valid.index] = True
+        new_mask[after.index[:n_valid]] = True
         return new_mask
 
     # Méthode d'extraction du masque booléen de la fenêtre d'imputation
@@ -840,18 +860,29 @@ class ImputationWindowCalculator:
         self,
         start: pd.Timestamp,
         end: pd.Timestamp,
-    ) -> List[str]:
+        entity: Optional[tuple] = None,
+    ) -> Union[List[str], Dict[tuple, List[str]]]:
         """Get list of columns that have coverage in a given time range.
 
-        Only supported for time series data. Uses the first and last dates
-        where the column contributes True values to the coverage matrix.
+        For time series data, returns the list of covered columns directly.
+        For panel data, ``column_coverage_`` holds one per-column coverage
+        dict per entity: pass ``entity`` to query a single entity, or omit
+        it to get a dict mapping every entity key to its own covered-column
+        list.
 
         Args:
             start: Start of the query range.
             end: End of the query range.
+            entity: Panel entity key (tuple, or its normalized scalar form
+                for single-level entities). Ignored for time series data.
+                Required to get a List[str] result for panel data; if
+                omitted for panel data, a dict over all entities is
+                returned instead.
 
         Returns:
-            List of column names with coverage overlapping [start, end].
+            List of column names with coverage overlapping [start, end]
+            (time series, or panel with ``entity`` given). Dict mapping
+            each entity key to such a list (panel, ``entity`` omitted).
 
         Raises:
             ValueError: If calculator not fitted.
@@ -862,12 +893,48 @@ class ImputationWindowCalculator:
 
         # Cas où la couverture des colonnes n'est pas disponible
         if self.column_coverage_ is None:
+            return {} if (self._is_panel and entity is None) else []
+
+        # Cas des données de panel : couverture par entité
+        if self._is_panel:
+            if entity is not None:
+                entity_key = entity[0] if len(entity) == 1 else entity
+                col_coverage = self.column_coverage_.get(entity_key)
+                return self._columns_with_coverage(col_coverage, start, end)
+            return {
+                entity_key: self._columns_with_coverage(col_coverage, start, end)
+                for entity_key, col_coverage in self.column_coverage_.items()
+            }
+
+        # Cas des séries temporelles
+        return self._columns_with_coverage(self.column_coverage_, start, end)
+
+    # Méthode auxiliaire d'extraction des colonnes couvertes depuis un dict de couverture
+    def _columns_with_coverage(
+        self,
+        column_coverage: Optional[Dict[str, Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]]],
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> List[str]:
+        """Filter a single per-column coverage dict for overlap with [start, end].
+
+        Args:
+            column_coverage: Dict mapping column names to (start, end)
+                coverage timestamps, or None.
+            start: Start of the query range.
+            end: End of the query range.
+
+        Returns:
+            List of column names with coverage overlapping [start, end].
+        """
+        # Cas où la couverture des colonnes n'est pas disponible
+        if column_coverage is None:
             return []
 
         # Initialisation de la liste résultat
         columns_with_coverage = []
         # Parcours des colonnes
-        for col, (col_start, col_end) in self.column_coverage_.items():
+        for col, (col_start, col_end) in column_coverage.items():
             # Exclusion des colonnes sans couverture définie
             if col_start is None or col_end is None:
                 continue

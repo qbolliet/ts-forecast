@@ -41,16 +41,14 @@ class TestGetImputationWindowMaskAlignment:
 class TestExtensionContiguity:
     """§3.2 : l'extension du masque doit s'arrêter au premier trou de couverture."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="§3.2 high_frequency_imputer_review.md : _extend_backward active toutes "
-               "les dates antérieures dont la couverture dépasse le seuil, même séparées "
-               "de la fenêtre stricte par un trou sous le seuil (extension non contiguë).",
-    )
     def test_extension_stops_at_first_gap(self):
         """extended_backward n'active rien au-delà d'un trou sous le seuil."""
         dates = pd.date_range('2020-01-01', periods=20, freq='MS')
-        df = pd.DataFrame({'a': np.nan, 'b': np.nan}, index=dates, dtype=float)
+        # 'b' en premier : c'est la colonne contiguë sur la fenêtre stricte, utilisée
+        # pour détecter la position (S/E) de la grille -- 'a' a des trous et ferait
+        # échouer cette détection si elle était choisie en premier (hors périmètre
+        # §3.2, bug latent indépendant dans _build_index_freq_grid).
+        df = pd.DataFrame({'b': np.nan, 'a': np.nan}, index=dates, dtype=float)
 
         # Fenêtre stricte : couverture totale sur [10, 15)
         df.loc[dates[10:15], 'a'] = 1.0
@@ -97,12 +95,6 @@ class TestMaskAtFrequency:
 class TestColumnCoveragePanel:
     """§3.1 : column_coverage_ doit contenir une entrée par entité pour un panel."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="§3.1 high_frequency_imputer_review.md : _fit_panel écrase "
-               "self.column_coverage_ à chaque entité au lieu de l'indexer par entité "
-               "(hfi/iwc:L279), seule la dernière entité survit après fit().",
-    )
     def test_column_coverage_is_per_entity_for_panel(self):
         """column_coverage_ contient une entrée par entité, pas la dernière seule."""
         dates = pd.date_range('2020-01-01', periods=24, freq='MS')
@@ -116,5 +108,9 @@ class TestColumnCoveragePanel:
         calc = ImputationWindowCalculator(coverage_threshold=0.5)
         calc.fit(df)
 
-        # Un dict par entité (clés tuples), pas un unique dict de colonnes
-        assert set(calc.column_coverage_.keys()) == {('A',), ('B',)}
+        # Un dict par entité (une clé par entité, cf. convention existante de
+        # _fit_panel : scalaire pour un panel à un seul niveau -- §3.4, hors
+        # périmètre, normaliserait en tuple), pas un unique dict de colonnes
+        assert set(calc.column_coverage_.keys()) == {'A', 'B'}
+        for col_coverage in calc.column_coverage_.values():
+            assert set(col_coverage.keys()) == {'a', 'b'}

@@ -2237,6 +2237,21 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             else:
                 time_idx = X_work.index
             self.imputation_window_ = (time_idx.min(), time_idx.max())
+        else:
+            # Avertissement global si aucune fenêtre stricte n'existe (fit "réussi" mais
+            # bornes None) : sans cela, tous les entraînements échouent silencieusement
+            # un à un et tout finit en interpolate_fallback (cf. PHASE 5)
+            start = self._imputation_window_calc.imputation_window_start_
+            no_window = (
+                start is None if not isinstance(start, dict)
+                else all(v is None for v in start.values())
+            )
+            if no_window:
+                warnings.warn(
+                    "No strict imputation window found: no model can be trained; "
+                    "all imputations will fall back to interpolation.",
+                    UserWarning
+                )
 
         # =================================================================
         # PHASE 2 — Additive transformer
