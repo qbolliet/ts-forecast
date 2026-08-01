@@ -27,7 +27,6 @@ import pandas as pd
 # Utilitaires du package
 from ..utils.frequency.converter import FrequencyConverter
 from ..utils.frequency.utils import normalize_frequency, is_higher_frequency
-from ..utils.position.utils import combine_frequency_position
 from ..panel.utils import (
     get_unique_panel_entities,
     group_keys_by_entity_and_variable,
@@ -38,7 +37,7 @@ from ..panel.utils import (
 )
 
 # Détection de la fréquence de l'index
-from .detector import detect_frequency, detect_dataset_frequency, detect_index_frequency
+from .detector import detect_frequency, detect_dataset_frequency, target_offset_for_index
 
 
 # Classe d'alignement des fréquences de jeu de données avec des fréquences cibles
@@ -129,6 +128,7 @@ class FrequencyAligner:
         return get_entity_mask(X, entity)
 
     # Méthode auxiliaire de construction d'un offset positionné comme l'index source
+    # Délégation à la fonction utilitaire partagée de tsforecast.frequency.detector
     def _target_offset_for_index(
         self,
         index: pd.DatetimeIndex,
@@ -136,9 +136,7 @@ class FrequencyAligner:
     ) -> str:
         """Build a pandas offset for target_frequency anchored like the index.
 
-        Detects whether the source index is anchored at period start or end
-        and combines that position with the target frequency, so that
-        aggregated labels land on dates that exist in the source index.
+        Thin wrapper over :func:`tsforecast.frequency.detector.target_offset_for_index`.
 
         Args:
             index: Source DatetimeIndex.
@@ -147,16 +145,7 @@ class FrequencyAligner:
         Returns:
             Pandas offset alias (e.g. 'QS' for a month-start index).
         """
-        # Détection de la position (début/fin) de l'index source
-        try:
-            _, position, _ = detect_index_frequency(index, return_format='components')
-        except Exception:
-            position = None
-        # Combinaison fréquence cible + position détectée (défaut : début)
-        try:
-            return combine_frequency_position(target_frequency, position or 'S')
-        except Exception:
-            return target_frequency
+        return target_offset_for_index(index, target_frequency)
 
     # Méthode auxiliaire de sélection de la série à resampler
     @staticmethod

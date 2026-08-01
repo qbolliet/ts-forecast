@@ -15,7 +15,7 @@ delegates the actual conversions to this class.
 # Importation des modules
 import numpy as np
 import pandas as pd
-from typing import Union, Optional, Literal, Dict, Tuple, List
+from typing import Any, Union, Optional, Literal, Dict, Tuple, List
 from pandas.tseries.frequencies import to_offset
 
 # Import de la classe parente
@@ -39,7 +39,7 @@ from ..position.utils import (
 from ...panel.utils import is_panel_data
 
 # Types pour les méthodes d'agrégation et d'interpolation
-AggregationMethod = Literal['mean', 'sum', 'first', 'last', 'min', 'max', 'median', 'std', 'count']
+AggregationMethod = Literal['mean', 'sum', 'first', 'last', 'min', 'max', 'median', 'std', 'count', 'all', 'any']
 InterpolationMethod = Literal['linear', 'time', 'index', 'values', 'nearest', 'zero', 'slinear', 'quadratic', 'cubic']
 
 
@@ -458,12 +458,22 @@ class FrequencyConverter(TemporalConverter):
             data: Time series data to aggregate
             target_freq: Target frequency (must be lower than current), with
                 optional position ('MS', 'QE', etc.)
-            method: Aggregation method
+            method: Aggregation method. ``'all'``/``'any'`` reduce boolean
+                (or boolean-castable) data: ``'all'`` is True iff every
+                sub-period of the target period is present in ``data`` and
+                True (a period that is empty, or only partially present at
+                the edge of the source index, is always False — this
+                full-coverage check is intrinsic to ``'all'`` and applies
+                regardless of ``full_periods_only``); ``'any'`` is True iff
+                at least one present sub-period is True (an empty period is
+                False, matching ``pandas.Series.any()`` on an empty input).
             full_periods_only: If True, periods where the number of non-NaN
                 observations is strictly less than the expected sub-period count
                 (derived from the frequency conversion factor) are set to NaN.
                 For example, when aggregating monthly data to quarterly, a
                 quarter with only 2 valid months out of 3 will produce NaN.
+                Ignored for ``method='all'``/``'any'``, which already encode
+                their own (boolean, not NaN) coverage semantics.
 
         Returns:
             Aggregated time series data
@@ -482,6 +492,10 @@ class FrequencyConverter(TemporalConverter):
             >>> quarterly = converter.aggregate_to_lower_frequency(
             ...     monthly_series, 'QE', 'sum', full_periods_only=True
             ... )
+            >>> # 'all' : vrai ssi les 12 mois de l'année sont présents et vrais
+            >>> monthly_mask = pd.Series(True, index=pd.date_range('2023-01-31', periods=12, freq='ME'))
+            >>> converter.aggregate_to_lower_frequency(monthly_mask, 'YE', method='all').tolist()
+            [True]
         """
         # Importation de la fonction de détection de fréquences
         from tsforecast.frequency.detector import detect_index_frequency
@@ -515,11 +529,29 @@ class FrequencyConverter(TemporalConverter):
             result = resampled.std()
         elif method == 'count':
             result = resampled.count()
+        elif method == 'all':
+            # Vrai ssi toutes les valeurs présentes le sont ; une période sans
+            # aucune observation est explicitement fausse (et non vacuously
+            # true comme le rendrait `Series.all()` sur une entrée vide)
+            result = resampled.agg(lambda s: bool(s.all()) if len(s) > 0 else False)
+            # Une période partiellement présente en bord de grille (moins de
+            # sous-périodes que n'en compte la fréquence source) ne peut
+            # jamais être retenue, même si les valeurs présentes sont toutes
+            # vraies : ce garde-fou est intrinsèque à 'all', indépendant de
+            # full_periods_only
+            result = self._require_full_subperiod_coverage(data, target_freq, resampled, result)
+        elif method == 'any':
+            # Vrai ssi au moins une valeur présente l'est ; une période sans
+            # aucune observation est explicitement fausse (déjà le
+            # comportement de `Series.any()` sur une entrée vide, rendu
+            # explicite ici par symétrie avec 'all')
+            result = resampled.agg(lambda s: bool(s.any()) if len(s) > 0 else False)
         else:
             raise ValueError(f"Unsupported aggregation method: {method}")
 
-        # Masquage des périodes incomplètes si demandé
-        if full_periods_only:
+        # Masquage des périodes incomplètes si demandé ('all'/'any' encodent déjà
+        # leur propre sémantique de couverture, en booléen plutôt qu'en NaN)
+        if full_periods_only and method not in ('all', 'any'):
             # Détection de la fréquence source
             source_freq = detect_index_frequency(index=data.index, return_format='full')
 
@@ -544,6 +576,66 @@ class FrequencyConverter(TemporalConverter):
                     result = result.where(valid_counts >= expected_count)
 
         return result
+
+    # Méthode auxiliaire de garde-fou de couverture intégrale pour la méthode 'all'
+    def _require_full_subperiod_coverage(
+        self,
+        data: Union[pd.Series, pd.DataFrame],
+        target_freq: str,
+        resampled: Any,
+        result: Union[pd.Series, pd.DataFrame],
+    ) -> Union[pd.Series, pd.DataFrame]:
+        """Force False on target periods not fully covered by source sub-periods.
+
+        Used by the ``'all'`` aggregation method: a target period can only be
+        True if it contains every sub-period expected at the source
+        frequency, not merely the ones actually present in the index.
+        Without this check, a period only partially present at the edge of
+        the source index (e.g. a yearly bin backed by only 7 of its 12
+        months) would evaluate to True whenever the present values happen to
+        all be True — exactly the failure mode this method exists to close.
+
+        Args:
+            data: Original data being aggregated, used to detect the source
+                frequency.
+            target_freq: Target frequency offset string.
+            resampled: The pandas Resampler used to produce ``result``.
+            result: Boolean result of the ``'all'`` aggregation, indexed on
+                the target frequency.
+
+        Returns:
+            ``result`` with any partially covered period forced to False.
+            Unchanged if the source frequency cannot be detected.
+        """
+        # Importation locale pour éviter l'import circulaire
+        from tsforecast.frequency.detector import detect_index_frequency
+
+        # Détection de la fréquence source : sans elle, impossible de connaître
+        # le nombre de sous-périodes attendu par période cible
+        source_freq = detect_index_frequency(index=data.index, return_format='full')
+        if not source_freq:
+            return result
+
+        # Extraction des fréquences de base (sans position ni ancrage)
+        source_base = normalize_frequency(source_freq, return_format='base')
+        target_base = normalize_frequency(target_freq, return_format='base')
+
+        # Comptage exact du nombre de sous-périodes attendu, période cible par
+        # période cible (délégué à count_subperiods_per_period, seul dépositaire
+        # de cette logique)
+        expected_counts = pd.Series(
+            self.count_subperiods_per_period(result.index, target_base, source_base),
+            index=result.index,
+        )
+        valid_counts = resampled.count()
+
+        # Comparaison élément par élément, colonne par colonne pour un DataFrame
+        if isinstance(result, pd.DataFrame):
+            fully_covered = valid_counts.ge(expected_counts, axis=0)
+        else:
+            fully_covered = valid_counts >= expected_counts
+
+        return result & fully_covered
 
     # Méthode d'interpolation à une fréquence plus élevée
     def interpolate_to_higher_frequency(self,

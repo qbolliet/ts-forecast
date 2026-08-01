@@ -11,6 +11,7 @@ from tsforecast.frequency.detector import (
     detect_frequency,
     detect_dataset_frequency,
     detect_index_frequency,
+    target_offset_for_index,
     _get_highest_frequency
 )
 
@@ -589,3 +590,48 @@ class TestDetectIndexFrequencyReturnFormat:
         freq_base = detect_index_frequency(dates, return_format='base')
 
         assert freq_default == freq_base
+
+
+class TestTargetOffsetForIndex:
+    """§3.3 : offset cible ancré comme l'index source (position S/E).
+
+    `target_offset_for_index` factorise la logique déjà utilisée par
+    `FrequencyAligner.aggregate_to_target` (§2.2a) pour être partagée avec
+    `ImputationWindowCalculator._convert_mask_to_frequency`.
+    """
+
+    def test_anchors_on_start_when_index_is_start_anchored(self):
+        """Un index MS combiné à une fréquence cible sans position donne 'QS'."""
+        ms_index = pd.date_range('2024-01-01', periods=12, freq='MS')
+        assert target_offset_for_index(ms_index, 'Q') == 'QS'
+
+    def test_anchors_on_end_when_index_is_end_anchored(self):
+        """Un index ME combiné à une fréquence cible sans position donne 'QE'."""
+        me_index = pd.date_range('2024-01-31', periods=12, freq='ME')
+        assert target_offset_for_index(me_index, 'Q') == 'QE'
+
+    def test_existing_target_position_is_overridden_by_source_position(self):
+        """Une position cible déjà présente ('QE') est écrasée par celle de l'index.
+
+        C'est le coeur du correctif §3.3 : un appelant demandant 'QE' contre
+        une grille source ancrée en début de période (MS) doit obtenir 'QS',
+        pas 'QE' inutilisable pour un reindex sur les données.
+        """
+        ms_index = pd.date_range('2024-01-01', periods=12, freq='MS')
+        assert target_offset_for_index(ms_index, 'QE') == 'QS'
+
+    def test_falls_back_to_raw_frequency_when_position_undetectable(self):
+        """Un index trop court pour détecter une position laisse la cible inchangée."""
+        # Un seul point : aucune fréquence détectable -> rien à ancrer
+        single_point_index = pd.DatetimeIndex(['2024-01-01'])
+        assert target_offset_for_index(single_point_index, 'Q') == 'Q'
+
+    def test_position_less_source_frequency_leaves_target_unchanged(self):
+        """Une fréquence source sans position (journalière) ne force aucune ancre.
+
+        Reproduit le scénario `FrequencyAligner.convert_to_target` (D -> 'ME') :
+        avec une source journalière, la fréquence cible déjà positionnée doit
+        être conservée telle quelle plutôt que forcée en position début.
+        """
+        daily_index = pd.date_range('2024-01-01', periods=59, freq='D')
+        assert target_offset_for_index(daily_index, 'ME') == 'ME'

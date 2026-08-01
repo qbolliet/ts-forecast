@@ -119,6 +119,58 @@ class TestMaskAtFrequency:
         assert mask_year.loc[pd.Timestamp('2020-01-01')] == True
         assert mask_year.loc[pd.Timestamp('2021-01-01')] == True
 
+    def test_mask_at_frequency_partial_year_is_false(self):
+        """11 mois couverts sur 12 -> le masque annuel vaut False."""
+        dates = pd.date_range('2020-01-01', periods=24, freq='MS')
+        df = pd.DataFrame({
+            'a': np.arange(24, dtype=float),
+            'b': np.arange(24, dtype=float) * 2,
+        }, index=dates)
+        calc = ImputationWindowCalculator(coverage_threshold=0.5, imputation_scope='strict')
+        calc.fit(df)
+        # Un seul mois de 2021 sort de la fenêtre stricte : l'année n'est plus
+        # intégralement couverte, même si 11 de ses 12 mois le sont encore
+        calc.imputation_window_mask_.loc[pd.Timestamp('2021-06-01')] = False
+
+        mask_year = calc.get_mask_at_frequency('YS')
+
+        assert mask_year.loc[pd.Timestamp('2020-01-01')] == True
+        assert mask_year.loc[pd.Timestamp('2021-01-01')] == False
+
+    def test_mask_at_frequency_index_reindexes_losslessly_on_data(self):
+        """L'index du masque annuel obtenu depuis une grille MS reste ancré en
+        début de période, même si l'appelant demande 'YE' : le résultat se
+        réindexe sans perte sur des données annuelles ancrées comme la grille."""
+        dates = pd.date_range('2020-01-01', periods=24, freq='MS')
+        df = pd.DataFrame({
+            'a': np.arange(24, dtype=float),
+            'b': np.arange(24, dtype=float) * 2,
+        }, index=dates)
+        calc = ImputationWindowCalculator(coverage_threshold=0.5, imputation_scope='strict')
+        calc.fit(df)
+
+        # Fréquence cible explicitement ancrée en fin de période ('YE'), alors
+        # que la grille source (MS) est ancrée en début de période
+        mask_year = calc.get_mask_at_frequency('YE')
+
+        # L'index résultat reste ancré en début de période ('YS'), comme la
+        # grille source -- pas en fin de période ('YE') comme demandé par
+        # l'appelant, ce qui le rendrait inutilisable pour un reindex
+        assert mask_year.index.freqstr == 'YS-JAN'
+
+        # Données annuelles ancrées comme la grille source : le reindex ne
+        # doit perdre aucune date, quelle que soit la valeur du masque
+        yearly_data = pd.Series(
+            np.arange(len(mask_year)),
+            index=pd.date_range(mask_year.index[0], periods=len(mask_year), freq='YS'),
+        )
+        reindexed = yearly_data.reindex(mask_year.index)
+        assert not reindexed.isna().any()
+
+        # Les deux années intégralement couvertes par le masque mensuel sont vraies
+        assert mask_year.loc[pd.Timestamp('2020-01-01')] == True
+        assert mask_year.loc[pd.Timestamp('2021-01-01')] == True
+
 
 class TestColumnCoveragePanel:
     """§3.1 : column_coverage_ doit contenir une entrée par entité pour un panel."""

@@ -14,6 +14,7 @@ from pandas.tseries.frequencies import to_offset
 from ..utils.frequency import to_literal, get_frequency_order, normalize_frequency, FrequencyType, UserFrequencyType
 from ..panel.utils import normalize_entity_key
 from ..utils.parse.utils import parse_frequency
+from ..utils.position.utils import combine_frequency_position
 
 # Classe de détection de la fréquence d'une série temporelle
 class FrequencyDetector:
@@ -889,6 +890,76 @@ def detect_index_frequency(
         freq = index.inferred_freq
         # Normalisation au format demandé
         return normalize_frequency(frequency=freq, return_format=return_format)
+
+
+# Fonction de construction d'un offset cible ancré comme un index source
+def target_offset_for_index(
+    index: pd.DatetimeIndex,
+    target_frequency: str,
+) -> str:
+    """Build a pandas offset for target_frequency anchored like the index.
+
+    Detects whether the source index is anchored at period start or end and
+    combines that position with the target frequency, so that aggregated
+    labels land on dates that exist in the source index (e.g. a
+    month-start-anchored index converted to a quarterly frequency yields
+    'QS', not 'QE'). Shared by every consumer that resamples data to a
+    lower frequency while needing the result to stay reindexable against
+    the original, position-anchored data.
+
+    Args:
+        index: Source DatetimeIndex whose position (start/end) is detected.
+        target_frequency: Target frequency, with or without an explicit
+            position (e.g. 'Q' or 'QE'). When a source position IS detected,
+            any existing target position is stripped and overridden by it,
+            so a caller passing an end-anchored frequency against a
+            start-anchored index still gets rebased correctly instead of
+            keeping the mismatched position as-is.
+
+    Returns:
+        Pandas offset alias anchored like ``index`` (e.g. 'QS') when a
+        position can be detected on ``index``. Falls back to
+        ``target_frequency`` unchanged when the source position cannot be
+        detected at all (e.g. a position-less source frequency like daily,
+        or an index too short to detect a frequency): there is then nothing
+        to anchor on, so the caller's own choice — positioned or not — is
+        preserved rather than defaulting to an arbitrary position.
+
+    Examples:
+        >>> ms_index = pd.date_range('2024-01-01', periods=12, freq='MS')
+        >>> target_offset_for_index(ms_index, 'Q')
+        'QS'
+        >>> target_offset_for_index(ms_index, 'QE')
+        'QS'
+        >>> daily_index = pd.date_range('2024-01-01', periods=59, freq='D')
+        >>> target_offset_for_index(daily_index, 'ME')
+        'ME'
+    """
+    # Détection de la position (début/fin) de l'index source
+    try:
+        _, position, _ = detect_index_frequency(index, return_format='components')
+    except Exception:
+        position = None
+
+    # Position source indétectable (fréquence sans position, ex. journalière,
+    # ou index trop court) : rien à ancrer, la fréquence cible fournie par
+    # l'appelant est conservée telle quelle, positionnée ou non
+    if position is None:
+        return target_frequency
+
+    # Une position cible déjà présente (ex. 'QE') serait sinon transmise telle
+    # quelle par combine_frequency_position, qui ignore silencieusement les
+    # fréquences déjà suffixées : on repart de la base pour l'écraser par la
+    # position détectée sur la source
+    try:
+        target_base = normalize_frequency(target_frequency, return_format='base')
+    except Exception:
+        return target_frequency
+
+    try:
+        return combine_frequency_position(target_base, position)
+    except Exception:
+        return target_frequency
 
 
 # Fonction auxiliaire d'extraction de la fréquence la plus haute d'un dictionnaire de fréquences

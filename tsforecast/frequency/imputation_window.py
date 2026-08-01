@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 # Modules du package
-from .detector import detect_dataset_frequency, detect_index_frequency
+from .detector import detect_dataset_frequency, detect_index_frequency, target_offset_for_index
 from ..panel.utils import (
     get_entity_mask,
     get_unique_panel_entities,
@@ -765,13 +765,15 @@ class ImputationWindowCalculator:
         """Get the strict imputation window mask resampled to a lower frequency.
 
         A lower-frequency period is True if and only if all its high-frequency
-        sub-periods fall within the imputation window. The conversion sums the
-        boolean mask (cast to int) at the target frequency, divides by the
-        conversion factor between source and target frequencies, takes the
-        floor, and casts to bool.
+        sub-periods fall within the imputation window. The conversion delegates
+        to :meth:`FrequencyConverter.aggregate_to_lower_frequency` with
+        ``method='all'``, anchoring the target offset on the same start/end
+        position as the source mask's grid (see
+        :func:`tsforecast.frequency.detector.target_offset_for_index`) so the
+        result stays reindexable against the original data.
 
-        For panel data, the conversion factor is computed independently per
-        entity, as each entity may have a different source frequency.
+        For panel data, the conversion is computed independently per entity,
+        as each entity may have a different source frequency.
 
         Args:
             frequency: Target (lower) frequency offset string (e.g., 'QE',
@@ -835,10 +837,14 @@ class ImputationWindowCalculator:
         """Resample a single boolean window mask to a lower frequency.
 
         A target period is True if and only if all its sub-periods at the
-        source frequency are covered by the mask: the boolean mask is summed
-        at the target frequency and compared to the number of sub-periods the
-        target period contains. Partially covered target periods (at the edges
-        of the grid) therefore yield False.
+        source frequency are covered by the mask. The conversion delegates to
+        :meth:`FrequencyConverter.aggregate_to_lower_frequency` with
+        ``method='all'``, which already forces False on periods only
+        partially present in the mask's grid (e.g. a target period straddling
+        the edge of the fitted grid). The target offset is anchored on the
+        same start/end position as the source mask's index (via
+        :func:`tsforecast.frequency.detector.target_offset_for_index`), so
+        the returned index stays reindexable against the original data.
 
         Args:
             mask: Boolean Series on the source-frequency grid, or None.
@@ -846,16 +852,17 @@ class ImputationWindowCalculator:
             target_freq: Target (lower) frequency offset string.
 
         Returns:
-            Boolean Series at the target frequency, or None if either the
-            mask or the source frequency is missing.
+            Boolean Series at the target frequency, anchored like the source
+            mask's index, or None if either the mask or the source frequency
+            is missing.
 
         Raises:
             ValueError: If source_freq is not higher than target_freq.
 
         Examples:
-            >>> grid = pd.date_range('2023-01-31', periods=12, freq='ME')
+            >>> grid = pd.date_range('2023-01-01', periods=12, freq='MS')
             >>> mask = pd.Series(True, index=grid)
-            >>> calc._convert_mask_to_frequency(mask, 'M', 'YE').tolist()
+            >>> calc._convert_mask_to_frequency(mask, 'M', 'Y').tolist()
             [True]
         """
         # Absence de masque ou de fréquence source exploitable
@@ -869,19 +876,18 @@ class ImputationWindowCalculator:
                 f"frequency : {target_freq}"
             )
 
-        # Agrégation par somme des sous-périodes couvertes
-        summed = self._converter.aggregate_to_lower_frequency(
-            mask.astype(int), target_freq, method='sum'
-        )
+        # Ancrage de l'offset cible sur la position (début/fin) de la grille
+        # source, pour que l'index résultat retombe sur des dates réindexables
+        # sur les données (et non sur des labels de fin de période inutilisables
+        # face à une grille source ancrée en début de période)
+        target_offset = target_offset_for_index(mask.index, target_freq)
 
-        # Comparaison au nombre de sous-périodes attendues : une période cible
-        # n'est retenue que si elle est intégralement couverte. Le comptage est
-        # délégué au convertisseur, seul dépositaire de la logique de comptage
-        # des sous-périodes (cf. FrequencyConverter.count_subperiods)
-        expected = self._converter.count_subperiods_per_period(
-            summed.index, target_freq, source_freq
-        )
-        return pd.Series(np.asarray(summed) >= expected, index=summed.index)
+        # Une période cible est dans la fenêtre ssi TOUTES ses sous-périodes le
+        # sont : délégué entièrement à 'all', qui encode déjà à la fois la
+        # comparaison booléenne et le garde-fou de couverture intégrale
+        return self._converter.aggregate_to_lower_frequency(
+            mask, target_offset, method='all'
+        ).astype(bool)
 
     # Méthode d'extraction de la couverture associée à chaque série
     def get_columns_with_coverage(
