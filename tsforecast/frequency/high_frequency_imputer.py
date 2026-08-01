@@ -99,16 +99,24 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             'aggregate', 'impute', or 'target_freq'.
         imputation_order_: Ordered list of variables for cascading imputation.
         imputation_models_: Fitted imputation models, keyed by cascade stage:
-            ``stage_key = (freq_label, var_key)`` where ``freq_label`` is
+            ``stage_key = (freq_label, group_key)`` where ``freq_label`` is
             :meth:`_freq_label` of the stage frequency (the frequency string
             for a time series, a frozenset of the entity -> frequency items
-            for a panel) and ``var_key`` the variable key (column name, or
-            ``(entity..., column)``). A variable imputed at two stages
-            therefore holds two distinct entries. Each value is either
-            ``'interpolate_fallback'`` or a dict with keys ``model``,
-            ``feature_cols``, ``scale_factor`` (sub-period count of the
-            stage), ``fit_scale_factor`` (the one baked into the model at
-            fit time), ``pred_freq`` and ``trained_on_imputed``.
+            for a panel) and ``group_key`` is:
+            - for a time series: the variable (column) name;
+            - for a panel (review §2.4): the variable name alone when every
+              entity shares the same detected frequency for it at this
+              stage, otherwise ``(variable name, detected frequency)`` when
+              entities disagree — NOT ``(entity, variable)``. The model
+              backing a panel entry is GLOBAL, fitted once on every entity
+              of the group rather than once per entity (which would only
+              refit and overwrite the exact same model).
+            A variable imputed at two stages therefore holds two distinct
+            entries. Each value is either ``'interpolate_fallback'`` or a
+            dict with keys ``model``, ``feature_cols``, ``scale_factor``
+            (sub-period count of the stage), ``fit_scale_factor`` (the one
+            baked into the model at fit time), ``pred_freq`` and
+            ``trained_on_imputed``.
         model_fitting_order_: List of those same ``stage_key`` tuples, in the
             exact order in which stages were registered, for replay during
             transform. ``len(imputation_models_) == len(model_fitting_order_)``
@@ -930,7 +938,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de récupération du modèle déjà entraîné pour une variable
     def _model_for_var(
         self,
-        var_key: Union[str, Tuple],
+        group_key: Union[str, Tuple],
     ) -> Optional[Dict[str, Any]]:
         """Find the model already fitted for a variable, whatever the stage.
 
@@ -942,16 +950,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         its chance at a later one.
 
         Args:
-            var_key: Variable key (column name, or ``(entity..., column)``).
+            group_key: Registry group key — the variable name, or
+                ``(variable name, detected frequency)`` for a panel where the
+                frequency differs by entity (see review §2.4).
 
         Returns:
             The most recently registered model entry for the variable, or
             None when none was ever fitted.
         """
-        # Parcours du registre sur la composante var_key de la clé d'étape
+        # Parcours du registre sur la composante group_key de la clé d'étape
         found: Optional[Dict[str, Any]] = None
         for stage_key, model_info in self.imputation_models_.items():
-            if stage_key[1] == var_key and isinstance(model_info, dict):
+            if stage_key[1] == group_key and isinstance(model_info, dict):
                 found = model_info
 
         return found
@@ -1080,7 +1090,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     def _build_stage_frame(
         self,
         X_original: pd.DataFrame,
-        imputed_store: Dict[Union[str, Tuple], pd.Series],
+        imputed_store: Dict[str, pd.Series],
         pred_freq: Union[str, Dict],
     ) -> pd.DataFrame:
         """Build the working frame for one prediction-frequency stage.
@@ -1093,8 +1103,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Args:
             X_original: Data as seen at fit/transform entry (after the
                 additive transformer). Never modified.
-            imputed_store: Mapping var_key -> Series of values imputed at
-                earlier stages (indexed like ``X_original``).
+            imputed_store: Mapping column name -> Series of values imputed
+                at earlier stages (indexed like ``X_original``). Keyed by
+                plain variable name: for a panel, the underlying model is
+                global (see review §2.4) and its predictions already span
+                every entity of the variable.
             pred_freq: Prediction frequency of the stage (str for time
                 series, dict entity -> frequency for panel).
 
@@ -1111,9 +1124,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X_stage = X_original.copy()
 
         # Injection des imputations des étapes précédentes
-        for var_key, imputed in imputed_store.items():
-            # Extraction du nom de la colonne de la clé
-            col = var_key[-1] if isinstance(var_key, tuple) else var_key
+        for col, imputed in imputed_store.items():
             # Vérification que la colonne existe dans le jeu de données
             if col not in X_stage.columns:
                 continue
@@ -1651,9 +1662,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.model_fitting_order_ = []
         # Conservation de la liste des étapes : le replay de "_transform" la rejoue à l'identique
         self.freq_prediction_list_ = freq_prediction_list
-        # Imputations déjà réalisées, par clé de variable : elles alimentent les
+        # Imputations déjà réalisées, par nom de variable : elles alimentent les
         # covariables des étapes suivantes, jamais X_work
-        imputed_store: Dict[Union[str, Tuple], pd.Series] = {}
+        imputed_store: Dict[str, pd.Series] = {}
 
         for pred_freq in freq_prediction_list:
             # 5a. Classification des variables relative à pred_freq
@@ -1681,22 +1692,57 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     reverse=True,
                 )
 
-            # 5d. Pour chaque variable à imputer
+            # 5d. Regroupement des clés d'imputation par variable au sein de l'étape :
+            # pour un panel, "ordered_impute_keys" contient une clé par couple
+            # (entité, variable), mais le modèle entraîné reste GLOBAL au panel
+            # (conforme à la spécification "l'entraînement se fait sur l'ensemble des
+            # entités") — itérer par entité ne ferait donc que refitter et réécraser
+            # exactement le même modèle plusieurs fois. Le regroupement se fait sur
+            # (variable, fréquence détectée) et non la seule variable : le facteur
+            # d'échelle et l'agrégation d'entraînement dépendent de la fréquence, qui
+            # peut différer selon l'entité pour une même variable.
+            # Piste inverse, non retenue ici (de vrais modèles par entité) :
+            # restreindre "training_mask" et "missing_mask" à l'entité via
+            # "self._freq_aligner.get_entity_mask".
+            vars_in_stage: "OrderedDict[Tuple[str, str], List[Union[str, Tuple]]]" = OrderedDict()
             for var_key in ordered_impute_keys:
                 var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
-                # Clé d'étape : un même couple (étape, variable) ne peut être
+                freq_norm = normalize_frequency(
+                    self.detected_frequencies_[var_key], return_format='base'
+                )
+                vars_in_stage.setdefault((var_name, freq_norm), []).append(var_key)
+
+            # La fréquence ne rejoint la clé de groupe que si elle diffère
+            # effectivement selon l'entité pour une même variable à cette étape
+            freqs_per_var: Dict[str, set] = {}
+            for var_name, freq_norm in vars_in_stage:
+                freqs_per_var.setdefault(var_name, set()).add(freq_norm)
+
+            # 5d'. Un seul fit par groupe (variable[, fréquence]), sur l'ensemble
+            # des entités du groupe
+            for (var_name, freq_norm), var_keys in vars_in_stage.items():
+                group_key = (
+                    var_name if len(freqs_per_var[var_name]) == 1
+                    else (var_name, freq_norm)
+                )
+                # Clé d'origine représentative du groupe (une des clés (entité,
+                # variable) qui le composent) : seuls le nom de colonne et la
+                # fréquence détectée comptent pour préparer les données
+                # d'entraînement, le modèle étant global au panel
+                repr_var_key = var_keys[0]
+                # Clé d'étape : un même couple (étape, groupe) ne peut être
                 # entraîné qu'une fois, et une variable imputée à deux étapes
                 # obtient deux entrées distinctes
-                stage_key = (self._freq_label(pred_freq), var_key)
+                stage_key = (self._freq_label(pred_freq), group_key)
 
                 # Sans réentraînement, un seul fit par variable : les étapes
                 # suivantes réutilisent le modèle avec le facteur de l'étape
                 if not self.cascade_refitting:
-                    base = self._model_for_var(var_key)
+                    base = self._model_for_var(group_key)
                     if base is not None:
                         self.imputation_models_[stage_key] = {
                             **base,
-                            'scale_factor': self._stage_scale_factor(var_key, pred_freq),
+                            'scale_factor': self._stage_scale_factor(repr_var_key, pred_freq),
                             'pred_freq': pred_freq,
                         }
                         self.model_fitting_order_.append(stage_key)
@@ -1714,7 +1760,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                 # Préparation des données d'entraînement
                 X_train, y_train, scale_factor, feature_factors = self._prepare_training_data(
-                    X_stage, X_work, var_key, pred_freq
+                    X_stage, X_work, repr_var_key, pred_freq
                 )
 
                 if len(X_train) < 2:
@@ -1774,7 +1820,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                 self.model_fitting_order_.append(stage_key)
 
-                # 5g. Cascade refitting : application des prédictions intermédiaires
+                # 5g. Cascade refitting : application des prédictions intermédiaires,
+                # sur l'ensemble des entités du groupe en une seule passe (le modèle
+                # est global au panel, cf. 5d)
                 if self.cascade_refitting:
                     model_info = self.imputation_models_.get(stage_key)
                     if model_info and model_info != 'interpolate_fallback':
@@ -1793,9 +1841,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                                 # voient les valeurs imputées
                                 X_stage.loc[missing_mask, var_name] = preds
                                 # Alimentation du magasin d'imputations pour les étapes
-                                # suivantes (jamais X_work)
-                                imputed_store[var_key] = pd.Series(
+                                # suivantes (jamais X_work), par nom de variable : les
+                                # imputations déjà déposées par un autre groupe de la
+                                # même variable (fréquences hétérogènes selon l'entité)
+                                # sont préservées
+                                new_imputed = pd.Series(
                                     preds, index=X_stage.index[missing_mask]
+                                )
+                                existing_imputed = imputed_store.get(var_name)
+                                imputed_store[var_name] = (
+                                    new_imputed if existing_imputed is None
+                                    else existing_imputed.combine_first(new_imputed)
                                 )
 
                                 # Marquage provenance
@@ -1882,7 +1938,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Frame d'entrée du replay : jamais modifié, il sert de base à chaque étape
         X_input = data_transformed
         # Imputations déjà réalisées, alimentant les covariables des étapes suivantes
-        imputed_store: Dict[Union[str, Tuple], pd.Series] = {}
+        imputed_store: Dict[str, pd.Series] = {}
         intermediate_results: Dict[str, pd.DataFrame] = {}
 
         for pred_freq in self.freq_prediction_list_:
@@ -1914,8 +1970,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
             # Parcours des variables imputées à cette étape
             for stage_key in stage_keys:
-                freq_label, var_key = stage_key
-                var_name = var_key[-1] if isinstance(var_key, tuple) else var_key
+                # "group_key" est la variable seule, ou (variable, fréquence
+                # détectée) pour un panel hétérogène en fréquence (cf. §2.4) : la
+                # variable est toujours la première composante, contrairement aux
+                # anciennes clés (entité..., variable)
+                freq_label, group_key = stage_key
+                var_name = group_key[0] if isinstance(group_key, tuple) else group_key
 
                 # Récupérer model_info
                 model_info = self.imputation_models_.get(stage_key)
@@ -1951,10 +2011,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     X_stage.loc[missing_mask, var_name] = predictions
                     # Alimentation des étapes suivantes, symétrique du bloc 5g du
                     # fit : sans réentraînement, les covariables des étapes
-                    # suivantes restent celles vues à l'entraînement
+                    # suivantes restent celles vues à l'entraînement. Clé par nom
+                    # de variable : les imputations déjà déposées par un autre
+                    # groupe de la même variable (fréquences hétérogènes selon
+                    # l'entité) sont préservées
                     if self.cascade_refitting:
-                        imputed_store[var_key] = pd.Series(
+                        new_imputed = pd.Series(
                             predictions, index=X_stage.index[missing_mask]
+                        )
+                        existing_imputed = imputed_store.get(var_name)
+                        imputed_store[var_name] = (
+                            new_imputed if existing_imputed is None
+                            else existing_imputed.combine_first(new_imputed)
                         )
 
                     # Marquage provenance

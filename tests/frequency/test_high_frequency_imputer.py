@@ -995,38 +995,102 @@ class TestModelsKeyedByStage:
         assert list(imputer.imputation_models_) == imputer.model_fitting_order_
 
 
-class TestPanelSingleFitPerVariable:
-    """§2.4 : un panel ne doit pas réentraîner le même modèle global par entité."""
+@pytest.fixture
+def panel_annual_quarterly_over_monthly():
+    """Panel version of `annual_quarterly_over_monthly`, entities identical.
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="§2.4 high_frequency_imputer_review.md : ordered_impute_keys contient "
-               "une clé (entité, variable) par entité et le modèle global (entraîné "
-               "sur tout le panel) est réentraîné une fois par entité au lieu d'une "
-               "seule fois par variable.",
-    )
-    def test_panel_single_fit_per_variable(self, mixed_freq_panel):
-        """3 entités, 1 variable annuelle -> 1 seul fit par étape."""
+    Three entities (``France``, ``Allemagne``, ``Italie``) carrying strictly
+    identical values for every column. This makes the panel deduplication
+    fix (review §2.4) verifiable deterministically: with a single GLOBAL
+    model per (stage, variable) group, entities with identical inputs must
+    get identical outputs — up to floating-point summation-order noise,
+    unlike ``mixed_freq_panel`` (``tests/frequency/conftest.py``), whose
+    per-entity seed depends on the non-reproducible ``hash()`` builtin.
+    """
+    dates = pd.date_range('2018-01-01', periods=72, freq='MS')
+    rng = np.random.default_rng(1)
+
+    monthly = pd.Series(10.0 + rng.normal(0, 0.5, len(dates)), index=dates)
+
+    quarterly = pd.Series(np.nan, index=dates)
+    for _, block in monthly.groupby([monthly.index.year, monthly.index.quarter]):
+        quarterly.loc[block.index[0]] = block.sum()
+
+    annual = pd.Series(np.nan, index=dates)
+    for _, block in monthly.groupby(monthly.index.year):
+        annual.loc[block.index[0]] = block.sum()
+
+    single_entity = pd.DataFrame({
+        'covariable_mensuelle': monthly,
+        'variable_trimestrielle': quarterly,
+        'variable_annuelle': annual,
+    })
+    single_entity.index.name = 'date'
+
+    frames = []
+    for entity in ('France', 'Allemagne', 'Italie'):
+        df = single_entity.copy()
+        df['entity'] = entity
+        frames.append(df.reset_index())
+
+    return pd.concat(frames, ignore_index=True).set_index(['entity', 'date']).sort_index()
+
+
+class TestPanelSingleFitPerVariable:
+    """§2.4 : un panel entraîne un modèle GLOBAL par variable, fitté une seule fois.
+
+    Avant le correctif, `ordered_impute_keys` contenait une clé par couple
+    (entité, variable) : pour 3 entités et 1 variable, le même modèle global
+    était réentraîné 3 fois et `imputation_models_` portait 3 clés pour un
+    seul modèle logique.
+    """
+
+    def test_panel_single_fit_per_variable(self, panel_annual_quarterly_over_monthly):
+        """3 entités, 1 variable annuelle -> un seul fit par étape."""
+        data = panel_annual_quarterly_over_monthly
+        _FitCountingEstimator.reset()
         imputer = HighFrequencyImputer(
             target_frequency='M',
-            estimator=LinearRegression(),
-            cascade_refitting=False,
-            keep_lower_frequencies=False,
+            estimator=_FitCountingEstimator(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+            train_on_partial_coverage=True,
         )
-        imputer.fit(mixed_freq_panel)
+        result = _fit_transform_quiet(imputer, data)
 
-        # Clés d'étape (freq_label, (entité, variable)) de la variable annuelle
-        balance_keys = [
-            key for key in imputer.imputation_models_
-            if isinstance(key[1], tuple) and key[1][-1] == 'balance_commerciale_annuelle'
-        ]
-        # Les 3 entités partagent le même modèle global : un seul objet distinct
-        model_ids = {
-            id(imputer.imputation_models_[key]['model'])
-            for key in balance_keys
-            if isinstance(imputer.imputation_models_[key], dict)
-        }
-        assert len(model_ids) == 1
+        # Trois couples (étape, variable) : ('Q', annuelle), ('M', annuelle)
+        # et ('M', trimestrielle) -- comme pour la série temporelle
+        # équivalente (`TestFitCountByCascadeRefitting`), malgré les 3
+        # entités du panel : ni le registre ni les fits ne sont dupliqués
+        # par entité
+        assert len(imputer.model_fitting_order_) == 3
+        assert len(imputer.imputation_models_) == 3
+        assert _FitCountingEstimator.n_fits == 3
+
+        # Aucune clé de registre n'est indexée par entité (§2.4 : la clé de
+        # groupe est la variable seule, ou (variable, fréquence détectée),
+        # jamais (entité, variable))
+        entities = {'France', 'Allemagne', 'Italie'}
+        for _, group_key in imputer.model_fitting_order_:
+            var_name = group_key[0] if isinstance(group_key, tuple) else group_key
+            assert var_name not in entities
+
+        # La provenance marque bien les lignes des 3 entités
+        provenance = imputer.imputation_provenance_['variable_annuelle']
+        assert set(provenance.index.get_level_values('entity')) == entities
+
+        # Non-régression numérique : les 3 entités, strictement identiques en
+        # entrée, obtiennent des imputations identiques (à un bruit de somme
+        # flottante près) -- ce qui n'était vrai qu'accessoirement avant la
+        # déduplication (3 fits redondants mais mathématiquement identiques)
+        target_level = result.xs('target', level='frequency')
+        annual_col = target_level['variable_annuelle']
+        france = annual_col.xs('France', level='entity')
+        allemagne = annual_col.xs('Allemagne', level='entity')
+        italie = annual_col.xs('Italie', level='entity')
+
+        assert np.allclose(france, allemagne, equal_nan=True)
+        assert np.allclose(france, italie, equal_nan=True)
 
 
 class TestNoImputationWithoutCovariates:

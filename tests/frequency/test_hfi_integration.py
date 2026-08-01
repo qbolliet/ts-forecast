@@ -16,8 +16,9 @@ le comportement actuel bogué) et référencent la section de la revue
 concernée ; ils doivent tomber un par un au fil des correctifs.
 
 Correctifs déjà appliqués et couverts sans ``xfail`` : §2.1 (facteur
-d'échelle), §2.2 / §5.1 (frames d'étape) et §2.3 / §5.2 (registre de modèles
-indexé par étape).
+d'échelle), §2.2 / §5.1 (frames d'étape), §2.3 / §5.2 (registre de modèles
+indexé par étape) et §2.4 (déduplication des fits panel, voir
+`test_high_frequency_imputer.py::TestPanelSingleFitPerVariable`).
 """
 import warnings
 
