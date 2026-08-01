@@ -129,10 +129,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
               refit and overwrite the exact same model).
             A variable imputed at two stages therefore holds two distinct
             entries. Each value is either ``'interpolate_fallback'`` or a
-            dict with keys ``model``, ``feature_cols``, ``scale_factor``
-            (sub-period count of the stage), ``fit_scale_factor`` (the one
-            baked into the model at fit time), ``pred_freq`` and
-            ``trained_on_imputed``.
+            dict with keys ``model``, ``feature_cols``, ``feature_means``
+            (per-covariate means of the TRAINING set, reapplied to fill the
+            missing covariates at prediction time, review §2.7),
+            ``scale_factor`` (sub-period count of the stage),
+            ``fit_scale_factor`` (the one baked into the model at fit time),
+            ``pred_freq`` and ``trained_on_imputed``.
         model_fitting_order_: List of those same ``stage_key`` tuples, in the
             exact order in which stages were registered, for replay during
             transform. ``len(imputation_models_) == len(model_fitting_order_)``
@@ -1698,59 +1700,207 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de détermination des échantillons de prédiction
     def _determine_prediction_samples(
         self,
-        X_work: pd.DataFrame,
-        var_name: str,
-        imputation_mask: pd.Series,
+        X_stage: pd.DataFrame,
+        rows_mask: pd.Series,
+        feature_cols: List[str],
     ) -> List[Tuple[pd.Index, List[str]]]:
-        """Determine prediction sample groups by available covariates.
+        """Group the rows to predict by their pattern of available covariates.
 
-        Within the imputation window, groups NaN observations by which
-        covariates are available. Orders from most covariates to fewest.
+        The rows in scope are given by ``rows_mask`` rather than derived
+        here from ``isna()``: since the disaggregation of review §2.6, the
+        scope covers the anchor dates too — a variable's own observed value
+        no longer excludes its row from prediction. The caller therefore
+        intersects the disaggregation scope with the imputation window (see
+        :meth:`_prediction_masks`).
+
+        Groups are ordered from the richest covariate pattern to the
+        poorest, the empty pattern last: callers skip that final group
+        instead of imputing from nothing (review §2.7).
 
         Args:
-            X_work: Working data.
-            var_name: Target variable name.
-            imputation_mask: Boolean mask for imputation window.
+            X_stage: Stage frame the prediction reads its covariates from.
+            rows_mask: Boolean mask, aligned on ``X_stage.index``, of the
+                rows the variable may be imputed on.
+            feature_cols: Columns the model was fitted on. Columns absent
+                from ``X_stage`` count as unavailable everywhere.
 
         Returns:
-            List of (index, feature_cols) tuples, ordered from most
-            features to fewest.
+            List of ``(index, available_cols)`` tuples ordered from most
+            available covariates to fewest. The union of the indexes is
+            exactly the rows of ``rows_mask``.
+
+        Examples:
+            >>> # samples = imputer._determine_prediction_samples(
+            ... #     X_stage, rows_mask, ['covariate_a', 'covariate_b']
+            ... # )
+            >>> # [(Index([...]), ['covariate_a', 'covariate_b']),
+            >>> #  (Index([...]), ['covariate_a']), (Index([...]), [])]
         """
-        # Détection des observations manquantes de la variable à prédire dans la fenêtre d'imputation
-        missing_in_window = imputation_mask & X_work[var_name].isna()
-        
-        # Retourne une liste vide s'il n'y a aucune observation à imputer
-        if not missing_in_window.any():
+        # Retour immédiat s'il n'y a aucune ligne à prédire
+        rows_mask = rows_mask.reindex(X_stage.index).fillna(False).astype(bool)
+        if not rows_mask.any():
             return []
 
-        # Extraction des features
-        feature_cols = [
-            c for c in X_work.columns
-            if c != var_name
-        ]
-        # Extraction des index à imputer
-        missing_idx = X_work.index[missing_in_window]
+        target_index = X_stage.index[rows_mask.to_numpy()]
 
-        # Regroupement par pattern de covariables disponibles
-        groups: Dict[tuple, List] = {}
-        # Parcours des index
-        for idx in missing_idx:
-            # Extraction des features dispobibles pour l'index
-            available = tuple(
-                col for col in feature_cols if pd.notna(X_work.at[idx, col])
+        # Sans covariable connue, toutes les lignes partagent le motif vide
+        known_cols = [c for c in feature_cols if c in X_stage.columns]
+        if not known_cols:
+            return [(target_index, [])]
+
+        # Motif de disponibilité des covariables, ligne par ligne
+        availability = X_stage.loc[rows_mask, known_cols].notna().to_numpy()
+
+        # Regroupement des lignes partageant exactement le même motif
+        patterns, inverse = np.unique(availability, axis=0, return_inverse=True)
+        inverse = np.asarray(inverse).ravel()
+
+        # Tri par nombre de covariables décroissant : les groupes les plus
+        # riches sont traités en premier, le motif vide en dernier
+        order = np.argsort(-patterns.sum(axis=1), kind='stable')
+
+        return [
+            (
+                target_index[inverse == pattern_id],
+                [col for col, present in zip(known_cols, patterns[pattern_id]) if present],
             )
-            # Ajout de la clé au dictionnaire si elle n'existe pas déjà
-            if available not in groups:
-                groups[available] = []
-            # Ajout de l'index
-            groups[available].append(idx)
+            for pattern_id in order
+        ]
 
-        # Tri par nombre de covariables décroissant
-        result = []
-        for available_cols, indices in sorted(groups.items(), key=lambda x: -len(x[0])):
-            result.append((pd.Index(indices), list(available_cols)))
+    # Méthode auxiliaire de construction des masques de désagrégation et de prédiction
+    def _prediction_masks(
+        self,
+        X_stage: pd.DataFrame,
+        X_input: pd.DataFrame,
+        stage_group: Optional[Dict[str, Any]],
+        var_name: str,
+    ) -> Tuple[pd.Series, pd.Series]:
+        """Build the disaggregation scope and the predictable rows of a stage.
 
-        return result
+        The scope is the whole grid of the group, anchor dates included
+        (review §2.6): the variable is re-expressed at the stage frequency
+        over all of it, so no row of the scope may keep a low-frequency
+        total. The predictable rows are the scope restricted to the
+        imputation window (review §2.7): nothing is ever predicted outside
+        the window, where covariate coverage is insufficient by
+        construction.
+
+        Callers therefore blank the whole scope and write back only the rows
+        that were actually predicted — a row of the scope left unpredicted
+        ends up NaN rather than carrying its period total.
+
+        Args:
+            X_stage: Stage frame the masks are aligned on.
+            X_input: Untouched input frame of the stage.
+            stage_group: Entry of :attr:`stage_groups_` for the stage key.
+            var_name: Column being imputed.
+
+        Returns:
+            Tuple of (disaggregation scope, predictable rows), both boolean
+            Series aligned on ``X_stage.index``, the second included in the
+            first.
+        """
+        # Périmètre de désagrégation, aligné sur le frame de l'étape
+        scope = self._disaggregation_mask(X_input, stage_group, var_name)
+        scope = scope.reindex(X_stage.index).fillna(False).astype(bool)
+
+        # Restriction à la fenêtre d'imputation quand le calculateur est entraîné
+        predictable = scope
+        if hasattr(self, '_imputation_window_calc') and self._imputation_window_calc._is_fitted:
+            window = self._imputation_window_calc.get_imputation_window_mask(X_stage)
+            predictable = scope & window.reindex(X_stage.index).fillna(False).astype(bool)
+
+        return scope, predictable
+
+    # Méthode auxiliaire de prédiction d'une variable sur les lignes prédictibles
+    def _predict_stage_values(
+        self,
+        model_info: Dict[str, Any],
+        X_stage: pd.DataFrame,
+        rows_mask: pd.Series,
+        context: str = '',
+    ) -> pd.Series:
+        """Predict a variable on the rows it can actually be predicted on.
+
+        Shared by the intermediate cascade of :meth:`_fit` and the replay of
+        :meth:`_transform` so both paths produce identical predictions on
+        identical data. Two rules, both from review §2.7:
+
+        1. rows are grouped by their pattern of available covariates and a
+           group without a single usable covariate is left unimputed —
+           nothing is fabricated where nothing was observed;
+        2. the remaining missing covariates are filled with the means of the
+           TRAINING SET, stored at fit time in ``model_info['feature_means']``.
+           Filling with the mean of the rows being predicted made the result
+           depend on the prediction sample.
+
+        Args:
+            model_info: Registry entry of the stage.
+            X_stage: Stage frame holding the covariates.
+            rows_mask: Rows the variable may be imputed on, from
+                :meth:`_prediction_masks`.
+            context: Label used in warning messages.
+
+        Returns:
+            Predictions indexed by the rows actually predicted — a subset of
+            ``rows_mask``, empty when no row carries any covariate.
+        """
+        feature_cols = list(model_info.get('feature_cols', []))
+        # Statistiques de remplissage du jeu d'entraînement (§2.7). Un registre
+        # produit par une version antérieure n'en porte pas : repli sur zéro,
+        # neutre pour les estimateurs linéaires centrés
+        feature_means = model_info.get('feature_means')
+        if feature_means is None:
+            feature_means = pd.Series(0.0, index=feature_cols)
+
+        # Regroupement des lignes à prédire par motif de covariables disponibles
+        prediction_samples = self._determine_prediction_samples(
+            X_stage, rows_mask, feature_cols
+        )
+
+        predicted: List[pd.Series] = []
+        skipped: List[pd.Index] = []
+
+        # Parcours des groupes, du plus riche en covariables au plus pauvre
+        for sample_index, available_cols in prediction_samples:
+            # Restriction aux features connues du modèle
+            usable = [c for c in feature_cols if c in available_cols]
+            # Aucune covariable observée : la date n'est pas imputée
+            if not usable:
+                skipped.append(sample_index)
+                continue
+
+            # Le motif décide SI l'on impute, les statistiques du fit décident
+            # AVEC QUOI l'on complète les covariables manquantes du groupe
+            X_pred = X_stage.loc[sample_index, feature_cols].fillna(feature_means)
+            predicted.append(
+                pd.Series(
+                    self._stage_predictions(model_info, X_pred),
+                    index=sample_index,
+                )
+            )
+
+        # Avertissement agrégé sur les dates laissées non imputées
+        if skipped:
+            skipped_index = skipped[0].append(skipped[1:]) if len(skipped) > 1 else skipped[0]
+            suffix = f" for {context}" if context else ""
+            warnings.warn(
+                f"No covariate available{suffix} on {len(skipped_index)} date(s) "
+                f"(e.g. {skipped_index[0]}): they are left unimputed rather than "
+                f"predicted from training means alone.",
+                UserWarning
+            )
+
+        # Concaténation des groupes prédits, réordonnée comme le frame d'étape.
+        # L'index vide conserve le type de celui du frame : les appelants y
+        # indexent directement, un RangeIndex vide y lèverait un KeyError
+        if not predicted:
+            return pd.Series(dtype=float, index=X_stage.index[:0])
+
+        values = pd.concat(predicted)
+        ordered_index = X_stage.index[X_stage.index.isin(values.index)]
+
+        return values.reindex(ordered_index)
 
     # Méthode auxiliaire de notation de la provenance des variables agrégées
     def _mark_aggregated_provenance(
@@ -2204,8 +2354,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     X_train, y_train, scale_factor, feature_factors
                 )
 
-                # Imputation simple des NaN dans les features
-                X_train_scaled = X_train_scaled.fillna(X_train_scaled.mean())
+                # Imputation simple des NaN dans les features. Les statistiques
+                # employées sont celles du JEU D'ENTRAÎNEMENT et sont conservées
+                # dans le registre : la prédiction les réapplique à l'identique
+                # (§2.7), là où la moyenne des lignes à prédire rendait le
+                # résultat dépendant du champ de prédiction
+                feature_means = X_train_scaled.mean()
+                X_train_scaled = X_train_scaled.fillna(feature_means)
                 # Écartement des covariables sans aucune observation sur la fenêtre
                 # d'entraînement : la moyenne de remplissage y reste NaN
                 X_train_scaled = X_train_scaled.dropna(axis=1, how='all')
@@ -2228,6 +2383,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     self.imputation_models_[stage_key] = {
                         'model': estimator,
                         'feature_cols': feature_cols,
+                        # Moyennes du jeu d'entraînement, réappliquées à la
+                        # prédiction pour compléter les covariables manquantes
+                        'feature_means': feature_means.reindex(feature_cols),
                         'scale_factor': scale_factor,
                         # Facteur cuit dans le modèle : y_train en a été divisé.
                         # Il ne bouge plus, quand "scale_factor" suit l'étape
@@ -2253,32 +2411,38 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 if self.cascade_refitting:
                     model_info = self.imputation_models_.get(stage_key)
                     if model_info and model_info != 'interpolate_fallback':
-                        # Lignes désagrégées : toute la grille du groupe, dates-ancres
-                        # comprises, pour que la colonne ne mélange pas le total de la
-                        # période basse fréquence et des valeurs de sous-période (§2.6)
-                        predict_mask = self._disaggregation_mask(
-                            X_work, stage_group, var_name
+                        stage_context = (
+                            f"'{var_name}' at stage "
+                            f"{self._stage_frequency_label(pred_freq)}"
                         )
-                        if predict_mask.any():
-                            X_predict = X_stage.loc[predict_mask, feature_cols]
-                            X_predict = X_predict.fillna(X_predict.mean())
+                        # Périmètre de désagrégation (toute la grille du groupe,
+                        # dates-ancres comprises, §2.6) et lignes prédictibles
+                        # (restreintes à la fenêtre d'imputation, §2.7)
+                        scope_mask, predict_mask = self._prediction_masks(
+                            X_stage, X_work, stage_group, var_name
+                        )
+                        if scope_mask.any():
                             try:
                                 # Les prédictions sont déjà à l'échelle de la fréquence
                                 # de prédiction : aucune remise à l'échelle inverse
-                                preds = pd.Series(
-                                    self._stage_predictions(model_info, X_predict),
-                                    index=X_stage.index[predict_mask]
+                                preds = self._predict_stage_values(
+                                    model_info, X_stage, predict_mask,
+                                    context=stage_context
                                 )
                                 # Contrainte additive : la somme des sous-périodes de
                                 # chaque période égale la valeur observée
                                 preds, disagg_mask = self._apply_period_totals(
                                     preds, X_work, stage_group,
-                                    context=f"'{var_name}' at stage "
-                                            f"{self._stage_frequency_label(pred_freq)}"
+                                    context=stage_context
                                 )
                                 # Cascade intra-étape : les variables suivantes de l'étape
-                                # voient les valeurs imputées
-                                X_stage.loc[predict_mask, var_name] = preds
+                                # voient les valeurs imputées. Le périmètre de
+                                # désagrégation est d'abord vidé en entier : une ancre
+                                # laissée non prédite ne doit pas conserver le total de
+                                # sa période dans une colonne à l'échelle de la
+                                # sous-période (§2.6)
+                                X_stage.loc[scope_mask, var_name] = np.nan
+                                X_stage.loc[preds.index, var_name] = preds
                                 # Alimentation du magasin d'imputations pour les étapes
                                 # suivantes (jamais X_work), par nom de variable : les
                                 # imputations déjà déposées par un autre groupe de la
@@ -2426,17 +2590,20 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         # recalage proportionnel la ramène à l'échelle de la
                         # sous-période : sans cela la colonne repliée garderait le
                         # mélange d'échelles du §2.6
-                        X_stage[var_name] = X_stage[var_name].interpolate(
+                        interpolated = X_stage[var_name].interpolate(
                             method='linear', limit_direction='both'
                         )
-                        predict_mask = self._disaggregation_mask(
-                            X_input, stage_group, var_name
+                        # Même restriction que le chemin modèle : rien n'est
+                        # produit hors de la fenêtre d'imputation (§2.7)
+                        scope_mask, predict_mask = self._prediction_masks(
+                            X_stage, X_input, stage_group, var_name
                         )
                         rescaled, disagg_mask = self._apply_period_totals(
-                            X_stage.loc[predict_mask, var_name], X_input,
+                            interpolated.loc[predict_mask], X_input,
                             stage_group, context=stage_context
                         )
-                        X_stage.loc[predict_mask, var_name] = rescaled
+                        X_stage.loc[scope_mask, var_name] = np.nan
+                        X_stage.loc[rescaled.index, var_name] = rescaled
                         self._mark_imputed_cells(
                             transform_tracker, var_name, rescaled.index,
                             disagg_mask, False
@@ -2447,33 +2614,33 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 if var_name not in X_stage.columns:
                     continue
 
-                # Lignes désagrégées : toute la grille du groupe, dates-ancres
+                # Périmètre de désagrégation (toute la grille du groupe, dates-ancres
                 # comprises, pour que la colonne ne mélange pas le total de la période
-                # basse fréquence et des valeurs de sous-période (§2.6)
-                predict_mask = self._disaggregation_mask(
-                    X_input, stage_group, var_name
+                # basse fréquence et des valeurs de sous-période, §2.6) et lignes
+                # prédictibles (restreintes à la fenêtre d'imputation, §2.7)
+                scope_mask, predict_mask = self._prediction_masks(
+                    X_stage, X_input, stage_group, var_name
                 )
-                if not predict_mask.any():
+                if not scope_mask.any():
                     continue
-
-                feature_cols = model_info.get('feature_cols', [])
-                X_features = X_stage.loc[predict_mask, feature_cols]
-                X_features = X_features.fillna(X_features.mean())
 
                 try:
                     # Les prédictions sont déjà à l'échelle de la fréquence de
                     # prédiction : aucune remise à l'échelle inverse
-                    predictions = pd.Series(
-                        self._stage_predictions(model_info, X_features),
-                        index=X_stage.index[predict_mask]
+                    predictions = self._predict_stage_values(
+                        model_info, X_stage, predict_mask, context=stage_context
                     )
                     # Contrainte additive : la somme des sous-périodes de chaque
                     # période égale la valeur observée
                     predictions, disagg_mask = self._apply_period_totals(
                         predictions, X_input, stage_group, context=stage_context
                     )
-                    # Cascade intra-étape : le frame de l'étape porte le résultat
-                    X_stage.loc[predict_mask, var_name] = predictions
+                    # Cascade intra-étape : le frame de l'étape porte le résultat.
+                    # Le périmètre de désagrégation est d'abord vidé en entier, une
+                    # ancre laissée non prédite ne devant pas conserver le total de
+                    # sa période dans une colonne à l'échelle de la sous-période (§2.6)
+                    X_stage.loc[scope_mask, var_name] = np.nan
+                    X_stage.loc[predictions.index, var_name] = predictions
                     # Alimentation des étapes suivantes, symétrique du bloc 5g du
                     # fit : sans réentraînement, les covariables des étapes
                     # suivantes restent celles vues à l'entraînement. Clé par nom
@@ -2643,17 +2810,23 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     method='linear', limit_direction='both'
                 )
             else:
-                feature_cols = model_info.get('feature_cols', [])
                 missing_idx = delayed_idx[missing_mask.values]
-                X_features = result.loc[missing_idx, feature_cols]
 
-                if not X_features.empty:
-                    X_features = X_features.fillna(X_features.mean())
+                if len(missing_idx) > 0:
+                    # Prédiction sur les seules dates portant au moins une
+                    # covariable, complétées par les moyennes du jeu
+                    # d'entraînement (§2.7). Aucune restriction à la fenêtre
+                    # d'imputation ici : cette méthode existe précisément pour
+                    # traiter les fins de série situées au-delà
+                    rows_mask = pd.Series(
+                        result.index.isin(missing_idx), index=result.index
+                    )
                     try:
-                        # Les prédictions sont déjà à l'échelle de la fréquence de
-                        # prédiction : aucune remise à l'échelle inverse
-                        predictions = self._stage_predictions(model_info, X_features)
-                        result.loc[missing_idx, column] = predictions
+                        predictions = self._predict_stage_values(
+                            model_info, result, rows_mask,
+                            context=f"delayed values of '{column}'"
+                        )
+                        result.loc[predictions.index, column] = predictions
                     except Exception as e:
                         warnings.warn(
                             f"Failed to impute delayed values for '{column}': {e}"

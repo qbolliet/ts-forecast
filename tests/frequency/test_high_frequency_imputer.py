@@ -1095,16 +1095,14 @@ class TestPanelSingleFitPerVariable:
 
 
 class TestNoImputationWithoutCovariates:
-    """§2.7 : fillna(mean) fabrique des prédictions là où aucune covariable n'existe."""
+    """§2.7 : aucune valeur produite hors de la fenêtre ni sans covariable.
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="§2.7 high_frequency_imputer_review.md : les NaN des features de "
-               "prédiction sont remplacés par la moyenne des lignes à prédire, "
-               "produisant des valeurs même aux dates où AUCUNE covariable n'a "
-               "jamais été observée (_determine_prediction_samples existe mais "
-               "n'est jamais appelée).",
-    )
+    Le défaut corrigé : les NaN des features de prédiction étaient remplacés
+    par la moyenne des lignes à prédire, produisant des valeurs même aux
+    dates où aucune covariable n'a jamais été observée
+    (`_determine_prediction_samples` existait mais n'était jamais appelée).
+    """
+
     def test_no_imputation_outside_window_without_covariates(self):
         """Aucune valeur imputée là où aucune covariable n'existe."""
         dates = pd.date_range('2020-01-01', periods=30, freq='MS')
@@ -1134,6 +1132,131 @@ class TestNoImputationWithoutCovariates:
         # devrait y avoir lieu
         never_covered = result['target_var'].iloc[1:10]
         assert never_covered.isna().all()
+
+        # Les mois couverts, eux, sont bien imputés
+        assert result['target_var'].iloc[10:].notna().any()
+
+    def test_no_prediction_outside_imputation_window(self, mixed_freq_timeseries):
+        """Sur le jeu de référence, rien n'est imputé avant la fenêtre.
+
+        `production_industrielle` ne démarre qu'en 2019 : la fenêtre stricte
+        exclut toute l'année 2018, où la revue §2.7 observait pourtant une
+        balance annuelle imputée dès 2018-02.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        window = imputer._imputation_window_calc.get_imputation_window_mask(
+            mixed_freq_timeseries
+        )
+        outside = window.index[~window]
+        assert (outside < pd.Timestamp('2019-01-01')).any()
+
+        imputed_types = {
+            ProvenanceType.DISAGGREGATED,
+            ProvenanceType.MODEL_ON_TRUE,
+            ProvenanceType.MODEL_ON_MIXED,
+        }
+        for column in ('pib_trimestriel', 'balance_commerciale_annuelle'):
+            # Aucune valeur produite hors fenêtre : ni imputation, ni ancre
+            # conservée à l'échelle de la période basse fréquence (§2.6)
+            assert result.loc[outside, column].isna().all()
+            provenance = imputer.imputation_provenance_.loc[outside, column]
+            assert not provenance.isin(list(imputed_types)).any()
+
+
+class TestPredictionFieldDeterminism:
+    """§2.7 : les imputations ne dépendent pas du champ de prédiction.
+
+    Les covariables manquantes sont complétées par les moyennes du JEU
+    D'ENTRAÎNEMENT, mémorisées dans `imputation_models_`, et non par la
+    moyenne des lignes présentées à `transform`.
+    """
+
+    def test_imputation_deterministic_wrt_prediction_field(self, mixed_freq_timeseries):
+        """`transform` d'un sous-ensemble redonne les mêmes valeurs.
+
+        La coupure tombe sur un début d'année, donc sur une frontière de
+        période pour les deux variables basse fréquence : tronquer au milieu
+        d'une période changerait le recalage additif, qui relève de §2.6.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(mixed_freq_timeseries.copy())
+
+            full = imputer.transform(mixed_freq_timeseries.copy())
+            subset_source = mixed_freq_timeseries.loc['2020-01-01':].copy()
+            subset = imputer.transform(subset_source)
+
+        pd.testing.assert_frame_equal(
+            full.loc[subset.index], subset, check_freq=False
+        )
+
+    def test_feature_means_come_from_training_set(self, mixed_freq_timeseries):
+        """Le registre porte les moyennes d'entraînement, sans NaN."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        fitted = [
+            info for info in imputer.imputation_models_.values()
+            if isinstance(info, dict)
+        ]
+        assert fitted
+        for model_info in fitted:
+            means = model_info['feature_means']
+            assert list(means.index) == list(model_info['feature_cols'])
+            assert means.notna().all()
+
+
+class TestDeterminePredictionSamplesIsCalled:
+    """§2.7 : `_determine_prediction_samples` n'est plus du code mort."""
+
+    def test_determine_prediction_samples_is_called(
+        self, monkeypatch, mixed_freq_timeseries
+    ):
+        """La méthode est appelée et ses groupes sont réellement consommés."""
+        calls = []
+        original = HighFrequencyImputer._determine_prediction_samples
+
+        def spy(self, X_stage, rows_mask, feature_cols):
+            samples = original(self, X_stage, rows_mask, feature_cols)
+            calls.append((rows_mask.sum(), samples))
+            return samples
+
+        monkeypatch.setattr(
+            HighFrequencyImputer, '_determine_prediction_samples', spy
+        )
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        assert calls
+
+        for n_rows, samples in calls:
+            # Partition exacte des lignes à prédire
+            assert sum(len(index) for index, _ in samples) == n_rows
+            # Groupes ordonnés du plus riche en covariables au plus pauvre
+            sizes = [len(cols) for _, cols in samples]
+            assert sizes == sorted(sizes, reverse=True)
 
 
 # Colonnes denses (fréquence de l'index) des fixtures de référence
@@ -1595,22 +1718,36 @@ class TestPeriodTotalsEnforced:
         Le dernier trimestre du jeu de référence a été vidé (délai de
         publication) : sans valeur observée aucune contrainte n'est
         imposable, et les cellules gardent une provenance MODEL_ON_*.
+
+        La fin retardée sort de la fenêtre stricte — c'est précisément le rôle
+        d'`imputation_scope='extended_forward'` de la couvrir (revue §2.9).
+        Depuis §2.7, plus rien n'est imputé hors de la fenêtre : l'assertion
+        porte donc sur les dates non observées QUI SONT dans la fenêtre. Le
+        contrôle porte sur la balance annuelle : son année 2024 est privée de
+        valeur (délai de publication) tout en tombant dans la fenêtre étendue,
+        alors que le seul trimestre non observé du PIB, lui, en sort.
         """
         imputer = HighFrequencyImputer(
             target_frequency='M',
             estimator=LinearRegression(),
             keep_lower_frequencies=False,
+            imputation_scope='extended_forward',
         )
         _fit_transform_quiet(imputer, mixed_freq_timeseries)
 
-        observed = mixed_freq_timeseries['pib_trimestriel'].dropna()
-        observed_periods = set(observed.index.to_period('Q'))
-        provenance = imputer.imputation_provenance_['pib_trimestriel']
+        column = 'balance_commerciale_annuelle'
+        observed = mixed_freq_timeseries[column].dropna()
+        observed_periods = set(observed.index.to_period('Y'))
+        provenance = imputer.imputation_provenance_[column]
+        window = imputer._imputation_window_calc.get_imputation_window_mask(
+            mixed_freq_timeseries
+        )
 
-        # Au moins une période de la grille est dépourvue de valeur observée
+        # Au moins une période de la fenêtre est dépourvue de valeur observée
         unobserved = [
             date for date in provenance.index
-            if date.to_period('Q') not in observed_periods
+            if date.to_period('Y') not in observed_periods
+            and bool(window.get(date, False))
         ]
         assert unobserved
         assert all(
@@ -1791,11 +1928,19 @@ class TestDisaggregationProvenance:
     """§2.6 : la matrice de provenance distingue les trois catégories."""
 
     def test_provenance_distinguishes_disaggregated(self, mixed_freq_timeseries):
-        """ORIGINAL, DISAGGREGATED et MODEL_ON_* coexistent dans la matrice."""
+        """ORIGINAL, DISAGGREGATED et MODEL_ON_* coexistent dans la matrice.
+
+        Le scope étendu est nécessaire depuis §2.7 : dans la fenêtre stricte,
+        toute période imputée porte par construction une valeur observée,
+        donc toute cellule imputée est recalée (DISAGGREGATED). MODEL_ON_*
+        n'apparaît que sur la partie étendue, où une période peut être
+        dépourvue d'observation (fin de série retardée).
+        """
         imputer = HighFrequencyImputer(
             target_frequency='M',
             estimator=LinearRegression(),
             keep_lower_frequencies=False,
+            imputation_scope='extended_forward',
         )
         _fit_transform_quiet(imputer, mixed_freq_timeseries)
 
@@ -1804,10 +1949,17 @@ class TestDisaggregationProvenance:
         assert ProvenanceType.DISAGGREGATED in present
         assert present & {ProvenanceType.MODEL_ON_TRUE, ProvenanceType.MODEL_ON_MIXED}
 
-        # Les ancres désagrégées ne sont plus déclarées originales
+        # Les ancres désagrégées ne sont plus déclarées originales. Seules les
+        # ancres SITUÉES DANS LA FENÊTRE sont concernées : depuis §2.7 aucune
+        # prédiction n'a lieu hors fenêtre, donc aucune désagrégation non plus
+        window = imputer._imputation_window_calc.get_imputation_window_mask(
+            mixed_freq_timeseries
+        )
         anchors = mixed_freq_timeseries['pib_trimestriel'].dropna().index
+        anchors_in_window = anchors[window.reindex(anchors).fillna(False)]
+        assert len(anchors_in_window) > 0
         assert (
-            imputer.imputation_provenance_.loc[anchors, 'pib_trimestriel']
+            imputer.imputation_provenance_.loc[anchors_in_window, 'pib_trimestriel']
             == ProvenanceType.DISAGGREGATED
         ).all()
 
