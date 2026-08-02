@@ -136,6 +136,41 @@ class TestAggregateToTarget:
         assert result.loc[pd.Timestamp('2020-04-01'), 'x'] == 12.0
         assert result.loc[pd.Timestamp('2020-10-01'), 'x'] == 30.0
 
+    def test_skips_missing_column(self, aligner, monthly_df):
+        """Une clé absente du DataFrame est ignorée, pas une erreur."""
+        result = aligner.aggregate_to_target(monthly_df, ['missing'], 'QE', is_panel=False)
+
+        pd.testing.assert_frame_equal(result, monthly_df)
+
+    def test_panel_skips_missing_column(self, aligner):
+        """Idem en panel : une colonne absente pour l'entité est ignorée."""
+        dates = pd.date_range('2023-01-01', periods=4, freq='MS')
+        index = pd.MultiIndex.from_product([['A'], dates], names=['entity', 'date'])
+        df = pd.DataFrame({'x': np.ones(len(index))}, index=index)
+
+        result = aligner.aggregate_to_target(df, [('A', 'missing')], 'QS', is_panel=True)
+
+        pd.testing.assert_frame_equal(result, df)
+
+    def test_skips_column_with_no_observations(self, aligner):
+        """Une colonne entièrement NaN est laissée telle quelle, sans erreur."""
+        dates = pd.date_range('2023-01-01', periods=8, freq='MS')
+        df = pd.DataFrame({'x': [np.nan] * 8}, index=dates)
+
+        result = aligner.aggregate_to_target(df, ['x'], 'QS', is_panel=False)
+
+        assert result['x'].isna().all()
+
+    def test_panel_skips_column_with_no_observations(self, aligner):
+        """Idem en panel : une colonne entièrement NaN pour l'entité est ignorée."""
+        dates = pd.date_range('2023-01-01', periods=8, freq='MS')
+        index = pd.MultiIndex.from_product([['A'], dates], names=['entity', 'date'])
+        df = pd.DataFrame({'x': [np.nan] * len(index)}, index=index)
+
+        result = aligner.aggregate_to_target(df, [('A', 'x')], 'QS', is_panel=True)
+
+        assert result['x'].isna().all()
+
     def test_panel_same_index_contract(self, aligner):
         """En panel, le contrat d'index est respecté entité par entité."""
         dates = pd.date_range('2023-01-31', periods=6, freq='ME')
@@ -183,6 +218,69 @@ class TestInterpolateToTarget:
         # Les mois intermédiaires sont comblés par interpolation
         assert not result['gdp'].isna().any()
 
+    def test_empty_keys_returns_df_unchanged(self, aligner):
+        """Aucune clé à interpoler : le DataFrame est retourné inchangé."""
+        dates = pd.date_range('2023-01-01', periods=3, freq='QS')
+        df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
+
+        result = aligner.interpolate_to_target(df, [], 'MS', is_panel=False)
+
+        pd.testing.assert_frame_equal(result, df)
+
+    def test_panel_densifies_index_per_entity(self, aligner):
+        """Panel : chaque entité est densifiée indépendamment à sa fréquence cible."""
+        dates = pd.date_range('2023-01-01', periods=3, freq='QS')
+        index = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+        df = pd.DataFrame(
+            {'gdp': [100.0, 110.0, 120.0, 200.0, 210.0, 220.0]}, index=index
+        )
+
+        result = aligner.interpolate_to_target(
+            df, [('A', 'gdp'), ('B', 'gdp')], 'MS', is_panel=True
+        )
+
+        expected_dates = pd.date_range('2023-01-01', '2023-07-01', freq='MS', name='date')
+        for entity in ['A', 'B']:
+            entity_frame = result.xs(entity, level='entity')
+            pd.testing.assert_index_equal(entity_frame.index, expected_dates)
+            assert not entity_frame['gdp'].isna().any()
+
+        # Les observations d'origine sont conservées à leurs dates
+        assert result.loc[('A', pd.Timestamp('2023-01-01')), 'gdp'] == 100.0
+        assert result.loc[('B', pd.Timestamp('2023-04-01')), 'gdp'] == 210.0
+
+    def test_skips_missing_column(self, aligner):
+        """Une clé absente du DataFrame est ignorée, pas une erreur."""
+        dates = pd.date_range('2023-01-01', periods=3, freq='QS')
+        df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
+
+        result = aligner.interpolate_to_target(df, ['missing'], 'MS', is_panel=False)
+
+        pd.testing.assert_frame_equal(result, df)
+
+    def test_panel_skips_missing_column(self, aligner):
+        """Idem en panel : une colonne absente pour l'entité est ignorée."""
+        dates = pd.date_range('2023-01-01', periods=3, freq='QS')
+        index = pd.MultiIndex.from_product([['A'], dates], names=['entity', 'date'])
+        df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=index)
+
+        result = aligner.interpolate_to_target(df, [('A', 'missing')], 'MS', is_panel=True)
+
+        pd.testing.assert_frame_equal(result, df)
+
+
+class TestRestrictToOriginalSpan:
+    """Tests unitaires de `restrict_to_original_span`."""
+
+    def test_empty_original_index_returns_densified_unchanged(self, aligner):
+        """Un index d'origine vide ne restreint rien : rien à borner."""
+        densified = pd.date_range('2023-01-01', periods=5, freq='MS')
+        original = pd.DatetimeIndex([])
+
+        result = aligner.restrict_to_original_span(densified, original)
+
+        pd.testing.assert_index_equal(result, densified)
+
 
 class TestConvertToTarget:
     """Tests de l'orientation agrégation/interpolation de convert_to_target."""
@@ -214,3 +312,21 @@ class TestConvertToTarget:
         # Contrat d'interpolation : index densifié à la fréquence cible
         assert len(result) > len(df)
         assert pd.infer_freq(result.index) == 'MS'
+
+    def test_empty_keys_returns_df_unchanged(self, aligner):
+        """Aucune clé à convertir : le DataFrame est retourné inchangé."""
+        dates = pd.date_range('2023-01-01', periods=4, freq='MS')
+        df = pd.DataFrame({'x': np.ones(len(dates))}, index=dates)
+
+        result = aligner.convert_to_target(df, [], 'QS', is_panel=False)
+
+        pd.testing.assert_frame_equal(result, df)
+
+    def test_skips_missing_column(self, aligner):
+        """Une clé absente du DataFrame est ignorée, pas une erreur."""
+        dates = pd.date_range('2023-01-01', periods=4, freq='MS')
+        df = pd.DataFrame({'x': np.ones(len(dates))}, index=dates)
+
+        result = aligner.convert_to_target(df, ['missing'], 'QS', is_panel=False)
+
+        pd.testing.assert_frame_equal(result, df)

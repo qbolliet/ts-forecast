@@ -195,6 +195,64 @@ class TestHighFrequencyImputerFrequencyDetection:
             imputer.fit(df)
 
 
+class TestHighFrequencyImputerParameterValidation:
+    """Garde-fous de construction avec l'API courante (pas l'API dépréciée)."""
+
+    @pytest.mark.parametrize('kwargs, match', [
+        (dict(on_frequency_mismatch='bogus'), 'on_frequency_mismatch'),
+        (dict(coverage_threshold=2.0), 'coverage_threshold'),
+        (dict(imputation_scope='bogus'), 'imputation_scope'),
+        (dict(train_on_partial_fit_order='bogus'), 'train_on_partial_fit_order'),
+    ])
+    def test_invalid_scalar_parameter_raises(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            HighFrequencyImputer(target_frequency='M', **kwargs)
+
+    def test_empty_target_frequency_dict_raises(self):
+        with pytest.raises(ValueError, match='cannot be empty'):
+            HighFrequencyImputer(target_frequency={})
+
+    def test_non_string_frequency_value_raises(self):
+        with pytest.raises(ValueError, match='must be a string'):
+            HighFrequencyImputer(target_frequency={'FR': 123})
+
+    def test_invalid_frequency_string_in_dict_raises(self):
+        with pytest.raises(ValueError, match='Invalid frequencies'):
+            HighFrequencyImputer(target_frequency={'FR': 'bogus_freq'})
+
+    def test_wrong_type_target_frequency_raises(self):
+        with pytest.raises(TypeError, match='string or dict'):
+            HighFrequencyImputer(target_frequency=['M'])
+
+    def test_empty_estimator_dict_raises(self):
+        with pytest.raises(ValueError, match='cannot be empty'):
+            HighFrequencyImputer(target_frequency='M', estimator={})
+
+    def test_single_estimator_missing_predict_raises(self):
+        class NoPredict:
+            def fit(self, X, y=None):
+                return self
+
+        with pytest.raises(ValueError, match="must have a 'predict' method"):
+            HighFrequencyImputer(target_frequency='M', estimator=NoPredict())
+
+    def test_dict_estimator_missing_predict_raises(self):
+        class NoPredict:
+            def fit(self, X, y=None):
+                return self
+
+        with pytest.raises(ValueError, match="must have a 'predict' method"):
+            HighFrequencyImputer(target_frequency='M', estimator={'var1': NoPredict()})
+
+    def test_dict_estimator_missing_fit_raises(self):
+        class NoFit:
+            def predict(self, X):
+                return X
+
+        with pytest.raises(ValueError, match="must have a 'fit' method"):
+            HighFrequencyImputer(target_frequency='M', estimator={'var1': NoFit()})
+
+
 class TestHighFrequencyImputerClassification:
     """Tests for variable classification."""
 
@@ -1342,6 +1400,48 @@ class TestStageFramesRebuiltFromOriginal:
         _assert_dense_columns_untouched(target_level, mixed_freq_timeseries)
 
 
+class TestMultiFrequencyLevelsNotDuplicated:
+    """§2.5 : `keep_lower_frequencies=True` ne duplique pas le niveau cible.
+
+    Avant le correctif, le niveau cible était empilé deux fois : une fois
+    sous son label de fréquence réel ('M') et une fois sous le label
+    générique 'target', avec un contenu identique.
+    """
+
+    def test_multifreq_levels_not_duplicated(self, mixed_freq_timeseries):
+        """Un seul niveau par label de fréquence, jamais de label 'target'."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        levels = result.index.get_level_values('frequency').tolist()
+        unique_levels = result.index.get_level_values('frequency').unique().tolist()
+
+        assert 'target' not in unique_levels
+        target_label = imputer._stage_frequency_label(imputer.effective_target_frequency_)
+        assert levels.count(target_label) == len(mixed_freq_timeseries)
+
+    def test_multifreq_levels_not_duplicated_panel(self, mixed_freq_panel):
+        """Idem pour un panel : un seul niveau par label de fréquence."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_panel)
+
+        unique_levels = result.index.get_level_values('frequency').unique().tolist()
+
+        assert 'target' not in unique_levels
+        target_label = imputer._stage_frequency_label(imputer.effective_target_frequency_)
+        assert target_label in unique_levels
+
+
 class TestInputNotMutated:
     """§5.1 : ni `fit` ni `transform` ne doivent modifier les données d'entrée."""
 
@@ -2441,6 +2541,42 @@ class TestNoStrictImputationWindowWarns:
 
         with pytest.warns(UserWarning, match="No strict imputation window"):
             imputer.fit(df)
+
+
+class TestTrainOnPartialFitOrderCV:
+    """`train_on_partial_fit_order='cv'` : ordre déterminé par MAPE de CV."""
+
+    def test_cv_order_runs_end_to_end(self, mixed_freq_timeseries):
+        """Suffisamment d'observations : le chemin de scoring CV s'exécute."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            train_on_partial_fit_order='cv',
+            train_on_partial_coverage=True,
+            keep_lower_frequencies=False,
+        )
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        assert len(result) == len(mixed_freq_timeseries)
+        assert len(imputer.model_fitting_order_) > 0
+
+    def test_cv_order_falls_back_with_few_observations(self):
+        """Moins de 10 observations disponibles : repli sur l'ordre de fréquence."""
+        dates = pd.date_range('2020-01-01', periods=8, freq='MS')
+        monthly = pd.Series(10.0 + np.arange(8), index=dates)
+        quarterly = pd.Series(np.nan, index=dates)
+        quarterly.iloc[[0, 3]] = [100.0, 130.0]
+        df = pd.DataFrame({'monthly_dense': monthly, 'quarterly': quarterly})
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            train_on_partial_fit_order='cv',
+            train_on_partial_coverage=True,
+        )
+        result = _fit_transform_quiet(imputer, df)
+
+        assert len(result) == len(df)
 
 
 class TestTrainOnPartialFitOrderRenamed:

@@ -325,3 +325,153 @@ class TestEntityKeysAreAlwaysTuples:
 
         assert set(imputer.target_frequency) == set(entities)
         assert all(isinstance(key, tuple) for key in imputer.target_frequency)
+
+
+class TestImputationWindowCalculatorValidation:
+    """Garde-fous de construction et de `fit()` (contrats d'entrée)."""
+
+    def test_invalid_coverage_threshold_raises(self):
+        with pytest.raises(ValueError, match='coverage_threshold'):
+            ImputationWindowCalculator(coverage_threshold=1.5)
+
+    def test_invalid_imputation_scope_raises(self):
+        with pytest.raises(ValueError, match='imputation_scope'):
+            ImputationWindowCalculator(imputation_scope='bogus')
+
+    def test_invalid_min_columns_raises(self):
+        with pytest.raises(ValueError, match='min_columns'):
+            ImputationWindowCalculator(min_columns=1)
+
+    def test_fit_rejects_non_dataframe(self):
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        with pytest.raises(ValueError, match='DataFrame'):
+            calc.fit([1, 2, 3])
+
+    def test_fit_rejects_empty_dataframe(self):
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        with pytest.raises(ValueError, match='empty'):
+            calc.fit(pd.DataFrame(index=pd.DatetimeIndex([])))
+
+    def test_fit_rejects_invalid_index_type(self):
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        df = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})  # RangeIndex, pas de temps
+
+        with pytest.raises(ValueError, match='DatetimeIndex or MultiIndex'):
+            calc.fit(df)
+
+    def test_fit_rejects_too_few_columns(self):
+        calc = ImputationWindowCalculator(coverage_threshold=0.5, min_columns=2)
+        dates = pd.date_range('2023-01-01', periods=12, freq='MS')
+        df = pd.DataFrame({'a': range(12)}, index=dates)
+
+        with pytest.raises(ValueError, match='min_columns'):
+            calc.fit(df)
+
+    def test_fit_panel_rejects_when_no_entity_has_valid_window(self):
+        """§3.6 : aucune entité n'a de fenêtre stricte -> ValueError explicite.
+
+        `b` est entièrement NaN pour les deux entités : la couverture
+        conjointe des deux colonnes n'atteint jamais 1.0, donc aucune des
+        deux entités n'obtient de fenêtre stricte.
+        """
+        dates = pd.date_range('2020-01-01', periods=12, freq='MS')
+        idx = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+        df = pd.DataFrame(
+            {'a': np.arange(24, dtype=float), 'b': [np.nan] * 24}, index=idx
+        )
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+
+        with pytest.raises(ValueError, match='No imputation window'):
+            calc.fit(df)
+
+
+class TestNotFittedGuards:
+    """Chaque accesseur public doit exiger `fit()` au préalable."""
+
+    def test_get_imputation_window_mask_before_fit_raises(self):
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        with pytest.raises(ValueError, match='not fitted'):
+            calc.get_imputation_window_mask()
+
+    def test_get_mask_at_frequency_before_fit_raises(self):
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        with pytest.raises(ValueError, match='not fitted'):
+            calc.get_mask_at_frequency('QS')
+
+    def test_get_columns_with_coverage_before_fit_raises(self):
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        with pytest.raises(ValueError, match='not fitted'):
+            calc.get_columns_with_coverage(
+                pd.Timestamp('2020-01-01'), pd.Timestamp('2020-02-01')
+            )
+
+
+class TestGetImputationWindowMaskNoData:
+    """`get_imputation_window_mask()` sans argument renvoie le masque brut."""
+
+    def test_returns_raw_fitted_mask_when_no_data_given(self):
+        dates = pd.date_range('2020-01-01', periods=12, freq='MS')
+        df = pd.DataFrame({'a': range(12), 'b': range(12)}, index=dates)
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        calc.fit(df)
+
+        result = calc.get_imputation_window_mask()
+
+        pd.testing.assert_series_equal(result, calc.imputation_window_mask_)
+
+
+class TestGetMaskAtFrequencyNormalizesDictKeys:
+    """§3.4/§5.4 : les clés scalaires fournies par l'appelant sont normalisées."""
+
+    def test_get_mask_at_frequency_normalizes_dict_keys(self):
+        df = _make_panel([('A',), ('B',)])
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        calc.fit(df)
+
+        result = calc.get_mask_at_frequency({'A': 'QS', 'B': 'QS'})
+
+        assert set(result) == {('A',), ('B',)}
+
+
+class TestExtensionNoOp:
+    """§3.2 : `_extend_backward`/`_extend_forward` n'étendent rien quand il n'y a
+    rien à étendre (masque entièrement False, ou fenêtre déjà aux bornes de la
+    grille de couverture).
+    """
+
+    @pytest.fixture
+    def calc(self):
+        return ImputationWindowCalculator(coverage_threshold=0.5)
+
+    @pytest.fixture
+    def full_coverage(self):
+        idx = pd.date_range('2020-01-01', periods=5, freq='MS')
+        return pd.Series([1.0] * 5, index=idx)
+
+    def test_extend_backward_noop_when_mask_entirely_false(self, calc, full_coverage):
+        mask = pd.Series([False] * 5, index=full_coverage.index)
+
+        result = calc._extend_backward(full_coverage, mask)
+
+        assert not result.any()
+
+    def test_extend_forward_noop_when_mask_entirely_false(self, calc, full_coverage):
+        mask = pd.Series([False] * 5, index=full_coverage.index)
+
+        result = calc._extend_forward(full_coverage, mask)
+
+        assert not result.any()
+
+    def test_extend_backward_noop_when_window_starts_at_grid_start(self, calc, full_coverage):
+        mask = pd.Series([True] * 5, index=full_coverage.index)
+
+        result = calc._extend_backward(full_coverage, mask)
+
+        pd.testing.assert_series_equal(result, mask)
+
+    def test_extend_forward_noop_when_window_ends_at_grid_end(self, calc, full_coverage):
+        mask = pd.Series([True] * 5, index=full_coverage.index)
+
+        result = calc._extend_forward(full_coverage, mask)
+
+        pd.testing.assert_series_equal(result, mask)
