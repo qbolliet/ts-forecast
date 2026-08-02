@@ -540,6 +540,13 @@ print("\nDonnées retransformées à l'échelle originale")
 
 ### 7.3 Optimisation des hyperparamètres
 
+L'état entraîné du transformer est **immuable** : `imputation_plan_` (la liste ordonnée des
+`ImputationStep`) est la seule source de vérité du fit, et `imputation_models_`,
+`model_fitting_order_`, `stage_groups_` et `frequency_progression_` n'en sont que des vues
+**dérivées, en lecture seule**. On ne remplace donc pas les modèles après coup : on passe les
+estimateurs optimisés au paramètre `estimator`, sous forme d'un dict `variable -> estimateur`,
+puis on ré-entraîne.
+
 ```python
 from sklearn.model_selection import GridSearchCV
 
@@ -550,22 +557,31 @@ param_grid = {
     'learning_rate': [0.01, 0.05, 0.1]
 }
 
+# Variables réellement imputées par un modèle, lues sur le plan d'imputation
+variables = {
+    step.var_name
+    for step in transformer.imputation_plan_
+    if not step.is_fallback
+}
+
 # Recherche d'hyperparamètres pour chaque variable
 best_estimators = {}
 
-for variable in transformer.imputation_models_.keys():
+for variable in variables:
     print(f"\nOptimisation pour {variable}...")
-    
-    # Préparation des données
-    freq = transformer.frequency_map_[variable]
-    data_agg = transformer._aggregate_to_frequency(data_train, freq)
-    
-    feature_cols = [c for c in data_agg.columns 
-                   if c != variable and c != 'date']
-    X = data_agg[feature_cols].fillna(method='ffill')
+
+    # Préparation des données à la fréquence propre de la variable
+    freq = transformer.detected_frequencies_[variable]
+    data_agg = transformer._freq_aligner.aggregate_to_target(
+        data_train, [c for c in data_train.columns if c != variable], freq,
+        transformer.is_panel_
+    )
+
+    feature_cols = [c for c in data_agg.columns if c != variable]
+    X = data_agg[feature_cols].ffill()
     y = data_agg[variable].dropna()
     X = X.loc[y.index]
-    
+
     # Grid search
     base_model = GradientBoostingRegressor(random_state=42)
     grid_search = GridSearchCV(
@@ -575,15 +591,21 @@ for variable in transformer.imputation_models_.keys():
         scoring='neg_mean_squared_error',
         n_jobs=-1
     )
-    
+
     grid_search.fit(X, y)
     best_estimators[variable] = grid_search.best_estimator_
-    
+
     print(f"  Meilleurs paramètres: {grid_search.best_params_}")
     print(f"  RMSE: {np.sqrt(-grid_search.best_score_):.4f}")
 
-# Mise à jour du transformer avec les meilleurs modèles
-transformer.imputation_models_ = best_estimators
+# Ré-entraînement avec les meilleurs modèles : le dict est passé au
+# constructeur, jamais affecté à "imputation_models_" (vue en lecture seule)
+tuned = HighFrequencyImputer(
+    target_frequency='M',
+    estimator=best_estimators,
+    time_col='date',
+)
+tuned.fit(data_train)
 ```
 
 ## 8. Bonnes pratiques et recommandations

@@ -3,6 +3,8 @@
 This module tests the HighFrequencyImputer class for mixed-frequency imputation,
 focusing on edge cases, panel data handling, and delay management.
 """
+import dataclasses
+
 import pytest
 import pandas as pd
 import numpy as np
@@ -2618,3 +2620,136 @@ class TestVerboseMode:
         out = capsys.readouterr().out
         assert '[HighFrequencyImputer]' in out
         assert 'no estimator available' in out
+
+
+class TestImputationPlan:
+    """§5.3 : le plan d'imputation est le seul état du fit, les anciennes
+    structures parallèles n'en sont plus que des vues dérivées."""
+
+    @staticmethod
+    def _fitted(data, **kwargs):
+        """Fit an imputer on the two-stage cascade of the fixtures."""
+        params = {
+            'target_frequency': 'M',
+            'estimator': LinearRegression(),
+            'cascade_refitting': True,
+            'keep_lower_frequencies': True,
+        }
+        params.update(kwargs)
+        imputer = HighFrequencyImputer(**params)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(data.copy())
+        return imputer
+
+    def test_plan_length_matches_fitting_order(self, mixed_freq_timeseries):
+        """Une étape de plan par entrée de `model_fitting_order_`."""
+        imputer = self._fitted(mixed_freq_timeseries)
+
+        assert len(imputer.imputation_plan_) == len(imputer.model_fitting_order_)
+        assert len(imputer.imputation_plan_) == len(imputer.imputation_models_)
+
+    def test_plan_length_matches_fitting_order_panel(self, mixed_freq_panel):
+        """Idem sur un panel, où les clés de groupe sont dédupliquées (§2.4)."""
+        imputer = self._fitted(mixed_freq_panel)
+
+        assert len(imputer.imputation_plan_) == len(imputer.model_fitting_order_)
+        assert len(imputer.imputation_plan_) == len(imputer.imputation_models_)
+
+    def test_derived_keys_are_coherent(self, mixed_freq_timeseries):
+        """Les quatre vues dérivées portent exactement les clés du plan."""
+        imputer = self._fitted(mixed_freq_timeseries)
+        plan_keys = [step.stage_key for step in imputer.imputation_plan_]
+
+        assert plan_keys == imputer.model_fitting_order_
+        assert list(imputer.imputation_models_) == plan_keys
+        assert list(imputer.stage_groups_) == plan_keys
+        # Chaque clé se décompose en (label de fréquence de l'étape, groupe)
+        for step in imputer.imputation_plan_:
+            assert step.stage_key == (step.pred_freq_label, step.var_key)
+        # La progression de fréquence ne référence que des variables du plan
+        assert set(imputer.frequency_progression_) == {
+            step.var_name for step in imputer.imputation_plan_
+        }
+
+    def test_registry_entries_match_steps(self, mixed_freq_timeseries):
+        """L'entrée de registre d'une étape reproduit fidèlement ses champs."""
+        imputer = self._fitted(mixed_freq_timeseries)
+
+        for step in imputer.imputation_plan_:
+            entry = imputer.imputation_models_[step.stage_key]
+            if step.is_fallback:
+                assert entry == 'interpolate_fallback'
+                continue
+            # Le modèle est partagé, pas copié
+            assert entry['model'] is step.model
+            assert entry['feature_cols'] == list(step.feature_cols)
+            assert entry['scale_factor'] == step.scale_factor
+            assert entry['fit_scale_factor'] == step.fit_scale_factor
+            assert entry['pred_freq'] == step.pred_freq
+            assert entry['trained_on_imputed'] == step.trained_on_imputed
+
+    def test_group_metadata_matches_steps(self, quarterly_over_monthly):
+        """`stage_groups_` dérive du plan, replis par interpolation compris."""
+        imputer = self._fitted(quarterly_over_monthly, estimator=None)
+
+        # La fixture sans estimateur emprunte le repli
+        assert any(step.is_fallback for step in imputer.imputation_plan_)
+        for step in imputer.imputation_plan_:
+            group = imputer.stage_groups_[step.stage_key]
+            assert group['var_name'] == step.var_name
+            assert group['f_var'] == step.source_frequency
+            assert group['entities'] == step.entities
+
+    def test_derived_views_are_read_only(self, mixed_freq_timeseries):
+        """Les vues dérivées n'ont pas de setter : le plan reste la source."""
+        imputer = self._fitted(mixed_freq_timeseries)
+
+        for attribute in (
+            'imputation_models_',
+            'model_fitting_order_',
+            'stage_groups_',
+            'frequency_progression_',
+        ):
+            with pytest.raises(AttributeError):
+                setattr(imputer, attribute, {})
+
+    def test_derived_views_are_absent_before_fit(self):
+        """Avant `fit`, les vues restent invisibles à `hasattr` (non-régression
+        du passage attribut -> propriété)."""
+        imputer = HighFrequencyImputer(target_frequency='M')
+
+        assert not hasattr(imputer, 'imputation_plan_')
+        assert not hasattr(imputer, 'imputation_models_')
+        assert not hasattr(imputer, 'model_fitting_order_')
+        assert not hasattr(imputer, 'stage_groups_')
+        assert not hasattr(imputer, 'frequency_progression_')
+
+    def test_steps_are_frozen(self, mixed_freq_timeseries):
+        """Une étape est immuable : seul `replace` produit une variante."""
+        imputer = self._fitted(mixed_freq_timeseries)
+        step = imputer.imputation_plan_[0]
+
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            step.scale_factor = 1.0
+
+        # La variante partage le modèle et ne modifie que le champ demandé
+        variant = dataclasses.replace(step, scale_factor=99.0)
+        assert variant.scale_factor == 99.0
+        assert step.scale_factor != 99.0
+        assert variant.model is step.model
+
+    def test_transform_replays_the_plan(self, mixed_freq_timeseries):
+        """`transform` rejoue le plan : le retirer prive la sortie de ses
+        imputations, preuve qu'aucun autre registre n'est consulté."""
+        imputer = self._fitted(mixed_freq_timeseries, keep_lower_frequencies=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            full = imputer.transform(mixed_freq_timeseries.copy())
+
+            # Plan vidé : plus aucune étape à rejouer
+            imputer.imputation_plan_ = []
+            empty = imputer.transform(mixed_freq_timeseries.copy())
+
+        imputed_col = 'balance_commerciale_annuelle'
+        assert full[imputed_col].notna().sum() > empty[imputed_col].notna().sum()

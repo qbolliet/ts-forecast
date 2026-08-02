@@ -8,6 +8,7 @@ It also provides mixed-frequency imputation capabilities with provenance trackin
 # Import des classes principales
 from .detector import FrequencyDetector, detect_frequency, detect_dataset_frequency, detect_index_frequency
 from .high_frequency_imputer import HighFrequencyImputer
+from .imputation_plan import ImputationStep, INTERPOLATE_FALLBACK
 from .provenance import ImputationProvenanceTracker, ProvenanceType
 from .imputation_window import ImputationWindowCalculator, ImputationScope
 from .target_frequency_validator import TargetFrequencyValidator
@@ -23,6 +24,8 @@ __all__ = [
     'detect_index_frequency',
     # Imputation
     'HighFrequencyImputer',
+    'ImputationStep',
+    'INTERPOLATE_FALLBACK',
     # Provenance tracking
     'ImputationProvenanceTracker',
     'ProvenanceType',
