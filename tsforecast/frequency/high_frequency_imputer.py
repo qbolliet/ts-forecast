@@ -292,6 +292,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         restore_original_values: bool = False,
         time_col: Optional[str] = None,
         panel_cols: Optional[List[str]] = None,
+        verbose: bool = False,
     ):
         """Initialize the HighFrequencyImputer.
 
@@ -362,6 +363,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 ORIGINAL mask). Default is False.
             time_col: Name of the time column (if in columns not index).
             panel_cols: List of column names identifying panel entities.
+            verbose: If True, print progress messages (cascade stages, fits,
+                fallbacks and their reason, dates left unimputed for lack of
+                covariates, end-of-transform provenance summary) prefixed
+                ``[HighFrequencyImputer]`` via :meth:`_log`. Default is
+                False, which keeps the transformer silent (review §5.6).
         """
         # Initialisation du parent
         super().__init__(
@@ -429,6 +435,21 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.scale_features = scale_features
         self.enforce_period_totals = enforce_period_totals
         self.restore_original_values = restore_original_values
+        self.verbose = verbose
+
+    # -------------------------------------------------------------------------
+    # Journalisation
+    # -------------------------------------------------------------------------
+    # Méthode auxiliaire de journalisation conditionnelle
+    def _log(self, message: str) -> None:
+        """Print a progress message when verbose mode is enabled.
+
+        Args:
+            message: Message to print, prefixed with the class tag.
+        """
+        # Silence total hors mode verbeux : aucune sortie standard produite
+        if self.verbose:
+            print(f"[HighFrequencyImputer] {message}")
 
     # -------------------------------------------------------------------------
     # Validation des paramètres d'entrée
@@ -1926,6 +1947,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if skipped:
             skipped_index = skipped[0].append(skipped[1:]) if len(skipped) > 1 else skipped[0]
             suffix = f" for {context}" if context else ""
+            self._log(
+                f"No covariate available{suffix} on {len(skipped_index)} date(s): "
+                f"left unimputed ({list(skipped_index[:5])}{'...' if len(skipped_index) > 5 else ''})"
+            )
             warnings.warn(
                 f"No covariate available{suffix} on {len(skipped_index)} date(s) "
                 f"(e.g. {skipped_index[0]}): they are left unimputed rather than "
@@ -2257,6 +2282,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             aggregate_keys = var_classification['aggregate']
             impute_keys = var_classification['impute']
 
+            self._log(
+                f"[fit] Stage {self._stage_frequency_label(pred_freq)}: "
+                f"{len(impute_keys)} variable(s) to impute: {impute_keys}"
+            )
+
             # 5b. Construction du frame de l'étape, reconstruit depuis les données d'origine
             X_stage = self._build_stage_frame(X_work, imputed_store, pred_freq)
             # Marquage de la provenance sur le frame d'étape (index d'origine)
@@ -2348,6 +2378,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                 estimator = self._get_estimator_for_variable(var_name)
                 if estimator is None:
+                    self._log(
+                        f"[fit] Fallback interpolate_fallback for '{var_name}': "
+                        f"no estimator available"
+                    )
                     warnings.warn(
                         f"No estimator available for variable '{var_name}', "
                         f"using linear interpolation as fallback"
@@ -2362,6 +2396,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 )
 
                 if len(X_train) < 2:
+                    self._log(
+                        f"[fit] Fallback interpolate_fallback for '{var_name}': "
+                        f"insufficient training data ({len(X_train)} observation(s))"
+                    )
                     warnings.warn(
                         f"Not enough training data for variable '{var_name}', "
                         f"using linear interpolation as fallback"
@@ -2393,6 +2431,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                 # Repli si le jeu d'entraînement est trop petit ou sans covariable exploitable
                 if len(X_train_scaled) < 2 or X_train_scaled.shape[1] == 0:
+                    self._log(
+                        f"[fit] Fallback interpolate_fallback for '{var_name}': "
+                        f"insufficient training data after preprocessing "
+                        f"({len(X_train_scaled)} observation(s), "
+                        f"{X_train_scaled.shape[1]} usable covariate(s))"
+                    )
                     self.imputation_models_[stage_key] = 'interpolate_fallback'
                     self.model_fitting_order_.append(stage_key)
                     continue
@@ -2401,6 +2445,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 feature_cols = list(X_train_scaled.columns)
                 try:
                     estimator.fit(X_train_scaled, y_train_scaled)
+                    trained_on_imputed = (
+                        self.train_on_partial_coverage and bool(imputed_store)
+                    )
                     self.imputation_models_[stage_key] = {
                         'model': estimator,
                         'feature_cols': feature_cols,
@@ -2412,12 +2459,26 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         # Il ne bouge plus, quand "scale_factor" suit l'étape
                         'fit_scale_factor': scale_factor,
                         'pred_freq': pred_freq,
-                        'trained_on_imputed': (
-                            self.train_on_partial_coverage
-                            and bool(imputed_store)
-                        ),
+                        'trained_on_imputed': trained_on_imputed,
                     }
+                    # Décompte valeurs vraies vs imputées effectivement vues à
+                    # l'entraînement, à partir de la provenance au moment du fit
+                    original_mask = self._provenance_tracker.get_mask(
+                        [ProvenanceType.ORIGINAL, ProvenanceType.DISAGGREGATED],
+                        column=var_name
+                    ).reindex(y_train_scaled.index).fillna(False)
+                    n_true = int(original_mask.sum())
+                    self._log(
+                        f"[fit] Fit '{var_name}' at frequency {freq_norm} on "
+                        f"{len(y_train_scaled)} observation(s) "
+                        f"({n_true} true, {len(y_train_scaled) - n_true} imputed, "
+                        f"trained_on_imputed={trained_on_imputed})"
+                    )
                 except Exception as e:
+                    self._log(
+                        f"[fit] Fallback interpolate_fallback for '{var_name}': "
+                        f"fit failed with {e!r}"
+                    )
                     warnings.warn(
                         f"Failed to fit model for variable '{var_name}': {e}. "
                         f"Using linear interpolation as fallback"
@@ -2615,6 +2676,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             freq_label = self._stage_frequency_label(pred_freq)
             is_final_stage = stage_idx == len(self.freq_prediction_list_) - 1
 
+            stage_var_names = [
+                (key[1][0] if isinstance(key[1], tuple) else key[1])
+                for key in stage_keys
+            ]
+            self._log(
+                f"[transform] Stage {freq_label}: replaying "
+                f"{len(stage_var_names)} variable(s): {stage_var_names}"
+            )
+
             # Parcours des variables imputées à cette étape
             for stage_key in stage_keys:
                 # "group_key" est la variable seule, ou (variable, fréquence
@@ -2633,6 +2703,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 stage_context = f"'{var_name}' at stage {freq_label}"
 
                 if model_info is None or model_info == 'interpolate_fallback':
+                    self._log(
+                        f"[transform] Fallback interpolate_fallback for "
+                        f"'{var_name}' at stage {freq_label}: registered as "
+                        f"interpolate_fallback at fit time"
+                    )
                     # Le repli n'alimente pas imputed_store : le fit n'en produit aucune
                     # valeur, les frames d'étape resteraient asymétriques
                     if var_name in X_stage.columns:
@@ -2713,6 +2788,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         disagg_mask, model_info.get('trained_on_imputed', False)
                     )
                 except Exception as e:
+                    self._log(
+                        f"[transform] Fallback interpolate_fallback for "
+                        f"'{var_name}' at stage {freq_label}: prediction "
+                        f"failed with {e!r}"
+                    )
                     warnings.warn(
                         f"Prediction failed for variable '{var_name}': {e}. "
                         f"Using interpolation fallback."
@@ -2749,6 +2829,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             self.imputation_provenance_ = self._build_multifreq_output(provenance_frames)
         else:
             self.imputation_provenance_ = transform_tracker.get_provenance_matrix()
+
+        # Résumé de provenance (mode verbeux uniquement, review §5.6)
+        overall_stats = transform_tracker.compute_statistics()['overall']
+        self._log(
+            "Transform summary: " + ", ".join(
+                f"{prov_type.value}={overall_stats[f'{prov_type.value}_pct']:.1f}%"
+                for prov_type in ProvenanceType
+            )
+        )
 
         # 6. Scission X et y
         if y is not None and y_col_name in data_result.columns:

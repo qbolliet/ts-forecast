@@ -2563,3 +2563,58 @@ class TestClassifyVariablesUnification:
 
         assert imputer.variable_categories_['daily_var'] == 'aggregate'
         assert imputer.variable_categories_['monthly_var'] == 'target_freq'
+
+
+class TestVerboseMode:
+    """§5.6 : mode `verbose`, qui aurait évité le bug §1.4 (prints de débogage
+    oubliés en production)."""
+
+    def test_verbose_false_produces_no_output(
+        self, capsys, annual_quarterly_over_monthly
+    ):
+        """`verbose=False` (défaut) : aucune sortie standard."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+        )
+        _fit_transform_quiet(imputer, annual_quarterly_over_monthly)
+
+        assert capsys.readouterr().out == ''
+
+    def test_verbose_true_produces_prefixed_lines_per_stage_and_fit(
+        self, capsys, annual_quarterly_over_monthly
+    ):
+        """`verbose=True` : au moins une ligne par étape et par fit, toutes
+        préfixées `[HighFrequencyImputer]`."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            verbose=True,
+        )
+        _fit_transform_quiet(imputer, annual_quarterly_over_monthly)
+
+        lines = [
+            line for line in capsys.readouterr().out.splitlines() if line
+        ]
+        assert lines
+        assert all(line.startswith('[HighFrequencyImputer]') for line in lines)
+
+        # Trois étapes de cascade ('Y', 'Q', 'M') et trois fits (un par
+        # couple étape/variable, cf. TestFitCountByCascadeRefitting)
+        stage_lines = [line for line in lines if '] Stage' in line]
+        fit_lines = [line for line in lines if '] Fit ' in line]
+        assert len(stage_lines) >= 3
+        assert len(fit_lines) == 3
+
+    def test_verbose_logs_fallback_reason_when_no_estimator(
+        self, capsys, annual_quarterly_over_monthly
+    ):
+        """Repli sans estimateur : la raison est journalisée."""
+        imputer = HighFrequencyImputer(target_frequency='M', verbose=True)
+        _fit_transform_quiet(imputer, annual_quarterly_over_monthly)
+
+        out = capsys.readouterr().out
+        assert '[HighFrequencyImputer]' in out
+        assert 'no estimator available' in out
