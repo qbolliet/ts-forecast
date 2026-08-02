@@ -69,6 +69,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     - Predictions are made for missing values
     - If cascade_refitting=True, models are retrained after each frequency stage
 
+    Vocabulary correspondence (review §6): some early design discussions used
+    a slightly different vocabulary than the final parameters below —
+
+    | Design vocabulary  | Actual parameter(s)/attribute                     |
+    |---------------------|----------------------------------------------------|
+    | ``fit_on_imputed``  | ``train_on_partial_coverage`` + ``cascade_refitting`` |
+    | ``keep_lower_frequencies`` | ``keep_lower_frequencies`` (unchanged)      |
+    | ``P1``              | ``imputation_window_``                              |
+    | ``refit``           | ``cascade_refitting``                               |
+
     Parameters:
         target_frequency: Target frequency for imputation. Can be:
             - str: Single frequency applied to all series/entities
@@ -2226,6 +2236,40 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         return progression
 
+    # Méthode auxiliaire de dérivation des bornes d'une fenêtre depuis son masque
+    @staticmethod
+    def _derive_window_bounds(
+        mask: Union[pd.Series, Dict[tuple, Optional[pd.Series]], None]
+    ) -> Union[Tuple, Dict[tuple, Tuple]]:
+        """Derive (start, end) bounds from a boolean window mask.
+
+        Used to populate ``training_window_`` from
+        ``ImputationWindowCalculator.imputation_window_mask_``, which holds
+        the EXTENDED mask (post ``imputation_scope``) — unlike
+        ``imputation_window_start_``/``imputation_window_end_``, frozen at
+        the strict-window bounds before extension (review §1.1).
+
+        Args:
+            mask: Boolean Series (time series) or dict entity -> Series (panel).
+
+        Returns:
+            (start, end) tuple, or dict mapping entities to (start, end).
+        """
+        # Cas des données de panel : dérivation par entité
+        if isinstance(mask, dict):
+            return {
+                entity: (
+                    (m.index[m].min(), m.index[m].max())
+                    if m is not None and m.any() else (None, None)
+                )
+                for entity, m in mask.items()
+            }
+        # Cas des séries temporelles
+        if mask is None or not mask.any():
+            return (None, None)
+        active = mask.index[mask]
+        return (active.min(), active.max())
+
     # -------------------------------------------------------------------------
     # Fit
     # -------------------------------------------------------------------------
@@ -2339,6 +2383,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 self._imputation_window_calc.imputation_window_start_,
                 self._imputation_window_calc.imputation_window_end_
             )
+            # Bornes de la fenêtre étendue, dérivées du masque : le calculateur
+            # n'expose que les bornes de la fenêtre STRICTE via
+            # imputation_window_start_/end_ (jamais recalculées après extension)
+            self.training_window_ = self._derive_window_bounds(
+                self._imputation_window_calc.imputation_window_mask_
+            )
         except ValueError as e:
             warnings.warn(
                 f"Could not calculate imputation window: {e}. Using all available data.",
@@ -2349,6 +2399,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             else:
                 time_idx = X_work.index
             self.imputation_window_ = (time_idx.min(), time_idx.max())
+            self.training_window_ = self.imputation_window_
         else:
             # Avertissement global si aucune fenêtre stricte n'existe (fit "réussi" mais
             # bornes None) : sans cela, tous les entraînements échouent silencieusement

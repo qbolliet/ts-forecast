@@ -220,8 +220,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             shift_columns = np.intersect1d(X.columns.tolist(), [k for k,v in self.strategy if v == 'shift']).tolist()
             mask_columns = np.intersect1d(X.columns.tolist(), [k for k,v in self.strategy if v == 'mask']).tolist()
 
-        # Détection des fréquences par colonne
-        self.detected_frequencies_ = detect_frequency(data=X, time_col=None, panel_cols=None, literal=False, check_consistency=False, strict=False)
+        # Détection des fréquences par colonne (return_format='base' par défaut)
+        self.detected_frequencies_ = detect_frequency(data=X, time_col=None, panel_cols=None, check_consistency=False, strict=False)
 
         # Calcul du nombre de périodes à shifter pour chaque variable
         # Initialisation du dictionnaire résultat
