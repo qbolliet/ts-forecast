@@ -339,12 +339,18 @@ class FrequencyConverter(TemporalConverter):
             >>> converter.get_conversion_factor('quarterly', 'monthly')
             0.3333333333333333
         """
+        # Normalisation des fréquences (codes/littéraux) vers leur base durée
+        # (ex: 'daily'/'D' -> 'D', 'monthly'/'M' -> 'M'), seul format reconnu
+        # par DurationConverter
+        from_base = normalize_frequency(from_unit, return_format='base')
+        to_base = normalize_frequency(to_unit, return_format='base')
+
         # Délégation au DurationConverter avec arguments inversés :
         # DurationConverter.get_conversion_factor(a, b) = durée(a) / durée(b)
         # = "combien de b dans un a"
         # On veut : "combien de from_freq dans un to_freq" = durée(to) / durée(from)
         # → on passe (to_freq, from_freq)
-        return get_duration_conversion_factor(to_freq, from_freq)
+        return get_duration_conversion_factor(to_base, from_base)
 
     # Méthode de comptage des sous-périodes, période cible par période cible
     def count_subperiods_per_period(
@@ -1465,7 +1471,7 @@ class FrequencyConverter(TemporalConverter):
         # Ex: 1 trimestre (Q) = 3 mois (M) → ratio = 3.0
         try:
             # Récupération du facteur de conversion depuis DurationConverter
-            ratio = self._duration_converter.get_conversion_factor(source_base, target_base)
+            ratio = get_duration_conversion_factor(source_base, target_base)
 
             # Vérification que le ratio est un entier positif (ou proche d'un entier)
             # Pour l'extension d'index, on a besoin d'un ratio entier
