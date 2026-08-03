@@ -45,7 +45,7 @@ class DurationConverter(TemporalConverter):
         to_unit: Union[DurationType, UserDurationType],
         rounding: RoundingType = None,
         **kwargs
-    ) -> float:
+    ) -> Union[int, float]:
         """Convert a value from one duration unit to another.
 
         Implementation of TemporalConverter.convert() for durations.
@@ -75,7 +75,7 @@ class DurationConverter(TemporalConverter):
             1
         """
         # Récupération du facteur de conversion
-        conversion_factor = self.get_conversion_factor(from_code, to_code)
+        conversion_factor = self.get_conversion_factor(from_unit, to_unit)
 
         # Application de la conversion
         result = value * conversion_factor
@@ -91,7 +91,7 @@ class DurationConverter(TemporalConverter):
         self,
         from_unit: Union[DurationType, UserDurationType],
         to_unit: Union[DurationType, UserDurationType]
-    ) -> float:
+    ) -> Union[int, float]:
         """Get the conversion factor between two duration units.
 
         Implementation of TemporalConverter.get_conversion_factor() for durations.
@@ -118,7 +118,7 @@ class DurationConverter(TemporalConverter):
         to_code = normalize_duration(to_unit)
         
         # Même durée
-        if from_code == from_code:
+        if from_code == to_code:
             return 1.0
 
         # Recherche dans la table calendaire
@@ -145,7 +145,7 @@ class DurationConverter(TemporalConverter):
         return from_to_seconds / to_to_seconds
 
     # Méthode auxiliaire d'application de l'arrondi
-    def _round_result(self, value: float, rounding: RoundingType) -> float:
+    def _round_result(self, value: float, rounding: RoundingType) -> Union[int, float]:
         """Apply rounding to the conversion result.
 
         Args:

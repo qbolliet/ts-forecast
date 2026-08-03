@@ -4,14 +4,21 @@ This module provides utilities for detecting and parsing DatetimeIndex frequenci
 into their component parts (frequency code, position, suffix) and for building
 complete frequency strings suitable for pandas operations.
 """
+# Report de l'évaluation des annotations (évite l'import circulaire avec ..frequency)
+from __future__ import annotations
+
 # Importation des modules
 import re
 import pandas as pd
-from typing import Tuple, Optional
+from typing import Tuple, Optional, TYPE_CHECKING
 
 # Importation des modules du package
-from ..frequency.types import FrequencyType
 from ..position import combine_frequency_position
+
+# Import réservé au typage statique : ..frequency importe ce module au niveau
+# package (via frequency/normalizer.py), un import réel ici créerait un cycle
+if TYPE_CHECKING:
+    from ..frequency.types import FrequencyType
 
 # Fonction de parsing d'une chaîne de caractères contenant une fréquence
 def parse_frequency(frequency_str : str) -> Tuple[FrequencyType, str, str]:
