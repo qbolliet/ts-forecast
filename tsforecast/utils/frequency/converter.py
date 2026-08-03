@@ -35,6 +35,8 @@ from ..position.utils import (
     normalize_position,
     validate_position,
 )
+# Import des utilitaires de gestion des durées
+from ..duration.utils import get_duration_conversion_factor
 
 # Import des utilitaires de panel
 from ...panel.utils import is_panel_data
@@ -95,25 +97,10 @@ class FrequencyConverter(TemporalConverter):
         >>> len(monthly)
         1
     """
-    # Table des nombres de sous-périodes calendaires (clé : fréquence basse,
-    # fréquence haute). Les paires emboîtées (Y/Q/M, W/D) y sont exactes ; les
-    # autres (jours dans un mois, semaines dans une année) portent la valeur
-    # conventionnelle, aucune valeur exacte constante n'existant. Dans les deux
-    # cas la table corrige le ratio de durées, inexact par construction
-    # (365/30 = 12.17 mois dans une année).
-    _CALENDAR_SUBPERIODS: Dict[Tuple[str, str], int] = {
-        ('Y', 'Q'): 4, ('Y', 'M'): 12, ('Y', 'SM'): 24, ('Y', 'W'): 52, ('Y', 'D'): 365,
-        ('Q', 'M'): 3, ('Q', 'SM'): 6, ('Q', 'W'): 13, ('Q', 'D'): 91,
-        ('M', 'SM'): 2, ('M', 'D'): 30,
-        ('W', 'D'): 7,
-    }
 
     # Initialisation
     def __init__(self):
         """Initialize the FrequencyConverter."""
-        # Initialisation du convertisseur de durées pour les facteurs de conversion
-        from ..duration.converter import DurationConverter
-        self._duration_converter = DurationConverter()
 
     # Implémentation de la méthode abstraite convert de TemporalConverter
     def convert(self,
@@ -352,85 +339,12 @@ class FrequencyConverter(TemporalConverter):
             >>> converter.get_conversion_factor('quarterly', 'monthly')
             0.3333333333333333
         """
-        # Normalisation des fréquences de base (sans positions S/E)
-        from_freq = normalize_frequency(from_unit)
-        to_freq = normalize_frequency(to_unit)
-
-        # Même fréquence → facteur 1
-        if from_freq == to_freq:
-            return 1.0
-
         # Délégation au DurationConverter avec arguments inversés :
         # DurationConverter.get_conversion_factor(a, b) = durée(a) / durée(b)
         # = "combien de b dans un a"
         # On veut : "combien de from_freq dans un to_freq" = durée(to) / durée(from)
         # → on passe (to_freq, from_freq)
-        return self._duration_converter.get_conversion_factor(to_freq, from_freq)
-
-    # Méthode de comptage des sous-périodes d'une période basse fréquence
-    def count_subperiods(self, low_freq: str, high_freq: str) -> float:
-        """Count the high_freq sub-periods contained in one low_freq period.
-
-        Unlike :meth:`get_conversion_factor`, which derives the ratio from
-        average durations (365/30 = 12.17 months in a year), this method
-        returns the calendar count expected by additive transformations: a
-        yearly total is split over exactly 12 months, not 12.17. Frequency
-        pairs absent from the calendar table fall back on the duration
-        ratio.
-
-        The count returned here is index-free, hence constant: for pairs
-        whose exact count varies from one period to the next (days in a
-        month, weeks in a year), it is the conventional value. Use
-        :meth:`count_subperiods_per_period` when the target periods are
-        known and the exact count matters.
-
-        Args:
-            low_freq: Lower (less granular) frequency, e.g. 'Y'.
-            high_freq: Higher (more granular) frequency, e.g. 'M'.
-
-        Returns:
-            Number of high-frequency sub-periods per low-frequency period,
-            e.g. 12.0 for ('Y', 'M'). Returns 1.0 when both frequencies are
-            equal, and a fraction when the arguments are swapped (a quarter
-            holds 0.25 year).
-
-        Raises:
-            ValueError: If either frequency is not supported.
-
-        Examples:
-            >>> converter = FrequencyConverter()
-            >>> converter.count_subperiods('Y', 'M')
-            12.0
-            >>> converter.count_subperiods('Q', 'M')
-            3.0
-            >>> converter.count_subperiods('M', 'M')
-            1.0
-            >>> converter.count_subperiods('annual', 'quarterly')
-            4.0
-            >>> converter.count_subperiods('Q', 'Y')
-            0.25
-        """
-        # Normalisation des fréquences de base (sans positions S/E ni ancrage)
-        low = normalize_frequency(low_freq, return_format='base')
-        high = normalize_frequency(high_freq, return_format='base')
-
-        # Même fréquence : une seule sous-période
-        if low == high:
-            return 1.0
-
-        # Recherche dans la table calendaire
-        exact = self._CALENDAR_SUBPERIODS.get((low, high))
-        if exact is not None:
-            return float(exact)
-
-        # Recherche de la paire inverse : un appel « à l'envers » (fréquence
-        # haute en premier) répond par la fraction de période correspondante
-        inverted = self._CALENDAR_SUBPERIODS.get((high, low))
-        if inverted is not None:
-            return 1.0 / float(inverted)
-
-        # Repli sur le ratio de durées : « combien de high dans un low »
-        return self.get_conversion_factor(high, low)
+        return get_duration_conversion_factor(to_freq, from_freq)
 
     # Méthode de comptage des sous-périodes, période cible par période cible
     def count_subperiods_per_period(
@@ -441,12 +355,12 @@ class FrequencyConverter(TemporalConverter):
     ) -> np.ndarray:
         """Count the high_freq sub-periods of each period of an index.
 
-        Where :meth:`count_subperiods` returns a single conventional count,
-        this method exploits the concrete periods carried by
-        ``target_index`` to count exactly: February holds 28 daily
-        sub-periods and January 31, where the constant count would give 30
-        for both. Falls back on :meth:`count_subperiods` when the frequency
-        bases cannot be expressed as pandas Periods.
+        Exploits the concrete periods carried by ``target_index`` to count
+        exactly: February holds 28 daily sub-periods and January 31, where a
+        constant factor would give ~30.4 for both. Falls back on
+        :meth:`get_conversion_factor` (a constant ratio, identical for every
+        period) when the frequency bases cannot be expressed as pandas
+        Periods.
 
         Args:
             target_index: Index at the low frequency, one entry per target
@@ -481,7 +395,8 @@ class FrequencyConverter(TemporalConverter):
             ])
         except (ValueError, AttributeError):
             # Repli sur le comptage constant si les bases ne sont pas des Periods
-            return np.full(len(target_index), self.count_subperiods(low, high))
+            # On calcule le ratio de durées : « combien de high dans un low »
+            return np.full(len(target_index), self.get_conversion_factor(high, low))
 
     # Méthode d'agrégation à une fréquence plus faible
     def aggregate_to_lower_frequency(self,
@@ -604,7 +519,7 @@ class FrequencyConverter(TemporalConverter):
                 try:
                     # Nombre attendu de sous-périodes par période cible
                     expected_count = int(round(
-                        self._duration_converter.get_conversion_factor(
+                        get_duration_conversion_factor(
                             target_base, source_base
                         )
                     ))
@@ -883,7 +798,7 @@ class FrequencyConverter(TemporalConverter):
             target_base = normalize_frequency(target_freq, return_format='base')
             # Calcul du facteur de conversion
             try:
-                factor = self._duration_converter.get_conversion_factor(
+                factor = get_duration_conversion_factor(
                     source_base, target_base
                 )
                 return int(round(factor))

@@ -14,6 +14,7 @@ from .utils import (
     to_literal,
     to_code,
     validate_duration,
+    get_duration_conversion_factor,
     convert_duration,
     get_duration_order
 )
@@ -32,6 +33,7 @@ __all__ = [
     'to_literal',
     'to_code',
     'validate_duration',
+    'get_duration_conversion_factor',
     'convert_duration',
     'get_duration_order',
 

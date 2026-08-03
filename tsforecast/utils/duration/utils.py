@@ -108,6 +108,40 @@ def validate_duration(duration: Union[DurationType, UserDurationType]) -> bool:
     return _normalizer.validate(duration)
 
 
+# Extraction du facteur de conversion entre deux durées
+def get_duration_conversion_factor(
+    from_duration: Union[DurationType, UserDurationType],
+    to_duration: Union[DurationType, UserDurationType]
+) -> Union[int, float]:
+    """Get the conversion factor between two duration units.
+    
+    Implementation of TemporalConverter.get_conversion_factor() for durations.
+
+    Args:
+        from_unit: Source duration unit
+        to_unit: Target duration unit
+
+    Returns:
+        Conversion factor to multiply by source value
+
+    Raises:
+        ValueError: If duration units are not supported
+
+    Examples:
+        >>> get_duration_conversion_factor('hour', 'minute')
+        60.0
+        >>> get_duration_conversion_factor('day', 'hour')
+        24.0
+    """
+    # Import local pour éviter l'import circulaire
+    from .converter import DurationConverter
+
+    # Initialisation de l'instance de la classe
+    _converter = DurationConverter()
+
+    return _converter.get_conversion_factor(from_duration, to_duration)
+
+
 # Conversion entre durées
 def convert_duration(
     value: float,
