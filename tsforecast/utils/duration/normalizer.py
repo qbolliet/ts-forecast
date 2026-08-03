@@ -4,17 +4,14 @@ This module provides the DurationNormalizer class to handle different duration
 representations including codes and literal names.
 """
 # Importation des modules
-from typing import Union, Literal
+from typing import Union
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
-
-# Types supportés pour les durées
-DurationType = Literal['ns', 'us', 'ms', 's', 'min', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'Y']
-UserDurationType = Literal[
-    'nanosecond', 'microsecond', 'millisecond', 'second', 'minute', 'hour',
-    'day', 'business_day', 'week', 'semi_month', 'month', 'quarter', 'year'
-]
+# Importation des types
+from .types import DurationType, UserDurationType
+# Importation de la fonction de parsing des fréquences pandas / durées
+from ..parse import parse_frequency
 
 
 # Classe de normalisation des durées
@@ -106,6 +103,15 @@ class DurationNormalizer(TemporalNormalizer):
         # Conversion du nom littéral en code
         if value in self._literal_to_code:
             return self._literal_to_code[value]
+
+        # Tentative d'extraction de la fréquence de base via parse_frequency
+        try:
+            base, _, _ = parse_frequency(value)
+            # Récursion seulement si la base est différente de la valeur d'entrée (évite boucle infinie)
+            if base != value:
+                return self.normalize(base)
+        except ValueError:
+            pass
 
         # Renvoie une erreur si le code est inconnu
         raise ValueError(

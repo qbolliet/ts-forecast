@@ -8,13 +8,12 @@ import math
 from typing import Union, Literal, Optional
 
 # Import de la classe parente
-from ..abc.converter import TemporalConverter
+from ..abc.converter import TemporalConverter, _CONVERSION_FACTORS_TO_SECONDS, _CALENDAR_SUBPERIODS
 
 # Import du normalizer
-from .normalizer import DurationNormalizer, DurationType, UserDurationType
-
-# Types pour le rounding
-RoundingType = Optional[Literal['floor', 'ceil']]
+from .utils import normalize_duration
+# Importation des types
+from .types import DurationType, UserDurationType, RoundingType
 
 
 # Classe de conversion entre durées
@@ -37,25 +36,6 @@ class DurationConverter(TemporalConverter):
     # Initialisation
     def __init__(self):
         """Initialize conversion factors and normalizer."""
-        # Instance du normaliseur de durées
-        self._normalizer = DurationNormalizer()
-
-        # Facteurs de conversion vers l'unité de référence (secondes)
-        self._conversion_factors = {
-            'ns': 1e-9,
-            'us': 1e-6,
-            'ms': 1e-3,
-            's': 1,
-            'min': 60,
-            'h': 3600,
-            'D': 86400,  # 24 * 3600
-            'B': 86400,  # Même que 'D' pour la conversion
-            'W': 604800,  # 7 * 24 * 3600
-            'SM': 1296000,  # 15 * 24 * 3600 (approximation)
-            'M': 2592000,  # 30 * 24 * 3600 (approximation)
-            'Q': 7776000,  # 90 * 24 * 3600 (approximation)
-            'Y': 31536000,  # 365 * 24 * 3600 (approximation)
-        }
 
     # Méthode principale de conversion
     def convert(
@@ -94,10 +74,6 @@ class DurationConverter(TemporalConverter):
             >>> converter.convert(90, 'minute', 'hour', rounding='floor')
             1
         """
-        # Normalisation des durées
-        from_code = self._normalizer.normalize(from_unit)
-        to_code = self._normalizer.normalize(to_unit)
-
         # Récupération du facteur de conversion
         conversion_factor = self.get_conversion_factor(from_code, to_code)
 
@@ -137,24 +113,39 @@ class DurationConverter(TemporalConverter):
             >>> converter.get_conversion_factor('day', 'hour')
             24.0
         """
-        # Normalisation des durées
-        from_code = self._normalizer.normalize(from_unit)
-        to_code = self._normalizer.normalize(to_unit)
+        # Normalisation des durées (sans positions S/E ni ancrage)
+        from_code = normalize_duration(from_unit)
+        to_code = normalize_duration(to_unit)
+        
+        # Même durée
+        if from_code == from_code:
+            return 1.0
+
+        # Recherche dans la table calendaire
+        exact = _CALENDAR_SUBPERIODS.get((from_code, to_code))
+        if exact is not None:
+            return float(exact)
+
+        # Recherche de la paire inverse : un appel « à l'envers » (fréquence
+        # haute en premier) répond par la fraction de période correspondante
+        inverted = _CALENDAR_SUBPERIODS.get((to_code, from_code))
+        if inverted is not None:
+            return 1.0 / float(inverted)
 
         # Vérification que les facteurs existent
-        if from_code not in self._conversion_factors:
+        if from_code not in _CONVERSION_FACTORS_TO_SECONDS:
             raise ValueError(f"No conversion factor for duration: {from_code}")
-        if to_code not in self._conversion_factors:
+        if to_code not in _CONVERSION_FACTORS_TO_SECONDS:
             raise ValueError(f"No conversion factor for duration: {to_code}")
 
         # Calcul du facteur via l'unité de référence (secondes)
-        from_to_seconds = self._conversion_factors[from_code]
-        to_to_seconds = self._conversion_factors[to_code]
+        from_to_seconds = _CONVERSION_FACTORS_TO_SECONDS[from_code]
+        to_to_seconds = _CONVERSION_FACTORS_TO_SECONDS[to_code]
 
         return from_to_seconds / to_to_seconds
 
     # Méthode auxiliaire d'application de l'arrondi
-    def _round_result(self, value: float, rounding: Literal['floor', 'ceil']) -> float:
+    def _round_result(self, value: float, rounding: RoundingType) -> float:
         """Apply rounding to the conversion result.
 
         Args:

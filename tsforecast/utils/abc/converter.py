@@ -7,7 +7,36 @@ temporal types.
 """
 # Importation des modules
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Dict, Tuple
+
+# Facteurs de conversion
+_CONVERSION_FACTORS_TO_SECONDS: Dict[str, float] = {
+    'ns': 1e-9,
+    'us': 1e-6,
+    'ms': 1e-3,
+    's': 1,
+    'min': 60,
+    'h': 3600,
+    'D': 86400,  # 24 * 3600
+    'B': 86400,  # Même que 'D' pour la conversion
+    'W': 604800,  # 7 * 24 * 3600
+    'SM': 1296000,  # 15 * 24 * 3600 (approximation)
+    'M': 2592000,  # 30 * 24 * 3600 (approximation)
+    'Q': 7776000,  # 90 * 24 * 3600 (approximation)
+    'Y': 31536000,  # 365 * 24 * 3600 (approximation)
+}
+# Table des nombres de sous-périodes calendaires (clé : fréquence basse,
+# fréquence haute). Les paires emboîtées (Y/Q/M, W/D) y sont exactes ; les
+# autres (jours dans un mois, semaines dans une année) portent la valeur
+# conventionnelle, aucune valeur exacte constante n'existant. Dans les deux
+# cas la table corrige le ratio de durées, inexact par construction
+# (365/30 = 12.17 mois dans une année).
+_CALENDAR_SUBPERIODS: Dict[Tuple[str, str], int] = {
+    ('Y', 'Q'): 4, ('Y', 'M'): 12, ('Y', 'SM'): 24, ('Y', 'W'): 52, ('Y', 'D'): 365,
+    ('Q', 'M'): 3, ('Q', 'SM'): 6, ('Q', 'W'): 13, ('Q', 'D'): 91,
+    ('M', 'SM'): 2, ('M', 'D'): 30,
+    ('W', 'D'): 7,
+}
 
 # Classe abstraite de conversion
 class TemporalConverter(ABC):

@@ -8,13 +8,12 @@ optional rounding.
 from typing import Union
 
 # Import des classes depuis les modules spécialisés
-from .normalizer import DurationNormalizer, DurationType, UserDurationType
-from .converter import DurationConverter, RoundingType
+from .normalizer import DurationNormalizer
+from .types import DurationType, UserDurationType, RoundingType
 
 
 # Instance globale pour faciliter l'utilisation
 _normalizer = DurationNormalizer()
-_converter = DurationConverter()
 
 
 # Fonctions de commodité pour accès direct
@@ -140,6 +139,12 @@ def convert_duration(
         >>> convert_duration(1.5, 'day', 'hour')
         36.0
     """
+    # Import local pour éviter l'import circulaire
+    from .converter import DurationConverter
+
+    # Initialisation de l'instance de la classe
+    _converter = DurationConverter()
+
     return _converter.convert(value, from_duration, to_duration, rounding)
 
 
