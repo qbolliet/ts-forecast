@@ -17,10 +17,6 @@ from .types import PositionType, UserPositionType
 from .utils import normalize_position, decompose_offset, combine_frequency_position
 # Import des utilitaires de validation
 from ..validation import validate_entities_grouped, validate_sorted_within_groups
-# Importation des utilitaires de fréquences
-from ..frequency import normalize_frequency
-# Importation du détecteur
-from tsforecast.frequency.detector import detect_dataset_frequency, detect_index_frequency
 
 
 # Classe de conversion entre positions de période
@@ -77,6 +73,9 @@ class PeriodPositionConverter(TemporalConverter):
             >>> end_series = converter.convert(series, 'start', 'end', freq='M')
             >>> # Index: 2023-01-31, 2023-02-28, 2023-03-31
         """
+        # Import différé du détecteur (voir note en tête de fichier)
+        from tsforecast.frequency.detector import detect_index_frequency
+
         # Normalisation des positions
         from_code = normalize_position(from_unit)
         to_code = normalize_position(to_unit)
@@ -169,6 +168,9 @@ class PeriodPositionConverter(TemporalConverter):
             >>> dates = pd.date_range('2023-01-01', periods=3, freq='MS')
             >>> end_dates = converter._convert_datetime_index(dates, 'S', 'E', 'M')
         """
+        # Import différé (voir note en tête de fichier)
+        from ..frequency import normalize_frequency
+
         # Décomposition de la fréquence pour obtenir la base fréquence
         base_freq = normalize_frequency(frequency=freq, return_format='base')
 
@@ -257,6 +259,9 @@ class PeriodPositionConverter(TemporalConverter):
             >>> series = pd.Series(range(6), index=idx)
             >>> end_series = converter._convert_panel(series, 'S', 'E')
         """
+        # Import différé du détecteur (voir note en tête de fichier)
+        from tsforecast.frequency.detector import detect_dataset_frequency, detect_index_frequency
+
         # Vérification que l'index est bien un MultiIndex
         if not isinstance(data.index, pd.MultiIndex):
             raise ValueError("Panel data must have a MultiIndex")

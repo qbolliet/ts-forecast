@@ -12,11 +12,9 @@ import re
 import pandas as pd
 from typing import Tuple, Optional, TYPE_CHECKING
 
-# Importation des modules du package
-from ..position import combine_frequency_position
-
-# Import réservé au typage statique : ..frequency importe ce module au niveau
-# package (via frequency/normalizer.py), un import réel ici créerait un cycle
+# Import réservé au typage statique : ..frequency et ..position importent ce
+# module au niveau package (via frequency/normalizer.py et position/utils.py),
+# un import réel ici créerait un cycle
 if TYPE_CHECKING:
     from ..frequency.types import FrequencyType
 
@@ -131,6 +129,7 @@ def build_frequency_string(
         'W'
     """
     from ..frequency.utils import normalize_frequency
+    from ..position import combine_frequency_position
 
     # Fréquence de base
     base_freq = normalize_frequency(frequency=frequency)

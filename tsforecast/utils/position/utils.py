@@ -6,14 +6,18 @@ serving as a convenient interface to the normalizer and converter functionality.
 # Importation des modules
 # Modules de base
 import pandas as pd
-from typing import Tuple, Union
+from typing import Tuple, Union, TYPE_CHECKING
 # Modules du package
 from .normalizer import PeriodPositionNormalizer, PositionType, UserPositionType
-from .converter import PeriodPositionConverter
 
-# Instances globales pour faciliter l'utilisation
+# Import réservé au typage statique : voir _get_converter() pour la raison de
+# l'import différé au niveau exécution
+if TYPE_CHECKING:
+    from .converter import PeriodPositionConverter
+
+# Instance globale pour faciliter l'utilisation
 _normalizer = PeriodPositionNormalizer()
-_converter = PeriodPositionConverter()
+
 
 
 # Fonctions de commodité pour accès direct
@@ -187,6 +191,11 @@ def convert_position(
         >>> series = pd.Series([1, 2, 3], index=dates)
         >>> end_series = convert_position(series, 'start', 'end', freq='M')
     """
+    # Importation locale (pour éviter les imports circulaires)
+    from .converter import PeriodPositionConverter
+    # Instanciation de la classe
+    _converter = PeriodPositionConverter()
+    
     return _converter.convert(value, from_position, to_position, freq=freq)
 
 # Fonction de conversion de l'offset
@@ -206,4 +215,9 @@ def convert_offset(offset_str: str, to_position: Union[PositionType, UserPositio
         >>> convert_offset('QE', 'start')
         'QS'
     """
+    # Importation locale (pour éviter les imports circulaires)
+    from .converter import PeriodPositionConverter
+    # Instanciation de la classe
+    _converter = PeriodPositionConverter()
+    
     return _converter.convert_offset(offset_str, to_position)
