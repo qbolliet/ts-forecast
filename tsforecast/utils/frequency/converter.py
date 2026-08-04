@@ -249,6 +249,9 @@ class FrequencyConverter(TemporalConverter):
             else :
                 if target_position is None :
                     target_freq_base, target_position, _ = normalize_frequency(target_freq, return_format='components')
+                    # Si la target_position n'est pas spécifiée dans la fréquence, on lui associe celle de la source
+                    if target_position is None :
+                        target_position = source_position
                 else :
                     target_freq_base = normalize_frequency(target_freq, return_format='base')
 
