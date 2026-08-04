@@ -10,10 +10,8 @@ import warnings
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
-
-# Types supportés pour les positions de période
-PositionType = Literal['S', 'E']
-UserPositionType = Literal['start', 'end']
+# Importation des types
+from .types import PositionType, UserPositionType
 
 
 # Classe de normalisation des positions de période

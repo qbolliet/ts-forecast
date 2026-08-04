@@ -7,13 +7,17 @@ positions (start vs end) for time series data, with support for pandas DateOffse
 
 # Importation des classes principales
 from .normalizer import (
-    PeriodPositionNormalizer,
-    PositionType,
-    UserPositionType
+    PeriodPositionNormalizer
 )
 
 from .converter import (
     PeriodPositionConverter
+)
+
+# Importation des types
+from .types import (
+    PositionType,
+    UserPositionType
 )
 
 # Importation des fonctions utilitaires

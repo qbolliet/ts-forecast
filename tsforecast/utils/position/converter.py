@@ -6,17 +6,21 @@ between start and end period positions for time series data.
 # Importation des modules
 import re
 import pandas as pd
-from typing import Union, Any
+from typing import Union, Optional
 from pandas.tseries.frequencies import to_offset
 
 # Import de la classe parente
 from ..abc.converter import TemporalConverter
 
 # Import du normalizer et des types
-from .normalizer import PeriodPositionNormalizer, PositionType, UserPositionType
-
+from .types import PositionType, UserPositionType
+from .utils import normalize_position, decompose_offset, combine_frequency_position
 # Import des utilitaires de validation
 from ..validation import validate_entities_grouped, validate_sorted_within_groups
+# Importation des utilitaires de fréquences
+from ..frequency import normalize_frequency
+# Importation du détecteur
+from tsforecast.frequency.detector import detect_dataset_frequency, detect_index_frequency
 
 
 # Classe de conversion entre positions de période
@@ -38,8 +42,6 @@ class PeriodPositionConverter(TemporalConverter):
     # Initialisation
     def __init__(self):
         """Initialize conversion utilities and normalizer."""
-        # Instance du normaliseur de positions
-        self._normalizer = PeriodPositionNormalizer()
 
     # Méthode principale de conversion
     def convert(
@@ -47,7 +49,7 @@ class PeriodPositionConverter(TemporalConverter):
         value: Union[pd.Series, pd.DataFrame, pd.DatetimeIndex],
         from_unit: Union[PositionType, UserPositionType],
         to_unit: Union[PositionType, UserPositionType],
-        freq: str = None,
+        freq: Optional[str] = None,
         **kwargs
     ) -> Union[pd.Series, pd.DataFrame, pd.DatetimeIndex]:
         """Convert time series data from one period position to another.
@@ -76,8 +78,8 @@ class PeriodPositionConverter(TemporalConverter):
             >>> # Index: 2023-01-31, 2023-02-28, 2023-03-31
         """
         # Normalisation des positions
-        from_code = self._normalizer.normalize(from_unit)
-        to_code = self._normalizer.normalize(to_unit)
+        from_code = normalize_position(from_unit)
+        to_code = normalize_position(to_unit)
 
         # Si les positions sont identiques, retourner les données telles quelles
         if from_code == to_code:
@@ -87,19 +89,19 @@ class PeriodPositionConverter(TemporalConverter):
         if isinstance(value, pd.DatetimeIndex):
             # Inférence de la fréquence si non fournie (pour DatetimeIndex simple)
             if freq is None:
-                freq = self._infer_frequency(value)
+                freq = detect_index_frequency(index=value, return_format='full')
                 if freq is None:
                     raise ValueError("Cannot infer frequency from data. Please provide 'freq' parameter.")
             return self._convert_datetime_index(value, from_code, to_code, freq)
         elif isinstance(value, (pd.Series, pd.DataFrame)):
             # Routage selon le type d'index
-            if isinstance(value.index, pd.MultiIndex):
+            if isinstance(value.index, pd.MultiIndex) and value.index.nlevels >= 2 :
                 # Pour les panels, l'inférence se fait par groupe dans _convert_panel()
                 return self._convert_panel(value, from_code, to_code, freq)
             elif isinstance(value.index, pd.DatetimeIndex):
                 # Inférence de la fréquence si non fournie (pour séries temporelles simples)
                 if freq is None:
-                    freq = self._infer_frequency(value)
+                    freq = detect_index_frequency(index=value.index, return_format='full')
                     if freq is None:
                         raise ValueError("Cannot infer frequency from data. Please provide 'freq' parameter.")
                 return self._convert_time_series(value, from_code, to_code, freq)
@@ -137,48 +139,11 @@ class PeriodPositionConverter(TemporalConverter):
             -1.0
         """
         # Normalisation des positions
-        from_code = self._normalizer.normalize(from_unit)
-        to_code = self._normalizer.normalize(to_unit)
+        from_code = normalize_position(from_unit)
+        to_code = normalize_position(to_unit)
 
         # Retour du facteur (1 si identique, -1 si différent pour indiquer un shift)
         return 1.0 if from_code == to_code else -1.0
-
-    # Méthode auxiliaire d'inférence de la fréquence depuis les données
-    def _infer_frequency(self, value: Union[pd.Series, pd.DataFrame, pd.DatetimeIndex]) -> str:
-        """Infer frequency from time series data or DatetimeIndex.
-
-        Args:
-            value: Data from which to infer frequency
-
-        Returns:
-            Inferred frequency string, or None if cannot infer
-
-        Examples:
-            >>> converter = PeriodPositionConverter()
-            >>> dates = pd.date_range('2023-01-01', periods=3, freq='MS')
-            >>> converter._infer_frequency(dates)
-            'MS'
-        """
-        # Extraction de l'index selon le type
-        if isinstance(value, pd.DatetimeIndex):
-            index = value
-        elif isinstance(value, (pd.Series, pd.DataFrame)):
-            if isinstance(value.index, pd.DatetimeIndex):
-                index = value.index
-            else:
-                return None
-        else:
-            return None
-
-        # Inférence de la fréquence pandas
-        try:
-            inferred = pd.infer_freq(index)
-            return inferred
-        except Exception:
-            # Si l'inférence échoue, essayer d'utiliser la fréquence de l'index
-            if hasattr(index, 'freq') and index.freq is not None:
-                return index.freq.freqstr if hasattr(index.freq, 'freqstr') else str(index.freq)
-            return None
 
     # Méthode auxiliaire de conversion d'un DatetimeIndex
     def _convert_datetime_index(
@@ -205,26 +170,16 @@ class PeriodPositionConverter(TemporalConverter):
             >>> end_dates = converter._convert_datetime_index(dates, 'S', 'E', 'M')
         """
         # Décomposition de la fréquence pour obtenir la base fréquence
-        base_freq, _ = self._normalizer.decompose_offset(freq)
-
-        # Nettoyage de base_freq pour to_period() : extraction de la lettre de base
-        # to_period() n'accepte que les fréquences de base (D, W, M, Q, Y, etc.)
-        # sans les ancres (YS-JAN, QS-OCT, etc.)
-        base_freq_match = re.match(r'^([DWMQY])', base_freq.upper())
-        if base_freq_match:
-            period_freq = base_freq_match.group(1)
-        else:
-            # Si pas de match, utiliser tel quel et laisser pandas gérer l'erreur
-            period_freq = base_freq
+        base_freq = normalize_frequency(frequency=freq, return_format='base')
 
         # Conversion en PeriodIndex puis retour en DatetimeIndex
         if from_pos == 'S' and to_pos == 'E':
             # Conversion de start à end : utiliser to_period puis to_timestamp avec 'end'
-            period_index = index.to_period(period_freq)
+            period_index = index.to_period(base_freq)
             return period_index.to_timestamp(how='end')
         elif from_pos == 'E' and to_pos == 'S':
             # Conversion de end à start : utiliser to_period puis to_timestamp avec 'start'
-            period_index = index.to_period(period_freq)
+            period_index = index.to_period(base_freq)
             return period_index.to_timestamp(how='start')
         else:
             # Cas identique, retourner tel quel
@@ -353,10 +308,10 @@ class PeriodPositionConverter(TemporalConverter):
             # Inférence de la fréquence pour ce groupe si non fournie
             group_freq = freq
             if group_freq is None:
-                group_freq = self._infer_frequency(group_dates)
+                group_freq = detect_index_frequency(index=group_dates, return_format='full')
                 if group_freq is None:
                     # Tentative avec les données du groupe
-                    group_freq = self._infer_frequency(group_data)
+                    group_freq = detect_dataset_frequency(df=group_data, consistency_mode='highest', strict=False)
                 if group_freq is None:
                     raise ValueError(
                         f"Cannot infer frequency for entity {group_keys}. "
@@ -428,15 +383,15 @@ class PeriodPositionConverter(TemporalConverter):
             'QS'
         """
         # Décomposition de l'offset
-        freq, from_pos = self._normalizer.decompose_offset(offset_str)
+        freq, from_pos = decompose_offset(offset_str)
 
         # Normalisation de la position cible
-        to_pos = self._normalizer.normalize(to_position)
+        to_pos = normalize_position(to_position)
 
         # Si les positions sont identiques, retourner tel quel
         if from_pos == to_pos:
             return offset_str
 
         # Recombinaison avec la nouvelle position
-        return self._normalizer.combine_frequency_position(freq, to_pos)
+        return combine_frequency_position(freq, to_pos)
 
