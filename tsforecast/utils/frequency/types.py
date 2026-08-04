@@ -3,7 +3,7 @@ from typing import Literal
 
 # Création des types
 # Types supportés pour les fréquences
-FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'T', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'A', 'Y']
+FrequencyType = Literal['ns', 'us', 'ms', 's', 'min', 'h', 'D', 'B', 'W', 'SM', 'M', 'Q', 'Y']
 UserFrequencyType = Literal[
-    'daily', 'weekly', 'monthly', 'quarterly', 'annual', 'business_daily'
+    'nanosecond', 'microsecond', 'millisecond', 'second', 'minute', 'hourly', 'daily', 'weekly', 'monthly', 'quarterly', 'annual', 'business_daily'
 ]
