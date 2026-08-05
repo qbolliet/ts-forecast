@@ -14,7 +14,8 @@ from ..abc.converter import TemporalConverter
 
 # Import du normalizer et des types
 from .types import PositionType, UserPositionType
-from .utils import normalize_position, decompose_offset, combine_frequency_position
+from .utils import normalize_position
+from ..parse.utils import parse_frequency, build_frequency_string
 # Import des utilitaires de validation
 from ..validation import validate_entities_grouped, validate_sorted_within_groups
 
@@ -392,17 +393,17 @@ class PeriodPositionConverter(TemporalConverter):
             'MS'
         """
         # Extraction du multiplicateur éventuel (ex: '2MS' -> '2' et 'MS'),
-        # pour le conserver tel quel dans le résultat (decompose_offset() le perd)
+        # pour le conserver tel quel dans le résultat (parse_frequency() ne le gère pas)
         multiplier_match = re.match(r'^(\d+)(.+)$', offset_str)
         multiplier, base_offset = multiplier_match.groups() if multiplier_match else ('', offset_str)
 
-        # Décomposition de l'offset (hors multiplicateur)
-        freq, _ = decompose_offset(base_offset)
+        # Décomposition de l'offset (hors multiplicateur) en fréquence de base
+        freq, _, _ = parse_frequency(base_offset)
 
         # Normalisation de la position cible
         to_pos = normalize_position(to_position)
 
         # Recombinaison avec la nouvelle position : appliquée même si l'offset
         # d'origine n'en portait pas explicitement une (ex: 'M' -> 'ME')
-        return f"{multiplier}{combine_frequency_position(freq, to_pos)}"
+        return f"{multiplier}{build_frequency_string(freq, to_pos)}"
 

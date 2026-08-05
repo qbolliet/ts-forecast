@@ -4,9 +4,7 @@ This module provides the PeriodPositionNormalizer class to handle different peri
 position representations (start vs end of period) for time series data.
 """
 # Importation des modules
-from typing import Union, Literal, Optional, Tuple
-import re
-import warnings
+from typing import Union
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
@@ -29,10 +27,6 @@ class PeriodPositionNormalizer(TemporalNormalizer):
         'E'
         >>> normalizer.to_literal('S')
         'start'
-        >>> normalizer.extract_position_from_offset('MS')
-        'S'
-        >>> normalizer.combine_frequency_position('M', 'start')
-        'MS'
     """
 
     # Initialisation
@@ -46,31 +40,6 @@ class PeriodPositionNormalizer(TemporalNormalizer):
 
         # Mapping inverse pour les conversions (utilisation de la méthode héritée)
         self._literal_to_code = self._build_reverse_mapping(self._code_to_literal)
-
-        # Fréquences qui supportent les suffixes de position S/E
-        self._position_aware_frequencies = ['M', 'Q', 'Y', 'W', 'B']
-
-        # Mapping des anciens codes pandas vers les nouveaux (pandas a changé ME->M, MS->M, etc.)
-        self._legacy_offset_mapping = {
-            'MS': ('M', 'S'),
-            'ME': ('M', 'E'),
-            'M': ('M', 'E'),  # Par défaut M = end
-            'QS': ('Q', 'S'),
-            'QE': ('Q', 'E'),
-            'Q': ('Q', 'E'),  # Par défaut Q = end
-            'YS': ('Y', 'S'),
-            'YE': ('Y', 'E'),
-            'Y': ('Y', 'E'),  # Par défaut Y = end
-            'AS': ('Y', 'S'),
-            'AE': ('Y', 'E'),
-            'A': ('Y', 'E'),  # A = alias pour Y
-            'WS': ('W', 'S'),
-            'WE': ('W', 'E'),
-            'W': ('W', 'E'),  # Par défaut W = end
-            'BS': ('B', 'S'),
-            'BE': ('B', 'E'),
-            'B': ('B', 'E')   # Par défaut B = end
-        }
 
     # Implémentation des méthodes abstraites de TemporalNormalizer
     # Méthode de normalisation des positions dans leur expression code
@@ -180,116 +149,6 @@ class PeriodPositionNormalizer(TemporalNormalizer):
             return True
         except ValueError:
             return False
-
-    # Méthode d'extraction de la position depuis un DateOffset pandas
-    def extract_position_from_offset(self, offset_str: str) -> PositionType:
-        """Extract period position from pandas DateOffset string.
-
-        Extracts the position component (start/end) from pandas frequency codes
-        like 'MS', 'ME', 'QS', 'QE', etc.
-
-        Args:
-            offset_str: Pandas DateOffset string (e.g., 'MS', 'QE', 'M')
-
-        Returns:
-            Position code ('S' or 'E')
-
-        Raises:
-            ValueError: If offset string doesn't contain position information
-
-        Examples:
-            >>> normalizer = PeriodPositionNormalizer()
-            >>> normalizer.extract_position_from_offset('MS')
-            'S'
-            >>> normalizer.extract_position_from_offset('QE')
-            'E'
-            >>> normalizer.extract_position_from_offset('M')
-            'E'
-        """
-        # Nettoyage de l'offset (suppression des multiplicateurs comme '2MS')
-        clean_offset = re.sub(r'^\d+', '', offset_str)
-
-        # Recherche dans le mapping des offsets connus
-        if clean_offset in self._legacy_offset_mapping:
-            _, position = self._legacy_offset_mapping[clean_offset]
-            return position
-
-        # Si pas de suffixe explicite, retourne 'E' par défaut
-        return 'E'
-
-    # Méthode de décomposition d'un DateOffset en fréquence et position
-    def decompose_offset(self, offset_str: str) -> Tuple[str, PositionType]:
-        """Decompose pandas DateOffset into frequency and position components.
-
-        Args:
-            offset_str: Pandas DateOffset string (e.g., 'MS', 'QE', 'M')
-
-        Returns:
-            Tuple of (frequency_code, position_code)
-
-        Examples:
-            >>> normalizer = PeriodPositionNormalizer()
-            >>> normalizer.decompose_offset('MS')
-            ('M', 'S')
-            >>> normalizer.decompose_offset('QE')
-            ('Q', 'E')
-            >>> normalizer.decompose_offset('M')
-            ('M', 'E')
-        """
-        # Nettoyage de l'offset (suppression des multiplicateurs comme '2MS')
-        multiplier_match = re.match(r'^(\d+)(.+)', offset_str)
-        if multiplier_match:
-            clean_offset = multiplier_match.group(2)
-        else:
-            clean_offset = offset_str
-
-        # Recherche dans le mapping des offsets connus
-        if clean_offset in self._legacy_offset_mapping:
-            freq, position = self._legacy_offset_mapping[clean_offset]
-            return (freq, position)
-
-        # Si pas trouvé, retourne l'offset tel quel avec position 'E' par défaut
-        return (clean_offset, 'E')
-
-    # Méthode de combinaison d'une fréquence et d'une position en DateOffset
-    def combine_frequency_position(
-        self,
-        frequency: str,
-        position: Optional[Union[PositionType, UserPositionType]]
-    ) -> str:
-        """Combine frequency and position into pandas DateOffset string.
-
-        Args:
-            frequency: Frequency code (e.g., 'M', 'Q', 'Y')
-            position: Position code or literal ('S', 'E', 'start', 'end')
-
-        Returns:
-            Pandas DateOffset string (e.g., 'MS', 'QE')
-
-        Examples:
-            >>> normalizer = PeriodPositionNormalizer()
-            >>> normalizer.combine_frequency_position('M', 'start')
-            'MS'
-            >>> normalizer.combine_frequency_position('Q', 'E')
-            'QE'
-            >>> normalizer.combine_frequency_position('D', 'end')
-            'D'
-        """
-        
-        # Si la fréquence ne supporte pas les positions, retourne la fréquence telle quelle
-        if frequency not in self._position_aware_frequencies:
-            return frequency
-        else:
-            # Si la position n'est pas spécifié, retourne la fréquence telle quelle
-            if position is None:
-                # Warning
-                warnings.warn(f"No 'position' specified with 'frequency' : '{frequency}'")
-                return frequency
-            else:
-                # Normalisation de la position
-                position_code = self.normalize(position)
-                # Combinaison de la fréquence et de la position
-                return f"{frequency}{position_code}"
 
     # Méthode de conversion d'une position vers son opposé
     def flip_position(self, position: Union[PositionType, UserPositionType]) -> PositionType:

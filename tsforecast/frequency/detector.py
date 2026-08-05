@@ -13,8 +13,7 @@ from pandas.tseries.frequencies import to_offset
 # Import des utilitaires de fréquence
 from ..utils.frequency import to_literal, get_frequency_order, normalize_frequency, FrequencyType, UserFrequencyType
 from ..panel.utils import normalize_entity_key
-from ..utils.parse.utils import parse_frequency
-from ..utils.position.utils import combine_frequency_position
+from ..utils.parse.utils import parse_frequency, build_frequency_string
 
 # Classe de détection de la fréquence d'une série temporelle
 class FrequencyDetector:
@@ -957,7 +956,7 @@ def target_offset_for_index(
         return target_frequency
 
     # Une position cible déjà présente (ex. 'QE') serait sinon transmise telle
-    # quelle par combine_frequency_position, qui ignore silencieusement les
+    # quelle par build_frequency_string, qui ignore silencieusement les
     # fréquences déjà suffixées : on repart de la base pour l'écraser par la
     # position détectée sur la source
     try:
@@ -966,7 +965,7 @@ def target_offset_for_index(
         return target_frequency
 
     try:
-        return combine_frequency_position(target_base, position)
+        return build_frequency_string(target_base, position)
     except Exception:
         return target_frequency
 

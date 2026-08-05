@@ -26,12 +26,10 @@ from ..abc.converter import TemporalConverter
 from .normalizer import FrequencyType, UserFrequencyType
 from .utils import normalize_frequency, is_higher_frequency
 from ..validation import validate_temporal_data
-from ..parse import parse_frequency
+from ..parse import parse_frequency, build_frequency_string
 
 # Import des utilitaires de gestion des positions
 from ..position.utils import (
-    combine_frequency_position,
-    decompose_offset,
     normalize_position,
     validate_position,
 )
@@ -80,6 +78,23 @@ def _modernize_resample_freq(freq: str) -> str:
     multiplier, base, anchor = match.groups()
     modern_base = _DEPRECATED_PERIOD_END_ALIASES.get(base, base)
     return f"{multiplier}{modern_base}{anchor}"
+
+
+# Fonction auxiliaire de suppression du multiplicateur d'un offset pandas
+def _strip_multiplier(freq_str: str) -> str:
+    """Strip a leading pandas offset multiplier (e.g. '2MS' -> 'MS').
+
+    ``parse_frequency`` does not handle multipliers ; les appelants qui n'ont
+    besoin que de la base et de la position (pas du multiplicateur lui-même)
+    le retirent d'abord.
+
+    Examples:
+        >>> _strip_multiplier('2MS')
+        'MS'
+        >>> _strip_multiplier('D')
+        'D'
+    """
+    return re.sub(r'^\d+', '', freq_str)
 
 
 # Classe de conversion d'une fréquence dans une autre
@@ -214,6 +229,12 @@ class FrequencyConverter(TemporalConverter):
         # Validation des paramètres d'entrée
         data = self._validate_conversion_params(data=data, target_freq=target_freq, time_col=time_col, panel_cols=panel_cols)
 
+        # Normalisation de la position cible en code ('S'/'E') : target_position
+        # accepte aussi les noms littéraux ('start'/'end') en entrée publique, mais
+        # build_frequency_string() n'accepte que des codes
+        if target_position is not None:
+            target_position = normalize_position(target_position)
+
         # Cas des données de panel (MultiIndex) : traitement entité par entité
         if is_panel_data(data):
             return self._convert_panel_frequency(
@@ -256,13 +277,13 @@ class FrequencyConverter(TemporalConverter):
                     target_freq_base = normalize_frequency(target_freq, return_format='base')
 
             # Construction de la fréquence cible complète avec position
-            target_freq_with_position = combine_frequency_position(
+            target_freq_with_position = build_frequency_string(
                 target_freq_base,
                 target_position
             )
 
             # Si les fréquences sont identiques (base + position), retourner les données telles quelles
-            source_freq_with_position = combine_frequency_position(
+            source_freq_with_position = build_frequency_string(
                 source_freq_base,
                 source_position
             )
@@ -839,9 +860,10 @@ class FrequencyConverter(TemporalConverter):
         # Résolution de la position cible
         position = target_position
         if position is None:
-            # Extraction de la position depuis la fréquence cible
-            _, extracted_pos = decompose_offset(target_freq)
-            position = extracted_pos
+            # Extraction de la position depuis la fréquence cible (hors multiplicateur) ;
+            # convention du package en l'absence de position explicite : fin de période
+            _, extracted_pos, _ = parse_frequency(_strip_multiplier(target_freq))
+            position = extracted_pos if extracted_pos is not None else 'E'
 
         # Normalisation et conversion en direction
         if position is not None:
@@ -884,8 +906,8 @@ class FrequencyConverter(TemporalConverter):
         if isinstance(target_freq, str):
             # Validation de la fréquence en décomposant d'abord pour gérer les positions S/E
             try:
-                # Décomposition de la fréquence pour extraire la base et la position
-                freq_base, freq_pos = decompose_offset(target_freq)
+                # Décomposition de la fréquence (hors multiplicateur) pour extraire la base et la position
+                freq_base, freq_pos, _ = parse_frequency(_strip_multiplier(target_freq))
                 # Normalisation de la fréquence de base uniquement
                 normalize_frequency(freq_base)
                 # Validation de la position si elle est spécifiée et non-default
@@ -927,8 +949,8 @@ class FrequencyConverter(TemporalConverter):
             # Validation de chaque fréquence cible (clé = colonne, entité ou (entité, colonne))
             for key, freq in target_freq.items():
                 try:
-                    # Décomposition de la fréquence pour extraire la base et la position
-                    freq_base, freq_pos = decompose_offset(freq)
+                    # Décomposition de la fréquence (hors multiplicateur) pour extraire la base et la position
+                    freq_base, freq_pos, _ = parse_frequency(_strip_multiplier(freq))
                     # Normalisation de la fréquence de base uniquement
                     normalize_frequency(freq_base)
                     # Validation de la position si elle est spécifiée et non-default
@@ -1115,7 +1137,7 @@ class FrequencyConverter(TemporalConverter):
                 resolved_position = target_position
 
             # Construction de la fréquence cible complète avec position
-            target_freq_with_position = combine_frequency_position(
+            target_freq_with_position = build_frequency_string(
                 target_freq_base,
                 resolved_position
             )
@@ -1144,7 +1166,7 @@ class FrequencyConverter(TemporalConverter):
                     col_position = target_position
 
                 # Construction de la fréquence cible complète avec position
-                col_target_with_position = combine_frequency_position(
+                col_target_with_position = build_frequency_string(
                     col_freq_base,
                     col_position
                 )

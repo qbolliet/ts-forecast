@@ -23,7 +23,7 @@ from ..panel.utils import (
     normalize_entity_key,
 )
 from ..utils.frequency.utils import is_higher_frequency, normalize_frequency
-from ..utils.position.utils import combine_frequency_position
+from ..utils.parse.utils import build_frequency_string
 from ..utils.time.utils import get_period_start, get_period_end
 from ..utils.frequency.converter import FrequencyConverter
 
@@ -538,7 +538,7 @@ class ImputationWindowCalculator:
 
         # Construction de l'offset pandas complet (fréquence + position)
         try:
-            grid_offset = combine_frequency_position(
+            grid_offset = build_frequency_string(
                 index_freq, hf_pos  # type: ignore[arg-type]
             )
         except Exception:

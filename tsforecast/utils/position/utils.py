@@ -6,7 +6,7 @@ serving as a convenient interface to the normalizer and converter functionality.
 # Importation des modules
 # Modules de base
 import pandas as pd
-from typing import Tuple, Union, TYPE_CHECKING
+from typing import Union, TYPE_CHECKING
 # Modules du package
 from .normalizer import PeriodPositionNormalizer, PositionType, UserPositionType
 
@@ -94,61 +94,6 @@ def validate_position(position: Union[PositionType, UserPositionType]) -> bool:
         False
     """
     return _normalizer.validate(position)
-
-# Fonction d'extraction de la position d'un offset
-def extract_position_from_offset(offset_str: str) -> str:
-    """Extract period position from pandas DateOffset string.
-
-    Args:
-        offset_str: Pandas DateOffset string (e.g., 'MS', 'QE').
-
-    Returns:
-        Position code ('S' or 'E').
-
-    Examples:
-        >>> extract_position_from_offset('MS')
-        'S'
-        >>> extract_position_from_offset('QE')
-        'E'
-    """
-    return _normalizer.extract_position_from_offset(offset_str)
-
-# Fonction de décomposition d'un offset
-def decompose_offset(offset_str: str) -> Tuple[str, str]:
-    """Decompose pandas DateOffset into frequency and position.
-
-    Args:
-        offset_str: Pandas DateOffset string.
-
-    Returns:
-        Tuple of (frequency_code, position_code).
-
-    Examples:
-        >>> decompose_offset('MS')
-        ('M', 'S')
-        >>> decompose_offset('QE')
-        ('Q', 'E')
-    """
-    return _normalizer.decompose_offset(offset_str)
-
-# Fonction de combinaison de la fréquence et de la position
-def combine_frequency_position(frequency: str, position: Union[PositionType, UserPositionType]) -> str:
-    """Combine frequency and position into pandas DateOffset.
-
-    Args:
-        frequency: Frequency code.
-        position: Position code or literal.
-
-    Returns:
-        Pandas DateOffset string.
-
-    Examples:
-        >>> combine_frequency_position('M', 'start')
-        'MS'
-        >>> combine_frequency_position('Q', 'E')
-        'QE'
-    """
-    return _normalizer.combine_frequency_position(frequency, position)
 
 # Fonction d'inversement de la position
 def flip_position(position: Union[PositionType, UserPositionType]) -> str:
