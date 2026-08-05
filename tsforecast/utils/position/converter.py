@@ -386,17 +386,23 @@ class PeriodPositionConverter(TemporalConverter):
             'ME'
             >>> converter.convert_offset('QE', 'start')
             'QS'
+            >>> converter.convert_offset('2MS', 'end')
+            '2ME'
+            >>> converter.convert_offset('M', 'start')
+            'MS'
         """
-        # Décomposition de l'offset
-        freq, from_pos = decompose_offset(offset_str)
+        # Extraction du multiplicateur éventuel (ex: '2MS' -> '2' et 'MS'),
+        # pour le conserver tel quel dans le résultat (decompose_offset() le perd)
+        multiplier_match = re.match(r'^(\d+)(.+)$', offset_str)
+        multiplier, base_offset = multiplier_match.groups() if multiplier_match else ('', offset_str)
+
+        # Décomposition de l'offset (hors multiplicateur)
+        freq, _ = decompose_offset(base_offset)
 
         # Normalisation de la position cible
         to_pos = normalize_position(to_position)
 
-        # Si les positions sont identiques, retourner tel quel
-        if from_pos == to_pos:
-            return offset_str
-
-        # Recombinaison avec la nouvelle position
-        return combine_frequency_position(freq, to_pos)
+        # Recombinaison avec la nouvelle position : appliquée même si l'offset
+        # d'origine n'en portait pas explicitement une (ex: 'M' -> 'ME')
+        return f"{multiplier}{combine_frequency_position(freq, to_pos)}"
 
