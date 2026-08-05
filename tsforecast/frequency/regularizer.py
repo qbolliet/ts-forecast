@@ -10,7 +10,8 @@ import numpy as np
 from typing import Dict, List, Optional, Union
 
 # Import des utilitaires internes
-from .detector import FrequencyDetector, detect_frequency, _get_highest_frequency, detect_index_frequency
+from ..utils.frequency.detector import FrequencyDetector
+from ..utils.frequency.utils import detect_frequency, _get_highest_frequency, detect_index_frequency
 from ..utils.frequency import normalize_frequency
 from ..panel.utils import normalize_entity_key
 

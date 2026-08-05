@@ -24,7 +24,13 @@ from ..abc.converter import TemporalConverter
 
 # Import des utilitaires de fréquence
 from .normalizer import FrequencyType, UserFrequencyType
-from .utils import normalize_frequency, is_higher_frequency
+from .utils import (
+    normalize_frequency,
+    is_higher_frequency,
+    detect_frequency,
+    detect_dataset_frequency,
+    detect_index_frequency,
+)
 from ..validation import validate_temporal_data
 from ..parse import parse_frequency, build_frequency_string
 
@@ -251,9 +257,6 @@ class FrequencyConverter(TemporalConverter):
 
         # Cas 1: Traitement des Series
         if isinstance(data, pd.Series):
-            # Import local pour éviter l'import circulaire
-            from ...frequency.detector import detect_frequency
-
             # Détection de la fréquence actuelle (avec position et anchor)
             detected_freq = detect_frequency(data=data, return_format='components')
 
@@ -479,9 +482,6 @@ class FrequencyConverter(TemporalConverter):
             >>> converter.aggregate_to_lower_frequency(monthly_mask, 'YE', method='all').tolist()
             [True]
         """
-        # Importation de la fonction de détection de fréquences
-        from tsforecast.frequency.detector import detect_index_frequency
-
         # Modernisation des alias dépréciés ('Y'/'A'/'Q'/'M' -> 'YE'/'YE'/'QE'/'ME')
         # avant tout resample, sans changer la position (S/E) déjà préservée
         target_freq = _modernize_resample_freq(target_freq)
@@ -593,9 +593,6 @@ class FrequencyConverter(TemporalConverter):
             ``result`` with any partially covered period forced to False.
             Unchanged if the source frequency cannot be detected.
         """
-        # Importation locale pour éviter l'import circulaire
-        from tsforecast.frequency.detector import detect_index_frequency
-
         # Détection de la fréquence source : sans elle, impossible de connaître
         # le nombre de sous-périodes attendu par période cible
         source_freq = detect_index_frequency(index=data.index, return_format='full')
@@ -668,9 +665,6 @@ class FrequencyConverter(TemporalConverter):
             >>> len(daily) > len(monthly_series)
             True
         """
-        # Importation de la fonction de détection de fréquence
-        from tsforecast.frequency.detector import detect_index_frequency
-
         # Modernisation des alias dépréciés ('Y'/'A'/'Q'/'M' -> 'YE'/'YE'/'QE'/'ME')
         # avant tout resample/asfreq/date_range, sans changer la position (S/E)
         target_freq = _modernize_resample_freq(target_freq)
@@ -1118,9 +1112,6 @@ class FrequencyConverter(TemporalConverter):
         Returns:
             Dictionary mapping column names to (source_freq, target_freq) tuples
         """
-        # Import local pour éviter l'import circulaire
-        from ...frequency.detector import detect_dataset_frequency
-
         # Détection des fréquences source de chaque colonne (index simple → {col: freq})
         # detect_dataset_frequency gère la détection par colonne et la normalisation
         current_frequencies = detect_dataset_frequency(data, return_format='with_position')

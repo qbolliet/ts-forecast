@@ -7,8 +7,8 @@ import warnings
 import pytest
 import pandas as pd
 import numpy as np
-from tsforecast.frequency.detector import (
-    FrequencyDetector,
+from tsforecast.utils.frequency.detector import FrequencyDetector
+from tsforecast.utils.frequency.utils import (
     detect_frequency,
     detect_dataset_frequency,
     detect_index_frequency,

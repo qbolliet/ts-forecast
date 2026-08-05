@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import LinearRegression
 
-from tsforecast.frequency.detector import detect_index_frequency
+from tsforecast.utils.frequency.utils import detect_index_frequency
 from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
 from tsforecast.frequency.imputation_window import ImputationWindowCalculator
 from tsforecast.panel.utils import get_unique_panel_entities, split_variable_key

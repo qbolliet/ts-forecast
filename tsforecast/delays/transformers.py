@@ -21,14 +21,12 @@ from sklearn.utils.validation import check_is_fitted
 # Importation des modules du package
 from tsforecast.utils.frequency import (
     normalize_frequency,
-    is_higher_frequency
-)
-from tsforecast.frequency import (
+    is_higher_frequency,
     detect_index_frequency,
+    detect_frequency,
 )
 from tsforecast.utils.time import resolve_date, get_period_start, get_period_boundaries
 from tsforecast.utils.duration import convert_duration, normalize_duration, DurationConverter
-from ..frequency.detector import detect_frequency
 from ..panel import PanelwiseTransformer, normalize_entity_key
 from tsforecast.utils.validation import validate_temporal_data
 from tsforecast.utils.parse import build_frequency_string

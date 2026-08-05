@@ -30,7 +30,7 @@ from ..panel.utils import (
     normalize_entity_key,
     split_variable_key,
 )
-from .detector import detect_frequency, detect_index_frequency
+from ..utils.frequency.utils import detect_frequency, detect_index_frequency
 from .imputation_plan import (
     ImputationStep,
     INTERPOLATE_FALLBACK,

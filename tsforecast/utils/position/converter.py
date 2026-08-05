@@ -74,8 +74,9 @@ class PeriodPositionConverter(TemporalConverter):
             >>> end_series = converter.convert(series, 'start', 'end', freq='M')
             >>> # Index: 2023-01-31, 2023-02-28, 2023-03-31
         """
-        # Import différé du détecteur (voir note en tête de fichier)
-        from tsforecast.frequency.detector import detect_index_frequency
+        # Import différé du détecteur : évite un import circulaire avec
+        # tsforecast.utils.frequency (dont converter.py importe position.utils)
+        from ..frequency import detect_index_frequency
 
         # Normalisation des positions
         from_code = normalize_position(from_unit)
@@ -260,8 +261,9 @@ class PeriodPositionConverter(TemporalConverter):
             >>> series = pd.Series(range(6), index=idx)
             >>> end_series = converter._convert_panel(series, 'S', 'E')
         """
-        # Import différé du détecteur (voir note en tête de fichier)
-        from tsforecast.frequency.detector import detect_dataset_frequency, detect_index_frequency
+        # Import différé du détecteur : évite un import circulaire avec
+        # tsforecast.utils.frequency (dont converter.py importe position.utils)
+        from ..frequency import detect_dataset_frequency, detect_index_frequency
 
         # Vérification que l'index est bien un MultiIndex
         if not isinstance(data.index, pd.MultiIndex):

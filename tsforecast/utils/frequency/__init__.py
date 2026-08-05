@@ -16,6 +16,9 @@ from .converter import (
     AggregationMethod,
     InterpolationMethod
 )
+from .detector import (
+    FrequencyDetector
+)
 from .utils import (
     normalize_frequency,
     to_literal,
@@ -25,7 +28,11 @@ from .utils import (
     is_higher_frequency,
     validate_frequency,
     get_frequency_order,
-    convert_frequency
+    convert_frequency,
+    detect_frequency,
+    detect_dataset_frequency,
+    detect_index_frequency,
+    target_offset_for_index
 )
 
 # Toutes les fonctions sont maintenant définies et exportées depuis normalizer.py
@@ -38,6 +45,7 @@ __all__ = [
     'FrequencyConverter',
     'AggregationMethod',
     'InterpolationMethod',
+    'FrequencyDetector',
     'normalize_frequency',
     'to_literal',
     'to_code',
@@ -46,5 +54,9 @@ __all__ = [
     'is_higher_frequency',
     'validate_frequency',
     'get_frequency_order',
-    'convert_frequency'
+    'convert_frequency',
+    'detect_frequency',
+    'detect_dataset_frequency',
+    'detect_index_frequency',
+    'target_offset_for_index'
 ]

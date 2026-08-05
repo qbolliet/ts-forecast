@@ -10,10 +10,8 @@ import numpy as np
 from typing import Dict, Optional, Union, Tuple, List, Any, Literal
 from datetime import datetime, timedelta
 import warnings
-# Module de détection de la fréquence des séries
-from ..frequency.detector import detect_frequency
-# Module de conversion en littéral
-from ..utils.frequency import to_literal
+# Module de détection de la fréquence des séries et de conversion en littéral
+from ..utils.frequency import detect_frequency, to_literal
 # Module de validation des données temporelles
 from ..utils.validation import validate_temporal_data
 # Module de manipulation temporelle

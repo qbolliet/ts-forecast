@@ -37,7 +37,7 @@ from ..panel.utils import (
 )
 
 # Détection de la fréquence de l'index
-from .detector import detect_frequency, detect_dataset_frequency, target_offset_for_index
+from ..utils.frequency.utils import detect_frequency, detect_dataset_frequency, target_offset_for_index
 
 
 # Classe d'alignement des fréquences de jeu de données avec des fréquences cibles
@@ -128,7 +128,7 @@ class FrequencyAligner:
         return get_entity_mask(X, entity)
 
     # Méthode auxiliaire de construction d'un offset positionné comme l'index source
-    # Délégation à la fonction utilitaire partagée de tsforecast.frequency.detector
+    # Délégation à la fonction utilitaire partagée de tsforecast.utils.frequency.utils
     def _target_offset_for_index(
         self,
         index: pd.DatetimeIndex,
@@ -136,7 +136,7 @@ class FrequencyAligner:
     ) -> str:
         """Build a pandas offset for target_frequency anchored like the index.
 
-        Thin wrapper over :func:`tsforecast.frequency.detector.target_offset_for_index`.
+        Thin wrapper over :func:`tsforecast.utils.frequency.utils.target_offset_for_index`.
 
         Args:
             index: Source DatetimeIndex.

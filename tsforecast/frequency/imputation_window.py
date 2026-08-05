@@ -15,14 +15,19 @@ import numpy as np
 import pandas as pd
 
 # Modules du package
-from .detector import detect_dataset_frequency, detect_index_frequency, target_offset_for_index
+from ..utils.frequency.utils import (
+    detect_dataset_frequency,
+    detect_index_frequency,
+    target_offset_for_index,
+    is_higher_frequency,
+    normalize_frequency,
+)
 from ..panel.utils import (
     get_entity_mask,
     get_unique_panel_entities,
     is_panel_data,
     normalize_entity_key,
 )
-from ..utils.frequency.utils import is_higher_frequency, normalize_frequency
 from ..utils.parse.utils import build_frequency_string
 from ..utils.time.utils import get_period_start, get_period_end
 from ..utils.frequency.converter import FrequencyConverter
@@ -769,7 +774,7 @@ class ImputationWindowCalculator:
         to :meth:`FrequencyConverter.aggregate_to_lower_frequency` with
         ``method='all'``, anchoring the target offset on the same start/end
         position as the source mask's grid (see
-        :func:`tsforecast.frequency.detector.target_offset_for_index`) so the
+        :func:`tsforecast.utils.frequency.utils.target_offset_for_index`) so the
         result stays reindexable against the original data.
 
         For panel data, the conversion is computed independently per entity,
@@ -843,7 +848,7 @@ class ImputationWindowCalculator:
         partially present in the mask's grid (e.g. a target period straddling
         the edge of the fitted grid). The target offset is anchored on the
         same start/end position as the source mask's index (via
-        :func:`tsforecast.frequency.detector.target_offset_for_index`), so
+        :func:`tsforecast.utils.frequency.utils.target_offset_for_index`), so
         the returned index stays reindexable against the original data.
 
         Args:

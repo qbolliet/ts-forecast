@@ -6,7 +6,7 @@ It also provides mixed-frequency imputation capabilities with provenance trackin
 """
 
 # Import des classes principales
-from .detector import FrequencyDetector, detect_frequency, detect_dataset_frequency, detect_index_frequency
+from ..utils.frequency import FrequencyDetector, detect_frequency, detect_dataset_frequency, detect_index_frequency
 from .high_frequency_imputer import HighFrequencyImputer
 from .imputation_plan import ImputationStep, INTERPOLATE_FALLBACK
 from .provenance import ImputationProvenanceTracker, ProvenanceType
