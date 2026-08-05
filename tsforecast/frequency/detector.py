@@ -12,7 +12,7 @@ from pandas.tseries.frequencies import to_offset
 
 # Import des utilitaires de fréquence
 from ..utils.frequency import to_literal, get_frequency_order, normalize_frequency, FrequencyType, UserFrequencyType
-from ..panel.utils import normalize_entity_key
+from ..panel.utils import normalize_entity_key, detect_panel_structure, extract_time_series_from_multiindex
 from ..utils.parse.utils import parse_frequency, build_frequency_string
 
 # Classe de détection de la fréquence d'une série temporelle
@@ -119,21 +119,6 @@ class FrequencyDetector:
 
         return None
 
-    # Méthode auxiliaire pour extraire la série temporelles (en dernière dimension par convention) d'un multi-index
-    def _extract_time_series_from_multiindex(self, series: pd.Series) -> pd.Series:
-        """Extract a simple time series from a series with MultiIndex.
-
-        Args:
-            series: Series with MultiIndex where the last level is the date
-
-        Returns:
-            Simple time series with only the time index
-        """
-        # Extraction de l'index temporel (dernier niveau)
-        time_index = series.index.get_level_values(-1)
-        # Création d'une série temporelle simple avec l'index temporel
-        return pd.Series(series.values, index=time_index)
-
     # Méthode auxiliaire d'extraction de la fréquence d'une colonne
     def _detect_column_frequency(
         self,
@@ -152,7 +137,7 @@ class FrequencyDetector:
         try:
             # Si la série a un MultiIndex, extraire la série temporelle simple
             if isinstance(series.index, pd.MultiIndex):
-                series = self._extract_time_series_from_multiindex(series)
+                series = extract_time_series_from_multiindex(series)
             return self.detect_time_series_frequency(series, return_format)
         except ValueError:
             # Pas assez d'observations, retourner None
@@ -224,16 +209,14 @@ class FrequencyDetector:
 
         # Groupby sur les niveaux de panel et détection pour chaque groupe.
         # Un niveau UNIQUE est passé sous forme scalaire (et non liste de
-        # longueur 1) pour éviter le FutureWarning pandas sur l'itération
-        # (les clés resteraient sinon promues en tuples dans une version
-        # future) ; le comportement (clé scalaire) est inchangé
+        # longueur 1)
         groupby_levels = panel_levels[0] if len(panel_levels) == 1 else panel_levels
         for panel_values, group_series in series.groupby(level=groupby_levels):
             # Création de l'identifiant du panel normalisé
             panel_id = normalize_entity_key(panel_values)
 
             # Extraction de la série temporelle simple et détection de la fréquence
-            temp_series = self._extract_time_series_from_multiindex(group_series)
+            temp_series = extract_time_series_from_multiindex(group_series)
             freq = self._detect_column_frequency(temp_series, return_format)
 
             if freq:
@@ -241,41 +224,6 @@ class FrequencyDetector:
 
         # Retour du dictionnaire (None si vide)
         return frequency_map if frequency_map else None
-
-    # Méthode auxiliaire de détection de la structure de panel
-    def _detect_panel_structure(self, df: pd.DataFrame, panel_cols: Optional[List[str]]) -> Tuple[Optional[List[str]], bool]:
-        """Detect the panel structure of the DataFrame (columns or index).
-
-        Args:
-            df: DataFrame to analyze
-            panel_cols: List of specified panel columns (can be None)
-
-        Returns:
-            Tuple (panel_cols_final, panel_in_index) where:
-                - panel_cols_final: List of detected panel columns (None if no panel)
-                - panel_in_index: True if panel is in the index, False if in columns
-        """
-        # Initialisation de l'indicateur que le panel est en index
-        panel_in_index = False
-        # Initialisation des noms des colonnes de panel
-        panel_cols_final = panel_cols
-
-        # Auto-détection si panel_cols non spécifié et index MultiIndex
-        if panel_cols is None and isinstance(df.index, pd.MultiIndex):
-            if df.index.nlevels >= 2:
-                # Extraction des noms des niveaux de panel (tous sauf le dernier)
-                panel_cols_final = df.index.names[:-1]
-                # Conversion en liste si nécessaire
-                if not isinstance(panel_cols_final, list):
-                    panel_cols_final = list(panel_cols_final)
-                panel_in_index = True
-        # Vérification si panel_cols spécifiés sont dans l'index
-        elif panel_cols is not None and isinstance(df.index, pd.MultiIndex):
-            if all(col in df.index.names for col in panel_cols):
-                panel_cols_final = panel_cols
-                panel_in_index = True
-
-        return panel_cols_final, panel_in_index
 
     # Méthode de détection des fréquences d'un jeu de données de panel
     def _detect_panel_frequencies(
@@ -308,9 +256,7 @@ class FrequencyDetector:
 
         if panel_in_index:
             # Groupby par niveaux d'index. Un niveau UNIQUE est passé sous
-            # forme scalaire (et non liste de longueur 1) pour éviter le
-            # FutureWarning pandas sur l'itération ; le comportement (clé
-            # scalaire) est inchangé
+            # forme scalaire (et non liste de longueur 1)
             groupby_levels = panel_cols[0] if len(panel_cols) == 1 else panel_cols
             for panel_values, group_df in df.groupby(level=groupby_levels):
                 # Création de l'identifiant du panel
@@ -321,7 +267,7 @@ class FrequencyDetector:
                     if col != time_col:
                         # Extraction de la série temporelle simple depuis le MultiIndex
                         series_with_multiindex = group_df[col]
-                        simple_series = self._extract_time_series_from_multiindex(series_with_multiindex)
+                        simple_series = extract_time_series_from_multiindex(series_with_multiindex)
 
                         # Détection de la fréquence
                         freq = self._detect_column_frequency(simple_series, return_format)
@@ -434,7 +380,7 @@ class FrequencyDetector:
             df = df.set_index(time_col)
 
         # Détection de la structure panel (dans l'index ou les colonnes)
-        panel_cols, panel_in_index = self._detect_panel_structure(df, panel_cols)
+        panel_cols, panel_in_index = detect_panel_structure(df, panel_cols)
 
         # Détermination si les données sont en panel
         is_panel = panel_cols is not None and len(panel_cols) > 0

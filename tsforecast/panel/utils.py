@@ -2,7 +2,7 @@
 # Modules de base
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 # Fonction de détection de la structure de panel
 def is_panel_data(data: Union[pd.DataFrame, pd.Series]) -> bool:
@@ -27,6 +27,59 @@ def is_panel_data(data: Union[pd.DataFrame, pd.Series]) -> bool:
         False
     """
     return isinstance(data.index, pd.MultiIndex) and data.index.nlevels >= 2
+
+# Fonction de détection de la structure de panel d'un DataFrame
+def detect_panel_structure(
+    df: pd.DataFrame,
+    panel_cols: Optional[List[str]],
+) -> Tuple[Optional[List[str]], bool]:
+    """Detect the panel structure of a DataFrame (columns or index).
+
+    Args:
+        df: DataFrame to analyze.
+        panel_cols: List of specified panel columns (can be None).
+
+    Returns:
+        Tuple (panel_cols_final, panel_in_index) where:
+            - panel_cols_final: List of detected panel columns (None if no panel)
+            - panel_in_index: True if panel is in the index, False if in columns
+    """
+    # Initialisation de l'indicateur que le panel est en index
+    panel_in_index = False
+    # Initialisation des noms des colonnes de panel
+    panel_cols_final = panel_cols
+
+    # Auto-détection si panel_cols non spécifié et index MultiIndex
+    if panel_cols is None and isinstance(df.index, pd.MultiIndex):
+        if df.index.nlevels >= 2:
+            # Extraction des noms des niveaux de panel (tous sauf le dernier)
+            panel_cols_final = df.index.names[:-1]
+            # Conversion en liste si nécessaire
+            if not isinstance(panel_cols_final, list):
+                panel_cols_final = list(panel_cols_final)
+            panel_in_index = True
+    # Vérification si panel_cols spécifiés sont dans l'index
+    elif panel_cols is not None and isinstance(df.index, pd.MultiIndex):
+        if all(col in df.index.names for col in panel_cols):
+            panel_cols_final = panel_cols
+            panel_in_index = True
+
+    return panel_cols_final, panel_in_index
+
+# Fonction d'extraction de la série temporelle (dernier niveau) d'un MultiIndex
+def extract_time_series_from_multiindex(series: pd.Series) -> pd.Series:
+    """Extract a simple time series from a series with MultiIndex.
+
+    Args:
+        series: Series with MultiIndex where the last level is the date.
+
+    Returns:
+        Simple time series with only the time index.
+    """
+    # Extraction de l'index temporel (dernier niveau)
+    time_index = series.index.get_level_values(-1)
+    # Création d'une série temporelle simple avec l'index temporel
+    return pd.Series(series.values, index=time_index)
 
 # Fonction de normalisation de l'entité du panel
 def normalize_entity_key(key) -> tuple:
