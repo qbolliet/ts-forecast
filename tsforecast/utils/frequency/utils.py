@@ -18,23 +18,6 @@ if TYPE_CHECKING:
 # Instance globale pour faciliter l'utilisation
 _normalizer = FrequencyNormalizer()
 
-# Instance globale (différée) du détecteur de fréquence
-_detector: Optional["FrequencyDetector"] = None
-
-# Fonction d'accès paresseuse au détecteur, pour éviter l'import circulaire avec .detector
-def _get_detector() -> "FrequencyDetector":
-    """Return the shared FrequencyDetector instance, importing it lazily.
-
-    Notes:
-        FrequencyDetector is imported here rather than at module level because
-        .detector itself imports normalize_frequency and get_frequency_order
-        from this module: a top-level import in both directions would deadlock.
-    """
-    global _detector
-    if _detector is None:
-        from .detector import FrequencyDetector
-        _detector = FrequencyDetector()
-    return _detector
 
 # Fonctions de commodité pour accès direct
 # Fonction de normalisation de la fréquence
@@ -367,15 +350,20 @@ def detect_frequency(data: Union[pd.Series, pd.DataFrame],
         if time_col is not None or panel_cols:
             raise ValueError("time_col and panel_cols parameters are only valid for DataFrame inputs")
 
+        # Importation du locale du détector (pour éviter les imports circulaires)
+        from .detector import FrequencyDetector
+        # Instanciation de la classe
+        _detector = FrequencyDetector()
+
         # Détection de la fréquence (peut retourner un dict pour MultiIndex)
-        freq_result = _get_detector().detect_frequency(data, return_format)
+        freq_result = _detector.detect_frequency(data, return_format)
 
         # Si check_consistency demandé et résultat est un dict (MultiIndex détecté)
         if check_consistency and isinstance(freq_result, dict):
             # Application de la logique de validation de consistance
             if consistency_mode == 'modal':
                 # Mode modal: fréquence la plus commune
-                _, frequency = _get_detector().validate_frequency_consistency(frequency_map=freq_result, strict=strict)
+                _, frequency = _detector.validate_frequency_consistency(frequency_map=freq_result, strict=strict)
                 return frequency
             elif consistency_mode == 'highest':
                 # Mode highest: fréquence la plus haute (plus granulaire)
@@ -429,13 +417,18 @@ def detect_dataset_frequency(df: pd.DataFrame,
     Returns:
         Dictionary mapping column names (or (panel_id, column) tuples) to frequencies or consistent frequency
     """
+    # Importation du locale du détector (pour éviter les imports circulaires)
+    from .detector import FrequencyDetector
+    # Instanciation de la classe
+    _detector = FrequencyDetector()
+    
     # Détection des fréquences
-    frequency_map = _get_detector().detect_dataset_frequency(df, time_col, panel_cols, return_format)
+    frequency_map = _detector.detect_dataset_frequency(df, time_col, panel_cols, return_format)
     # Vérification de la consistence des fréquences si demandé
     if check_consistency :
         if consistency_mode == 'modal':
             # Mode modal: fréquence la plus commune
-            _, frequency = _get_detector().validate_frequency_consistency(frequency_map=frequency_map, strict=strict)
+            _, frequency = _detector.validate_frequency_consistency(frequency_map=frequency_map, strict=strict)
         elif consistency_mode == 'highest':
             # Mode highest: fréquence la plus haute (plus granulaire)
             frequency = _get_highest_frequency(frequency_map)
