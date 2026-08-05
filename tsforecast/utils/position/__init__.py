@@ -26,9 +26,6 @@ from .utils import (
     to_literal,
     to_code,
     validate_position,
-    extract_position_from_offset,
-    decompose_offset,
-    combine_frequency_position,
     flip_position,
     convert_position,
     convert_offset
@@ -49,9 +46,6 @@ __all__ = [
     'to_literal',
     'to_code',
     'validate_position',
-    'extract_position_from_offset',
-    'decompose_offset',
-    'combine_frequency_position',
     'flip_position',
 
     # Fonctions de conversion

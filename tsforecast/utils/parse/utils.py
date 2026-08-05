@@ -18,6 +18,9 @@ from typing import Tuple, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from ..frequency.types import FrequencyType
 
+# Fréquences pandas supportant un suffixe de position S/E (ex: 'MS', 'QE')
+_POSITION_AWARE_FREQUENCIES = ('M', 'Q', 'Y', 'W', 'B')
+
 # Fonction de parsing d'une chaîne de caractères contenant une fréquence
 def parse_frequency(frequency_str : str) -> Tuple[FrequencyType, str, str]:
     """Parse a frequency string into its component parts.
@@ -69,7 +72,10 @@ def parse_frequency(frequency_str : str) -> Tuple[FrequencyType, str, str]:
 
     # Séparation de la fréquence de sa position et de son suffixe
     # Expression régulière pour matcher: indicateur [S|E] optionnel [-suffixe] optionnel
-    match = re.match(r"([A-Z]+?)([SE])?(-(.*?))?$", frequency_str)
+    # L'indicateur autorise aussi les minuscules (ex: 'h', 'min', 'ms', 'us', 'ns')
+    # pour couvrir les fréquences infra-journalières ; S/E restent en majuscules,
+    # seules les fréquences position-aware (M/Q/Y/W/B) les utilisant réellement
+    match = re.match(r"([A-Za-z]+?)([SE])?(-(.*?))?$", frequency_str)
 
     # Extraction des éléments si un appariement est trouvé
     if match:
@@ -129,7 +135,6 @@ def build_frequency_string(
         'W'
     """
     from ..frequency.utils import normalize_frequency
-    from ..position import combine_frequency_position
 
     # Fréquence de base
     base_freq = normalize_frequency(frequency=frequency)
@@ -138,12 +143,14 @@ def build_frequency_string(
     if position is not None and position not in ['S', 'E']:
         raise ValueError(f"position must be 'S' (start), 'E' (end), or None, got '{position}'")
 
-    # Si pas de position, retourne la fréquence de base
+    # Si pas de position, retourne la fréquence de base (le suffixe est ignoré :
+    # il n'a de sens qu'accolé à une position, ex: 'QE-DEC')
     if position is None:
         return base_freq
 
-    # Combinaison avec la position
-    freq_with_position = combine_frequency_position(base_freq, position)
+    # Ajout de la position uniquement si la fréquence la supporte (ex: 'D' n'a
+    # pas de déclinaison S/E) ; sinon la position est silencieusement ignorée
+    freq_with_position = f"{base_freq}{position}" if base_freq in _POSITION_AWARE_FREQUENCIES else base_freq
 
     # Ajout du suffixe si présent
     if suffix is not None:
