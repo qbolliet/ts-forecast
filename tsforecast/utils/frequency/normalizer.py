@@ -13,7 +13,7 @@ from ..abc.normalizer import TemporalNormalizer
 
 # Import de l'utilitaire du package
 from .types import FrequencyType, UserFrequencyType
-from ..parse.utils import parse_frequency
+from ..parse.utils import parse_frequency, build_frequency_string
 
 
 # Classe de normalisation des fréquences
@@ -199,7 +199,7 @@ class FrequencyNormalizer(TemporalNormalizer):
             return False
 
     # Conversion d'une fréquence dans son expression pandas
-    def to_pandas_freq(self, frequency: Union[FrequencyType, UserFrequencyType]) -> FrequencyType:
+    def to_pandas_freq(self, frequency: str) -> str:
         """Convert frequency to pandas frequency code.
 
         Args:
@@ -213,10 +213,24 @@ class FrequencyNormalizer(TemporalNormalizer):
             >>> normalizer.to_pandas_freq('monthly')
             'M'
         """
-        return self.normalize(frequency)
+        # Distinction suivant la nature de l'entrée
+        if frequency in self._literal_to_pandas:
+            # Normalisation de la fréquence
+            pandas_freq = self.normalize(frequency)
+        elif frequency in self._pandas_to_literal:
+            pandas_freq = frequency
+        else:
+            # Parsing de la fréquence en entrée
+            parsed_freq, parsed_position, parsed_suffix = parse_frequency(frequency)
+            # Normalisation de la fréquence
+            normalized_parsed_freq = self.normalize(parsed_freq)
+            # Réassemblage 
+            pandas_freq = build_frequency_string(frequency=normalized_parsed_freq, position=parsed_position, suffix=parsed_suffix)
+            
+        return pandas_freq
 
     # Conversion d'une fréquence en DateOffset
-    def to_dateoffset(self, frequency: FrequencyType) -> pd.DateOffset:
+    def to_dateoffset(self, frequency: str) -> pd.DateOffset:
         """Convert frequency to pandas DateOffset object.
 
         Args:
@@ -231,8 +245,8 @@ class FrequencyNormalizer(TemporalNormalizer):
             >>> isinstance(offset, pd.DateOffset)
             True
         """
-        # Normalisation de la fréquence
-        pandas_freq = self.normalize(frequency)
+        # Conversion en fréquence pandas
+        pandas_freq = self.to_pandas_freq(frequency=frequency)
         # Conversion en OffSet
         return to_offset(pandas_freq)
 
