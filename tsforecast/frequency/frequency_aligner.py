@@ -64,88 +64,6 @@ class FrequencyAligner:
         # Initialisation du convertisseur de fréquences
         self._freq_converter = FrequencyConverter()
 
-    # Méthode de regroupement des variables par entité
-    # Délégation à la fonction utilitaire partagée de tsforecast.panel.utils
-    def group_keys_by_entity_and_variable(
-        self,
-        keys: List[Union[str, Tuple]],
-    ) -> Dict[tuple, List[str]]:
-        """Group variable keys by entity, extracting column names.
-
-        Thin wrapper over :func:`tsforecast.panel.utils.group_keys_by_entity_and_variable`.
-
-        Args:
-            keys: List of (entity..., variable) tuples or plain column names.
-
-        Returns:
-            Dict mapping entity tuples to lists of column names.
-            For time series (non-panel), returns {(): [col_names]}.
-        """
-        return group_keys_by_entity_and_variable(keys)
-
-    # Méthode d'extraction de la fréquence cible d'une entité
-    # Délégation à la fonction utilitaire partagée de tsforecast.panel.utils
-    def get_entity_target_frequency(
-        self,
-        entity: tuple,
-        target_frequency: Union[str, Dict],
-    ) -> str:
-        """Get the target frequency for a specific entity.
-
-        Thin wrapper over :func:`tsforecast.panel.utils.get_entity_target_frequency`.
-
-        Args:
-            entity: Entity tuple (e.g., ('FR',) or ('FR', 'GDP')).
-            target_frequency: Either a single frequency string or a dict
-                mapping entities to frequencies.
-
-        Returns:
-            Target frequency string for the entity.
-
-        Raises:
-            ValueError: If no target frequency found for the entity.
-        """
-        return get_entity_target_frequency(entity, target_frequency)
-
-    # Méthode de construction du masque des observations associées à une entité
-    # Délégation à la fonction utilitaire partagée de tsforecast.panel.utils
-    def get_entity_mask(
-        self,
-        X: pd.DataFrame,
-        entity: tuple,
-    ) -> np.ndarray:
-        """Get a boolean mask for rows belonging to a specific entity.
-
-        Thin wrapper over :func:`tsforecast.panel.utils.get_entity_mask`.
-
-        Args:
-            X: DataFrame with MultiIndex (entity levels + time level).
-            entity: Entity tuple to filter on.
-
-        Returns:
-            Boolean numpy array of shape (len(X),).
-        """
-        return get_entity_mask(X, entity)
-
-    # Méthode auxiliaire de construction d'un offset positionné comme l'index source
-    # Délégation à la fonction utilitaire partagée de tsforecast.utils.frequency.utils
-    def _target_offset_for_index(
-        self,
-        index: pd.DatetimeIndex,
-        target_frequency: str,
-    ) -> str:
-        """Build a pandas offset for target_frequency anchored like the index.
-
-        Thin wrapper over :func:`tsforecast.utils.frequency.utils.target_offset_for_index`.
-
-        Args:
-            index: Source DatetimeIndex.
-            target_frequency: Base target frequency (e.g. 'Q').
-
-        Returns:
-            Pandas offset alias (e.g. 'QS' for a month-start index).
-        """
-        return target_offset_for_index(index, target_frequency)
 
     # Méthode auxiliaire de sélection de la série à resampler
     @staticmethod
@@ -229,10 +147,10 @@ class FrequencyAligner:
         # Cas séries temporelles : agrégation globale
         if not is_panel:
             # Extraction des colonnes des tuples
-            columns = self.extract_column_names(aggregate_keys)
+            columns = extract_column_names(aggregate_keys)
             # Offset ancré comme l'index source, pour que les labels agrégés
             # retombent sur des dates présentes dans l'index d'origine
-            target_offset = self._target_offset_for_index(df.index, target_frequency)
+            target_offset = target_offset_for_index(df.index, target_frequency)
             # Parcours des colonnes
             for col in columns:
                 # Vérification que la colonne est dans le jeu de données
@@ -254,14 +172,14 @@ class FrequencyAligner:
 
         # Cas panel : agrégation par entité
         # Extraction du dictionnaire associant une liste de variables à chaque entité
-        grouped = self.group_keys_by_entity_and_variable(aggregate_keys)
+        grouped = group_keys_by_entity_and_variable(aggregate_keys)
 
         # Parcours des entités
         for entity, cols in grouped.items():
             # Extraction de la fréquence cible associée à l'enité
-            entity_target = self.get_entity_target_frequency(entity, target_frequency)
+            entity_target = get_entity_target_frequency(entity, target_frequency)
             # Création du masque des observations de l'entité
-            entity_mask = self.get_entity_mask(df, entity)
+            entity_mask = get_entity_mask(df, entity)
 
             # Parcours des colonnes
             for col in cols:
@@ -276,7 +194,7 @@ class FrequencyAligner:
                     list(range(df.index.nlevels - 1))
                 )
                 # Offset ancré comme l'index de l'entité
-                target_offset = self._target_offset_for_index(
+                target_offset = target_offset_for_index(
                     entity_series.index, entity_target
                 )
                 # Restriction aux valeurs observées : la fréquence source doit être
@@ -351,7 +269,7 @@ class FrequencyAligner:
         # Parcours des entités du panel
         for entity in get_unique_panel_entities(df):
             # Extraction des dates originales de l'entité
-            entity_mask = self.get_entity_mask(df, entity)
+            entity_mask = get_entity_mask(df, entity)
             entity_times = df.index.get_level_values(-1)[entity_mask]
 
             # Union avec les dates issues de l'interpolation
@@ -439,7 +357,7 @@ class FrequencyAligner:
         # Cas séries temporelles : interpolation globale
         if not is_panel:
             # Extraction des colonnes
-            columns = self.extract_column_names(interpolate_keys)
+            columns = extract_column_names(interpolate_keys)
 
             # Interpolation de chaque colonne
             interpolated: Dict[str, pd.Series] = {}
@@ -483,15 +401,15 @@ class FrequencyAligner:
 
         # Cas panel : interpolation par entité
         # Regroupement des colonnes par entité
-        grouped = self.group_keys_by_entity_and_variable(interpolate_keys)
+        grouped = group_keys_by_entity_and_variable(interpolate_keys)
 
         # Interpolation des séries de chaque entité
         interpolated_panel: Dict[tuple, Dict[str, pd.Series]] = {}
         for entity, cols in grouped.items():
             # Extraction de la fréquence cible associée à l'entité
-            entity_target = self.get_entity_target_frequency(entity, target_frequency)
+            entity_target = get_entity_target_frequency(entity, target_frequency)
             # Extraction du masque des observations associées à l'entité
-            entity_mask = self.get_entity_mask(df, entity)
+            entity_mask = get_entity_mask(df, entity)
 
             # Parcours des colonnes
             for col in cols:
@@ -529,7 +447,7 @@ class FrequencyAligner:
         # Affectation des colonnes interpolées par entité
         for entity, cols in interpolated_panel.items():
             # Extraction du masque des observations de l'entité dans l'index densifié
-            entity_mask = self.get_entity_mask(result, entity)
+            entity_mask = get_entity_mask(result, entity)
             # Extraction des dates de l'entité
             entity_times = target_index.get_level_values(-1)[entity_mask]
 
@@ -611,7 +529,7 @@ class FrequencyAligner:
             # Extraction de la fréquence source
             source_freq = freq_map.get(lookup_key)
             # Fréquence cible : globale pour TS, par entité pour panel
-            key_target = self.get_entity_target_frequency(
+            key_target = get_entity_target_frequency(
                 entity if is_panel else (), target_frequency
             )
             # Orientation de la conversion
@@ -639,21 +557,3 @@ class FrequencyAligner:
             )
         return result
 
-    # Méthode d'extraction des noms de colonnes
-    # Délégation à la fonction utilitaire partagée de tsforecast.panel.utils
-    def extract_column_names(
-        self,
-        keys: List[Union[str, Tuple]],
-    ) -> List[str]:
-        """Extract unique column names from variable keys.
-
-        Thin wrapper over :func:`tsforecast.panel.utils.extract_column_names`.
-
-        Args:
-            keys: List of variable identifiers (column names or
-                (entity, column) tuples).
-
-        Returns:
-            List of unique column names.
-        """
-        return extract_column_names(keys)
