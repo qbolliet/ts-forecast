@@ -447,7 +447,10 @@ def detect_index_frequency(
 
     For a DatetimeIndex, analyzes the frequency and returns it in the
     requested format. With 'components' format, returns a tuple of
-    (base, position, suffix).
+    (base, position, suffix). When pandas' own inference (``inferred_freq``)
+    fails to detect a frequency, falls back to ``FrequencyDetector``, which
+    extends detection to patterns ``inferred_freq`` misses (e.g. quarterly,
+    business daily, semi-monthly).
 
     For a MultiIndex with dates as the last level, detects frequency
     for each unique entity (combination of non-date levels) and returns
@@ -520,6 +523,17 @@ def detect_index_frequency(
         # Traitement du DatetimeIndex
         # Inférence de la fréquence de l'index
         freq = index.inferred_freq
+
+        if freq is None:
+            # Repli lorsque l'inférence directe échoue (ex. fréquence trimestrielle
+            # ou motif régulier non reconnu par pandas.inferred_freq) : construction
+            # d'une série dédiée pour bénéficier des heuristiques étendues de
+            # FrequencyDetector (extension au-delà de infer_freq, cf. _extend_infer_freq)
+            from .detector import FrequencyDetector
+            series = pd.Series(range(len(index)), index=index)
+            fallback_result = FrequencyDetector().detect_time_series_frequency(series, return_format)
+            return fallback_result
+
         # Normalisation au format demandé
         return normalize_frequency(frequency=freq, return_format=return_format)
 
