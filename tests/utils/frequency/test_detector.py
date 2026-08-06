@@ -255,8 +255,10 @@ class TestFrequencyDetectorMultiIndex:
         detector = FrequencyDetector(min_observations=2)
         freq = detector.detect_frequency(series)
 
-        # Aucun groupe n'a assez d'observations
-        assert freq is None
+        # Aucun groupe n'a assez d'observations, mais les entités restent dans le
+        # dictionnaire, associées à None (pas de suppression silencieuse)
+        assert isinstance(freq, dict)
+        assert freq == {('A',): None, ('B',): None}
 
     def test_series_multiindex_only_1_level(self):
         """Test erreur avec MultiIndex ayant un seul niveau."""
@@ -396,6 +398,18 @@ class TestDetectDatasetFrequency:
         freq_map = detector.detect_dataset_frequency(df)
 
         assert freq_map == {'value1': 'D', 'value2': 'D'}
+
+    def test_invalid_time_col_raises(self):
+        """Un time_col absent des colonnes doit lever une erreur plutôt que
+        d'être ignoré silencieusement (le RangeIndex résiduel ne doit pas
+        être interprété à tort comme des dates)."""
+        dates = pd.date_range('2023-01-01', periods=5, freq='D')
+        df = pd.DataFrame({'value': [1, 2, 3, 4, 5]}, index=dates).reset_index(names='date')
+
+        detector = FrequencyDetector()
+
+        with pytest.raises(ValueError, match="time_col"):
+            detector.detect_dataset_frequency(df, time_col='not_a_column')
 
     def test_dataframe_with_panel_cols(self):
         """Test détection avec panel_cols explicites."""
