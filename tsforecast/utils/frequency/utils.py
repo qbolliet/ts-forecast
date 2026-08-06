@@ -334,7 +334,7 @@ def detect_frequency(data: Union[pd.Series, pd.DataFrame],
         ... ], names=['panel_id', 'date'])
         >>> series = pd.Series([1, 2, 3, 4, 5, 6], index=idx)
         >>> detect_frequency(series)
-        {'A': 'D', 'B': 'D'}
+        {('A',): 'D', ('B',): 'D'}
 
         >>> # Series with MultiIndex and consistency check
         >>> detect_frequency(series, check_consistency=True)
