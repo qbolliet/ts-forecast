@@ -165,7 +165,11 @@ class FrequencyDetector:
         Returns:
             - For simple series: Detected frequency as string, or None if detection fails
             - For MultiIndex series: Dictionary mapping panel_id to frequencies.
-              Panel ids are ALWAYS tuples, even for a single entity level.
+              Panel ids are ALWAYS tuples, even for a single entity level. Entities
+              for which frequency detection fails (e.g. fewer than
+              ``min_observations`` dates) are still present in the dictionary,
+              mapped to None, rather than being silently dropped. None is only
+              returned if the series has no panel group at all.
 
         Raises:
             ValueError: If series has insufficient non-null observations or invalid index
@@ -214,14 +218,13 @@ class FrequencyDetector:
             # Création de l'identifiant du panel normalisé
             panel_id = normalize_entity_key(panel_values)
 
-            # Extraction de la série temporelle simple et détection de la fréquence
+            # Extraction de la série temporelle simple et détection de la fréquence.
+            # L'entité est TOUJOURS ajoutée au dictionnaire, avec None en cas
+            # d'échec de détection
             temp_series = extract_time_series_from_multiindex(group_series)
-            freq = self._detect_column_frequency(temp_series, return_format)
+            frequency_map[panel_id] = self._detect_column_frequency(temp_series, return_format)
 
-            if freq:
-                frequency_map[panel_id] = freq
-
-        # Retour du dictionnaire (None si vide)
+        # Retour du dictionnaire (None si aucune entité, c'est-à-dire aucun groupe)
         return frequency_map if frequency_map else None
 
     # Méthode de détection des fréquences d'un jeu de données de panel
@@ -248,7 +251,9 @@ class FrequencyDetector:
             nested, so a single-level panel yields ``('FR', 'gdp')`` and a
             two-level panel ``('FR', 'manufacturing', 'gdp')``. Use
             :func:`tsforecast.panel.utils.split_variable_key` to split a key
-            back into its ``(entity_tuple, column)`` parts.
+            back into its ``(entity_tuple, column)`` parts. Keys for which
+            frequency detection fails (e.g. fewer than ``min_observations``
+            dates) are still present, mapped to None.
         """
         # Initialisation du dictionnaire des fréquences
         frequency_map = {}
@@ -268,10 +273,10 @@ class FrequencyDetector:
                         series_with_multiindex = group_df[col]
                         simple_series = extract_time_series_from_multiindex(series_with_multiindex)
 
-                        # Détection de la fréquence
-                        freq = self._detect_column_frequency(simple_series, return_format)
-                        if freq:
-                            frequency_map[panel_id + (col,)] = freq
+                        # Détection de la fréquence (None en cas d'échec)
+                        frequency_map[panel_id + (col,)] = self._detect_column_frequency(
+                            simple_series, return_format
+                        )
         else:
             # Groupby par colonnes
             for panel_values, group_df in df.groupby(panel_cols):
@@ -281,10 +286,10 @@ class FrequencyDetector:
                 # Détection de la fréquence pour chaque colonne du groupe
                 for col in df.columns:
                     if col not in panel_cols and col != time_col:
-                        # Détection de la fréquence
-                        freq = self._detect_column_frequency(group_df[col], return_format)
-                        if freq:
-                            frequency_map[panel_id + (col,)] = freq
+                        # Détection de la fréquence (None en cas d'échec)
+                        frequency_map[panel_id + (col,)] = self._detect_column_frequency(
+                            group_df[col], return_format
+                        )
 
         return frequency_map
 
@@ -354,6 +359,9 @@ class FrequencyDetector:
         Returns:
             Dictionary mapping column names (or (panel_id, column) tuples) to frequencies
 
+        Raises:
+            ValueError: If time_col is specified but not found in df.columns
+
         Examples:
             >>> import pandas as pd
             >>> # Simple DataFrame
@@ -374,8 +382,13 @@ class FrequencyDetector:
             >>> freq_map
             {('A', 'value'): 'D', ('B', 'value'): 'D'}
         """
-        # Préparation de l'index temporel si spécifié
-        if time_col is not None and time_col in df.columns:
+        # Préparation de l'index temporel si spécifié. Une time_col absente des
+        # colonnes lève une erreur
+        if time_col is not None:
+            if time_col not in df.columns:
+                raise ValueError(
+                    f"time_col '{time_col}' not found in DataFrame columns: {list(df.columns)}"
+                )
             df = df.set_index(time_col)
 
         # Détection de la structure panel (dans l'index ou les colonnes)
