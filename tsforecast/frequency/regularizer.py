@@ -13,7 +13,11 @@ from typing import Dict, List, Optional, Union
 from ..utils.frequency.detector import FrequencyDetector
 from ..utils.frequency.utils import detect_frequency, _get_highest_frequency, detect_index_frequency
 from ..utils.frequency import normalize_frequency
-from ..panel.utils import normalize_entity_key
+from ..panel.utils import (
+    build_panel_index,
+    iter_entity_blocks,
+    normalize_entity_key,
+)
 
 
 # Classe de régularisation d'index temporel
@@ -391,6 +395,11 @@ class IndexRegularizer:
     ) -> Union[pd.Series, pd.DataFrame]:
         """Regularize panel data entity by entity.
 
+        Entity blocks are extracted and re-assembled with the shared panel
+        primitives (:func:`iter_entity_blocks`, :func:`build_panel_index`), so
+        each entity is regularized by the very same code path as a plain time
+        series.
+
         Args:
             data: Panel data with MultiIndex.
             per_entity: If True, detect frequency per entity; if False, use a
@@ -399,12 +408,6 @@ class IndexRegularizer:
         Returns:
             Regularized panel data.
         """
-        # Extraction du niveau des dates
-        date_level = data.index.nlevels - 1
-        # Extraction des entités
-        entity_index = data.index.droplevel(date_level)
-        entity_keys = entity_index.unique()
-
         # Fréquence globale (si per_entity=False)
         global_freq = None
         if not per_entity:
@@ -424,27 +427,12 @@ class IndexRegularizer:
 
             # Fallback : détection par entité puis fréquence la plus haute
             if global_freq is None:
-                # Initialisation du dictionnaire des fréquences par entité
+                # Détection sur le bloc daté de chaque entité
                 entity_freqs = {}
-                # Parcours des entités
-                for entity_key in entity_keys:
-                    # Création du masque de l'index correspondant à l'entité
-                    mask = entity_index == entity_key
-                    # Extraction des dates de l'entité
-                    dates = data.index.get_level_values(date_level)[mask]
-                    # Extraction des données de l'entité
-                    entity_data_tmp = data[mask]
-                    # Construction de la série temporelle de l'entité
-                    if isinstance(entity_data_tmp, pd.DataFrame):
-                        entity_data_tmp = entity_data_tmp.copy()
-                        entity_data_tmp.index = dates
-                    else:
-                        entity_data_tmp = pd.Series(entity_data_tmp.values, index=dates)
-                    # Détection de la série temporelle de l'entité
-                    entity_freq = self._resolve_frequency_ts(entity_data_tmp)
-                    # Ajout au dictionnaire
+                for entity, _, block in iter_entity_blocks(data, is_panel=True):
+                    entity_freq = self._resolve_frequency_ts(block)
                     if entity_freq is not None:
-                        entity_freqs[normalize_entity_key(entity_key)] = entity_freq
+                        entity_freqs[entity] = entity_freq
                 # Extraction de la fréquence la plus élevée
                 if entity_freqs:
                     self._validate_consistent_positions(entity_freqs)
@@ -452,54 +440,22 @@ class IndexRegularizer:
 
         # Régularisation par entité
         parts = []
-        level_names = data.index.names
 
-        # Parcours par entité
-        for entity_key in entity_keys:
-            # Création du masque par entité
-            mask = entity_index == entity_key
-            subset = data[mask]
-
-            # Extraction du DatetimeIndex de cette entité
-            dates = subset.index.get_level_values(date_level)
-
-            # Construction d'un DataFrame/Series indexé par date uniquement
-            if isinstance(subset, pd.DataFrame):
-                entity_data = subset.copy()
-                entity_data.index = dates
-            else:
-                entity_data = pd.Series(subset.values, index=dates, name=subset.name)
-
+        # Parcours des blocs d'entités, ramenés à leur seul index temporel
+        for entity, mask, block in iter_entity_blocks(data, is_panel=True):
             # Résolution de la fréquence pour cette entité
-            if per_entity:
-                freq = self._resolve_frequency_ts(entity_data)
-            else:
-                freq = global_freq
+            freq = self._resolve_frequency_ts(block) if per_entity else global_freq
 
+            # Pas de fréquence détectable → bloc gardé tel quel
             if freq is None:
-                # Pas de fréquence détectable → garder tel quel
-                parts.append(subset)
+                parts.append(data[mask])
                 continue
 
-            # Régularisation
-            regularized = self._regularize_ts(entity_data, freq)
-
-            # Reconstruction du MultiIndex
-            key = normalize_entity_key(entity_key)
-            n = len(regularized)
-
-            # Niveaux d'entité
-            entity_levels = [np.full(n, k) for k in key]
-            arrays = entity_levels + [regularized.index]
-
-            new_mi = pd.MultiIndex.from_arrays(arrays, names=level_names)
-
-            # Attribution de l'index
-            if isinstance(regularized, pd.DataFrame):
-                regularized.index = new_mi
-            else:
-                regularized = pd.Series(regularized.values, index=new_mi, name=regularized.name)
-
+            # Régularisation, puis reconstruction du MultiIndex de l'entité
+            regularized = self._regularize_ts(block, freq)
+            regularized.index = build_panel_index(
+                entity, regularized.index, names=data.index.names
+            )
             parts.append(regularized)
 
         if not parts:

@@ -2,7 +2,7 @@
 # Modules de base
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 # Fonction de détection de la structure de panel
 def is_panel_data(data: Union[pd.DataFrame, pd.Series]) -> bool:
@@ -352,3 +352,88 @@ def resolve_entity_column_frequencies(
         # Sinon : colonne non couverte, omise (laissée inchangée)
 
     return resolved
+
+# Fonction d'itération sur les blocs d'entités d'un jeu de données
+def iter_entity_blocks(
+    data: Union[pd.DataFrame, pd.Series],
+    is_panel: Optional[bool] = None,
+) -> Iterator[Tuple[tuple, np.ndarray, Union[pd.DataFrame, pd.Series]]]:
+    """Iterate over the entity blocks of a dataset, each indexed by date only.
+
+    Unifies the time series and panel cases: a time series is yielded as a
+    degenerate panel holding a single entity ``()`` covering every row, so
+    callers can share one processing loop instead of branching on the data
+    structure. Panel blocks have their entity levels dropped, hence carry a
+    plain DatetimeIndex just like a time series.
+
+    Args:
+        data: Time series (DatetimeIndex) or panel data (MultiIndex whose
+            first n-1 levels are entities and last level is time).
+        is_panel: Force the structure interpretation. If None, it is inferred
+            with :func:`is_panel_data`.
+
+    Yields:
+        Tuple ``(entity, mask, block)`` where ``entity`` is the entity key
+        (``()`` for a time series), ``mask`` a boolean array selecting the
+        entity's rows in ``data``, and ``block`` the entity's data indexed by
+        date only.
+
+    Examples:
+        >>> dates = pd.date_range('2023-01-01', periods=2, freq='MS')
+        >>> idx = pd.MultiIndex.from_product([['FR', 'DE'], dates])
+        >>> df = pd.DataFrame({'x': range(4)}, index=idx)
+        >>> [entity for entity, _, _ in iter_entity_blocks(df)]
+        [('FR',), ('DE',)]
+        >>> ts = pd.DataFrame({'x': range(2)}, index=dates)
+        >>> [entity for entity, _, _ in iter_entity_blocks(ts)]
+        [()]
+    """
+    # Résolution de la structure des données
+    if is_panel is None:
+        is_panel = is_panel_data(data)
+
+    # Cas des séries temporelles : un unique bloc d'entité vide couvrant tout
+    if not is_panel:
+        yield (), np.ones(len(data), dtype=bool), data
+        return
+
+    # Niveaux d'entité à retirer pour ramener chaque bloc à un index daté
+    entity_levels = list(range(data.index.nlevels - 1))
+
+    # Parcours des entités du panel
+    for entity in get_unique_panel_entities(data):
+        # Masque des observations de l'entité
+        mask = get_entity_mask(data, entity)
+        # Extraction du bloc, ramené à son seul index temporel
+        yield entity, mask, data[mask].droplevel(entity_levels)
+
+# Fonction de reconstruction d'un MultiIndex de panel pour une entité
+def build_panel_index(
+    entity: tuple,
+    times: pd.Index,
+    names: Optional[Sequence] = None,
+) -> pd.MultiIndex:
+    """Rebuild a panel MultiIndex from an entity key and its dates.
+
+    Inverse of the block extraction performed by :func:`iter_entity_blocks`:
+    re-attaches the entity levels dropped there.
+
+    Args:
+        entity: Entity key as a tuple (e.g. ``('FR',)``).
+        times: Dates of the entity.
+        names: Names of the resulting index levels (entity levels then time).
+
+    Returns:
+        MultiIndex pairing ``entity`` with each date of ``times``.
+
+    Examples:
+        >>> dates = pd.date_range('2023-01-01', periods=2, freq='MS')
+        >>> build_panel_index(('FR',), dates, names=['entity', 'date'])
+        MultiIndex([('FR', '2023-01-01'),
+                    ('FR', '2023-02-01')],
+                   names=['entity', 'date'])
+    """
+    # Réplication de chaque niveau d'entité sur la longueur de l'index temporel
+    arrays = [np.full(len(times), level) for level in entity]
+    # Reconstruction du MultiIndex (niveaux d'entité puis niveau temporel)
+    return pd.MultiIndex.from_arrays([*arrays, times], names=names)
