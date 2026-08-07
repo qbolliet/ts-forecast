@@ -29,6 +29,9 @@ from ..panel.utils import (
     get_unique_panel_entities,
     normalize_entity_key,
     split_variable_key,
+    extract_column_names,
+    group_keys_by_entity_and_variable,
+    get_entity_mask,
 )
 from ..utils.frequency.utils import detect_frequency, detect_index_frequency
 from .imputation_plan import (
@@ -1207,9 +1210,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             pf = pred_freq
 
-        return self._freq_converter.count_subperiods(
-            self.detected_frequencies_[var_key],
+        # "get_conversion_factor(haut, bas)" : nombre de périodes hautes dans
+        # une période basse, décompte calendaire (12 mois par an, pas 12.17)
+        return self._freq_converter.get_conversion_factor(
             pf,
+            self.detected_frequencies_[var_key],
         )
 
     # -------------------------------------------------------------------------
@@ -1475,7 +1480,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Cas des données de panel : restriction aux entités du groupe
         mask = np.zeros(len(X_input), dtype=bool)
         for entity in entities:
-            mask |= self._freq_aligner.get_entity_mask(X_input, entity)
+            mask |= get_entity_mask(X_input, entity)
 
         return pd.Series(mask, index=X_input.index)
 
@@ -1839,7 +1844,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         for column in columns:
             f_col = column_frequencies.get(column)
             try:
-                counts[column] = self._freq_converter.count_subperiods(f_var, f_col)
+                counts[column] = self._freq_converter.get_conversion_factor(f_col, f_var)
             except (ValueError, TypeError):
                 counts[column] = default
 
@@ -2134,11 +2139,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Cas de données de panel
         if self.is_panel_:
             # Regroupement des clés par entités
-            grouped = self._freq_aligner.group_keys_by_entity_and_variable(aggregate_keys)
+            grouped = group_keys_by_entity_and_variable(aggregate_keys)
             # Parcours des entités et de leurs colonnes associées
             for entity, cols in grouped.items():
                 # Extraction des observations liées à l'entité
-                entity_mask = self._freq_aligner.get_entity_mask(X, entity)
+                entity_mask = get_entity_mask(X, entity)
                 entity_index = X.index[entity_mask]
                 # Parcours des colonnes
                 for col in cols:
@@ -2155,7 +2160,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Cas de données de séries temporelles
         else:
             # Extraction des noms de colonne des tuples
-            columns = self._freq_aligner.extract_column_names(aggregate_keys)
+            columns = extract_column_names(aggregate_keys)
             # Parcours des colonnes
             for col in columns:
                 # Marquage comme agrégé des seules cellules porteuses d'un
@@ -2498,7 +2503,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # peut différer selon l'entité pour une même variable.
             # Piste inverse, non retenue ici (de vrais modèles par entité) :
             # restreindre "training_mask" et "missing_mask" à l'entité via
-            # "self._freq_aligner.get_entity_mask".
+            # "get_entity_mask".
             vars_in_stage: "OrderedDict[Tuple[str, str], List[Union[str, Tuple]]]" = OrderedDict()
             for var_key in ordered_impute_keys:
                 _, var_name = split_variable_key(var_key)
