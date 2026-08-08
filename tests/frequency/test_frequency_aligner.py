@@ -5,7 +5,7 @@ HighFrequencyImputer :
 - aggregate_to_target préserve l'index dense d'origine (valeurs agrégées
   réindexées, NaN hors bornes de période, NaN pour les périodes incomplètes) ;
 - interpolate_to_target densifie l'index (union avec les dates interpolées,
-  restreinte à la plage d'origine) ;
+  couvrant les périodes sources complètes des observations extrêmes) ;
 - convert_to_target oriente chaque clé vers l'agrégation ou l'interpolation
   selon la fréquence source observée de la variable.
 """
@@ -202,14 +202,15 @@ class TestInterpolateToTarget:
     """Tests de la densification d'index de interpolate_to_target."""
 
     def test_densifies_index_to_target_frequency(self, aligner):
-        """Un index trimestriel est densifié en index mensuel sur la plage d'origine."""
+        """Un index trimestriel est densifié en index mensuel sur ses périodes sources."""
         dates = pd.date_range('2023-01-01', periods=3, freq='QS')
         df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
 
         result = aligner.interpolate_to_target(df, ['gdp'], 'MS', is_panel=False)
 
-        # 3 trimestres densifiés en mois, restreints à la plage d'origine
-        expected_index = pd.date_range('2023-01-01', '2023-07-01', freq='MS')
+        # 3 trimestres densifiés en 9 mois : l'observation du T3, en position
+        # start, couvre aussi août et septembre
+        expected_index = pd.date_range('2023-01-01', '2023-09-01', freq='MS')
         pd.testing.assert_index_equal(result.index, expected_index)
 
         # Les observations d'origine sont conservées aux débuts de trimestre
@@ -239,7 +240,7 @@ class TestInterpolateToTarget:
             df, [('A', 'gdp'), ('B', 'gdp')], 'MS', is_panel=True
         )
 
-        expected_dates = pd.date_range('2023-01-01', '2023-07-01', freq='MS', name='date')
+        expected_dates = pd.date_range('2023-01-01', '2023-09-01', freq='MS', name='date')
         for entity in ['A', 'B']:
             entity_frame = result.xs(entity, level='entity')
             pd.testing.assert_index_equal(entity_frame.index, expected_dates)
@@ -269,17 +270,40 @@ class TestInterpolateToTarget:
         pd.testing.assert_frame_equal(result, df)
 
 
-class TestRestrictToOriginalSpan:
-    """Tests unitaires de `restrict_to_original_span`."""
+class TestDensifiedSpanFollowsPosition:
+    """Tests de la couverture de la densification selon la position de période."""
 
-    def test_empty_original_index_returns_densified_unchanged(self, aligner):
-        """Un index d'origine vide ne restreint rien : rien à borner."""
-        densified = pd.date_range('2023-01-01', periods=5, freq='MS')
-        original = pd.DatetimeIndex([])
+    def test_start_position_extends_forward(self, aligner):
+        """Position start : les sous-périodes suivant la dernière observation sont couvertes."""
+        dates = pd.date_range('2023-01-01', periods=3, freq='QS')
+        df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
 
-        result = aligner.restrict_to_original_span(densified, original)
+        result = aligner.interpolate_to_target(df, ['gdp'], 'MS', is_panel=False)
 
-        pd.testing.assert_index_equal(result, densified)
+        # L'observation 2023-07-01 couvre juillet, août et septembre
+        assert result.index[0] == pd.Timestamp('2023-01-01')
+        assert result.index[-1] == pd.Timestamp('2023-09-01')
+
+    def test_end_position_extends_backward(self, aligner):
+        """Position end : les sous-périodes précédant la première observation sont couvertes."""
+        dates = pd.date_range('2023-03-31', periods=3, freq='QE')
+        df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
+
+        result = aligner.interpolate_to_target(df, ['gdp'], 'ME', is_panel=False)
+
+        # L'observation 2023-03-31 couvre janvier, février et mars
+        assert result.index[0] == pd.Timestamp('2023-01-31')
+        assert result.index[-1] == pd.Timestamp('2023-09-30')
+
+    def test_dense_index_is_not_extended_beyond_its_own_periods(self, aligner):
+        """Une frame déjà à la fréquence cible n'est pas étendue : les trous sont comblés."""
+        dates = pd.date_range('2023-01-01', periods=9, freq='MS')
+        values = [100.0, np.nan, np.nan, 110.0, np.nan, np.nan, 120.0, np.nan, np.nan]
+        df = pd.DataFrame({'gdp': values}, index=dates)
+
+        result = aligner.interpolate_to_target(df, ['gdp'], 'MS', is_panel=False)
+
+        pd.testing.assert_index_equal(result.index, dates)
 
 
 class TestConvertToTarget:

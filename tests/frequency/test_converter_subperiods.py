@@ -1,11 +1,11 @@
 """Tests unitaires du comptage de sous-périodes de FrequencyConverter.
 
-Ce module épingle le contrat des deux méthodes de comptage introduites par le
-correctif §2.1(b) de `high_frequency_imputer_review.md` :
+Ce module épingle le contrat des deux méthodes de comptage :
 
-- `count_subperiods(low, high)` : comptage constant, indépendant de tout index,
-  exact pour les paires calendaires emboîtées (12 mois dans une année, et non
-  les 12.17 du ratio de durées) ;
+- `get_conversion_factor(high, low)` : comptage constant, indépendant de tout
+  index, exact pour les paires calendaires emboîtées (12 mois dans une année,
+  et non les 12.17 d'un ratio de durées naïf) — remplaçant de l'ancien
+  `count_subperiods(low, high)`, dont il inverse l'ordre des arguments ;
 - `count_subperiods_per_period(index, low, high)` : comptage exact période par
   période, qui respecte les irrégularités calendaires (février compte 28 jours).
 
@@ -27,7 +27,12 @@ def converter():
 
 
 class TestCountSubperiods:
-    """Tests du comptage constant `count_subperiods`."""
+    """Tests du comptage constant `get_conversion_factor(high, low)`.
+
+    L'appel se lit « combien de périodes hautes dans une période basse » :
+    l'ordre des arguments est donc l'inverse de celui de l'ancien
+    `count_subperiods(low, high)`, dont cette méthode reprend le contrat.
+    """
 
     @pytest.mark.parametrize(
         'low_freq, high_freq, expected',
@@ -40,44 +45,43 @@ class TestCountSubperiods:
     )
     def test_calendar_pairs_are_exact(self, converter, low_freq, high_freq, expected):
         """Les paires calendaires emboîtées donnent un compte entier exact."""
-        assert converter.count_subperiods(low_freq, high_freq) == expected
+        assert converter.get_conversion_factor(high_freq, low_freq) == expected
 
-    def test_differs_from_duration_ratio(self, converter):
-        """Le comptage corrige le ratio de durées, inexact par construction."""
-        # Le ratio de durées annonce 12.1667 mois dans une année (365/30)
-        assert converter.get_conversion_factor('M', 'Y') != 12.0
-        assert converter.count_subperiods('Y', 'M') == 12.0
+    def test_corrects_the_naive_duration_ratio(self, converter):
+        """Le comptage est calendaire, et non un ratio de durées moyennes."""
+        # Un ratio de durées naïf annoncerait 12.1667 mois dans une année (365/30)
+        assert converter.get_conversion_factor('M', 'Y') == 12.0
 
     def test_accepts_user_and_anchored_frequencies(self, converter):
         """Les libellés utilisateur et les offsets ancrés sont normalisés."""
-        assert converter.count_subperiods('annual', 'quarterly') == 4.0
-        assert converter.count_subperiods('YS', 'MS') == 12.0
-        assert converter.count_subperiods('YE-DEC', 'ME') == 12.0
+        assert converter.get_conversion_factor('quarterly', 'annual') == 4.0
+        assert converter.get_conversion_factor('MS', 'YS') == 12.0
+        assert converter.get_conversion_factor('ME', 'YE-DEC') == 12.0
 
     def test_conventional_count_for_irregular_pairs(self, converter):
         """Les paires sans compte constant portent la valeur conventionnelle."""
         # Un mois compte 28 à 31 jours : la convention retenue est 30
-        assert converter.count_subperiods('M', 'D') == 30.0
+        assert converter.get_conversion_factor('D', 'M') == 30.0
         # Une année compte 365 ou 366 jours, et 52 semaines entamées ou non
-        assert converter.count_subperiods('Y', 'D') == 365.0
-        assert converter.count_subperiods('Y', 'W') == 52.0
+        assert converter.get_conversion_factor('D', 'Y') == 365.0
+        assert converter.get_conversion_factor('W', 'Y') == 52.0
 
     def test_inverted_pair_returns_fraction(self, converter):
         """Un appel inversé répond par la fraction de période correspondante."""
         # Cas rencontré à l'entraînement : covariable annuelle dans une période
         # trimestrielle (cf. HighFrequencyImputer._covariate_subperiod_counts)
-        assert converter.count_subperiods('Q', 'Y') == 0.25
-        assert converter.count_subperiods('M', 'Y') == pytest.approx(1 / 12)
+        assert converter.get_conversion_factor('Y', 'Q') == 0.25
+        assert converter.get_conversion_factor('Y', 'M') == pytest.approx(1 / 12)
 
     def test_unknown_pair_falls_back_on_duration_ratio(self, converter):
         """Les paires absentes de la table retombent sur le ratio de durées."""
         # Semaines dans un mois : aucun compte calendaire constant n'existe
-        assert converter.count_subperiods('M', 'W') == pytest.approx(30 / 7)
+        assert converter.get_conversion_factor('W', 'M') == pytest.approx(30 / 7)
 
     def test_unsupported_frequency_raises(self, converter):
         """Une fréquence inconnue remonte une ValueError."""
         with pytest.raises(ValueError):
-            converter.count_subperiods('Y', 'not_a_frequency')
+            converter.get_conversion_factor('not_a_frequency', 'Y')
 
 
 class TestCountSubperiodsPerPeriod:

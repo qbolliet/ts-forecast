@@ -12,13 +12,16 @@ the generic :class:`tsforecast.utils.frequency.converter.FrequencyConverter`
   values are reindexed on it, with NaN outside period boundaries and NaN for
   incomplete periods (``full_periods_only`` semantics).
 - ``interpolate_to_target`` densifies the original index (union with the
-  interpolated dates, restricted to the original time span).
+  interpolated dates), which covers the **full source periods** of the first
+  and last observations: a quarterly series in position start ending on
+  2023-07-01 densifies up to 2023-09-01, the last month its Q3 observation
+  covers.
 - Source frequencies are detected from each variable's observed values (not
   from the index), so a quarterly variable carried on a monthly index is
   handled as quarterly.
 """
 # Modules de base
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 # Manipulation de données
 import numpy as np
@@ -28,11 +31,11 @@ import pandas as pd
 from ..utils.frequency.converter import FrequencyConverter
 from ..utils.frequency.utils import normalize_frequency, is_higher_frequency
 from ..panel.utils import (
-    get_unique_panel_entities,
-    group_keys_by_entity_and_variable,
+    build_panel_index,
     extract_column_names,
-    get_entity_mask,
     get_entity_target_frequency,
+    group_keys_by_entity_and_variable,
+    iter_entity_blocks,
     split_variable_key,
 )
 
@@ -64,7 +67,90 @@ class FrequencyAligner:
         # Initialisation du convertisseur de fréquences
         self._freq_converter = FrequencyConverter()
 
+    # -------------------------------------------------------------------------
+    # Itération unifiée séries temporelles / panel
+    # -------------------------------------------------------------------------
+    # Méthode auxiliaire d'itération sur les séries à convertir
+    def _iter_variable_series(
+        self,
+        df: pd.DataFrame,
+        keys: List[Union[str, Tuple]],
+        target_frequency: Union[str, Dict],
+        is_panel: bool,
+    ) -> Iterator[Tuple[tuple, Union[np.ndarray, slice], str, pd.Series, str]]:
+        """Yield each variable to convert as a date-indexed series.
 
+        Single entry point of the time series / panel disjunction: a time
+        series is iterated as a panel holding one entity ``()`` covering
+        every row, so aggregation and interpolation are written once, against
+        a plain date-indexed series.
+
+        Args:
+            df: Input DataFrame.
+            keys: Variable keys to convert (column names or
+                (entity..., variable) tuples).
+            target_frequency: Target frequency (str or per-entity dict).
+            is_panel: Whether the data is panel data.
+
+        Yields:
+            Tuple ``(entity, mask, col, series, entity_target)`` where
+            ``mask`` selects the entity's rows in ``df``, ``series`` is the
+            column restricted to the entity and indexed by date only, and
+            ``entity_target`` the target frequency resolved for the entity.
+        """
+        # Regroupement des colonnes par entité : hors panel, l'entité portée par
+        # une éventuelle clé-tuple est ignorée (une seule série par colonne)
+        grouped = (
+            group_keys_by_entity_and_variable(keys) if is_panel
+            else {(): extract_column_names(keys)}
+        )
+
+        # Parcours des blocs d'entités (bloc unique hors panel)
+        for entity, mask, block in iter_entity_blocks(df, is_panel=is_panel):
+            # Entité sans colonne à convertir
+            cols = grouped.get(entity)
+            if not cols:
+                continue
+
+            # Fréquence cible de l'entité : l'entité vide d'une série temporelle
+            # ne peut être servie que par une cible globale
+            entity_target = get_entity_target_frequency(entity, target_frequency)
+
+            # Parcours des colonnes de l'entité
+            for col in cols:
+                # Colonne absente du jeu de données : ignorée
+                if col not in df.columns:
+                    continue
+                yield entity, mask, col, block[col], entity_target
+
+    # Méthode auxiliaire d'affectation d'une colonne sur les lignes d'une entité
+    @staticmethod
+    def _assign_entity_values(
+        result: pd.DataFrame,
+        mask: Union[np.ndarray, slice],
+        col: str,
+        values: np.ndarray,
+    ) -> None:
+        """Assign values to the rows of one entity, in place.
+
+        Args:
+            result: Frame to update in place.
+            mask: Boolean array selecting the entity's rows.
+            col: Column to update.
+            values: Values to write, positionally aligned on ``mask``.
+        """
+        # Promotion en flottant des colonnes entières ou booléennes : les valeurs
+        # converties portent des NaN (hors bornes de période, périodes
+        # incomplètes) qu'un dtype entier ne peut pas accueillir
+        if result[col].dtype.kind in 'iub':
+            result[col] = result[col].astype(float)
+
+        # Affectation positionnelle sur les lignes de l'entité
+        result.loc[mask, col] = values
+
+    # -------------------------------------------------------------------------
+    # Conversions unitaires, sur une série indexée par dates
+    # -------------------------------------------------------------------------
     # Méthode auxiliaire de sélection de la série à resampler
     @staticmethod
     def _observed_series_for_aggregation(series: pd.Series) -> pd.Series:
@@ -101,6 +187,83 @@ class FrequencyAligner:
         # Repli sur la série complète si les observations sont irrégulières
         return observed if inferred is not None else series
 
+    # Méthode auxiliaire d'agrégation d'une série indexée par dates
+    def _aggregate_series(
+        self,
+        series: pd.Series,
+        target_frequency: str,
+    ) -> Optional[pd.Series]:
+        """Aggregate one date-indexed series onto its own index.
+
+        Args:
+            series: Column to aggregate, indexed by date only.
+            target_frequency: Target frequency of the series.
+
+        Returns:
+            Aggregated series reindexed on ``series``'s index (NaN outside
+            period boundaries and for incomplete periods), or None when the
+            series holds no observation at all.
+        """
+        # Offset ancré comme l'index source, pour que les labels agrégés
+        # retombent sur des dates présentes dans l'index d'origine
+        target_offset = target_offset_for_index(series.index, target_frequency)
+
+        # Restriction aux valeurs observées : la fréquence source doit être
+        # celle de la variable, pas celle de l'index
+        observed = self._observed_series_for_aggregation(series)
+
+        # Série sans aucune observation : rien à agréger
+        if observed.dropna().empty:
+            return None
+
+        # Agrégation à la fréquence cible
+        aggregated = self._freq_converter.aggregate_to_lower_frequency(
+            observed, target_offset, method='sum', full_periods_only=True
+        )
+
+        # Reproduction de l'index d'origine
+        return aggregated.reindex(series.index)
+
+    # Méthode auxiliaire d'interpolation d'une série indexée par dates
+    def _interpolate_series(
+        self,
+        series: pd.Series,
+        target_frequency: str,
+        method: str = 'linear',
+        limit: Union[int, Literal['default'], None] = 'default',
+        limit_direction: Optional[Literal['forward', 'backward', 'both']] = None,
+        limit_area: Optional[Literal['inside', 'outside']] = None,
+    ) -> pd.Series:
+        """Interpolate one date-indexed series to a higher frequency.
+
+        Args:
+            series: Column to interpolate, indexed by date only.
+            target_frequency: Target frequency of the series.
+            method: Interpolation method passed to the converter.
+            limit: Maximum number of consecutive NaN values to fill.
+            limit_direction: Direction in which to fill NaN values.
+            limit_area: Restriction area for filling NaN values.
+
+        Returns:
+            Interpolated series, indexed on the target frequency grid covering
+            the full source periods of the first and last observations.
+        """
+        # Interpolation à la fréquence cible : la fréquence source est détectée
+        # sur les valeurs observées de la variable (et non sur l'index) pour
+        # respecter la fréquence propre de la variable
+        return self._freq_converter.interpolate_to_higher_frequency(
+            series,
+            target_frequency,
+            method=method,
+            limit=limit,
+            limit_direction=limit_direction,
+            limit_area=limit_area,
+            source_freq=detect_frequency(series, return_format='with_position'),
+        )
+
+    # -------------------------------------------------------------------------
+    # Conversions de jeux de données
+    # -------------------------------------------------------------------------
     # Méthode d'aggrégation des données à une fréquence cible
     def aggregate_to_target(
         self,
@@ -144,146 +307,68 @@ class FrequencyAligner:
         # Initialisation du jeu de données résultat
         result = df.copy()
 
-        # Cas séries temporelles : agrégation globale
-        if not is_panel:
-            # Extraction des colonnes des tuples
-            columns = extract_column_names(aggregate_keys)
-            # Offset ancré comme l'index source, pour que les labels agrégés
-            # retombent sur des dates présentes dans l'index d'origine
-            target_offset = target_offset_for_index(df.index, target_frequency)
-            # Parcours des colonnes
-            for col in columns:
-                # Vérification que la colonne est dans le jeu de données
-                if col not in df.columns:
-                    continue
-                # Restriction aux valeurs observées : la fréquence source doit être
-                # celle de la variable, pas celle de l'index
-                observed = self._observed_series_for_aggregation(df[col])
-                # Colonne sans aucune observation : laissée telle quelle
-                if observed.dropna().empty:
-                    continue
-                # Aggrégation à la fréquence cible
-                aggregated = self._freq_converter.aggregate_to_lower_frequency(
-                    observed, target_offset, method='sum', full_periods_only=True
-                )
-                # Reproduction de l'index original
-                result[col] = aggregated.reindex(df.index)
-            return result
-
-        # Cas panel : agrégation par entité
-        # Extraction du dictionnaire associant une liste de variables à chaque entité
-        grouped = group_keys_by_entity_and_variable(aggregate_keys)
-
-        # Parcours des entités
-        for entity, cols in grouped.items():
-            # Extraction de la fréquence cible associée à l'enité
-            entity_target = get_entity_target_frequency(entity, target_frequency)
-            # Création du masque des observations de l'entité
-            entity_mask = get_entity_mask(df, entity)
-
-            # Parcours des colonnes
-            for col in cols:
-                # Cas où la colonne n'est pas présente dans le jeu de données
-                if col not in df.columns:
-                    continue
-
-                # Extraction des observations de l'entité pour la colonne d'intérêt
-                entity_series = df.loc[entity_mask, col]
-                # Suppression des niveaux afférents à l'entité
-                entity_series = entity_series.droplevel(
-                    list(range(df.index.nlevels - 1))
-                )
-                # Offset ancré comme l'index de l'entité
-                target_offset = target_offset_for_index(
-                    entity_series.index, entity_target
-                )
-                # Restriction aux valeurs observées : la fréquence source doit être
-                # celle de la variable, pas celle de l'index
-                observed = self._observed_series_for_aggregation(entity_series)
-                # Colonne sans aucune observation pour l'entité : laissée telle quelle
-                if observed.dropna().empty:
-                    continue
-                # Agrégation à la fréquence souhaitée
-                aggregated = self._freq_converter.aggregate_to_lower_frequency(
-                    observed, target_offset, method='sum', full_periods_only=True
-                )
-                # Réindexation à l'index temporel original
-                reindexed = aggregated.reindex(entity_series.index)
-                # Ajout au DataFrame résultat
-                result.loc[entity_mask, col] = reindexed.values
+        # Parcours des séries à agréger (séries temporelles et panel confondus)
+        for _, mask, col, series, entity_target in self._iter_variable_series(
+            df, aggregate_keys, target_frequency, is_panel
+        ):
+            # Agrégation de la série sur son propre index
+            aggregated = self._aggregate_series(series, entity_target)
+            # Colonne sans observation pour l'entité : laissée telle quelle
+            if aggregated is None:
+                continue
+            # Affectation aux lignes de l'entité
+            self._assign_entity_values(result, mask, col, aggregated.values)
 
         return result
 
-
-    # Méthode auxiliaire de restriction d'un index densifié à la plage d'origine
-    def restrict_to_original_span(
-        self,
-        densified_index: pd.DatetimeIndex,
-        original_index: pd.DatetimeIndex,
-    ) -> pd.DatetimeIndex:
-        """Restrict a densified index to the time span of the original index.
-
-        Densification adds intermediate dates but must not extend the period
-        covered by the data: interpolation can generate dates beyond the last
-        observation (up to the end of its source period).
-
-        Args:
-            densified_index: Index densified with the interpolated dates.
-            original_index: Original time index.
-
-        Returns:
-            Densified index restricted to [min, max] of the original index.
-        """
-        # Cas d'un index original vide : aucune borne à appliquer
-        if len(original_index) == 0:
-            return densified_index
-
-        # Restriction aux bornes de l'index original
-        return densified_index[
-            (densified_index >= original_index.min())
-            & (densified_index <= original_index.max())
-        ]
-
-    # Méthode auxiliaire de construction de l'index densifié d'un panel
-    def build_densified_panel_index(
+    # Méthode auxiliaire de construction de l'index densifié
+    def build_densified_index(
         self,
         df: pd.DataFrame,
         interpolated: Dict[tuple, Dict[str, pd.Series]],
-    ) -> pd.MultiIndex:
-        """Build a panel MultiIndex densified with the interpolated dates.
+        is_panel: bool,
+    ) -> pd.Index:
+        """Build the index densified with the interpolated dates.
 
-        For each entity, the time index is the union of its original dates and
+        The time index of each entity is the union of its original dates and
         the dates produced by interpolation, so that entity-specific target
-        frequencies are respected.
+        frequencies are respected. The union is kept whole: interpolation
+        covers the full source periods of the first and last observations,
+        and those sub-periods legitimately belong to the data (a quarterly
+        observation in position start covers the two months that follow it,
+        in position end the two months that precede it).
 
         Args:
-            df: Original panel DataFrame with MultiIndex.
+            df: Original DataFrame (DatetimeIndex or panel MultiIndex).
             interpolated: Interpolated series, keyed by entity then column.
+            is_panel: Whether the data is panel data.
 
         Returns:
-            MultiIndex combining each entity with its densified time index.
+            DatetimeIndex for a time series, MultiIndex combining each entity
+            with its densified time index for a panel.
         """
-        # Initialisation des tuples de l'index résultat
-        tuples: List[tuple] = []
+        # Initialisation des morceaux d'index par entité
+        parts: List[pd.Index] = []
 
-        # Parcours des entités du panel
-        for entity in get_unique_panel_entities(df):
-            # Extraction des dates originales de l'entité
-            entity_mask = get_entity_mask(df, entity)
-            entity_times = df.index.get_level_values(-1)[entity_mask]
-
-            # Union avec les dates issues de l'interpolation
-            densified_times = entity_times
+        # Parcours des blocs d'entités (bloc unique hors panel)
+        for entity, _, block in iter_entity_blocks(df, is_panel=is_panel):
+            # Union des dates d'origine et des dates issues de l'interpolation
+            densified_times = block.index
             for series in interpolated.get(entity, {}).values():
                 densified_times = densified_times.union(series.index)
 
-            # Restriction à la plage temporelle d'origine de l'entité
-            densified_times = self.restrict_to_original_span(densified_times, entity_times)
+            # Reconstruction du MultiIndex de l'entité pour un panel
+            parts.append(
+                build_panel_index(entity, densified_times, names=df.index.names)
+                if is_panel else densified_times
+            )
 
-            # Construction des tuples (entité..., date)
-            tuples.extend((*entity, time) for time in densified_times)
+        # Panel sans aucune entité : index d'origine conservé
+        if not parts:
+            return df.index
 
-        return pd.MultiIndex.from_tuples(tuples, names=df.index.names)
+        # Concaténation des morceaux, entité par entité
+        return parts[0].append(parts[1:]) if len(parts) > 1 else parts[0]
 
     # Méthode d'interpolation d'un jeu de données à une fréquence cible
     def interpolate_to_target(
@@ -305,6 +390,14 @@ class FrequencyAligner:
         target frequency, while passing a frame already indexed at the target
         frequency simply fills its NaN holes. Columns that are not interpolated
         keep their original values and are NaN on the newly created dates.
+
+        Densification spans the **full source periods** of the first and last
+        observations, whose sub-periods are covered by the data: a ``QS``
+        series ending on 2023-07-01 densifies to ``MS`` up to 2023-09-01, a
+        ``QE`` series starting on 2023-03-31 densifies to ``ME`` down to
+        2023-01-31. The output index is therefore generally wider than the
+        input one — callers that must stay on their own grid have to reindex
+        explicitly.
 
         For panel data, interpolation and densification are performed per
         entity to respect entity-specific target frequencies.
@@ -354,111 +447,41 @@ class FrequencyAligner:
         if not interpolate_keys:
             return df
 
-        # Cas séries temporelles : interpolation globale
-        if not is_panel:
-            # Extraction des colonnes
-            columns = extract_column_names(interpolate_keys)
+        # Interpolation de chaque série (séries temporelles et panel confondus)
+        interpolated: Dict[tuple, Dict[str, pd.Series]] = {}
+        for entity, _, col, series, entity_target in self._iter_variable_series(
+            df, interpolate_keys, target_frequency, is_panel
+        ):
+            interpolated.setdefault(entity, {})[col] = self._interpolate_series(
+                series,
+                entity_target,
+                method=method,
+                limit=limit,
+                limit_direction=limit_direction,
+                limit_area=limit_area,
+            )
 
-            # Interpolation de chaque colonne
-            interpolated: Dict[str, pd.Series] = {}
-            for col in columns:
-                # Vérification que la colonne est bien dans le jeu de données
-                if col not in df.columns:
-                    continue
+        # Densification de l'index, entité par entité
+        target_index = self.build_densified_index(df, interpolated, is_panel)
 
-                # Interpolation à la fréquence cible
-                interpolated[col] = self._freq_converter.interpolate_to_higher_frequency(
-                    df[col],
-                    target_frequency,
-                    method=method,
-                    limit=limit,
-                    limit_direction=limit_direction,
-                    limit_area=limit_area,
-                    source_freq=detect_frequency(df[col], return_format='with_position'),
-                )
-
-            # Densification de l'index : union de l'index original et des index interpolés
-            target_index = df.index
-            for series in interpolated.values():
-                target_index = target_index.union(series.index)
-
-            # Restriction à la plage temporelle d'origine
-            target_index = self.restrict_to_original_span(target_index, df.index)
-
-            # Réindexation du jeu de données sur l'index densifié
-            result = df.reindex(target_index)
-
-            # Affectation des colonnes interpolées
-            for col, series in interpolated.items():
-                # Les valeurs interpolées priment, complétées par les observations
-                # d'origine situées hors de l'index cible (positions de période différentes)
-                result[col] = (
-                    series.reindex(target_index)
-                    .combine_first(df[col].reindex(target_index))
-                )
-
-            return result
-
-        # Cas panel : interpolation par entité
-        # Regroupement des colonnes par entité
-        grouped = group_keys_by_entity_and_variable(interpolate_keys)
-
-        # Interpolation des séries de chaque entité
-        interpolated_panel: Dict[tuple, Dict[str, pd.Series]] = {}
-        for entity, cols in grouped.items():
-            # Extraction de la fréquence cible associée à l'entité
-            entity_target = get_entity_target_frequency(entity, target_frequency)
-            # Extraction du masque des observations associées à l'entité
-            entity_mask = get_entity_mask(df, entity)
-
-            # Parcours des colonnes
-            for col in cols:
-                # Vérification que la colonne est dans le jeu de données
-                if col not in df.columns:
-                    continue
-
-                # Extraction des observations de la colonne associées à l'entité
-                entity_series = df.loc[entity_mask, col]
-                # Suppression des niveaux associés à l'entité
-                entity_series = entity_series.droplevel(
-                    list(range(df.index.nlevels - 1))
-                )
-
-                # Interpolation à la fréquence cible de l'entité
-                # La fréquence source est détectée sur les valeurs observées de la variable
-                # (et non sur l'index) pour respecter la fréquence propre de la variable
-                interpolated_panel.setdefault(entity, {})[col] = self._freq_converter.interpolate_to_higher_frequency(
-                    entity_series,
-                    entity_target,
-                    method=method,
-                    limit=limit,
-                    limit_direction=limit_direction,
-                    limit_area=limit_area,
-                    source_freq=detect_frequency(entity_series, return_format='with_position'),
-                )
-
-        # Densification de l'index du panel entité par entité
-        target_index = self.build_densified_panel_index(df, interpolated_panel)
         # Réindexation du jeu de données sur l'index densifié
         result = df.reindex(target_index)
-        # Nombre de niveaux d'entité de l'index résultat
-        entity_levels = list(range(target_index.nlevels - 1))
 
-        # Affectation des colonnes interpolées par entité
-        for entity, cols in interpolated_panel.items():
-            # Extraction du masque des observations de l'entité dans l'index densifié
-            entity_mask = get_entity_mask(result, entity)
-            # Extraction des dates de l'entité
-            entity_times = target_index.get_level_values(-1)[entity_mask]
+        # Affectation des colonnes interpolées, entité par entité
+        for entity, mask, block in iter_entity_blocks(result, is_panel=is_panel):
+            # Entité sans colonne interpolée
+            cols = interpolated.get(entity)
+            if not cols:
+                continue
 
             # Parcours des colonnes interpolées
             for col, series in cols.items():
-                # Extraction des valeurs originales réindexées de l'entité
-                original = result.loc[entity_mask, col].droplevel(entity_levels)
-                # Les valeurs interpolées priment, complétées par les observations d'origine
-                filled = series.combine_first(original).reindex(entity_times)
-                # Affectation au résultat
-                result.loc[entity_mask, col] = filled.values
+                # Les valeurs interpolées priment, complétées par les observations
+                # d'origine situées hors de la grille cible (positions de période
+                # différentes)
+                filled = series.combine_first(block[col]).reindex(block.index)
+                # Affectation aux lignes de l'entité
+                self._assign_entity_values(result, mask, col, filled.values)
 
         return result
 
@@ -556,4 +579,3 @@ class FrequencyAligner:
                 limit_area=interp_limit_area,
             )
         return result
-
