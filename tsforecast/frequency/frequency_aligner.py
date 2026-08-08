@@ -8,10 +8,10 @@ HighFrequencyImputer and therefore follows index conventions that differ from
 the generic :class:`tsforecast.utils.frequency.converter.FrequencyConverter`
 (to which it delegates the actual conversions):
 
-- ``aggregate_to_target`` preserves the original (dense) index: aggregated
+- ``_aggregate_to_target`` preserves the original (dense) index: aggregated
   values are reindexed on it, with NaN outside period boundaries and NaN for
   incomplete periods (``full_periods_only`` semantics).
-- ``interpolate_to_target`` densifies the original index (union with the
+- ``_interpolate_to_target`` densifies the original index (union with the
   interpolated dates), which covers the **full source periods** of the first
   and last observations: a quarterly series in position start ending on
   2023-07-01 densifies up to 2023-09-01, the last month its Q3 observation
@@ -56,7 +56,7 @@ class FrequencyAligner:
         >>> aligner = FrequencyAligner()
         >>> dates = pd.date_range('2023-01-01', periods=90, freq='D')
         >>> df = pd.DataFrame({'daily_var': range(90)}, index=dates)
-        >>> agg = aligner.aggregate_to_target(
+        >>> agg = aligner._aggregate_to_target(
         ...     df, ['daily_var'], 'M', is_panel=False
         ... )
     """
@@ -153,7 +153,7 @@ class FrequencyAligner:
     # -------------------------------------------------------------------------
     # Méthode auxiliaire de sélection de la série à resampler
     @staticmethod
-    def _observed_series_for_aggregation(series: pd.Series) -> pd.Series:
+    def _observed_series(series: pd.Series) -> pd.Series:
         """Select the series to resample: observed values when they are regular.
 
         Aggregating the observed values only (instead of the full series) lets
@@ -210,7 +210,7 @@ class FrequencyAligner:
 
         # Restriction aux valeurs observées : la fréquence source doit être
         # celle de la variable, pas celle de l'index
-        observed = self._observed_series_for_aggregation(series)
+        observed = self._observed_series(series)
 
         # Série sans aucune observation : rien à agréger
         if observed.dropna().empty:
@@ -251,8 +251,17 @@ class FrequencyAligner:
         # Interpolation à la fréquence cible : la fréquence source est détectée
         # sur les valeurs observées de la variable (et non sur l'index) pour
         # respecter la fréquence propre de la variable
+
+        # Restriction aux valeurs observées : la fréquence source doit être
+        # celle de la variable, pas celle de l'index
+        observed = self._observed_series(series)
+
+        # Série sans aucune observation : rien à agréger
+        if observed.dropna().empty:
+            return None
+        
         return self._freq_converter.interpolate_to_higher_frequency(
-            series,
+            observed,
             target_frequency,
             method=method,
             limit=limit,
@@ -265,7 +274,7 @@ class FrequencyAligner:
     # Conversions de jeux de données
     # -------------------------------------------------------------------------
     # Méthode d'aggrégation des données à une fréquence cible
-    def aggregate_to_target(
+    def _aggregate_to_target(
         self,
         df: pd.DataFrame,
         aggregate_keys: List[Union[str, Tuple]],
@@ -371,7 +380,7 @@ class FrequencyAligner:
         return parts[0].append(parts[1:]) if len(parts) > 1 else parts[0]
 
     # Méthode d'interpolation d'un jeu de données à une fréquence cible
-    def interpolate_to_target(
+    def _interpolate_to_target(
         self,
         df: pd.DataFrame,
         interpolate_keys: List[Union[str, Tuple]],
@@ -437,7 +446,7 @@ class FrequencyAligner:
             >>> aligner = FrequencyAligner()
             >>> dates = pd.date_range('2023-01-01', periods=3, freq='QS')
             >>> df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
-            >>> out = aligner.interpolate_to_target(
+            >>> out = aligner._interpolate_to_target(
             ...     df, ['gdp'], 'MS', is_panel=False
             ... )
             >>> len(out)
@@ -502,8 +511,8 @@ class FrequencyAligner:
         For each variable key (or per entity for panel data), the source
         frequency is detected from the variable's observed values. If the
         target frequency is **higher** (more granular) than the source, the
-        column is interpolated via :meth:`interpolate_to_target`. Otherwise it
-        is aggregated via :meth:`aggregate_to_target`.
+        column is interpolated via :meth:`_interpolate_to_target`. Otherwise it
+        is aggregated via :meth:`_aggregate_to_target`.
 
         Args:
             df: Input DataFrame.
@@ -516,7 +525,7 @@ class FrequencyAligner:
             interp_limit: Maximum number of consecutive NaN values to fill during
                 interpolation. If ``'default'``, computed automatically from the
                 frequency conversion factor. See
-                :meth:`interpolate_to_target` for details.
+                :meth:`_interpolate_to_target` for details.
             interp_limit_direction: Direction in which to fill NaN values. If None,
                 defaults to ``'forward'`` when target_position is start
                 (``'S'``/``'start'``) and ``'backward'`` when target_position is
@@ -524,7 +533,7 @@ class FrequencyAligner:
                 :meth:`pandas.DataFrame.interpolate` for details.
             interp_limit_area: Restriction area for NaN filling during
                 interpolation (``'inside'`` or ``'outside'``). Forwarded to
-                :meth:`interpolate_to_target`.
+                :meth:`_interpolate_to_target`.
 
         Returns:
             DataFrame with converted columns.
@@ -567,11 +576,11 @@ class FrequencyAligner:
         # Application des conversions
         result = df
         if aggregate_keys:
-            result = self.aggregate_to_target(
+            result = self._aggregate_to_target(
                 result, aggregate_keys, target_frequency, is_panel
             )
         if interpolate_keys:
-            result = self.interpolate_to_target(
+            result = self._interpolate_to_target(
                 result, interpolate_keys, target_frequency, is_panel,
                 method=interp_method,
                 limit=interp_limit,
