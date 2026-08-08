@@ -39,7 +39,7 @@ class TestAggregateToTarget:
 
     def test_preserves_original_index(self, aligner, monthly_df):
         """L'index de sortie reste l'index dense d'origine (hors lignes tout-NaN)."""
-        result = aligner.aggregate_to_target(monthly_df, ['x'], 'QE', is_panel=False)
+        result = aligner._aggregate_to_target(monthly_df, ['x'], 'QE')
 
         # La colonne 'y' n'étant pas agrégée, aucune ligne n'est tout-NaN :
         # l'index d'origine est intégralement préservé
@@ -47,7 +47,7 @@ class TestAggregateToTarget:
 
     def test_aggregated_values_on_period_boundaries_only(self, aligner, monthly_df):
         """Les valeurs agrégées ne sont portées que par les fins de période complètes."""
-        result = aligner.aggregate_to_target(monthly_df, ['x'], 'QE', is_panel=False)
+        result = aligner._aggregate_to_target(monthly_df, ['x'], 'QE')
 
         # Somme des mois sur les trimestres complets (3 mois chacun)
         assert result.loc[pd.Timestamp('2023-03-31'), 'x'] == 3.0
@@ -65,7 +65,7 @@ class TestAggregateToTarget:
         dates = pd.date_range('2023-01-01', periods=8, freq='MS')
         df = pd.DataFrame({'x': np.ones(len(dates))}, index=dates)
 
-        result = aligner.aggregate_to_target(df, ['x'], 'Q', is_panel=False)
+        result = aligner._aggregate_to_target(df, ['x'], 'Q')
 
         # Le résultat ne doit pas être vide : les labels doivent atterrir sur l'index MS
         assert len(result) > 0
@@ -76,7 +76,7 @@ class TestAggregateToTarget:
         dates = pd.date_range('2023-01-01', periods=8, freq='MS')
         df = pd.DataFrame({'x': np.ones(len(dates))}, index=dates)
 
-        result = aligner.aggregate_to_target(df, ['x'], 'QS', is_panel=False)
+        result = aligner._aggregate_to_target(df, ['x'], 'QS')
 
         assert len(result) == len(df)
 
@@ -89,8 +89,8 @@ class TestAggregateToTarget:
         )
         df = pd.DataFrame({'x': np.ones(len(index))}, index=index)
 
-        result = aligner.aggregate_to_target(
-            df, [('A', 'x'), ('B', 'x')], 'Q', is_panel=True
+        result = aligner._aggregate_to_target(
+            df, [('A', 'x'), ('B', 'x')], 'Q'
         )
 
         assert len(result) == len(df)
@@ -110,7 +110,7 @@ class TestAggregateToTarget:
         quarterly[quarterly.index.month.isin([1, 4, 7, 10])] = 10.0
         df = pd.DataFrame({'gdp': quarterly, 'dense': np.ones(len(dates))}, index=dates)
 
-        result = aligner.aggregate_to_target(df, ['gdp'], 'Y', is_panel=False)
+        result = aligner._aggregate_to_target(df, ['gdp'], 'Y')
 
         # Somme des 4 trimestres, portée par le 1er janvier de chaque année complète
         expected_labels = pd.DatetimeIndex(['2020-01-01', '2021-01-01'])
@@ -126,7 +126,7 @@ class TestAggregateToTarget:
         values[[2, 7]] = np.nan
         df = pd.DataFrame({'x': values}, index=dates)
 
-        result = aligner.aggregate_to_target(df, ['x'], 'Q', is_panel=False)
+        result = aligner._aggregate_to_target(df, ['x'], 'Q')
 
         # Index préservé et sémantique full_periods_only inchangée : les
         # trimestres amputés d'un mois (T1 et T3) restent NaN
@@ -138,7 +138,7 @@ class TestAggregateToTarget:
 
     def test_skips_missing_column(self, aligner, monthly_df):
         """Une clé absente du DataFrame est ignorée, pas une erreur."""
-        result = aligner.aggregate_to_target(monthly_df, ['missing'], 'QE', is_panel=False)
+        result = aligner._aggregate_to_target(monthly_df, ['missing'], 'QE')
 
         pd.testing.assert_frame_equal(result, monthly_df)
 
@@ -148,7 +148,7 @@ class TestAggregateToTarget:
         index = pd.MultiIndex.from_product([['A'], dates], names=['entity', 'date'])
         df = pd.DataFrame({'x': np.ones(len(index))}, index=index)
 
-        result = aligner.aggregate_to_target(df, [('A', 'missing')], 'QS', is_panel=True)
+        result = aligner._aggregate_to_target(df, [('A', 'missing')], 'QS')
 
         pd.testing.assert_frame_equal(result, df)
 
@@ -157,7 +157,7 @@ class TestAggregateToTarget:
         dates = pd.date_range('2023-01-01', periods=8, freq='MS')
         df = pd.DataFrame({'x': [np.nan] * 8}, index=dates)
 
-        result = aligner.aggregate_to_target(df, ['x'], 'QS', is_panel=False)
+        result = aligner._aggregate_to_target(df, ['x'], 'QS')
 
         assert result['x'].isna().all()
 
@@ -167,7 +167,7 @@ class TestAggregateToTarget:
         index = pd.MultiIndex.from_product([['A'], dates], names=['entity', 'date'])
         df = pd.DataFrame({'x': [np.nan] * len(index)}, index=index)
 
-        result = aligner.aggregate_to_target(df, [('A', 'x')], 'QS', is_panel=True)
+        result = aligner._aggregate_to_target(df, [('A', 'x')], 'QS')
 
         assert result['x'].isna().all()
 
@@ -185,8 +185,8 @@ class TestAggregateToTarget:
             index=index,
         )
 
-        result = aligner.aggregate_to_target(
-            df, [('A', 'x'), ('B', 'x')], 'QE', is_panel=True
+        result = aligner._aggregate_to_target(
+            df, [('A', 'x'), ('B', 'x')], 'QE'
         )
 
         # Index préservé (aucune ligne tout-NaN grâce à 'y')
@@ -206,7 +206,7 @@ class TestInterpolateToTarget:
         dates = pd.date_range('2023-01-01', periods=3, freq='QS')
         df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
 
-        result = aligner.interpolate_to_target(df, ['gdp'], 'MS', is_panel=False)
+        result = aligner._interpolate_to_target(df, ['gdp'], 'MS')
 
         # 3 trimestres densifiés en 9 mois : l'observation du T3, en position
         # start, couvre aussi août et septembre
@@ -224,7 +224,7 @@ class TestInterpolateToTarget:
         dates = pd.date_range('2023-01-01', periods=3, freq='QS')
         df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
 
-        result = aligner.interpolate_to_target(df, [], 'MS', is_panel=False)
+        result = aligner._interpolate_to_target(df, [], 'MS')
 
         pd.testing.assert_frame_equal(result, df)
 
@@ -236,8 +236,8 @@ class TestInterpolateToTarget:
             {'gdp': [100.0, 110.0, 120.0, 200.0, 210.0, 220.0]}, index=index
         )
 
-        result = aligner.interpolate_to_target(
-            df, [('A', 'gdp'), ('B', 'gdp')], 'MS', is_panel=True
+        result = aligner._interpolate_to_target(
+            df, [('A', 'gdp'), ('B', 'gdp')], 'MS'
         )
 
         expected_dates = pd.date_range('2023-01-01', '2023-09-01', freq='MS', name='date')
@@ -255,7 +255,7 @@ class TestInterpolateToTarget:
         dates = pd.date_range('2023-01-01', periods=3, freq='QS')
         df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
 
-        result = aligner.interpolate_to_target(df, ['missing'], 'MS', is_panel=False)
+        result = aligner._interpolate_to_target(df, ['missing'], 'MS')
 
         pd.testing.assert_frame_equal(result, df)
 
@@ -265,7 +265,7 @@ class TestInterpolateToTarget:
         index = pd.MultiIndex.from_product([['A'], dates], names=['entity', 'date'])
         df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=index)
 
-        result = aligner.interpolate_to_target(df, [('A', 'missing')], 'MS', is_panel=True)
+        result = aligner._interpolate_to_target(df, [('A', 'missing')], 'MS')
 
         pd.testing.assert_frame_equal(result, df)
 
@@ -278,7 +278,7 @@ class TestDensifiedSpanFollowsPosition:
         dates = pd.date_range('2023-01-01', periods=3, freq='QS')
         df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
 
-        result = aligner.interpolate_to_target(df, ['gdp'], 'MS', is_panel=False)
+        result = aligner._interpolate_to_target(df, ['gdp'], 'MS')
 
         # L'observation 2023-07-01 couvre juillet, août et septembre
         assert result.index[0] == pd.Timestamp('2023-01-01')
@@ -289,7 +289,7 @@ class TestDensifiedSpanFollowsPosition:
         dates = pd.date_range('2023-03-31', periods=3, freq='QE')
         df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
 
-        result = aligner.interpolate_to_target(df, ['gdp'], 'ME', is_panel=False)
+        result = aligner._interpolate_to_target(df, ['gdp'], 'ME')
 
         # L'observation 2023-03-31 couvre janvier, février et mars
         assert result.index[0] == pd.Timestamp('2023-01-31')
@@ -301,7 +301,7 @@ class TestDensifiedSpanFollowsPosition:
         values = [100.0, np.nan, np.nan, 110.0, np.nan, np.nan, 120.0, np.nan, np.nan]
         df = pd.DataFrame({'gdp': values}, index=dates)
 
-        result = aligner.interpolate_to_target(df, ['gdp'], 'MS', is_panel=False)
+        result = aligner._interpolate_to_target(df, ['gdp'], 'MS')
 
         pd.testing.assert_index_equal(result.index, dates)
 
@@ -320,7 +320,7 @@ class TestConvertToTarget:
             index=dates,
         )
 
-        result = aligner.convert_to_target(df, ['x'], 'ME', is_panel=False)
+        result = aligner.convert_to_target(df, ['x'], 'ME')
 
         # Contrat d'agrégation : index d'origine préservé, sommes aux fins de mois
         pd.testing.assert_index_equal(result.index, df.index)
@@ -331,7 +331,7 @@ class TestConvertToTarget:
         dates = pd.date_range('2023-01-01', periods=3, freq='QS')
         df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
 
-        result = aligner.convert_to_target(df, ['gdp'], 'MS', is_panel=False)
+        result = aligner.convert_to_target(df, ['gdp'], 'MS')
 
         # Contrat d'interpolation : index densifié à la fréquence cible
         assert len(result) > len(df)
@@ -342,7 +342,7 @@ class TestConvertToTarget:
         dates = pd.date_range('2023-01-01', periods=4, freq='MS')
         df = pd.DataFrame({'x': np.ones(len(dates))}, index=dates)
 
-        result = aligner.convert_to_target(df, [], 'QS', is_panel=False)
+        result = aligner.convert_to_target(df, [], 'QS')
 
         pd.testing.assert_frame_equal(result, df)
 
@@ -351,6 +351,6 @@ class TestConvertToTarget:
         dates = pd.date_range('2023-01-01', periods=4, freq='MS')
         df = pd.DataFrame({'x': np.ones(len(dates))}, index=dates)
 
-        result = aligner.convert_to_target(df, ['missing'], 'QS', is_panel=False)
+        result = aligner.convert_to_target(df, ['missing'], 'QS')
 
         pd.testing.assert_frame_equal(result, df)

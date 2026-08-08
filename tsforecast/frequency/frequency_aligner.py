@@ -35,6 +35,7 @@ from ..panel.utils import (
     extract_column_names,
     get_entity_target_frequency,
     group_keys_by_entity_and_variable,
+    is_panel_data,
     iter_entity_blocks,
     split_variable_key,
 )
@@ -57,7 +58,7 @@ class FrequencyAligner:
         >>> dates = pd.date_range('2023-01-01', periods=90, freq='D')
         >>> df = pd.DataFrame({'daily_var': range(90)}, index=dates)
         >>> agg = aligner._aggregate_to_target(
-        ...     df, ['daily_var'], 'M', is_panel=False
+        ...     df, ['daily_var'], 'M'
         ... )
     """
 
@@ -279,7 +280,6 @@ class FrequencyAligner:
         df: pd.DataFrame,
         aggregate_keys: List[Union[str, Tuple]],
         target_frequency: Union[str, Dict],
-        is_panel: bool,
     ) -> pd.DataFrame:
         """Aggregate high-frequency columns to target frequency.
 
@@ -304,7 +304,6 @@ class FrequencyAligner:
             aggregate_keys: Variable keys to aggregate (column names or
                 (entity..., variable) tuples).
             target_frequency: Target frequency (str or per-entity dict).
-            is_panel: Whether the data is panel data.
 
         Returns:
             DataFrame with aggregated columns, indexed exactly like ``df``.
@@ -318,7 +317,7 @@ class FrequencyAligner:
 
         # Parcours des séries à agréger (séries temporelles et panel confondus)
         for _, mask, col, series, entity_target in self._iter_variable_series(
-            df, aggregate_keys, target_frequency, is_panel
+            df, aggregate_keys, target_frequency, is_panel_data(df)
         ):
             # Agrégation de la série sur son propre index
             aggregated = self._aggregate_series(series, entity_target)
@@ -385,7 +384,6 @@ class FrequencyAligner:
         df: pd.DataFrame,
         interpolate_keys: List[Union[str, Tuple]],
         target_frequency: Union[str, Dict],
-        is_panel: bool,
         method: str = 'linear',
         limit: Union[int, Literal['default'], None] = 'default',
         limit_direction: Optional[Literal['forward', 'backward', 'both']] = None,
@@ -420,7 +418,6 @@ class FrequencyAligner:
             interpolate_keys: Variable keys to interpolate (column names or
                 (entity..., variable) tuples).
             target_frequency: Target frequency (str or per-entity dict).
-            is_panel: Whether the data is panel data.
             method: Interpolation method passed to
                 :meth:`FrequencyConverter.interpolate_to_higher_frequency`
                 (e.g. ``'linear'``, ``'time'``). Defaults to ``'linear'``.
@@ -447,7 +444,7 @@ class FrequencyAligner:
             >>> dates = pd.date_range('2023-01-01', periods=3, freq='QS')
             >>> df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
             >>> out = aligner._interpolate_to_target(
-            ...     df, ['gdp'], 'MS', is_panel=False
+            ...     df, ['gdp'], 'MS'
             ... )
             >>> len(out)
             9
@@ -455,6 +452,9 @@ class FrequencyAligner:
         # Cas où aucune clé d'interpolation n'est spécifiée, retourne le jeu de données inchangé
         if not interpolate_keys:
             return df
+
+        # Détection unique de la structure du jeu de données (série ou panel)
+        is_panel = is_panel_data(df)
 
         # Interpolation de chaque série (séries temporelles et panel confondus)
         interpolated: Dict[tuple, Dict[str, pd.Series]] = {}
@@ -500,7 +500,6 @@ class FrequencyAligner:
         df: pd.DataFrame,
         keys: List[Union[str, Tuple]],
         target_frequency: Union[str, Dict],
-        is_panel: bool,
         interp_method: str = 'linear',
         interp_limit: Union[int, Literal['default'], None] = 'default',
         interp_limit_direction: Optional[Literal['forward', 'backward', 'both']] = None,
@@ -519,7 +518,6 @@ class FrequencyAligner:
             keys: Variable keys to convert (column names or
                 (entity..., variable) tuples).
             target_frequency: Target frequency (str or per-entity dict).
-            is_panel: Whether the data is panel data.
             interp_method: Interpolation method used when upsampling.
                 Defaults to ``'linear'``.
             interp_limit: Maximum number of consecutive NaN values to fill during
@@ -541,6 +539,9 @@ class FrequencyAligner:
         # Cas où aucune clé n'est spécifiée
         if not keys:
             return df
+
+        # Détection unique de la structure du jeu de données (série ou panel)
+        is_panel = is_panel_data(df)
 
         # Initialisation des listes de clés selon la direction de conversion
         aggregate_keys: List[Union[str, Tuple]] = []
@@ -577,11 +578,11 @@ class FrequencyAligner:
         result = df
         if aggregate_keys:
             result = self._aggregate_to_target(
-                result, aggregate_keys, target_frequency, is_panel
+                result, aggregate_keys, target_frequency
             )
         if interpolate_keys:
             result = self._interpolate_to_target(
-                result, interpolate_keys, target_frequency, is_panel,
+                result, interpolate_keys, target_frequency,
                 method=interp_method,
                 limit=interp_limit,
                 limit_direction=interp_limit_direction,

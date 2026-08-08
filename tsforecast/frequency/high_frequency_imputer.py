@@ -1695,8 +1695,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Agrégation des colonnes plus fréquentes que la fréquence de l'étape
         classification = self._classify_variables_at_frequency(pred_freq)
-        return self._freq_aligner.aggregate_to_target(
-            X_stage, classification['aggregate'], pred_freq, self.is_panel_
+        return self._freq_aligner._aggregate_to_target(
+            X_stage, classification['aggregate'], pred_freq
         )
 
     # Méthode auxiliaire de préparation des données d'entraînement du modèle d'imputation
@@ -1785,8 +1785,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             key for key in self._classify_variables_at_frequency(f_var)['aggregate']
             if split_variable_key(key)[1] != var_name
         ]
-        X_features = self._freq_aligner.aggregate_to_target(
-            X_stage, feature_agg_keys, f_var, self.is_panel_
+        X_features = self._freq_aligner._aggregate_to_target(
+            X_stage, feature_agg_keys, f_var
         )
 
         # Extraction des données d'entraînement
