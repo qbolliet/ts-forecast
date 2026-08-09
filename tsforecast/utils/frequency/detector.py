@@ -12,6 +12,7 @@ from typing import Dict, Literal, Optional, Union, Tuple, List
 # Import des utilitaires de fréquence
 from .utils import normalize_frequency
 from .types import FrequencyType, UserFrequencyType
+from ..parse.utils import build_frequency_string
 from ...panel.utils import normalize_entity_key, detect_panel_structure, extract_time_series_from_multiindex
 
 # Classe de détection de la fréquence d'une série temporelle
@@ -506,7 +507,12 @@ class FrequencyDetector:
             modal_days: Modal time difference in days between consecutive observations
 
         Returns:
-            Raw frequency code or None if no match found
+            Raw frequency code or None if no match found. For period-based
+            frequencies (monthly, quarterly, annual), the position (start/end)
+            is appended when it can be detected on ``time_index`` (e.g. 'MS'
+            rather than bare 'M'), so callers requesting 'with_position',
+            'full' or 'components' formats get a positioned frequency instead
+            of having to re-detect it themselves.
         """
         # Détection basée sur le nombre de jours modal
         if modal_days == 1:
@@ -518,12 +524,65 @@ class FrequencyDetector:
             # Fréquence semi-mensuelle (environ 2 fois par mois)
             return self._detect_semi_monthly_frequency(time_index=time_index)
         elif 28 <= modal_days <= 31:
-            return 'M'
+            return self._with_detected_position('M', time_index)
         elif 89 <= modal_days <= 92:
-            return 'Q'
+            return self._with_detected_position('Q', time_index)
         elif 365 <= modal_days <= 366:
-            return 'Y'
+            return self._with_detected_position('Y', time_index)
 
+        return None
+
+    # Méthode auxiliaire d'ajout de la position détectée à une fréquence de base
+    @staticmethod
+    def _with_detected_position(base_freq: FrequencyType, time_index: pd.DatetimeIndex) -> FrequencyType:
+        """Combine a base frequency with its detected start/end position.
+
+        ``pd.infer_freq`` already reports positioned codes (``'MS'``, ``'QE'``,
+        ...) when it succeeds ; this only concerns the manual fallback path
+        (:meth:`_detect_day_frequency`), which otherwise has no notion of
+        position at all.
+
+        Args:
+            base_freq: Base frequency code ('M', 'Q' or 'Y').
+            time_index: Sorted datetime index the frequency was detected on.
+
+        Returns:
+            ``base_freq`` combined with its detected position (e.g. ``'MS'``),
+            or ``base_freq`` unchanged if the position is ambiguous.
+        """
+        position = FrequencyDetector._detect_period_position(base_freq, time_index)
+        if position is None:
+            return base_freq
+        return build_frequency_string(base_freq, position)
+
+    # Méthode auxiliaire de détection de la position (début/fin de période) d'un index
+    @staticmethod
+    def _detect_period_position(base_freq: FrequencyType, time_index: pd.DatetimeIndex) -> Optional[str]:
+        """Detect whether dates are anchored at period start or period end.
+
+        Args:
+            base_freq: Base frequency code ('M', 'Q' or 'Y').
+            time_index: Sorted datetime index to inspect.
+
+        Returns:
+            ``'S'`` if every date falls on its period's start, ``'E'`` if
+            every date falls on its period's end, ``None`` if mixed/neither
+            (or if ``base_freq`` isn't one of the period-based frequencies).
+        """
+        # Propriétés vectorisées de pandas pour chaque fréquence période
+        position_checks = {
+            'M': ('is_month_start', 'is_month_end'),
+            'Q': ('is_quarter_start', 'is_quarter_end'),
+            'Y': ('is_year_start', 'is_year_end'),
+        }
+        if base_freq not in position_checks:
+            return None
+
+        start_attr, end_attr = position_checks[base_freq]
+        if getattr(time_index, start_attr).all():
+            return 'S'
+        if getattr(time_index, end_attr).all():
+            return 'E'
         return None
 
     # Méthode de détection des fréquences infrajournalières
