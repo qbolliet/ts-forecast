@@ -6,17 +6,14 @@ onto a regular date_range.
 """
 # Importation des modules
 import pandas as pd
-import numpy as np
 from typing import Dict, List, Optional, Union
 
 # Import des utilitaires internes
-from ..utils.frequency.detector import FrequencyDetector
-from ..utils.frequency.utils import detect_frequency, _get_highest_frequency, detect_index_frequency
+from ..utils.frequency.utils import _get_highest_frequency, detect_index_frequency
 from ..utils.frequency import normalize_frequency
 from ..panel.utils import (
     build_panel_index,
     iter_entity_blocks,
-    normalize_entity_key,
 )
 
 
@@ -52,8 +49,6 @@ class IndexRegularizer:
         """
         # Instanciation des attributs
         self.min_observations = min_observations
-        # Initialisation d'un détecteur de fréquence
-        self._detector = FrequencyDetector(min_observations=min_observations)
 
     #  Méthode de détection de la régularité
     def is_regular(
@@ -151,7 +146,11 @@ class IndexRegularizer:
         # Série temporelle simple
         if not isinstance(data.index, pd.MultiIndex):
             # Détection de la fréquence de la série temporelle
-            freq = self._resolve_frequency_ts(data)
+            try:
+                freq = detect_index_frequency(data.index, return_format='full')
+            except (ValueError, TypeError):
+                freq = None
+            # Régulatisation de la série
             if freq is None:
                 # Impossible de détecter la fréquence → retour inchangé
                 result = data
@@ -245,29 +244,23 @@ class IndexRegularizer:
         Returns:
             Dict or bool.
         """
-        # Extraction du niveau lié à la date
-        date_level = index.nlevels - 1
-        # Extraction des entités
-        entity_index = index.droplevel(date_level)
-
         # Initialisation du dictionnaire résultat
         results: Dict[tuple, bool] = {}
         # Initialisation de la collection des fréquences détectées
         detected_freqs = set()
 
-        # Parcours des entités
-        for entity_key in entity_index.unique():
-            # Masque correspondant aux obserbations de l'entité
-            mask = entity_index == entity_key
-            # Extraction des dates de l'entité
-            dates = index.get_level_values(date_level)[mask]
-            
+        # Parcours des entités via le primitif de panel partagé avec la régularisation
+        # (série factice ne portant que l'index, pour réutiliser iter_entity_blocks)
+        dummy = pd.Series(index=index, dtype='float64')
+        for entity, _, block in iter_entity_blocks(dummy, is_panel=True):
+            # Dates de l'entité, ramenées à un DatetimeIndex simple par iter_entity_blocks
+            dates = block.index
+
             # Vérification de la régularité des dates
             regular = self._is_regular_ts(dates)
 
-            # Construction de la clé associée à l'entité et complétion des résultats
-            # Clé TOUJOURS normalisée en tuple, y compris à un seul niveau (§5.4)
-            results[normalize_entity_key(entity_key)] = regular
+            # Complétion des résultats (clé TOUJOURS normalisée en tuple par iter_entity_blocks)
+            results[entity] = regular
 
             # Détection de la fréquence
             if regular:
@@ -282,44 +275,6 @@ class IndexRegularizer:
         all_regular = all(results.values())
         same_freq = len(detected_freqs) <= 1
         return all_regular and same_freq
-
-    # Méthode auxiliaire de détection de la fréquence d'une série temporelle
-    def _resolve_frequency_ts(
-        self,
-        data: Union[pd.Series, pd.DataFrame],
-    ) -> Optional[str]:
-        """Resolve the pandas frequency string for a time series.
-
-        Auto-detects the frequency using ``detect_index_frequency`` and
-        ``detect_frequency`` with ``return_format='full'``.
-
-        Args:
-            data: Time series data.
-
-        Returns:
-            Pandas-compatible frequency string, or None.
-        """
-        # Détection via detect_index_frequency
-        try:
-            return detect_index_frequency(data.index, return_format='full')
-        except (ValueError, TypeError):
-            pass
-
-        # Fallback : détection par colonnes via detect_frequency
-        try:
-            if isinstance(data, pd.DataFrame):
-                freq_map = detect_frequency(data, return_format='full')
-                if isinstance(freq_map, dict):
-                    self._validate_consistent_positions(freq_map)
-                    return _get_highest_frequency(freq_map)
-            elif isinstance(data, pd.Series):
-                freq = detect_frequency(data, return_format='full')
-                if freq is not None and not isinstance(freq, dict):
-                    return freq
-        except (ValueError, TypeError):
-            pass
-
-        return None
 
     # Méthode auxiliaire de validation de l'ensemble des positions
     @staticmethod
@@ -425,12 +380,17 @@ class IndexRegularizer:
             except (ValueError, TypeError):
                 pass
 
-            # Fallback : détection par entité puis fréquence la plus haute
+            # Fallback : détection par entité puis fréquence la plus haute (une entité
+            # dont la détection échoue ne doit pas faire échouer les autres, contrairement
+            # à la détection groupée ci-dessus qui échoue dès qu'une entité est irrégulière)
             if global_freq is None:
                 # Détection sur le bloc daté de chaque entité
                 entity_freqs = {}
                 for entity, _, block in iter_entity_blocks(data, is_panel=True):
-                    entity_freq = self._resolve_frequency_ts(block)
+                    try:
+                        entity_freq = detect_index_frequency(block.index, return_format='full')
+                    except (ValueError, TypeError):
+                        entity_freq = None
                     if entity_freq is not None:
                         entity_freqs[entity] = entity_freq
                 # Extraction de la fréquence la plus élevée
@@ -444,7 +404,13 @@ class IndexRegularizer:
         # Parcours des blocs d'entités, ramenés à leur seul index temporel
         for entity, mask, block in iter_entity_blocks(data, is_panel=True):
             # Résolution de la fréquence pour cette entité
-            freq = self._resolve_frequency_ts(block) if per_entity else global_freq
+            if per_entity:
+                try:
+                    freq = detect_index_frequency(block.index, return_format='full')
+                except (ValueError, TypeError):
+                    freq = None
+            else:
+                freq = global_freq
 
             # Pas de fréquence détectable → bloc gardé tel quel
             if freq is None:
