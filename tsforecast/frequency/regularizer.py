@@ -24,9 +24,6 @@ class IndexRegularizer:
     Provides methods to check whether a DatetimeIndex (or MultiIndex with dates)
     is regular, and to regularize it by filling temporal gaps with NaN rows.
 
-    Attributes:
-        min_observations (int): Minimum observations required for frequency detection.
-
     Examples:
         >>> import pandas as pd
         >>> regularizer = IndexRegularizer()
@@ -40,15 +37,9 @@ class IndexRegularizer:
     """
 
     # Initialisation
-    def __init__(self, min_observations: int = 2):
+    def __init__(self):
         """Initialize the IndexRegularizer.
-
-        Args:
-            min_observations: Minimum number of observations required for
-                frequency detection.
         """
-        # Instanciation des attributs
-        self.min_observations = min_observations
 
     #  Méthode de détection de la régularité
     def is_regular(
