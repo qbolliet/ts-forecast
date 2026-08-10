@@ -67,6 +67,7 @@ class ImputationWindowCalculator:
 
     For panel data, EVERY dict-valued attribute
     (``imputation_window_start_``, ``imputation_window_end_``,
+    ``imputation_strict_window_start_``, ``imputation_strict_window_end_``,
     ``imputation_window_mask_``, ``coverage_by_date_``, ``column_coverage_``
     and ``index_freq_``) is keyed by the entity **tuple**, even when the panel
     has a single entity level: ``('France',)``, never ``'France'``. These are
@@ -79,11 +80,20 @@ class ImputationWindowCalculator:
     so scalars remain accepted at the public boundary only.
 
     Attributes:
-        imputation_window_start_: Start of the strict imputation window
-            (coverage == 1.0). Scalar for time series,
+        imputation_window_start_: Start of the imputation window, following
+            ``imputation_scope`` — identical to
+            ``imputation_strict_window_start_`` when ``imputation_scope='strict'``
+            (the default), extended otherwise. Always matches the active
+            range of ``imputation_window_mask_``. Scalar for time series,
             Dict[tuple, Optional[Timestamp]] for panel.
-        imputation_window_end_: End of the strict imputation window.
-            Same type as imputation_window_start_.
+        imputation_window_end_: End of the imputation window, following
+            ``imputation_scope``. Same type as imputation_window_start_.
+        imputation_strict_window_start_: Start of the STRICT imputation
+            window (coverage == 1.0), independent of ``imputation_scope``.
+            Scalar for time series, Dict[tuple, Optional[Timestamp]] for panel.
+        imputation_strict_window_end_: End of the strict imputation window,
+            independent of ``imputation_scope``. Same type as
+            imputation_strict_window_start_.
         imputation_window_mask_: Boolean mask on the high-frequency grid
             identifying observations in the strict window the imputation_window. 
             pd.Series for time series,Dict[tuple, Optional[pd.Series]] for panel.
@@ -116,7 +126,7 @@ class ImputationWindowCalculator:
         self,
         coverage_threshold: float = 0.5,
         imputation_scope: ImputationScope = 'strict',
-        min_columns: int = 2,
+        min_columns: int = 1,
     ):
         """Initialize the ImputationWindowCalculator.
 
@@ -132,11 +142,11 @@ class ImputationWindowCalculator:
                   where coverage >= threshold.
                 - 'extended_both': Extend in both directions.
             min_columns: Minimum number of data columns required.
-                Must be at least 2. Default 2.
+                Must be at least 1. Default 2.
 
         Raises:
             ValueError: If coverage_threshold not in [0, 1], invalid
-                imputation_scope, or min_columns < 2.
+                imputation_scope, or min_columns < 1.
         """
         # Validation des paramètres
         if not 0 <= coverage_threshold <= 1:
@@ -148,8 +158,8 @@ class ImputationWindowCalculator:
                 f"imputation_scope must be one of 'strict', 'extended_backward', "
                 f"'extended_forward', 'extended_both', got '{imputation_scope}'"
             )
-        if min_columns < 2:
-            raise ValueError(f"min_columns must be at least 2, got {min_columns}")
+        if min_columns < 1:
+            raise ValueError(f"min_columns must be at least 1, got {min_columns}")
 
         # Stockage des paramètres
         self.coverage_threshold = coverage_threshold
@@ -157,8 +167,12 @@ class ImputationWindowCalculator:
         self.min_columns = min_columns
 
         # Attributs de fenêtre d'imputation — scalaires pour TS, dict par entité pour panel
+        # Bornes suivant imputation_scope (== bornes strictes en scope 'strict')
         self.imputation_window_start_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
         self.imputation_window_end_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
+        # Bornes de la fenêtre STRICTE, indépendantes de imputation_scope
+        self.imputation_strict_window_start_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
+        self.imputation_strict_window_end_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
         self.imputation_window_mask_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
 
         # Attributs auxiliaires
@@ -252,9 +266,11 @@ class ImputationWindowCalculator:
         # Calcul de la fenêtre pour l'unique entité TS
         result = self._compute_window(data, self._detected_frequencies, self.index_freq_)
 
-        # Valorisation des attributs de fenêtre stricte
+        # Valorisation des bornes de fenêtre (scope-dépendantes et strictes)
         self.imputation_window_start_ = result['imputation_start']
         self.imputation_window_end_ = result['imputation_end']
+        self.imputation_strict_window_start_ = result['imputation_strict_start']
+        self.imputation_strict_window_end_ = result['imputation_strict_end']
         self.imputation_window_mask_ = result['imputation_window_mask']
 
         # Valorisation des attributs auxiliaires
@@ -279,6 +295,8 @@ class ImputationWindowCalculator:
         # Initialisation des dictionnaires de résultats
         self.imputation_window_start_ = {}
         self.imputation_window_end_ = {}
+        self.imputation_strict_window_start_ = {}
+        self.imputation_strict_window_end_ = {}
         self.imputation_window_mask_ = {}
         self.coverage_by_date_ = {}
         self.column_coverage_ = {}
@@ -307,6 +325,8 @@ class ImputationWindowCalculator:
             if self.index_freq_[entity_key] is None:
                 self.imputation_window_start_[entity_key] = None
                 self.imputation_window_end_[entity_key] = None
+                self.imputation_strict_window_start_[entity_key] = None
+                self.imputation_strict_window_end_[entity_key] = None
                 self.imputation_window_mask_[entity_key] = None
                 self.coverage_by_date_[entity_key] = None
                 continue
@@ -314,17 +334,21 @@ class ImputationWindowCalculator:
             # Calcul de la fenêtre d'imputation
             result = self._compute_window(entity_df, col_freqs, self.index_freq_[entity_key])
 
-            # Complétion des dictionnaires de fenêtre d'imputation
+            # Complétion des dictionnaires de bornes (scope-dépendantes et strictes)
             self.imputation_window_start_[entity_key] = result['imputation_start']
             self.imputation_window_end_[entity_key] = result['imputation_end']
+            self.imputation_strict_window_start_[entity_key] = result['imputation_strict_start']
+            self.imputation_strict_window_end_[entity_key] = result['imputation_strict_end']
             self.imputation_window_mask_[entity_key] = result['imputation_window_mask']
 
             # Complétion des attributs auxiliaires
             self.coverage_by_date_[entity_key] = result['coverage']
             self.column_coverage_[entity_key] = result['column_coverage']
 
-        # Vérification qu'au moins une entité a une fenêtre valide
-        valid_starts = [v for v in self.imputation_window_start_.values() if v is not None]
+        # Vérification qu'au moins une entité a une fenêtre valide (fenêtre stricte :
+        # l'extension ne peut jamais créer de fenêtre là où aucune fenêtre stricte
+        # n'existe, cf. _compute_window)
+        valid_starts = [v for v in self.imputation_strict_window_start_.values() if v is not None]
         if not valid_starts:
             raise ValueError("No imputation window found for any entity in the panel")
 
@@ -355,10 +379,11 @@ class ImputationWindowCalculator:
 
         Builds the high-frequency grid and coverage matrix, derives the
         coverage series, then constructs the strict imputation window mask
-        (coverage == 1.0). Window bounds are derived from this mask.
-        The imputation window mask is then extended according to
-        imputation_scope by passing the mask to _extend_backward and/or
-        _extend_forward.
+        (coverage == 1.0). Strict window bounds are derived from this mask,
+        independently of imputation_scope. The mask is then extended
+        according to imputation_scope by passing it to _extend_backward
+        and/or _extend_forward, and scope-dependent bounds are derived from
+        the resulting (possibly extended) mask.
 
         Args:
             df: DataFrame with simple DatetimeIndex for the entity.
@@ -368,10 +393,16 @@ class ImputationWindowCalculator:
 
         Returns:
             Dict with keys:
-                - 'imputation_start': Start of the strict window.
-                - 'imputation_end': End of the strict window.
+                - 'imputation_start': Start of the scope-dependent window
+                  (== 'imputation_strict_start' when imputation_scope is
+                  'strict').
+                - 'imputation_end': End of the scope-dependent window.
+                - 'imputation_strict_start': Start of the strict window,
+                  independent of imputation_scope.
+                - 'imputation_strict_end': End of the strict window,
+                  independent of imputation_scope.
                 - 'imputation_window_mask': Boolean pd.Series on the grid
-                  identifying observations in the strict window.
+                  identifying observations in the (possibly extended) window.
                 - 'coverage': coverage pd.Series on the high-freq grid.
                 - 'column_coverage': Dict of per-column (start, end)
                   tuples.
@@ -380,6 +411,8 @@ class ImputationWindowCalculator:
         _none_result = {
             'imputation_start': None,
             'imputation_end': None,
+            'imputation_strict_start': None,
+            'imputation_strict_end': None,
             'imputation_window_mask': None,
             'coverage': None,
             'column_coverage': None,
@@ -431,9 +464,9 @@ class ImputationWindowCalculator:
                 'imputation_window_mask': imputation_window_mask,
             }
 
-        # Extraction des bornes strictes depuis le masque
-        imputation_start = strict_dates.min()
-        imputation_end = strict_dates.max()
+        # Extraction des bornes strictes depuis le masque, indépendamment du scope
+        imputation_strict_start = strict_dates.min()
+        imputation_strict_end = strict_dates.max()
 
         # Vérification de la contiguïté de la fenêtre stricte
         if len(strict_dates) > 1:
@@ -462,9 +495,16 @@ class ImputationWindowCalculator:
                 UserWarning
             )
 
+        # Bornes scope-dépendantes, dérivées du masque final (identiques aux bornes
+        # strictes en scope 'strict', puisqu'aucune extension n'a alors eu lieu)
+        imputation_start = imputation_dates.min()
+        imputation_end = imputation_dates.max()
+
         return {
             'imputation_start': imputation_start,
             'imputation_end': imputation_end,
+            'imputation_strict_start': imputation_strict_start,
+            'imputation_strict_end': imputation_strict_end,
             'imputation_window_mask': imputation_window_mask,
             'coverage': coverage,
             'column_coverage': column_coverage,

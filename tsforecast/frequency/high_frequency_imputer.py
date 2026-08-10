@@ -2241,39 +2241,32 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         return progression
 
-    # Méthode auxiliaire de dérivation des bornes d'une fenêtre depuis son masque
+    # Méthode auxiliaire de mise en correspondance des bornes (start, end) d'une fenêtre
     @staticmethod
-    def _derive_window_bounds(
-        mask: Union[pd.Series, Dict[tuple, Optional[pd.Series]], None]
+    def _zip_window_bounds(
+        start: Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]], None],
+        end: Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]], None],
     ) -> Union[Tuple, Dict[tuple, Tuple]]:
-        """Derive (start, end) bounds from a boolean window mask.
+        """Pair per-entity (or scalar) start/end bounds into (start, end) tuples.
 
         Used to populate ``training_window_`` from
-        ``ImputationWindowCalculator.imputation_window_mask_``, which holds
-        the EXTENDED mask (post ``imputation_scope``) — unlike
-        ``imputation_window_start_``/``imputation_window_end_``, frozen at
-        the strict-window bounds before extension (review §1.1).
+        ``ImputationWindowCalculator.imputation_window_start_``/``_end_``,
+        which already follow ``imputation_scope`` (review §1.1 follow-up) —
+        no need to re-derive bounds from ``imputation_window_mask_`` anymore.
 
         Args:
-            mask: Boolean Series (time series) or dict entity -> Series (panel).
+            start: Window start(s), as returned by ``ImputationWindowCalculator``
+                (scalar for time series, dict keyed by entity tuple for panel).
+            end: Window end(s), same shape as ``start``.
 
         Returns:
             (start, end) tuple, or dict mapping entities to (start, end).
         """
-        # Cas des données de panel : dérivation par entité
-        if isinstance(mask, dict):
-            return {
-                entity: (
-                    (m.index[m].min(), m.index[m].max())
-                    if m is not None and m.any() else (None, None)
-                )
-                for entity, m in mask.items()
-            }
+        # Cas des données de panel : appariement par entité
+        if isinstance(start, dict):
+            return {entity: (start[entity], end[entity]) for entity in start}
         # Cas des séries temporelles
-        if mask is None or not mask.any():
-            return (None, None)
-        active = mask.index[mask]
-        return (active.min(), active.max())
+        return (start, end)
 
     # -------------------------------------------------------------------------
     # Fit
@@ -2384,15 +2377,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         )
         try:
             self._imputation_window_calc.fit(X_work)
-            self.imputation_window_ = (
-                self._imputation_window_calc.imputation_window_start_,
-                self._imputation_window_calc.imputation_window_end_
+            # Fenêtre STRICTE (coverage == 1.0), indépendante de imputation_scope
+            self.imputation_window_ = self._zip_window_bounds(
+                self._imputation_window_calc.imputation_strict_window_start_,
+                self._imputation_window_calc.imputation_strict_window_end_,
             )
-            # Bornes de la fenêtre étendue, dérivées du masque : le calculateur
-            # n'expose que les bornes de la fenêtre STRICTE via
-            # imputation_window_start_/end_ (jamais recalculées après extension)
-            self.training_window_ = self._derive_window_bounds(
-                self._imputation_window_calc.imputation_window_mask_
+            # Fenêtre d'entraînement étendue selon imputation_scope : le calculateur
+            # expose désormais directement ces bornes (imputation_window_start_/end_
+            # suivent imputation_scope), plus besoin de les redériver du masque
+            self.training_window_ = self._zip_window_bounds(
+                self._imputation_window_calc.imputation_window_start_,
+                self._imputation_window_calc.imputation_window_end_,
             )
         except ValueError as e:
             warnings.warn(
@@ -2409,7 +2404,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Avertissement global si aucune fenêtre stricte n'existe (fit "réussi" mais
             # bornes None) : sans cela, tous les entraînements échouent silencieusement
             # un à un et tout finit en interpolate_fallback (cf. PHASE 5)
-            start = self._imputation_window_calc.imputation_window_start_
+            start = self._imputation_window_calc.imputation_strict_window_start_
             no_window = (
                 start is None if not isinstance(start, dict)
                 else all(v is None for v in start.values())

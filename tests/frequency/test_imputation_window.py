@@ -100,6 +100,52 @@ class TestExtensionContiguity:
         assert calc.imputation_window_mask_.loc[dates[8:10]].all()
 
 
+class TestStrictVsScopeWindowBounds:
+    """imputation_window_start_/_end_ suivent imputation_scope, tandis que
+    imputation_strict_window_start_/_end_ restent figées sur la fenêtre stricte."""
+
+    @staticmethod
+    def _make_df_with_shoulder():
+        dates = pd.date_range('2020-01-01', periods=20, freq='MS')
+        # 'b' en premier : cf. commentaire de test_extension_stops_at_first_gap
+        df = pd.DataFrame({'b': np.nan, 'a': np.nan}, index=dates, dtype=float)
+        # Fenêtre stricte : couverture totale sur [10, 15)
+        df.loc[dates[10:15], 'a'] = 1.0
+        df.loc[dates[10:15], 'b'] = 1.0
+        # Épaule avant la fenêtre stricte, à couverture == seuil (0.5)
+        df.loc[dates[8:10], 'a'] = 1.0
+        return dates, df
+
+    def test_strict_scope_bounds_are_identical(self):
+        """En scope 'strict' (pas d'extension), les deux jeux de bornes coïncident."""
+        dates, df = self._make_df_with_shoulder()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='strict', min_columns=2
+        )
+        calc.fit(df)
+
+        assert calc.imputation_window_start_ == calc.imputation_strict_window_start_
+        assert calc.imputation_window_end_ == calc.imputation_strict_window_end_
+        assert calc.imputation_window_start_ == dates[10]
+        assert calc.imputation_window_end_ == dates[14]
+
+    def test_extended_scope_moves_window_bounds_but_not_strict_bounds(self):
+        """En scope étendu, seules les bornes scope-dépendantes bougent."""
+        dates, df = self._make_df_with_shoulder()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='extended_backward', min_columns=2
+        )
+        calc.fit(df)
+
+        # La fenêtre stricte reste [10, 14], indépendamment du scope
+        assert calc.imputation_strict_window_start_ == dates[10]
+        assert calc.imputation_strict_window_end_ == dates[14]
+
+        # La fenêtre scope-dépendante s'étend jusqu'à l'épaule [8, 10)
+        assert calc.imputation_window_start_ == dates[8]
+        assert calc.imputation_window_end_ == dates[14]
+
+
 class TestMaskAtFrequency:
     """§3.3 : get_mask_at_frequency ne doit pas systématiquement retourner False."""
 
@@ -208,6 +254,8 @@ class TestEntityKeysAreAlwaysTuples:
     ENTITY_KEYED_ATTRS = (
         'imputation_window_start_',
         'imputation_window_end_',
+        'imputation_strict_window_start_',
+        'imputation_strict_window_end_',
         'imputation_window_mask_',
         'coverage_by_date_',
         'column_coverage_',
@@ -340,7 +388,17 @@ class TestImputationWindowCalculatorValidation:
 
     def test_invalid_min_columns_raises(self):
         with pytest.raises(ValueError, match='min_columns'):
-            ImputationWindowCalculator(min_columns=1)
+            ImputationWindowCalculator(min_columns=0)
+
+    def test_fit_with_single_column(self):
+        """min_columns=1 : la couverture se réduit à la présence de l'unique colonne."""
+        dates = pd.date_range('2023-01-01', periods=12, freq='MS')
+        df = pd.DataFrame({'a': [np.nan, np.nan] + list(range(10))}, index=dates)
+        calc = ImputationWindowCalculator(min_columns=1)
+        calc.fit(df)
+
+        assert calc.imputation_strict_window_start_ == dates[2]
+        assert calc.imputation_strict_window_end_ == dates[-1]
 
     def test_fit_rejects_non_dataframe(self):
         calc = ImputationWindowCalculator(coverage_threshold=0.5)
