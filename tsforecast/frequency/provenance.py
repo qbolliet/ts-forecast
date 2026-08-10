@@ -13,6 +13,9 @@ from enum import Enum
 import numpy as np
 import pandas as pd
 
+# Utilitaires de panel
+from ..panel.utils import detect_panel_structure
+
 
 # Enumération des types de provenance
 class ProvenanceType(str, Enum):
@@ -32,6 +35,14 @@ class ProvenanceType(str, Enum):
     MODEL_ON_MIXED = 'model_on_mixed'
     AGGREGATED = 'aggregated'
     DISAGGREGATED = 'disaggregated'
+
+    # Représentation lisible (utilisée par l'affichage tabulaire de pandas,
+    # p.ex. provenance_matrix_) : 'original' plutôt que 'ProvenanceType.ORIGINAL'.
+    # __repr__ reste celui d'Enum (<ProvenanceType.ORIGINAL: 'original'>), qui
+    # continue de distinguer un ProvenanceType d'un str brut dans les affichages
+    # scalaires (repr de liste, retour de get_provenance, etc.).
+    def __str__(self) -> str:
+        return self.value
 
 
 # Classe de suivi de la provenance des valeurs imputées
@@ -60,18 +71,17 @@ class ImputationProvenanceTracker:
         >>> tracker.get_provenance('var1', dates[2])
         <ProvenanceType.MODEL_ON_TRUE: 'model_on_true'>
     """
-
+    # Initialisation
     def __init__(self):
         """Initialize the ImputationProvenanceTracker."""
         # Initialisation de la matrice de provenance
         self.provenance_matrix_: Optional[pd.DataFrame] = None
         # Initialisation des statistiques
         self.statistics_: Optional[Dict[str, Dict[str, Union[int, float]]]] = None
-        # Indicateur de données de panel
-        self._is_panel: bool = False
-        # Colonnes de panel
+        # Colonnes de panel (résolues lors de initialize())
         self._panel_cols: Optional[List[str]] = None
 
+    # Méthode d'initialisation sur le jeu de données initial
     def initialize(
         self,
         data: pd.DataFrame,
@@ -85,8 +95,15 @@ class ImputationProvenanceTracker:
 
         Args:
             data: Input DataFrame with potential NaN values to be imputed.
-            panel_cols: List of column names identifying panel entities.
-                If provided, these columns are excluded from provenance tracking.
+                Panel data can be passed either as a MultiIndex (entity levels
+                followed by a time level) or as a flat DataFrame carrying the
+                entity as ordinary column(s).
+            panel_cols: Names identifying panel entities. If None, panel
+                structure is auto-detected from a MultiIndex.
+                If provided and matching MultiIndex level names, the panel is
+                assumed to already be in the index. Otherwise, panel_cols are
+                treated as ordinary DataFrame columns and excluded from
+                provenance tracking.
 
         Returns:
             self: The initialized tracker.
@@ -107,12 +124,16 @@ class ImputationProvenanceTracker:
         if data.empty:
             raise ValueError("data cannot be empty")
 
-        # Stockage des informations de panel
+        # Détection de la structure de panel : colonnes explicites, ou
+        # auto-détection depuis un MultiIndex
+        panel_cols, panel_in_index = detect_panel_structure(data, panel_cols)
         self._panel_cols = panel_cols
-        self._is_panel = panel_cols is not None and len(panel_cols) > 0
+        is_panel = panel_cols is not None and len(panel_cols) > 0
 
-        # Détermination des colonnes à tracker (exclusion des colonnes de panel)
-        if self._is_panel:
+        # Détermination des colonnes à tracker : seul un panel porté par des
+        # colonnes ordinaires nécessite une exclusion, un panel en index ne
+        # laisse déjà que les variables dans les colonnes
+        if is_panel and not panel_in_index:
             track_cols = [col for col in data.columns if col not in panel_cols]
         else:
             track_cols = list(data.columns)
@@ -132,6 +153,7 @@ class ImputationProvenanceTracker:
 
         return self
 
+    # Méthode de marquage d'observartions comme "imputées"
     def mark_imputed(
         self,
         column: str,
@@ -170,6 +192,7 @@ class ImputationProvenanceTracker:
         # Marquage de la provenance
         self.provenance_matrix_.loc[index, column] = provenance
 
+    # Méthode de marquage de certaines observations comme "agrégées"
     def mark_aggregated(
         self,
         column: str,
@@ -188,6 +211,7 @@ class ImputationProvenanceTracker:
         """
         self.mark_imputed(column, index, ProvenanceType.AGGREGATED)
 
+    # Méthpode de marquage de certaines observations comme "désagrégées"
     def mark_disaggregated(
         self,
         column: str,
@@ -210,6 +234,7 @@ class ImputationProvenanceTracker:
         """
         self.mark_imputed(column, index, ProvenanceType.DISAGGREGATED)
 
+    # Méthode de marquage de certaines observations comme imputées par un modèle
     def mark_model_imputed(
         self,
         column: str,
@@ -235,6 +260,7 @@ class ImputationProvenanceTracker:
         provenance = ProvenanceType.MODEL_ON_MIXED if trained_on_imputed else ProvenanceType.MODEL_ON_TRUE
         self.mark_imputed(column, index, provenance)
 
+    # Méthode d'extraction de la provenance
     def get_provenance(
         self,
         column: str,
@@ -266,6 +292,7 @@ class ImputationProvenanceTracker:
 
         return self.provenance_matrix_.loc[index, column]
 
+    # Méthode d'extraction du masque
     def get_mask(
         self,
         provenance_types: Union[ProvenanceType, List[ProvenanceType]],
@@ -308,6 +335,7 @@ class ImputationProvenanceTracker:
         # Création du masque
         return data.isin(provenance_types)
 
+    # Méthode de calcule de statistique sur la provenance des observations
     def compute_statistics(self) -> Dict[str, Dict[str, Union[int, float]]]:
         """Compute statistics about provenance distribution.
 
@@ -374,6 +402,7 @@ class ImputationProvenanceTracker:
 
         return self.statistics_
 
+    # Méthode d'extraction de la matrice de provenance
     def get_provenance_matrix(self) -> pd.DataFrame:
         """Get the full provenance matrix.
 
@@ -387,6 +416,7 @@ class ImputationProvenanceTracker:
             raise ValueError("Provenance matrix not initialized. Call initialize() first.")
         return self.provenance_matrix_.copy()
 
+    # Méthode de conversion de la matrice de provenance en chaîne de caractères
     def to_string_matrix(self) -> pd.DataFrame:
         """Convert provenance matrix to string representation.
 
@@ -415,6 +445,7 @@ class ImputationProvenanceTracker:
 
         return self.provenance_matrix_.map(convert_to_string)
 
+    # Méthode d'appariement de deux jeux de données
     def merge(
         self,
         other: 'ImputationProvenanceTracker',
@@ -468,6 +499,7 @@ class ImputationProvenanceTracker:
 
         return self
 
+    # Reprénsentation de la classe sous-forme de chaîne de caractères
     def __repr__(self) -> str:
         """String representation of the tracker."""
         if self.provenance_matrix_ is None:
