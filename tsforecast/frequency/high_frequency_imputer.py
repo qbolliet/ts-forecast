@@ -44,7 +44,6 @@ from .imputation_window import ImputationWindowCalculator, ImputationScope
 from .target_frequency_validator import TargetFrequencyValidator
 from .frequency_aligner import FrequencyAligner
 
-
 # Type aliases
 VariableCategory = Literal['aggregate', 'impute', 'target_freq']
 
@@ -265,7 +264,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             TUPLE for a panel (user-supplied scalar keys are normalized at
             init, see the key format contract above).
         entities_: Unique entities in panel data, as tuples.
-        _source_frequency_label_: Frequency label of the index seen at fit
+        _source_index_frequency_label: Frequency label of the index seen at fit
             time, in the very format used for the ``frequency`` level of a
             multi-frequency output. ``inverse_transform`` keeps that level
             and drops the others (review §2.10). None when the index
@@ -778,23 +777,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Méthodes auxiliaires
     # -------------------------------------------------------------------------
-    # Méthode auxiliaire de classification des variables relative à la fréquence cible effective
-    def _classify_variables(
-        self
-    ) -> Dict[str, List[Union[str, Tuple]]]:
-        """Classify each variable by its relationship to the target frequency.
-
-        Special case of :meth:`_classify_variables_at_frequency` at
-        ``self.effective_target_frequency_`` (review §5.5) — both methods
-        used to duplicate the same comparison logic under two different
-        output shapes; only the more general one remains.
-
-        Returns:
-            Same format as :meth:`_classify_variables_at_frequency`: dict
-            with keys 'aggregate', 'impute', 'target_freq', each containing
-            a list of variable keys.
-        """
-        return self._classify_variables_at_frequency(self.effective_target_frequency_)
 
     # Méthode auxiliaire de classification des variables par rapport à une fréquence cible
     def _classify_variables_at_frequency(
@@ -824,11 +806,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 # Décomposition de la clé : entité toujours en tuple
                 entity, _ = split_variable_key(key)
 
-                # Extraction de la fréquence cible associée à l'entité : lookup
-                # UNIQUE, les clés sont des tuples de bout en bout (§5.4). Une
-                # absence signale une entité hors de cette étape de cascade
-                # (cf. _build_frequency_prediction_list), pas un désaccord de
-                # format de clé
+                # Extraction de la fréquence cible associée à l'entité
                 if isinstance(prediction_frequency, dict):
                     pred_freq = prediction_frequency.get(entity)
                 else:
@@ -1135,8 +1113,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """Build a human-readable frequency label for a cascade stage.
 
         Used both as the ``stage_frames`` key and as the value of the
-        ``frequency`` level in the multi-frequency output (see review
-        §2.5): every level, including the last (target) one, keeps its
+        ``frequency`` level in the multi-frequency output : 
+        every level, including the last (target) one, keeps its
         real frequency label — no level is ever named ``'target'``. The
         target level remains identifiable via ``effective_target_frequency_``.
 
@@ -2301,8 +2279,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 0 — Setup
         # =================================================================
+        # Extraction des colonnes d'intérêt
         self.feature_columns_ = list(X.columns)
         self.target_column_ = y.name if y is not None else None
+        # Identification de la structure des données
         self.is_panel_ = bool(self.panel_cols) or is_panel_data(data=X)
 
         # Construction du jeu de données de travail
@@ -2322,15 +2302,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             self.entities_ = None
 
         # Label de fréquence de l'index d'entrée : il identifie, à l'inversion,
-        # le niveau à conserver dans une sortie multi-fréquences (§2.10). Le
+        # le niveau à conserver dans une sortie multi-fréquences. Le
         # passage par "_stage_frequency_label" garantit le même format de label
         # que celui porté par le niveau "frequency" de la sortie
         try:
             index_freq = detect_index_frequency(X_work.index, return_format='base')
-            self._source_frequency_label_ = self._stage_frequency_label(index_freq)
+            self._source_index_frequency_label = self._stage_frequency_label(index_freq)
         except (ValueError, TypeError):
             # Index irrégulier ou trop court : le repli sur le niveau cible suffit
-            self._source_frequency_label_ = None
+            self._source_index_frequency_label = None
 
         # Expansion de target_frequency en dict si panel + string
         if self.is_panel_ and isinstance(self.target_frequency, str) and self.entities_:
@@ -2361,7 +2341,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # triviale du format catégorie -> liste de "_classify_variables" (§5.5)
         variable_categories: Dict[Union[str, Tuple], VariableCategory] = {
             key: category
-            for category, keys in self._classify_variables().items()
+            for category, keys in self._classify_variables_at_frequency(self.effective_target_frequency_).items()
             for key in keys
         }
         self.variable_categories_ = variable_categories
@@ -2370,12 +2350,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 1 — Imputation window
         # =================================================================
+        
+        # Initialisation du calculateur de fréquences d'imputation
         self._imputation_window_calc = ImputationWindowCalculator(
             coverage_threshold=self.coverage_threshold,
             imputation_scope=self.imputation_scope,
             min_columns=2,
         )
         try:
+            # Calcul de la fenêtre d'imputation
             self._imputation_window_calc.fit(X_work)
             # Fenêtre STRICTE (coverage == 1.0), indépendante de imputation_scope
             self.imputation_window_ = self._zip_window_bounds(
@@ -2390,10 +2373,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 self._imputation_window_calc.imputation_window_end_,
             )
         except ValueError as e:
+            # Warning
             warnings.warn(
                 f"Could not calculate imputation window: {e}. Using all available data.",
                 UserWarning
             )
+            # On se restreint aux dates minimales et maximales
             if isinstance(X_work.index, pd.MultiIndex):
                 time_idx = X_work.index.get_level_values(-1)
             else:
@@ -2410,6 +2395,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 else all(v is None for v in start.values())
             )
             if no_window:
+                # Warning
                 warnings.warn(
                     "No strict imputation window found: no model can be trained; "
                     "all imputations will fall back to interpolation.",
@@ -2419,8 +2405,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 2 — Additive transformer
         # =================================================================
+        # Application du transformer rendant les données additives par période pour passer d'une fréquence à une autre
         if self.additive_transformer is not None:
+            # Clone du transformer
             self.additive_transformer_ = clone(self.additive_transformer)
+            # Entraînement et application de la transformation
             X_work = self.additive_transformer_.fit_transform(X_work)
             if isinstance(X_work, tuple):
                 X_work = X_work[0]
@@ -2430,12 +2419,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 3 — Frequency prediction list
         # =================================================================
+        # Construction de la liste des fréquences pour lesquelles il faut imputer les variables
         freq_prediction_list = self._build_frequency_prediction_list()
 
         # =================================================================
         # PHASE 4 — Provenance initialization
         # =================================================================
+        # Instanciation de la classe
         self._provenance_tracker = ImputationProvenanceTracker()
+        # Initialisation : Scan du jeu de données initial 
         self._provenance_tracker.initialize(X_work, panel_cols=self.panel_cols)
 
         # =================================================================
@@ -3113,7 +3105,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     ) -> Optional[str]:
         """Pick the frequency level to keep when inverting a stacked output.
 
-        The level of the source index (``_source_frequency_label_``) is the
+        The level of the source index (``_source_index_frequency_label``) is the
         one to keep: it is where the values sit at the granularity of the
         data given to ``fit`` (review §2.10). It may be missing when the
         index frequency could not be detected, or when it never was a
@@ -3141,9 +3133,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             return None
 
         # Priorité au niveau de l'index source
-        if self._source_frequency_label_ is not None:
-            if self._source_frequency_label_ in available:
-                return self._source_frequency_label_
+        if self._source_index_frequency_label is not None:
+            if self._source_index_frequency_label in available:
+                return self._source_index_frequency_label
 
         # Repli sur le niveau cible, toujours produit par la cascade
         target_label = self._stage_frequency_label(self.effective_target_frequency_)
@@ -3153,7 +3145,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Dernier repli : le dernier niveau empilé, avec avertissement
         warnings.warn(
             f"Neither the source frequency level "
-            f"({self._source_frequency_label_}) nor the target one "
+            f"({self._source_index_frequency_label}) nor the target one "
             f"({target_label}) is present in the data to invert. "
             f"Falling back on the last stacked level '{available[-1]}'."
         )
