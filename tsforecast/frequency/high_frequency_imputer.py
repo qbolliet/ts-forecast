@@ -1561,7 +1561,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             impute_freqs = set()
             # Parcours des variables
             for key, cat in self.variable_categories_.items():
-                # Sléection des variables à imputer (à fréquence plus faible que la fréquence cible)
+                # Sélection des variables à imputer (à fréquence plus faible que la fréquence cible)
                 if cat == 'impute':
                     # Extraction de la fréquence
                     freq = self.detected_frequencies_[key]
