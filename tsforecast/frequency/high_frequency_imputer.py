@@ -448,7 +448,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 "which behaves identically.",
                 DeprecationWarning
             )
-
+        # /!\ Je suis toujours en phase de développement, donc je ne souhaite pas maintenir des paramètres dépréciés pour assurer une cohérence dans l'API. Je souhaite ainsi supprimer "impute_delayed_values"
         # Instanciation des attributs
         self.target_frequency = target_frequency
         self.additive_transformer = additive_transformer
@@ -984,7 +984,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Extraction du nom de la variable de la clé
             _, var_name = split_variable_key(var_key)
 
-            # Préparation des données d'entraînement dans la fenêtre stricte
+            # Préparation des données d'entraînement dans la fenêtre d'imputation stricte
+            # /!\ Actuellement "get_imputation_window_mask" ne retourne pas le masque correspondant à la fenêtre d'imputation stricte mais celui correspondant à "imputation_scope". J'aimerais que "compute_window" dans le ImputationWindowCalculator dans imputation_window.py renvoie le masque associé à la fenêtre stricte et le masque associé à l'imputation scope dans deux clés séparées et que "get_imputation_window_mask" ait un argument supplémentaire qui permette de chosiir la fenêtre stricte ou non. On choisira la fenêtre stricte ici et on avisera pour l'ensemble des autres utilisations de la méthode dans ce script.
             if hasattr(self, '_imputation_window_calc') and self._imputation_window_calc._is_fitted:
                 mask = self._imputation_window_calc.get_imputation_window_mask(X)
             else:
@@ -1005,6 +1006,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             y_sub = X.loc[mask, var_name]
 
             # Fallback si < 10 observations
+            # /!\ Faire en sorte que le nombre minimum d'observations d'entraînement soit un paramètre (avec une valeur par défaut fixée à 10) et changer la docstring pour ne plus mentionner "10" explicitement
             if len(X_sub) < 10:
                 fallback_scored.append((var_key, get_frequency_order(
                     self.detected_frequencies_[var_key]
@@ -1022,7 +1024,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Initialisation de la KFold : le mélange (shuffle=True) est
             # volontaire ici, l'objectif est de produire un ORDRE de variables
             # à imputer, pas une évaluation honnête d'un modèle de série
-            # temporelle — ne pas "corriger" en shuffle=False
+            # temporelle.
+            # En effet les données ne sont normalement plus des séries temporelles 
+            # mais sont toutes alignées afin d'être agrégées.
             kf = KFold(n_splits=5, shuffle=True, random_state=42)
             # Initialisation de la liste des scores
             mapes = []
@@ -1033,12 +1037,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 y_train, y_val = y_sub.iloc[train_idx], y_sub.iloc[val_idx]
                 # Estimation et prédiction sur la validation
                 try:
+                    # Clone de l'estimateur
                     est = clone(estimator)
+                    # Entraînement
                     est.fit(X_train, y_train)
+                    # Prédiction
                     preds = est.predict(X_val)
                     # Évite la division par zéro
                     non_zero = y_val != 0
                     if non_zero.sum() > 0:
+                        # /!\ Faire en sorte que l'on puisse choisir la métrique en argument ou mettre une métrique custom pourvu que la fonction ait la bonne forme (il me semble que sklearn impose déjà ce genre de choses pour ceux qui veulent utiliser des métriques custom dans l'argument "scoring", je souhaite faire quelque chose de similaire ici (voir réutiliser une primitive de sklearn permettant de faire cela)). MAPE serait la valeur par défaut.
                         mapes.append(mean_absolute_percentage_error(
                             y_val[non_zero], preds[non_zero]
                         ))
@@ -1180,7 +1188,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if isinstance(pred_freq, dict):
             if isinstance(var_key, tuple):
                 # Décomposition de la clé et accès DIRECT : la variable est
-                # imputée à cette étape, donc son entité y figure (§5.4)
+                # imputée à cette étape, donc son entité y figure
                 entity, _ = split_variable_key(var_key)
                 pf = pred_freq[entity]
             else:
@@ -1189,7 +1197,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             pf = pred_freq
 
         # "get_conversion_factor(haut, bas)" : nombre de périodes hautes dans
-        # une période basse, décompte calendaire (12 mois par an, pas 12.17)
+        # une période basse, décompte calendaire
         return self._freq_converter.get_conversion_factor(
             pf,
             self.detected_frequencies_[var_key],
@@ -1268,7 +1276,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     ) -> Tuple[pd.Series, pd.Series]:
         """Rescale predictions so each period sums to its observed total.
 
-        Implements the additive constraint of review §2.6 (option 1): the
+        Implements the additive constraint : the
         sub-periods predicted for one period of a lower-frequency variable
         are multiplied by ``observed total / predicted total``, so that the
         column carries a genuine disaggregation of the observation instead
@@ -1414,6 +1422,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if not self.enforce_period_totals or stage_group is None:
             return values, pd.Series(False, index=values.index)
 
+        # Extraction du nom de la variable
         var_name = stage_group['var_name']
         if var_name not in X_input.columns:
             return values, pd.Series(False, index=values.index)
@@ -1423,6 +1432,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             X_input.index, stage_group['f_var'], stage_group.get('entities')
         )
 
+        # /!\ J'aimerais rendre optionnelle la cohérence des imputatiohs entre périodes et qu'elle soit pilotée par un argument. Cela peut peut-être être fait en rendant toute la méthode "_apply_period_totals" optionnelle dans le "fit" et pas seulement cette sous-méthode.
         return self._rescale_to_period_totals(
             values, X_input[var_name], period_membership, context=context
         )
@@ -1693,8 +1703,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         against the ``f_var``-scale target. Predictions, on the other hand,
         are made on covariates carried at the stage frequency ``pred_freq``.
         The gap between both scales is precisely what ``scale_factor`` is
-        meant to absorb, which is why this aggregation conditions the
-        validity of the frequency scaling (see review §2.1 and §5.1).
+        meant to absorb.
 
         The variable's own column is always read from ``X_original``: a
         variable is never trained on its own imputations from earlier
@@ -1716,6 +1725,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             per-covariate sub-period count used to bring each aggregated
             column back to the scale it carries at prediction time.
         """
+        # /!\ Voir si le fait de ne jamais entraîner la prédiction d'une variable y sur ses valeurs imputées lors de cascade précédente est facilement modifiable et paramétrisable. Si ce n'est pas trop compliqué, j'aimerais que l'on puisse choisir si lors de la cascade on entraine également le modèle sur des valeurs prédites à des étapes précédentes (et donc bruitées ou non). Dans le mode de cascade_refitting, j'aimerais qu'on puisse également ajouter grâce à un argument la provenance des différents X (soit sous forme de variable catégorielle car le odèle tolère des variables non numériques, soit sous forme de one-hot).
+
         # Extraction du nom de la variable
         _, var_name = split_variable_key(var_key)
 
@@ -1725,6 +1736,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             if c != var_name
         ]
 
+        # /!\ Si self.cascade_refitting = False, ne faut-il pas se restreindre aux variables qui sont à une fréquence supérieure ou égale à la fréquence de prédiction pour ne pas entrainer un modèle sur des variables qui seront Nan en prédiction ?
+        
         # Si la série est univariée, renvoie des éléments vides
         if not feature_cols:
             return pd.DataFrame(), pd.Series(dtype=float), 1.0, pd.Series(dtype=float)
@@ -1733,9 +1746,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         y_source = X_original[var_name]
 
         # Masque d'entraînement : fenêtre d'entraînement + valeurs non-null pour y
+        # /!\ Pourquoi se restreint-on au à l'imputation mask pour les données d'entrainement ? Cela ne me semble a priori pertinent que pour les données de prédiction
         if hasattr(self, '_imputation_window_calc') and self._imputation_window_calc._is_fitted:
             # Extraction du mask d'imputation
             training_mask = self._imputation_window_calc.get_imputation_window_mask(X_stage)
+            # /!\ Je ne pense pas qu'il y ait besoin de se restreindre à la fenêtre stricte ici
             # Hybridation avec la période de disponibilité de y
             training_mask &= y_source.notna()
         else:
@@ -1744,11 +1759,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Restriction aux données originales si train_on_partial_coverage=False
         if not self.train_on_partial_coverage:
             if hasattr(self, '_provenance_tracker'):
-                # DISAGGREGATED est admis au même titre qu'ORIGINAL : les dates-ancres
-                # d'une variable désagrégée à une étape antérieure changent de
-                # provenance (revue §2.6) alors que "y_source" reste lu dans les
+                # DISAGGREGATED et AGGREGATED sont admis au même titre qu'ORIGINAL : 
+                # les dates-ancres d'une variable désagrégée à une étape antérieure 
+                # changent de provenance alors que "y_source" reste lu dans les
                 # données d'origine — les exclure viderait le masque à l'étape
                 # suivante et enverrait tout en repli
+                # /!\ Ne serait-il pas logique de rajouter ProvenanceType.AGGREGATED ici car dans le cas où l'on a des données additives, il n'y a pas d'approximation dans l'agrégation ?
                 original_mask = self._provenance_tracker.get_mask(
                     [ProvenanceType.ORIGINAL, ProvenanceType.DISAGGREGATED],
                     column=var_name
@@ -1887,15 +1903,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """Group the rows to predict by their pattern of available covariates.
 
         The rows in scope are given by ``rows_mask`` rather than derived
-        here from ``isna()``: since the disaggregation of review §2.6, the
-        scope covers the anchor dates too — a variable's own observed value
-        no longer excludes its row from prediction. The caller therefore
+        here from ``isna()``. The caller therefore
         intersects the disaggregation scope with the imputation window (see
         :meth:`_prediction_masks`).
 
         Groups are ordered from the richest covariate pattern to the
         poorest, the empty pattern last: callers skip that final group
-        instead of imputing from nothing (review §2.7).
+        instead of imputing from nothing.
 
         Args:
             X_stage: Stage frame the prediction reads its covariates from.
@@ -1957,11 +1971,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     ) -> Tuple[pd.Series, pd.Series]:
         """Build the disaggregation scope and the predictable rows of a stage.
 
-        The scope is the whole grid of the group, anchor dates included
-        (review §2.6): the variable is re-expressed at the stage frequency
+        The scope is the whole grid of the group, anchor dates included :
+        the variable is re-expressed at the stage frequency
         over all of it, so no row of the scope may keep a low-frequency
         total. The predictable rows are the scope restricted to the
-        imputation window (review §2.7): nothing is ever predicted outside
+        imputation window : nothing is ever predicted outside
         the window, where covariate coverage is insufficient by
         construction.
 
@@ -2025,10 +2039,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Predictions indexed by the rows actually predicted — a subset of
             ``rows_mask``, empty when no row carries any covariate.
         """
+        # Extraction des noms des colonnes de features
         feature_cols = list(step.feature_cols)
-        # Statistiques de remplissage du jeu d'entraînement (§2.7). Une étape
+        # Statistiques de remplissage du jeu d'entraînement. Une étape
         # peut ne pas en porter : repli sur zéro, neutre pour les estimateurs
         # linéaires centrés
+        # /!\ A supprimer si on retire l'imputation
         feature_means = step.feature_means
         if feature_means is None:
             feature_means = pd.Series(0.0, index=feature_cols)
@@ -2038,7 +2054,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             X_stage, rows_mask, feature_cols
         )
 
+        # Initialisation de la liste des observations prédites
         predicted: List[pd.Series] = []
+        # Initialisation de la liste des observations ignorées
         skipped: List[pd.Index] = []
 
         # Parcours des groupes, du plus riche en covariables au plus pauvre
@@ -2062,12 +2080,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Avertissement agrégé sur les dates laissées non imputées
         if skipped:
+            # Extraction des observations ignorées
             skipped_index = skipped[0].append(skipped[1:]) if len(skipped) > 1 else skipped[0]
             suffix = f" for {context}" if context else ""
+            # Logging
             self._log(
                 f"No covariate available{suffix} on {len(skipped_index)} date(s): "
                 f"left unimputed ({list(skipped_index[:5])}{'...' if len(skipped_index) > 5 else ''})"
             )
+            # Warning
             warnings.warn(
                 f"No covariate available{suffix} on {len(skipped_index)} date(s) "
                 f"(e.g. {skipped_index[0]}): they are left unimputed rather than "
@@ -2095,14 +2116,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     ) -> None:
         """Mark aggregated values in the provenance tracker.
 
-        Only the cells that actually CARRY an aggregate are marked: an
+        Only the cells that actually carry an aggregate are marked: an
         aggregation to a lower frequency leaves the sub-period rows empty,
-        and marking them too (review §2.8.2) would claim NaN cells were
-        aggregated. Cells already marked ORIGINAL are excluded too: since
+        and marking them too would claim NaN cells were aggregated.
+        Cells already marked ORIGINAL are excluded too: since
         aggregation runs at every stage, a column that already held a true
         observation at this index would otherwise have its ORIGINAL
         provenance overwritten by AGGREGATED, even though nothing was
-        actually aggregated to obtain it (review §2.8.2).
+        actually aggregated to obtain it.
 
         Args:
             tracker: Provenance tracker instance.
@@ -2420,7 +2441,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # PHASE 3 — Frequency prediction list
         # =================================================================
         # Construction de la liste des fréquences pour lesquelles il faut imputer les variables
-        freq_prediction_list = self._build_frequency_prediction_list()
+        # Conservation de la liste des étapes : le replay de "_transform" la rejoue à l'identique
+        self.freq_prediction_list_ = self._build_frequency_prediction_list()
 
         # =================================================================
         # PHASE 4 — Provenance initialization
@@ -2433,8 +2455,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 5 — Iterate over frequency prediction list
         # =================================================================
-        # Plan d'imputation : unique état écrit par le fit (review §5.3). Une
-        # étape immuable par couple (fréquence de prédiction, groupe de
+        # Une étape immuable par couple (fréquence de prédiction, groupe de
         # variables), portant tout ce dont le replay a besoin — modèle,
         # colonnes et statistiques d'entraînement, facteurs d'échelle, et les
         # métadonnées de désagrégation (fréquence source, entités concernées),
@@ -2442,25 +2463,27 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # "imputation_models_", "model_fitting_order_", "stage_groups_" et
         # "frequency_progression_" en sont des vues dérivées en lecture seule
         self.imputation_plan_: List[ImputationStep] = []
-        # Conservation de la liste des étapes : le replay de "_transform" la rejoue à l'identique
-        self.freq_prediction_list_ = freq_prediction_list
+        
         # Imputations déjà réalisées, par nom de variable : elles alimentent les
-        # covariables des étapes suivantes, jamais X_work
+        # covariables des étapes suivantes
         imputed_store: Dict[str, pd.Series] = {}
 
-        for pred_freq in freq_prediction_list:
+        # Parcours des fréquences pour lesquelles il faut entraîner un modèle de prédiction
+        for pred_freq in self.freq_prediction_list_:
             # 5a. Classification des variables relative à pred_freq
             var_classification = self._classify_variables_at_frequency(pred_freq)
             aggregate_keys = var_classification['aggregate']
             impute_keys = var_classification['impute']
 
+            # Logging
             self._log(
                 f"[fit] Stage {self._stage_frequency_label(pred_freq)}: "
                 f"{len(impute_keys)} variable(s) to impute: {impute_keys}"
             )
 
             # 5b. Construction du frame de l'étape, reconstruit depuis les données d'origine
-            X_stage = self._build_stage_frame(X_work, imputed_store, pred_freq)
+            # /!\ Voir si "aggregate_keys" ne peut pas être donné en argument de la méthode "_build_stage_frame" plutôt que recalculé à l'aide de classify_variable_at_frequency à l'intérieur de la méthode.
+            X_stage = self._build_stage_frame(X_original=X_work, imputed_store=imputed_store, pred_freq=pred_freq)
             # Marquage de la provenance sur le frame d'étape (index d'origine)
             self._mark_aggregated_provenance(
                 self._provenance_tracker, X_stage, aggregate_keys
@@ -2482,15 +2505,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # 5d. Regroupement des clés d'imputation par variable au sein de l'étape :
             # pour un panel, "ordered_impute_keys" contient une clé par couple
             # (entité, variable), mais le modèle entraîné reste GLOBAL au panel
-            # (conforme à la spécification "l'entraînement se fait sur l'ensemble des
-            # entités") — itérer par entité ne ferait donc que refitter et réécraser
-            # exactement le même modèle plusieurs fois. Le regroupement se fait sur
-            # (variable, fréquence détectée) et non la seule variable : le facteur
-            # d'échelle et l'agrégation d'entraînement dépendent de la fréquence, qui
-            # peut différer selon l'entité pour une même variable.
-            # Piste inverse, non retenue ici (de vrais modèles par entité) :
-            # restreindre "training_mask" et "missing_mask" à l'entité via
-            # "get_entity_mask".
+            # Le regroupement se fait sur (variable, fréquence détectée) et non la seule 
+            # variable : le facteur d'échelle et l'agrégation d'entraînement dépendent 
+            # de la fréquence, qui peut différer selon l'entité pour une même variable.
             vars_in_stage: "OrderedDict[Tuple[str, str], List[Union[str, Tuple]]]" = OrderedDict()
             for var_key in ordered_impute_keys:
                 _, var_name = split_variable_key(var_key)
@@ -2508,6 +2525,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # 5d'. Un seul fit par groupe (variable[, fréquence]), sur l'ensemble
             # des entités du groupe
             for (var_name, freq_norm), var_keys in vars_in_stage.items():
+                # Construction de la clé du groupe (nom de la variable / nom de la variable x fréquence)
                 group_key = (
                     var_name if len(freqs_per_var[var_name]) == 1
                     else (var_name, freq_norm)
@@ -2516,6 +2534,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 # variable) qui le composent) : seuls le nom de colonne et la
                 # fréquence détectée comptent pour préparer les données
                 # d'entraînement, le modèle étant global au panel
+                # /!\ Est-ce que cela fonctionne aussi lorsque l'entité est représentée par plusieurs variables de sorte que le tuple (entité, variable) est de longueur supérieure à 2 ?
                 repr_var_key = var_keys[0]
 
                 # Champs d'identité de l'étape, communs à tous les chemins
@@ -2552,28 +2571,33 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     trained_on_imputed=False,
                 )
 
-                # Sans réentraînement, un seul fit par variable : les étapes
-                # suivantes réutilisent le modèle avec le facteur de l'étape.
-                # "replace" partage la référence de l'estimateur et conserve
-                # "fit_scale_factor", l'échelle cuite dans le modèle
+                # Sans réentraînement, un seul fit par variable.
+                # "replace" partage la référence de l'estimateur et conserve "fit_scale_factor"
                 if not self.cascade_refitting:
+                    # Extraction du modèle
                     base = self._model_for_var(group_key)
+                    # Mise à jour de l'étape d'imputation
                     if base is not None:
                         self.imputation_plan_.append(
                             replace(base, **stage_fields, scale_factor=stage_scale)
                         )
                         continue
 
+                # Extraction de l'estimateur
                 estimator = self._get_estimator_for_variable(var_name)
+                # Cas où l'estimateur n'est pas renseigné
                 if estimator is None:
+                    # Logging
                     self._log(
                         f"[fit] Fallback interpolate_fallback for '{var_name}': "
                         f"no estimator available"
                     )
+                    # Warning
                     warnings.warn(
                         f"No estimator available for variable '{var_name}', "
                         f"using linear interpolation as fallback"
                     )
+                    # Fallback sur l'interpolation
                     self.imputation_plan_.append(fallback_step)
                     continue
 
@@ -2582,15 +2606,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     X_stage, X_work, repr_var_key, pred_freq
                 )
 
+                # Vérification qu'il y a au moins deux observations dans le jeu de données d'entraînement
                 if len(X_train) < 2:
+                    # Logging
                     self._log(
                         f"[fit] Fallback interpolate_fallback for '{var_name}': "
                         f"insufficient training data ({len(X_train)} observation(s))"
                     )
+                    # Warning
                     warnings.warn(
                         f"Not enough training data for variable '{var_name}', "
                         f"using linear interpolation as fallback"
                     )
+                    # Repli sur l'interpolation
                     self.imputation_plan_.append(fallback_step)
                     continue
 
@@ -2599,6 +2627,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     X_train, y_train, scale_factor, feature_factors
                 )
 
+                # /!\ Je pensais supprimer cette étape d'imputation "naïve" des Nan à la moyenne car je pense préférable de laisser l'utilisateur fournir dans son estimateur (qui peut être un Pipeline sklearn), la méthode d'imputation des Nan qui lui semble la meilleure ou un estimateur qui est robuste aux Nan. Cette remarque me semble par ailleurs cohérente avec celle que je fais dans "_prepare_training_data" sur la sélection des features_cols lorsque "cascade_refitting=False".
                 # Imputation simple des NaN dans les features. Les statistiques
                 # employées sont celles du JEU D'ENTRAÎNEMENT et sont conservées
                 # dans le registre : la prédiction les réapplique à l'identique
@@ -2617,28 +2646,35 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                 # Repli si le jeu d'entraînement est trop petit ou sans covariable exploitable
                 if len(X_train_scaled) < 2 or X_train_scaled.shape[1] == 0:
+                    # Logging
                     self._log(
                         f"[fit] Fallback interpolate_fallback for '{var_name}': "
                         f"insufficient training data after preprocessing "
                         f"({len(X_train_scaled)} observation(s), "
                         f"{X_train_scaled.shape[1]} usable covariate(s))"
                     )
+                    # Repli sur l'interpolation
                     self.imputation_plan_.append(fallback_step)
                     continue
 
                 # 5f. Fit du modèle + construction de l'étape
                 feature_cols = list(X_train_scaled.columns)
                 try:
+                    # Entraînement de l'estimateur
                     estimator.fit(X_train_scaled, y_train_scaled)
+                    # Booléen indiquant si le modèle a été entraîné sur des valeurs imputées
+                    # /!\ Je n'arrive pas à voir à quel moment les valeurs imputées ont été ajoutées au jeu de données avant l'entraînement de l'estimateur, peux tu me l'indiquer ?
                     trained_on_imputed = (
                         self.train_on_partial_coverage and bool(imputed_store)
                     )
+                    # Paramètres de cette étape d'imputation pour la transformation
                     step = ImputationStep(
                         **stage_fields,
                         model=estimator,
                         feature_cols=tuple(feature_cols),
                         # Moyennes du jeu d'entraînement, réappliquées à la
                         # prédiction pour compléter les covariables manquantes
+                        # /!\ A supprimer si on retire l'imputation des Nan plus haut
                         feature_means=feature_means.reindex(feature_cols),
                         scale_factor=scale_factor,
                         # Facteur cuit dans le modèle : y_train en a été divisé.
@@ -2648,49 +2684,58 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     )
                     # Décompte valeurs vraies vs imputées effectivement vues à
                     # l'entraînement, à partir de la provenance au moment du fit
+                    # /!\ Ne serait-il pas logique de rajouter ProvenanceType.AGGREGATED ici car dans le cas où l'on a des données additives, il n'y a pas d'approximation dans l'agrégation ?
                     original_mask = self._provenance_tracker.get_mask(
                         [ProvenanceType.ORIGINAL, ProvenanceType.DISAGGREGATED],
                         column=var_name
                     ).reindex(y_train_scaled.index).fillna(False)
+                    # Calcul du nombre de vraies valeurs dans le masque original
                     n_true = int(original_mask.sum())
+                    # Logging
                     self._log(
                         f"[fit] Fit '{var_name}' at frequency {freq_norm} on "
                         f"{len(y_train_scaled)} observation(s) "
                         f"({n_true} true, {len(y_train_scaled) - n_true} imputed, "
                         f"trained_on_imputed={trained_on_imputed})"
                     )
+                # Cas d'erreur
                 except Exception as e:
+                    # Logging
                     self._log(
                         f"[fit] Fallback interpolate_fallback for '{var_name}': "
                         f"fit failed with {e!r}"
                     )
+                    # Warning
                     warnings.warn(
                         f"Failed to fit model for variable '{var_name}': {e}. "
                         f"Using linear interpolation as fallback"
                     )
+                    # Repli sur l'interpolation
                     step = fallback_step
 
                 # Enregistrement unique de l'étape : le chemin nominal et le
-                # repli sur échec écrivent la même entrée de plan, là où deux
-                # écritures successives dans le registre devaient s'écraser
+                # repli sur échec écrivent la même entrée de plan.
                 self.imputation_plan_.append(step)
 
                 # 5g. Cascade refitting : application des prédictions intermédiaires,
-                # sur l'ensemble des entités du groupe en une seule passe (le modèle
-                # est global au panel, cf. 5d)
+                # sur l'ensemble des entités
                 if self.cascade_refitting:
+                    # Cas où l'étape correspond effectivement à un modèle entrainé (et non à l'interpolation par défaut)
                     if not step.is_fallback:
+                        # Extraction des méta-données de l'étape
                         stage_group = step.group_metadata()
+                        # Extraction du contexte (variable prédite et fréquence du prédiction)
                         stage_context = (
                             f"'{var_name}' at stage "
                             f"{self._stage_frequency_label(pred_freq)}"
                         )
                         # Périmètre de désagrégation (toute la grille du groupe,
-                        # dates-ancres comprises, §2.6) et lignes prédictibles
-                        # (restreintes à la fenêtre d'imputation, §2.7)
+                        # dates-ancres comprises) et lignes prédictibles
+                        # (restreintes à la fenêtre d'imputation)
                         scope_mask, predict_mask = self._prediction_masks(
                             X_stage, X_work, stage_group, var_name
                         )
+                        # Cas où le masque est non vide
                         if scope_mask.any():
                             try:
                                 # Les prédictions sont déjà à l'échelle de la fréquence
@@ -2710,7 +2755,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                                 # désagrégation est d'abord vidé en entier : une ancre
                                 # laissée non prédite ne doit pas conserver le total de
                                 # sa période dans une colonne à l'échelle de la
-                                # sous-période (§2.6)
+                                # sous-période
                                 X_stage.loc[scope_mask, var_name] = np.nan
                                 X_stage.loc[preds.index, var_name] = preds
                                 # Alimentation du magasin d'imputations pour les étapes
@@ -2726,15 +2771,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                                 # Marquage provenance : DISAGGREGATED sur les cellules
                                 # effectivement recalées, MODEL_ON_* sur les autres.
-                                # "preds.index" couvre toutes les entités du groupe, ce
-                                # qui est cohérent avec le modèle GLOBAL au panel (§2.4) :
-                                # marquer par "var_name" seul, sans restriction d'entité,
-                                # ne perd donc aucune information (review §2.8.3)
+                                # "preds.index" couvre toutes les entités du groupe
                                 self._mark_imputed_cells(
                                     self._provenance_tracker, var_name, preds.index,
                                     disagg_mask, step.trained_on_imputed
                                 )
                             except Exception as e:
+                                # Warning
                                 warnings.warn(
                                     f"Intermediate imputation failed for '{var_name}': {e}"
                                 )
@@ -2742,19 +2785,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 6 — Finalisation
         # =================================================================
-        # "frequency_progression_" n'est plus matérialisé : c'est une vue
-        # dérivée du plan, calculée à la lecture
 
-        if self.impute_delayed_values:
-            warnings.warn(
-                "impute_delayed_values is deprecated and has no effect: publication "
-                "delays are now handled by imputation_scope='extended_forward' "
-                "combined with coverage_threshold, which imputes delayed series ends "
-                "directly from the extended training window (review §2.9).",
-                DeprecationWarning
-            )
-
-        # Attribut distinct de celui écrit par "_transform" (review §2.8.1) :
+        # Attribut distinct de celui écrit par "_transform" :
         # sans cela, un "fit_transform" perdrait la trace du fit, écrasée par
         # celle du transform qui suit immédiatement
         self.imputation_provenance_fit_ = self._provenance_tracker.get_provenance_matrix()
@@ -2793,22 +2825,25 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             (X_transformed, y_transformed) if y is provided.
         """
         # 1. Setup
+        # Vérification que l'entrée est un DataFrame
         if not isinstance(X, pd.DataFrame):
             raise ValueError(f"X must be a pandas DataFrame, got {type(X).__name__}")
 
         # Mémorisation de l'entrée du DERNIER transform : la transformation
         # inverse y lit l'index source, ses noms de niveaux et, sur demande
-        # (restore_original_values), les valeurs d'origine exactes (§2.10).
+        # (restore_original_values), les valeurs d'origine exactes.
         # Cet instantané est donc écrasé à chaque appel de transform
         self._original_X_ = X.copy()
         self._original_y_ = y.copy() if y is not None else None
 
+        # Extraction du nom de y
         y_col_name = None
         if y is not None:
             y_col_name = y.name if y.name is not None else '__target__'
             data_work = pd.concat([X, y.to_frame(name=y_col_name)], axis=1)
         else:
             data_work = X.copy()
+
 
         if not isinstance(data_work.index, (pd.DatetimeIndex, pd.MultiIndex)):
             if self.time_col and self.time_col in data_work.columns:
@@ -2820,15 +2855,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         transform_tracker = ImputationProvenanceTracker()
         transform_tracker.initialize(data_work, panel_cols=self.panel_cols)
 
-        # 2. Appliquer additive transformer
+        # 2. Application du transformer additif
         if self.additive_transformer_ is not None:
+            # Transformation additive
             data_transformed = self.additive_transformer_.transform(data_work)
+            # Extraction du premier élément du tuple si le transformer ne renvoie pas un DataFrame (le premier élément correspond à X)
             if isinstance(data_transformed, tuple):
                 data_transformed = data_transformed[0]
         else:
             data_transformed = data_work.copy()
 
-        # 3. Rejouer les étapes du fit dans le même ordre, avec les mêmes frames d'étape
+        # 3. Réapplication les étapes du fit dans le même ordre, avec les mêmes frames d'étape
         # Frame d'entrée du replay : jamais modifié, il sert de base à chaque étape
         X_input = data_transformed
         # Imputations déjà réalisées, alimentant les covariables des étapes suivantes
@@ -2838,18 +2875,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         stage_frames: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
         # Instantané de la matrice de provenance par label de fréquence réel,
         # capturé au même moment que "stage_frames" : "transform_tracker" est
-        # unique et continue d'être écrit aux étapes suivantes, donc sans cet
-        # instantané la provenance d'un niveau bas serait écrasée par celle
-        # d'une étape ultérieure (review §2.8.4)
+        # unique et continue d'être écrit aux étapes suivantes.
         provenance_frames: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
 
+        # Parcours des étapes
         for stage_idx, pred_freq in enumerate(self.freq_prediction_list_):
             # Classification des variables relative à pred_freq
             var_classification = self._classify_variables_at_frequency(pred_freq)
+            # Extraction des variables à agréger
             aggregate_keys = var_classification['aggregate']
 
             # Construction du frame d'étape : même méthode qu'au fit, mêmes frames
             X_stage = self._build_stage_frame(X_input, imputed_store, pred_freq)
+            # Indication de la provenance
             self._mark_aggregated_provenance(
                 transform_tracker, X_stage, aggregate_keys
             )
@@ -2861,11 +2899,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 if step.pred_freq_label == registry_label
             ]
 
-            # Label de fréquence réel de l'étape (jamais 'target', cf. §2.5)
+            # Label de fréquence réel de l'étape
             freq_label = self._stage_frequency_label(pred_freq)
+            # Booléen indiquant s'il s'agit de la dernière étape
             is_final_stage = stage_idx == len(self.freq_prediction_list_) - 1
 
+            # Extraction du nom de la variable imputée dans l'étape
             stage_var_names = [step.var_name for step in stage_steps]
+            # Logging
             self._log(
                 f"[transform] Stage {freq_label}: replaying "
                 f"{len(stage_var_names)} variable(s): {stage_var_names}"
@@ -2882,7 +2923,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 stage_group = step.group_metadata()
                 stage_context = f"'{var_name}' at stage {freq_label}"
 
+                # Cas où l'étape est le cas de repli sur l'interpolation
                 if step.is_fallback:
+                    # Logging
                     self._log(
                         f"[transform] Fallback interpolate_fallback for "
                         f"'{var_name}' at stage {freq_label}: registered as "
@@ -2893,22 +2936,23 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     if var_name in X_stage.columns:
                         # L'ancre sert de point d'appui à l'interpolation, puis le
                         # recalage proportionnel la ramène à l'échelle de la
-                        # sous-période : sans cela la colonne repliée garderait le
-                        # mélange d'échelles du §2.6
+                        # sous-période
                         interpolated = X_stage[var_name].interpolate(
                             method='linear', limit_direction='both'
                         )
                         # Même restriction que le chemin modèle : rien n'est
-                        # produit hors de la fenêtre d'imputation (§2.7)
+                        # produit hors de la fenêtre d'imputation
                         scope_mask, predict_mask = self._prediction_masks(
                             X_stage, X_input, stage_group, var_name
                         )
+                        # Application de la contrainte d'agrégation
                         rescaled, disagg_mask = self._apply_period_totals(
                             interpolated.loc[predict_mask], X_input,
                             stage_group, context=stage_context
                         )
                         X_stage.loc[scope_mask, var_name] = np.nan
                         X_stage.loc[rescaled.index, var_name] = rescaled
+                        # Marquage de la provenance des cases imputées
                         self._mark_imputed_cells(
                             transform_tracker, var_name, rescaled.index,
                             disagg_mask, False
@@ -2921,8 +2965,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                 # Périmètre de désagrégation (toute la grille du groupe, dates-ancres
                 # comprises, pour que la colonne ne mélange pas le total de la période
-                # basse fréquence et des valeurs de sous-période, §2.6) et lignes
-                # prédictibles (restreintes à la fenêtre d'imputation, §2.7)
+                # basse fréquence et des valeurs de sous-période) et lignes
+                # prédictibles (restreintes à la fenêtre d'imputation)
                 scope_mask, predict_mask = self._prediction_masks(
                     X_stage, X_input, stage_group, var_name
                 )
@@ -2943,7 +2987,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     # Cascade intra-étape : le frame de l'étape porte le résultat.
                     # Le périmètre de désagrégation est d'abord vidé en entier, une
                     # ancre laissée non prédite ne devant pas conserver le total de
-                    # sa période dans une colonne à l'échelle de la sous-période (§2.6)
+                    # sa période dans une colonne à l'échelle de la sous-période
                     X_stage.loc[scope_mask, var_name] = np.nan
                     X_stage.loc[predictions.index, var_name] = predictions
                     # Alimentation des étapes suivantes, symétrique du bloc 5g du
@@ -2961,27 +3005,30 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                     # Marquage provenance : DISAGGREGATED sur les cellules
                     # effectivement recalées, MODEL_ON_* sur les autres. Même
-                    # remarque qu'au fit (§2.8.3) : "predictions.index" couvre
+                    # remarque qu'au fit : "predictions.index" couvre
                     # toutes les entités du groupe, cohérent avec le modèle GLOBAL
                     self._mark_imputed_cells(
                         transform_tracker, var_name, predictions.index,
                         disagg_mask, step.trained_on_imputed
                     )
                 except Exception as e:
+                    # Logging
                     self._log(
                         f"[transform] Fallback interpolate_fallback for "
                         f"'{var_name}' at stage {freq_label}: prediction "
                         f"failed with {e!r}"
                     )
+                    # Warning
                     warnings.warn(
                         f"Prediction failed for variable '{var_name}': {e}. "
                         f"Using interpolation fallback."
                     )
+                    # Repli sur l'interpolation
                     X_stage[var_name] = X_stage[var_name].interpolate(
                         method='linear', limit_direction='both'
                     )
 
-            # Stockage du frame d'étape APRÈS les imputations de l'étape (§2.5) :
+            # Stockage du frame d'étape APRÈS les imputations de l'étape :
             # un niveau par étape ayant produit au moins un modèle, plus la
             # dernière étape (fréquence cible) même sans imputation propre,
             # nécessaire à la sortie sans MultiIndex ci-dessous
@@ -3003,15 +3050,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # 5. Mise à jour de la provenance : une matrice par niveau de
         # fréquence, empilée avec la même structure d'index que
-        # "data_result" (§2.8.4), quand keep_lower_frequencies=True ; sinon
-        # la seule matrice au niveau cible, comme avant
+        # "data_result", quand keep_lower_frequencies=True ; sinon
+        # la seule matrice au niveau cible
         if self.keep_lower_frequencies and provenance_frames:
             self.imputation_provenance_ = self._build_multifreq_output(provenance_frames)
         else:
             self.imputation_provenance_ = transform_tracker.get_provenance_matrix()
 
-        # Résumé de provenance (mode verbeux uniquement, review §5.6)
+        # Résumé de provenance
         overall_stats = transform_tracker.compute_statistics()['overall']
+        # Logging
         self._log(
             "Transform summary: " + ", ".join(
                 f"{prov_type.value}={overall_stats[f'{prov_type.value}_pct']:.1f}%"
