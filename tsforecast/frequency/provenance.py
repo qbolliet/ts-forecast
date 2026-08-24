@@ -260,6 +260,43 @@ class ImputationProvenanceTracker:
         provenance = ProvenanceType.MODEL_ON_MIXED if trained_on_imputed else ProvenanceType.MODEL_ON_TRUE
         self.mark_imputed(column, index, provenance)
 
+    # Méthode de remise à zéro de la provenance de certaines observations
+    def clear_provenance(
+        self,
+        column: str,
+        index: Union[pd.Timestamp, pd.DatetimeIndex, slice]
+    ) -> None:
+        """Reset the provenance of specific cells to "not filled".
+
+        Symmetric of :meth:`mark_imputed`: it removes a provenance instead of
+        setting one. The cells go back to ``None``, the value
+        :meth:`initialize` gives to a NaN cell, so that a cell emptied by the
+        cascade stops being declared ORIGINAL while it no longer carries any
+        value.
+
+        Args:
+            column: Name of the column holding the cleared values.
+            index: Index location(s) of the cell(s) to reset.
+
+        Raises:
+            ValueError: If provenance matrix not initialized or column unknown.
+
+        Examples:
+            >>> tracker.clear_provenance('pib_trimestriel', anchor_dates)
+            >>> tracker.get_provenance('pib_trimestriel', anchor_dates[0]) is None
+            True
+        """
+        # Validation de l'initialisation
+        if self.provenance_matrix_ is None:
+            raise ValueError("Provenance matrix not initialized. Call initialize() first.")
+
+        # Validation de la colonne
+        if column not in self.provenance_matrix_.columns:
+            raise ValueError(f"Column '{column}' not found in provenance matrix")
+
+        # Remise à l'état "non renseigné" (convention de initialize pour un NaN)
+        self.provenance_matrix_.loc[index, column] = None
+
     # Méthode d'extraction de la provenance
     def get_provenance(
         self,
