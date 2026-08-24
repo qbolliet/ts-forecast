@@ -106,17 +106,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             identified via effective_target_frequency_. If False, the
             output is the plain frame of the last cascade stage (target
             frequency), with no frequency level in its index.
-        delays: Deprecated. Publication delays are now handled by
-            imputation_scope='extended_forward' combined with
-            coverage_threshold, which extends the training window to cover
-            delayed series ends directly (review §2.9). Still structurally
-            validated at init for backward compatibility, but never
-            consumed at fit/transform time.
-        impute_delayed_values: Deprecated. If True, emits a
-            DeprecationWarning at fit time and otherwise has no effect: use
-            imputation_scope='extended_forward' (with coverage_threshold)
-            instead, which handles delayed series ends through the standard
-            extended-window mechanism.
         on_frequency_mismatch: How to handle target_frequency higher than data ('error'/'warn').
         coverage_threshold: Minimum ratio of columns with data (0-1) for extended window.
         imputation_scope: Training window scope ('strict', 'extended_backward',
@@ -126,9 +115,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             train_on_partial_coverage is True:
             - 'frequency': Sort by frequency level then entity count (default)
             - 'cv': Use cross-validation to impute easiest variables first
-            - 'random': Deprecated alias for 'frequency' (the ordering it
-              names has never been random — it is a frequency sort).
-              Emits a DeprecationWarning at init.
         scale_features: If True, divide X_train by the number of sub-periods
             as well as y_train, which is always divided. Set it to True when
             the training covariates were aggregated by summation to the
@@ -310,13 +296,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         additive_transformer: Optional[TransformerMixin] = None,
         cascade_refitting: bool = True,
         keep_lower_frequencies: bool = True,
-        impute_delayed_values: bool = False,
-        delays: Optional[pd.DataFrame] = None,
         on_frequency_mismatch: Literal['error', 'warn'] = 'error',
         coverage_threshold: float = 0.5,
         imputation_scope: ImputationScope = 'strict',
         train_on_partial_coverage: bool = False,
-        train_on_partial_fit_order: Literal['frequency', 'cv', 'random'] = 'frequency',
+        train_on_partial_fit_order: Literal['frequency', 'cv'] = 'frequency',
         scale_features: bool = True,
         enforce_period_totals: bool = True,
         restore_original_values: bool = False,
@@ -352,17 +336,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 target level is identified via effective_target_frequency_,
                 not by a dedicated 'target' label). If False, only the
                 target frequency is returned as a plain frame.
-            impute_delayed_values: Deprecated. If True, emits a
-                DeprecationWarning at fit time and otherwise has no effect:
-                use imputation_scope='extended_forward' (with
-                coverage_threshold) instead, which extends the training
-                window to cover delayed series ends through the standard
-                extended-window mechanism. Default is False.
-            delays: Deprecated. Publication delays are now handled by
-                imputation_scope='extended_forward' combined with
-                coverage_threshold. Still structurally validated at init
-                for backward compatibility, but never consumed at
-                fit/transform time.
             on_frequency_mismatch: How to handle target_frequency higher than
                 data frequencies ('error'/'warn').
             coverage_threshold: Minimum percentage of columns (0-1) that
@@ -373,8 +346,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             train_on_partial_fit_order: Order for variable imputation:
                 - 'frequency': By frequency level then entity count (default)
                 - 'cv': Cross-validation to find easiest variables first
-                - 'random': Deprecated alias for 'frequency'. Emits a
-                  DeprecationWarning.
             scale_features: If True, divide X_train by the number of
                 sub-periods alongside y_train, which is always divided.
             enforce_period_totals: If True (default), rescale the sub-periods
@@ -412,15 +383,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if additive_transformer is not None:
             self._validate_additive_transformer(additive_transformer)
 
-        # Validation des délais de publication
-        if delays is not None:
-            required_cols = ['column', 'delay', 'unit', 'reference_point']
-            missing_cols = set(required_cols) - set(delays.columns)
-            if missing_cols:
-                raise ValueError(
-                    f"delays DataFrame missing required columns: {missing_cols}"
-                )
-
         if on_frequency_mismatch not in ['error', 'warn']:
             raise ValueError(
                 f"on_frequency_mismatch must be 'error' or 'warn', "
@@ -435,28 +397,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             raise ValueError(
                 f"imputation_scope must be one of {valid_scopes}, got '{imputation_scope}'"
             )
-        if train_on_partial_fit_order not in ('frequency', 'cv', 'random'):
+        if train_on_partial_fit_order not in ('frequency', 'cv'):
             raise ValueError(
                 f"train_on_partial_fit_order must be 'frequency' or 'cv', "
                 f"got '{train_on_partial_fit_order}'"
             )
-        if train_on_partial_fit_order == 'random':
-            warnings.warn(
-                "train_on_partial_fit_order='random' is deprecated and will be "
-                "removed in a future version: the ordering it names has never "
-                "been random (it is a frequency sort). Use 'frequency' instead, "
-                "which behaves identically.",
-                DeprecationWarning
-            )
-        # /!\ Je suis toujours en phase de développement, donc je ne souhaite pas maintenir des paramètres dépréciés pour assurer une cohérence dans l'API. Je souhaite ainsi supprimer "impute_delayed_values"
         # Instanciation des attributs
         self.target_frequency = target_frequency
         self.additive_transformer = additive_transformer
         self.estimator = estimator
-        self.delays = delays
         self.cascade_refitting = cascade_refitting
         self.keep_lower_frequencies = keep_lower_frequencies
-        self.impute_delayed_values = impute_delayed_values
         self.on_frequency_mismatch = on_frequency_mismatch
         self.coverage_threshold = coverage_threshold
         self.imputation_scope = imputation_scope

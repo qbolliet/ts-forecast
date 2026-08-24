@@ -27,31 +27,22 @@ class TestHighFrequencyImputerInit:
         assert imputer.target_frequency == 'M'
         assert imputer.additive_transformer is None
         assert imputer.estimator is None
-        assert imputer.delays is None
-        assert imputer.impute_delayed_values is False
         assert imputer.time_col is None
         assert imputer.panel_cols is None
         assert imputer.imputation_scope == 'strict'
         assert imputer.coverage_threshold == 0.5
+        assert imputer.train_on_partial_fit_order == 'frequency'
         assert imputer.verbose is False
 
     def test_init_with_all_parameters(self):
         """Test initialisation avec tous les paramètres."""
         estimator = LinearRegression()
         transformer = StandardScaler()
-        delays_df = pd.DataFrame({
-            'column': ['var1'],
-            'delay': [30],
-            'unit': ['D'],
-            'reference_point': ['end']
-        })
 
         imputer = HighFrequencyImputer(
             target_frequency='Q',
             additive_transformer=transformer,
             estimator=estimator,
-            delays=delays_df,
-            impute_delayed_values=True,
             imputation_scope='extended_forward',
             coverage_threshold=0.75,
             time_col='timestamp',
@@ -62,13 +53,25 @@ class TestHighFrequencyImputerInit:
         assert imputer.target_frequency == 'Q'
         assert imputer.additive_transformer is transformer
         assert imputer.estimator is estimator
-        assert imputer.delays is not None
-        assert imputer.impute_delayed_values is True
         assert imputer.imputation_scope == 'extended_forward'
         assert imputer.coverage_threshold == 0.75
         assert imputer.time_col == 'timestamp'
         assert imputer.panel_cols == ['country', 'sector']
         assert imputer.verbose is True
+
+    def test_removed_parameters_rejected(self):
+        """Les paramètres dépréciés supprimés de l'API lèvent une erreur de
+        construction : `delays` et `impute_delayed_values` n'existent plus
+        (TypeError, argument inconnu), et `train_on_partial_fit_order='random'`
+        n'est plus une valeur valide (ValueError)."""
+        with pytest.raises(TypeError):
+            HighFrequencyImputer(target_frequency='M', delays=None)
+
+        with pytest.raises(TypeError):
+            HighFrequencyImputer(target_frequency='M', impute_delayed_values=False)
+
+        with pytest.raises(ValueError, match="train_on_partial_fit_order"):
+            HighFrequencyImputer(target_frequency='M', train_on_partial_fit_order='random')
 
     def test_init_with_dict_estimator(self):
         """Test initialisation avec dictionnaire d'estimateurs."""
@@ -110,18 +113,6 @@ class TestHighFrequencyImputerValidation:
             HighFrequencyImputer(
                 target_frequency='M',
                 estimator="not_an_estimator"
-            )
-
-    def test_invalid_delays_dataframe(self):
-        """Test erreur avec DataFrame de délais incomplet.
-
-        La validation de `delays` a lieu à la construction (`__init__`),
-        pas à `fit()`.
-        """
-        with pytest.raises(ValueError, match="missing required columns"):
-            HighFrequencyImputer(
-                target_frequency='M',
-                delays=pd.DataFrame({'variable': ['var1']})  # Colonnes manquantes
             )
 
     def test_input_not_dataframe(self):
@@ -471,47 +462,9 @@ class TestHighFrequencyImputerPanelData:
 
 
 class TestHighFrequencyImputerDelays:
-    """§2.9 : `delays`/`impute_delayed_values` sont dépréciés au profit de
-    `imputation_scope='extended_forward'` + `coverage_threshold`, qui gère
-    nativement les fins de série retardées (revue §2.9)."""
-
-    def test_impute_delayed_values_true_emits_deprecation_warning(self):
-        """`impute_delayed_values=True` avertit à `fit` mais reste un no-op."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            estimator=LinearRegression(),
-            impute_delayed_values=True,
-        )
-
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({
-            'feature': range(12),
-            'target': list(range(10)) + [np.nan, np.nan]
-        }, index=dates)
-
-        with pytest.warns(DeprecationWarning, match="extended_forward"):
-            imputer.fit(df)
-
-        # L'ancien attribut d'inférence de délais n'existe plus
-        assert not hasattr(imputer, 'inferred_delays_')
-
-    def test_impute_delayed_values_false_emits_no_warning(self):
-        """`impute_delayed_values=False` (défaut) : aucun avertissement émis."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            estimator=LinearRegression(),
-            impute_delayed_values=False,
-        )
-
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({
-            'feature': range(12),
-            'target': list(range(10)) + [np.nan, np.nan]
-        }, index=dates)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', DeprecationWarning)
-            imputer.fit(df)  # ne doit pas lever
+    """§2.9 : `delays`/`impute_delayed_values` ont été retirés de l'API au
+    profit de `imputation_scope='extended_forward'` + `coverage_threshold`,
+    qui gère nativement les fins de série retardées (revue §2.9)."""
 
     def test_delayed_series_end_covered_by_extended_forward(self):
         """Fin de série retardée (3 derniers points NaN) couverte par la
@@ -2542,73 +2495,6 @@ class TestTrainOnPartialFitOrderCV:
         result = _fit_transform_quiet(imputer, df)
 
         assert len(result) == len(df)
-
-
-class TestTrainOnPartialFitOrderRenamed:
-    """§4.6 : `train_on_partial_fit_order='random'` est renommé en
-    `'frequency'` (le tri n'a jamais été aléatoire) ; `'random'` reste un
-    alias déprécié qui se comporte à l'identique."""
-
-    def _fit_data(self):
-        dates = pd.date_range('2018-01-01', periods=24, freq='MS')
-        rng = np.random.default_rng(7)
-        monthly = pd.Series(10.0 + rng.normal(0, 1.0, len(dates)), index=dates)
-        quarterly = pd.Series(np.nan, index=dates)
-        for _, block in monthly.groupby(monthly.index.to_period('Q')):
-            quarterly.loc[block.index[0]] = block.sum()
-        return pd.DataFrame({'monthly_var': monthly, 'quarterly_var': quarterly})
-
-    def test_random_emits_deprecation_warning(self):
-        """`train_on_partial_fit_order='random'` avertit dès l'init."""
-        with pytest.warns(DeprecationWarning, match="train_on_partial_fit_order"):
-            HighFrequencyImputer(
-                target_frequency='M',
-                estimator=LinearRegression(),
-                train_on_partial_coverage=True,
-                train_on_partial_fit_order='random',
-            )
-
-    def test_frequency_emits_no_deprecation_warning(self):
-        """La nouvelle valeur par défaut 'frequency' n'avertit pas."""
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', DeprecationWarning)
-            HighFrequencyImputer(
-                target_frequency='M',
-                estimator=LinearRegression(),
-                train_on_partial_coverage=True,
-                train_on_partial_fit_order='frequency',
-            )  # ne doit pas lever
-
-    def test_default_is_frequency(self):
-        """La valeur par défaut du paramètre est désormais 'frequency'."""
-        imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
-        assert imputer.train_on_partial_fit_order == 'frequency'
-
-    def test_random_behaves_like_frequency(self):
-        """'random' et 'frequency' produisent le même résultat de fit/transform."""
-        data = self._fit_data()
-
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            imputer_random = HighFrequencyImputer(
-                target_frequency='M',
-                estimator=LinearRegression(),
-                train_on_partial_coverage=True,
-                train_on_partial_fit_order='random',
-                keep_lower_frequencies=False,
-            )
-            result_random = imputer_random.fit_transform(data.copy())
-
-        imputer_frequency = HighFrequencyImputer(
-            target_frequency='M',
-            estimator=LinearRegression(),
-            train_on_partial_coverage=True,
-            train_on_partial_fit_order='frequency',
-            keep_lower_frequencies=False,
-        )
-        result_frequency = imputer_frequency.fit_transform(data.copy())
-
-        pd.testing.assert_frame_equal(result_random, result_frequency)
 
 
 class TestClassifyVariablesUnification:
