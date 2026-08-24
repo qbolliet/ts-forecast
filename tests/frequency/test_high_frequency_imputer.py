@@ -244,7 +244,7 @@ class TestHighFrequencyImputerClassification:
 
         imputer.fit(df)
 
-        assert imputer.variable_categories_.get('daily_var') == 'aggregate'
+        assert 'daily_var' in imputer.variable_categories_['aggregate']
 
     def test_classify_target_freq_variables(self):
         """Test classification des variables à la fréquence cible."""
@@ -255,7 +255,7 @@ class TestHighFrequencyImputerClassification:
 
         imputer.fit(df)
 
-        assert imputer.variable_categories_.get('monthly_var') == 'target_freq'
+        assert 'monthly_var' in imputer.variable_categories_['target_freq']
 
     def test_classify_impute_variables(self):
         """Test classification des variables basse fréquence pour imputation.
@@ -285,7 +285,7 @@ class TestHighFrequencyImputerClassification:
         imputer.fit(df)
 
         # La variable trimestrielle est classée pour imputation
-        assert imputer.variable_categories_.get('quarterly_var') == 'impute'
+        assert 'quarterly_var' in imputer.variable_categories_['impute']
 
 
 class TestHighFrequencyImputerAggregation:
@@ -676,7 +676,9 @@ class TestHighFrequencyImputerEdgeCases:
 
         # Pas d'agrégation ni d'imputation nécessaire
         assert isinstance(result, pd.DataFrame)
-        assert all(cat == 'target_freq' for cat in imputer.variable_categories_.values())
+        assert not imputer.variable_categories_['aggregate']
+        assert not imputer.variable_categories_['impute']
+        assert set(imputer.variable_categories_['target_freq']) == {'var1', 'var2'}
 
     def test_empty_dataframe(self):
         """Test avec DataFrame vide."""
@@ -2503,13 +2505,13 @@ class TestClassifyVariablesUnification:
     wrapper `_classify_variables()` proposé par la revue pour exposer le
     résultat relatif à `effective_target_frequency_` : cette méthode
     n'existe plus du tout, donc plus rien à comparer entre "les deux
-    méthodes". Seul `test_variable_categories_stays_key_to_category`
-    (conversion clé -> catégorie depuis le format unifié) garde un sens."""
+    méthodes". `variable_categories_` est exposé directement au format
+    catégorie -> liste de clés produit par `_classify_variables_at_frequency`
+    (§3.2 : plus d'aller-retour clé -> catégorie -> clé)."""
 
-    def test_variable_categories_stays_key_to_category(self):
-        """`variable_categories_` reste au format clé -> catégorie, converti
-        trivialement depuis le format catégorie -> liste des deux méthodes
-        unifiées (consommateurs externes documentés)."""
+    def test_variable_categories_format(self):
+        """Les trois clés de catégorie sont toujours présentes, leur union
+        couvre exactement `detected_frequencies_` et elles sont disjointes."""
         imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
 
         # "monthly_var" n'a une valeur qu'aux fins de mois (NaN ailleurs) pour
@@ -2523,8 +2525,19 @@ class TestClassifyVariablesUnification:
         }, index=dates)
         imputer.fit(df)
 
-        assert imputer.variable_categories_['daily_var'] == 'aggregate'
-        assert imputer.variable_categories_['monthly_var'] == 'target_freq'
+        assert set(imputer.variable_categories_.keys()) == {'aggregate', 'impute', 'target_freq'}
+
+        aggregate = set(imputer.variable_categories_['aggregate'])
+        impute = set(imputer.variable_categories_['impute'])
+        target_freq = set(imputer.variable_categories_['target_freq'])
+
+        assert aggregate | impute | target_freq == set(imputer.detected_frequencies_)
+        assert aggregate & impute == set()
+        assert aggregate & target_freq == set()
+        assert impute & target_freq == set()
+
+        assert 'daily_var' in aggregate
+        assert 'monthly_var' in target_freq
 
 
 class TestVerboseMode:

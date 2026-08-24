@@ -160,8 +160,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         detected_frequencies_: Detected frequency per variable — column name
             for a time series, flattened ``(entity..., column)`` tuple for a
             panel.
-        variable_categories_: Category per variable key (same key format as
-            detected_frequencies_): 'aggregate', 'impute', or 'target_freq'.
+        variable_categories_: Variable keys per category (same key format as
+            detected_frequencies_): ``Dict[VariableCategory, List[Union[str, Tuple]]]``
+            with keys 'aggregate', 'impute', and 'target_freq'.
         imputation_order_: Ordered list of variables for cascading imputation.
         imputation_plan_: SINGLE SOURCE OF TRUTH of the fitted cascade
             (review §5.3): the ordered list of
@@ -821,10 +822,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Ordered list of variable identifiers to impute.
         """
         # Extraction des variables à imputer de la liste
-        # /!\ Est ce que ce genre d'opérations sur les valeurs du dictionnaire ne donne pas envie de le formater comme le résultat de "_classify_variables_at_frequency"
-        impute_vars = [
-            key for key, cat in self.variable_categories_.items() if cat == 'impute'
-        ]
+        impute_vars = list(self.variable_categories_['impute'])
 
         # Cas où il n'y a pas de variables à imputer
         if not impute_vars:
@@ -1520,14 +1518,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Construction de la liste des fréquences uniques à imputer (qui correspondent aux fréquences plus faibles que la fréquence cible)
             # Initialisation de l'ensemble des fréquences à imputer
             impute_freqs = set()
-            # Parcours des variables
-            for key, cat in self.variable_categories_.items():
-                # Sélection des variables à imputer (à fréquence plus faible que la fréquence cible)
-                if cat == 'impute':
-                    # Extraction de la fréquence
-                    freq = self.detected_frequencies_[key]
-                    # Ajout à la liste
-                    impute_freqs.add(normalize_frequency(freq, return_format='base'))
+            # Parcours des variables à imputer (à fréquence plus faible que la fréquence cible)
+            for key in self.variable_categories_['impute']:
+                # Extraction de la fréquence
+                freq = self.detected_frequencies_[key]
+                # Ajout à la liste
+                impute_freqs.add(normalize_frequency(freq, return_format='base'))
 
             # Retourne la fréquence cible s'il n'y a rien à imputer
             if not impute_freqs:
@@ -2306,17 +2302,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             on_frequency_mismatch=self.on_frequency_mismatch,
         )
 
-        # Classification et ordre d'imputation. "variable_categories_" reste
-        # exposé au format clé -> catégorie (consommé par
-        # "_determine_imputation_order" et "_build_frequency_prediction_list",
-        # et documenté pour les consommateurs externes) via une conversion
-        # triviale du format catégorie -> liste de "_classify_variables" (§5.5)
-        variable_categories: Dict[Union[str, Tuple], VariableCategory] = {
-            key: category
-            for category, keys in self._classify_variables_at_frequency(self.effective_target_frequency_).items()
-            for key in keys
-        }
-        self.variable_categories_ = variable_categories
+        # Classification et ordre d'imputation
+        self.variable_categories_ = self._classify_variables_at_frequency(
+            self.effective_target_frequency_
+        )
         self.imputation_order_ = self._determine_imputation_order()
 
         # =================================================================
