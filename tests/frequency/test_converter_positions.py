@@ -25,8 +25,9 @@ class TestFrequencyConverterPositions:
         qe_dates = pd.date_range('2024-03-31', periods=4, freq='QE')
         qe_series = pd.Series([100, 200, 300, 400], index=qe_dates)
 
-        # Conversion vers mensuel
-        monthly = converter.convert_frequency(qe_series, 'M', method='mean')
+        # Conversion vers mensuel (upsampling : method doit être une méthode
+        # d'interpolation, 'mean' n'est valide que pour l'agrégation)
+        monthly = converter.convert_frequency(qe_series, 'M', method='linear')
 
         # Vérification que l'index mensuel est bien en position end (ME)
         # La fréquence inférée devrait être 'ME' ou équivalent
@@ -42,8 +43,9 @@ class TestFrequencyConverterPositions:
         qs_dates = pd.date_range('2024-01-01', periods=4, freq='QS')
         qs_series = pd.Series([100, 200, 300, 400], index=qs_dates)
 
-        # Conversion vers mensuel avec position start
-        monthly = converter.convert_frequency(qs_series, 'MS', method='mean')
+        # Conversion vers mensuel avec position start (upsampling : method
+        # doit être une méthode d'interpolation, pas 'mean')
+        monthly = converter.convert_frequency(qs_series, 'MS', method='linear')
 
         # Vérification que l'index mensuel est bien en position start (MS)
         detected_freq = pd.infer_freq(monthly.index)
@@ -75,11 +77,12 @@ class TestFrequencyConverterPositions:
         qe_dates = pd.date_range('2024-03-31', periods=4, freq='QE')
         qe_series = pd.Series([100, 200, 300, 400], index=qe_dates)
 
-        # Conversion vers mensuel avec position start explicite
+        # Conversion vers mensuel avec position start explicite (upsampling :
+        # method doit être une méthode d'interpolation, pas 'mean')
         monthly = converter.convert_frequency(
             qe_series,
             'M',
-            method='mean',
+            method='linear',
             target_position='start'
         )
 
@@ -94,7 +97,8 @@ class TestFrequencyConverterPositions:
         qe_series = pd.Series([100, 200, 300, 400], index=qe_dates)
 
         # Conversion vers mensuel avec position start dans target_freq
-        monthly = converter.convert_frequency(qe_series, 'MS', method='mean')
+        # (upsampling : method doit être une méthode d'interpolation, pas 'mean')
+        monthly = converter.convert_frequency(qe_series, 'MS', method='linear')
 
         # Vérification que la position start de target_freq est respectée
         detected_freq = pd.infer_freq(monthly.index)
@@ -156,8 +160,9 @@ class TestFrequencyConverterPositions:
         qe_dec_dates = pd.date_range('2024-03-31', periods=4, freq='QE-DEC')
         qe_series = pd.Series([100, 200, 300, 400], index=qe_dec_dates)
 
-        # Conversion vers mensuel
-        monthly = converter.convert_frequency(qe_series, 'ME', method='mean')
+        # Conversion vers mensuel (upsampling : method doit être une méthode
+        # d'interpolation, pas 'mean')
+        monthly = converter.convert_frequency(qe_series, 'ME', method='linear')
 
         # Vérification que la conversion fonctionne sans erreur
         assert len(monthly) > 0, "Conversion should produce non-empty result"
@@ -171,9 +176,11 @@ class TestFrequencyConverterPositions:
         qe_dates = pd.date_range('2024-03-31', periods=4, freq='QE')
         qe_series = pd.Series([100, 200, 300, 400], index=qe_dates)
 
-        # Conversion vers mensuel avec interpolation linéaire ET forward fill
-        # L'interpolation seule ne peut pas remplir les valeurs AVANT la première date
-        monthly = converter.convert_frequency(qe_series, 'ME', method='linear', fill_method='bfill')
+        # Conversion vers mensuel avec interpolation linéaire. 'fill_method'
+        # n'existe pas dans l'API actuelle : le comblement des valeurs AVANT
+        # la première date est géré par le limit_direction par défaut
+        # ('backward' pour une fréquence cible positionnée en fin de période)
+        monthly = converter.convert_frequency(qe_series, 'ME', method='linear')
 
         # Vérification qu'il n'y a pas de NaN après interpolation + fill
         assert not monthly.isna().any(), "Interpolation with bfill should fill all NaN values"
@@ -236,8 +243,9 @@ class TestFrequencyConverterPositions:
             'col2': [1000, 2000, 3000, 4000]
         }, index=qe_dates)
 
-        # Conversion vers mensuel
-        monthly_df = converter.convert_frequency(qe_df, 'M', method='mean')
+        # Conversion vers mensuel (upsampling : method doit être une méthode
+        # d'interpolation, pas 'mean')
+        monthly_df = converter.convert_frequency(qe_df, 'M', method='linear')
 
         # Vérification que l'extension fonctionne pour DataFrame
         assert len(monthly_df) == 12, f"Expected 12 months, got {len(monthly_df)}"

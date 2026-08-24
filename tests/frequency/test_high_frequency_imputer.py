@@ -27,19 +27,20 @@ class TestHighFrequencyImputerInit:
         assert imputer.target_frequency == 'M'
         assert imputer.additive_transformer is None
         assert imputer.estimator is None
-        assert imputer.low_frequency_handling is None  # None par défaut pour compatibilité sklearn
         assert imputer.delays is None
         assert imputer.impute_delayed_values is False
-        assert imputer.fit_per_entity is False
-        assert imputer.time_col == 'date'
+        assert imputer.time_col is None
         assert imputer.panel_cols is None
+        assert imputer.imputation_scope == 'strict'
+        assert imputer.coverage_threshold == 0.5
+        assert imputer.verbose is False
 
     def test_init_with_all_parameters(self):
         """Test initialisation avec tous les paramètres."""
         estimator = LinearRegression()
         transformer = StandardScaler()
         delays_df = pd.DataFrame({
-            'variable': ['var1'],
+            'column': ['var1'],
             'delay': [30],
             'unit': ['D'],
             'reference_point': ['end']
@@ -49,23 +50,25 @@ class TestHighFrequencyImputerInit:
             target_frequency='Q',
             additive_transformer=transformer,
             estimator=estimator,
-            low_frequency_handling={'var1': 'impute'},
             delays=delays_df,
             impute_delayed_values=True,
-            fit_per_entity=True,
+            imputation_scope='extended_forward',
+            coverage_threshold=0.75,
             time_col='timestamp',
-            panel_cols=['country', 'sector']
+            panel_cols=['country', 'sector'],
+            verbose=True,
         )
 
         assert imputer.target_frequency == 'Q'
         assert imputer.additive_transformer is transformer
         assert imputer.estimator is estimator
-        assert imputer.low_frequency_handling == {'var1': 'impute'}
         assert imputer.delays is not None
         assert imputer.impute_delayed_values is True
-        assert imputer.fit_per_entity is True
+        assert imputer.imputation_scope == 'extended_forward'
+        assert imputer.coverage_threshold == 0.75
         assert imputer.time_col == 'timestamp'
         assert imputer.panel_cols == ['country', 'sector']
+        assert imputer.verbose is True
 
     def test_init_with_dict_estimator(self):
         """Test initialisation avec dictionnaire d'estimateurs."""
@@ -88,54 +91,38 @@ class TestHighFrequencyImputerValidation:
     """Tests for parameter validation."""
 
     def test_invalid_target_frequency(self):
-        """Test erreur avec fréquence cible invalide."""
-        imputer = HighFrequencyImputer(target_frequency='invalid_freq')
+        """Test erreur avec fréquence cible invalide.
 
-        # Création de données de test
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({'value': range(12)}, index=dates)
-
+        La validation de `target_frequency` a lieu à la construction
+        (`__init__`), pas à `fit()` : c'est donc la construction qui doit
+        être encadrée par `pytest.raises`.
+        """
         with pytest.raises(ValueError, match="Invalid target_frequency"):
-            imputer.fit(df)
+            HighFrequencyImputer(target_frequency='invalid_freq')
 
     def test_invalid_estimator_type(self):
-        """Test erreur avec type d'estimateur invalide."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            estimator="not_an_estimator"
-        )
+        """Test erreur avec type d'estimateur invalide.
 
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({'value': range(12)}, index=dates)
-
-        with pytest.raises(ValueError, match="must be a sklearn BaseEstimator"):
-            imputer.fit(df)
-
-    def test_invalid_low_frequency_handling_strategy(self):
-        """Test erreur avec stratégie de gestion basse fréquence invalide."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            low_frequency_handling={'var1': 'invalid_strategy'}
-        )
-
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({'var1': range(12)}, index=dates)
-
-        with pytest.raises(ValueError, match="Invalid strategy"):
-            imputer.fit(df)
+        La validation de `estimator` a lieu à la construction (`__init__`),
+        pas à `fit()`.
+        """
+        with pytest.raises(ValueError, match="must have a 'fit' method"):
+            HighFrequencyImputer(
+                target_frequency='M',
+                estimator="not_an_estimator"
+            )
 
     def test_invalid_delays_dataframe(self):
-        """Test erreur avec DataFrame de délais incomplet."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            delays=pd.DataFrame({'variable': ['var1']})  # Colonnes manquantes
-        )
+        """Test erreur avec DataFrame de délais incomplet.
 
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({'var1': range(12)}, index=dates)
-
+        La validation de `delays` a lieu à la construction (`__init__`),
+        pas à `fit()`.
+        """
         with pytest.raises(ValueError, match="missing required columns"):
-            imputer.fit(df)
+            HighFrequencyImputer(
+                target_frequency='M',
+                delays=pd.DataFrame({'variable': ['var1']})  # Colonnes manquantes
+            )
 
     def test_input_not_dataframe(self):
         """Test erreur avec entrée non-DataFrame."""
@@ -279,39 +266,35 @@ class TestHighFrequencyImputerClassification:
 
         assert imputer.variable_categories_.get('monthly_var') == 'target_freq'
 
-    def test_classify_interpolate_variables(self):
-        """Test classification des variables basse fréquence pour interpolation."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            low_frequency_handling={'quarterly_var': 'interpolate'}
-        )
-
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({
-            'monthly_var': range(12),
-            'quarterly_var': [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
-        }, index=dates)
-
-        imputer.fit(df)
-
-        # La variable trimestrielle devrait être marquée pour interpolation
-        # Note: dépend de la détection de fréquence
-
     def test_classify_impute_variables(self):
-        """Test classification des variables basse fréquence pour imputation."""
+        """Test classification des variables basse fréquence pour imputation.
+
+        `low_frequency_handling` (permettant de forcer une stratégie par
+        variable) a été supprimé : il n'existe plus que 3 catégories
+        ('aggregate', 'target_freq', 'impute'), déterminées automatiquement
+        depuis la fréquence détectée. Pour qu'une variable soit détectée en
+        fréquence trimestrielle malgré un index mensuel, elle doit être NaN
+        hors des mois d'ancrage du trimestre (comme dans les fixtures de
+        `conftest.py`), pas seulement porter une valeur répétée.
+        """
         imputer = HighFrequencyImputer(
             target_frequency='M',
-            low_frequency_handling={'quarterly_var': 'impute'},
             estimator=LinearRegression()
         )
 
         dates = pd.date_range('2023-01-01', periods=12, freq='M')
+        quarterly_var = [np.nan] * 12
+        for i in (0, 3, 6, 9):
+            quarterly_var[i] = i // 3 + 1
         df = pd.DataFrame({
             'monthly_var': range(12),
-            'quarterly_var': [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+            'quarterly_var': quarterly_var
         }, index=dates)
 
         imputer.fit(df)
+
+        # La variable trimestrielle est classée pour imputation
+        assert imputer.variable_categories_.get('quarterly_var') == 'impute'
 
 
 class TestHighFrequencyImputerAggregation:
@@ -351,11 +334,13 @@ class TestHighFrequencyImputerInterpolation:
     """Tests for low-frequency variable interpolation."""
 
     def test_interpolate_daily_data_with_nan(self):
-        """Test interpolation de données journalières avec NaN vers cible mensuelle."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            low_frequency_handling={}  # Default = interpolation
-        )
+        """Test interpolation de données journalières avec NaN vers cible mensuelle.
+
+        `low_frequency_handling` a été supprimé : `daily_var` est de
+        fréquence plus haute que la cible ('M'), donc classée 'aggregate'
+        (sans rapport avec ce paramètre disparu).
+        """
+        imputer = HighFrequencyImputer(target_frequency='M')
 
         # Données journalières avec quelques NaN
         dates = pd.date_range('2023-01-01', periods=31, freq='D')
@@ -466,50 +451,22 @@ class TestHighFrequencyImputerCascading:
 class TestHighFrequencyImputerPanelData:
     """Tests for panel data handling."""
 
-    def test_panel_data_single_model(self):
-        """Test données de panel avec modèle unique."""
+    def test_panel_data_single_model(self, mixed_freq_panel):
+        """Test données de panel avec modèle unique.
+
+        `fit_per_entity` a été supprimé : un panel entraîne désormais
+        toujours un modèle global unique par variable (jamais un modèle par
+        entité, cf. `TestPanelSingleFitPerVariable`), donc plus rien à
+        distinguer ici.
+        """
         imputer = HighFrequencyImputer(
             target_frequency='M',
             estimator=LinearRegression(),
-            fit_per_entity=False,
-            panel_cols=['entity']
         )
 
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({
-            'entity': ['A'] * 6 + ['B'] * 6,
-            'feature': range(12),
-            'target': [i if i % 2 == 0 else np.nan for i in range(12)]
-        })
-        df['date'] = list(dates[:6]) + list(dates[:6])
-        df = df.set_index('date')
-
-        imputer.fit(df)
-        result = imputer.transform(df)
+        result = _fit_transform_quiet(imputer, mixed_freq_panel)
 
         assert isinstance(result, pd.DataFrame)
-
-    def test_panel_data_per_entity_models(self):
-        """Test données de panel avec modèles par entité."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            estimator=LinearRegression(),
-            fit_per_entity=True,
-            panel_cols=['entity']
-        )
-
-        dates = pd.date_range('2023-01-01', periods=12, freq='M')
-        df = pd.DataFrame({
-            'entity': ['A'] * 12 + ['B'] * 12,
-            'feature': list(range(12)) + list(range(12)),
-            'target': [i if i % 2 == 0 else np.nan for i in range(12)] * 2
-        })
-        df['date'] = list(dates) + list(dates)
-        df = df.set_index('date')
-
-        imputer.fit(df)
-
-        # Vérifier que des modèles par entité ont été créés
         assert imputer.is_panel_ is True
 
 
@@ -841,24 +798,32 @@ class TestHighFrequencyImputerSklearnCompatibility:
         assert isinstance(result, pd.DataFrame)
 
     def test_get_params(self):
-        """Test get_params pour la compatibilité sklearn."""
+        """Test get_params pour la compatibilité sklearn.
+
+        `fit_per_entity` a été supprimé de l'API : remplacé ici par
+        `verbose`, un autre paramètre booléen toujours présent.
+        """
         imputer = HighFrequencyImputer(
             target_frequency='M',
-            fit_per_entity=True
+            verbose=True
         )
 
         params = imputer.get_params()
 
         assert params['target_frequency'] == 'M'
-        assert params['fit_per_entity'] is True
+        assert params['verbose'] is True
 
     def test_set_params(self):
-        """Test set_params pour la compatibilité sklearn."""
+        """Test set_params pour la compatibilité sklearn.
+
+        `fit_per_entity` a été supprimé de l'API : remplacé ici par
+        `verbose`, un autre paramètre booléen toujours présent.
+        """
         imputer = HighFrequencyImputer(target_frequency='M')
 
-        imputer.set_params(fit_per_entity=True)
+        imputer.set_params(verbose=True)
 
-        assert imputer.fit_per_entity is True
+        assert imputer.verbose is True
 
     def test_clone(self):
         """Test clone pour la compatibilité sklearn."""
@@ -2647,40 +2612,13 @@ class TestTrainOnPartialFitOrderRenamed:
 
 
 class TestClassifyVariablesUnification:
-    """§5.5 : `_classify_variables` délègue désormais à
-    `_classify_variables_at_frequency(effective_target_frequency_)` et doit
-    donc renvoyer un contenu identique."""
-
-    def test_same_content_time_series(self):
-        """Séries temporelles : même contenu pour les deux méthodes."""
-        imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
-
-        dates = pd.date_range('2023-01-01', periods=31, freq='D')
-        df = pd.DataFrame({
-            'daily_var': range(31),
-            'monthly_var': [1] * 31,
-        }, index=dates)
-        imputer.fit(df)
-
-        assert imputer._classify_variables() == imputer._classify_variables_at_frequency(
-            imputer.effective_target_frequency_
-        )
-
-    def test_same_content_panel(self):
-        """Panel : même contenu pour les deux méthodes."""
-        imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
-
-        dates = pd.date_range('2023-01-01', periods=31, freq='D')
-        idx = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['entity', 'date'])
-        df = pd.DataFrame({
-            'daily_var': list(range(31)) * 2,
-            'monthly_var': [1] * 62,
-        }, index=idx)
-        imputer.fit(df)
-
-        assert imputer._classify_variables() == imputer._classify_variables_at_frequency(
-            imputer.effective_target_frequency_
-        )
+    """§5.5 : la consolidation en une seule méthode
+    (`_classify_variables_at_frequency`) a eu lieu, mais sans conserver le
+    wrapper `_classify_variables()` proposé par la revue pour exposer le
+    résultat relatif à `effective_target_frequency_` : cette méthode
+    n'existe plus du tout, donc plus rien à comparer entre "les deux
+    méthodes". Seul `test_variable_categories_stays_key_to_category`
+    (conversion clé -> catégorie depuis le format unifié) garde un sens."""
 
     def test_variable_categories_stays_key_to_category(self):
         """`variable_categories_` reste au format clé -> catégorie, converti

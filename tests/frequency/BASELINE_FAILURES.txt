@@ -1,0 +1,68 @@
+# Baseline test failures for tests/frequency/
+# Date: 2026-08-24
+# Commit: 187c2d2 (working tree, tests obsolètes corrigés par-dessus)
+# Result: 6 failed, 382 passed
+#
+# Historique : la référence initiale (32 failed, 362 passed, même commit)
+# a été triée ci-dessous. Les 20 échecs de la famille "test obsolète" ont été
+# réécrits pour cibler l'API actuelle, et 6 tests dont l'intention avait
+# disparu avec le symbole référencé ont été supprimés (voir tableau). Le code
+# de tsforecast/ n'a pas été modifié. Les 6 échecs restants ("fonctionnalité
+# manquante" / "vrai bug") sont listés ci-dessous comme nouvelle référence.
+
+tests/frequency/test_converter_positions.py::TestExtendIndexForUpsampling::test_unsupported_frequency_pair_returns_original
+tests/frequency/test_hfi_edge_cases.py::TestIrregularFrequency::test_single_gap_in_otherwise_regular_monthly_series_raises
+tests/frequency/test_hfi_edge_cases.py::TestIrregularFrequency::test_undetectable_frequency_raises
+tests/frequency/test_high_frequency_imputer.py::TestHighFrequencyImputerDelays::test_impute_delayed_values_true_emits_deprecation_warning
+tests/frequency/test_high_frequency_imputer.py::TestHighFrequencyImputerEdgeCases::test_all_nan_column
+tests/frequency/test_high_frequency_imputer.py::TestHighFrequencyImputerValidation::test_missing_datetime_index
+
+## Triage des 32 échecs de la référence initiale (2026-08-24, commit 187c2d2)
+
+| Test | Famille | Cause | Action |
+|---|---|---|---|
+| `test_converter_positions.py::TestFrequencyConverterPositions::test_qe_to_me_preserves_end_position` | test obsolète | `method='mean'` passé à un upsampling (QE→M) ; seules des méthodes d'interpolation (`'linear'`, ...) sont valides dans ce sens, `'mean'` n'a jamais été accepté | Réécrit avec `method='linear'` |
+| `test_converter_positions.py::TestFrequencyConverterPositions::test_qs_to_ms_preserves_start_position` | test obsolète | Idem (QS→MS, `method='mean'` en upsampling) | Réécrit avec `method='linear'` |
+| `test_converter_positions.py::TestFrequencyConverterPositions::test_explicit_target_position_overrides_source` | test obsolète | Idem (QE→M, `method='mean'` en upsampling) | Réécrit avec `method='linear'` |
+| `test_converter_positions.py::TestFrequencyConverterPositions::test_target_freq_with_position_overrides_default` | test obsolète | Idem (QE→MS, `method='mean'` en upsampling) | Réécrit avec `method='linear'` |
+| `test_converter_positions.py::TestFrequencyConverterPositions::test_qe_dec_anchor_preserved` | test obsolète | Idem (QE-DEC→ME, `method='mean'` en upsampling) | Réécrit avec `method='linear'` |
+| `test_converter_positions.py::TestFrequencyConverterPositions::test_interpolation_fills_extended_periods` | test obsolète | Appelle `convert_frequency(..., fill_method='bfill')` : paramètre inexistant dans l'API actuelle | Réécrit sans `fill_method` : le `limit_direction` par défaut ('backward' pour une fréquence cible en position 'end') comble déjà les valeurs avant la première date |
+| `test_converter_positions.py::TestFrequencyConverterPositions::test_dataframe_conversion_preserves_positions` | test obsolète | Idem (`method='mean'` en upsampling, cas DataFrame) | Réécrit avec `method='linear'` |
+| `test_converter_positions.py::TestExtendIndexForUpsampling::test_unsupported_frequency_pair_returns_original` | fonctionnalité manquante | `_extend_index_for_upsampling('2D', 'D')` appelle `normalize_frequency('2D', ...)` non protégé par le `try/except` qui gère déjà les paires (source_base, target_base) non supportées : `normalize_frequency` ne supporte pas les multiples de fréquence ('2D') et lève avant d'atteindre ce `try/except` | Correctif hors périmètre, à traiter séparément (non appliqué) |
+| `test_converter_validation.py::TestDurationConverterIntegration::test_duration_converter_is_initialized` | test obsolète | Vérifie `hasattr(converter, '_duration_converter')` : cet attribut interne n'existe plus, `FrequencyConverter` utilise désormais la fonction libre `get_duration_conversion_factor` | Supprimé (rien à initialiser : il n'y a plus d'objet interne à tester) |
+| `test_converter_validation.py::TestDurationConverterIntegration::test_qe_to_me_extension_uses_duration_converter` | test obsolète | `method='mean'` en upsampling (QE→ME) | Réécrit avec `method='linear'` |
+| `test_converter_validation.py::TestDurationConverterIntegration::test_ye_to_qe_extension_uses_duration_converter` | test obsolète | `method='mean'` en upsampling (YE→QE) | Réécrit avec `method='linear'` |
+| `test_converter_validation.py::TestDurationConverterIntegration::test_conversion_factors_match_duration_converter` | test obsolète | Accède à `converter._duration_converter.get_conversion_factor(...)`, attribut interne supprimé | Réécrit en appelant directement `get_duration_conversion_factor(...)` (import depuis `tsforecast.utils.duration.utils`) |
+| `test_hfi_edge_cases.py::TestIrregularFrequency::test_undetectable_frequency_raises` | vrai bug | Le fichier documente explicitement (docstring de la classe) qu'une fréquence non détectable doit lever une `ValueError` contrôlée ; ce contrat ne tient plus, `fit_transform` ne lève plus rien | Correctif hors périmètre de cette campagne (fichier explicitement "hors périmètre de la revue HighFrequencyImputer"), à corriger séparément |
+| `test_hfi_edge_cases.py::TestIrregularFrequency::test_single_gap_in_otherwise_regular_monthly_series_raises` | vrai bug | Idem : un unique mois manquant dans une série mensuelle régulière devait lever une `ValueError` contrôlée, ne lève plus | Idem, à corriger séparément |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerInit::test_init_default_parameters` | test obsolète | Référence `low_frequency_handling` et `fit_per_entity` (paramètres supprimés) et suppose `time_col == 'date'` (défaut actuel : `None`) | Réécrit avec l'ensemble de paramètres courant (`imputation_scope`, `coverage_threshold`, `verbose`, `time_col is None`, ...) |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerInit::test_init_with_all_parameters` | test obsolète | Construit avec `low_frequency_handling=` et `fit_per_entity=`, kwargs inexistants (`TypeError`) | Réécrit avec les paramètres actuels (`imputation_scope`, `coverage_threshold`, `verbose`, ...) ; corrige aussi le nom de colonne du DataFrame `delays` (`'column'`, pas `'variable'`) |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerValidation::test_invalid_target_frequency` | test obsolète | La validation de `target_frequency` a lieu désormais dans `__init__` (et non plus dans `fit()`), donc la `ValueError` est levée avant d'atteindre le bloc `pytest.raises` qui n'entourait que `imputer.fit(df)` | Réécrit : `pytest.raises` entoure désormais la construction |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerValidation::test_invalid_estimator_type` | test obsolète | Idem (validation de `estimator` dans `__init__`) ; le message d'erreur a aussi changé (`"must have a 'fit' method"`, pas `"must be a sklearn BaseEstimator"`) | Réécrit : `pytest.raises` entoure la construction, regex mise à jour |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerValidation::test_invalid_low_frequency_handling_strategy` | test obsolète | `low_frequency_handling` (et la notion de "stratégie" par variable qu'il portait) a été entièrement supprimé de l'API | Supprimé (aucune notion de "stratégie invalide" à tester dans l'API actuelle) |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerValidation::test_invalid_delays_dataframe` | test obsolète | Idem (validation de `delays` dans `__init__`, pas dans `fit()`) | Réécrit : `pytest.raises` entoure la construction |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerValidation::test_missing_datetime_index` | vrai bug | `fit()` sur un DataFrame avec un `RangeIndex` et sans colonne `time_col` ne lève plus aucune erreur (devrait lever une `ValueError` mentionnant `DatetimeIndex`) : le pipeline de validation temporelle laisse passer ce cas silencieusement | Correctif hors périmètre, à corriger séparément |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerClassification::test_classify_interpolate_variables` | test obsolète | La catégorie `'interpolate'` a disparu : `VariableCategory` ne contient plus que `'aggregate'`, `'impute'`, `'target_freq'` (toute variable plus basse fréquence que la cible est désormais classée `'impute'`) | Supprimé (la distinction interpolate/impute qu'il testait n'existe plus) |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerClassification::test_classify_impute_variables` | test obsolète | Utilise `low_frequency_handling` (supprimé) pour forcer la catégorie ; de plus la variable trimestrielle testée porte une valeur répétée à chaque mois (pas de `NaN` hors ancrage), donc n'est pas détectée en fréquence trimestrielle | Réécrit : construction sans `low_frequency_handling`, `quarterly_var` avec `NaN` hors des mois d'ancrage (comme les fixtures `conftest.py`), classification `'impute'` obtenue automatiquement |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerInterpolation::test_interpolate_daily_data_with_nan` | test obsolète | Utilise `low_frequency_handling={}` (supprimé) alors que `daily_var` est de fréquence plus haute que la cible (`'aggregate'`), sans rapport avec ce paramètre | Réécrit sans `low_frequency_handling` |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerPanelData::test_panel_data_single_model` | test obsolète | Construit avec `fit_per_entity=False` (kwarg supprimé) | Réécrit sans `fit_per_entity`, en réutilisant la fixture `mixed_freq_panel` (la construction ad hoc précédente, panel colonnes avec date en index et entité en colonne, n'est plus une structure supportée par `_detect_data_structure`) |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerPanelData::test_panel_data_per_entity_models` | test obsolète | Construit avec `fit_per_entity=True` (kwarg supprimé) ; le mode "un modèle par entité" a disparu, un panel entraîne toujours un modèle global unique par variable (cf. `TestPanelSingleFitPerVariable`) | Supprimé (l'intention — vérifier l'existence de modèles par entité — a disparu avec la fonctionnalité elle-même) |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerDelays::test_impute_delayed_values_true_emits_deprecation_warning` | vrai bug | La docstring de `__init__` promet explicitement qu'`impute_delayed_values=True` émet un `DeprecationWarning` à `fit()` ; aucun `warnings.warn` n'est implémenté nulle part dans le code pour ce paramètre | Correctif hors périmètre, à corriger séparément |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerEdgeCases::test_all_nan_column` | vrai bug | Une colonne entièrement `NaN` devrait produire un `UserWarning` contrôlé (commentaire du test) ; en pratique `detect_frequency` lève une `ValueError` non rattrapée ("Series has only 0 non-null observations") | Correctif hors périmètre, à corriger séparément |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerSklearnCompatibility::test_get_params` | test obsolète | Utilise `fit_per_entity` (kwarg supprimé) | Réécrit avec `verbose` (autre paramètre booléen toujours présent) |
+| `test_high_frequency_imputer.py::TestHighFrequencyImputerSklearnCompatibility::test_set_params` | test obsolète | Idem | Réécrit avec `verbose` |
+| `test_high_frequency_imputer.py::TestClassifyVariablesUnification::test_same_content_time_series` | test obsolète | Compare `imputer._classify_variables()` (symbole supprimé) à `imputer._classify_variables_at_frequency(...)` | Supprimé (la comparaison entre "les deux méthodes" n'a plus de sens : une seule subsiste) |
+| `test_high_frequency_imputer.py::TestClassifyVariablesUnification::test_same_content_panel` | test obsolète | Idem, cas panel | Supprimé |
+
+### Résumé par famille (sur les 32 échecs initiaux)
+
+- **test obsolète** : 26 tests — 20 réécrits pour cibler l'API actuelle, 6 supprimés (intention disparue avec le symbole/la fonctionnalité).
+- **fonctionnalité manquante** : 1 test — `normalize_frequency` ne supporte pas les multiples de fréquence ('2D'), non traité (hors périmètre).
+- **vrai bug** : 5 tests — comportements documentés (docstrings/commentaires des tests) mais non implémentés ou régressés, non traités (hors périmètre) :
+  - `TestIrregularFrequency::test_undetectable_frequency_raises`
+  - `TestIrregularFrequency::test_single_gap_in_otherwise_regular_monthly_series_raises`
+  - `TestHighFrequencyImputerValidation::test_missing_datetime_index`
+  - `TestHighFrequencyImputerDelays::test_impute_delayed_values_true_emits_deprecation_warning`
+  - `TestHighFrequencyImputerEdgeCases::test_all_nan_column`
+
+Aucun fichier de `tsforecast/` n'a été modifié pendant ce triage.

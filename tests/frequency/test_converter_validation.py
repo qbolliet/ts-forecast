@@ -6,6 +6,7 @@ de conversion, notamment la validation de freq_pos dans _validate_conversion_par
 import pytest
 import pandas as pd
 from tsforecast.utils.frequency.converter import FrequencyConverter
+from tsforecast.utils.duration.utils import get_duration_conversion_factor
 
 
 class TestFrequencyValidation:
@@ -131,19 +132,15 @@ class TestDurationConverterIntegration:
         """Fixture pour créer une instance de FrequencyConverter."""
         return FrequencyConverter()
 
-    def test_duration_converter_is_initialized(self, converter):
-        """Test que DurationConverter est correctement initialisé."""
-        assert hasattr(converter, '_duration_converter')
-        assert converter._duration_converter is not None
-
     def test_qe_to_me_extension_uses_duration_converter(self, converter):
         """Test que l'extension QE→ME utilise les facteurs de DurationConverter."""
         # Création de données trimestrielles
         qe_dates = pd.date_range('2024-03-31', periods=4, freq='QE')
         qe_series = pd.Series([100, 200, 300, 400], index=qe_dates)
 
-        # Conversion vers mensuel
-        monthly = converter.convert_frequency(qe_series, 'ME', method='mean')
+        # Conversion vers mensuel (upsampling : method doit être une méthode
+        # d'interpolation, pas 'mean')
+        monthly = converter.convert_frequency(qe_series, 'ME', method='linear')
 
         # Vérification que l'extension a bien créé 12 mois
         # (ratio Q→M devrait être 3, donc 4 trimestres = 12 mois)
@@ -155,8 +152,9 @@ class TestDurationConverterIntegration:
         ye_dates = pd.date_range('2023-12-31', periods=2, freq='YE')
         ye_series = pd.Series([1000, 2000], index=ye_dates)
 
-        # Conversion vers trimestriel
-        quarterly = converter.convert_frequency(ye_series, 'QE', method='mean')
+        # Conversion vers trimestriel (upsampling : method doit être une
+        # méthode d'interpolation, pas 'mean')
+        quarterly = converter.convert_frequency(ye_series, 'QE', method='linear')
 
         # Vérification que l'extension fonctionne
         # (ratio Y→Q devrait être 4)
@@ -176,17 +174,22 @@ class TestDurationConverterIntegration:
         assert len(result) > 0
 
     def test_conversion_factors_match_duration_converter(self, converter):
-        """Test que les ratios calculés correspondent à DurationConverter."""
+        """Test que les ratios calculés correspondent à DurationConverter.
+
+        `FrequencyConverter` ne conserve plus de `DurationConverter` en
+        attribut interne : les facteurs de conversion sont obtenus via la
+        fonction utilitaire `get_duration_conversion_factor`.
+        """
         # Test direct du ratio Q→M
-        ratio_q_to_m = converter._duration_converter.get_conversion_factor('Q', 'M')
+        ratio_q_to_m = get_duration_conversion_factor('Q', 'M')
         assert ratio_q_to_m == 3.0, f"Expected 3.0, got {ratio_q_to_m}"
 
         # Test direct du ratio Y→Q
-        ratio_y_to_q = converter._duration_converter.get_conversion_factor('Y', 'Q')
+        ratio_y_to_q = get_duration_conversion_factor('Y', 'Q')
         assert ratio_y_to_q == 4.0, f"Expected 4.0, got {ratio_y_to_q}"
 
         # Test direct du ratio Y→M
-        ratio_y_to_m = converter._duration_converter.get_conversion_factor('Y', 'M')
+        ratio_y_to_m = get_duration_conversion_factor('Y', 'M')
         assert ratio_y_to_m == 12.0, f"Expected 12.0, got {ratio_y_to_m}"
 
 
