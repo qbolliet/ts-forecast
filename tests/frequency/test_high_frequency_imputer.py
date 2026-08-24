@@ -230,6 +230,20 @@ class TestHighFrequencyImputerParameterValidation:
         with pytest.raises(ValueError, match="must have a 'fit' method"):
             HighFrequencyImputer(target_frequency='M', estimator={'var1': NoFit()})
 
+    @pytest.mark.parametrize('param_name', [
+        'cascade_refitting',
+        'keep_lower_frequencies',
+        'scale_features',
+        'enforce_period_totals',
+        'restore_original_values',
+        'verbose',
+    ])
+    @pytest.mark.parametrize('bad_value', [1, 0, 'True', None])
+    def test_boolean_params_validated(self, param_name, bad_value):
+        """B22 : aucun booléen de __init__ n'était typé-vérifié avant ce correctif."""
+        with pytest.raises(TypeError, match=param_name):
+            HighFrequencyImputer(target_frequency='M', **{param_name: bad_value})
+
 
 class TestHighFrequencyImputerClassification:
     """Tests for variable classification."""
@@ -794,6 +808,180 @@ class TestHighFrequencyImputerSklearnCompatibility:
         assert cloned.target_frequency == 'M'
         # L'estimateur peut être le même objet ou un clone selon sklearn
         assert cloned.estimator is not None
+
+    def test_get_params_returns_input_target_frequency(self):
+        """B3 : get_params()['target_frequency'] est LA valeur reçue par __init__.
+
+        sklearn.clone() exige `get_params()[name] is` la valeur passée au
+        constructeur ; stocker une version normalisée cassait ce contrat.
+        """
+        raw = {'FR': 'Q', 'DE': 'Q'}
+        imputer = HighFrequencyImputer(
+            target_frequency=raw, estimator=LinearRegression()
+        )
+
+        assert imputer.get_params()['target_frequency'] is raw
+
+    def test_clone_with_dict_target_frequency(self):
+        """B3 : clone() ne lève plus sur un target_frequency de type dict."""
+        from sklearn.base import clone
+
+        imputer = HighFrequencyImputer(
+            target_frequency={'FR': 'Q', 'DE': 'Q'},
+            estimator=LinearRegression(),
+        )
+
+        cloned = clone(imputer)
+
+        assert cloned.target_frequency == {'FR': 'Q', 'DE': 'Q'}
+
+    def test_pipeline_with_imputer_fits(self, mixed_freq_panel):
+        """B3 : un HighFrequencyImputer à target_frequency dict s'entraîne
+        dans un Pipeline sklearn sur des données de panel (clone() y est
+        systématiquement appelé par certains méta-estimateurs)."""
+        entities = sorted({key[0] for key in mixed_freq_panel.index})
+        target_frequency = {entity: 'M' for entity in entities}
+
+        pipeline = Pipeline([
+            ('imputer', HighFrequencyImputer(
+                target_frequency=target_frequency,
+                estimator=LinearRegression(),
+            )),
+        ])
+
+        result = _fit_transform_quiet(pipeline, mixed_freq_panel)
+
+        assert isinstance(result, pd.DataFrame)
+
+
+class TestEntryContractAndSklearnConformance:
+    """§3.16 : contrat d'entrée et conformité sklearn (B14, B15, B16, B19, B20).
+
+    Lot mécanique indépendant de la logique d'imputation : ces défauts
+    empêchaient des usages nominaux de la classe (clone(), refit, panel
+    déclaré par panel_cols, cible sans nom, transform avant fit).
+    """
+
+    def test_unnamed_y_is_imputed(self, quarterly_over_monthly):
+        """B14 : une cible Series sans nom est bien imputée au transform.
+
+        Avant correctif, la colonne portait le nom `0` au fit (`y.to_frame()`)
+        et `'__target__'` au transform : les deux ne coïncidant jamais, `y`
+        ressortait de `transform` inchangé, en silence.
+        """
+        X = quarterly_over_monthly[['covariable_mensuelle']]
+        y = quarterly_over_monthly['variable_trimestrielle'].rename(None)
+        assert y.name is None
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M', estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(X, y)
+            _, y_t = imputer.transform(X, y)
+
+        assert y.isna().sum() > 0
+        assert y_t.isna().sum() < y.isna().sum()
+
+    def test_y_index_mismatch_raises(self):
+        """B14 : un désaccord d'index entre X et y lève, plutôt que de
+        produire un jeu de travail gonflé de NaN par un concat mal aligné."""
+        dates = pd.date_range('2023-01-01', periods=12, freq='MS')
+        X = pd.DataFrame({'feature': range(12)}, index=dates)
+        # Même longueur que X, mais un index de valeurs différentes
+        y = pd.Series(range(12), index=pd.RangeIndex(12), name='target')
+
+        imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+
+        with pytest.raises(ValueError, match='different indices'):
+            imputer.fit(X, y)
+
+    def test_panel_cols_without_multiindex_fits(self):
+        """B15 : la forme panel documentée (panel_cols sur un frame plat,
+        sans y) s'ajuste sans AttributeError sur effective_target_frequency_."""
+        dates = pd.date_range('2020-01-01', periods=12, freq='MS')
+        rows = [
+            {'country': entity, 'date': d, 'value': i}
+            for entity in ('FR', 'DE')
+            for i, d in enumerate(dates)
+        ]
+        flat_df = pd.DataFrame(rows)
+
+        imputer = HighFrequencyImputer(
+            target_frequency='Q', time_col='date', panel_cols=['country'],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(flat_df)
+
+        assert imputer.is_panel_ is True
+        assert imputer.entities_ is not None
+        assert isinstance(imputer.effective_target_frequency_, dict)
+
+    def test_incomplete_target_frequency_dict_raises(self, mixed_freq_panel):
+        """B16 : une entité manquante du dict target_frequency lève un
+        ValueError nommant l'entité, plutôt que de faire disparaître ses
+        variables en silence de toutes les catégories."""
+        entities = sorted({key[0] for key in mixed_freq_panel.index})
+        incomplete = {entities[0]: 'M'}  # il manque les autres entités
+
+        imputer = HighFrequencyImputer(
+            target_frequency=incomplete, estimator=LinearRegression()
+        )
+
+        with pytest.raises(ValueError, match='missing entries for entities'):
+            imputer.fit(mixed_freq_panel)
+
+    def test_refit_resets_transform_state(self, quarterly_over_monthly):
+        """B19 : un refit purge la provenance/les snapshots d'un transform
+        antérieur ; inverse_transform sans nouveau transform doit lever,
+        pas réutiliser silencieusement l'état d'un jeu de données différent."""
+        data_a = quarterly_over_monthly
+        data_b = quarterly_over_monthly.iloc[::-1].set_axis(quarterly_over_monthly.index)
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M', estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(data_a)
+            imputer.transform(data_a)
+            imputer.fit(data_b)
+
+        assert not hasattr(imputer, 'imputation_provenance_')
+        with pytest.raises(ValueError, match='previous call to transform'):
+            imputer.inverse_transform(data_b)
+
+    def test_transform_before_fit_raises_not_fitted(self):
+        """B20 : transform avant fit lève NotFittedError, pas un
+        AttributeError cryptique (conversion_metadata_ posé dans __init__
+        de la classe de base faisait passer check_is_fitted à tort)."""
+        from sklearn.exceptions import NotFittedError
+
+        imputer = HighFrequencyImputer(target_frequency='M')
+        dates = pd.date_range('2023-01-01', periods=12, freq='MS')
+        df = pd.DataFrame({'value': range(12)}, index=dates)
+
+        with pytest.raises(NotFittedError):
+            imputer.transform(df)
+
+    def test_no_estimator_warns_once(self, mixed_freq_panel):
+        """B22 : estimator=None émet UN SEUL avertissement à fit, pas un par
+        variable et par étape de la cascade."""
+        imputer = HighFrequencyImputer(target_frequency='M')
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.fit(mixed_freq_panel)
+
+        no_estimator_warnings = [
+            w for w in caught
+            if 'No estimator was provided' in str(w.message)
+        ]
+        assert len(no_estimator_warnings) == 1
 
 
 # =============================================================================

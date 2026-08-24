@@ -149,9 +149,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         ``(entity..., column)`` tuple produced by ``detect_frequency``; use
         :func:`tsforecast.panel.utils.split_variable_key` to split it back
         into ``(entity_tuple, column)``. Entity keys supplied by the user in
-        a ``target_frequency`` dict are normalized to tuples at init by
-        ``_validate_target_frequency_format``, so ``{'FR': 'M'}`` is stored
-        as ``{('FR',): 'M'}``. Consequently every internal lookup on
+        a ``target_frequency`` dict are normalized to tuples by
+        ``_validate_target_frequency_format``, so ``{'FR': 'M'}`` becomes
+        ``{('FR',): 'M'}`` in ``effective_target_frequency_``. This
+        normalization is recomputed at every ``fit`` call rather than stored
+        on ``self.target_frequency`` (B3/§3.16): ``self.target_frequency``
+        stays IDENTICAL to whatever was passed to ``__init__``, unnormalized,
+        because ``sklearn.clone()`` requires ``get_params()[name] is`` the
+        received value. Always read ``effective_target_frequency_`` after
+        ``fit`` — never ``self.target_frequency`` — when tuple-normalized
+        keys are needed. Consequently every internal lookup on
         ``effective_target_frequency_``, ``detected_frequencies_`` or a stage
         frequency dict is a SINGLE lookup: there is no defensive
         scalar/tuple fallback left, and a ``KeyError`` is a real bug.
@@ -163,7 +170,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         variable_categories_: Variable keys per category (same key format as
             detected_frequencies_): ``Dict[VariableCategory, List[Union[str, Tuple]]]``
             with keys 'aggregate', 'impute', and 'target_freq'.
-        imputation_order_: Ordered list of variables for cascading imputation.
+        imputation_order_: Ordered list of variables for cascading imputation,
+            computed once in PHASE 3 of ``_fit``. INFORMATIVE ONLY (B22): the
+            actual per-stage order used by the cascade is recomputed by
+            PHASE 5 (``ordered_impute_keys``, possibly via
+            ``train_on_partial_fit_order='cv'``), which never reads this
+            attribute back. Kept for introspection/debugging, not consumed
+            internally.
         imputation_plan_: SINGLE SOURCE OF TRUTH of the fitted cascade
             (review §5.3): the ordered list of
             :class:`~tsforecast.frequency.ImputationStep`, one entry per
@@ -341,6 +354,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 data frequencies ('error'/'warn').
             coverage_threshold: Minimum percentage of columns (0-1) that
                 must have non-null values for extended training window.
+                INERT under the default ``imputation_scope='strict'`` (B22):
+                it is only consulted by the ``'extended_*'`` scopes, which
+                relax the strict (coverage == 1.0) window.
             imputation_scope: Training window scope.
             train_on_partial_coverage: If True, use imputed values for
                 training models outside the imputation window.
@@ -364,6 +380,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 (DISAGGREGATED at the target level, hence dropped by the
                 ORIGINAL mask). Default is False.
             time_col: Name of the time column (if in columns not index).
+                When set, ``convert_cols_to_index=True`` (fixed by this
+                class) converts ``time_col``/``panel_cols`` to X's index
+                BEFORE ``fit``/``transform`` ever see it — this conversion
+                itself does not depend on the flag's value, only the
+                metadata capture used to align ``y`` does (B15). ``y``, if
+                provided, must therefore keep the SAME index it had before
+                that conversion (typically a plain ``RangeIndex`` matching
+                X's original row order) — it is realigned onto X's converted
+                index automatically; see ``_align_target_index``.
             panel_cols: List of column names identifying panel entities.
             verbose: If True, print progress messages (cascade stages, fits,
                 fallbacks and their reason, dates left unimputed for lack of
@@ -379,7 +404,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         )
 
         # Validation des paramètres
-        target_frequency = self._validate_target_frequency_format(target_frequency)
+        # "target_frequency" est seulement VALIDÉ ici (la valeur normalisée
+        # renvoyée est jetée) : sklearn.clone() exige get_params()[name] is
+        # la valeur reçue par __init__, donc l'attribut stocké ci-dessous
+        # doit rester la valeur TELLE QUE REÇUE. La normalisation (clés
+        # d'entité en tuples, fréquences en forme de base) est recalculée à
+        # chaque fit() et vit dans effective_target_frequency_ (B3/§3.16)
+        self._validate_target_frequency_format(target_frequency)
         self._validate_estimator(estimator)
         if additive_transformer is not None:
             self._validate_additive_transformer(additive_transformer)
@@ -403,6 +434,22 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 f"train_on_partial_fit_order must be 'frequency' or 'cv', "
                 f"got '{train_on_partial_fit_order}'"
             )
+        # Validation groupée des booléens (B22) : aucun ne l'était, un
+        # 'frequency'/1/None passé par erreur se propageait silencieusement
+        # jusqu'à un "if" qui l'évalue en vérité/mensonge Python générique
+        boolean_params = {
+            'cascade_refitting': cascade_refitting,
+            'keep_lower_frequencies': keep_lower_frequencies,
+            'scale_features': scale_features,
+            'enforce_period_totals': enforce_period_totals,
+            'restore_original_values': restore_original_values,
+            'verbose': verbose,
+        }
+        for param_name, param_value in boolean_params.items():
+            if not isinstance(param_value, bool):
+                raise TypeError(
+                    f"{param_name} must be a bool, got {type(param_value).__name__}"
+                )
         # Instanciation des attributs
         self.target_frequency = target_frequency
         self.additive_transformer = additive_transformer
@@ -432,6 +479,80 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Silence total hors mode verbeux : aucune sortie standard produite
         if self.verbose:
             print(f"[HighFrequencyImputer] {message}")
+
+    # -------------------------------------------------------------------------
+    # Alignement de la cible
+    # -------------------------------------------------------------------------
+    # Méthode auxiliaire de résolution du nom de colonne de la cible
+    def _resolve_target_column_name(self, y: pd.Series) -> str:
+        """Resolve the column name used for ``y`` once merged into a frame.
+
+        Single naming rule shared by ``_fit``, ``_transform`` and
+        ``_inverse_transform``. Two independent rules previously let the
+        fit-time name (``0``, from an unnamed Series' ``to_frame()``) and
+        the transform-time name (``'__target__'``) diverge, so the target
+        was never found among ``X_stage.columns`` and silently skipped
+        imputation at transform time.
+
+        Args:
+            y: Target series, possibly unnamed.
+
+        Returns:
+            ``y.name`` if set, else the fallback ``'__target__'``.
+        """
+        return y.name if y.name is not None else '__target__'
+
+    # Méthode auxiliaire d'alignement de l'index de la cible sur celui de X
+    # /!\ Voir si on souhaite pas tout de même tolérer ici ou dans le XYTransformer des index de X et y qui ne coïncident pas (en particulier X en time series peut contenir plus d'observations que y car on align X_t et avec y_t+h)
+    def _align_target_index(self, X: pd.DataFrame, y: pd.Series) -> pd.Series:
+        """Align ``y``'s index onto ``X``'s, tolerating the col->index step.
+
+        When ``time_col``/``panel_cols`` are used, the base transformer
+        converts ``X``'s columns to a Multi/DatetimeIndex before ``_fit``/
+        ``_transform`` ever see it (``convert_cols_to_index=True``, fixed by
+        this class) — but it never touches ``y``, which still carries
+        whatever index it had at the call site. If that original index
+        matches the one ``conversion_metadata_`` recorded before conversion,
+        ``y`` is repositioned onto ``X.index`` (row order is preserved:
+        ``auto_sort`` is fixed to False). Otherwise the two indices must
+        already match exactly: silently reindexing on mismatched index
+        VALUES would grow the working frame with NaN rows instead of
+        raising.
+
+        Args:
+            X: Working features, already validated/converted.
+            y: Target series as received by ``fit``/``transform``.
+
+        Returns:
+            ``y`` reindexed onto ``X.index`` when that is safe to do.
+
+        Raises:
+            ValueError: If ``X`` and ``y`` indices neither match nor derive
+                from the same pre-conversion index.
+        """
+        # Cas nominal : les deux index coïncident déjà
+        if X.index.equals(y.index):
+            return y
+
+        # Cas colonnes -> index : la conversion appliquée à X, jamais à y,
+        # est réappliquée à y en réutilisant les métadonnées de conversion
+        conversion_meta = getattr(self, 'conversion_metadata_', None)
+        if (
+            conversion_meta is not None
+            and conversion_meta.get('index_was_replaced')
+            and conversion_meta['original_index'].equals(y.index)
+        ):
+            return y.set_axis(X.index)
+
+        # Aucun des deux cas : un désaccord d'index est un vrai bug appelant,
+        # pas un cas à corriger silencieusement (concat aligne sur la VALEUR
+        # de l'index, pas sur la position)
+        raise ValueError(
+            "X and y have different indices. y must share X's index, or — "
+            "for column-based panel/time-series data (time_col/panel_cols) "
+            "— the index X had before those columns were converted to the "
+            "index."
+        )
 
     # -------------------------------------------------------------------------
     # Validation des paramètres d'entrée
@@ -2261,9 +2382,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 0 — Setup
         # =================================================================
+        # Purge de l'état écrit par un précédent "transform"
+        for stale_attr in ('imputation_provenance_', '_original_X_', '_original_y_'):
+            if stale_attr in self.__dict__:
+                delattr(self, stale_attr)
+
         # Extraction des colonnes d'intérêt
         self.feature_columns_ = list(X.columns)
-        self.target_column_ = y.name if y is not None else None
         # Identification de la structure des données
         self.is_panel_ = bool(self.panel_cols) or is_panel_data(data=X)
 
@@ -2273,9 +2398,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Vérification que X et y ont la même longueur
             if len(X) != len(y):
                 raise ValueError("X and y should be of equal length")
-            X_work = pd.concat([X, y.to_frame()], axis=1)
+            # Alignement de l'index de y sur celui de X : tolère la
+            # conversion colonnes -> index (time_col/panel_cols) que "fit"
+            # a déjà appliquée à X mais jamais à y
+            y = self._align_target_index(X, y)
+            y_col_name = self._resolve_target_column_name(y)
+            X_work = pd.concat([X, y.to_frame(name=y_col_name)], axis=1)
         else:
+            y_col_name = None
             X_work = X.copy()
+        self.target_column_ = y_col_name
 
         # Identification des entités
         if self.is_panel_ and isinstance(X.index, pd.MultiIndex):
@@ -2294,15 +2426,28 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Index irrégulier ou trop court : le repli sur le niveau cible suffit
             self._source_index_frequency_label = None
 
+        # Avertissement UNIQUE si aucun estimateur n'est fourni
+        if self.estimator is None:
+            warnings.warn(
+                "No estimator was provided (estimator=None): every variable "
+                "will fall back to linear interpolation.",
+                UserWarning
+            )
+
+        # Normalisation de target_frequency
+        normalized_target_frequency = self._validate_target_frequency_format(
+            self.target_frequency
+        )
+
         # Expansion de target_frequency en dict si panel + string
-        if self.is_panel_ and isinstance(self.target_frequency, str) and self.entities_:
+        if self.is_panel_ and isinstance(normalized_target_frequency, str) and self.entities_:
             self.effective_target_frequency_ = {
-                entity: self.target_frequency for entity in self.entities_
+                entity: normalized_target_frequency for entity in self.entities_
             }
-        elif isinstance(self.target_frequency, dict):
-            self.effective_target_frequency_ = self.target_frequency.copy()
+        elif isinstance(normalized_target_frequency, dict):
+            self.effective_target_frequency_ = normalized_target_frequency.copy()
         else:
-            self.effective_target_frequency_ = self.target_frequency
+            self.effective_target_frequency_ = normalized_target_frequency
 
         # Détection des fréquences
         self.detected_frequencies_ = detect_frequency(data=X_work)
@@ -2548,11 +2693,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         f"[fit] Fallback interpolate_fallback for '{var_name}': "
                         f"no estimator available"
                     )
-                    # Warning
-                    warnings.warn(
-                        f"No estimator available for variable '{var_name}', "
-                        f"using linear interpolation as fallback"
-                    )
+                    # Warning : seulement pour un manque PROPRE À CETTE
+                    # variable (dict sans '__default__' pour elle) ; le cas
+                    # global self.estimator=None a déjà émis un avertissement
+                    # unique en PHASE 0, le répéter par variable et
+                    # par étape serait purement redondant
+                    if self.estimator is not None:
+                        warnings.warn(
+                            f"No estimator available for variable '{var_name}', "
+                            f"using linear interpolation as fallback"
+                        )
                     # Fallback sur l'interpolation
                     self.imputation_plan_.append(fallback_step)
                     continue
@@ -2785,6 +2935,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if not isinstance(X, pd.DataFrame):
             raise ValueError(f"X must be a pandas DataFrame, got {type(X).__name__}")
 
+        # Alignement de l'index de y sur celui de X 
+        if y is not None:
+            y = self._align_target_index(X, y)
+
         # Mémorisation de l'entrée du DERNIER transform : la transformation
         # inverse y lit l'index source, ses noms de niveaux et, sur demande
         # (restore_original_values), les valeurs d'origine exactes.
@@ -2792,10 +2946,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self._original_X_ = X.copy()
         self._original_y_ = y.copy() if y is not None else None
 
-        # Extraction du nom de y
+        # Extraction du nom de y (même règle qu'au fit)
         y_col_name = None
         if y is not None:
-            y_col_name = y.name if y.name is not None else '__target__'
+            y_col_name = self._resolve_target_column_name(y)
             data_work = pd.concat([X, y.to_frame(name=y_col_name)], axis=1)
         else:
             data_work = X.copy()
@@ -3318,7 +3472,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Concaténation X / y, symétrique de "_transform"
         y_col_name = None
         if y is not None:
-            y_col_name = y.name if y.name is not None else '__target__'
+            y_col_name = self._resolve_target_column_name(y)
             data_work = pd.concat([X, y.to_frame(name=y_col_name)], axis=1)
         else:
             data_work = X.copy()

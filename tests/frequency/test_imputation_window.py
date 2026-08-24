@@ -359,20 +359,33 @@ class TestEntityKeysAreAlwaysTuples:
         ],
     )
     def test_imputer_normalizes_user_supplied_target_frequency_keys(self, entities):
-        """Les clés d'entité fournies par l'utilisateur sont normalisées en tuple."""
+        """Les clés d'entité fournies par l'utilisateur sont normalisées en tuple.
+
+        La normalisation n'a plus lieu à __init__ (B3/§3.16) : elle est
+        recalculée à chaque fit() dans effective_target_frequency_, pour que
+        self.target_frequency reste IDENTIQUE à la valeur reçue (conformité
+        sklearn.clone()). C'est donc effective_target_frequency_, après fit,
+        qui porte les clés d'entité normalisées.
+        """
         df = _make_panel(entities)
         # Clés utilisateur volontairement "brutes" : scalaires quand c'est possible
         user_keys = [
             entity[0] if len(entity) == 1 else entity
             for entity in entities
         ]
+        raw_target_frequency = {key: 'M' for key in user_keys}
         imputer = HighFrequencyImputer(
-            target_frequency={key: 'M' for key in user_keys},
+            target_frequency=raw_target_frequency,
             estimator=LinearRegression(),
         )
 
-        assert set(imputer.target_frequency) == set(entities)
-        assert all(isinstance(key, tuple) for key in imputer.target_frequency)
+        # self.target_frequency reste la valeur brute, non normalisée
+        assert imputer.target_frequency is raw_target_frequency
+
+        imputer.fit(df)
+
+        assert set(imputer.effective_target_frequency_) == set(entities)
+        assert all(isinstance(key, tuple) for key in imputer.effective_target_frequency_)
 
 
 class TestImputationWindowCalculatorValidation:
