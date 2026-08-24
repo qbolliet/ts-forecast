@@ -2414,7 +2414,9 @@ class TestProvenancePerFrequencyLevel:
         ).all()
 
     def test_panel_provenance_keeps_entity_and_frequency_levels(self, mixed_freq_panel):
-        """Panel : la provenance porte (entity, frequency, date), comme la sortie."""
+        """Panel : la provenance porte (country, frequency, date), comme la
+        sortie — le nom d'origine du niveau d'entité (`country`) est
+        préservé, il n'est plus écrasé par `'entity'` (§3.13)."""
         imputer = HighFrequencyImputer(
             target_frequency='M',
             estimator=LinearRegression(),
@@ -2423,7 +2425,7 @@ class TestProvenancePerFrequencyLevel:
         result = _fit_transform_quiet(imputer, mixed_freq_panel)
 
         assert imputer.imputation_provenance_.index.names == result.index.names
-        assert set(imputer.imputation_provenance_.index.get_level_values('entity')) == {
+        assert set(imputer.imputation_provenance_.index.get_level_values('country')) == {
             'France', 'Allemagne', 'Italie'
         }
 
@@ -2940,18 +2942,16 @@ class TestHighFrequencyImputerMultiLevelPanel:
     `repr_var_key = var_keys[0]` que le nom de colonne et la fréquence
     détectée, identiques pour toutes les clés du groupe : rien dans leur
     logique ne suppose un unique niveau d'entité. Ce chemin n'était exercé,
-    jusqu'ici, que par `mixed_freq_panel` (un seul niveau, `country`)."""
+    jusqu'ici, que par `mixed_freq_panel` (un seul niveau, `country`).
+
+    `keep_lower_frequencies=True` est désormais couvert : `_build_multifreq_output`
+    conserve tous les niveaux d'entité (`combined.index.nlevels - 1`), plus
+    seulement le premier (§3.13)."""
 
     def test_two_level_panel_fit_transform(self, panel_two_level_dataset):
         """`fit_transform` aboutit sur un panel à deux niveaux d'entité : la
         sortie garde les niveaux (country, sector, date) et la variable
-        trimestrielle est imputée pour les 4 couples pays/secteur.
-
-        `keep_lower_frequencies=False` : à True, `_stack_stage_frames`
-        aplatit l'entité sur son seul premier niveau
-        (`get_level_values(0)`), ce qui mélangerait les deux secteurs d'un
-        même pays sous la même étiquette d'entité — hors périmètre de ce
-        correctif (aucun changement de code de production ici, cf. C19)."""
+        trimestrielle est imputée pour les 4 couples pays/secteur."""
         imputer = HighFrequencyImputer(
             target_frequency='M',
             estimator=LinearRegression(),
@@ -2989,8 +2989,7 @@ class TestHighFrequencyImputerMultiLevelPanel:
 
     def test_two_level_panel_inverse_transform(self, panel_two_level_dataset):
         """`inverse_transform` restitue l'index et les valeurs d'origine
-        pour un panel à deux niveaux d'entité (`keep_lower_frequencies=False`,
-        cf. `test_two_level_panel_fit_transform`)."""
+        pour un panel à deux niveaux d'entité, `keep_lower_frequencies=False`."""
         imputer = HighFrequencyImputer(
             target_frequency='M',
             estimator=LinearRegression(),
@@ -3014,6 +3013,75 @@ class TestHighFrequencyImputerMultiLevelPanel:
             check_dtype=False,
             check_freq=False,
         )
+
+    def test_two_level_panel_stacked_index_is_unique(self, panel_two_level_dataset):
+        """`keep_lower_frequencies=True` : l'index empilé n'a aucun doublon
+        et porte les quatre niveaux (country, sector, frequency, date) —
+        avant le correctif, `sector` était jeté et ('France', 'Industrie')
+        / ('France', 'Services') finissaient sous la même étiquette."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+
+        result = _fit_transform_quiet(imputer, panel_two_level_dataset)
+
+        assert list(result.index.names) == ['country', 'sector', 'frequency', 'date']
+        assert not result.index.duplicated().any()
+
+    def test_two_level_panel_provenance_same_index(self, panel_two_level_dataset):
+        """`imputation_provenance_` porte exactement les mêmes noms de
+        niveaux que la sortie empilée."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+
+        result = _fit_transform_quiet(imputer, panel_two_level_dataset)
+
+        assert list(imputer.imputation_provenance_.index.names) == list(result.index.names)
+        assert not imputer.imputation_provenance_.index.duplicated().any()
+
+    def test_two_level_panel_inverse_transform_with_stacking(self, panel_two_level_dataset):
+        """`inverse_transform` ne lève plus sur une sortie empilée à deux
+        niveaux d'entité et restitue l'index ET les valeurs d'origine."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+
+        result = _fit_transform_quiet(imputer, panel_two_level_dataset)
+        inverse = imputer.inverse_transform(result)
+
+        assert inverse.index.names == panel_two_level_dataset.index.names
+        assert set(inverse.index) == set(panel_two_level_dataset.index)
+
+        original_mask = imputer.imputation_provenance_ == ProvenanceType.ORIGINAL
+        target_original_mask = _target_level(imputer, original_mask)
+        pd.testing.assert_frame_equal(
+            inverse.where(target_original_mask),
+            panel_two_level_dataset.where(target_original_mask),
+            check_dtype=False,
+            check_freq=False,
+        )
+
+    def test_single_level_panel_index_names_preserved(self, mixed_freq_panel):
+        """Non-régression du cas à un seul niveau d'entité : le nom d'origine
+        (`country`) est désormais préservé dans la sortie empilée, là où
+        l'ancien code l'écrasait systématiquement par `'entity'`."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=True,
+        )
+
+        result = _fit_transform_quiet(imputer, mixed_freq_panel)
+
+        assert list(result.index.names) == ['country', 'frequency', 'date']
+        assert not result.index.duplicated().any()
 
 
 # =============================================================================

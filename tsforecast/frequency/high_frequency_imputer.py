@@ -99,8 +99,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             then reused at the following stages, only its ``scale_factor``
             changing, predictions being rescaled accordingly.
         keep_lower_frequencies: If True, output includes all intermediate
-            frequencies in a MultiIndex structure: (entity, frequency, date)
-            for panel data, (frequency, date) for time series. Every level,
+            frequencies in a MultiIndex structure: (entity..., frequency,
+            date) for panel data, (frequency, date) for time series. Every level,
             including the target-frequency one, is labeled with its real
             frequency string — never 'target' — so the target level is
             identified via effective_target_frequency_. If False, the
@@ -238,7 +238,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             ``keep_lower_frequencies=False`` this is a single matrix at the
             target frequency. With ``keep_lower_frequencies=True`` it is
             stacked exactly like the transformed output — MultiIndex
-            ``(frequency, date)`` for a time series, ``(entity, frequency,
+            ``(frequency, date)`` for a time series, ``(entity..., frequency,
             date)`` for a panel, one row-block per cascade stage — so that a
             cell's provenance always describes the value actually present at
             that (frequency, date) in the output, instead of one single
@@ -348,7 +348,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 the first stage where it is imputable, then reused at the
                 following stages with the scale factor of the stage.
             keep_lower_frequencies: If True, output includes all intermediate
-                frequencies in a MultiIndex structure — (entity, frequency,
+                frequencies in a MultiIndex structure — (entity..., frequency,
                 date) for panel data, (frequency, date) for time series —
                 every level labeled with its real frequency string (the
                 target level is identified via effective_target_frequency_,
@@ -2851,7 +2851,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 # variable) qui le composent) : seuls le nom de colonne et la
                 # fréquence détectée comptent pour préparer les données
                 # d'entraînement, le modèle étant global au panel
-                # /!\ Est-ce que cela fonctionne aussi lorsque l'entité est représentée par plusieurs variables de sorte que le tuple (entité, variable) est de longueur supérieure à 2 ?
                 repr_var_key = var_keys[0]
 
                 # Champs d'identité de l'étape, communs à tous les chemins
@@ -3528,44 +3527,51 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             DataFrame with a MultiIndex:
             - Time series: ``(frequency, date)``
-            - Panel: ``(entity, frequency, date)``
+            - Panel: ``(entity..., frequency, date)``
             Every level — including the target-frequency one — keeps its
             real frequency label; no level is named ``'target'``. The
             target level is identified via ``effective_target_frequency_``,
             not via a dedicated label.
         """
+        # Étiquette de fréquence de l'étape par ligne, construite directement
+        # pour ne pas risquer de collision avec une colonne portant déjà le même nom
+        # Initialisation de la liste des jeux de données
         all_frames = []
+        # Initialisation de la liste des fréquences
+        freq_labels = []
 
+        # Population des liste
         for freq_label, df in stage_frames.items():
-            df_copy = df.copy()
-            df_copy['_frequency_level'] = freq_label
-            all_frames.append(df_copy)
+            all_frames.append(df)
+            freq_labels.append(np.full(len(df), freq_label, dtype=object))
 
+        # Concaténation
         combined = pd.concat(all_frames, ignore_index=False)
+        freq_values = np.concatenate(freq_labels)
 
-        if self.is_panel_:
-            if isinstance(combined.index, pd.MultiIndex):
-                entity_values = combined.index.get_level_values(0)
-                date_values = combined.index.get_level_values(-1)
-                freq_values = combined['_frequency_level']
-
-                new_index = pd.MultiIndex.from_arrays(
-                    [entity_values, freq_values, date_values],
-                    names=['entity', 'frequency', 'date']
-                )
-            else:
-                new_index = pd.MultiIndex.from_arrays(
-                    [combined['_frequency_level'], combined.index],
-                    names=['frequency', 'date']
-                )
+        # Construction du MultiIndex résultat
+        if self.is_panel_ and isinstance(combined.index, pd.MultiIndex):
+            # Conservation de l'ensemble des niveaux de l'entité
+            n_entity = combined.index.nlevels - 1
+            entity_arrays = [
+                combined.index.get_level_values(i) for i in range(n_entity)
+            ]
+            entity_names = [
+                combined.index.names[i] if combined.index.names[i] is not None
+                else ('entity' if n_entity == 1 else f'entity_{i}')
+                for i in range(n_entity)
+            ]
+            new_index = pd.MultiIndex.from_arrays(
+                [*entity_arrays, freq_values, combined.index.get_level_values(-1)],
+                names=[*entity_names, 'frequency', 'date'],
+            )
         else:
             new_index = pd.MultiIndex.from_arrays(
-                [combined['_frequency_level'], combined.index],
+                [freq_values, combined.index],
                 names=['frequency', 'date']
             )
 
-        combined.index = new_index
-        combined = combined.drop(columns=['_frequency_level'])
+        combined = combined.set_axis(new_index)
 
         return combined
 
@@ -3651,9 +3657,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """Reduce a stacked frame to one frequency level and restore its index.
 
         Panel and time series are handled the same way: the level is
-        addressed by NAME, never by position. The index names of the
-        remaining levels are restored from the last transform input, the
-        stacking having renamed them (``['entity', 'frequency', 'date']``).
+        addressed by name, never by position. The index names of the
+        remaining levels are restored from the last transform input, in
+        case the stacking renamed them (unnamed entity levels become
+        ``'entity'``, or ``'entity_0'``, ``'entity_1'``, ... for a
+        multi-level panel).
 
         Args:
             frame: Frame to reduce, stacked or not.
