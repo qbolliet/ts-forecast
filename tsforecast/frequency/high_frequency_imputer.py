@@ -244,9 +244,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             that (frequency, date) in the output, instead of one single
             level's provenance being reused (falsely) to describe every
             level (review §2.8.4).
-        imputation_window_: Tuple (start, end) of the imputation window where
-            all series have data. For a panel, each element is a dict keyed
-            by entity TUPLE, straight from ``ImputationWindowCalculator``.
+        imputation_window_: Tuple (start, end) of the imputation window of the
+            fit data, where all series have data. For a panel, each element is
+            a dict keyed by entity tuple, straight from
+            ``ImputationWindowCalculator``. It describes the training set;
+            ``transform`` recomputes its own window on the data it imputes,
+            the window being a constraint on covariate availability rather
+            than an estimated parameter.
         training_window_: Tuple (start, end) of the extended training window.
         frequency_progression_: DERIVED from ``imputation_plan_``, READ-ONLY.
             Dict mapping each variable name to the ordered list of
@@ -2043,6 +2047,84 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             for pattern_id in order
         ]
 
+    # Méthode auxiliaire d'ajustement d'un calculateur de fenêtre d'imputation
+    def _fit_imputation_window(
+        self,
+        data: pd.DataFrame,
+    ) -> Tuple[Optional[ImputationWindowCalculator], Optional[ValueError]]:
+        """Fit a fresh imputation-window calculator on the given data.
+
+        The imputation window is a constraint on covariate availability, not
+        an estimated parameter: it is a deterministic function of the frame it
+        is computed on. ``_fit`` and ``_transform`` therefore
+        share this factory and each compute the window on their own data, so
+        that ``transform`` on out-of-sample dates keeps predicting instead of
+        silently emptying the column. On identical data both calls rebuild the
+        same window, which is what preserves
+        ``fit_transform(X) == fit(X).transform(X)``.
+
+        Args:
+            data: Frame the window is computed on. Must be the frame BEFORE
+                the additive transformer, on both paths, or the two windows
+                would not coincide.
+
+        Returns:
+            Tuple ``(calculator, error)``: the fitted calculator and None, or
+            None and the ``ValueError`` raised by the calculator. Callers
+            decide how to report the failure — their messages differ.
+        """
+        # Instanciation avec les hyperparamètres de l'imputeur
+        calculator = ImputationWindowCalculator(
+            coverage_threshold=self.coverage_threshold,
+            imputation_scope=self.imputation_scope,
+            min_columns=2,
+        )
+        # Estilation de la fenêtre
+        try:
+            calculator.fit(data)
+        except ValueError as error:
+            return None, error
+
+        return calculator, None
+
+    # Méthode auxiliaire de mise en forme lisible des bornes d'une fenêtre
+    @staticmethod
+    def _window_bounds_label(
+        window_calc: ImputationWindowCalculator,
+        max_entities: int = 3,
+    ) -> str:
+        """Render the bounds of a fitted imputation window as a short string.
+
+        Args:
+            window_calc: Fitted calculator whose bounds are rendered.
+            max_entities: Maximum number of panel entities listed before the
+                rendering is truncated with an ellipsis.
+
+        Returns:
+            ``'[start, end]'`` for time series data, ``'France [a, b], ...'``
+            for panel data, ``'undefined'`` when no window could be derived.
+        """
+        # Extraction des dates de début et de fin
+        start = window_calc.imputation_window_start_
+        end = window_calc.imputation_window_end_
+
+        # Cas des séries temporelles : bornes scalaires
+        if not isinstance(start, dict):
+            if start is None or end is None:
+                return "undefined"
+            return f"[{start.date()}, {end.date()}]"
+
+        # Cas des données de panel : bornes par entité, tronquées
+        entities = list(start)
+        rendered = [
+            f"{entity} [{start[entity].date()}, {end[entity].date()}]"
+            if start.get(entity) is not None and end.get(entity) is not None
+            else f"{entity} undefined"
+            for entity in entities[:max_entities]
+        ]
+        suffix = ", ..." if len(entities) > max_entities else ""
+        return ", ".join(rendered) + suffix if rendered else "undefined"
+
     # Méthode auxiliaire de construction des masques de désagrégation et de prédiction
     def _prediction_masks(
         self,
@@ -2050,6 +2132,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X_input: pd.DataFrame,
         stage_group: Optional[Dict[str, Any]],
         var_name: str,
+        window_calc: Optional[ImputationWindowCalculator],
+        context: str = '',
     ) -> Tuple[pd.Series, pd.Series]:
         """Build the disaggregation scope and the predictable rows of a stage.
 
@@ -2061,15 +2145,25 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         the window, where covariate coverage is insufficient by
         construction.
 
-        Callers therefore blank the whole scope and write back only the rows
-        that were actually predicted — a row of the scope left unpredicted
-        ends up NaN rather than carrying its period total.
+        Callers therefore blank the predictable rows and write back only those
+        actually predicted — an anchor left unpredicted inside the window ends
+        up NaN rather than carrying its period total. Rows of the scope lying
+        outside the window are never touched: nothing is produced there, so
+        nothing may be destroyed there either.
+
+        A scope entirely outside the window is reported: it is the signature of
+        a ``transform`` on data the window does not cover, which used to empty
+        the column in complete silence.
 
         Args:
             X_stage: Stage frame the masks are aligned on.
             X_input: Untouched input frame of the stage.
             stage_group: Entry of :attr:`stage_groups_` for the stage key.
             var_name: Column being imputed.
+            window_calc: Calculator carrying the imputation window, computed
+                on the data being imputed (see :meth:`_fit_imputation_window`).
+                None or unfitted leaves the whole scope predictable.
+            context: Label used in the warning message.
 
         Returns:
             Tuple of (disaggregation scope, predictable rows), both boolean
@@ -2082,9 +2176,38 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Restriction à la fenêtre d'imputation quand le calculateur est entraîné
         predictable = scope
-        if hasattr(self, '_imputation_window_calc') and self._imputation_window_calc._is_fitted:
-            window = self._imputation_window_calc.get_imputation_window_mask(X_stage)
+        if window_calc is not None and window_calc._is_fitted:
+            window = window_calc.get_imputation_window_mask(X_stage)
             predictable = scope & window.reindex(X_stage.index).fillna(False).astype(bool)
+
+        # Périmètre non vide entièrement hors fenêtre : distinct du périmètre
+        # vide, qui lui est silencieux à juste titre. Sans cet avertissement,
+        # une variable ne produisant plus aucune valeur passe inaperçue
+        if scope.any() and not predictable.any():
+            # Recherche des observations en dehors de la fenêtre
+            out_of_window = X_stage.index[scope.to_numpy()]
+            suffix = f" for {context}" if context else ""
+            # Calcul des bornes de la fenêtre
+            bounds = (
+                self._window_bounds_label(window_calc)
+                if window_calc is not None and window_calc._is_fitted
+                else "undefined"
+            )
+            # Logging
+            self._log(
+                f"No row in the imputation window{suffix}: "
+                f"{len(out_of_window)} date(s) in scope, window {bounds} "
+                f"({list(out_of_window[:5])}{'...' if len(out_of_window) > 5 else ''})"
+            )
+            # Warning
+            warnings.warn(
+                f"No row of the imputation scope{suffix} falls inside the "
+                f"imputation window (bounds: {bounds}): all "
+                f"{len(out_of_window)} date(s) in scope (e.g. "
+                f"{out_of_window[0]}) are left as they came in, nothing is "
+                f"imputed for them.",
+                UserWarning
+            )
 
         return scope, predictable
 
@@ -2188,6 +2311,93 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         ordered_index = X_stage.index[X_stage.index.isin(values.index)]
 
         return values.reindex(ordered_index)
+
+    # Méthode auxiliaire d'écriture des valeurs produites à une étape
+    def _write_stage_values(
+        self,
+        X_stage: pd.DataFrame,
+        var_name: str,
+        predictions: pd.Series,
+        scope_mask: pd.Series,
+        predict_mask: pd.Series,
+        tracker: ImputationProvenanceTracker,
+        disaggregated_mask: pd.Series,
+        trained_on_imputed: bool,
+        context: str = '',
+    ) -> bool:
+        """Blank the window part of the scope, then write the values back.
+
+        Single point of truth for the "empty then rewrite" discipline shared
+        by the cascade of :meth:`_fit` and the replay of :meth:`_transform`.
+        Two rules :
+
+        1. blanking is restricted to ``scope ∩ window``. That is the region
+           the variable is committed to being re-expressed on, hence the only
+           one where keeping a low-frequency total would mix two scales.
+           Outside the window nothing is produced, so nothing is destroyed;
+        2. nothing is blanked at all when no value was produced — erasing an
+           input observation without putting anything in its place is never
+           the intended behaviour.
+
+        The provenance follows the data: cells blanked but not rewritten lose
+        their original mark, so the matrix never declares observed a cell that
+        no longer holds a value.
+
+        Args:
+            X_stage: Stage frame written in place.
+            var_name: Column being imputed.
+            predictions: Values to write, indexed by the rows they belong to.
+            scope_mask: Disaggregation scope, from :meth:`_prediction_masks`.
+            predict_mask: Predictable rows, from :meth:`_prediction_masks`.
+            tracker: Provenance tracker of the running pass.
+            disaggregated_mask: Boolean mask, aligned on ``predictions.index``,
+                of the cells produced by a rescaled disaggregation.
+            trained_on_imputed: Whether the model saw imputed values at fit
+                time (drives MODEL_ON_MIXED vs MODEL_ON_TRUE).
+            context: Label used in log messages.
+
+        Returns:
+            True if values were written, False if the column was left as is.
+        """
+        # Construction du suffixe
+        suffix = f" for {context}" if context else ""
+
+        # Aucune valeur produite : la colonne reste intacte, y compris ses
+        # observations d'entrée
+        if len(predictions) == 0:
+            # Logging
+            self._log(
+                f"No value produced{suffix}: column '{var_name}' left untouched"
+            )
+            return False
+
+        # Vidage restreint à la fenêtre, puis réécriture des valeurs produites
+        # Vidage
+        blank_mask = scope_mask & predict_mask
+        if blank_mask.any():
+            X_stage.loc[blank_mask, var_name] = np.nan
+        # Réécriture
+        X_stage.loc[predictions.index, var_name] = predictions
+
+        # Marquage de la provenance des cellules effectivement écrites
+        self._mark_imputed_cells(
+            tracker, var_name, predictions.index,
+            disaggregated_mask, trained_on_imputed
+        )
+
+        # Cellules vidées sans réécriture : elles ne portent plus de valeur,
+        # elles ne peuvent donc plus être déclarées ORIGINAL
+        cleared = X_stage.index[blank_mask.to_numpy()].difference(predictions.index)
+        if (
+            len(cleared) > 0
+            and tracker.provenance_matrix_ is not None
+            and var_name in tracker.provenance_matrix_.columns
+        ):
+            cleared = cleared.intersection(tracker.provenance_matrix_.index)
+            if len(cleared) > 0:
+                tracker.clear_provenance(var_name, cleared)
+
+        return True
 
     # Méthode auxiliaire de notation de la provenance des variables agrégées
     def _mark_aggregated_provenance(
@@ -2471,31 +2681,25 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # PHASE 1 — Imputation window
         # =================================================================
         
-        # Initialisation du calculateur de fréquences d'imputation
-        self._imputation_window_calc = ImputationWindowCalculator(
-            coverage_threshold=self.coverage_threshold,
-            imputation_scope=self.imputation_scope,
-            min_columns=2,
-        )
-        try:
-            # Calcul de la fenêtre d'imputation
-            self._imputation_window_calc.fit(X_work)
-            # Fenêtre STRICTE (coverage == 1.0), indépendante de imputation_scope
-            self.imputation_window_ = self._zip_window_bounds(
-                self._imputation_window_calc.imputation_strict_window_start_,
-                self._imputation_window_calc.imputation_strict_window_end_,
+        # Calcul de la fenêtre d'imputation sur les données du fit. Le
+        # calculateur reste porté par l'instance : il définit le jeu
+        # d'entraînement (_prepare_training_data, _determine_variable_order_cv).
+        # La fenêtre de prédiction, elle, est recalculée sur les données imputées
+        window_calc, window_error = self._fit_imputation_window(X_work)
+
+        # Cas d'échec du calcul : le calculateur non entraîné est conservé, les
+        # gardes "_is_fitted" des consommateurs le neutralisent d'elles-mêmes
+        if window_calc is None:
+            # Instanciation du calculateur de fenêtre
+            self._imputation_window_calc = ImputationWindowCalculator(
+                coverage_threshold=self.coverage_threshold,
+                imputation_scope=self.imputation_scope,
+                min_columns=2,
             )
-            # Fenêtre d'entraînement étendue selon imputation_scope : le calculateur
-            # expose désormais directement ces bornes (imputation_window_start_/end_
-            # suivent imputation_scope), plus besoin de les redériver du masque
-            self.training_window_ = self._zip_window_bounds(
-                self._imputation_window_calc.imputation_window_start_,
-                self._imputation_window_calc.imputation_window_end_,
-            )
-        except ValueError as e:
             # Warning
             warnings.warn(
-                f"Could not calculate imputation window: {e}. Using all available data.",
+                f"Could not calculate imputation window: {window_error}. "
+                f"Using all available data.",
                 UserWarning
             )
             # On se restreint aux dates minimales et maximales
@@ -2506,10 +2710,22 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             self.imputation_window_ = (time_idx.min(), time_idx.max())
             self.training_window_ = self.imputation_window_
         else:
+            self._imputation_window_calc = window_calc
+            # Fenêtre STRICTE (coverage == 1.0), indépendante de imputation_scope
+            self.imputation_window_ = self._zip_window_bounds(
+                window_calc.imputation_strict_window_start_,
+                window_calc.imputation_strict_window_end_,
+            )
+            # Fenêtre d'entraînement étendue selon imputation_scope
+            self.training_window_ = self._zip_window_bounds(
+                window_calc.imputation_window_start_,
+                window_calc.imputation_window_end_,
+            )
+
             # Avertissement global si aucune fenêtre stricte n'existe (fit "réussi" mais
             # bornes None) : sans cela, tous les entraînements échouent silencieusement
             # un à un et tout finit en interpolate_fallback (cf. PHASE 5)
-            start = self._imputation_window_calc.imputation_strict_window_start_
+            start = window_calc.imputation_strict_window_start_
             no_window = (
                 start is None if not isinstance(start, dict)
                 else all(v is None for v in start.values())
@@ -2839,7 +3055,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         # dates-ancres comprises) et lignes prédictibles
                         # (restreintes à la fenêtre d'imputation)
                         scope_mask, predict_mask = self._prediction_masks(
-                            X_stage, X_work, stage_group, var_name
+                            X_stage, X_work, stage_group, var_name,
+                            self._imputation_window_calc, context=stage_context
                         )
                         # Cas où le masque est non vide
                         if scope_mask.any():
@@ -2856,32 +3073,26 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                                     preds, X_work, stage_group,
                                     context=stage_context
                                 )
-                                # Cascade intra-étape : les variables suivantes de l'étape
-                                # voient les valeurs imputées. Le périmètre de
-                                # désagrégation est d'abord vidé en entier : une ancre
-                                # laissée non prédite ne doit pas conserver le total de
-                                # sa période dans une colonne à l'échelle de la
-                                # sous-période
-                                X_stage.loc[scope_mask, var_name] = np.nan
-                                X_stage.loc[preds.index, var_name] = preds
+                                # Cascade intra-étape : les variables suivantes de
+                                # l'étape voient les valeurs imputées. Le vidage du
+                                # périmètre et le marquage de la provenance suivent
+                                # la discipline commune de "_write_stage_values"
+                                written = self._write_stage_values(
+                                    X_stage, var_name, preds, scope_mask, predict_mask,
+                                    self._provenance_tracker, disagg_mask,
+                                    step.trained_on_imputed, context=stage_context
+                                )
                                 # Alimentation du magasin d'imputations pour les étapes
-                                # suivantes (jamais X_work), par nom de variable : les
+                                # suivantes  par nom de variable : les
                                 # imputations déjà déposées par un autre groupe de la
                                 # même variable (fréquences hétérogènes selon l'entité)
                                 # sont préservées
-                                existing_imputed = imputed_store.get(var_name)
-                                imputed_store[var_name] = (
-                                    preds if existing_imputed is None
-                                    else existing_imputed.combine_first(preds)
-                                )
-
-                                # Marquage provenance : DISAGGREGATED sur les cellules
-                                # effectivement recalées, MODEL_ON_* sur les autres.
-                                # "preds.index" couvre toutes les entités du groupe
-                                self._mark_imputed_cells(
-                                    self._provenance_tracker, var_name, preds.index,
-                                    disagg_mask, step.trained_on_imputed
-                                )
+                                if written:
+                                    existing_imputed = imputed_store.get(var_name)
+                                    imputed_store[var_name] = (
+                                        preds if existing_imputed is None
+                                        else existing_imputed.combine_first(preds)
+                                    )
                             except Exception as e:
                                 # Warning
                                 warnings.warn(
@@ -2913,6 +3124,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         data by :meth:`_build_stage_frame` — the very method used by
         :meth:`_fit` — so fit and transform work on identical stage frames
         for identical data. The input frame itself is never modified.
+
+        The imputation window restricting the predictions is recomputed here,
+        on the data being transformed, with the hyperparameters of the fit. 
+        Reusing the window fitted on the training data emptied
+        the imputed column entirely as soon as the dates fell outside its
+        grid. Since the recomputation on the fit data gives back the fit
+        window, ``fit_transform(X)`` and ``fit(X).transform(X)`` stay strictly
+        identical.
 
         Note:
             This method is stateful: it snapshots its input in
@@ -2964,6 +3183,25 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Init provenance tracker pour la transformation
         transform_tracker = ImputationProvenanceTracker()
         transform_tracker.initialize(data_work, panel_cols=self.panel_cols)
+
+        # Fenêtre d'imputation des données transformée, calculée une seule fois
+        # et au même stade qu'au fit (avant le transformer additif), pour que le
+        # recalcul sur les données du fit redonne exactement la fenêtre du fit.
+        # Réutiliser celle du fit rendait tout entièrement NaN dès que les dates
+        # sortaient de sa grille.
+        transform_window_calc, window_error = self._fit_imputation_window(data_work)
+        if transform_window_calc is None:
+            # Logging
+            self._log(
+                f"[transform] No imputation window could be computed: "
+                f"{window_error}. Predicting on the whole scope."
+            )
+            # Warning
+            warnings.warn(
+                f"Could not calculate the imputation window of the data being "
+                f"transformed: {window_error}. Using all available data.",
+                UserWarning
+            )
 
         # 2. Application du transformer additif
         if self.additive_transformer_ is not None:
@@ -3053,19 +3291,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         # Même restriction que le chemin modèle : rien n'est
                         # produit hors de la fenêtre d'imputation
                         scope_mask, predict_mask = self._prediction_masks(
-                            X_stage, X_input, stage_group, var_name
+                            X_stage, X_input, stage_group, var_name,
+                            transform_window_calc, context=stage_context
                         )
                         # Application de la contrainte d'agrégation
                         rescaled, disagg_mask = self._apply_period_totals(
                             interpolated.loc[predict_mask], X_input,
                             stage_group, context=stage_context
                         )
-                        X_stage.loc[scope_mask, var_name] = np.nan
-                        X_stage.loc[rescaled.index, var_name] = rescaled
-                        # Marquage de la provenance des cases imputées
-                        self._mark_imputed_cells(
-                            transform_tracker, var_name, rescaled.index,
-                            disagg_mask, False
+                        # Même discipline d'écriture que le chemin modèle
+                        self._write_stage_values(
+                            X_stage, var_name, rescaled, scope_mask, predict_mask,
+                            transform_tracker, disagg_mask, False,
+                            context=stage_context
                         )
                     continue
 
@@ -3078,7 +3316,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 # basse fréquence et des valeurs de sous-période) et lignes
                 # prédictibles (restreintes à la fenêtre d'imputation)
                 scope_mask, predict_mask = self._prediction_masks(
-                    X_stage, X_input, stage_group, var_name
+                    X_stage, X_input, stage_group, var_name,
+                    transform_window_calc, context=stage_context
                 )
                 if not scope_mask.any():
                     continue
@@ -3095,32 +3334,26 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         predictions, X_input, stage_group, context=stage_context
                     )
                     # Cascade intra-étape : le frame de l'étape porte le résultat.
-                    # Le périmètre de désagrégation est d'abord vidé en entier, une
-                    # ancre laissée non prédite ne devant pas conserver le total de
-                    # sa période dans une colonne à l'échelle de la sous-période
-                    X_stage.loc[scope_mask, var_name] = np.nan
-                    X_stage.loc[predictions.index, var_name] = predictions
+                    # Le vidage du périmètre et le marquage de la provenance
+                    # suivent la discipline commune de "_write_stage_values" :
+                    # "predictions.index" couvre toutes les entités du groupe.
+                    written = self._write_stage_values(
+                        X_stage, var_name, predictions, scope_mask, predict_mask,
+                        transform_tracker, disagg_mask, step.trained_on_imputed,
+                        context=stage_context
+                    )
                     # Alimentation des étapes suivantes, symétrique du bloc 5g du
                     # fit : sans réentraînement, les covariables des étapes
                     # suivantes restent celles vues à l'entraînement. Clé par nom
                     # de variable : les imputations déjà déposées par un autre
                     # groupe de la même variable (fréquences hétérogènes selon
                     # l'entité) sont préservées
-                    if self.cascade_refitting:
+                    if self.cascade_refitting and written:
                         existing_imputed = imputed_store.get(var_name)
                         imputed_store[var_name] = (
                             predictions if existing_imputed is None
                             else existing_imputed.combine_first(predictions)
                         )
-
-                    # Marquage provenance : DISAGGREGATED sur les cellules
-                    # effectivement recalées, MODEL_ON_* sur les autres. Même
-                    # remarque qu'au fit : "predictions.index" couvre
-                    # toutes les entités du groupe, cohérent avec le modèle GLOBAL
-                    self._mark_imputed_cells(
-                        transform_tracker, var_name, predictions.index,
-                        disagg_mask, step.trained_on_imputed
-                    )
                 except Exception as e:
                     # Logging
                     self._log(
@@ -3133,9 +3366,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         f"Prediction failed for variable '{var_name}': {e}. "
                         f"Using interpolation fallback."
                     )
-                    # Repli sur l'interpolation
-                    X_stage[var_name] = X_stage[var_name].interpolate(
+                    # Repli sur l'interpolation, restreint aux lignes prédictibles
+                    # et tracé comme toute autre valeur produite : écrire la
+                    # colonne entière produirait des valeurs hors fenêtre, sans
+                    # provenance, que l'inversion ne saurait pas retirer
+                    interpolated = X_stage[var_name].interpolate(
                         method='linear', limit_direction='both'
+                    )
+                    filled = interpolated.loc[predict_mask].dropna()
+                    self._write_stage_values(
+                        X_stage, var_name, filled, scope_mask, predict_mask,
+                        transform_tracker, pd.Series(False, index=filled.index),
+                        step.trained_on_imputed, context=stage_context
                     )
 
             # Stockage du frame d'étape APRÈS les imputations de l'étape :
@@ -3167,6 +3409,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         else:
             self.imputation_provenance_ = transform_tracker.get_provenance_matrix()
 
+        # Contrôle de cohérence provenance / données
+        self._check_provenance_consistency(data_result, self.imputation_provenance_)
+
         # Résumé de provenance
         overall_stats = transform_tracker.compute_statistics()['overall']
         # Logging
@@ -3188,6 +3433,78 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Méthodes auxiliaires de transform
     # -------------------------------------------------------------------------
+    # Méthode auxiliaire de contrôle de cohérence entre provenance et données
+    def _check_provenance_consistency(
+        self,
+        data_result: pd.DataFrame,
+        provenance: pd.DataFrame,
+    ) -> None:
+        """Report cells declared ORIGINAL where the output holds no value.
+
+        The invariant is one-way: a cell may hold a value without a provenance
+        (it was never touched by the cascade), but a NaN cell may never be
+        declared observed — ``inverse_transform`` reads ORIGINAL as "keep this
+        value". A violation is reported rather than silently
+        repaired: it signals that some path empties a cell without updating
+        the matrix, which is worth seeing.
+
+        The report names the frequency level when the output carries one:
+        an intermediate level of a ``keep_lower_frequencies=True`` output
+        stacks a stage frame aggregated to a lower frequency against a
+        provenance snapshot still taken on the source index, so its dense
+        columns read NaN there while their marks stay ORIGINAL. That known
+        gap belongs to the multi-frequency output, not to the cascade, and is
+        harmless for the inversion, which works on a single level.
+
+        Args:
+            data_result: Frame returned by the transform.
+            provenance: Provenance matrix built alongside it, sharing its index
+                structure.
+        """
+        # Colonnes communes aux deux frames
+        common_cols = [c for c in data_result.columns if c in provenance.columns]
+        if not common_cols:
+            return
+
+        # Cellules vides déclarées observées
+        values = data_result[common_cols]
+        marks = provenance[common_cols].reindex(index=values.index)
+        inconsistent = values.isna() & (marks == ProvenanceType.ORIGINAL)
+        if not inconsistent.to_numpy().any():
+            return
+
+        # Ventilation par niveau de fréquence quand la sortie en porte un
+        if self._has_frequency_level(data_result):
+            levels = data_result.index.get_level_values('frequency')
+            detail = ", ".join(
+                f"{level}: " + ", ".join(
+                    f"{col}={int(count)}"
+                    for col, count in inconsistent[levels == level].sum().items()
+                    if count > 0
+                )
+                for level in levels.unique()
+                if inconsistent[levels == level].to_numpy().any()
+            )
+        else:
+            detail = ", ".join(
+                f"{col}={int(count)}"
+                for col, count in inconsistent.sum().items() if count > 0
+            )
+
+        total = int(inconsistent.to_numpy().sum())
+        # Logging
+        self._log(
+            f"Provenance inconsistency: {total} empty cell(s) still marked "
+            f"ORIGINAL ({detail})"
+        )
+        # Warning
+        warnings.warn(
+            f"Provenance inconsistency after transform: {total} cell(s) are NaN "
+            f"but still marked ORIGINAL ({detail}). inverse_transform would "
+            f"treat them as observed values on the affected level.",
+            UserWarning
+        )
+
     def _build_multifreq_output(
         self,
         stage_frames: "OrderedDict[str, pd.DataFrame]",

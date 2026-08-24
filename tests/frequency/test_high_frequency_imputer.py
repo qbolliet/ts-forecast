@@ -1323,9 +1323,20 @@ class TestNoImputationWithoutCovariates:
         result = _fit_transform_quiet(imputer, df)
 
         # Mois 1 à 9 : la covariable n'a jamais existé, aucune imputation ne
-        # devrait y avoir lieu
+        # devrait y avoir lieu. Depuis §3.14 l'entrée y est rendue telle
+        # quelle — les ancres trimestrielles d'origine sont conservées, seule
+        # une valeur PRODUITE y serait un défaut
         never_covered = result['target_var'].iloc[1:10]
-        assert never_covered.isna().all()
+        pd.testing.assert_series_equal(
+            never_covered, df['target_var'].iloc[1:10], check_freq=False
+        )
+        provenance = imputer.imputation_provenance_['target_var'].iloc[1:10]
+        imputed_types = {
+            ProvenanceType.DISAGGREGATED,
+            ProvenanceType.MODEL_ON_TRUE,
+            ProvenanceType.MODEL_ON_MIXED,
+        }
+        assert not provenance.isin(list(imputed_types)).any()
 
         # Les mois couverts, eux, sont bien imputés
         assert result['target_var'].iloc[10:].notna().any()
@@ -1357,9 +1368,14 @@ class TestNoImputationWithoutCovariates:
             ProvenanceType.MODEL_ON_MIXED,
         }
         for column in ('pib_trimestriel', 'balance_commerciale_annuelle'):
-            # Aucune valeur produite hors fenêtre : ni imputation, ni ancre
-            # conservée à l'échelle de la période basse fréquence (§2.6)
-            assert result.loc[outside, column].isna().all()
+            # Aucune valeur PRODUITE hors fenêtre. Depuis §3.14 le vidage du
+            # périmètre de désagrégation se restreint lui aussi à la fenêtre :
+            # hors fenêtre la sortie est exactement l'entrée, ancres comprises
+            pd.testing.assert_series_equal(
+                result.loc[outside, column],
+                mixed_freq_timeseries.loc[outside, column],
+                check_freq=False,
+            )
             provenance = imputer.imputation_provenance_.loc[outside, column]
             assert not provenance.isin(list(imputed_types)).any()
 
@@ -2998,3 +3014,240 @@ class TestHighFrequencyImputerMultiLevelPanel:
             check_dtype=False,
             check_freq=False,
         )
+
+
+# =============================================================================
+# §3.14 (B1) — `transform` hors fenêtre de fit
+# =============================================================================
+def _build_monthly_with_quarterly(start, periods=72, seed=0):
+    """Build a monthly frame carrying one dense covariate and a quarterly var.
+
+    Same additive setup as the `quarterly_over_monthly` fixture, but with a
+    parametrizable date range: the point of §3.14 is precisely that the fit
+    frame and the transform frame span DISJOINT periods.
+
+    Args:
+        start: First month of the frame ('YYYY-MM-DD', month-start anchored).
+        periods: Number of months.
+        seed: Seed of the covariate's noise.
+
+    Returns:
+        DataFrame indexed by month-start dates, with a dense ``monthly_var``
+        and a ``gdp`` column non-NaN only on the first month of each quarter,
+        where it holds the quarter's total.
+    """
+    dates = pd.date_range(start=start, periods=periods, freq='MS')
+    rng = np.random.default_rng(seed)
+
+    monthly = pd.Series(30.0 + rng.normal(0, 2.0, periods), index=dates)
+    quarterly = pd.Series(np.nan, index=dates)
+    # La valeur trimestrielle est portée par le premier mois, ancre de la période
+    for _, block in monthly.groupby(monthly.index.to_period('Q')):
+        quarterly.loc[block.index[0]] = block.sum()
+
+    data = pd.DataFrame({'monthly_var': monthly, 'gdp': quarterly})
+    data.index.name = 'date'
+    return data
+
+
+def _assert_no_observation_lost(source, result, imputer=None):
+    """Assert no observed input value disappears from the output.
+
+    Generic invariant of §3.14, meant to be reused by the following batches:
+    the cascade may CHANGE an observed value (spreading a quarterly total over
+    its months is the whole point of the disaggregation), it may never turn it
+    into NaN without putting anything in its place.
+
+    Args:
+        source: Frame given to fit_transform / transform.
+        result: Frame it returned.
+        imputer: Fitted imputer, needed only to strip the ``frequency`` level
+            of a ``keep_lower_frequencies=True`` output.
+
+    Raises:
+        AssertionError: If an observed cell of `source` is NaN in `result`.
+    """
+    # Restriction au niveau de la fréquence cible pour une sortie empilée
+    frame = _target_level(imputer, result) if imputer is not None else result
+
+    common_cols = [c for c in source.columns if c in frame.columns]
+    assert common_cols, "aucune colonne commune : le test serait vide"
+
+    common_index = source.index.intersection(frame.index)
+    assert len(common_index) > 0, "aucune ligne commune : le test serait vide"
+
+    for col in common_cols:
+        observed = source.loc[common_index, col].notna()
+        lost = observed & frame.loc[common_index, col].isna()
+        assert not lost.any(), (
+            f"{int(lost.sum())} observation(s) de '{col}' détruite(s) par la "
+            f"transformation, p.ex. {list(common_index[lost.to_numpy()][:5])}"
+        )
+
+
+class TestTransformOutsideFitWindow:
+    """§3.14 (B1) : `transform` sur des dates hors de la grille du fit.
+
+    Le défaut corrigé : `_prediction_masks` réutilisait le
+    `ImputationWindowCalculator` du fit, dont le masque valait False sur toute
+    date inconnue. Le périmètre de désagrégation était alors vidé en entier
+    sans qu'aucune prédiction ne vienne le remplir — colonne entièrement NaN,
+    observations d'entrée détruites, et pas le moindre avertissement.
+
+    La fenêtre d'imputation est une contrainte de DISPONIBILITÉ DES
+    COVARIABLES, pas un paramètre estimé : elle se recalcule désormais sur les
+    données que l'on impute.
+    """
+
+    @staticmethod
+    def _imputer(**kwargs):
+        """Build an imputer with the parameters shared by the whole class."""
+        params = dict(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        params.update(kwargs)
+        return HighFrequencyImputer(**params)
+
+    def test_transform_out_of_fit_window_imputes(self):
+        """Le scénario de reproduction : fit 2015-2020, transform 2021-2023."""
+        fit_df = _build_monthly_with_quarterly('2015-01-01', 72, seed=0)
+        new_df = _build_monthly_with_quarterly('2021-01-01', 36, seed=1)
+
+        imputer = self._imputer()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            fitted = imputer.fit_transform(fit_df.copy())
+            transformed = imputer.transform(new_df.copy())
+
+        # Contrôle : sur les données du fit, tout allait déjà bien
+        assert fitted['gdp'].notna().sum() == len(fit_df)
+
+        # Le défaut : 0/36 alors que l'entrée portait 12 observations
+        assert new_df['gdp'].notna().sum() == 12
+        assert transformed['gdp'].notna().sum() == len(new_df)
+
+    def test_transform_never_erases_observations(self, mixed_freq_timeseries):
+        """Aucune valeur non-NaN de l'entrée ne disparaît de la sortie."""
+        # Cas hors échantillon
+        fit_df = _build_monthly_with_quarterly('2015-01-01', 72, seed=0)
+        new_df = _build_monthly_with_quarterly('2021-01-01', 36, seed=1)
+
+        imputer = self._imputer()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(fit_df.copy())
+            transformed = imputer.transform(new_df.copy())
+        _assert_no_observation_lost(new_df, transformed, imputer)
+
+        # Cas du jeu de référence : les ancres 2018 de `pib_trimestriel` sont
+        # dans le périmètre mais hors fenêtre stricte
+        # (`production_industrielle` ne démarre qu'en 2019)
+        reference = self._imputer(keep_lower_frequencies=True)
+        result = _fit_transform_quiet(reference, mixed_freq_timeseries)
+        _assert_no_observation_lost(mixed_freq_timeseries, result, reference)
+
+    @pytest.mark.parametrize('dataset', ['mixed_freq_timeseries', 'mixed_freq_panel'])
+    @pytest.mark.parametrize('keep_lower_frequencies', [False, True])
+    def test_fit_transform_equals_fit_then_transform(
+        self, dataset, keep_lower_frequencies, request
+    ):
+        """`fit_transform(X)` et `fit(X).transform(X)` restent identiques.
+
+        Garde-fou non négociable du recalcul de la fenêtre : deux instances
+        distinctes, pour que l'égalité ne puisse pas venir d'un état partagé.
+        """
+        data = request.getfixturevalue(dataset)
+
+        combined = self._imputer(keep_lower_frequencies=keep_lower_frequencies)
+        separate = self._imputer(keep_lower_frequencies=keep_lower_frequencies)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result_combined = combined.fit_transform(data.copy())
+            separate.fit(data.copy())
+            result_separate = separate.transform(data.copy())
+
+        pd.testing.assert_frame_equal(
+            result_combined.sort_index(), result_separate.sort_index()
+        )
+
+    def test_out_of_window_rows_warn(self):
+        """Un périmètre entièrement hors fenêtre est signalé, dates comprises.
+
+        Le fit porte sur un jeu normal ; le transform, lui, reçoit des données
+        où la covariable et la variable à imputer ne se recouvrent JAMAIS : la
+        fenêtre stricte y est vide alors que le périmètre de désagrégation est
+        entier. C'est le cas que §3.14 traversait en silence.
+        """
+        fit_df = _build_monthly_with_quarterly('2015-01-01', 72, seed=0)
+
+        # Jeu de transform sans aucun mois où les deux séries coexistent
+        dates = pd.date_range('2021-01-01', periods=36, freq='MS')
+        rng = np.random.default_rng(3)
+        monthly = pd.Series(np.nan, index=dates)
+        monthly.iloc[:12] = 30.0 + rng.normal(0, 1.0, 12)
+        quarterly = pd.Series(np.nan, index=dates)
+        quarterly.loc[dates[12::3]] = 100.0
+        disjoint = pd.DataFrame({'monthly_var': monthly, 'gdp': quarterly})
+        disjoint.index.name = 'date'
+
+        imputer = self._imputer()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(fit_df.copy())
+
+        with pytest.warns(UserWarning) as caught:
+            result = imputer.transform(disjoint.copy())
+
+        messages = [
+            str(w.message) for w in caught
+            if 'falls inside the imputation window' in str(w.message)
+        ]
+        assert messages, "aucun avertissement sur les lignes hors fenêtre"
+        # Le message nomme le nombre de dates, un exemple daté et les bornes
+        assert 'date(s)' in messages[0]
+        assert '2021-' in messages[0]
+        assert 'bounds:' in messages[0]
+
+        # Et rien n'a été détruit au passage
+        _assert_no_observation_lost(disjoint, result, imputer)
+
+    def test_provenance_matches_output_after_transform(self, mixed_freq_timeseries):
+        """Aucune cellule ORIGINAL là où la sortie est NaN."""
+        fit_df = _build_monthly_with_quarterly('2015-01-01', 72, seed=0)
+        new_df = _build_monthly_with_quarterly('2021-01-01', 36, seed=1)
+
+        imputer = self._imputer()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(fit_df.copy())
+            transformed = imputer.transform(new_df.copy())
+
+        provenance = imputer.imputation_provenance_
+        common = [c for c in transformed.columns if c in provenance.columns]
+        inconsistent = (
+            transformed[common].isna()
+            & (provenance[common].reindex(index=transformed.index)
+               == ProvenanceType.ORIGINAL)
+        )
+        assert not inconsistent.any().any()
+
+        # Même invariant sur le jeu de référence, où le vidage du périmètre
+        # laisse des cellules non réécrites à l'intérieur de la fenêtre.
+        # Contrôle au NIVEAU CIBLE : c'est celui que lit `inverse_transform`.
+        # Les niveaux intermédiaires d'une sortie multi-fréquences violent
+        # encore l'invariant (une colonne dense agrégée y est NaN hors ancre
+        # alors que son instantané de provenance reste au pas source) —
+        # défaut propre à l'empilement, signalé par le contrôle interne
+        reference = self._imputer(keep_lower_frequencies=True)
+        result = _fit_transform_quiet(reference, mixed_freq_timeseries)
+        values = _target_level(reference, result)
+        provenance = _target_level(reference, reference.imputation_provenance_)
+        common = [c for c in values.columns if c in provenance.columns]
+        inconsistent = (
+            values[common].isna()
+            & (provenance[common].reindex(index=values.index)
+               == ProvenanceType.ORIGINAL)
+        )
+        assert not inconsistent.any().any()
