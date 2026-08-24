@@ -2726,3 +2726,87 @@ class TestImputationPlan:
 
         imputed_col = 'balance_commerciale_annuelle'
         assert full[imputed_col].notna().sum() > empty[imputed_col].notna().sum()
+
+
+class TestHighFrequencyImputerMultiLevelPanel:
+    """§C19 : couverture d'un panel à deux niveaux d'entité (country, sector).
+
+    `split_variable_key`, `get_entity_mask`, `_period_membership`,
+    `_stage_scale_factor` et `to_entity_tuple` ne consomment en aval de
+    `repr_var_key = var_keys[0]` que le nom de colonne et la fréquence
+    détectée, identiques pour toutes les clés du groupe : rien dans leur
+    logique ne suppose un unique niveau d'entité. Ce chemin n'était exercé,
+    jusqu'ici, que par `mixed_freq_panel` (un seul niveau, `country`)."""
+
+    def test_two_level_panel_fit_transform(self, panel_two_level_dataset):
+        """`fit_transform` aboutit sur un panel à deux niveaux d'entité : la
+        sortie garde les niveaux (country, sector, date) et la variable
+        trimestrielle est imputée pour les 4 couples pays/secteur.
+
+        `keep_lower_frequencies=False` : à True, `_stack_stage_frames`
+        aplatit l'entité sur son seul premier niveau
+        (`get_level_values(0)`), ce qui mélangerait les deux secteurs d'un
+        même pays sous la même étiquette d'entité — hors périmètre de ce
+        correctif (aucun changement de code de production ici, cf. C19)."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+
+        result = _fit_transform_quiet(imputer, panel_two_level_dataset)
+
+        assert imputer.is_panel_ is True
+        assert list(result.index.names) == ['country', 'sector', 'date']
+
+        pairs = panel_two_level_dataset.index.droplevel('date').unique()
+        assert len(pairs) == 4
+        for country, sector in pairs:
+            values = result.xs((country, sector), level=('country', 'sector'))
+            assert values['indicateur_trimestriel'].notna().all()
+
+    def test_two_level_panel_entities_are_length_two_tuples(self, panel_two_level_dataset):
+        """Chaque étape du plan porte ses entités sous forme de tuples
+        (country, sector) à deux éléments, pas des scalaires ni des tuples
+        à un seul niveau."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+        )
+
+        _fit_transform_quiet(imputer, panel_two_level_dataset)
+
+        assert len(imputer.imputation_plan_) > 0
+        for step in imputer.imputation_plan_:
+            assert step.entities is not None
+            for entity in step.entities:
+                assert isinstance(entity, tuple)
+                assert len(entity) == 2
+
+    def test_two_level_panel_inverse_transform(self, panel_two_level_dataset):
+        """`inverse_transform` restitue l'index et les valeurs d'origine
+        pour un panel à deux niveaux d'entité (`keep_lower_frequencies=False`,
+        cf. `test_two_level_panel_fit_transform`)."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+
+        result = _fit_transform_quiet(imputer, panel_two_level_dataset)
+        inverse = imputer.inverse_transform(result)
+
+        assert inverse.index.names == panel_two_level_dataset.index.names
+        assert set(inverse.index) == set(panel_two_level_dataset.index)
+
+        # Toute cellule dont la provenance n'est pas ORIGINAL revient à NaN,
+        # les autres traversent l'inversion sans être touchées
+        original_mask = imputer.imputation_provenance_ == ProvenanceType.ORIGINAL
+        assert (~original_mask).any().any()
+        assert inverse.where(~original_mask).isna().all().all()
+        pd.testing.assert_frame_equal(
+            inverse.where(original_mask),
+            panel_two_level_dataset.where(original_mask),
+            check_dtype=False,
+            check_freq=False,
+        )

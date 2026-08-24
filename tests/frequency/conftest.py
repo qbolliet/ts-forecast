@@ -200,6 +200,64 @@ def mixed_freq_timeseries() -> pd.DataFrame:
     return _build_timeseries()
 
 
+def _build_panel_two_level(seed: int = 7) -> pd.DataFrame:
+    """Build a two-level entity panel (country x sector), 2x2 entities."""
+    countries = ['France', 'Allemagne']
+    sectors = ['Industrie', 'Services']
+    dates = pd.date_range(start='2019-01-01', end='2022-12-01', freq='MS')
+    n_periods = len(dates)
+
+    all_data = []
+    for country in countries:
+        for sector in sectors:
+            np.random.seed(seed + hash((country, sector)) % 1000)
+
+            df = pd.DataFrame(index=dates)
+            df['country'] = country
+            df['sector'] = sector
+
+            # ----- Variable mensuelle dense (~100-110), aucune valeur manquante -----
+            trend = np.linspace(100, 110, n_periods)
+            noise = np.random.normal(0, 1.0, n_periods)
+            df['indicateur_mensuel'] = trend + noise
+
+            # ----- Variable trimestrielle à imputer, NaN hors fin de trimestre -----
+            df['indicateur_trimestriel'] = np.nan
+            quarter_start_months = [1, 4, 7, 10]
+            quarter_idx = 0
+            for date in dates:
+                if date.month in quarter_start_months:
+                    df.loc[date, 'indicateur_trimestriel'] = (
+                        500 + quarter_idx * 5 + np.random.normal(0, 3)
+                    )
+                    quarter_idx += 1
+
+            all_data.append(df)
+
+    df_panel = pd.concat(all_data, ignore_index=False)
+    df_panel = df_panel.reset_index().rename(columns={'index': 'date'})
+    df_panel = df_panel.set_index(['country', 'sector', 'date'])
+    df_panel = df_panel.sort_index()
+
+    return df_panel
+
+
+@pytest.fixture
+def panel_two_level_dataset() -> pd.DataFrame:
+    """Two-level entity panel (country x sector), 2x2 = 4 entities.
+
+    MultiIndex (``country``, ``sector``, ``date``) with 2 countries
+    (``France``, ``Allemagne``) x 2 sectors (``Industrie``, ``Services``),
+    each with the same 48 month-start (``MS``) dates from 2019-01-01 to
+    2022-12-01 (192 rows total). Columns:
+
+    - ``indicateur_mensuel`` (monthly, dense, no NaN): ~100-110.
+    - ``indicateur_trimestriel`` (quarterly: non-NaN only at quarter-start
+      months 1/4/7/10, NaN elsewhere) — the variable to impute: ~500-575.
+    """
+    return _build_panel_two_level()
+
+
 @pytest.fixture
 def mixed_freq_panel() -> pd.DataFrame:
     """Mixed-frequency macroeconomic panel (mirrors df_panel).

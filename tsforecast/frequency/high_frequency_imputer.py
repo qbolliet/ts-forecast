@@ -110,7 +110,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         coverage_threshold: Minimum ratio of columns with data (0-1) for extended window.
         imputation_scope: Training window scope ('strict', 'extended_backward',
             'extended_forward', 'extended_both').
-        train_on_partial_coverage: If True, use imputed values for training outside P1.
+        train_on_partial_coverage: If True, use imputed values for training outside the strict window.
         train_on_partial_fit_order: Order for imputing variables when
             train_on_partial_coverage is True:
             - 'frequency': Sort by frequency level then entity count (default)
@@ -1589,6 +1589,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X_original: pd.DataFrame,
         imputed_store: Dict[str, pd.Series],
         pred_freq: Union[str, Dict],
+        aggregate_keys: Optional[List[Union[str, Tuple]]] = None,
     ) -> pd.DataFrame:
         """Build the working frame for one prediction-frequency stage.
 
@@ -1607,6 +1608,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 every entity of the variable.
             pred_freq: Prediction frequency of the stage (str for time
                 series, dict entity -> frequency for panel).
+            aggregate_keys: Variable keys to aggregate to ``pred_freq``, as
+                already computed by the caller via
+                :meth:`_classify_variables_at_frequency`. When ``None``
+                (default), it is recomputed internally from ``pred_freq`` —
+                kept for backward compatibility with callers passing only
+                three positional arguments (e.g. the notebook, existing
+                tests).
 
         Returns:
             Frame aligned on ``X_original``'s index, with higher-frequency
@@ -1628,10 +1636,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Les valeurs d'origine priment sur les valeurs imputées
             X_stage[col] = X_stage[col].combine_first(imputed)
 
-        # Agrégation des colonnes plus fréquentes que la fréquence de l'étape
-        classification = self._classify_variables_at_frequency(pred_freq)
+        # Agrégation des colonnes plus fréquentes que la fréquence de l'étape :
+        # réutilisation de la classification de l'appelant si fournie, pour
+        # éviter de la recalculer alors qu'il vient de le faire
+        if aggregate_keys is None:
+            aggregate_keys = self._classify_variables_at_frequency(pred_freq)['aggregate']
         return self._freq_aligner._aggregate_to_target(
-            X_stage, classification['aggregate'], pred_freq
+            X_stage, aggregate_keys, pred_freq
         )
 
     # Méthode auxiliaire de préparation des données d'entraînement du modèle d'imputation
@@ -1712,11 +1723,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 # données d'origine — les exclure viderait le masque à l'étape
                 # suivante et enverrait tout en repli
                 # /!\ Ne serait-il pas logique de rajouter ProvenanceType.AGGREGATED ici car dans le cas où l'on a des données additives, il n'y a pas d'approximation dans l'agrégation ?
+                # Réindexation défensive : le masque de provenance est aligné sur
+                # provenance_matrix_.index, potentiellement différent de celui de
+                # training_mask (X_stage.index) ; un "&" entre index divergents
+                # produirait des NaN convertis en objet puis un KeyError au .loc suivant
                 original_mask = self._provenance_tracker.get_mask(
                     [ProvenanceType.ORIGINAL, ProvenanceType.DISAGGREGATED],
                     column=var_name
-                )
-                # /!\ Vérifier la compatibilité des index
+                ).reindex(training_mask.index).fillna(False).astype(bool)
                 training_mask = training_mask & original_mask
 
         # Agrégation des covariables à la fréquence propre de la variable
@@ -2422,8 +2436,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
 
             # 5b. Construction du frame de l'étape, reconstruit depuis les données d'origine
-            # /!\ Voir si "aggregate_keys" ne peut pas être donné en argument de la méthode "_build_stage_frame" plutôt que recalculé à l'aide de classify_variable_at_frequency à l'intérieur de la méthode.
-            X_stage = self._build_stage_frame(X_original=X_work, imputed_store=imputed_store, pred_freq=pred_freq)
+            X_stage = self._build_stage_frame(
+                X_original=X_work, imputed_store=imputed_store, pred_freq=pred_freq,
+                aggregate_keys=aggregate_keys,
+            )
             # Marquage de la provenance sur le frame d'étape (index d'origine)
             self._mark_aggregated_provenance(
                 self._provenance_tracker, X_stage, aggregate_keys
@@ -2826,7 +2842,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             aggregate_keys = var_classification['aggregate']
 
             # Construction du frame d'étape : même méthode qu'au fit, mêmes frames
-            X_stage = self._build_stage_frame(X_input, imputed_store, pred_freq)
+            X_stage = self._build_stage_frame(X_input, imputed_store, pred_freq, aggregate_keys)
             # Indication de la provenance
             self._mark_aggregated_provenance(
                 transform_tracker, X_stage, aggregate_keys
