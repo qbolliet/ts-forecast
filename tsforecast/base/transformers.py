@@ -226,8 +226,6 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         self.auto_sort = auto_sort
         self.convert_cols_to_index = convert_cols_to_index
 
-        # Attribut pour stocker les métadonnées de conversion
-        self.conversion_metadata_ = None
 
     # Méthode de détection de la structure des données
     def _detect_data_structure(self, X: pd.DataFrame) -> Tuple[bool, bool, bool]:
