@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
 from sklearn.linear_model import LinearRegression, Ridge
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 
@@ -2708,6 +2708,230 @@ class TestTrainOnPartialFitOrderCV:
         result = _fit_transform_quiet(imputer, df)
 
         assert len(result) == len(df)
+
+
+class TestDetermineVariableOrderCV:
+    """§3.4 : correctifs B9/B10 et paramétrisation de `_determine_variable_order_cv`.
+
+    Ces tests appellent `_determine_variable_order_cv` directement plutôt que
+    de passer par un `fit()` complet : la méthode ne consulte que
+    `self.detected_frequencies_`, `self.estimator` (via
+    `_get_estimator_for_variable`) et, optionnellement,
+    `self._imputation_window_calc` (absent ici, donc le masque de fenêtre
+    stricte vaut `True` partout) — un état minimal suffit à l'isoler.
+    """
+
+    def test_cv_order_respects_scoring(self):
+        """Deux métriques différentes produisent deux ordres.
+
+        Avant le correctif B9, `avg_mape` valait `inf` pour chaque variable
+        et ce test échouait : les deux scorings produisaient le même ordre
+        (celui d'entrée), un no-op silencieux.
+        """
+        rng = np.random.default_rng(0)
+        n = 40
+        covariate = rng.normal(0, 1, n)
+        # Grande échelle, mal expliquée par "covariate" : bonne MAPE relative
+        # (bruit petit devant la moyenne ~100) mais mauvais MSE/R2 (résidu
+        # de variance 25 non expliqué par le modèle)
+        var_a = 100 + 5 * rng.normal(0, 1, n)
+        # Échelle proche de zéro, bien expliquée par "covariate" : excellent
+        # MSE/R2 (résidu quasi nul) mais MAPE dégradée par les valeurs
+        # proches de zéro au dénominateur
+        var_b = 0.01 * covariate + 0.001 * rng.normal(0, 1, n)
+        df = pd.DataFrame({'covariate': covariate, 'var_a': var_a, 'var_b': var_b})
+
+        imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+        imputer.detected_frequencies_ = {'var_a': 'M', 'var_b': 'M'}
+
+        imputer.set_params(cv_scoring='neg_mean_absolute_percentage_error')
+        order_mape = imputer._determine_variable_order_cv(df, ['var_a', 'var_b'])
+
+        imputer.set_params(cv_scoring='neg_mean_squared_error')
+        order_mse = imputer._determine_variable_order_cv(df, ['var_a', 'var_b'])
+
+        assert order_mape != order_mse
+        assert order_mape == ['var_a', 'var_b']
+        assert order_mse == ['var_b', 'var_a']
+
+    def test_cv_scores_are_finite(self):
+        """B9 : les NaN hors des lignes où la cible est observée ne doivent
+        plus faire échouer tous les plis de CV.
+
+        `easy_var`/`hard_var` portent des NaN sur leurs 15 premières lignes,
+        comme une variable basse fréquence dans un frame d'étape agrégé.
+        Avant le correctif, `y_sub` conservait ces NaN, chaque `est.fit`
+        levait, et `self._log` (ici capturé via `verbose=True`) aurait
+        signalé un échec total des plis pour LES DEUX variables.
+        """
+        rng = np.random.default_rng(1)
+        n = 60
+        covariate = rng.normal(0, 1, n)
+        easy_var = 3 * covariate + 0.01 * rng.normal(0, 1, n) + 50
+        hard_var = rng.normal(0, 1, n) + 50
+        df = pd.DataFrame({'covariate': covariate, 'easy_var': easy_var, 'hard_var': hard_var})
+        df.loc[df.index[:15], 'easy_var'] = np.nan
+        df.loc[df.index[:15], 'hard_var'] = np.nan
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M', estimator=LinearRegression(), verbose=True
+        )
+        imputer.detected_frequencies_ = {'easy_var': 'M', 'hard_var': 'M'}
+
+        capsys_buffer = []
+        real_print = print
+
+        def capturing_print(*args, **kwargs):
+            capsys_buffer.append(' '.join(str(a) for a in args))
+
+        import builtins
+        builtins.print = capturing_print
+        try:
+            order = imputer._determine_variable_order_cv(df, ['hard_var', 'easy_var'])
+        finally:
+            builtins.print = real_print
+
+        assert order == ['easy_var', 'hard_var']
+        assert not any('CV scoring failed on every fold' in line for line in capsys_buffer)
+
+    def test_cv_mode_applies_without_partial_coverage(self, mixed_freq_timeseries, monkeypatch):
+        """B10 : `train_on_partial_fit_order='cv'` s'applique même avec
+        `train_on_partial_coverage=False` (son défaut) — avant le correctif,
+        la conjonction des deux flags dans `_fit` retombait silencieusement
+        sur le tri par fréquence sans jamais appeler la méthode de CV."""
+        calls = []
+        original = HighFrequencyImputer._determine_variable_order_cv
+
+        def spy(self, X, impute_vars):
+            calls.append(list(impute_vars))
+            return original(self, X, impute_vars)
+
+        monkeypatch.setattr(HighFrequencyImputer, '_determine_variable_order_cv', spy)
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            train_on_partial_fit_order='cv',
+            train_on_partial_coverage=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        assert len(calls) > 0
+
+    def test_cv_fallback_below_min_cv_train_size(self):
+        """Une variable dont le nombre d'observations exploitables est
+        insuffisant rejoint le groupe de repli, pas le groupe noté par CV.
+
+        Estimateur tolérant les NaN (`HistGradientBoostingRegressor`) plutôt
+        que `LinearRegression` : le contrat du prompt 12 (§3.5) veut que les
+        NaN résiduels de "few_obs" comme COVARIABLE de "many_obs" restent à
+        la charge de l'estimateur plutôt que de faire échouer tous les plis
+        — un artefact de ce test isolé, pas un cas visé par ce correctif.
+        """
+        rng = np.random.default_rng(2)
+        n = 30
+        covariate = rng.normal(0, 1, n)
+        many_obs = 2 * covariate + 0.1 * rng.normal(0, 1, n) + 10
+        df = pd.DataFrame({'covariate': covariate, 'many_obs': many_obs})
+        # "few_obs" : seulement 5 observations exploitables sur 30
+        few_obs = pd.Series(np.nan, index=df.index)
+        few_obs.iloc[:5] = 1.0 + np.arange(5)
+        df['few_obs'] = few_obs
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=HistGradientBoostingRegressor(random_state=0),
+            min_cv_train_size=10,
+        )
+        imputer.detected_frequencies_ = {'many_obs': 'M', 'few_obs': 'M'}
+
+        order = imputer._determine_variable_order_cv(df, ['few_obs', 'many_obs'])
+
+        # Le groupe noté par CV (ici "many_obs" seul) précède toujours le
+        # groupe de repli (ici "few_obs" seul), quel que soit l'ordre d'entrée
+        assert order == ['many_obs', 'few_obs']
+
+    def test_invalid_cv_scoring_raises(self):
+        """Une valeur de `cv_scoring` non reconnue par sklearn lève un
+        `ValueError` explicite, via `sklearn.metrics.check_scoring`."""
+        rng = np.random.default_rng(3)
+        n = 30
+        covariate = rng.normal(0, 1, n)
+        var_a = 2 * covariate + 0.1 * rng.normal(0, 1, n) + 10
+        var_b = 2 * covariate + 0.1 * rng.normal(0, 1, n) + 10
+        df = pd.DataFrame({'covariate': covariate, 'var_a': var_a, 'var_b': var_b})
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cv_scoring='not_a_real_scorer',
+        )
+        imputer.detected_frequencies_ = {'var_a': 'M', 'var_b': 'M'}
+
+        with pytest.raises(ValueError):
+            imputer._determine_variable_order_cv(df, ['var_a', 'var_b'])
+
+    def test_unscorable_variable_goes_last(self):
+        """Une variable sans estimateur disponible (dict sans entrée ni
+        '__default__') obtient la sentinelle -inf et passe en dernier,
+        derrière toute variable correctement notée."""
+        rng = np.random.default_rng(4)
+        n = 30
+        covariate = rng.normal(0, 1, n)
+        scored_var = 2 * covariate + 0.05 * rng.normal(0, 1, n) + 20
+        unscorable_var = 2 * covariate + 0.05 * rng.normal(0, 1, n) + 20
+        df = pd.DataFrame({
+            'covariate': covariate, 'scored_var': scored_var, 'unscorable_var': unscorable_var,
+        })
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M', estimator={'scored_var': LinearRegression()},
+        )
+        imputer.detected_frequencies_ = {'scored_var': 'M', 'unscorable_var': 'M'}
+
+        order = imputer._determine_variable_order_cv(df, ['scored_var', 'unscorable_var'])
+
+        assert order == ['scored_var', 'unscorable_var']
+
+    def test_cv_n_splits_validation(self):
+        """`cv_n_splits < 2` lève un `ValueError` ; `min_cv_train_size <
+        cv_n_splits` émet un `UserWarning` sans lever (les deux paramètres
+        restent indépendants, la CV repliera systématiquement)."""
+        with pytest.raises(ValueError, match="cv_n_splits"):
+            HighFrequencyImputer(target_frequency='M', cv_n_splits=1)
+
+        with pytest.raises(ValueError, match="min_cv_train_size"):
+            HighFrequencyImputer(target_frequency='M', min_cv_train_size=1)
+
+        with pytest.warns(UserWarning, match="min_cv_train_size"):
+            HighFrequencyImputer(target_frequency='M', min_cv_train_size=3, cv_n_splits=5)
+
+    def test_fallback_group_order_matches_frequency_sort(self):
+        """L'ordre du groupe de repli suit celui de `_fit`
+        (`sorted(..., key=get_frequency_order, reverse=True)`, fréquence la
+        plus basse d'abord) — pas l'inverse."""
+        rng = np.random.default_rng(5)
+        n = 12
+        df = pd.DataFrame({
+            'daily_var': rng.normal(0, 1, n),
+            'monthly_var': rng.normal(0, 1, n),
+            'quarterly_var': rng.normal(0, 1, n),
+        })
+
+        # Seuil impossible à atteindre : toutes les variables rejoignent le
+        # groupe de repli, isolant son tri de celui du groupe noté par CV
+        imputer = HighFrequencyImputer(
+            target_frequency='M', estimator=LinearRegression(), min_cv_train_size=1000,
+        )
+        imputer.detected_frequencies_ = {
+            'daily_var': 'D', 'monthly_var': 'M', 'quarterly_var': 'Q',
+        }
+
+        order = imputer._determine_variable_order_cv(
+            df, ['daily_var', 'monthly_var', 'quarterly_var']
+        )
+
+        assert order == ['quarterly_var', 'monthly_var', 'daily_var']
 
 
 class TestClassifyVariablesUnification:

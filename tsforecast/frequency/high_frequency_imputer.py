@@ -8,14 +8,14 @@ for low-frequency series in mixed-frequency datasets using machine learning mode
 import warnings
 from collections import OrderedDict
 from dataclasses import replace
-from typing import Dict, List, Literal, Optional, Sequence, Union, Any, Tuple
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Union, Any, Tuple
 # Manipulation de données
 import numpy as np
 import pandas as pd
 # Sklearn
 from sklearn.base import BaseEstimator, TransformerMixin, clone
-from sklearn.model_selection import KFold
-from sklearn.metrics import mean_absolute_percentage_error
+from sklearn.model_selection import KFold, cross_val_score
+from sklearn.metrics import check_scoring
 # Utilitaires du package
 from ..xy.transformers import XYPanelTimeSeriesTransformer
 from ..utils.frequency.converter import FrequencyConverter
@@ -121,10 +121,33 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         imputation_scope: Training window scope ('strict', 'extended_backward',
             'extended_forward', 'extended_both').
         train_on_partial_coverage: If True, use imputed values for training outside the strict window.
-        train_on_partial_fit_order: Order for imputing variables when
-            train_on_partial_coverage is True:
+        train_on_partial_fit_order: Order in which variables are imputed at
+            each cascade stage:
             - 'frequency': Sort by frequency level then entity count (default)
-            - 'cv': Use cross-validation to impute easiest variables first
+            - 'cv': Cross-validate each variable with its estimator and
+              impute the easiest ones (highest score) first. Applies
+              regardless of ``train_on_partial_coverage`` — the two
+              parameters are independent.
+        min_cv_train_size: Minimum number of scorable observations (target
+            non-NaN, restricted to the strict imputation window) a variable
+            must have for ``train_on_partial_fit_order='cv'`` to score it by
+            cross-validation. Below this, the variable falls back to the
+            'frequency' ordering group. Must be >= 2.
+        cv_scoring: Scoring used by ``train_on_partial_fit_order='cv'``, in
+            the ``sklearn`` sense: a registry string (e.g.
+            ``'neg_mean_absolute_percentage_error'``, ``'r2'``), a scorer
+            from ``sklearn.metrics.make_scorer``, or a callable
+            ``scorer(estimator, X, y) -> float``, validated at scoring time
+            via ``sklearn.metrics.check_scoring``. Higher is better in every
+            case (sklearn convention), so the variable with the HIGHEST
+            score is imputed first. Behavior change versus the previous
+            hardcoded MAPE: rows with ``y == 0`` are no longer excluded —
+            ``mean_absolute_percentage_error`` instead floors the
+            denominator at ``eps``, so a zero target produces a very large
+            error rather than being ignored. Prefer
+            ``'neg_root_mean_squared_error'`` for series containing zeros.
+        cv_n_splits: Number of folds used by ``train_on_partial_fit_order='cv'``.
+            Must be >= 2.
         scale_features: If True, divide X_train by the number of sub-periods
             as well as y_train, which is always divided. Set it to True when
             the training covariates were aggregated by summation to the
@@ -339,6 +362,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         imputation_scope: ImputationScope = 'strict',
         train_on_partial_coverage: bool = False,
         train_on_partial_fit_order: Literal['frequency', 'cv'] = 'frequency',
+        min_cv_train_size: int = 10,
+        cv_scoring: Union[str, Callable] = 'neg_mean_absolute_percentage_error',
+        cv_n_splits: int = 5,
         scale_features: bool = True,
         enforce_period_totals: bool = True,
         restore_original_values: bool = False,
@@ -386,7 +412,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 training models outside the imputation window.
             train_on_partial_fit_order: Order for variable imputation:
                 - 'frequency': By frequency level then entity count (default)
-                - 'cv': Cross-validation to find easiest variables first
+                - 'cv': Cross-validation to find easiest variables first,
+                  applied regardless of ``train_on_partial_coverage``
+            min_cv_train_size: Minimum scorable observations for a variable
+                to be cross-validated under ``train_on_partial_fit_order='cv'``;
+                below this it falls back to the 'frequency' ordering group.
+                Must be >= 2.
+            cv_scoring: Scoring for ``train_on_partial_fit_order='cv'``, any
+                value accepted by ``sklearn.metrics.check_scoring`` (registry
+                string, ``make_scorer`` scorer, or callable). Higher is
+                better; the highest-scoring variable is imputed first.
+            cv_n_splits: Number of CV folds for ``train_on_partial_fit_order='cv'``.
+                Must be >= 2.
             scale_features: If True, divide X_train by the number of
                 sub-periods alongside y_train, which is always divided.
             enforce_period_totals: If True (default), rescale the sub-periods
@@ -458,6 +495,26 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 f"train_on_partial_fit_order must be 'frequency' or 'cv', "
                 f"got '{train_on_partial_fit_order}'"
             )
+        if min_cv_train_size < 2:
+            raise ValueError(
+                f"min_cv_train_size must be >= 2, got {min_cv_train_size}"
+            )
+        if cv_n_splits < 2:
+            raise ValueError(
+                f"cv_n_splits must be >= 2, got {cv_n_splits}"
+            )
+        # Avertissement : croiser les deux paramètres pour
+        # imposer min_cv_train_size >= cv_n_splits couplerait deux options
+        # indépendantes. Sous ce seuil, cross_val_score échoue sur chaque
+        # pli (trop peu d'observations par pli) et la variable retombe dans
+        # le groupe de repli à chaque fois
+        if min_cv_train_size < cv_n_splits:
+            warnings.warn(
+                f"min_cv_train_size ({min_cv_train_size}) < cv_n_splits "
+                f"({cv_n_splits}): cross-validation will systematically "
+                f"fall back to the 'frequency' ordering for every variable.",
+                UserWarning
+            )
         # Validation groupée des booléens (B22) : aucun ne l'était, un
         # 'frequency'/1/None passé par erreur se propageait silencieusement
         # jusqu'à un "if" qui l'évalue en vérité/mensonge Python générique
@@ -485,6 +542,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.imputation_scope = imputation_scope
         self.train_on_partial_coverage = train_on_partial_coverage
         self.train_on_partial_fit_order = train_on_partial_fit_order
+        self.min_cv_train_size = min_cv_train_size
+        self.cv_scoring = cv_scoring
+        self.cv_n_splits = cv_n_splits
         self.scale_features = scale_features
         self.enforce_period_totals = enforce_period_totals
         self.restore_original_values = restore_original_values
@@ -1046,11 +1106,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X: pd.DataFrame,
         impute_vars: List[Union[str, Tuple]],
     ) -> List[Union[str, Tuple]]:
-        """Determine variable order using cross-validation MAPE.
+        """Determine variable order using cross-validated scoring.
 
-        Variables with the lowest MAPE (easiest to predict) are placed first.
-        Falls back to the 'random' ordering if fewer than 10 observations
-        are available for training.
+        Variables with the highest CV score (easiest to predict, sklearn's
+        "greater is better" convention) are placed first. Falls back to the
+        'frequency' ordering group when fewer than ``min_cv_train_size``
+        scorable observations are available for training.
 
         Args:
             X: Working data.
@@ -1063,13 +1124,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if len(impute_vars) <= 1:
             return impute_vars
 
-        # Deux groupes de scores, non comparables entre eux : le MAPE de la CV
-        # (généralement < 1) et l'ordre de fréquence utilisé en repli (entiers,
-        # potentiellement grands) ne doivent pas être triés ensemble, sous peine
-        # d'envoyer mécaniquement les variables en repli en fin (ou en tête) de
-        # liste suivant l'échelle relative des deux. On les trie séparément puis
-        # on concatène : d'abord les variables notées par CV (score croissant),
-        # puis les replis (triés par fréquence)
+        # Deux groupes de scores, non comparables entre eux : le score de CV
+        # (échelle du "scoring" choisi) et l'ordre de fréquence utilisé en
+        # repli (entiers, potentiellement grands) ne doivent pas être triés
+        # ensemble, sous peine d'envoyer mécaniquement les variables en repli
+        # en fin (ou en tête) de liste suivant l'échelle relative des deux. On
+        # les trie séparément puis on concatène : d'abord les variables
+        # notées par CV, puis les replis
         cv_scored: List[Tuple[Union[str, Tuple], float]] = []
         fallback_scored: List[Tuple[Union[str, Tuple], float]] = []
 
@@ -1094,71 +1155,79 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # "panel_cols" n'est nécessaire ici (cf. "_prepare_training_data")
             feature_cols = [c for c in X.columns if c != var_name]
 
-            # Score infini si la série est univariée
+            # Score -inf (pire score possible, convention "greater is
+            # better") si la série est univariée : elle ne doit jamais passer
+            # en tête
             if not feature_cols:
-                cv_scored.append((var_key, float('inf')))
+                cv_scored.append((var_key, -np.inf))
                 continue
 
-            # Séparation en X et y
-            X_sub = X.loc[mask, feature_cols]
-            y_sub = X.loc[mask, var_name]
+            # Restriction aux lignes réellement exploitables : la cible doit
+            # être observée. "mask" seul laisse passer les sous-périodes
+            # NaN d'une variable basse fréquence, sur lesquelles tout fit
+            # échoue et le score valait "inf" pour chaque variable — rendant
+            # le tri suivant un no-op silencieux. Les NaN résiduels de
+            # "X_sub" restent (features), à la charge de l'estimateur
+            # (Pipeline avec imputer, ou modèle tolérant les NaN)
+            scoring_rows = mask & X[var_name].notna()
+            X_sub = X.loc[scoring_rows, feature_cols]
+            y_sub = X.loc[scoring_rows, var_name]
 
-            # Fallback si < 10 observations
-            # /!\ Faire en sorte que le nombre minimum d'observations d'entraînement soit un paramètre (avec une valeur par défaut fixée à 10) et changer la docstring pour ne plus mentionner "10" explicitement
-            if len(X_sub) < 10:
+            # Fallback si moins de "min_cv_train_size" observations exploitables
+            if len(X_sub) < self.min_cv_train_size:
                 fallback_scored.append((var_key, get_frequency_order(
                     self.detected_frequencies_[var_key]
                 )))
                 continue
 
-            # CV 5-fold avec MAPE
             # Extraction de l'estimateur
             estimator = self._get_estimator_for_variable(var_name)
-            # Score infini si l'estimateur n'est pas spécifié
+            # Score -inf si l'estimateur n'est pas spécifié
             if estimator is None:
-                cv_scored.append((var_key, float('inf')))
+                cv_scored.append((var_key, -np.inf))
                 continue
+
+            # Validation du "scoring" : lève un ValueError explicite si la
+            # valeur n'est pas reconnue par sklearn (registre, make_scorer,
+            # appelable de signature scorer(estimator, X, y))
+            scorer = check_scoring(estimator, scoring=self.cv_scoring)
 
             # Initialisation de la KFold : le mélange (shuffle=True) est
             # volontaire ici, l'objectif est de produire un ORDRE de variables
             # à imputer, pas une évaluation honnête d'un modèle de série
             # temporelle.
-            # En effet les données ne sont normalement plus des séries temporelles 
+            # En effet les données ne sont normalement plus des séries temporelles
             # mais sont toutes alignées afin d'être agrégées.
-            kf = KFold(n_splits=5, shuffle=True, random_state=42)
-            # Initialisation de la liste des scores
-            mapes = []
-            # Parcours des sous-ensembles d'entraînement et de validation
-            for train_idx, val_idx in kf.split(X_sub):
-                # Extraction des observations d'entraînement et de validation
-                X_train, X_val = X_sub.iloc[train_idx], X_sub.iloc[val_idx]
-                y_train, y_val = y_sub.iloc[train_idx], y_sub.iloc[val_idx]
-                # Estimation et prédiction sur la validation
-                try:
-                    # Clone de l'estimateur
-                    est = clone(estimator)
-                    # Entraînement
-                    est.fit(X_train, y_train)
-                    # Prédiction
-                    preds = est.predict(X_val)
-                    # Évite la division par zéro
-                    non_zero = y_val != 0
-                    if non_zero.sum() > 0:
-                        # /!\ Faire en sorte que l'on puisse choisir la métrique en argument ou mettre une métrique custom pourvu que la fonction ait la bonne forme (il me semble que sklearn impose déjà ce genre de choses pour ceux qui veulent utiliser des métriques custom dans l'argument "scoring", je souhaite faire quelque chose de similaire ici (voir réutiliser une primitive de sklearn permettant de faire cela)). MAPE serait la valeur par défaut.
-                        mapes.append(mean_absolute_percentage_error(
-                            y_val[non_zero], preds[non_zero]
-                        ))
-                except Exception:
-                    mapes.append(float('inf'))
-            # Moyenne des erreurs
-            avg_mape = np.mean(mapes) if mapes else float('inf')
+            # "cross_val_score" absorbe la gestion d'erreur par pli
+            # (estimateur qui lève sur un pli donné) via "error_score=np.nan"
+            scores = cross_val_score(
+                estimator, X_sub, y_sub,
+                cv=KFold(n_splits=self.cv_n_splits, shuffle=True, random_state=42),
+                scoring=scorer,
+                error_score=np.nan,
+            )
+            # Score -inf si TOUS les plis ont échoué, signalé explicitement :
+            # sans ce log l'échec systématique resterait silencieux
+            if np.all(np.isnan(scores)):
+                self._log(
+                    f"[fit] CV scoring failed on every fold for '{var_name}': "
+                    f"falling back to the lowest possible score."
+                )
+                score = -np.inf
+            else:
+                score = float(np.nanmean(scores))
             # Ajout à la liste des scores
-            cv_scored.append((var_key, avg_mape))
+            cv_scored.append((var_key, score))
 
-        # Tri indépendant de chaque groupe (croissant dans les deux cas), puis
-        # concaténation : les variables notées par CV d'abord, les replis ensuite
-        cv_scored.sort(key=lambda x: x[1])
-        fallback_scored.sort(key=lambda x: x[1])
+        # Tri décroissant (convention sklearn "greater is better") : le score
+        # le plus élevé = variable la plus facile = imputée en premier. Le
+        # groupe de repli est trié dans le MÊME sens (reverse=True) pour
+        # s'aligner sur le tri par fréquence de "_fit"
+        # (sorted(..., key=get_frequency_order, reverse=True), fréquence la
+        # plus basse d'abord) — sans quoi les deux chemins ordonneraient les
+        # fréquences en sens inverse l'un de l'autre
+        cv_scored.sort(key=lambda x: x[1], reverse=True)
+        fallback_scored.sort(key=lambda x: x[1], reverse=True)
         return [v for v, _ in cv_scored] + [v for v, _ in fallback_scored]
 
     # Méthode auxiliaire d'extraction de l'estimateur associé à une variable
@@ -2850,6 +2919,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         predictions feed ``imputed_store``, which enriches the covariates of
         the following stages; ``X_work`` is never modified.
 
+        PHASE 5 falls back to interpolation whenever the training set for a
+        variable holds fewer than 2 observations (``len(X_train) < 2`` /
+        ``len(X_train_scaled) < 2``). Unlike ``min_cv_train_size`` (which
+        only gates whether a variable is scored by cross-validation before
+        ``train_on_partial_fit_order='cv'`` orders the cascade), this
+        threshold is structural — no estimator can be fit on a single point —
+        and stays hardcoded.
+
         Args:
             X: Features of shape (n_samples, n_features).
             y: Targets of shape (n_samples,) or (n_samples, n_targets).
@@ -3076,7 +3153,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
 
             # 5c. Ordonnancement des variables à imputer
-            if self.train_on_partial_fit_order == 'cv' and self.train_on_partial_coverage:
+            if self.train_on_partial_fit_order == 'cv':
                 ordered_impute_keys = self._determine_variable_order_cv(X_stage, impute_keys)
             else:
                 # Tri par fréquence (plus basse d'abord)
