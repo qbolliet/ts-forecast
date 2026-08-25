@@ -1078,10 +1078,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Extraction du nom de la variable de la clé
             _, var_name = split_variable_key(var_key)
 
-            # Préparation des données d'entraînement dans la fenêtre d'imputation stricte
-            # /!\ Actuellement "get_imputation_window_mask" ne retourne pas le masque correspondant à la fenêtre d'imputation stricte mais celui correspondant à "imputation_scope". J'aimerais que "compute_window" dans le ImputationWindowCalculator dans imputation_window.py renvoie le masque associé à la fenêtre stricte et le masque associé à l'imputation scope dans deux clés séparées et que "get_imputation_window_mask" ait un argument supplémentaire qui permette de chosiir la fenêtre stricte ou non. On choisira la fenêtre stricte ici et on avisera pour l'ensemble des autres utilisations de la méthode dans ce script.
+            # Préparation des données d'entraînement dans la fenêtre d'imputation
+            # stricte : l'ordonnancement doit comparer la qualité de l'imputation des variables sur des données
+            # de qualité homogène, sinon le score d'une variable dépend de l'étendue
+            # de son extension et l'ordre obtenu n'est plus interprétable
             if hasattr(self, '_imputation_window_calc') and self._imputation_window_calc._is_fitted:
-                mask = self._imputation_window_calc.get_imputation_window_mask(X)
+                mask = self._imputation_window_calc.get_imputation_window_mask(
+                    X, kind='strict'
+                )
             else:
                 mask = pd.Series(True, index=X.index)
 
@@ -1905,9 +1909,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Masque d'entraînement : fenêtre d'entraînement + valeurs non-null pour y
         # /!\ Pourquoi se restreint-on au à l'imputation mask pour les données d'entrainement ? Cela ne me semble a priori pertinent que pour les données de prédiction
         if hasattr(self, '_imputation_window_calc') and self._imputation_window_calc._is_fitted:
-            # Extraction du mask d'imputation
-            training_mask = self._imputation_window_calc.get_imputation_window_mask(X_stage)
-            # /!\ Je ne pense pas qu'il y ait besoin de se restreindre à la fenêtre stricte ici
+            # Extraction du masque de la fenêtre d'entraînement, réglable
+            # indépendamment de celle de la prédiction (cf. training_scope du
+            # calculateur) : un modèle peut ainsi être ajusté sur une plage plus
+            # large que celle sur laquelle il impute
+            training_mask = self._imputation_window_calc.get_imputation_window_mask(
+                X_stage, kind='training'
+            )
             # Hybridation avec la période de disponibilité de y
             training_mask &= y_source.notna()
         else:
@@ -2371,7 +2379,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Restriction à la fenêtre d'imputation quand le calculateur est entraîné
         predictable = scope
         if window_calc is not None and window_calc._is_fitted:
-            window = window_calc.get_imputation_window_mask(X_stage)
+            # Fenêtre de prédiction : "extended_forward" existe précisément pour
+            # imputer les fins de série retardées, elle ne doit donc pas être
+            # confondue ici avec la fenêtre stricte ni avec celle d'entraînement
+            window = window_calc.get_imputation_window_mask(
+                X_stage, kind='imputation'
+            )
             predictable = scope & window.reindex(X_stage.index).fillna(False).astype(bool)
 
         # Périmètre non vide entièrement hors fenêtre : distinct du périmètre

@@ -32,8 +32,13 @@ from ..utils.parse.utils import build_frequency_string
 from ..utils.time.utils import get_period_start, get_period_end
 from ..utils.frequency.converter import FrequencyConverter
 
-# Type pour le scope d'imputation
+# Type pour le scope d'imputation (fenêtre de prédiction)
 ImputationScope = Literal['strict', 'extended_backward', 'extended_forward', 'extended_both']
+
+# Type pour le scope d'entraînement : les quatre valeurs d'ImputationScope, plus
+# 'unrestricted' qui supprime toute restriction de fenêtre à l'entraînement
+TrainingScope = Literal['strict', 'extended_backward', 'extended_forward',
+                        'extended_both', 'unrestricted']
 
 
 # Classe de calcul de la fenêtre d'imputation à partir des couvertures multi-fréquences
@@ -47,9 +52,26 @@ class ImputationWindowCalculator:
 
     The class builds a boolean coverage matrix at the highest detected
     frequency, then derives coverage (fraction of columns covered) at
-    each date. The strict window is where coverage equals 1.0. The
-    extended training window grows backward or forward as long as coverage
-    meets the specified threshold.
+    each date. The strict window is where coverage equals 1.0. An extended
+    window grows backward or forward from it as long as coverage meets the
+    specified threshold.
+
+    THREE masks are derived from the same coverage computation, so that the
+    range a model is fitted on can be set independently of the range it
+    imputes:
+
+    - ``imputation_strict_window_mask_`` — coverage == 1.0, no extension.
+    - ``imputation_window_mask_`` — the prediction window, extended per
+      ``imputation_scope`` with ``coverage_threshold``.
+    - ``training_window_mask_`` — the training window, extended per
+      ``training_scope`` with ``training_coverage_threshold``; the value
+      'unrestricted' lifts the restriction entirely.
+
+    Both training parameters default to None, meaning "follow the prediction
+    window": the three masks then reduce to the historical single window.
+    Callers pick one through the ``kind`` argument of
+    :meth:`get_imputation_window_mask` and :meth:`get_mask_at_frequency`,
+    whose default 'imputation' preserves the historical behaviour.
 
     For panel data (MultiIndex with entity levels + time level), windows
     are computed independently per entity.
@@ -65,10 +87,11 @@ class ImputationWindowCalculator:
     :meth:`get_imputation_window_mask` (optionally passing ``data``), which
     reindexes/aligns the mask onto the caller's index.
 
-    For panel data, EVERY dict-valued attribute
+    For panel data, every dict-valued attribute
     (``imputation_window_start_``, ``imputation_window_end_``,
     ``imputation_strict_window_start_``, ``imputation_strict_window_end_``,
-    ``imputation_window_mask_``, ``coverage_by_date_``, ``column_coverage_``
+    ``imputation_strict_window_mask_``, ``imputation_window_mask_``,
+    ``training_window_mask_``, ``coverage_by_date_``, ``column_coverage_``
     and ``index_freq_``) is keyed by the entity **tuple**, even when the panel
     has a single entity level: ``('France',)``, never ``'France'``. These are
     exactly the keys returned by
@@ -94,9 +117,27 @@ class ImputationWindowCalculator:
         imputation_strict_window_end_: End of the strict imputation window,
             independent of ``imputation_scope``. Same type as
             imputation_strict_window_start_.
+        training_window_start_: Start of the training window, following
+            ``training_scope`` — identical to
+            ``imputation_strict_window_start_`` when ``imputation_scope='strict'``
+            (the default), extended otherwise. Always matches the active
+            range of ``training_window_mask_``. Scalar for time series,
+            Dict[tuple, Optional[Timestamp]] for panel.
+        training_window_end_: End of the training window, following
+            ``training_scope``. Same type as training_window_start_.
+        imputation_strict_window_mask_: Boolean mask on the high-frequency
+            grid identifying observations in the STRICT window
+            (coverage == 1.0), before any extension. pd.Series for time
+            series, Dict[tuple, Optional[pd.Series]] for panel.
         imputation_window_mask_: Boolean mask on the high-frequency grid
-            identifying observations in the strict window the imputation_window. 
-            pd.Series for time series,Dict[tuple, Optional[pd.Series]] for panel.
+            identifying observations in the imputation (prediction) window,
+            i.e. the strict window extended per ``imputation_scope``.
+            pd.Series for time series, Dict[tuple, Optional[pd.Series]] for
+            panel.
+        training_window_mask_: Boolean mask on the high-frequency grid
+            identifying observations in the TRAINING window, i.e. the strict
+            window extended per ``training_scope`` — all True when that scope
+            is 'unrestricted'. Same type as imputation_window_mask_.
         coverage_by_date_: Ratio of columns covered per high-freq date.
             pd.Series for time series, Dict[tuple, Optional[pd.Series]]
             for panel.
@@ -116,9 +157,13 @@ class ImputationWindowCalculator:
         ...     'var1': [np.nan, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, np.nan],
         ...     'var2': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
         ... }, index=dates)
-        >>> calc = ImputationWindowCalculator(imputation_scope='extended_both')
+        >>> calc = ImputationWindowCalculator(
+        ...     imputation_scope='extended_both',
+        ...     training_scope='unrestricted',
+        ... )
         >>> calc.fit(data)
         >>> print(calc.imputation_window_start_, calc.imputation_window_end_)
+        >>> training = calc.get_imputation_window_mask(data, kind='training')
     """
 
     # Initialisation
@@ -126,27 +171,40 @@ class ImputationWindowCalculator:
         self,
         coverage_threshold: float = 0.5,
         imputation_scope: ImputationScope = 'strict',
+        training_scope: Optional[TrainingScope] = None,
+        training_coverage_threshold: Optional[float] = None,
         min_columns: int = 1,
     ):
         """Initialize the ImputationWindowCalculator.
 
         Args:
             coverage_threshold: Minimum fraction of columns that must have
-                coverage for a date to be included in the extended window.
-                Value between 0 and 1. Default 0.5.
-            imputation_scope: How to determine the imputation window:
+                coverage for a date to be included in the extended PREDICTION
+                window. Value between 0 and 1. Default 0.5.
+            imputation_scope: How to determine the imputation (prediction)
+                window:
                 - 'strict': Only dates where all columns have coverage.
                 - 'extended_backward': Extend before the strict window
                   where coverage >= threshold.
                 - 'extended_forward': Extend after the strict window
                   where coverage >= threshold.
                 - 'extended_both': Extend in both directions.
+            training_scope: How to determine the training window. Accepts the
+                four ``imputation_scope`` values plus 'unrestricted', which
+                lifts the window restriction altogether (mask everywhere True)
+                so a model can be fitted on a wider range than it imputes.
+                None (the default) follows ``imputation_scope``, which keeps a
+                single shared window.
+            training_coverage_threshold: Coverage threshold of the training
+                window extensions. None (the default) follows
+                ``coverage_threshold``.
             min_columns: Minimum number of data columns required.
-                Must be at least 1. Default 2.
+                Must be at least 1. Default 1.
 
         Raises:
-            ValueError: If coverage_threshold not in [0, 1], invalid
-                imputation_scope, or min_columns < 1.
+            ValueError: If coverage_threshold or training_coverage_threshold
+                is not in [0, 1], if imputation_scope or training_scope is
+                invalid, or if min_columns < 1.
         """
         # Validation des paramètres
         if not 0 <= coverage_threshold <= 1:
@@ -158,22 +216,43 @@ class ImputationWindowCalculator:
                 f"imputation_scope must be one of 'strict', 'extended_backward', "
                 f"'extended_forward', 'extended_both', got '{imputation_scope}'"
             )
+        if training_scope is not None and training_scope not in (
+            'strict', 'extended_backward', 'extended_forward', 'extended_both', 'unrestricted'
+        ):
+            raise ValueError(
+                f"training_scope must be None or one of 'strict', 'extended_backward', "
+                f"'extended_forward', 'extended_both', 'unrestricted', got '{training_scope}'"
+            )
+        if training_coverage_threshold is not None and not 0 <= training_coverage_threshold <= 1:
+            raise ValueError(
+                f"training_coverage_threshold must be between 0 and 1, "
+                f"got {training_coverage_threshold}"
+            )
         if min_columns < 1:
             raise ValueError(f"min_columns must be at least 1, got {min_columns}")
 
-        # Stockage des paramètres
+        # Stockage des paramètres, tels que reçus : les défauts None ne sont pas
+        # résolus ici, la convention sklearn imposant que get_params()/clone()
+        # retrouvent la valeur fournie par l'appelant (cf. _effective_* plus bas)
         self.coverage_threshold = coverage_threshold
         self.imputation_scope = imputation_scope
+        self.training_scope = training_scope
+        self.training_coverage_threshold = training_coverage_threshold
         self.min_columns = min_columns
 
         # Attributs de fenêtre d'imputation — scalaires pour TS, dict par entité pour panel
         # Bornes suivant imputation_scope (== bornes strictes en scope 'strict')
         self.imputation_window_start_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
         self.imputation_window_end_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
-        # Bornes de la fenêtre STRICTE, indépendantes de imputation_scope
+        # Bornes de la fenêtre stricte, indépendantes de imputation_scope
         self.imputation_strict_window_start_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
         self.imputation_strict_window_end_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
+        # Masque de la fenêtre stricte, avant toute extension
+        self.imputation_strict_window_mask_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
+        # Masque de la fenêtre d'imputation (prédiction), étendu selon imputation_scope
         self.imputation_window_mask_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
+        # Masque de la fenêtre d'entraînement, étendu selon training_scope
+        self.training_window_mask_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
 
         # Attributs auxiliaires
         self.coverage_by_date_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
@@ -190,15 +269,42 @@ class ImputationWindowCalculator:
         self._is_fitted: bool = False
         self._converter = FrequencyConverter()
 
+    # Résolution du défaut "suit la fenêtre de prédiction" pour le scope d'entraînement
+    @property
+    def _effective_training_scope(self) -> str:
+        """Training scope actually applied, falling back to imputation_scope.
+
+        Returns:
+            ``training_scope`` when set, otherwise ``imputation_scope``.
+        """
+        return self.training_scope if self.training_scope is not None else self.imputation_scope
+
+    # Résolution du défaut "suit la fenêtre de prédiction" pour le seuil d'entraînement
+    @property
+    def _effective_training_coverage_threshold(self) -> float:
+        """Training coverage threshold actually applied, falling back to coverage_threshold.
+
+        Returns:
+            ``training_coverage_threshold`` when set, otherwise
+            ``coverage_threshold``.
+        """
+        return (
+            self.training_coverage_threshold
+            if self.training_coverage_threshold is not None
+            else self.coverage_threshold
+        )
+
     # Méthode d'entraînement du calculateur
     def fit(self, data: pd.DataFrame) -> 'ImputationWindowCalculator':
         """Calculate the imputation and training windows from data.
 
         Detects column frequencies, builds a coverage matrix at the
-        highest detected frequency, then computes the strict imputation
-        window (all columns covered) and the scope-extended imputation
-        window. Boolean masks for the imputation window are built and stored
-        alongside the window bounds.
+        highest detected frequency, then derives the strict window (all
+        columns covered) and extends it in two independent directions.
+        three boolean masks are stored alongside the window bounds:
+        ``imputation_strict_window_mask_`` (no extension),
+        ``imputation_window_mask_`` (extended per ``imputation_scope``) and
+        ``training_window_mask_`` (extended per ``training_scope``).
 
         Args:
             data: DataFrame with DatetimeIndex (time series) or MultiIndex
@@ -253,7 +359,8 @@ class ImputationWindowCalculator:
         """Compute windows and masks for time series data (DatetimeIndex).
 
         Delegates to _compute_window and stores all resulting attributes:
-        imputation window bounds and mask, coverage series, and column coverage mapping.
+        imputation window bounds, the three window masks (strict, imputation
+        and training), the coverage series and the column coverage mapping.
 
         Args:
             data: DataFrame with a simple DatetimeIndex.
@@ -269,9 +376,15 @@ class ImputationWindowCalculator:
         # Valorisation des bornes de fenêtre (scope-dépendantes et strictes)
         self.imputation_window_start_ = result['imputation_start']
         self.imputation_window_end_ = result['imputation_end']
+        self.training_window_start_ = result['training_start']
+        self.training_window_end_ = result['training_end']
         self.imputation_strict_window_start_ = result['imputation_strict_start']
         self.imputation_strict_window_end_ = result['imputation_strict_end']
+
+        # Valorisation des trois masques
+        self.imputation_strict_window_mask_ = result['imputation_strict_window_mask']
         self.imputation_window_mask_ = result['imputation_window_mask']
+        self.training_window_mask_ = result['training_window_mask']
 
         # Valorisation des attributs auxiliaires
         self.coverage_by_date_ = result['coverage']
@@ -283,8 +396,9 @@ class ImputationWindowCalculator:
 
         Iterates over each panel entity, extracts its sub-DataFrame, and
         calls _compute_window. Results are aggregated into dicts keyed by
-        entity tuple: strict window bounds, strict and training boolean
-        masks on each entity's high-frequency grid, and coverage series.
+        entity tuple: window bounds (strict and scope-dependent), the three
+        boolean masks (strict, imputation and training) on each entity's
+        high-frequency grid, and coverage series.
 
         Args:
             data: Panel DataFrame with MultiIndex whose last level is time.
@@ -295,9 +409,13 @@ class ImputationWindowCalculator:
         # Initialisation des dictionnaires de résultats
         self.imputation_window_start_ = {}
         self.imputation_window_end_ = {}
+        self.training_window_start_ = {}
+        self.training_window_end_ = {}
         self.imputation_strict_window_start_ = {}
         self.imputation_strict_window_end_ = {}
+        self.imputation_strict_window_mask_ = {}
         self.imputation_window_mask_ = {}
+        self.training_window_mask_ = {}
         self.coverage_by_date_ = {}
         self.column_coverage_ = {}
 
@@ -315,20 +433,24 @@ class ImputationWindowCalculator:
             }
 
             # Clé d'entité TOUJOURS le tuple rendu par get_unique_panel_entities,
-            # y compris à un seul niveau : ('France',) et jamais 'France' (revue
-            # §3.4/§5.4). Toute déscalarisation ici obligerait chaque consommateur
-            # à un double lookup défensif, qui masque les incohérences au lieu de
-            # les faire échouer
+            # y compris à un seul niveau : ('France',) et jamais 'France'.
             entity_key = entity
 
             # Cas où la fréquence de l'index n'a pas pu être identifiée
             if self.index_freq_[entity_key] is None:
                 self.imputation_window_start_[entity_key] = None
                 self.imputation_window_end_[entity_key] = None
+                self.training_window_start_[entity_key] = None
+                self.training_window_end_[entity_key] = None
                 self.imputation_strict_window_start_[entity_key] = None
                 self.imputation_strict_window_end_[entity_key] = None
+                self.imputation_strict_window_mask_[entity_key] = None
                 self.imputation_window_mask_[entity_key] = None
+                self.training_window_mask_[entity_key] = None
                 self.coverage_by_date_[entity_key] = None
+                # column_coverage_ doit rester keyée par TOUTES les entités, faute
+                # de quoi get_columns_with_coverage lève un KeyError sur celles-ci
+                self.column_coverage_[entity_key] = None
                 continue
 
             # Calcul de la fenêtre d'imputation
@@ -337,20 +459,39 @@ class ImputationWindowCalculator:
             # Complétion des dictionnaires de bornes (scope-dépendantes et strictes)
             self.imputation_window_start_[entity_key] = result['imputation_start']
             self.imputation_window_end_[entity_key] = result['imputation_end']
+            self.training_window_start_[entity_key] = result['training_start']
+            self.training_window_end_[entity_key] = result['training_end']
             self.imputation_strict_window_start_[entity_key] = result['imputation_strict_start']
             self.imputation_strict_window_end_[entity_key] = result['imputation_strict_end']
+
+            # Complétion des trois masques
+            self.imputation_strict_window_mask_[entity_key] = result['imputation_strict_window_mask']
             self.imputation_window_mask_[entity_key] = result['imputation_window_mask']
+            self.training_window_mask_[entity_key] = result['training_window_mask']
 
             # Complétion des attributs auxiliaires
             self.coverage_by_date_[entity_key] = result['coverage']
             self.column_coverage_[entity_key] = result['column_coverage']
 
-        # Vérification qu'au moins une entité a une fenêtre valide (fenêtre stricte :
-        # l'extension ne peut jamais créer de fenêtre là où aucune fenêtre stricte
-        # n'existe, cf. _compute_window)
+        # Vérification qu'au moins une entité a une fenêtre valide. Une fenêtre
+        # stricte absente partout reste rédhibitoire : l'extension ne peut jamais
+        # créer de fenêtre là où aucune fenêtre stricte n'existe (cf.
+        # _compute_window). Seul training_scope='unrestricted' y échappe, en
+        # couvrant toute la grille — le panel reste alors entraînable, même si
+        # aucune valeur n'y est imputable
         valid_starts = [v for v in self.imputation_strict_window_start_.values() if v is not None]
         if not valid_starts:
-            raise ValueError("No imputation window found for any entity in the panel")
+            trainable = [
+                mask for mask in self.training_window_mask_.values()
+                if mask is not None and bool(mask.any())
+            ]
+            if not trainable:
+                raise ValueError("No imputation window found for any entity in the panel")
+            warnings.warn(
+                "No entity has a strict imputation window; training proceeds on the "
+                "unrestricted training window, but no value can be imputed.",
+                UserWarning
+            )
 
     # Méthode auxiliaire permettant d'extraire des observations relatives à une entité du panel
     # Délégation à la fonction utilitaire partagée de tsforecast.panel.utils
@@ -378,12 +519,14 @@ class ImputationWindowCalculator:
         """Compute imputation and training windows for one entity.
 
         Builds the high-frequency grid and coverage matrix, derives the
-        coverage series, then constructs the strict imputation window mask
+        coverage series, then constructs the strict window mask
         (coverage == 1.0). Strict window bounds are derived from this mask,
-        independently of imputation_scope. The mask is then extended
-        according to imputation_scope by passing it to _extend_backward
-        and/or _extend_forward, and scope-dependent bounds are derived from
-        the resulting (possibly extended) mask.
+        independently of imputation_scope. TWO further masks are then derived
+        from it by _build_scope_mask, which never mutates it: the imputation
+        (prediction) mask, extended per imputation_scope / coverage_threshold,
+        and the training mask, extended per training_scope /
+        training_coverage_threshold. Scope-dependent bounds are derived from
+        the imputation mask only.
 
         Args:
             df: DataFrame with simple DatetimeIndex for the entity.
@@ -397,12 +540,21 @@ class ImputationWindowCalculator:
                   (== 'imputation_strict_start' when imputation_scope is
                   'strict').
                 - 'imputation_end': End of the scope-dependent window.
+                - 'training_start': Start of the scope-dependent window
+                   (== 'imputation_strict_start' when training_scope is
+                    'strict').
+                - 'training_end': End of the scope-dependent window.
                 - 'imputation_strict_start': Start of the strict window,
                   independent of imputation_scope.
                 - 'imputation_strict_end': End of the strict window,
                   independent of imputation_scope.
-                - 'imputation_window_mask': Boolean pd.Series on the grid
-                  identifying observations in the (possibly extended) window.
+                - 'imputation_strict_window_mask': Boolean pd.Series on the
+                  grid where coverage == 1.0, BEFORE any extension.
+                - 'imputation_window_mask': Same, extended per
+                  imputation_scope / coverage_threshold.
+                - 'training_window_mask': Same, extended per training_scope
+                  / training_coverage_threshold (all True when the effective
+                  training scope is 'unrestricted').
                 - 'coverage': coverage pd.Series on the high-freq grid.
                 - 'column_coverage': Dict of per-column (start, end)
                   tuples.
@@ -411,9 +563,13 @@ class ImputationWindowCalculator:
         _none_result = {
             'imputation_start': None,
             'imputation_end': None,
+            'training_start': None,
+            'training_end': None,
             'imputation_strict_start': None,
             'imputation_strict_end': None,
+            'imputation_strict_window_mask': None,
             'imputation_window_mask': None,
+            'training_window_mask': None,
             'coverage': None,
             'column_coverage': None,
         }
@@ -441,27 +597,44 @@ class ImputationWindowCalculator:
             else:
                 column_coverage[col] = (None, None)
 
-        # Construction du masque de la fenêtre stricte sur la grille haute fréquence
+        # Construction du masque de la fenêtre STRICTE sur la grille haute fréquence :
+        # les trois masques en dérivent, il n'est donc jamais réaffecté ni muté
         # Utilisation d'un seuil légèrement inférieur à 1.0 pour les erreurs d'arrondi
-        imputation_window_mask = pd.Series(
+        imputation_strict_window_mask = pd.Series(
             np.asarray(coverage >= (1.0 - 1e-10), dtype=bool),
             index=grid,
         )
 
         # Dérivation des bornes de la fenêtre stricte depuis le masque
-        strict_dates = imputation_window_mask.index[imputation_window_mask]
+        strict_dates = imputation_strict_window_mask.index[imputation_strict_window_mask]
 
         # Cas où pour aucune période l'ensemble des variables sont disponibles simultanément
         if len(strict_dates) == 0:
             warnings.warn(
-                "There is no period in the DataFrame where all the variables are available.",
+                "There is no period in the DataFrame where all the variables are available. "
+                "Only training_scope='unrestricted' allows training in this case.",
                 UserWarning
             )
+            # Les extensions sont tout de même appliquées : partant d'un masque strict
+            # vide, leur garde "len(masked_dates) == 0" les rend inopérantes et le
+            # résultat reste tout-faux, sauf pour 'unrestricted' qui devient tout-vrai
             return {
                 **_none_result,
                 'coverage': coverage,
                 'column_coverage': column_coverage,
-                'imputation_window_mask': imputation_window_mask,
+                'imputation_strict_window_mask': imputation_strict_window_mask,
+                'imputation_window_mask': self._build_scope_mask(
+                    coverage,
+                    imputation_strict_window_mask,
+                    self.imputation_scope,
+                    self.coverage_threshold,
+                ),
+                'training_window_mask': self._build_scope_mask(
+                    coverage,
+                    imputation_strict_window_mask,
+                    self._effective_training_scope,
+                    self._effective_training_coverage_threshold,
+                ),
             }
 
         # Extraction des bornes strictes depuis le masque, indépendamment du scope
@@ -479,14 +652,22 @@ class ImputationWindowCalculator:
                     UserWarning
                 )
 
-        # Extension du masque d'entraînement selon le scope
-        if self.imputation_scope in ('extended_backward', 'extended_both'):
-            imputation_window_mask = self._extend_backward(coverage, imputation_window_mask)
+        # Dérivation des deux masques étendus, chacun avec son scope et son seuil
+        imputation_window_mask = self._build_scope_mask(
+            coverage,
+            imputation_strict_window_mask,
+            self.imputation_scope,
+            self.coverage_threshold,
+        )
+        training_window_mask = self._build_scope_mask(
+            coverage,
+            imputation_strict_window_mask,
+            self._effective_training_scope,
+            self._effective_training_coverage_threshold,
+        )
 
-        if self.imputation_scope in ('extended_forward', 'extended_both'):
-            imputation_window_mask = self._extend_forward(coverage, imputation_window_mask)
-
-        # Cas où la fenêtre d'entraînement ne contient qu'une seule observation
+        # Cas où la fenêtre d'imputation ne contient qu'une seule observation.
+        # Avertissement rattaché au seul masque d'imputation
         imputation_dates = imputation_window_mask.index[imputation_window_mask]
         if len(imputation_dates) <= 1:
             warnings.warn(
@@ -495,17 +676,35 @@ class ImputationWindowCalculator:
                 UserWarning
             )
 
+        # Cas où la fenêtre d'entraînement ne contient qu'une seule observation.
+        # Avertissement rattaché au seul masque d'entraînement
+        training_dates = training_window_mask.index[training_window_mask]
+        if len(training_dates) <= 1:
+            warnings.warn(
+                "Training window contains only one observation. Consider relaxing "
+                "constraints or using a different training_scope.",
+                UserWarning
+            )
+
         # Bornes scope-dépendantes, dérivées du masque final (identiques aux bornes
         # strictes en scope 'strict', puisqu'aucune extension n'a alors eu lieu)
+        # Imputation
         imputation_start = imputation_dates.min()
         imputation_end = imputation_dates.max()
+        # Entraînement
+        training_start = training_dates.min()
+        training_end = training_dates.max()
 
         return {
             'imputation_start': imputation_start,
             'imputation_end': imputation_end,
+            'training_start': training_start,
+            'training_end': training_end,
             'imputation_strict_start': imputation_strict_start,
             'imputation_strict_end': imputation_strict_end,
+            'imputation_strict_window_mask': imputation_strict_window_mask,
             'imputation_window_mask': imputation_window_mask,
+            'training_window_mask': training_window_mask,
             'coverage': coverage,
             'column_coverage': column_coverage,
         }
@@ -648,11 +847,47 @@ class ImputationWindowCalculator:
 
         return coverage
 
+    # Méthode auxiliaire de dérivation d'un masque de scope depuis le masque strict
+    def _build_scope_mask(
+        self,
+        coverage: pd.Series,
+        strict_mask: pd.Series,
+        scope: str,
+        threshold: float,
+    ) -> pd.Series:
+        """Derive one scope mask from the strict mask, without mutating it.
+
+        Args:
+            coverage: Coverage series on the high-freq grid.
+            strict_mask: Boolean pd.Series of the strict window
+                (coverage == 1.0), shared by every derived mask.
+            scope: One of 'strict', 'extended_backward', 'extended_forward',
+                'extended_both' or 'unrestricted'.
+            threshold: Coverage threshold governing the extensions of this
+                mask, so that prediction and training windows may differ.
+
+        Returns:
+            New boolean pd.Series on the grid. All True for 'unrestricted';
+            an unchanged copy of strict_mask for 'strict'.
+        """
+        # Aucune restriction : toute la grille est retenue
+        if scope == 'unrestricted':
+            return pd.Series(True, index=coverage.index)
+
+        # Copie systématique : jamais l'original, les trois masques en dérivent
+        mask = strict_mask.copy()
+        if scope in ('extended_backward', 'extended_both'):
+            mask = self._extend_backward(coverage, mask, threshold)
+        if scope in ('extended_forward', 'extended_both'):
+            mask = self._extend_forward(coverage, mask, threshold)
+        return mask
+
     # Méthode auxiliaire d'extension du masque d'entraînement avant le début de la fenêtre stricte
     def _extend_backward(
         self,
         coverage: pd.Series,
         mask: pd.Series,
+        threshold: float,
     ) -> pd.Series:
         """Extend a boolean window mask backward while coverage meets the threshold.
 
@@ -665,6 +900,9 @@ class ImputationWindowCalculator:
             coverage: coverage series on the high-freq grid.
             mask: Boolean pd.Series on the high-freq grid representing the
                 current window (strict or partially extended).
+            threshold: Minimum coverage a date must reach to be activated.
+                Passed in rather than read off the instance, so that the
+                training window can use its own threshold.
 
         Returns:
             New boolean pd.Series with additional True values prepended
@@ -685,7 +923,7 @@ class ImputationWindowCalculator:
 
         # Extension contiguë : n_valid = position du premier point sous le seuil
         # (ou la longueur totale si aucun point ne le viole)
-        below = (before < self.coverage_threshold).to_numpy()
+        below = (before < threshold).to_numpy()
         n_valid = int(np.argmax(below)) if below.any() else len(before)
 
         # Activation des dates contiguës satisfaisant le seuil (no-op si n_valid == 0)
@@ -698,6 +936,7 @@ class ImputationWindowCalculator:
         self,
         coverage: pd.Series,
         mask: pd.Series,
+        threshold: float,
     ) -> pd.Series:
         """Extend a boolean window mask forward while coverage meets the threshold.
 
@@ -710,6 +949,9 @@ class ImputationWindowCalculator:
             coverage: coverage series on the high-freq grid.
             mask: Boolean pd.Series on the high-freq grid representing the
                 current window (strict or partially extended).
+            threshold: Minimum coverage a date must reach to be activated.
+                Passed in rather than read off the instance, so that the
+                training window can use its own threshold.
 
         Returns:
             New boolean pd.Series with additional True values appended
@@ -730,7 +972,7 @@ class ImputationWindowCalculator:
 
         # Extension contiguë : n_valid = position du premier point sous le seuil
         # (ou la longueur totale si aucun point ne le viole)
-        below = (after < self.coverage_threshold).to_numpy()
+        below = (after < threshold).to_numpy()
         n_valid = int(np.argmax(below)) if below.any() else len(after)
 
         # Activation des dates contiguës satisfaisant le seuil (no-op si n_valid == 0)
@@ -738,18 +980,55 @@ class ImputationWindowCalculator:
         new_mask[after.index[:n_valid]] = True
         return new_mask
 
+    # Méthode auxiliaire de sélection du masque désigné par "kind"
+    def _select_mask(
+        self,
+        kind: str,
+    ) -> Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]]:
+        """Return the fitted mask attribute designated by ``kind``.
+
+        Args:
+            kind: 'imputation' for the prediction window, 'strict' for the
+                unextended window, 'training' for the training window.
+
+        Returns:
+            The corresponding fitted mask attribute, untouched.
+
+        Raises:
+            ValueError: If kind is not one of the three accepted values.
+        """
+        # Validation explicite : un kind fautif doit échouer, pas retomber
+        # silencieusement sur la fenêtre d'imputation
+        if kind not in ('imputation', 'strict', 'training'):
+            raise ValueError(
+                f"kind must be one of 'imputation', 'strict', 'training', got '{kind}'"
+            )
+        return {
+            'imputation': self.imputation_window_mask_,
+            'strict': self.imputation_strict_window_mask_,
+            'training': self.training_window_mask_,
+        }[kind]
+
     # Méthode d'extraction du masque booléen de la fenêtre d'imputation
     def get_imputation_window_mask(
         self,
         data: Optional[Union[pd.DataFrame, pd.Series]] = None,
+        kind: Literal['imputation', 'strict', 'training'] = 'imputation',
     ) -> Union[pd.Series, Dict[tuple, Optional[pd.Series]]]:
-        """Get the boolean imputation-window mask, optionally aligned to data.
+        """Get one of the boolean window masks, optionally aligned to data.
 
         Args:
             data: If provided, the mask is re-indexed on ``data.index``
                 (dates absent from the fitted grid are False). For panel
                 data, a single boolean Series aligned on the MultiIndex
                 rows of ``data`` is returned instead of a dict.
+            kind: Which window to read:
+                - 'imputation' (default): the prediction window, extended
+                  per ``imputation_scope``. The default preserves the
+                  historical behaviour of this method.
+                - 'strict': the unextended window (coverage == 1.0).
+                - 'training': the training window, extended per
+                  ``training_scope``.
 
         Returns:
             Boolean Series aligned on ``data.index`` if ``data`` is given.
@@ -757,15 +1036,19 @@ class ImputationWindowCalculator:
             mapping entity tuples to Series for panel).
 
         Raises:
-            ValueError: If calculator not fitted.
+            ValueError: If calculator not fitted, or if kind is invalid.
         """
         # Vérification de l'entraînement du calculateur
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
+        # Sélection de la source : toute la logique d'alignement ci-dessous
+        # opère indifféremment sur l'un des trois masques
+        source = self._select_mask(kind)
+
         # Sans données : retour du masque brut sur la grille interne
         if data is None:
-            return self.imputation_window_mask_
+            return source
 
         # Extraction de l'index
         index = data.index
@@ -776,7 +1059,7 @@ class ImputationWindowCalculator:
             entity_levels = [index.get_level_values(i) for i in range(index.nlevels - 1)]
             dates = index.get_level_values(-1)
             # Parcours des masques par entité
-            for entity, entity_mask in (self.imputation_window_mask_ or {}).items():
+            for entity, entity_mask in (source or {}).items():
                 if entity_mask is None:
                     continue
                 # Sélection des lignes de l'entité (clé garantie tuple, cf. §3.4)
@@ -794,7 +1077,7 @@ class ImputationWindowCalculator:
 
         # Cas des séries temporelles : simple réindexation sur l'index des données
         return (
-            self.imputation_window_mask_
+            source
             .reindex(index)
             .fillna(False)
             .astype(bool)
@@ -806,11 +1089,12 @@ class ImputationWindowCalculator:
     def get_mask_at_frequency(
         self,
         frequency: Union[str, Dict[tuple, str]],
+        kind: Literal['imputation', 'strict', 'training'] = 'imputation',
     ) -> Union[pd.Series, Dict[tuple, Optional[pd.Series]]]:
-        """Get the strict imputation window mask resampled to a lower frequency.
+        """Get the selected window mask resampled to a lower frequency.
 
         A lower-frequency period is True if and only if all its high-frequency
-        sub-periods fall within the imputation window. The conversion delegates
+        sub-periods fall within the selected window. The conversion delegates
         to :meth:`FrequencyConverter.aggregate_to_lower_frequency` with
         ``method='all'``, anchoring the target offset on the same start/end
         position as the source mask's grid (see
@@ -825,6 +1109,8 @@ class ImputationWindowCalculator:
                 'YE') or dictionnary entity -> frequency string. Entity keys
                 may be given in scalar form for a single-level panel: they
                 are normalized to tuples before lookup.
+            kind: Which window to convert — 'imputation' (default), 'strict'
+                or 'training'. See :meth:`get_imputation_window_mask`.
 
         Returns:
             Boolean Series at the target frequency (time series), or dict
@@ -833,8 +1119,8 @@ class ImputationWindowCalculator:
             None.
 
         Raises:
-            ValueError: If calculator not fitted, or if the target frequency
-                is not lower than the mask frequency.
+            ValueError: If calculator not fitted, if kind is invalid, or if
+                the target frequency is not lower than the mask frequency.
 
         Examples:
             >>> monthly_calc.fit(data)
@@ -844,10 +1130,13 @@ class ImputationWindowCalculator:
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
+        # Sélection de la source, identique à get_imputation_window_mask
+        source = self._select_mask(kind)
+
         # Cas des séries temporelles : conversion unique
         if not self._is_panel:
             return self._convert_mask_to_frequency(
-                mask=self.imputation_window_mask_,
+                mask=source,
                 source_freq=self.index_freq_,
                 target_freq=frequency,
             )
@@ -869,7 +1158,7 @@ class ImputationWindowCalculator:
                 source_freq=self.index_freq_[entity],
                 target_freq=frequency[entity] if isinstance(frequency, dict) else frequency,
             )
-            for entity, entity_mask in self.imputation_window_mask_.items()
+            for entity, entity_mask in source.items()
         }
 
     # Méthode auxiliaire de conversion d'un masque booléen vers une fréquence inférieure

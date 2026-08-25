@@ -403,6 +403,24 @@ class TestImputationWindowCalculatorValidation:
         with pytest.raises(ValueError, match='min_columns'):
             ImputationWindowCalculator(min_columns=0)
 
+    def test_invalid_training_scope_raises(self):
+        with pytest.raises(ValueError, match='training_scope'):
+            ImputationWindowCalculator(training_scope='bogus')
+
+    def test_invalid_training_coverage_threshold_raises(self):
+        with pytest.raises(ValueError, match='training_coverage_threshold'):
+            ImputationWindowCalculator(training_coverage_threshold=1.5)
+
+    def test_invalid_kind_raises(self):
+        """Un `kind` fautif échoue au lieu de retomber sur la fenêtre d'imputation."""
+        dates = pd.date_range('2020-01-01', periods=12, freq='MS')
+        df = pd.DataFrame({'a': range(12), 'b': range(12)}, index=dates)
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        calc.fit(df)
+
+        with pytest.raises(ValueError, match='kind'):
+            calc.get_imputation_window_mask(kind='bogus')
+
     def test_fit_with_single_column(self):
         """min_columns=1 : la couverture se réduit à la présence de l'unique colonne."""
         dates = pd.date_range('2023-01-01', periods=12, freq='MS')
@@ -522,27 +540,346 @@ class TestExtensionNoOp:
     def test_extend_backward_noop_when_mask_entirely_false(self, calc, full_coverage):
         mask = pd.Series([False] * 5, index=full_coverage.index)
 
-        result = calc._extend_backward(full_coverage, mask)
+        result = calc._extend_backward(full_coverage, mask, 0.5)
 
         assert not result.any()
 
     def test_extend_forward_noop_when_mask_entirely_false(self, calc, full_coverage):
         mask = pd.Series([False] * 5, index=full_coverage.index)
 
-        result = calc._extend_forward(full_coverage, mask)
+        result = calc._extend_forward(full_coverage, mask, 0.5)
 
         assert not result.any()
 
     def test_extend_backward_noop_when_window_starts_at_grid_start(self, calc, full_coverage):
         mask = pd.Series([True] * 5, index=full_coverage.index)
 
-        result = calc._extend_backward(full_coverage, mask)
+        result = calc._extend_backward(full_coverage, mask, 0.5)
 
         pd.testing.assert_series_equal(result, mask)
 
     def test_extend_forward_noop_when_window_ends_at_grid_end(self, calc, full_coverage):
         mask = pd.Series([True] * 5, index=full_coverage.index)
 
-        result = calc._extend_forward(full_coverage, mask)
+        result = calc._extend_forward(full_coverage, mask, 0.5)
 
         pd.testing.assert_series_equal(result, mask)
+
+
+# Fonction auxiliaire de construction d'un jeu à épaules avant ET arrière
+def _make_df_with_shoulders():
+    """Build a monthly frame with a strict window flanked by two half-coverage shoulders.
+
+    Returns:
+        Tuple ``(dates, df)`` where the strict window (both columns covered)
+        spans ``dates[10:15]``, and both ``dates[8:10]`` and ``dates[15:17]``
+        sit at coverage 0.5 — included by a 0.5 threshold, excluded by 0.9.
+    """
+    dates = pd.date_range('2020-01-01', periods=20, freq='MS')
+    # 'b' en premier : cf. commentaire de test_extension_stops_at_first_gap
+    df = pd.DataFrame({'b': np.nan, 'a': np.nan}, index=dates, dtype=float)
+    # Fenêtre stricte : couverture totale sur [10, 15)
+    df.loc[dates[10:15], 'a'] = 1.0
+    df.loc[dates[10:15], 'b'] = 1.0
+    # Épaules à couverture == seuil (0.5), de part et d'autre de la fenêtre stricte
+    df.loc[dates[8:10], 'a'] = 1.0
+    df.loc[dates[15:17], 'a'] = 1.0
+    return dates, df
+
+
+# Fonction auxiliaire de construction d'un jeu sans aucune fenêtre stricte
+def _make_df_without_strict_window():
+    """Build a monthly frame where the two columns never overlap.
+
+    Returns:
+        Tuple ``(dates, df)``: ``b`` covers ``dates[0:8]`` and ``a`` covers
+        ``dates[12:20]``, so coverage never reaches 1.0 anywhere.
+    """
+    dates = pd.date_range('2020-01-01', periods=20, freq='MS')
+    df = pd.DataFrame({'b': np.nan, 'a': np.nan}, index=dates, dtype=float)
+    df.loc[dates[0:8], 'b'] = 1.0
+    df.loc[dates[12:20], 'a'] = 1.0
+    return dates, df
+
+
+# Fonction auxiliaire de construction d'un panel dont une entité n'a pas de fenêtre
+def _make_panel_with_none_entity():
+    """Build a two-entity panel whose entity ``B`` has an undetectable frequency.
+
+    Returns:
+        Panel DataFrame indexed by (``entity``, ``date``). Entity ``A`` is a
+        regular monthly series; entity ``B`` carries deliberately irregular
+        dates, so ``detect_index_frequency`` yields None for it and every
+        per-entity attribute of the calculator is None.
+    """
+    dates_a = pd.date_range('2020-01-01', periods=24, freq='MS')
+    dates_b = pd.DatetimeIndex(['2020-01-01', '2020-01-03', '2020-06-17', '2023-02-28'])
+    tuples = [('A', date) for date in dates_a] + [('B', date) for date in dates_b]
+    idx = pd.MultiIndex.from_tuples(tuples, names=['entity', 'date'])
+    n_rows = len(idx)
+    return pd.DataFrame({
+        'b': np.arange(n_rows, dtype=float),
+        'a': np.arange(n_rows, dtype=float) * 2,
+    }, index=idx)
+
+
+class TestThreeWindowMasks:
+    """§3.3 : le masque strict est conservé à côté du masque de scope."""
+
+    def test_strict_mask_narrower_than_scope_mask(self):
+        """Sous 'extended_both', le masque strict est strictement inclus dans celui de scope."""
+        dates, df = _make_df_with_shoulders()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='extended_both', min_columns=2
+        )
+        calc.fit(df)
+
+        strict = calc.imputation_strict_window_mask_
+        scope = calc.imputation_window_mask_
+
+        # Inclusion : aucune date stricte n'est absente du masque de scope
+        assert not (strict & ~scope).any()
+        # Stricte : le scope active des dates que le masque strict n'a pas
+        assert (scope & ~strict).any()
+        # Les épaules sont précisément ces dates supplémentaires
+        assert not strict.loc[dates[8:10]].any()
+        assert scope.loc[dates[8:10]].all()
+
+    def test_strict_equals_scope_under_strict_scope(self):
+        """En scope 'strict', aucune extension n'a lieu : les deux masques coïncident."""
+        dates, df = _make_df_with_shoulders()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='strict', min_columns=2
+        )
+        calc.fit(df)
+
+        pd.testing.assert_series_equal(
+            calc.imputation_strict_window_mask_, calc.imputation_window_mask_
+        )
+
+
+class TestTrainingScope:
+    """§3.3/§3.7 : la fenêtre d'entraînement se règle indépendamment de celle de prédiction."""
+
+    def test_training_mask_follows_training_scope(self):
+        """Deux valeurs de training_scope produisent deux masques d'étendue différente."""
+        dates, df = _make_df_with_shoulders()
+        narrow = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='strict',
+            training_scope='strict', min_columns=2,
+        ).fit(df)
+        wide = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='strict',
+            training_scope='extended_both', min_columns=2,
+        ).fit(df)
+
+        # La fenêtre d'entraînement s'élargit, celle de prédiction reste stricte
+        assert wide.training_window_mask_.sum() > narrow.training_window_mask_.sum()
+        pd.testing.assert_series_equal(
+            wide.imputation_window_mask_, narrow.imputation_window_mask_
+        )
+        # Le masque large recouvre entièrement le masque étroit
+        assert not (narrow.training_window_mask_ & ~wide.training_window_mask_).any()
+
+    def test_training_scope_none_follows_imputation_scope(self):
+        """Non-régression du défaut : à None, la fenêtre d'entraînement suit celle de prédiction."""
+        dates, df = _make_df_with_shoulders()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='extended_both', min_columns=2
+        )
+        calc.fit(df)
+
+        pd.testing.assert_series_equal(
+            calc.training_window_mask_, calc.imputation_window_mask_
+        )
+
+    def test_training_coverage_threshold_independent(self):
+        """À imputation_scope constant, deux seuils d'entraînement donnent deux extensions."""
+        dates, df = _make_df_with_shoulders()
+        kwargs = dict(
+            coverage_threshold=0.5, imputation_scope='extended_both',
+            training_scope='extended_both', min_columns=2,
+        )
+        permissive = ImputationWindowCalculator(training_coverage_threshold=0.5, **kwargs).fit(df)
+        strict_thr = ImputationWindowCalculator(training_coverage_threshold=0.9, **kwargs).fit(df)
+
+        # Le seuil 0.9 exclut les épaules à couverture 0.5, le seuil 0.5 les retient
+        assert permissive.training_window_mask_.sum() > strict_thr.training_window_mask_.sum()
+        assert not strict_thr.training_window_mask_.loc[dates[8:10]].any()
+        assert permissive.training_window_mask_.loc[dates[8:10]].all()
+        # La fenêtre de prédiction, elle, est identique de part et d'autre
+        pd.testing.assert_series_equal(
+            permissive.imputation_window_mask_, strict_thr.imputation_window_mask_
+        )
+
+    def test_unrestricted_training_scope_is_all_true(self):
+        """'unrestricted' supprime toute restriction, sans toucher à la fenêtre de prédiction."""
+        dates, df = _make_df_with_shoulders()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='strict',
+            training_scope='unrestricted', min_columns=2,
+        )
+        calc.fit(df)
+
+        assert calc.training_window_mask_.all()
+        # La fenêtre de prédiction reste la fenêtre stricte
+        pd.testing.assert_series_equal(
+            calc.imputation_window_mask_, calc.imputation_strict_window_mask_
+        )
+
+
+class TestThreeWindowMasksPanel:
+    """§3.3 : les trois masques sont calculés par entité, y compris les entités sans fenêtre."""
+
+    def test_none_window_entity_has_none_for_all_three_masks(self):
+        """Une entité sans fréquence identifiable porte None sur les trois masques."""
+        df = _make_panel_with_none_entity()
+        calc = ImputationWindowCalculator(coverage_threshold=0.5, min_columns=2)
+        calc.fit(df)
+
+        for attr in (
+            'imputation_strict_window_mask_',
+            'imputation_window_mask_',
+            'training_window_mask_',
+        ):
+            masks = getattr(calc, attr)
+            assert set(masks) == {('A',), ('B',)}, attr
+            assert masks[('B',)] is None, attr
+            assert masks[('A',)] is not None, attr
+
+        # column_coverage_ reste keyée par TOUTES les entités
+        assert set(calc.column_coverage_) == {('A',), ('B',)}
+
+    def test_training_scope_none_follows_imputation_scope_panel(self):
+        """Non-régression du défaut, entité par entité."""
+        df = _make_panel_with_none_entity()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='extended_both', min_columns=2
+        )
+        calc.fit(df)
+
+        for entity, training_mask in calc.training_window_mask_.items():
+            imputation_mask = calc.imputation_window_mask_[entity]
+            if training_mask is None:
+                assert imputation_mask is None
+                continue
+            pd.testing.assert_series_equal(training_mask, imputation_mask)
+
+    def test_unrestricted_training_scope_is_all_true_panel(self):
+        """'unrestricted' vaut tout-vrai pour les entités fittées, None pour les autres."""
+        df = _make_panel_with_none_entity()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='strict',
+            training_scope='unrestricted', min_columns=2,
+        )
+        calc.fit(df)
+
+        assert calc.training_window_mask_[('A',)].all()
+        assert calc.training_window_mask_[('B',)] is None
+
+        # Aligné sur les données : l'entité sans fenêtre reste entièrement False
+        aligned = calc.get_imputation_window_mask(df, kind='training')
+        assert aligned.loc['A'].all()
+        assert not aligned.loc['B'].any()
+
+
+class TestNoStrictWindow:
+    """B23 : la branche « aucune fenêtre stricte » doit renseigner les trois masques."""
+
+    def test_no_strict_window_sets_three_masks(self):
+        """Sans fenêtre stricte, les trois masques existent et les bornes restent None."""
+        dates, df = _make_df_without_strict_window()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='extended_both', min_columns=2
+        )
+        with pytest.warns(UserWarning, match='no period'):
+            calc.fit(df)
+
+        # Trois Series, et non None : le calcul de couverture a bien eu lieu
+        for attr in (
+            'imputation_strict_window_mask_',
+            'imputation_window_mask_',
+            'training_window_mask_',
+        ):
+            assert isinstance(getattr(calc, attr), pd.Series), attr
+            # L'extension ne peut rien activer à partir d'un masque strict vide
+            assert not getattr(calc, attr).any(), attr
+
+        # Les bornes restent indéterminées
+        assert calc.imputation_window_start_ is None
+        assert calc.imputation_window_end_ is None
+        assert calc.imputation_strict_window_start_ is None
+        assert calc.imputation_strict_window_end_ is None
+
+    def test_no_strict_window_honours_unrestricted(self):
+        """Seul 'unrestricted' produit une fenêtre d'entraînement exploitable dans ce cas."""
+        dates, df = _make_df_without_strict_window()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='extended_both',
+            training_scope='unrestricted', min_columns=2,
+        )
+        with pytest.warns(UserWarning, match="unrestricted"):
+            calc.fit(df)
+
+        # Fenêtre d'entraînement tout-vrai, fenêtres stricte et d'imputation tout-faux
+        assert calc.training_window_mask_.all()
+        assert not calc.imputation_strict_window_mask_.any()
+        assert not calc.imputation_window_mask_.any()
+
+    def test_no_strict_window_panel_allowed_under_unrestricted(self):
+        """Panel sans aucune fenêtre stricte : rédhibitoire par défaut, toléré en 'unrestricted'."""
+        dates, df = _make_df_without_strict_window()
+        idx = pd.MultiIndex.from_tuples(
+            [(entity, date) for entity in ('A', 'B') for date in dates],
+            names=['entity', 'date'],
+        )
+        panel = pd.concat([df, df]).set_index(idx)
+
+        # Défaut : aucune entité entraînable, l'échec reste explicite
+        with pytest.raises(ValueError, match='No imputation window'):
+            ImputationWindowCalculator(coverage_threshold=0.5, min_columns=2).fit(panel)
+
+        # 'unrestricted' : le panel reste entraînable, sans rien pouvoir imputer
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, training_scope='unrestricted', min_columns=2
+        )
+        with pytest.warns(UserWarning):
+            calc.fit(panel)
+        assert calc.training_window_mask_[('A',)].all()
+        assert not calc.imputation_window_mask_[('A',)].any()
+
+
+class TestGetMaskAtFrequencyKind:
+    """B24 : `kind` se propage à la conversion de fréquence."""
+
+    def test_get_mask_at_frequency_kind(self):
+        """Les masques strict et de scope donnent deux masques trimestriels distincts."""
+        dates, df = _make_df_with_shoulders()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='extended_both', min_columns=2
+        )
+        calc.fit(df)
+
+        strict_quarterly = calc.get_mask_at_frequency('QS', kind='strict')
+        scope_quarterly = calc.get_mask_at_frequency('QS', kind='imputation')
+        training_quarterly = calc.get_mask_at_frequency('QS', kind='training')
+
+        # L'extension active des trimestres que la fenêtre stricte n'atteint pas
+        assert scope_quarterly.sum() > strict_quarterly.sum()
+        assert not (strict_quarterly & ~scope_quarterly).any()
+        # training_scope à None suit imputation_scope
+        pd.testing.assert_series_equal(training_quarterly, scope_quarterly)
+
+    def test_get_mask_at_frequency_defaults_to_imputation(self):
+        """Le défaut préserve le comportement historique de la méthode."""
+        dates, df = _make_df_with_shoulders()
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='extended_both', min_columns=2
+        )
+        calc.fit(df)
+
+        pd.testing.assert_series_equal(
+            calc.get_mask_at_frequency('QS'),
+            calc.get_mask_at_frequency('QS', kind='imputation'),
+        )
+
