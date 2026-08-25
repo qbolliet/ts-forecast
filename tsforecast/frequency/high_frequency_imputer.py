@@ -8,7 +8,7 @@ for low-frequency series in mixed-frequency datasets using machine learning mode
 import warnings
 from collections import OrderedDict
 from dataclasses import replace
-from typing import Dict, List, Literal, Optional, Union, Any, Tuple
+from typing import Dict, List, Literal, Optional, Sequence, Union, Any, Tuple
 # Manipulation de données
 import numpy as np
 import pandas as pd
@@ -98,6 +98,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             when True, one per imputable variable when False — the model is
             then reused at the following stages, only its ``scale_factor``
             changing, predictions being rescaled accordingly.
+            It also drives the intra-stage cascade, identically in ``fit`` and
+            in ``transform`` : only when True do the
+            variables imputed later in a stage see the values the earlier ones
+            produced. A fallback step never feeds the following variables,
+            whatever the flag — ``fit`` produces no value for it at all, so
+            ``transform`` writes its interpolation to the output only, never to
+            the covariates. As a consequence, with ``cascade_refitting=False``
+            the fit writes nothing and ``imputation_provenance_fit_`` carries no
+            MODEL_ON_*/DISAGGREGATED mark; ``imputation_provenance_``, written
+            by ``transform``, carries them in every regime.
         keep_lower_frequencies: If True, output includes all intermediate
             frequencies in a MultiIndex structure: (entity..., frequency,
             date) for panel data, (frequency, date) for time series. Every level,
@@ -123,14 +133,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         enforce_period_totals: If True (default), the sub-periods predicted
             for one period of a lower-frequency variable are rescaled
             proportionally so that they sum back to the value observed for
-            that period (review §2.6, option 1). Only the additive
+            that period. Only the additive
             constraint is optional: an imputed variable is ALWAYS predicted
             over its whole period, anchor dates included, so that its column
             never mixes the low-frequency total with sub-period values. Set
             it to False to keep the raw model output, homogeneous in scale
             but free of any additive constraint. Periods that are only
             partly predicted, that hold no observation, or whose predictions
-            sum to zero are never rescaled.
+            sum to zero are never rescaled. The option drives the resclaing
+            only, never the provenance marking: an anchor date is marked
+            DISAGGREGATED either way, since it is the row a real observation
+            was read from. Marking it MODEL_ON_* instead
+            used to empty the training mask of the next cascade stage and
+            send the whole variable to the interpolation fallback.
         restore_original_values: If True, ``inverse_transform`` refills the
             cells that were non-NaN in the input of the last ``transform``
             with their exact original values, on top of the provenance-based
@@ -1546,6 +1561,43 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         return pd.Series(mask, index=X_input.index)
 
+    # Méthode auxiliaire de construction du masque des dates-ancres écrites
+    @staticmethod
+    def _anchor_mask(
+        X_input: pd.DataFrame,
+        var_name: str,
+        index: pd.Index,
+    ) -> pd.Series:
+        """Locate the anchor dates among the cells written at a stage.
+
+        An anchor date is a row where the low-frequency variable carries a
+        real observation in the untouched input frame. Re-expressing it at
+        the stage frequency does not make it a plain model output: it is a
+        real observation spread over its period, which is what
+        DISAGGREGATED denotes. This holds whether or not the additive
+        rescaling ran, hence a mask read off the data rather than off the
+        rescaling's return value.
+
+        Args:
+            X_input: Untouched input frame of the stage.
+            var_name: Column being imputed.
+            index: Index of the cells that received a value.
+
+        Returns:
+            Boolean Series aligned on ``index``, all False when the column
+            is absent from ``X_input``.
+
+        Examples:
+            >>> # frame = pd.DataFrame({'yr': [1.0, np.nan, np.nan]}, index=idx)
+            >>> # HighFrequencyImputer._anchor_mask(frame, 'yr', idx).tolist()
+            >>> # [True, False, False]
+        """
+        # Colonne absente : aucune ancre à signaler
+        if var_name not in X_input.columns:
+            return pd.Series(False, index=index)
+
+        return X_input[var_name].reindex(index).notna()
+
     # Méthode auxiliaire de récupération du modèle déjà entraîné pour une variable
     def _model_for_var(
         self,
@@ -2316,6 +2368,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     def _write_stage_values(
         self,
         X_stage: pd.DataFrame,
+        X_input: pd.DataFrame,
         var_name: str,
         predictions: pd.Series,
         scope_mask: pd.Series,
@@ -2323,6 +2376,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         tracker: ImputationProvenanceTracker,
         disaggregated_mask: pd.Series,
         trained_on_imputed: bool,
+        extra_frames: Sequence[pd.DataFrame] = (),
         context: str = '',
     ) -> bool:
         """Blank the window part of the scope, then write the values back.
@@ -2343,8 +2397,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         their original mark, so the matrix never declares observed a cell that
         no longer holds a value.
 
+        The provenance of a written cell depends on its NATURE, never on
+        whether the additive rescaling succeeded: an anchor date stays an
+        anchor date whether ``enforce_period_totals`` is on or off, so the
+        mask handed to :meth:`_mark_imputed_cells` is the union of the
+        rescaled cells and of the scope's anchors.
+
         Args:
             X_stage: Stage frame written in place.
+            X_input: Untouched input frame of the stage, holding the
+                variable's original low-frequency observations. Only read, to
+                locate the anchor dates of the written scope.
             var_name: Column being imputed.
             predictions: Values to write, indexed by the rows they belong to.
             scope_mask: Disaggregation scope, from :meth:`_prediction_masks`.
@@ -2354,6 +2417,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 of the cells produced by a rescaled disaggregation.
             trained_on_imputed: Whether the model saw imputed values at fit
                 time (drives MODEL_ON_MIXED vs MODEL_ON_TRUE).
+            extra_frames: Further frames to apply the very same blank-then-
+                rewrite to, without touching the provenance — the covariate
+                mirror of :meth:`_transform` when it is a distinct object
+                from the output frame.
             context: Label used in log messages.
 
         Returns:
@@ -2372,17 +2439,30 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             return False
 
         # Vidage restreint à la fenêtre, puis réécriture des valeurs produites
-        # Vidage
         blank_mask = scope_mask & predict_mask
-        if blank_mask.any():
-            X_stage.loc[blank_mask, var_name] = np.nan
-        # Réécriture
-        X_stage.loc[predictions.index, var_name] = predictions
+        self._blank_and_write(X_stage, var_name, predictions, blank_mask)
 
-        # Marquage de la provenance des cellules effectivement écrites
+        # Mêmes écritures sur les frames miroirs, sans marquage de provenance :
+        # le tracker est unique et n'est écrit qu'une fois, pour le frame de sortie
+        for frame in extra_frames:
+            if frame is not X_stage:
+                self._blank_and_write(frame, var_name, predictions, blank_mask)
+
+        # Marquage de la provenance des cellules effectivement écrites.
+        # Une date-ancre reste une date-ancre, que le recalage additif ait eu
+        # lieu ou non : le masque de marquage est l'union des cellules recalées
+        # et des ancres du périmètre. "disaggregated_mask" conserve ainsi son
+        # seul rôle informatif — « cette cellule a été recalée »
+        # Réindexation explicite : "_mark_imputed_cells" consomme le masque
+        # positionnellement (".to_numpy()" contre "predictions.index"), l'union
+        # doit donc être alignée dans cet ordre exact
+        anchor_mask = self._anchor_mask(X_input, var_name, predictions.index)
+        marked_mask = (
+            disaggregated_mask.reindex(predictions.index).fillna(False).astype(bool)
+            | anchor_mask
+        )
         self._mark_imputed_cells(
-            tracker, var_name, predictions.index,
-            disaggregated_mask, trained_on_imputed
+            tracker, var_name, predictions.index, marked_mask, trained_on_imputed
         )
 
         # Cellules vidées sans réécriture : elles ne portent plus de valeur,
@@ -2398,6 +2478,32 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 tracker.clear_provenance(var_name, cleared)
 
         return True
+
+    # Méthode auxiliaire de vidage puis réécriture d'une colonne d'un frame d'étape
+    @staticmethod
+    def _blank_and_write(
+        frame: pd.DataFrame,
+        var_name: str,
+        predictions: pd.Series,
+        blank_mask: pd.Series,
+    ) -> None:
+        """Apply the blank-then-rewrite discipline to one frame, in place.
+
+        Extracted from :meth:`_write_stage_values` so the output frame and
+        its covariate mirror receive rigorously the same writes while the
+        provenance is marked exactly once.
+
+        Args:
+            frame: Frame written in place.
+            var_name: Column being imputed.
+            predictions: Values to write, indexed by the rows they belong to.
+            blank_mask: Rows to blank first (scope restricted to the window).
+        """
+        # Vidage
+        if blank_mask.any():
+            frame.loc[blank_mask, var_name] = np.nan
+        # Réécriture
+        frame.loc[predictions.index, var_name] = predictions
 
     # Méthode auxiliaire de notation de la provenance des variables agrégées
     def _mark_aggregated_provenance(
@@ -2478,14 +2584,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         A cell belonging to a period whose sub-periods were rescaled onto an
         observed total is DISAGGREGATED — it carries a real observation,
-        spread out. Any other imputed cell keeps its MODEL_ON_* provenance.
+        spread out. So is an anchor date re-expressed at the stage
+        frequency, whether or not the rescaling ran. Any other imputed cell
+        keeps its MODEL_ON_* provenance.
 
         Args:
             tracker: Provenance tracker to write into.
             column: Column being imputed.
             index: Index of every cell that received a value.
             disaggregated_mask: Boolean mask, aligned on ``index``, of the
-                cells produced by a rescaled disaggregation.
+                cells to mark DISAGGREGATED — the union of the rescaled
+                cells and of the anchor dates, built by
+                :meth:`_write_stage_values`.
             trained_on_imputed: Whether the model saw imputed values at fit
                 time (drives MODEL_ON_MIXED vs MODEL_ON_TRUE).
         """
@@ -3077,20 +3187,27 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                                 # périmètre et le marquage de la provenance suivent
                                 # la discipline commune de "_write_stage_values"
                                 written = self._write_stage_values(
-                                    X_stage, var_name, preds, scope_mask, predict_mask,
+                                    X_stage, X_work, var_name, preds,
+                                    scope_mask, predict_mask,
                                     self._provenance_tracker, disagg_mask,
                                     step.trained_on_imputed, context=stage_context
                                 )
                                 # Alimentation du magasin d'imputations pour les étapes
-                                # suivantes  par nom de variable : les
-                                # imputations déjà déposées par un autre groupe de la
-                                # même variable (fréquences hétérogènes selon l'entité)
-                                # sont préservées
+                                # suivantes, par nom de variable. Le receveur du
+                                # "combine_first" l'emporte : ce sont donc les
+                                # prédictions de l'étape courante qui gagnent, parce
+                                # qu'elles sont à l'échelle la plus fine atteinte
+                                # jusqu'ici. "existing" ne subsiste que sur les lignes
+                                # que "preds" ne couvre pas, c'est-à-dire les entités
+                                # d'un autre groupe de la même variable (fréquences
+                                # hétérogènes selon l'entité) — l'intention d'origine
+                                # est préservée sans figer le magasin sur la première
+                                # étape
                                 if written:
                                     existing_imputed = imputed_store.get(var_name)
                                     imputed_store[var_name] = (
                                         preds if existing_imputed is None
-                                        else existing_imputed.combine_first(preds)
+                                        else preds.combine_first(existing_imputed)
                                     )
                             except Exception as e:
                                 # Warning
@@ -3179,10 +3296,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             else:
                 raise ValueError("Data must have a DatetimeIndex or MultiIndex")
 
-        # Init provenance tracker pour la transformation
-        transform_tracker = ImputationProvenanceTracker()
-        transform_tracker.initialize(data_work, panel_cols=self.panel_cols)
-
         # Fenêtre d'imputation des données transformée, calculée une seule fois
         # et au même stade qu'au fit (avant le transformer additif), pour que le
         # recalcul sur les données du fit redonne exactement la fenêtre du fit.
@@ -3211,6 +3324,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 data_transformed = data_transformed[0]
         else:
             data_transformed = data_work.copy()
+
+        # Init du tracker de provenance APRÈS le transformateur additif, comme la
+        # PHASE 4 du fit qui suit sa PHASE 2. Deux raisons :
+        # "ORIGINAL" marque les valeurs présentes à l'entrée de la CASCADE, or
+        # celle-ci commence après la transformation additive — un transformateur
+        # qui change le motif de NaN (différenciation, log de valeurs négatives)
+        # produisait sinon deux masques ORIGINAL différents entre fit et
+        # transform ; et la matrice partage ainsi l'index et les colonnes des
+        # frames d'étape, tous dérivés de "data_transformed"
+        transform_tracker = ImputationProvenanceTracker()
+        transform_tracker.initialize(data_transformed, panel_cols=self.panel_cols)
 
         # 3. Réapplication les étapes du fit dans le même ordre, avec les mêmes frames d'étape
         # Frame d'entrée du replay : jamais modifié, il sert de base à chaque étape
@@ -3259,6 +3383,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 f"{len(stage_var_names)} variable(s): {stage_var_names}"
             )
 
+            # Frame des covariables de l'étape, miroir exact du "X_stage" du fit.
+            # "X_stage" porte la sortie et reçoit donc toutes les
+            # écritures ; le miroir n'accumule que ce que le bloc 5g du fit
+            # accumule — les écritures des étapes NON de repli, et seulement sous
+            # "cascade_refitting". Frame distinct systématiquement, y compris
+            # quand les deux gardes passent partout : un repli non planifié (échec
+            # de prédiction au replay) n'est pas connu avant d'être rencontré, et
+            # il ne doit pas plus contaminer les covariables qu'un repli déclaré
+            X_covariates = X_stage.copy()
+
             # Parcours des variables imputées à cette étape
             for step in stage_steps:
                 # Le plan porte le nom de colonne et les métadonnées de groupe,
@@ -3278,13 +3412,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         f"'{var_name}' at stage {freq_label}: registered as "
                         f"interpolate_fallback at fit time"
                     )
-                    # Le repli n'alimente pas imputed_store : le fit n'en produit aucune
-                    # valeur, les frames d'étape resteraient asymétriques
+                    # Le repli n'alimente ni imputed_store ni le frame des
+                    # covariables : le fit n'en produit aucune valeur (le bloc 5g
+                    # écarte les replis), les étapes suivantes ne doivent donc pas
+                    # les voir. Seule la sortie les reçoit
                     if var_name in X_stage.columns:
                         # L'ancre sert de point d'appui à l'interpolation, puis le
                         # recalage proportionnel la ramène à l'échelle de la
-                        # sous-période
-                        interpolated = X_stage[var_name].interpolate(
+                        # sous-période. Interpolation lue sur le miroir des
+                        # covariables, seul frame dont l'état reproduit celui du fit
+                        interpolated = X_covariates[var_name].interpolate(
                             method='linear', limit_direction='both'
                         )
                         # Même restriction que le chemin modèle : rien n'est
@@ -3300,7 +3437,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         )
                         # Même discipline d'écriture que le chemin modèle
                         self._write_stage_values(
-                            X_stage, var_name, rescaled, scope_mask, predict_mask,
+                            X_stage, X_input, var_name, rescaled,
+                            scope_mask, predict_mask,
                             transform_tracker, disagg_mask, False,
                             context=stage_context
                         )
@@ -3323,9 +3461,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
                 try:
                     # Les prédictions sont déjà à l'échelle de la fréquence de
-                    # prédiction : aucune remise à l'échelle inverse
+                    # prédiction : aucune remise à l'échelle inverse. Covariables
+                    # lues sur le miroir, dont l'état reproduit celui du frame
+                    # d'étape du fit au même instant de la cascade
                     predictions = self._predict_stage_values(
-                        step, X_stage, predict_mask, context=stage_context
+                        step, X_covariates, predict_mask, context=stage_context
                     )
                     # Contrainte additive : la somme des sous-périodes de chaque
                     # période égale la valeur observée
@@ -3336,22 +3476,35 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     # Le vidage du périmètre et le marquage de la provenance
                     # suivent la discipline commune de "_write_stage_values" :
                     # "predictions.index" couvre toutes les entités du groupe.
+                    # Le miroir des covariables n'est mis à jour que sous la même
+                    # garde que le bloc 5g du fit — étape non de repli et
+                    # "cascade_refitting" — pour que les variables suivantes de
+                    # l'étape voient exactement ce que le fit leur montrait
+                    mirror = (
+                        (X_covariates,)
+                        if self.cascade_refitting and not step.is_fallback
+                        else ()
+                    )
                     written = self._write_stage_values(
-                        X_stage, var_name, predictions, scope_mask, predict_mask,
+                        X_stage, X_input, var_name, predictions,
+                        scope_mask, predict_mask,
                         transform_tracker, disagg_mask, step.trained_on_imputed,
-                        context=stage_context
+                        extra_frames=mirror, context=stage_context
                     )
                     # Alimentation des étapes suivantes, symétrique du bloc 5g du
                     # fit : sans réentraînement, les covariables des étapes
-                    # suivantes restent celles vues à l'entraînement. Clé par nom
-                    # de variable : les imputations déjà déposées par un autre
-                    # groupe de la même variable (fréquences hétérogènes selon
-                    # l'entité) sont préservées
+                    # suivantes restent celles vues à l'entraînement. Le receveur
+                    # du "combine_first" l'emporte : ce sont donc les prédictions
+                    # de l'étape courante qui gagnent, à l'échelle la plus fine
+                    # atteinte jusqu'ici. "existing" ne subsiste que sur les lignes
+                    # que "predictions" ne couvre pas, c'est-à-dire les entités
+                    # d'un AUTRE groupe de la même variable (dans le cas où les fréquences
+                    # sont hétérogènes selon l'entité)
                     if self.cascade_refitting and written:
                         existing_imputed = imputed_store.get(var_name)
                         imputed_store[var_name] = (
                             predictions if existing_imputed is None
-                            else existing_imputed.combine_first(predictions)
+                            else predictions.combine_first(existing_imputed)
                         )
                 except Exception as e:
                     # Logging
@@ -3368,13 +3521,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     # Repli sur l'interpolation, restreint aux lignes prédictibles
                     # et tracé comme toute autre valeur produite : écrire la
                     # colonne entière produirait des valeurs hors fenêtre, sans
-                    # provenance, que l'inversion ne saurait pas retirer
-                    interpolated = X_stage[var_name].interpolate(
+                    # provenance, que l'inversion ne saurait pas retirer.
+                    # Comme le repli déclaré, il n'alimente que la sortie : le
+                    # bloc 5g du fit n'écrit rien quand la prédiction échoue
+                    interpolated = X_covariates[var_name].interpolate(
                         method='linear', limit_direction='both'
                     )
                     filled = interpolated.loc[predict_mask].dropna()
                     self._write_stage_values(
-                        X_stage, var_name, filled, scope_mask, predict_mask,
+                        X_stage, X_input, var_name, filled,
+                        scope_mask, predict_mask,
                         transform_tracker, pd.Series(False, index=filled.index),
                         step.trained_on_imputed, context=stage_context
                     )

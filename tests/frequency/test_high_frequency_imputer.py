@@ -8,7 +8,7 @@ import dataclasses
 import pytest
 import pandas as pd
 import numpy as np
-from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
@@ -2139,9 +2139,14 @@ class TestEnforcePeriodTotalsParameter:
         imputed_at_anchors = result.loc[anchors.index, 'variable_trimestrielle']
         assert not np.isclose(imputed_at_anchors, anchors, atol=1e-9).any()
 
-        # Aucune cellule n'est marquée DISAGGREGATED
+        # §3.15 (B2) : le marquage suit la NATURE de la cellule, pas la réussite
+        # du recalage. Les dates-ancres restent DISAGGREGATED — sans quoi le
+        # filtre de provenance de l'étape suivante viderait son masque
+        # d'entraînement — et les sous-périodes seules deviennent MODEL_ON_*
         provenance = imputer.imputation_provenance_['variable_trimestrielle']
-        assert not (provenance == ProvenanceType.DISAGGREGATED).any()
+        disaggregated = provenance == ProvenanceType.DISAGGREGATED
+        assert disaggregated.loc[anchors.index].all()
+        assert not disaggregated.drop(index=anchors.index).any()
         assert (provenance == ProvenanceType.MODEL_ON_TRUE).any()
 
     def test_default_is_option_one(self):
@@ -3319,3 +3324,520 @@ class TestTransformOutsideFitWindow:
                == ProvenanceType.ORIGINAL)
         )
         assert not inconsistent.any().any()
+
+
+# =============================================================================
+# §3.15 — Symétrie fit/transform de la cascade (B5, B7, B8, B2)
+# =============================================================================
+
+@pytest.fixture
+def panel_heterogeneous_variable_frequency():
+    """Panel where one variable has a different frequency per entity.
+
+    MultiIndex (``country``, ``date``), two entities over 72 month-start
+    dates. ``covariable_mensuelle`` is dense for both. ``variable_basse``
+    is ANNUAL for ``France`` (January anchors) and QUARTERLY for
+    ``Allemagne`` (quarter-start anchors), so a single cascade stage fits
+    TWO distinct groups for the same column name — the situation the
+    ``imputed_store`` ``combine_first`` is meant to survive (review §3.15,
+    B5).
+    """
+    dates = pd.date_range('2018-01-01', periods=72, freq='MS')
+    rng = np.random.default_rng(11)
+
+    frames = []
+    for country, period in (('France', 'Y'), ('Allemagne', 'Q')):
+        monthly = pd.Series(20.0 + rng.normal(0, 0.5, len(dates)), index=dates)
+        low = pd.Series(np.nan, index=dates)
+        # L'ancre de chaque période porte la somme de ses mois
+        for _, block in monthly.groupby(monthly.index.to_period(period)):
+            low.loc[block.index[0]] = block.sum()
+
+        frame = pd.DataFrame(
+            {'covariable_mensuelle': monthly, 'variable_basse': low}
+        )
+        frame['country'] = country
+        frame.index.name = 'date'
+        frames.append(frame.reset_index())
+
+    panel = pd.concat(frames, ignore_index=True)
+    return panel.set_index(['country', 'date']).sort_index()
+
+
+class _StoreSpy:
+    """Capture the ``imputed_store`` and the values written at each step.
+
+    ``_build_stage_frame`` receives the very dict ``_fit``/``_transform``
+    keep mutating, so holding a reference to it is enough to read its final
+    content. ``_write_stage_values`` gives the values each (stage, variable)
+    couple actually produced.
+    """
+
+    def __init__(self):
+        self.store = None
+        self.written = {}
+        self._build = HighFrequencyImputer._build_stage_frame
+        self._write = HighFrequencyImputer._write_stage_values
+
+    def __enter__(self):
+        spy = self
+
+        def build(imputer, X_original, imputed_store, pred_freq, aggregate_keys=None):
+            if spy.store is None:
+                spy.store = imputed_store
+            return spy._build(
+                imputer, X_original, imputed_store, pred_freq, aggregate_keys
+            )
+
+        def write(imputer, X_stage, X_input, var_name, predictions, *args, **kwargs):
+            spy.written[(kwargs.get('context', ''), var_name)] = predictions.copy()
+            return spy._write(
+                imputer, X_stage, X_input, var_name, predictions, *args, **kwargs
+            )
+
+        HighFrequencyImputer._build_stage_frame = build
+        HighFrequencyImputer._write_stage_values = write
+        return self
+
+    def __exit__(self, *exc):
+        HighFrequencyImputer._build_stage_frame = self._build
+        HighFrequencyImputer._write_stage_values = self._write
+        return False
+
+    def last_written(self, var_name):
+        """Values produced by the LAST step that wrote ``var_name``."""
+        matching = [v for (_, name), v in self.written.items() if name == var_name]
+        assert matching, "aucune ecriture capturee pour " + var_name
+        return matching[-1]
+
+
+class TestImputedStoreRefreshedAtEachStage:
+    """B5 : `imputed_store` porte la prédiction de l'étape la plus fine."""
+
+    @staticmethod
+    def _imputer(**kwargs):
+        params = dict(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+            train_on_partial_coverage=True,
+        )
+        params.update(kwargs)
+        return HighFrequencyImputer(**params)
+
+    def test_imputed_store_refreshed_at_each_stage(
+        self, annual_quarterly_over_monthly
+    ):
+        """La valeur stockée est celle du DERNIER passage, pas du premier.
+
+        `variable_annuelle` est imputée aux étapes 'Q' puis 'M'. Avec le
+        `combine_first` à l'envers, le magasin restait figé sur les valeurs
+        d'échelle trimestrielle et toute étape ultérieure recevait une
+        covariable ~3x trop grande.
+        """
+        imputer = self._imputer()
+        with _StoreSpy() as spy:
+            _fit_transform_quiet(imputer, annual_quarterly_over_monthly)
+
+        # La variable est bien passée par au moins deux étapes
+        stages = [
+            step.pred_freq_label for step in imputer.imputation_plan_
+            if step.var_name == 'variable_annuelle' and not step.is_fallback
+        ]
+        assert len(stages) >= 2, "une seule etape pour la variable : %s" % stages
+
+        stored = spy.store['variable_annuelle']
+        last = spy.last_written('variable_annuelle')
+
+        # Égalité EXACTE avec la dernière écriture, sur son propre index
+        pd.testing.assert_series_equal(
+            stored.reindex(last.index), last, check_names=False
+        )
+
+    def test_stored_values_are_at_the_finest_stage_scale(
+        self, annual_quarterly_over_monthly
+    ):
+        """Contrôle d'échelle : ~1/12 de l'annuel, pas ~1/4."""
+        imputer = self._imputer()
+        with _StoreSpy() as spy:
+            _fit_transform_quiet(imputer, annual_quarterly_over_monthly)
+
+        annual = annual_quarterly_over_monthly['variable_annuelle'].dropna().median()
+        stored = spy.store['variable_annuelle'].dropna().median()
+
+        # Échelle mensuelle : le rapport doit être plus proche de 12 que de 4
+        ratio = annual / stored
+        assert abs(ratio - 12) < abs(ratio - 4), (
+            "rapport annuel/stocke = %.2f, echelle trimestrielle (~4) "
+            "au lieu de mensuelle (~12)" % ratio
+        )
+
+
+class TestOtherGroupDepositsPreserved:
+    """B5 : le correctif ne sacrifie pas les dépôts d'un autre groupe."""
+
+    def test_other_group_deposits_preserved(
+        self, panel_heterogeneous_variable_frequency
+    ):
+        """Fréquences hétérogènes selon l'entité : les deux groupes survivent."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+            train_on_partial_coverage=True,
+        )
+        with _StoreSpy() as spy:
+            _fit_transform_quiet(imputer, panel_heterogeneous_variable_frequency)
+
+        # Deux groupes distincts pour la même colonne, à des fréquences différentes
+        group_keys = {
+            step.var_key for step in imputer.imputation_plan_
+            if step.var_name == 'variable_basse' and not step.is_fallback
+        }
+        assert len(group_keys) >= 2, "un seul groupe fitte : %s" % (group_keys,)
+
+        stored = spy.store['variable_basse'].dropna()
+        entities = set(stored.index.get_level_values('country').unique())
+
+        # Le dépôt de chaque entité subsiste : "preds.combine_first(existing)"
+        # ne recouvre que les lignes que "preds" couvre effectivement
+        assert entities == {'France', 'Allemagne'}
+
+
+class TestCascadeGuardsAreSymmetric:
+    """B7 : `fit` et `transform` cascadent sous les mêmes gardes."""
+
+    @staticmethod
+    def _covariate_frames(imputer, data):
+        """Frames de covariables vus par le fit puis par le transform.
+
+        Le fit les reçoit par `_prepare_training_data`, le transform par
+        `_predict_stage_values` : ce sont les deux seuls points où une
+        covariable devient une entrée du modèle.
+        """
+        from tsforecast.panel.utils import split_variable_key
+
+        fit_frames, transform_frames = {}, {}
+        # `_predict_stage_values` est appelée par le bloc 5g du FIT aussi :
+        # sans ce drapeau, la capture « transform » enregistrerait des frames
+        # du fit dès que `cascade_refitting=True`, et la comparaison serait
+        # vide de sens (frame du fit contre lui-même)
+        replaying = {'now': False}
+        orig_prepare = HighFrequencyImputer._prepare_training_data
+        orig_predict = HighFrequencyImputer._predict_stage_values
+
+        def prepare(self, X_stage, X_original, var_key, pred_freq):
+            _, var_name = split_variable_key(var_key)
+            fit_frames.setdefault(
+                (self._freq_label(pred_freq), var_name), X_stage.copy()
+            )
+            return orig_prepare(self, X_stage, X_original, var_key, pred_freq)
+
+        def predict(self, step, X_stage, rows_mask, context=''):
+            if replaying['now']:
+                transform_frames.setdefault(
+                    (step.pred_freq_label, step.var_name), X_stage.copy()
+                )
+            return orig_predict(self, step, X_stage, rows_mask, context)
+
+        HighFrequencyImputer._prepare_training_data = prepare
+        HighFrequencyImputer._predict_stage_values = predict
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                imputer.fit(data.copy())
+                replaying['now'] = True
+                imputer.transform(data.copy())
+        finally:
+            HighFrequencyImputer._prepare_training_data = orig_prepare
+            HighFrequencyImputer._predict_stage_values = orig_predict
+
+        return fit_frames, transform_frames
+
+    @staticmethod
+    def _diverging_cells(a, b):
+        """Cellules divergentes : valeur différente OU motif de NaN différent."""
+        cols = [c for c in a.columns if c in b.columns]
+        left, right = a[cols], b.loc[a.index, cols]
+        both = left.notna() & right.notna()
+        value_diff = ((left - right).abs() > 1e-9) & both
+        nan_diff = left.notna() != right.notna()
+        return int((value_diff | nan_diff).sum().sum())
+
+    def _assert_symmetric(self, imputer, data):
+        """Aucune cellule de covariable ne diffère entre fit et transform."""
+        fit_frames, transform_frames = self._covariate_frames(imputer, data)
+
+        compared = sorted(set(fit_frames) & set(transform_frames), key=str)
+        assert compared, "aucun couple (etape, variable) comparable"
+        for key in compared:
+            diverging = self._diverging_cells(fit_frames[key], transform_frames[key])
+            assert diverging == 0, (
+                "%d cellule(s) de covariable divergentes entre fit et "
+                "transform pour %s" % (diverging, (key,))
+            )
+
+    @pytest.mark.parametrize('cascade_refitting', [False, True])
+    def test_no_refitting_fit_and_transform_agree(
+        self, mixed_freq_timeseries, cascade_refitting
+    ):
+        """Les covariables du transform sont celles vues à l'entraînement.
+
+        Sous `cascade_refitting=False`, l'étape k était entraînée sur un
+        frame que les étapes 1..k-1 n'avaient pas touché, et appliquée sur
+        un frame qu'elles avaient déjà réécrit.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=cascade_refitting,
+            keep_lower_frequencies=True,
+        )
+        self._assert_symmetric(imputer, mixed_freq_timeseries)
+
+    @pytest.mark.parametrize('cascade_refitting', [False, True])
+    def test_panel_no_refitting_fit_and_transform_agree(
+        self, mixed_freq_panel, cascade_refitting
+    ):
+        """Même invariant sur un panel."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=cascade_refitting,
+            keep_lower_frequencies=True,
+        )
+        self._assert_symmetric(imputer, mixed_freq_panel)
+
+    def test_fallback_step_symmetric(self, annual_quarterly_over_monthly):
+        """Un repli ne nourrit jamais les covariables des étapes suivantes.
+
+        Le bloc 5g du fit écarte les replis (`if not step.is_fallback`) ;
+        le transform les appliquait pourtant à son frame d'étape, que la
+        variable suivante voyait ensuite.
+        """
+        # Dict d'estimateurs sans entrée pour la variable annuelle : son étape
+        # bascule en repli, celle de la variable trimestrielle reste un modèle
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator={'variable_trimestrielle': LinearRegression()},
+            cascade_refitting=True,
+            keep_lower_frequencies=True,
+            train_on_partial_coverage=True,
+        )
+        fit_frames, transform_frames = self._covariate_frames(
+            imputer, annual_quarterly_over_monthly
+        )
+
+        fallbacks = [
+            step for step in imputer.imputation_plan_
+            if step.var_name == 'variable_annuelle' and step.is_fallback
+        ]
+        assert fallbacks, "le repli attendu n'a pas ete declenche"
+
+        compared = sorted(set(fit_frames) & set(transform_frames), key=str)
+        assert compared, "aucun couple (etape, variable) comparable"
+        for key in compared:
+            diverging = self._diverging_cells(fit_frames[key], transform_frames[key])
+            assert diverging == 0, (
+                "le repli a contamine les covariables du transform pour "
+                "%s (%d cellule(s))" % ((key,), diverging)
+            )
+
+
+class _FirstObservationDropped(BaseEstimator, TransformerMixin):
+    """Additive transformer changing the NaN pattern, like a differencing."""
+
+    def __init__(self, column='inflation_ipc'):
+        self.column = column
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        out = X.copy()
+        out.iloc[0, out.columns.get_loc(self.column)] = np.nan
+        return out
+
+    def inverse_transform(self, X):
+        return X.copy()
+
+
+class _ExtraColumnAdded(BaseEstimator, TransformerMixin):
+    """Additive transformer adding a dense column, absent from the input."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        out = X.copy()
+        out['covariable_ajoutee'] = np.arange(len(out), dtype=float)
+        return out
+
+    def inverse_transform(self, X):
+        return X.drop(columns=['covariable_ajoutee'], errors='ignore')
+
+
+class TestProvenanceTrackerInitializedAfterAdditiveTransformer:
+    """B8 : le tracker est initialisé au même moment dans les deux chemins."""
+
+    def test_provenance_identical_with_differencing_transformer(
+        self, mixed_freq_timeseries
+    ):
+        """Un transformateur changeant le motif de NaN ne divise plus ORIGINAL.
+
+        `initialize` marque ORIGINAL là où `notna()`. Initialisé AVANT le
+        transformateur au transform et APRÈS au fit, il produisait deux
+        masques différents : la première observation était non-ORIGINAL au
+        fit et ORIGINAL au transform.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            additive_transformer=_FirstObservationDropped(),
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(mixed_freq_timeseries.copy())
+            imputer.transform(mixed_freq_timeseries.copy())
+
+        fit_original = imputer.imputation_provenance_fit_ == ProvenanceType.ORIGINAL
+        transform_original = imputer.imputation_provenance_ == ProvenanceType.ORIGINAL
+
+        # La cellule annulée par le transformateur n'est ORIGINAL nulle part
+        first_date = mixed_freq_timeseries.index[0]
+        assert not fit_original.loc[first_date, 'inflation_ipc']
+        assert not transform_original.loc[first_date, 'inflation_ipc']
+
+        # Et les deux masques coïncident partout
+        pd.testing.assert_frame_equal(fit_original, transform_original)
+
+    def test_provenance_covers_a_column_added_by_the_transformer(
+        self, mixed_freq_timeseries
+    ):
+        """Une colonne ajoutée par le transformateur figure dans la provenance.
+
+        La matrice du transform venait de `data_work` alors que les frames
+        d'étape viennent de `data_transformed` : la colonne ajoutée
+        manquait à la matrice, sans le moindre message.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            additive_transformer=_ExtraColumnAdded(),
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(mixed_freq_timeseries.copy())
+            result = imputer.transform(mixed_freq_timeseries.copy())
+
+        assert 'covariable_ajoutee' in imputer.imputation_provenance_.columns
+        assert list(imputer.imputation_provenance_fit_.columns) == list(
+            imputer.imputation_provenance_.columns
+        )
+        # La matrice décrit bien la sortie, pas l'entrée
+        assert set(imputer.imputation_provenance_.columns) == set(result.columns)
+
+
+class TestAnchorsMarkedWithoutPeriodTotals:
+    """B2 : `enforce_period_totals=False` ne casse plus l'étape suivante."""
+
+    @staticmethod
+    def _imputer(**kwargs):
+        params = dict(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            enforce_period_totals=False,
+            keep_lower_frequencies=False,
+        )
+        params.update(kwargs)
+        return HighFrequencyImputer(**params)
+
+    def test_anchors_marked_disaggregated_without_period_totals(
+        self, mixed_freq_timeseries
+    ):
+        """Une date-ancre reste une date-ancre, recalage ou non."""
+        imputer = self._imputer()
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        column = 'balance_commerciale_annuelle'
+        anchors = mixed_freq_timeseries[column].dropna().index
+        provenance = imputer.imputation_provenance_[column]
+        marked = provenance.reindex(anchors).dropna()
+
+        # Une ancre RÉÉCRITE est DISAGGREGATED, jamais MODEL_ON_*. Une ancre
+        # hors fenêtre d'imputation n'est pas réécrite du tout et garde donc
+        # sa marque ORIGINAL : rien n'y a été produit, rien n'y a été détruit
+        assert len(marked) > 0
+        assert marked.isin(
+            [ProvenanceType.DISAGGREGATED, ProvenanceType.ORIGINAL]
+        ).all()
+        assert (marked == ProvenanceType.DISAGGREGATED).any()
+
+        # Les sous-périodes, elles, restent des sorties de modèle
+        sub_periods = provenance.drop(index=anchors).dropna()
+        assert len(sub_periods) > 0
+        assert (sub_periods != ProvenanceType.DISAGGREGATED).all()
+
+    def test_period_totals_marking_is_unchanged_when_enforced(
+        self, mixed_freq_timeseries
+    ):
+        """Sous le régime par défaut, l'union est un no-op strict."""
+        imputer = self._imputer(enforce_period_totals=True)
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        column = 'balance_commerciale_annuelle'
+        provenance = imputer.imputation_provenance_[column].dropna()
+        written = provenance[provenance != ProvenanceType.ORIGINAL]
+
+        # Toutes les cellules recalées, ancres comprises, restent DISAGGREGATED
+        assert len(written) > 0
+        assert (written == ProvenanceType.DISAGGREGATED).all()
+
+    def test_no_period_totals_does_not_force_fallback(self, mixed_freq_timeseries):
+        """Aucune étape ne bascule en repli faute de masque d'entraînement.
+
+        Le marquage MODEL_ON_* des ancres vidait le filtre de provenance de
+        `_prepare_training_data` à l'étape suivante, d'où `len(X_train) < 2`
+        puis repli interpolation.
+        """
+        imputer = self._imputer(keep_lower_frequencies=True)
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        fallbacks = [
+            (step.pred_freq_label, step.var_name)
+            for step in imputer.imputation_plan_ if step.is_fallback
+        ]
+        assert fallbacks == [], "etapes basculees en repli : %s" % (fallbacks,)
+
+    def test_no_period_totals_column_is_homogeneous(self, mixed_freq_timeseries):
+        """La colonne ne mélange plus le total annuel et des sous-périodes.
+
+        Sans le correctif, l'ancre de janvier portait le total annuel
+        observé à côté de valeurs d'échelle trimestrielle, avec une rampe
+        linéaire entre les deux : la somme de l'année atteignait 164 fois
+        le total observé.
+        """
+        imputer = self._imputer()
+        result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        column = 'balance_commerciale_annuelle'
+        observed = mixed_freq_timeseries[column].dropna()
+        imputed = result[column]
+
+        checked = 0
+        for anchor, total in observed.items():
+            year = imputed[imputed.index.year == anchor.year].dropna()
+            if len(year) < 12:
+                continue
+            checked += 1
+            # Aucune cellule ne porte encore le total de la période
+            assert not np.isclose(year, total, atol=1e-9).any()
+            # Et l'échelle reste celle de la sous-période
+            assert abs(year.sum() / total) < 5, (
+                "somme %.2f pour un total observe de %.2f" % (year.sum(), total)
+            )
+        assert checked > 0
