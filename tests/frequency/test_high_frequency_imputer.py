@@ -3841,3 +3841,244 @@ class TestAnchorsMarkedWithoutPeriodTotals:
                 "somme %.2f pour un total observe de %.2f" % (year.sum(), total)
             )
         assert checked > 0
+
+
+# ---------------------------------------------------------------------------
+# §1bis B25/B6/B11/B12 — échelles et fréquences
+# ---------------------------------------------------------------------------
+
+_SCALE_LEVELS = {'M': 1000.0, 'Q': 3000.0, 'Y': 12000.0}
+
+
+def _series_at(index, freq, level, rng):
+    """Series carrying `level` on the period ends of `freq`, NaN elsewhere."""
+    out = pd.Series(np.nan, index=index)
+    anchors = index[~index.to_period(freq).duplicated(keep='last')]
+    out.loc[anchors] = level + rng.normal(0, level * 0.02, len(anchors))
+    return out
+
+
+def _scale_frame(spec, seed=0):
+    """Monthly frame whose columns carry the frequencies given by `spec`."""
+    index = pd.date_range('2015-01-31', '2023-12-31', freq='ME', name='date')
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame({
+        name: _series_at(index, freq, _SCALE_LEVELS[freq], rng)
+        for name, freq in spec.items()
+    })
+
+
+def _stage_scales(imputer, data, var_key, cov_name, pred_freq):
+    """Training and prediction magnitudes of one covariate, plus its divisor.
+
+    Reproduces what the estimator actually sees: `X_train` divided by its
+    per-covariate divisor at fit time, and the raw stage frame at predict
+    time. Reading the methods directly keeps the measurement independent of
+    whether the step fell back to interpolation.
+    """
+    classified = imputer._classify_variables_at_frequency(pred_freq)
+    X_stage = imputer._build_stage_frame(data, {}, pred_freq, classified['aggregate'])
+    X_train, _, scale_factor, factors = imputer._prepare_training_data(
+        X_stage, data, var_key, pred_freq
+    )
+    divisor = factors[cov_name]
+    if isinstance(divisor, pd.Series):
+        fit_scale = (X_train[cov_name] / divisor).abs().mean()
+    else:
+        fit_scale = (X_train[cov_name] / divisor).abs().mean()
+    return fit_scale, X_stage[cov_name].abs().mean(), divisor, scale_factor
+
+
+def _fitted(data, **kwargs):
+    params = {'target_frequency': 'M', 'keep_lower_frequencies': False}
+    params.update(kwargs)
+    imputer = HighFrequencyImputer(**params)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        imputer.fit(data.copy())
+    return imputer
+
+
+class TestCovariateScalingDivisors:
+    """§1bis B25/B6 : chaque covariable est ramenée à SON échelle de prédiction.
+
+    Au fit, une covariable est agrégée à `f_var` ; au predict, elle est lue
+    brute dans le frame d'étape, où elle porte `f_stage`. Le diviseur doit
+    être le nombre de sous-périodes `f_stage` dans une période `f_var` — ni
+    systématiquement `scale_factor`, ni systématiquement le décompte propre
+    à la fréquence détectée de la covariable.
+    """
+
+    def test_training_scale_matches_prediction_scale(self):
+        """Covariable mensuelle, variable annuelle, étape trimestrielle : rapport 1."""
+        # Le cas B25 : f_cov=M est plus fine que pred_freq=Q, donc
+        # _build_stage_frame l'agrège et elle porte Q au predict. Le diviseur
+        # etait get_conversion_factor(M, Y) = 12 pour une echelle Q qui en
+        # appelle 4 : les features arrivaient 3x trop petites a l'entrainement
+        data = _scale_frame({'cov': 'M', 'var': 'Y'})
+        imputer = _fitted(data)
+
+        fit_scale, pred_scale, divisor, _ = _stage_scales(
+            imputer, data, 'var', 'cov', 'Q'
+        )
+
+        assert divisor == 4.0
+        assert pred_scale / fit_scale == pytest.approx(1.0, rel=1e-9)
+
+    def test_coarser_covariate_keeps_own_divisor(self):
+        """Covariable trimestrielle sous variable annuelle : diviseur 4, pas scale_factor."""
+        # f_cov=Q n'est PAS plus fine que pred_freq=M : _build_stage_frame la
+        # laisse au trimestre. Diviser par scale_factor (12) la rendrait 3x
+        # trop petite — c'est le cas qui interdit un diviseur unique
+        data = _scale_frame({'ref': 'M', 'cov': 'Q', 'var': 'Y'})
+        imputer = _fitted(data)
+
+        fit_scale, pred_scale, divisor, scale_factor = _stage_scales(
+            imputer, data, 'var', 'cov', 'M'
+        )
+
+        assert scale_factor == 12.0
+        assert divisor == 4.0
+        assert pred_scale / fit_scale == pytest.approx(1.0, rel=1e-9)
+
+    def test_non_aggregated_covariate_not_scaled(self):
+        """Covariable plus grossière que la variable : diviseur 1, pas 0.25."""
+        # f_cov=Y n'est pas plus fine que f_var=Q : la colonne n'est jamais
+        # ré-agrégée et porte deja son echelle de prediction. Le diviseur
+        # fractionnaire get_conversion_factor(Y, Q) = 0.25 la MULTIPLIAIT par 4
+        data = _scale_frame({'ref': 'M', 'cov': 'Y', 'var': 'Q'})
+        imputer = _fitted(data)
+
+        fit_scale, pred_scale, divisor, _ = _stage_scales(
+            imputer, data, 'var', 'cov', 'M'
+        )
+
+        assert divisor == 1.0
+        assert pred_scale / fit_scale == pytest.approx(1.0, rel=1e-9)
+
+
+def _panel_heterogeneous_covariate(columns=None):
+    """Panel where `ip` is MONTHLY for France and QUARTERLY for Allemagne.
+
+    `columns` reorders the input frame's columns, to prove the divisors do
+    not depend on the order the user happened to choose.
+    """
+    dates = pd.date_range('2015-01-31', '2023-12-31', freq='ME', name='date')
+    frames = []
+    for country, ip_freq, seed in (('France', 'M', 3), ('Allemagne', 'Q', 4)):
+        rng = np.random.default_rng(seed)
+        frame = pd.DataFrame({
+            'ref': _series_at(dates, 'M', 1000.0, rng),
+            'ip': _series_at(dates, ip_freq, _SCALE_LEVELS[ip_freq], rng),
+            'var': _series_at(dates, 'Y', 12000.0, rng),
+        })
+        frame['country'] = country
+        frames.append(frame.reset_index())
+
+    panel = pd.concat(frames, ignore_index=True).set_index(['country', 'date'])
+    panel = panel.sort_index()
+    return panel if columns is None else panel[columns]
+
+
+class TestCovariateFactorsPerEntity:
+    """§1bis B6 : le diviseur est calculé PAR ENTITÉ, jamais par nom nu.
+
+    Une table `{nom de colonne: fréquence}` s'effondre sur un panel où la
+    même colonne porte deux fréquences : la dernière entité insérée gagne, et
+    le modèle obtenu dépend de l'ordre des colonnes du DataFrame d'entrée.
+    """
+
+    @staticmethod
+    def _divisors(panel):
+        from tsforecast.panel.utils import split_variable_key
+
+        imputer = _fitted(panel)
+        var_key = next(
+            key for key in imputer.detected_frequencies_
+            if split_variable_key(key)[1] == 'var'
+        )
+        classified = imputer._classify_variables_at_frequency('M')
+        X_stage = imputer._build_stage_frame(panel, {}, 'M', classified['aggregate'])
+        _, _, _, factors = imputer._prepare_training_data(
+            X_stage, panel, var_key, 'M'
+        )
+        return factors
+
+    def test_covariate_factors_per_entity(self):
+        """'ip' mensuelle chez France et trimestrielle chez Allemagne : 12 et 4."""
+        factors = self._divisors(_panel_heterogeneous_covariate())
+
+        # Les deux entités ne peuvent pas partager un diviseur : la ventilation
+        # se fait donc par ligne, ce qu'une Series par colonne ne peut porter
+        assert isinstance(factors, pd.DataFrame)
+        france = factors.xs('France', level='country')['ip'].unique()
+        allemagne = factors.xs('Allemagne', level='country')['ip'].unique()
+        assert france.tolist() == [12.0]
+        assert allemagne.tolist() == [4.0]
+
+    def test_divisors_do_not_depend_on_column_order(self):
+        """Permuter les colonnes d'entrée ne change aucun diviseur."""
+        direct = self._divisors(_panel_heterogeneous_covariate())
+        swapped = self._divisors(
+            _panel_heterogeneous_covariate(columns=['var', 'ip', 'ref'])
+        )
+        pd.testing.assert_frame_equal(
+            direct, swapped[direct.columns], check_like=True
+        )
+
+
+class TestUnitScaleFactorStillScalesFeatures:
+    """§1bis B12 : un scale_factor unitaire n'implique pas des diviseurs unitaires."""
+
+    def test_unit_scale_factor_still_scales_features(self):
+        """scale_factor == 1.0 avec des feature_factors non unitaires : X est divisé."""
+        imputer = HighFrequencyImputer(target_frequency='M')
+        X_train = pd.DataFrame({'a': [12.0, 24.0], 'b': [4.0, 8.0]})
+        y_train = pd.Series([1.0, 2.0])
+        factors = pd.Series({'a': 12.0, 'b': 4.0})
+
+        X_scaled, y_scaled = imputer._apply_frequency_scaling(
+            X_train, y_train, 1.0, factors
+        )
+
+        # Le court-circuit historique renvoyait X_train intact, laissant les
+        # covariables d'une variable trimestrielle prédite au trimestre à une
+        # échelle sans rapport avec celles de l'étape voisine
+        assert X_scaled['a'].tolist() == [1.0, 2.0]
+        assert X_scaled['b'].tolist() == [1.0, 2.0]
+        # La cible reste inchangée : elle est bien divisée par 1
+        assert y_scaled.tolist() == [1.0, 2.0]
+
+    def test_unit_factors_short_circuit(self):
+        """Rien à mettre à l'échelle : les objets d'entrée sont rendus tels quels."""
+        imputer = HighFrequencyImputer(target_frequency='M')
+        X_train = pd.DataFrame({'a': [12.0, 24.0]})
+        y_train = pd.Series([1.0, 2.0])
+
+        X_scaled, y_scaled = imputer._apply_frequency_scaling(
+            X_train, y_train, 1.0, pd.Series({'a': 1.0})
+        )
+
+        assert X_scaled is X_train
+        assert y_scaled is y_train
+
+
+class TestStageScaleFactorIsDocumentedAverage:
+    """§1bis B11 : le facteur d'étape est une moyenne, pas un décompte calendaire.
+
+    `count_subperiods_per_period` rendrait 28 en février et 31 en janvier,
+    mais il rend un décompte PAR PÉRIODE : le câbler impose un diviseur par
+    ligne, qui arrive avec `train_on_own_imputations`. Ce test fige le
+    comportement documenté pour rendre ce changement visible.
+    """
+
+    def test_scale_factor_is_documented_average(self):
+        """Étape journalière sur variable mensuelle : 30.0 constant."""
+        data = _scale_frame({'cov': 'M', 'var': 'Q'})
+        imputer = _fitted(data)
+
+        # 30 jours par mois quelle que soit la periode : fevrier (28) et
+        # janvier (31) recoivent le meme facteur
+        assert imputer._stage_scale_factor('cov', 'D') == 30.0
+        # Les paires calendaires emboitees restent exactes
+        assert imputer._stage_scale_factor('var', 'M') == 3.0

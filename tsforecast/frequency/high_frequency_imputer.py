@@ -129,7 +129,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             as well as y_train, which is always divided. Set it to True when
             the training covariates were aggregated by summation to the
             variable's frequency, so that both sides of the model are
-            expressed at the sub-period scale used at prediction time.
+            expressed at the sub-period scale used at prediction time. Each
+            covariate gets its own divisor, read per entity, since a column
+            aggregated on both sides does not necessarily carry the stage
+            frequency at prediction time. For a daily or weekly stage the
+            divisors are period-invariant averages (30, 91, 365 rather than
+            the true calendar counts) — see :meth:`_stage_scale_factor`.
         enforce_period_totals: If True (default), the sub-periods predicted
             for one period of a lower-frequency variable are rescaled
             proportionally so that they sum back to the value observed for
@@ -1262,16 +1267,32 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         The scale factor is the number of prediction-frequency (high)
         sub-periods in one period of the variable's own detected (low)
-        frequency — 12 for a yearly variable predicted monthly. The
-        calendar count is exact where the duration ratio of
-        ``get_conversion_factor`` would give 12.17.
+        frequency — 12 for a yearly variable predicted monthly.
+
+        The count comes from :meth:`~FrequencyConverter.get_conversion_factor`
+        and is exact for nested calendar pairs (M -> Y = 12, Q -> Y = 4,
+        M -> Q = 3). Daily and weekly stages instead get the conventional
+        counts of the duration table (D -> M = 30, D -> Q = 91, D -> Y = 365,
+        W -> Y = 52): there, the factor is a period-invariant average, biased
+        by +7.1% in February and -3.2% in January, applying 91 to quarters of
+        90, 91 and 92 days alike, and 365 to leap years.
+        ``enforce_period_totals=True`` absorbs that bias in the output, never
+        in the fitted coefficients, since the factor also feeds
+        ``fit_scale_factor``.
+
+        Calendar-exact counting is available as
+        :meth:`~FrequencyConverter.count_subperiods_per_period`, but it
+        returns one count per period: wiring it in makes the scale factor
+        non-scalar, which is the per-row divisor introduced together with
+        ``train_on_own_imputations``.
 
         Args:
             var_key: Variable key (column name, or ``(entity..., column)``).
             pred_freq: Prediction frequency of the stage.
 
         Returns:
-            Number of stage sub-periods per variable period.
+            Number of stage sub-periods per variable period, as a
+            period-invariant average for daily and weekly stages.
         """
         # Extraction de la fréquence de prédiction s'il s'agit d'un dictionnaire
         if isinstance(pred_freq, dict):
@@ -1286,7 +1307,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             pf = pred_freq
 
         # "get_conversion_factor(haut, bas)" : nombre de périodes hautes dans
-        # une période basse, décompte calendaire
+        # une période basse — exact sur les paires calendaires emboîtées,
+        # moyenne conventionnelle sur les étapes journalières
         return self._freq_converter.get_conversion_factor(
             pf,
             self.detected_frequencies_[var_key],
@@ -1829,7 +1851,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X_original: pd.DataFrame,
         var_key: Union[str, Tuple],
         pred_freq: Union[str, Dict],
-    ) -> Tuple[pd.DataFrame, pd.Series, float, pd.Series]:
+    ) -> Tuple[pd.DataFrame, pd.Series, float, Union[pd.Series, pd.DataFrame]]:
         """Prepare X_train, y_train and scale factors for a variable.
 
         Covariates are **aggregated to the variable's own frequency**
@@ -1931,56 +1953,157 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # mensuel : 12
         scale_factor = self._stage_scale_factor(var_key, pred_freq)
 
-        # Facteurs propres à chaque covariable : une colonne agrégée à f_var
-        # totalise autant d'observations que sa fréquence en compte dans une
-        # période de f_var, et non systématiquement scale_factor
-        feature_factors = self._covariate_subperiod_counts(
-            X_train.columns, f_var, scale_factor
+        # Diviseurs propres à chaque covariable : chacune doit retrouver
+        # l'échelle qu'elle portera au predict, qui n'est ni systématiquement
+        # scale_factor ni systématiquement sa propre fréquence
+        feature_factors = self._covariate_scaling_divisors(
+            X_train, f_var, pred_freq, scale_factor
         )
 
         return X_train, y_train, scale_factor, feature_factors
 
-    # Méthode auxiliaire de comptage des sous-périodes propres à chaque covariable
-    def _covariate_subperiod_counts(
-        self,
-        columns: pd.Index,
-        f_var: str,
-        default: float,
-    ) -> pd.Series:
-        """Count how many observations each covariate contributes per period.
-
-        A covariate aggregated by summation to the variable's frequency
-        ``f_var`` totals as many observations as its own frequency holds in
-        one ``f_var`` period: 12 for a monthly covariate within a year, but
-        only 4 for a quarterly one. Dividing every column by the same
-        ``scale_factor`` would therefore leave the coarser covariates three
-        times above the scale they carry at prediction time.
+    # Méthode auxiliaire de lecture des fréquences détectées d'une colonne
+    def _column_frequencies_by_entity(self, column: str) -> Dict[tuple, str]:
+        """Detected frequencies of one column, one entry per entity.
 
         Args:
-            columns: Covariate columns of the training frame.
-            f_var: Frequency of the variable being imputed.
-            default: Fallback count for covariates whose frequency is
-                unknown (typically the stage scale factor).
+            column: Bare column name, without the entity part of the key.
 
         Returns:
-            Series of sub-period counts indexed by column name.
+            Mapping entity tuple -> detected frequency. The single key is
+            ``()`` for a time series. Empty when the column carries no
+            detected frequency at all.
+
+        Examples:
+            >>> # imputer._column_frequencies_by_entity('ip')
+            >>> # {('FR',): 'M', ('DE',): 'Q'}
         """
-        # Table nom de colonne -> fréquence détectée, tous panels confondus
-        column_frequencies = {
-            split_variable_key(key)[1]: freq
+        # Itération + filtre plutôt qu'une compréhension indexée par le nom nu :
+        # un panel peut porter la même colonne à des fréquences différentes
+        # selon l'entité, et l'indexer par nom nu ferait gagner la DERNIÈRE
+        # entité rencontrée — donc dépendre de l'ordre des colonnes en entrée
+        return {
+            split_variable_key(key)[0]: freq
             for key, freq in self.detected_frequencies_.items()
+            if split_variable_key(key)[1] == column
         }
 
-        # Comptage colonne par colonne, avec repli sur le facteur de l'étape
-        counts = {}
-        for column in columns:
-            f_col = column_frequencies.get(column)
-            try:
-                counts[column] = self._freq_converter.get_conversion_factor(f_col, f_var)
-            except (ValueError, TypeError):
-                counts[column] = default
+    # Méthode auxiliaire de calcul du diviseur d'une covariable
+    def _covariate_divisor(
+        self,
+        f_col: Optional[str],
+        f_var: str,
+        pred_freq: str,
+        default: float,
+    ) -> float:
+        """Divisor carrying one covariate from its training to its prediction scale.
 
-        return pd.Series(counts, dtype=float)
+        Args:
+            f_col: Detected frequency of the covariate, None when unknown.
+            f_var: Detected frequency of the variable being imputed.
+            pred_freq: Prediction frequency of the stage, for one entity.
+            default: Fallback divisor when the frequencies cannot be compared.
+
+        Returns:
+            Number of prediction-scale sub-periods the training value totals.
+        """
+        try:
+            # Colonne jamais ré-agrégée vers f_var par "_prepare_training_data" :
+            # elle porte déjà au fit l'échelle qu'elle aura au predict
+            if not is_higher_frequency(f_col, f_var):
+                return 1.0
+
+            # Fréquence réellement portée par la colonne au predict :
+            # "_build_stage_frame" n'agrège que ce qui est STRICTEMENT plus fin
+            # que l'étape, une covariable plus grossière garde la sienne
+            f_stage = pred_freq if is_higher_frequency(f_col, pred_freq) else f_col
+
+            return self._freq_converter.get_conversion_factor(f_stage, f_var)
+        except (ValueError, TypeError):
+            return default
+
+    # Méthode auxiliaire de calcul des diviseurs de mise à l'échelle des covariables
+    def _covariate_scaling_divisors(
+        self,
+        X_train: pd.DataFrame,
+        f_var: str,
+        pred_freq: Union[str, Dict],
+        default: float,
+    ) -> Union[pd.Series, pd.DataFrame]:
+        """Compute the divisor carrying each covariate to its prediction scale.
+
+        A covariate is seen at two different scales. At fit time
+        :meth:`_prepare_training_data` aggregates by summation to ``f_var``
+        every column strictly finer than ``f_var``. At prediction time the
+        same column is read raw from the stage frame, where it carries
+        ``f_stage``: the stage frequency when :meth:`_build_stage_frame`
+        aggregated it (covariate strictly finer than the stage), its own
+        detected frequency otherwise.
+
+        The divisor is therefore the number of ``f_stage`` sub-periods in one
+        ``f_var`` period, and ``1.0`` for a column that was never
+        re-aggregated.
+
+        Frequencies are read  per entity: a panel may carry the same column at
+        different frequencies depending on the entity, in which case a single
+        divisor per column cannot be right for every row.
+
+        Args:
+            X_train: Training frame, already aggregated at ``f_var``.
+            f_var: Detected frequency of the variable being imputed.
+            pred_freq: Prediction frequency of the stage (str for a time
+                series, entity -> frequency dict for a panel).
+            default: Fallback divisor for covariates whose frequency is
+                unknown, typically the stage scale factor.
+
+        Returns:
+            Series of divisors indexed by column name when every entity
+            agrees, DataFrame indexed and columned like ``X_train`` otherwise.
+        """
+        # Entités portées par les fréquences détectées : "()" en série temporelle
+        entities = {
+            split_variable_key(key)[0] for key in self.detected_frequencies_
+        }
+
+        # Diviseur par (entité, colonne)
+        per_entity: Dict[tuple, Dict[str, float]] = {
+            entity: {} for entity in entities
+        }
+        # Parcours des colonnes
+        for column in X_train.columns:
+            # Extraction des fréquences de la colonne par entité
+            frequencies = self._column_frequencies_by_entity(column)
+            # Parcours des entités
+            for entity in entities:
+                # Fréquence de prédiction
+                pf = (
+                    pred_freq[entity] if isinstance(pred_freq, dict) else pred_freq
+                )
+                # Population du dictionnaire avec le facteur de mise à l'échelle
+                per_entity[entity][column] = self._covariate_divisor(
+                    frequencies.get(entity), f_var, pf, default
+                )
+
+        # Forme compacte quand toutes les entités s'accordent : c'est le cas des
+        # séries temporelles et des panels homogènes, de loin le plus fréquent
+        rows = list(per_entity.values())
+        if not rows:
+            return pd.Series(dtype=float)
+        if all(row == rows[0] for row in rows[1:]):
+            return pd.Series(rows[0], dtype=float)
+
+        # Ventilation ligne à ligne : le diviseur dépend conjointement de
+        # l'entité et de la colonne, aucune Series indexée sur l'une des deux
+        # dimensions ne peut le porter
+        fallback = dict.fromkeys(X_train.columns, default)
+        entity_per_row = [
+            normalize_entity_key(key) for key in X_train.index.droplevel(-1)
+        ]
+        return pd.DataFrame(
+            [per_entity.get(entity, fallback) for entity in entity_per_row],
+            index=X_train.index,
+            columns=X_train.columns,
+        )
 
     # Méthode auxiliaire d'application du facteur de mise à l'échelle aux données
     def _apply_frequency_scaling(
@@ -1988,7 +2111,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         X_train: pd.DataFrame,
         y_train: pd.Series,
         scale_factor: float,
-        feature_factors: Optional[pd.Series] = None,
+        feature_factors: Optional[Union[pd.Series, pd.DataFrame]] = None,
     ) -> Tuple[pd.DataFrame, pd.Series]:
         """Scale training data to the prediction-frequency scale.
 
@@ -1996,7 +2119,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         model directly predicts values at the prediction frequency.
         Features are divided too when scale_features=True (i.e. when they
         were aggregated by summation to the variable's low frequency), each
-        one by its own sub-period count when ``feature_factors`` is given.
+        one by its own divisor when ``feature_factors`` is given.
 
         Because the model already returns sub-period values, predictions
         must never be multiplied back by the scale factor.
@@ -2006,29 +2129,48 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             y_train: Training target (at the variable's low frequency).
             scale_factor: Number of prediction-frequency sub-periods per
                 variable-frequency period (e.g. 12 for yearly -> monthly).
-            feature_factors: Per-covariate sub-period counts indexed by
-                column name. Defaults to ``scale_factor`` for every column,
-                which only holds when all covariates share the prediction
-                frequency.
+            feature_factors: Per-covariate divisors from
+                :meth:`_covariate_scaling_divisors` — a Series indexed by
+                column name, or a DataFrame aligned on ``X_train`` when a
+                panel carries a column at different frequencies depending on
+                the entity. Falling back to ``scale_factor`` for every column
+                only holds when all covariates share the prediction frequency,
+                which is why the divisors are computed per covariate.
 
         Returns:
             Tuple of (scaled X_train, scaled y_train).
         """
-        # Retour direct si aucune mise à l'échelle n'est nécessaire
-        if scale_factor == 1.0:
+        # Court-circuit uniquemet si rien n'est à mettre à l'échelle : un
+        # scale_factor unitaire n'implique pas des feature_factors unitaires.
+        # Une variable trimestrielle prédite au trimestre
+        # laisserait sinon ses covariables annuelles intactes, là où une
+        # variable de la même étape avec scale_factor = 3 divise les siennes
+        scalar_scale = np.isscalar(scale_factor)
+        factors_are_unit = feature_factors is None or bool(
+            np.all(np.asarray(feature_factors, dtype=float) == 1.0)
+        )
+        if scalar_scale and scale_factor == 1.0 and factors_are_unit:
             return X_train, y_train
 
         # La cible est TOUJOURS ramenée à l'échelle d'une sous-période
         y_scaled = y_train / scale_factor
 
         # Les features ne le sont que si elles ont été agrégées par somme,
-        # chacune par le nombre d'observations qu'elle y a contribuées
+        # chacune par le diviseur qui lui rend son échelle de prédiction
         if not self.scale_features:
             return X_train, y_scaled
         if feature_factors is None:
             return X_train / scale_factor, y_scaled
 
-        divisors = feature_factors.reindex(X_train.columns).fillna(scale_factor)
+        # Réalignement défensif : le DataFrame porte un diviseur par ligne et
+        # par colonne, la Series un diviseur par colonne
+        if isinstance(feature_factors, pd.DataFrame):
+            divisors = feature_factors.reindex(
+                index=X_train.index, columns=X_train.columns
+            ).fillna(scale_factor)
+        else:
+            divisors = feature_factors.reindex(X_train.columns).fillna(scale_factor)
+
         return X_train / divisors, y_scaled
 
     # Méthode auxiliaire de détermination des échantillons de prédiction
@@ -2890,7 +3032,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.imputation_plan_: List[ImputationStep] = []
         
         # Imputations déjà réalisées, par nom de variable : elles alimentent les
-        # covariables des étapes suivantes
+        # covariables des étapes suivantes.
+        # Cette table est indexée par NOM NU : le modèle d'un panel est GLOBAL, ses
+        # prédictions couvrent toutes les entités de son groupe, et les lignes
+        # d'un AUTRE groupe de la même variable proviennent donc de "existing".
+        # Aucune valeur n'est écrasée, contrairement à un diviseur d'échelle
         imputed_store: Dict[str, pd.Series] = {}
 
         # Parcours des fréquences pour lesquelles il faut entraîner un modèle de prédiction
@@ -3339,7 +3485,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # 3. Réapplication les étapes du fit dans le même ordre, avec les mêmes frames d'étape
         # Frame d'entrée du replay : jamais modifié, il sert de base à chaque étape
         X_input = data_transformed
-        # Imputations déjà réalisées, alimentant les covariables des étapes suivantes
+        # Imputations déjà réalisées, alimentant les covariables des étapes
+        # suivantes. Indexée par NOM NU, sans collision entre entités : voir le
+        # commentaire du bloc symétrique de "_fit"
         imputed_store: Dict[str, pd.Series] = {}
         # Frames d'étape APRÈS imputations, par label de fréquence réel (§2.5) :
         # alimenté après la boucle d'imputation de chaque étape, jamais avant

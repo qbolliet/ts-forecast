@@ -68,8 +68,10 @@ class TestCountSubperiods:
 
     def test_inverted_pair_returns_fraction(self, converter):
         """Un appel inversé répond par la fraction de période correspondante."""
-        # Cas rencontré à l'entraînement : covariable annuelle dans une période
-        # trimestrielle (cf. HighFrequencyImputer._covariate_subperiod_counts)
+        # Comportement propre au convertisseur : une covariable annuelle dans
+        # une période trimestrielle rend 0.25. HighFrequencyImputer ne s'y
+        # expose plus — "_covariate_scaling_divisors" rend 1.0 pour une colonne
+        # jamais ré-agrégée, au lieu de diviser par 0.25 donc de multiplier par 4
         assert converter.get_conversion_factor('Y', 'Q') == 0.25
         assert converter.get_conversion_factor('Y', 'M') == pytest.approx(1 / 12)
 
