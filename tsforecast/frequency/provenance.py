@@ -27,8 +27,13 @@ class ProvenanceType(str, Enum):
         MODEL_ON_MIXED: Value was imputed by a model trained on a mix of true and imputed values.
         AGGREGATED: Value was obtained by aggregating true values from higher frequency.
         DISAGGREGATED: Value is one sub-period of a lower-frequency observation that
-            was spread over its whole period, the sub-periods being rescaled so that
-            they sum back to the observed total.
+            was spread over its whole period. Two cases carry that mark: a cell
+            whose period was rescaled so that its sub-periods sum back to the
+            observed total (``enforce_period_totals=True``), and an ANCHOR DATE
+            re-expressed at the stage frequency — the row that held the
+            low-frequency observation itself — whether or not the rescaling ran.
+            Only the first case guarantees the additive identity; the second only
+            states that the cell sits where a real observation was.
     """
     ORIGINAL = 'original'
     MODEL_ON_TRUE = 'model_on_true'
