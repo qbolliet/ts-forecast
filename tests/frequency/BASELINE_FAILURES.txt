@@ -1,7 +1,14 @@
 # Baseline test failures for tests/frequency/
-# Date: 2026-08-24
-# Commit: 187c2d2 (working tree, tests obsolètes corrigés par-dessus)
-# Result: 6 failed, 382 passed
+# Date: 2026-08-26
+# Commit: 2e1a0af (branche qb-mixed-frequencies, arbre propre)
+# Result: 5 failed, 486 passed (491 tests collectés)
+#
+# Relevé du 2026-08-26 (prompt 22) : la référence du 2026-08-24 (6 failed,
+# 382 passed au commit 187c2d2) était périmée sur un point :
+# test_impute_delayed_values_true_emits_deprecation_warning passe désormais et
+# a été retiré de la liste ci-dessous. Le triage historique qui suit est
+# conservé tel quel : il documente les 32 échecs d'origine, pas la référence
+# courante.
 #
 # Historique : la référence initiale (32 failed, 362 passed, même commit)
 # a été triée ci-dessous. Les 20 échecs de la famille "test obsolète" ont été
@@ -13,7 +20,6 @@
 tests/frequency/test_converter_positions.py::TestExtendIndexForUpsampling::test_unsupported_frequency_pair_returns_original
 tests/frequency/test_hfi_edge_cases.py::TestIrregularFrequency::test_single_gap_in_otherwise_regular_monthly_series_raises
 tests/frequency/test_hfi_edge_cases.py::TestIrregularFrequency::test_undetectable_frequency_raises
-tests/frequency/test_high_frequency_imputer.py::TestHighFrequencyImputerDelays::test_impute_delayed_values_true_emits_deprecation_warning
 tests/frequency/test_high_frequency_imputer.py::TestHighFrequencyImputerEdgeCases::test_all_nan_column
 tests/frequency/test_high_frequency_imputer.py::TestHighFrequencyImputerValidation::test_missing_datetime_index
 

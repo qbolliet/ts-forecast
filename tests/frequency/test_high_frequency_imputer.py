@@ -1161,10 +1161,16 @@ class TestModelsKeyedByStage:
     """§2.3 : imputation_models_ ne doit pas être écrasé d'une étape à l'autre."""
 
     def test_models_keyed_by_stage(self, mixed_freq_timeseries):
-        """Une variable imputée à deux étapes -> deux modèles distincts."""
+        """Une variable imputée à deux étapes -> deux modèles distincts.
+
+        Estimateur conforme au contrat NaN : depuis le prompt 22, une
+        `LinearRegression` nue voit sa prédiction de contrôle échouer au fit
+        et l'étape mensuelle est DÉGRADÉE en repli — le registre n'y porte
+        alors plus de modèle du tout, et ce n'est pas ce que ce test mesure.
+        """
         imputer = HighFrequencyImputer(
             target_frequency='M',
-            estimator=LinearRegression(),
+            estimator=_nan_tolerant_regressor(),
             cascade_refitting=True,
             keep_lower_frequencies=True,
         )
@@ -2182,6 +2188,321 @@ class TestInterpolateFallbackRescaled:
         assert set(imputer.stage_groups_) == set(imputer.model_fitting_order_)
 
 
+class _RaisingPredictor(BaseEstimator, RegressorMixin):
+    """Estimateur qui s'ajuste sans broncher mais lève à la prédiction.
+
+    Isole le chemin `except` de `_transform` du motif de NaN des covariables :
+    ce qui est testé est la production des valeurs de repli, pas la raison de
+    l'échec.
+    """
+
+    def fit(self, X, y):
+        self.n_features_in_ = X.shape[1]
+        return self
+
+    def predict(self, X):
+        raise ValueError("Input X contains NaN")
+
+
+class _SwitchablePredictor(BaseEstimator, RegressorMixin):
+    """Estimateur qui prédit au fit puis lève au transform, sur commande.
+
+    Seule façon d'atteindre le chemin `except` de `_transform` avec une étape
+    dont `trained_on_imputed` vaut True : il faut que la prédiction de
+    contrôle du bloc 5g RÉUSSISSE — sans quoi l'étape est dégradée en repli
+    déclaré dès le fit — et que seule celle du replay échoue.
+    """
+
+    fail = False
+
+    def fit(self, X, y):
+        self.mean_ = float(np.nanmean(np.asarray(y, dtype=float)))
+        return self
+
+    def predict(self, X):
+        if type(self).fail:
+            raise ValueError("Input X contains NaN")
+        return np.full(len(X), self.mean_)
+
+
+@pytest.fixture
+def quarterly_single_low_frequency():
+    """Une SEULE variable basse fréquence, portée par une covariable dense.
+
+    Indispensable à la comparaison des deux chemins de repli : avec plusieurs
+    variables par étape, l'ordre intra-étape ferait diverger l'état du frame
+    d'étape entre les deux exécutions et la comparaison ne prouverait rien.
+    """
+    dates = pd.date_range('2018-01-01', periods=72, freq='MS')
+    rng = np.random.default_rng(11)
+
+    monthly = pd.Series(30.0 + rng.normal(0, 2.0, len(dates)), index=dates)
+    quarterly = pd.Series(np.nan, index=dates)
+    # La valeur trimestrielle est portée par le premier mois, ancre de la période
+    for _, period_block in monthly.groupby(monthly.index.to_period('Q')):
+        quarterly.loc[period_block.index[0]] = period_block.sum()
+
+    data = pd.DataFrame(
+        {'covariable_mensuelle': monthly, 'variable_trimestrielle': quarterly}
+    )
+    data.index.name = 'date'
+    return data
+
+
+class TestFallbackAdditiveCoherence:
+    """B27 : les deux chemins de repli respectent la contrainte additive.
+
+    `_transform` portait deux blocs de repli censés être identiques, dont
+    seul le repli DÉCLARÉ appliquait `_apply_period_totals`. Le chemin
+    `except` recopiait donc le total de la période dans chacune de ses
+    sous-périodes (rapport mesuré 3.11 sur `pib_trimestriel`).
+    """
+
+    @pytest.mark.parametrize('path', ['declared', 'predict_failure'])
+    def test_transform_fallback_enforces_period_totals(
+        self, mixed_freq_timeseries, path
+    ):
+        """Toute période entièrement imputée par un repli somme au total observé.
+
+        Les deux manières d'atteindre un repli au transform sont couvertes :
+        l'étape déclarée de repli au fit, et l'échec de prédiction au replay
+        (que seul `cascade_refitting=False` laisse survivre au fit, le bloc 5g
+        dégradant sinon l'étape dès l'ajustement).
+        """
+        if path == 'declared':
+            estimator, cascade_refitting = LinearRegression(), True
+        else:
+            estimator, cascade_refitting = _RaisingPredictor(), False
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=estimator,
+            cascade_refitting=cascade_refitting,
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            result = imputer.fit_transform(mixed_freq_timeseries.copy())
+
+        # Le repli a bien été emprunté : sans cela le test ne prouverait rien.
+        # Le chemin déclaré se lit dans le plan, le chemin "except" dans
+        # l'avertissement du transform — le plan y annonce encore un modèle
+        if path == 'declared':
+            assert any(
+                info == 'interpolate_fallback'
+                for info in imputer.imputation_models_.values()
+            )
+        else:
+            assert [
+                w for w in caught if 'Prediction failed' in str(w.message)
+            ]
+
+        _assert_period_totals(
+            result, mixed_freq_timeseries, 'pib_trimestriel', 'Q'
+        )
+        _assert_period_totals(
+            result, mixed_freq_timeseries, 'balance_commerciale_annuelle', 'Y'
+        )
+
+    def test_both_fallback_paths_produce_identical_values(
+        self, quarterly_single_low_frequency
+    ):
+        """Repli déclaré et repli sur échec rendent la MÊME colonne.
+
+        Une seule variable basse fréquence, donc un état du frame d'étape
+        identique dans les deux cas ; `cascade_refitting=False` empêche le
+        bloc 5g de dégrader l'étape au fit et laisse l'échec se produire au
+        transform.
+        """
+        # Repli DÉCLARÉ : dict d'estimateurs sans entrée pour cette variable
+        # ni '__default__', donc aucun estimateur disponible au fit
+        declared = HighFrequencyImputer(
+            target_frequency='M',
+            estimator={'covariable_mensuelle': LinearRegression()},
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        declared_result = _fit_transform_quiet(
+            declared, quarterly_single_low_frequency
+        )
+        assert all(step.is_fallback for step in declared.imputation_plan_)
+
+        # Repli sur ÉCHEC de prédiction : l'ajustement passe, le predict lève
+        failing = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=_RaisingPredictor(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        failing_result = _fit_transform_quiet(
+            failing, quarterly_single_low_frequency
+        )
+        assert not any(step.is_fallback for step in failing.imputation_plan_)
+
+        pd.testing.assert_series_equal(
+            declared_result['variable_trimestrielle'],
+            failing_result['variable_trimestrielle'],
+        )
+
+    def test_transform_fallback_marks_trained_on_imputed_false(
+        self, mixed_freq_timeseries
+    ):
+        """Aucune cellule produite par un repli ne porte MODEL_ON_MIXED.
+
+        Une interpolation n'a consommé aucune covariable : la marquer
+        MODEL_ON_MIXED parce que le modèle qui vient d'échouer avait vu des
+        valeurs imputées serait un mensonge de provenance.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=_SwitchablePredictor(),
+            cascade_refitting=True,
+            train_on_partial_coverage=True,
+            keep_lower_frequencies=False,
+        )
+        _SwitchablePredictor.fail = False
+        try:
+            # Le fit réussit : les étapes restent des étapes À MODÈLE, et les
+            # dernières d'entre elles ont vu le magasin d'imputations rempli
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                imputer.fit(mixed_freq_timeseries.copy())
+            assert not any(step.is_fallback for step in imputer.imputation_plan_)
+            assert any(step.trained_on_imputed for step in imputer.imputation_plan_), (
+                "aucune etape entrainee sur des imputations : le test ne "
+                "distinguerait rien"
+            )
+
+            # Seul le replay échoue : le chemin "except" est emprunté
+            _SwitchablePredictor.fail = True
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                imputer.transform(mixed_freq_timeseries.copy())
+            assert [w for w in caught if 'Prediction failed' in str(w.message)]
+        finally:
+            _SwitchablePredictor.fail = False
+
+        provenance = imputer.imputation_provenance_
+        checked = 0
+        for column in ('pib_trimestriel', 'balance_commerciale_annuelle'):
+            marks = provenance[column].dropna()
+            assert not (marks == ProvenanceType.MODEL_ON_MIXED).any(), (
+                f"'{column}' porte des cellules MODEL_ON_MIXED produites "
+                f"par un repli"
+            )
+            checked += 1
+        assert checked == 2
+
+    def test_transform_fallback_does_not_feed_imputed_store(
+        self, mixed_freq_timeseries
+    ):
+        """Le repli n'alimente ni le magasin ni le miroir des covariables.
+
+        Le bloc 5g du fit n'écrit rien quand la prédiction échoue : les étapes
+        suivantes ne doivent donc pas voir des valeurs que le fit n'a jamais
+        produites.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=_RaisingPredictor(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        imputer.fit(mixed_freq_timeseries.copy())
+
+        with _StoreSpy() as spy:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                imputer.transform(mixed_freq_timeseries.copy())
+
+        # Le magasin reste vide : toutes les étapes sont parties en repli
+        assert spy.store == {}
+
+        # Et aucune écriture n'a porté de frame miroir
+        assert spy.mirrored, "aucune ecriture capturee"
+        assert all(frames == () for frames in spy.mirrored.values())
+
+    def test_write_error_is_not_swallowed_as_fallback(
+        self, quarterly_over_monthly
+    ):
+        """Une erreur d'écriture remonte au lieu de produire une interpolation.
+
+        Le `try` de `_transform` n'enveloppe plus que l'appel de prédiction :
+        un bug du chemin d'écriture est un bug, pas une donnée difficile.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        imputer.fit(quarterly_over_monthly.copy())
+        assert not any(step.is_fallback for step in imputer.imputation_plan_)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("erreur d'ecriture volontaire")
+
+        original_write = HighFrequencyImputer._write_stage_values
+        HighFrequencyImputer._write_stage_values = boom
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                with pytest.raises(RuntimeError, match="erreur d'ecriture"):
+                    imputer.transform(quarterly_over_monthly.copy())
+        finally:
+            HighFrequencyImputer._write_stage_values = original_write
+
+        # L'erreur ne doit pas avoir été convertie en repli au passage : sans
+        # le resserrement du "try", elle remontait quand même — mais seulement
+        # parce que le repli rappelait l'écriture, après avoir averti
+        assert not [
+            w for w in caught if 'Prediction failed' in str(w.message)
+        ], "l'erreur d'ecriture a ete convertie en repli par interpolation"
+
+    def test_failed_intermediate_prediction_registers_fallback_step(
+        self, mixed_freq_timeseries
+    ):
+        """Le plan dit repli quand la prédiction de contrôle du fit échoue.
+
+        Un modèle incapable de prédire sur le frame d'étape de son propre
+        entraînement n'est pas un modèle utilisable : `imputation_plan_` ne
+        doit pas annoncer un modèle là où `transform` ne produira jamais que
+        de l'interpolation.
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=_RaisingPredictor(),
+            cascade_refitting=True,
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.fit(mixed_freq_timeseries.copy())
+
+        downgraded = [
+            str(w.message) for w in caught
+            if 'Intermediate imputation failed' in str(w.message)
+        ]
+        assert downgraded
+        assert all('downgraded to interpolate_fallback' in m for m in downgraded)
+
+        # Toutes les étapes sont désormais déclarées comme des replis
+        assert imputer.imputation_plan_
+        assert all(step.is_fallback for step in imputer.imputation_plan_)
+        assert all(
+            info == 'interpolate_fallback'
+            for info in imputer.imputation_models_.values()
+        )
+
+        # Et le transform emprunte donc le repli DÉCLARÉ, sans lever
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.transform(mixed_freq_timeseries.copy())
+        assert not [
+            w for w in caught if 'Prediction failed' in str(w.message)
+        ]
+
+
 class TestDisaggregationProvenance:
     """§2.6 : la matrice de provenance distingue les trois catégories."""
 
@@ -2245,10 +2566,15 @@ class TestDisaggregationProvenance:
         se restreint aux cellules ORIGINAL quand train_on_partial_coverage
         est False ; les ancres devenant DISAGGREGATED, il doit les accepter
         aussi, sinon tout bascule en repli dès la seconde étape.
+
+        Estimateur conforme au contrat NaN : le repli mesuré ici doit être
+        celui d'un masque d'entraînement vide, pas celui d'un estimateur qui
+        ne tolère pas les NaN — depuis le prompt 22, ce dernier fait dégrader
+        l'étape en repli dès le fit et rendrait le test trompeur.
         """
         imputer = HighFrequencyImputer(
             target_frequency='M',
-            estimator=LinearRegression(),
+            estimator=_nan_tolerant_regressor(),
             cascade_refitting=True,
             keep_lower_frequencies=True,
             train_on_partial_coverage=False,
@@ -3601,6 +3927,9 @@ class _StoreSpy:
     def __init__(self):
         self.store = None
         self.written = {}
+        # Frames miroirs passés à chaque écriture : un repli ne doit alimenter
+        # ni le magasin ni le miroir des covariables
+        self.mirrored = {}
         self._build = HighFrequencyImputer._build_stage_frame
         self._write = HighFrequencyImputer._write_stage_values
 
@@ -3615,7 +3944,9 @@ class _StoreSpy:
             )
 
         def write(imputer, X_stage, X_input, var_name, predictions, *args, **kwargs):
-            spy.written[(kwargs.get('context', ''), var_name)] = predictions.copy()
+            key = (kwargs.get('context', ''), var_name)
+            spy.written[key] = predictions.copy()
+            spy.mirrored[key] = tuple(kwargs.get('extra_frames', ()))
             return spy._write(
                 imputer, X_stage, X_input, var_name, predictions, *args, **kwargs
             )
@@ -4448,7 +4779,15 @@ class TestNaNCovariateContract:
     def test_bare_linear_regression_falls_back_with_explicit_message(
         self, mixed_freq_timeseries
     ):
-        """Une LinearRegression nue lève, et l'avertissement énonce le contrat."""
+        """Une LinearRegression nue lève, et l'avertissement énonce le contrat.
+
+        Sous `cascade_refitting=True` — le défaut — l'échec est désormais vu
+        dès le FIT, par la prédiction de contrôle du bloc 5g, qui dégrade
+        l'étape en repli déclaré (prompt 22, partie C) : le transform
+        n'échoue donc plus et n'émet plus « Prediction failed ». Le contrat
+        énoncé est le même, seul le moment de son émission a changé, ce que
+        les deux volets ci-dessous vérifient séparément.
+        """
         imputer = HighFrequencyImputer(
             target_frequency='M',
             estimator=LinearRegression(),
@@ -4460,9 +4799,36 @@ class TestNaNCovariateContract:
 
         failed = [
             str(w.message) for w in caught
-            if 'Prediction failed' in str(w.message)
+            if 'Intermediate imputation failed' in str(w.message)
         ]
         assert failed, "la LinearRegression nue aurait du lever sur les NaN"
+        assert all('tolerate NaN' in m and 'Pipeline' in m for m in failed)
+        assert all('downgraded to interpolate_fallback' in m for m in failed)
+
+    def test_bare_linear_regression_falls_back_at_transform_without_refitting(
+        self, mixed_freq_timeseries
+    ):
+        """Sans réentraînement, l'échec n'est vu qu'au transform.
+
+        Le bloc 5g ne s'exécute pas sous `cascade_refitting=False` : l'échec
+        n'est donc pas détectable au fit, et c'est le chemin `except` de
+        `_transform` qui reste le filet de sécurité (prompt 22, partie C.3).
+        """
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=_RaisingPredictor(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.fit_transform(mixed_freq_timeseries.copy())
+
+        failed = [
+            str(w.message) for w in caught
+            if 'Prediction failed' in str(w.message)
+        ]
+        assert failed, "le chemin except du transform aurait du etre emprunte"
         assert all('tolerate NaN' in m and 'Pipeline' in m for m in failed)
 
     def test_imputation_step_has_no_feature_means(self, mixed_freq_timeseries):
