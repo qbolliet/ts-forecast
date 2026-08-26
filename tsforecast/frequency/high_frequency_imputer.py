@@ -108,6 +108,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             the fit writes nothing and ``imputation_provenance_fit_`` carries no
             MODEL_ON_*/DISAGGREGATED mark; ``imputation_provenance_``, written
             by ``transform``, carries them in every regime.
+        covariate_eligibility: How a covariate's availability is aggregated over
+            the entities of a panel when ``cascade_refitting=False`` restricts
+            the features to those observed at prediction time. ``'any_entity'``
+            (default) keeps a column available for at least one entity, leaving
+            the other entities' rows NaN for the estimator to handle (see the
+            NaN contract on ``estimator``); ``'all_entities'`` is the
+            conservative setting for estimators that do not tolerate NaN, at
+            the price of dropping a column for everyone. Ignored for a time
+            series and when ``cascade_refitting=True``.
         keep_lower_frequencies: If True, output includes all intermediate
             frequencies in a MultiIndex structure: (entity..., frequency,
             date) for panel data, (frequency, date) for time series. Every level,
@@ -245,9 +254,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
               refit and overwrite the exact same model).
             A variable imputed at two stages therefore holds two distinct
             entries. Each value is either ``'interpolate_fallback'`` or a
-            dict with keys ``model``, ``feature_cols``, ``feature_means``
-            (per-covariate means of the TRAINING set, reapplied to fill the
-            missing covariates at prediction time, review §2.7),
+            dict with keys ``model``, ``feature_cols``,
             ``scale_factor`` (sub-period count of the stage),
             ``fit_scale_factor`` (the one baked into the model at fit time),
             ``pred_freq`` and ``trained_on_imputed``.
@@ -356,6 +363,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         estimator: Optional[Union[BaseEstimator, Dict[str, BaseEstimator]]]=None,
         additive_transformer: Optional[TransformerMixin] = None,
         cascade_refitting: bool = True,
+        covariate_eligibility: Literal['any_entity', 'all_entities'] = 'any_entity',
         keep_lower_frequencies: bool = True,
         on_frequency_mismatch: Literal['error', 'warn'] = 'error',
         coverage_threshold: float = 0.5,
@@ -383,6 +391,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 - Single estimator: Applied to all variables
                 - Dict[variable_name, estimator]: Variable-specific models,
                   a model associated to '__default__' key can be provided
+                The estimator must tolerate NaN in X, or be wrapped in a
+                Pipeline handling them (e.g. SimpleImputer) if needed — the imputer
+                does not fill missing covariates itself.
             additive_transformer: Transformer to make data additive before
                 imputation (e.g., log transformer, differencing). Must support
                 fit_transform() and inverse_transform(). If None, data is
@@ -393,6 +404,23 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 stages. If False, each imputable variable is fitted once, at
                 the first stage where it is imputable, then reused at the
                 following stages with the scale factor of the stage.
+            covariate_eligibility: How a covariate's availability is aggregated
+                over the entities of a panel when ``cascade_refitting=False``
+                filters the features down to those observed at prediction time.
+                Ignored for a time series, and ignored altogether when
+                ``cascade_refitting=True``.
+                - ``'any_entity'`` (default): keep the column as soon as it is
+                  available for at least one entity. The rows of the other
+                  entities stay NaN and are handed to the estimator, which is
+                  exactly the contract stated on ``estimator``. On a real panel,
+                  dropping a covariate for everyone because a single entity
+                  lacks it wastes information.
+                - ``'all_entities'``: conservative, meant for estimators that do
+                  NOT tolerate NaN. Under a bare LinearRegression a partially
+                  NaN column makes ``predict`` raise and sends THE WHOLE GROUP
+                  to the interpolation fallback — worse than dropping the
+                  column. The transformer cannot guess the estimator's
+                  tolerance, hence the parameter rather than a hard-wired rule.
             keep_lower_frequencies: If True, output includes all intermediate
                 frequencies in a MultiIndex structure — (entity..., frequency,
                 date) for panel data, (frequency, date) for time series —
@@ -428,8 +456,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 sub-periods alongside y_train, which is always divided.
             enforce_period_totals: If True (default), rescale the sub-periods
                 predicted for one period of a lower-frequency variable so
-                that they sum back to the value observed for that period
-                (review §2.6, option 1). Independently of this flag, an
+                that they sum back to the value observed for that period.
+                Independently of this flag, an
                 imputed variable is always predicted over its whole period —
                 anchor dates included — so that its column never mixes the
                 low-frequency total with sub-period values. False keeps the
@@ -480,6 +508,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             raise ValueError(
                 f"on_frequency_mismatch must be 'error' or 'warn', "
                 f"got '{on_frequency_mismatch}'"
+            )
+        if covariate_eligibility not in ('any_entity', 'all_entities'):
+            raise ValueError(
+                f"covariate_eligibility must be 'any_entity' or 'all_entities', "
+                f"got '{covariate_eligibility}'"
             )
         if not 0 <= coverage_threshold <= 1:
             raise ValueError(
@@ -536,6 +569,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.additive_transformer = additive_transformer
         self.estimator = estimator
         self.cascade_refitting = cascade_refitting
+        self.covariate_eligibility = covariate_eligibility
         self.keep_lower_frequencies = keep_lower_frequencies
         self.on_frequency_mismatch = on_frequency_mismatch
         self.coverage_threshold = coverage_threshold
@@ -869,9 +903,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             OrderedDict mapping ``(freq_label, group_key)`` to the stage
             entry: the string ``'interpolate_fallback'``, or a dict with
-            keys ``model``, ``feature_cols``, ``feature_means``,
-            ``scale_factor``, ``fit_scale_factor``, ``pred_freq`` and
-            ``trained_on_imputed``.
+            keys ``model``, ``feature_cols``, ``scale_factor``,
+            ``fit_scale_factor``, ``pred_freq`` and ``trained_on_imputed``.
 
         Raises:
             AttributeError: If the imputer has not been fitted yet.
@@ -1966,8 +1999,34 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             if c != var_name
         ]
 
-        # /!\ Si self.cascade_refitting = False, ne faut-il pas se restreindre aux variables qui sont à une fréquence supérieure ou égale à la fréquence de prédiction pour ne pas entrainer un modèle sur des variables qui seront Nan en prédiction ?
-        
+        # Sans réentraînement en cascade, "imputed_store" reste vide au fit comme
+        # au transform : une covariable de fréquence moindre que l'étape n'y est
+        # jamais imputée et reste NaN partout sauf sur ses dates-ancres.
+        # L'entraînement doit donc se restreindre aux covariables qui seront
+        # effectivement disponibles à la prédiction à cette étape
+        # /!\ Dans ma compréhension on a également un problème similaire lorsque self.cascade_refitting=True : Lorsque l'on a un jeu de données avec des variables mensuelles, trimestrielles et annuelles par exemple et que l'on veut imputer une variable annuelle à la fréquence trimestrielle alors on ne peut entrainer le modèle servant à imputer la variable annuelle à la fréquence trimestrielle qu'à partir des variables trimstrielles et mensuelles (que l'on peut aggréger à la fréquence trimestrielle pour X pred et à la fréquence annuelle pour X_train) mais on ne peut pas utiliser les autres variables annuelles (sauf celles déjà imputées) pour prédire entrainer le modèle à prédire la valeur de la variable annuelle à la fréquence trimestrielle
+        # Réponse : constat confirmé et reproduit — défaut B28, traité par le prompt 23
+        # (architecture §3.17). La garde ci-dessous doit disparaître au profit d'un
+        # état de matérialisation tenu au fil de la cascade, et le portage des basses
+        # fréquences sur la grille de l'étape devient un mode de "covariate_carrying"
+        if not self.cascade_refitting:
+            # Détermination des variables disponibles à la fréquence de prédiction
+            eligible = [
+                c for c in feature_cols if self._is_available_at(c, pred_freq)
+            ]
+            # Cas dégénéré : sans ce journal, le repli par interpolation qui
+            # découle du retour anticipé ci-dessous (via "len(X_train) < 2")
+            # est incompréhensible
+            if feature_cols and not eligible:
+                # Logging
+                self._log(
+                    f"[fit] All covariates filtered out for '{var_name}' at "
+                    f"stage {self._stage_frequency_label(pred_freq)} "
+                    f"(cascade_refitting=False, covariate_eligibility="
+                    f"'{self.covariate_eligibility}')"
+                )
+            feature_cols = eligible
+
         # Si la série est univariée, renvoie des éléments vides
         if not feature_cols:
             return pd.DataFrame(), pd.Series(dtype=float), 1.0, pd.Series(dtype=float)
@@ -2064,6 +2123,74 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             for key, freq in self.detected_frequencies_.items()
             if split_variable_key(key)[1] == column
         }
+
+    # Méthode auxiliaire de disponibilité d'une covariable à la prédiction
+    def _is_available_at(
+        self,
+        column: str,
+        pred_freq: Union[str, Dict],
+    ) -> bool:
+        """Tell whether a covariate will still be observed at prediction time.
+
+        A covariate at least as frequent as the stage is aggregated onto the
+        stage grid and is therefore fully observed there. A covariate STRICTLY
+        less frequent than the stage is not: without cascade refitting it is
+        never imputed, so it stays NaN everywhere but on its own anchor dates —
+        training a model on it would fit a coefficient for a column that is
+        missing at predict.
+
+        On a panel the column carries one frequency PER ENTITY, so the
+        comparison is made entity by entity against that entity's own
+        prediction frequency, then aggregated according to
+        ``covariate_eligibility``.
+
+        Args:
+            column: Bare column name, without the entity part of the key.
+            pred_freq: Prediction frequency of the stage: a string for a time
+                series, an entity -> frequency dict for a panel.
+
+        Returns:
+            True when the column is eligible as a feature for this stage.
+            False for a column carrying no detected frequency at all.
+
+        Examples:
+            >>> # 'ip' monthly for France, quarterly for Allemagne, stage at 'M'
+            >>> # imputer.covariate_eligibility = 'any_entity'
+            >>> # imputer._is_available_at('ip', {('France',): 'M',
+            >>> #                                  ('Allemagne',): 'M'})
+            >>> # True   ('all_entities' would give False)
+        """
+        # Fréquences détectées de la colonne, une par entité :
+        # "_column_frequencies_by_entity" itère et filtre plutôt que d'indexer
+        # par le nom nu — un panel peut porter la même colonne à deux fréquences
+        # selon l'entité, et l'indexation par nom nu ferait gagner la dernière
+        # entité rencontrée, donc dépendre de l'ordre des colonnes en entrée
+        frequencies = self._column_frequencies_by_entity(column)
+
+        # Verdict par entité
+        verdicts = []
+        for entity, f_cov in frequencies.items():
+            if isinstance(pred_freq, dict):
+                # Entité absente de l'étape : elle n'y prédit rien, elle ne vote pas
+                if entity not in pred_freq:
+                    continue
+                pf = pred_freq[entity]
+            else:
+                pf = pred_freq
+            # Disponible si et seulement si la covariable n'est pas MOINS
+            # fréquente que l'étape : elle y est alors agrégée, donc observée
+            verdicts.append(not is_higher_frequency(pf, f_cov))
+
+        # Une colonne sans aucune entrée n'est pas éligible
+        if not verdicts:
+            return False
+
+        # Agrégation sur les entités du panel, gouvernée par le paramètre :
+        # "any_entity" laisse les lignes des autres entités en NaN à charge de
+        # l'estimateur, "all_entities" écarte la colonne pour tout le monde
+        predicate = any if self.covariate_eligibility == 'any_entity' else all
+
+        return predicate(verdicts)
 
     # Méthode auxiliaire de calcul du diviseur d'une covariable
     def _covariate_divisor(
@@ -2499,15 +2626,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         Shared by the intermediate cascade of :meth:`_fit` and the replay of
         :meth:`_transform` so both paths produce identical predictions on
-        identical data. Two rules, both from review §2.7:
+        identical data. One rule: rows are grouped by their pattern of
+        available covariates and a group without a single usable covariate is
+        left unimputed — nothing is fabricated where nothing was observed.
 
-        1. rows are grouped by their pattern of available covariates and a
-           group without a single usable covariate is left unimputed —
-           nothing is fabricated where nothing was observed;
-        2. the remaining missing covariates are filled with the means of the
-           TRAINING SET, stored at fit time in ``step.feature_means``.
-           Filling with the mean of the rows being predicted made the result
-           depend on the prediction sample.
+        The covariates still missing on a partial pattern are handed to the
+        estimator AS NaN: filling them here would substitute a hidden
+        imputation policy for the user's own. The estimator must therefore
+        tolerate NaN in X, or be wrapped in a Pipeline handling them (see the
+        ``estimator`` parameter of :meth:`__init__`); one that does not raises,
+        and the caller falls back on linear interpolation.
 
         Args:
             step: Plan step of the stage.
@@ -2522,13 +2650,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """
         # Extraction des noms des colonnes de features
         feature_cols = list(step.feature_cols)
-        # Statistiques de remplissage du jeu d'entraînement. Une étape
-        # peut ne pas en porter : repli sur zéro, neutre pour les estimateurs
-        # linéaires centrés
-        # /!\ A supprimer si on retire l'imputation
-        feature_means = step.feature_means
-        if feature_means is None:
-            feature_means = pd.Series(0.0, index=feature_cols)
 
         # Regroupement des lignes à prédire par motif de covariables disponibles
         prediction_samples = self._determine_prediction_samples(
@@ -2549,9 +2670,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 skipped.append(sample_index)
                 continue
 
-            # Le motif décide SI l'on impute, les statistiques du fit décident
-            # AVEC QUOI l'on complète les covariables manquantes du groupe
-            X_pred = X_stage.loc[sample_index, feature_cols].fillna(feature_means)
+            # Le motif décide SI l'on impute ; les covariables encore
+            # manquantes du groupe partent telles quelles à l'estimateur, à qui
+            # il revient de les traiter (cf. contrat NaN de "estimator")
+            X_pred = X_stage.loc[sample_index, feature_cols]
             predicted.append(
                 pd.Series(
                     self._stage_predictions(step, X_pred),
@@ -2573,7 +2695,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             warnings.warn(
                 f"No covariate available{suffix} on {len(skipped_index)} date(s) "
                 f"(e.g. {skipped_index[0]}): they are left unimputed rather than "
-                f"predicted from training means alone.",
+                f"predicted from no observed covariate at all.",
                 UserWarning
             )
 
@@ -3227,7 +3349,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     **stage_fields,
                     model=INTERPOLATE_FALLBACK,
                     feature_cols=(),
-                    feature_means=None,
                     scale_factor=stage_scale,
                     fit_scale_factor=stage_scale,
                     trained_on_imputed=False,
@@ -3294,17 +3415,37 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     X_train, y_train, scale_factor, feature_factors
                 )
 
-                # /!\ Je pensais supprimer cette étape d'imputation "naïve" des Nan à la moyenne car je pense préférable de laisser l'utilisateur fournir dans son estimateur (qui peut être un Pipeline sklearn), la méthode d'imputation des Nan qui lui semble la meilleure ou un estimateur qui est robuste aux Nan. Cette remarque me semble par ailleurs cohérente avec celle que je fais dans "_prepare_training_data" sur la sélection des features_cols lorsque "cascade_refitting=False".
-                # Imputation simple des NaN dans les features. Les statistiques
-                # employées sont celles du JEU D'ENTRAÎNEMENT et sont conservées
-                # dans le registre : la prédiction les réapplique à l'identique
-                # (§2.7), là où la moyenne des lignes à prédire rendait le
-                # résultat dépendant du champ de prédiction
-                feature_means = X_train_scaled.mean()
-                X_train_scaled = X_train_scaled.fillna(feature_means)
-                # Écartement des covariables sans aucune observation sur la fenêtre
-                # d'entraînement : la moyenne de remplissage y reste NaN
-                X_train_scaled = X_train_scaled.dropna(axis=1, how='all')
+                # Écartement des covariables entièrement vides.
+                # La condition est évaluée sur les DEUX fenêtres : avec une
+                # fenêtre d'entraînement plus large que celle de prédiction
+                # (cf. "training_scope" du calculateur), une colonne peut être
+                # observée à l'entraînement et intégralement NaN au predict, et
+                # le modèle apprendrait un coefficient pour une feature
+                # systématiquement absente. Élargir la fenêtre d'entraînement
+                # doit ajouter des lignes, jamais des colonnes
+                usable_cols = X_train_scaled.notna().any()
+                if (hasattr(self, '_imputation_window_calc')
+                        and self._imputation_window_calc._is_fitted):
+                    prediction_window = (
+                        self._imputation_window_calc.get_imputation_window_mask(
+                            X_stage, kind='imputation'
+                        ).reindex(X_stage.index).fillna(False).astype(bool)
+                    )
+                    if prediction_window.any():
+                        seen_at_predict = (
+                            X_stage.loc[prediction_window].notna().any()
+                            .reindex(X_train_scaled.columns).fillna(False)
+                        )
+                        usable_cols &= seen_at_predict
+                X_train_scaled = X_train_scaled.loc[:, usable_cols]
+
+                # Écartement des lignes d'entraînement sans aucune covariable
+                # observée.
+                # C'est le pendant, côté entraînement, du groupe au motif vide
+                # déjà écarté par "_determine_prediction_samples" côté prédiction
+                observed_rows = X_train_scaled.notna().any(axis=1)
+                X_train_scaled = X_train_scaled.loc[observed_rows]
+                y_train_scaled = y_train_scaled.loc[observed_rows]
 
                 # Suppression des lignes avec y NaN
                 valid_mask = y_train_scaled.notna()
@@ -3339,10 +3480,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         **stage_fields,
                         model=estimator,
                         feature_cols=tuple(feature_cols),
-                        # Moyennes du jeu d'entraînement, réappliquées à la
-                        # prédiction pour compléter les covariables manquantes
-                        # /!\ A supprimer si on retire l'imputation des Nan plus haut
-                        feature_means=feature_means.reindex(feature_cols),
                         scale_factor=scale_factor,
                         # Facteur cuit dans le modèle : y_train en a été divisé.
                         # Il ne bouge plus, quand "scale_factor" suit l'étape
@@ -3445,10 +3582,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                                         preds if existing_imputed is None
                                         else preds.combine_first(existing_imputed)
                                     )
+                            # Un estimateur ne tolérant pas les NaN lève ici :
+                            # les covariables partiellement observées lui
+                            # parviennent telles quelles depuis le retrait de
+                            # l'imputation à la moyenne
                             except Exception as e:
                                 # Warning
                                 warnings.warn(
-                                    f"Intermediate imputation failed for '{var_name}': {e}"
+                                    f"Intermediate imputation failed for "
+                                    f"'{var_name}': {e}. The estimator must "
+                                    f"tolerate NaN in X, or be wrapped in a "
+                                    f"Pipeline handling them (e.g. SimpleImputer)."
                                 )
 
         # =================================================================
@@ -3744,6 +3888,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                             predictions if existing_imputed is None
                             else predictions.combine_first(existing_imputed)
                         )
+                # Un estimateur ne tolérant pas les NaN lève ici : les
+                # covariables partiellement observées lui parviennent telles
+                # quelles depuis le retrait de l'imputation à la moyenne, et
+                # le repli par interpolation prend alors le relais
                 except Exception as e:
                     # Logging
                     self._log(
@@ -3754,6 +3902,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     # Warning
                     warnings.warn(
                         f"Prediction failed for variable '{var_name}': {e}. "
+                        f"The estimator must tolerate NaN in X, or be wrapped "
+                        f"in a Pipeline handling them (e.g. SimpleImputer). "
                         f"Using interpolation fallback."
                     )
                     # Repli sur l'interpolation, restreint aux lignes prédictibles

@@ -41,6 +41,8 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.impute import SimpleImputer
 
 from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
 
@@ -73,10 +75,17 @@ def _run_hfi(
     keep_lower_frequencies: bool,
     imputation_scope: str = 'strict',
 ):
-    """Fit_transform avec LinearRegression, target_frequency='M', warnings ignorés."""
+    """Fit_transform avec un régresseur tolérant les NaN, target_frequency='M'.
+
+    Depuis le retrait de `feature_means`, l'imputer ne complète plus les
+    covariables manquantes : sur les jeux de référence multi-fréquences, une
+    `LinearRegression` nue lève au `predict` et bascule l'étape en repli par
+    interpolation, qui ne recale pas les totaux de période. Le harnais fournit
+    donc un `Pipeline` conforme au contrat NaN documenté sur `estimator`.
+    """
     imputer = HighFrequencyImputer(
         target_frequency='M',
-        estimator=LinearRegression(),
+        estimator=make_pipeline(SimpleImputer(), LinearRegression()),
         cascade_refitting=cascade_refitting,
         keep_lower_frequencies=keep_lower_frequencies,
         imputation_scope=imputation_scope,

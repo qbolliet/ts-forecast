@@ -4,6 +4,7 @@ This module tests the HighFrequencyImputer class for mixed-frequency imputation,
 focusing on edge cases, panel data handling, and delay management.
 """
 import dataclasses
+from contextlib import contextmanager
 
 import pytest
 import pandas as pd
@@ -12,9 +13,12 @@ from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.impute import SimpleImputer
 
 from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.frequency.imputation_plan import ImputationStep
+from tsforecast.frequency.imputation_window import ImputationWindowCalculator
 
 
 class TestHighFrequencyImputerInit:
@@ -995,6 +999,19 @@ class TestEntryContractAndSklearnConformance:
 import warnings
 
 
+def _nan_tolerant_regressor():
+    """Régression linéaire tolérant les NaN, via un SimpleImputer en amont.
+
+    Depuis le retrait de `feature_means`, l'imputer ne complète plus les
+    covariables manquantes : elles parviennent telles quelles à l'estimateur.
+    Une `LinearRegression` nue lève donc au `predict` sur tout jeu à
+    covariables trouées et bascule l'étape en repli par interpolation — ce
+    qui n'est PAS le comportement que ces tests mesurent. Ils fournissent
+    donc un estimateur conforme au contrat NaN documenté sur `estimator`.
+    """
+    return make_pipeline(SimpleImputer(), LinearRegression())
+
+
 def _fit_transform_quiet(imputer, data):
     """Run fit_transform while silencing the (expected, unrelated) warnings."""
     with warnings.catch_warnings():
@@ -1383,9 +1400,10 @@ class TestNoImputationWithoutCovariates:
 class TestPredictionFieldDeterminism:
     """§2.7 : les imputations ne dépendent pas du champ de prédiction.
 
-    Les covariables manquantes sont complétées par les moyennes du JEU
-    D'ENTRAÎNEMENT, mémorisées dans `imputation_models_`, et non par la
-    moyenne des lignes présentées à `transform`.
+    Depuis §3.5, plus aucune statistique n'est calculée sur les lignes à
+    prédire : les covariables manquantes partent telles quelles à
+    l'estimateur. Le déterminisme vis-à-vis du champ en découle
+    directement, sans mémoriser de moyenne d'entraînement.
     """
 
     def test_imputation_deterministic_wrt_prediction_field(self, mixed_freq_timeseries):
@@ -1412,25 +1430,6 @@ class TestPredictionFieldDeterminism:
         pd.testing.assert_frame_equal(
             full.loc[subset.index], subset, check_freq=False
         )
-
-    def test_feature_means_come_from_training_set(self, mixed_freq_timeseries):
-        """Le registre porte les moyennes d'entraînement, sans NaN."""
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            estimator=LinearRegression(),
-            keep_lower_frequencies=False,
-        )
-        _fit_transform_quiet(imputer, mixed_freq_timeseries)
-
-        fitted = [
-            info for info in imputer.imputation_models_.values()
-            if isinstance(info, dict)
-        ]
-        assert fitted
-        for model_info in fitted:
-            means = model_info['feature_means']
-            assert list(means.index) == list(model_info['feature_cols'])
-            assert means.notna().all()
 
 
 class TestDeterminePredictionSamplesIsCalled:
@@ -1632,9 +1631,11 @@ class _FitCountingEstimator(BaseEstimator, RegressorMixin):
         cls.n_fits = 0
 
     def fit(self, X, y):
-        """Fit the wrapped linear regression and count the call."""
+        """Fit the wrapped regression and count the call."""
         type(self).n_fits += 1
-        self._model = LinearRegression().fit(X, y)
+        # Pipeline plutôt que LinearRegression nue : le contrat NaN de
+        # "estimator" s'applique aussi aux estimateurs de test
+        self._model = _nan_tolerant_regressor().fit(X, y)
         return self
 
     def predict(self, X):
@@ -1764,7 +1765,7 @@ class TestFitCountByCascadeRefitting:
         data = annual_quarterly_over_monthly
         imputer = HighFrequencyImputer(
             target_frequency='M',
-            estimator=LinearRegression(),
+            estimator=_nan_tolerant_regressor(),
             cascade_refitting=False,
             keep_lower_frequencies=False,
         )
@@ -1772,7 +1773,7 @@ class TestFitCountByCascadeRefitting:
 
         imputer_cascade = HighFrequencyImputer(
             target_frequency='M',
-            estimator=LinearRegression(),
+            estimator=_nan_tolerant_regressor(),
             cascade_refitting=False,
             keep_lower_frequencies=True,
         )
@@ -1920,7 +1921,7 @@ class TestPeriodTotalsEnforced:
         """Le jeu de référence du notebook : PIB trimestriel et balance annuelle."""
         imputer = HighFrequencyImputer(
             target_frequency='M',
-            estimator=LinearRegression(),
+            estimator=_nan_tolerant_regressor(),
             keep_lower_frequencies=False,
         )
         result = _fit_transform_quiet(imputer, mixed_freq_timeseries)
@@ -1934,7 +1935,7 @@ class TestPeriodTotalsEnforced:
         """Panel : le recalage est fait par entité, aucun bloc ne les mélange."""
         imputer = HighFrequencyImputer(
             target_frequency='M',
-            estimator=LinearRegression(),
+            estimator=_nan_tolerant_regressor(),
             keep_lower_frequencies=False,
         )
         result = _fit_transform_quiet(imputer, mixed_freq_panel)
@@ -3642,7 +3643,7 @@ class TestImputedStoreRefreshedAtEachStage:
     def _imputer(**kwargs):
         params = dict(
             target_frequency='M',
-            estimator=LinearRegression(),
+            estimator=_nan_tolerant_regressor(),
             cascade_refitting=True,
             keep_lower_frequencies=True,
             train_on_partial_coverage=True,
@@ -3845,7 +3846,7 @@ class TestCascadeGuardsAreSymmetric:
         # bascule en repli, celle de la variable trimestrielle reste un modèle
         imputer = HighFrequencyImputer(
             target_frequency='M',
-            estimator={'variable_trimestrielle': LinearRegression()},
+            estimator={'variable_trimestrielle': _nan_tolerant_regressor()},
             cascade_refitting=True,
             keep_lower_frequencies=True,
             train_on_partial_coverage=True,
@@ -3918,7 +3919,7 @@ class TestProvenanceTrackerInitializedAfterAdditiveTransformer:
         """
         imputer = HighFrequencyImputer(
             target_frequency='M',
-            estimator=LinearRegression(),
+            estimator=_nan_tolerant_regressor(),
             additive_transformer=_FirstObservationDropped(),
             keep_lower_frequencies=False,
         )
@@ -3973,7 +3974,7 @@ class TestAnchorsMarkedWithoutPeriodTotals:
     def _imputer(**kwargs):
         params = dict(
             target_frequency='M',
-            estimator=LinearRegression(),
+            estimator=_nan_tolerant_regressor(),
             enforce_period_totals=False,
             keep_lower_frequencies=False,
         )
@@ -4306,3 +4307,382 @@ class TestStageScaleFactorIsDocumentedAverage:
         assert imputer._stage_scale_factor('cov', 'D') == 30.0
         # Les paires calendaires emboitees restent exactes
         assert imputer._stage_scale_factor('var', 'M') == 3.0
+
+
+# ---------------------------------------------------------------------------
+# §3.5 / §3.6 — contrat NaN et éligibilité des covariables
+# ---------------------------------------------------------------------------
+
+class _RecordingEstimator(BaseEstimator, RegressorMixin):
+    """NaN-tolerant regressor recording the frames it is handed.
+
+    The recordings are held by the class, not the instance:
+    ``_get_estimator_for_variable`` clones the estimator before every fit.
+    """
+
+    fit_frames = []
+    predict_frames = []
+
+    def __init__(self):
+        pass
+
+    @classmethod
+    def reset(cls) -> None:
+        """Empty both recordings."""
+        cls.fit_frames = []
+        cls.predict_frames = []
+
+    def fit(self, X, y):
+        """Record the training frame, then fit a NaN-tolerant pipeline."""
+        type(self).fit_frames.append(X.copy())
+        self._model = _nan_tolerant_regressor().fit(X, y)
+        return self
+
+    def predict(self, X):
+        """Record the prediction frame, then delegate."""
+        type(self).predict_frames.append(X.copy())
+        return self._model.predict(X)
+
+
+@contextmanager
+def _simulated_training_scope(prediction_cutoff=None):
+    """Widen the TRAINING window while narrowing the PREDICTION one.
+
+    Anticipates ``training_scope`` (prompt 13), which the imputer does not
+    expose yet. Without it both windows are the same object, and since the
+    strict window is bounded by each column's first and last valid index, no
+    column can ever be entirely NaN inside it: the two guards of §3.6 are
+    unreachable through the public API. Overriding the masks is the only way
+    to exercise them today.
+
+    Args:
+        prediction_cutoff: First date of the prediction window. None keeps
+            both windows equal (control case).
+    """
+    original = ImputationWindowCalculator.get_imputation_window_mask
+
+    def patched(self, data=None, kind='imputation'):
+        mask = original(self, data, kind=kind)
+        # Fenêtre d'entraînement sans restriction, comme training_scope='unrestricted'
+        if kind == 'training' or prediction_cutoff is None:
+            return pd.Series(True, index=mask.index)
+        dates = mask.index.get_level_values(-1)
+        return pd.Series(dates >= pd.Timestamp(prediction_cutoff), index=mask.index)
+
+    ImputationWindowCalculator.get_imputation_window_mask = patched
+    try:
+        yield
+    finally:
+        ImputationWindowCalculator.get_imputation_window_mask = original
+
+
+def _window_probe_frame(blank_from='2020-01-01', blank_year=None):
+    """Monthly frame with a covariate that stops, plus an annual target.
+
+    Args:
+        blank_from: Date from which ``spotty`` stops being observed.
+        blank_year: Year over which EVERY covariate is blanked, leaving that
+            year's training row without a single observed covariate.
+    """
+    index = pd.date_range('2015-01-31', '2023-12-31', freq='ME', name='date')
+    rng = np.random.default_rng(0)
+    ref = pd.Series(1000.0 + rng.normal(0, 20, len(index)), index=index)
+    spotty = ref.copy()
+    spotty[spotty.index >= pd.Timestamp(blank_from)] = np.nan
+    frame = pd.DataFrame(
+        {'ref': ref, 'spotty': spotty, 'var': _series_at(index, 'Y', 12000.0, rng)}
+    )
+    if blank_year is not None:
+        blanked = frame.index.year == blank_year
+        frame.loc[blanked, ['ref', 'spotty']] = np.nan
+    return frame
+
+
+class TestNaNCovariateContract:
+    """§3.5 : l'imputer ne complète plus les covariables, l'estimateur décide.
+
+    `feature_means` remplaçait silencieusement les covariables manquantes par
+    la moyenne du jeu d'entraînement. Retirée, cette politique redevient le
+    choix de l'utilisateur : un Pipeline avec SimpleImputer, ou un estimateur
+    tolérant nativement les NaN.
+    """
+
+    def test_nan_covariates_reach_estimator(self, mixed_freq_timeseries):
+        """Des NaN parviennent réellement au `predict` de l'estimateur."""
+        _RecordingEstimator.reset()
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=_RecordingEstimator(),
+            keep_lower_frequencies=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        assert _RecordingEstimator.predict_frames, "aucun predict enregistre"
+        assert any(
+            frame.isna().any().any()
+            for frame in _RecordingEstimator.predict_frames
+        ), "aucun NaN n'a atteint l'estimateur : une imputation subsiste"
+
+    def test_pipeline_with_simple_imputer_predicts(self, mixed_freq_timeseries):
+        """Un Pipeline(SimpleImputer, LinearRegression) prédit sans repli."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=make_pipeline(SimpleImputer(), LinearRegression()),
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            result = imputer.fit_transform(mixed_freq_timeseries.copy())
+
+        # Aucune étape ne bascule en repli, ni au fit ni au transform
+        assert not any(step.is_fallback for step in imputer.imputation_plan_)
+        assert not [
+            w for w in caught if 'Prediction failed' in str(w.message)
+        ], "le repli par interpolation a ete declenche"
+
+        # Et les variables basse fréquence sont bien imputées
+        for column in ('pib_trimestriel', 'balance_commerciale_annuelle'):
+            produced = result[column].notna().sum()
+            assert produced > mixed_freq_timeseries[column].notna().sum()
+
+    def test_bare_linear_regression_falls_back_with_explicit_message(
+        self, mixed_freq_timeseries
+    ):
+        """Une LinearRegression nue lève, et l'avertissement énonce le contrat."""
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            keep_lower_frequencies=False,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.fit_transform(mixed_freq_timeseries.copy())
+
+        failed = [
+            str(w.message) for w in caught
+            if 'Prediction failed' in str(w.message)
+        ]
+        assert failed, "la LinearRegression nue aurait du lever sur les NaN"
+        assert all('tolerate NaN' in m and 'Pipeline' in m for m in failed)
+
+    def test_imputation_step_has_no_feature_means(self, mixed_freq_timeseries):
+        """Le champ a disparu de la dataclass ET de `to_registry_entry`."""
+        names = {field.name for field in dataclasses.fields(ImputationStep)}
+        assert 'feature_means' not in names
+
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=_nan_tolerant_regressor(),
+            keep_lower_frequencies=False,
+        )
+        _fit_transform_quiet(imputer, mixed_freq_timeseries)
+
+        entries = [
+            entry for entry in imputer.imputation_models_.values()
+            if isinstance(entry, dict)
+        ]
+        assert entries
+        for entry in entries:
+            # Six clés désormais, contre sept auparavant
+            assert set(entry) == {
+                'model', 'feature_cols', 'scale_factor', 'fit_scale_factor',
+                'pred_freq', 'trained_on_imputed',
+            }
+
+
+class TestCovariateEligibility:
+    """§3.6 (C8) : sans réentraînement, on n'entraîne que sur le disponible.
+
+    Avec `cascade_refitting=False`, `imputed_store` reste vide au fit comme au
+    transform : une covariable moins fréquente que l'étape reste NaN partout
+    sauf sur ses dates-ancres. `fillna(feature_means)` la masquait ; elle
+    produit désormais des NaN, d'où le filtre d'éligibilité.
+    """
+
+    @staticmethod
+    def _feature_cols_by_variable(imputer):
+        """Features retenues par le plan, indexées par variable imputée."""
+        return {
+            step.var_name: set(step.feature_cols)
+            for step in imputer.imputation_plan_
+        }
+
+    def test_feature_cols_filtered_when_no_refitting(
+        self, annual_quarterly_over_monthly
+    ):
+        """Aucune `feature_cols` ne porte de variable moins fréquente que l'étape."""
+        imputer = _fitted(
+            annual_quarterly_over_monthly,
+            estimator=_nan_tolerant_regressor(),
+            cascade_refitting=False,
+        )
+        by_variable = self._feature_cols_by_variable(imputer)
+
+        # Étape unique 'M' : seule la covariable mensuelle survit au filtre
+        assert by_variable['variable_annuelle'] == {'covariable_mensuelle'}
+        assert by_variable['variable_trimestrielle'] == {'covariable_mensuelle'}
+
+    def test_feature_cols_not_filtered_with_refitting(
+        self, annual_quarterly_over_monthly
+    ):
+        """Avec la cascade, les basses fréquences restent des covariables."""
+        imputer = _fitted(
+            annual_quarterly_over_monthly,
+            estimator=_nan_tolerant_regressor(),
+            cascade_refitting=True,
+        )
+        by_variable = self._feature_cols_by_variable(imputer)
+
+        # La cascade les impute étape par étape : elles sont donc disponibles
+        assert 'variable_trimestrielle' in by_variable['variable_annuelle']
+        assert 'variable_annuelle' in by_variable['variable_trimestrielle']
+
+    def test_covariate_eligibility_any_entity_keeps_partial_column(self):
+        """'any_entity' : une colonne disponible chez une seule entité est gardée."""
+        imputer = _fitted(
+            _panel_heterogeneous_covariate(),
+            estimator=_nan_tolerant_regressor(),
+            cascade_refitting=False,
+            covariate_eligibility='any_entity',
+        )
+        # 'ip' est mensuelle en France, trimestrielle en Allemagne : disponible
+        # à l'étape 'M' pour la France seule, donc retenue. L'étape de 'ip'
+        # lui-même (groupe Allemagne, où il est imputable) est écartée : une
+        # variable n'est jamais sa propre covariable
+        steps = [s for s in imputer.imputation_plan_ if s.var_name == 'var']
+        assert steps
+        for step in steps:
+            assert 'ip' in step.feature_cols
+            assert 'ref' in step.feature_cols
+
+    def test_covariate_eligibility_all_entities_drops_it(self):
+        """'all_entities' : la même colonne est écartée pour tout le monde."""
+        imputer = _fitted(
+            _panel_heterogeneous_covariate(),
+            estimator=_nan_tolerant_regressor(),
+            cascade_refitting=False,
+            covariate_eligibility='all_entities',
+        )
+        steps = [s for s in imputer.imputation_plan_ if s.var_name == 'var']
+        assert steps
+        for step in steps:
+            assert 'ip' not in step.feature_cols
+            # 'ref' est mensuelle pour les deux entités : elle survit
+            assert 'ref' in step.feature_cols
+
+    @pytest.mark.parametrize('eligibility', ['any_entity', 'all_entities'])
+    def test_eligibility_ignores_column_name_collision(self, eligibility):
+        """Le verdict ne dépend pas de l'ordre des colonnes d'entrée (B6).
+
+        Une table `{nom de colonne: fréquence}` ferait gagner la DERNIÈRE
+        entité rencontrée : le résultat dépendrait alors de l'ordre dans
+        lequel l'utilisateur a rangé ses colonnes.
+        """
+        straight = _fitted(
+            _panel_heterogeneous_covariate(columns=['ref', 'ip', 'var']),
+            estimator=_nan_tolerant_regressor(),
+            cascade_refitting=False,
+            covariate_eligibility=eligibility,
+        )
+        flipped = _fitted(
+            _panel_heterogeneous_covariate(columns=['var', 'ip', 'ref']),
+            estimator=_nan_tolerant_regressor(),
+            cascade_refitting=False,
+            covariate_eligibility=eligibility,
+        )
+        assert (
+            self._feature_cols_by_variable(straight)
+            == self._feature_cols_by_variable(flipped)
+        )
+
+    def test_empty_feature_cols_falls_back_and_logs(
+        self, annual_quarterly_over_monthly, capsys, monkeypatch
+    ):
+        """Le repli du cas dégénéré est journalisé, sinon il est incompréhensible.
+
+        Aucun jeu réaliste ne vide `feature_cols` par le seul filtre — il
+        reste toujours une covariable à la fréquence cible. La méthode
+        d'éligibilité est donc neutralisée pour atteindre la branche.
+        """
+        monkeypatch.setattr(
+            HighFrequencyImputer, '_is_available_at',
+            lambda self, column, pred_freq: False
+        )
+        imputer = HighFrequencyImputer(
+            target_frequency='M',
+            estimator=_nan_tolerant_regressor(),
+            cascade_refitting=False,
+            keep_lower_frequencies=False,
+            verbose=True,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(annual_quarterly_over_monthly.copy())
+
+        logged = capsys.readouterr().out
+        assert 'All covariates filtered out' in logged
+        assert 'cascade_refitting=False' in logged
+        assert "covariate_eligibility='any_entity'" in logged
+        # Et toutes les étapes retombent sur l'interpolation
+        assert imputer.imputation_plan_
+        assert all(step.is_fallback for step in imputer.imputation_plan_)
+
+    def test_covariate_eligibility_invalid_raises(self):
+        """Une valeur hors littéral est refusée à la construction."""
+        with pytest.raises(ValueError, match='covariate_eligibility'):
+            HighFrequencyImputer(
+                target_frequency='M', covariate_eligibility='per_entity'
+            )
+
+
+class TestTrainingWindowGuards:
+    """§3.6, ajustements imposés par une fenêtre d'entraînement élargie.
+
+    Les deux garde-fous sont inertes tant que `training_scope` n'est pas
+    exposé sur l'imputer (prompt 13) : les fenêtres d'entraînement et de
+    prédiction sont alors le même objet. `_simulated_training_scope` les
+    dissocie pour les rendre atteignables.
+    """
+
+    def test_column_all_nan_on_prediction_window_dropped(self):
+        """Une colonne vide au predict n'entre pas dans le modèle.
+
+        Élargir la fenêtre d'entraînement doit ajouter des LIGNES, jamais des
+        COLONNES : sans ce garde-fou, le modèle apprendrait un coefficient
+        pour une feature systématiquement absente à la prédiction.
+        """
+        data = _window_probe_frame(blank_from='2020-01-01')
+
+        # Témoin : fenêtres identiques, 'spotty' est une feature légitime
+        with _simulated_training_scope(None):
+            control = _fitted(
+                data, estimator=_nan_tolerant_regressor(), cascade_refitting=False
+            )
+        assert {'ref', 'spotty'} == set(control.imputation_plan_[0].feature_cols)
+
+        # Fenêtre de prédiction restreinte à la plage où 'spotty' est vide
+        with _simulated_training_scope('2020-01-01'):
+            imputer = _fitted(
+                data, estimator=_nan_tolerant_regressor(), cascade_refitting=False
+            )
+        assert {'ref'} == set(imputer.imputation_plan_[0].feature_cols)
+
+    def test_training_rows_without_covariates_dropped(self):
+        """Une ligne d'entraînement sans aucune covariable observée est écartée.
+
+        Elle n'apporte aucun signal, et un SimpleImputer en ferait une ligne
+        intégralement constante — du bruit pur ajouté à l'ajustement.
+        """
+        data = _window_probe_frame(blank_from='2024-01-01', blank_year=2016)
+
+        _RecordingEstimator.reset()
+        with _simulated_training_scope(None):
+            _fitted(data, estimator=_RecordingEstimator(), cascade_refitting=False)
+
+        assert _RecordingEstimator.fit_frames, "aucun fit enregistre"
+        for frame in _RecordingEstimator.fit_frames:
+            # Aucune ligne intégralement NaN ne parvient à l'estimateur
+            assert frame.notna().any(axis=1).all()
+            # Et c'est bien l'année vidée qui manque, pas une autre
+            assert 2016 not in set(frame.index.year)
+            assert 2017 in set(frame.index.year)

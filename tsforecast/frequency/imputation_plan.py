@@ -5,19 +5,15 @@ step of the cascade fitted by
 :class:`tsforecast.frequency.HighFrequencyImputer`. The ordered list of those
 steps — ``imputation_plan_`` — is the single source of truth of the fitted
 state: ``imputation_models_``, ``model_fitting_order_``, ``stage_groups_`` and
-``frequency_progression_`` are all derived, read-only views of it (review
-§5.3).
+``frequency_progression_`` are all derived, read-only views of it.
 """
 # Importation des modules
 # Modules de base
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Union
-# Manipulation de données
-import pandas as pd
 
 
-# Sentinelle de repli : valeur historique portée par "imputation_models_" quand
-# aucun modèle n'a pu être entraîné pour l'étape
+# Méthode de repli
 INTERPOLATE_FALLBACK = 'interpolate_fallback'
 
 
@@ -28,9 +24,6 @@ EntityKey = Tuple[str, ...]
 
 
 # Étape du plan d'imputation
-# "eq=False" est nécessaire : l'égalité générée comparerait les champs un à un,
-# donc "feature_means" (une Series) via un "==" élémentaire dont la valeur de
-# vérité est ambiguë. L'identité suffit ici, aucun code ne compare deux étapes
 @dataclass(frozen=True, eq=False)
 class ImputationStep:
     """One step of the fitted imputation plan.
@@ -39,8 +32,7 @@ class ImputationStep:
     one prediction frequency. It carries everything ``transform`` needs to
     replay that work — the estimator and its training-time metadata, the
     scaling factors, and the group metadata driving the disaggregation — so
-    that the replay never has to cross-reference several parallel registries
-    (review §5.3).
+    that the replay never has to cross-reference several parallel registries.
 
     Steps are immutable: build a variant with :func:`dataclasses.replace`
     rather than mutating one. That is what backs ``cascade_refitting=False``,
@@ -58,7 +50,7 @@ class ImputationStep:
         var_key: Registry group key, second component of :attr:`stage_key`:
             the variable (column) name alone, or ``(variable name, detected
             frequency)`` for a panel whose entities disagree on the
-            frequency of that variable (review §2.4). NEVER an
+            frequency of that variable. Never an
             ``(entity, variable)`` pair: the model backing a step is global
             to the panel.
         var_name: Column being imputed at this step.
@@ -67,10 +59,6 @@ class ImputationStep:
             linear interpolation instead (see :attr:`is_fallback`).
         feature_cols: Feature columns the model was fitted on, in fit order.
             Empty for a fallback step.
-        feature_means: Per-covariate means of the TRAINING set, reapplied at
-            prediction time to fill the missing covariates (review §2.7) so
-            that the result does not depend on the prediction sample. None
-            for a fallback step.
         scale_factor: Number of stage sub-periods held by one period of the
             variable — 12 for a yearly variable predicted monthly. Follows
             the stage, so it differs from :attr:`fit_scale_factor` for a
@@ -99,7 +87,6 @@ class ImputationStep:
         ...     var_name='gdp',
         ...     model=LinearRegression(),
         ...     feature_cols=('industrial_production',),
-        ...     feature_means=None,
         ...     scale_factor=3.0,
         ...     fit_scale_factor=3.0,
         ...     trained_on_imputed=False,
@@ -118,7 +105,6 @@ class ImputationStep:
     var_name: str
     model: Any
     feature_cols: Tuple[str, ...]
-    feature_means: Optional[pd.Series]
     scale_factor: float
     fit_scale_factor: float
     trained_on_imputed: bool
@@ -155,12 +141,12 @@ class ImputationStep:
         Reproduces the historical registry format exactly, so that the
         derived ``imputation_models_`` view stays consumable as before:
         a bare :data:`INTERPOLATE_FALLBACK` string for a fallback step, the
-        seven-key metadata dict otherwise.
+        six-key metadata dict otherwise.
 
         Returns:
             The fallback sentinel, or a dict with keys ``model``,
-            ``feature_cols``, ``feature_means``, ``scale_factor``,
-            ``fit_scale_factor``, ``pred_freq`` and ``trained_on_imputed``.
+            ``feature_cols``, ``scale_factor``, ``fit_scale_factor``,
+            ``pred_freq`` and ``trained_on_imputed``.
         """
         # Cas du repli : l'entrée historique est une simple chaîne
         if self.is_fallback:
@@ -172,7 +158,6 @@ class ImputationStep:
             # mais un tuple passé à un ".loc" de colonnes serait interprété
             # comme une clé unique de MultiIndex
             'feature_cols': list(self.feature_cols),
-            'feature_means': self.feature_means,
             'scale_factor': self.scale_factor,
             'fit_scale_factor': self.fit_scale_factor,
             'pred_freq': self.pred_freq,
