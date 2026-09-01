@@ -713,7 +713,8 @@ class FrequencyConverter(TemporalConverter):
                                       limit: Union[int, str, None] = None,
                                       limit_direction: Optional[Literal['forward', 'backward', 'both']] = None,
                                       limit_area: Optional[Literal['inside', 'outside']] = None,
-                                      source_freq: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
+                                      source_freq: Optional[str] = None,
+                                      anchor_fraction: Optional[float] = None) -> Union[pd.Series, pd.DataFrame]:
         """Interpolate data to a higher frequency using asfreq.
 
         Args:
@@ -737,9 +738,59 @@ class FrequencyConverter(TemporalConverter):
                 from the index. Provide it explicitly when the index frequency
                 differs from the variable's own frequency (e.g. a quarterly
                 variable carried on a monthly index).
+            anchor_fraction: Position, within its own source period, at which
+                each observed value is considered reached. ``0.0`` is the start
+                of the period, ``0.5`` its middle, ``1.0`` its end. ``None``
+                (default) keeps the historical behaviour: the value applies at
+                the date it is stamped on (start or end of period, depending on
+                the index position), and no re-anchoring beyond
+                :meth:`_reanchor_index_to_target` takes place.
+
+                When set, each source timestamp is moved to
+                ``period_start + anchor_fraction * period_length`` — the
+                **calendar** length of its own source period (365 days in 2021,
+                366 in 2024, 28 days in February) — the interpolation runs on
+                the **union** of the shifted anchors and the target grid, and
+                only the target grid is kept. The shifted timestamps generally
+                do not fall on the target grid, so the anchor values themselves
+                do not survive in the output: that is the point (at ``0.5`` the
+                yearly value no longer claims to hold on 31 December). They are
+                never re-injected afterwards.
+
+                Consequences to keep in mind:
+
+                - ``'linear'`` is interpreted by pandas **positionally**, which
+                  is meaningless on the irregular union index, so it is treated
+                  as ``'time'`` when ``anchor_fraction`` is set (the two agree
+                  on the regular grid of the ``None`` path). Every other method
+                  already uses the index values and is passed through as is.
+                - at the edges of the series, beyond the last shifted anchor,
+                  ``limit_direction`` decides, with the defaults resolved by
+                  :meth:`_resolve_limit_direction` (``'backward'`` for a target
+                  in end position, hence trailing NaN in the example below).
+                - ``limit`` counts consecutive NaN on the union index, which is
+                  denser than the target grid.
+                - if the source frequency base cannot be expressed as a
+                  ``pd.Period`` (irregular base), the ``None`` behaviour is
+                  silently used instead. A frequency multiplier (``'2M'``) is
+                  handled as its base, like in
+                  :meth:`_extend_index_for_upsampling`.
+
+                This parameter applies to **interpolation only** — never to
+                aggregation, nor to disaggregation by period totals, which stay
+                anchored on the exact periods. It composes with a rescaling to
+                period totals: the anchor changes the **shape** of the
+                interpolation, the rescaling then re-imposes the **total**, in
+                that order and without conflict.
 
         Returns:
             Interpolated time series data
+
+        Raises:
+            ValueError: If ``target_freq`` is not a valid pandas offset, if
+                ``method`` is not a supported interpolation method, or if
+                ``anchor_fraction`` is neither None nor a real number in
+                ``[0, 1]``.
 
         Examples:
             >>> import pandas as pd
@@ -749,10 +800,43 @@ class FrequencyConverter(TemporalConverter):
             >>> daily = converter.interpolate_to_higher_frequency(monthly_series, 'daily', 'linear')
             >>> len(daily) > len(monthly_series)
             True
+
+            Yearly series interpolated to quarters. Without an anchor, the
+            values are held at the end of each year and the 2022 quarters step
+            evenly from 120 to 132:
+
+            >>> yearly = pd.Series(
+            ...     [120.0, 132.0],
+            ...     index=pd.date_range('2021-12-31', periods=2, freq='YE')
+            ... )
+            >>> plain = converter.interpolate_to_higher_frequency(yearly, 'Q', method='linear')
+            >>> list(plain['2022'].round(2))
+            [123.0, 126.0, 129.0, 132.0]
+
+            With ``anchor_fraction=0.5`` the anchors move to the middle of each
+            year (2021-07-02 and 2022-07-02), so the first 2022 quarter is
+            interpolated between the two shifted points, and the quarters past
+            the last anchor are left to ``limit_direction`` (``'backward'``
+            here, hence NaN):
+
+            >>> mid = converter.interpolate_to_higher_frequency(
+            ...     yearly, 'Q', method='linear', anchor_fraction=0.5
+            ... )
+            >>> list(mid['2022'].round(2))
+            [128.94, 131.93, nan, nan]
         """
+        # Validation de la position d'ancrage, sans coercition : le chemin
+        # anchor_fraction=None n'exécute que ce test d'identité
+        if anchor_fraction is not None:
+            anchor_fraction = self._validate_anchor_fraction(anchor_fraction)
+
         # Modernisation des alias dépréciés ('Y'/'A'/'Q'/'M' -> 'YE'/'YE'/'QE'/'ME')
         # avant tout resample/asfreq/date_range, sans changer la position (S/E)
         target_freq = _modernize_resample_freq(target_freq)
+
+        # Grille cible à laquelle restreindre le résultat après interpolation sur
+        # l'union : renseignée uniquement quand un décalage d'ancre a eu lieu
+        final_index: Optional[pd.DatetimeIndex] = None
 
         # Extraction de la position
         _, target_position, _ = parse_frequency(frequency_str=target_freq)
@@ -790,8 +874,35 @@ class FrequencyConverter(TemporalConverter):
                 target_freq=target_freq
             )
 
-            # Réindexation des données sur l'index étendu
-            upsampled = anchored.reindex(extended_index)
+            if anchor_fraction is None:
+                # Réindexation des données sur l'index étendu
+                upsampled = anchored.reindex(extended_index)
+            else:
+                # Décalage des ancres à la fraction demandée de leur période source
+                shifted_index = self._shift_index_to_anchor_fraction(
+                    index=data.index,
+                    source_freq=source_freq,
+                    target_freq=target_freq,
+                    anchor_fraction=anchor_fraction
+                )
+
+                if shifted_index is None:
+                    # Repli sur le comportement anchor_fraction=None quand la base
+                    # source ne s'exprime pas en pd.Period
+                    upsampled = anchored.reindex(extended_index)
+                else:
+                    # Les timestamps décalés ne tombent pas sur la grille cible :
+                    # l'interpolation se fait sur l'union, la restriction à la
+                    # grille cible intervient après
+                    anchored.index = shifted_index
+                    final_index = extended_index
+                    upsampled = anchored.reindex(extended_index.union(shifted_index))
+
+                    # 'linear' est positionnel : sur une union irrégulière il
+                    # ignorerait les écarts réels entre timestamps. 'time' est son
+                    # équivalent pondéré par le temps, identique sur grille régulière
+                    if method == 'linear':
+                        method = 'time'
         else:
             # Fallback : utilisation de asfreq si la fréquence source n'est pas détectable
             upsampled = data.asfreq(target_freq)
@@ -822,10 +933,16 @@ class FrequencyConverter(TemporalConverter):
         # Application de l'interpolation
         valid_methods = {'linear', 'time', 'index', 'values', 'nearest',
                          'zero', 'slinear', 'quadratic', 'cubic'}
-        if method in valid_methods:
-            return upsampled.interpolate(**interpolate_kwargs)
-        else:
+        if method not in valid_methods:
             raise ValueError(f"Unsupported aggregation method: {method}, should be in {valid_methods}")
+
+        result = upsampled.interpolate(**interpolate_kwargs)
+
+        # Restriction à la grille cible : les ancres décalées ne survivent pas
+        if final_index is not None:
+            result = result.reindex(final_index)
+
+        return result
 
     # Méthode auxiliaire de ré-ancrage de l'index source sur la position cible
     def _reanchor_index_to_target(self,
@@ -875,6 +992,121 @@ class FrequencyConverter(TemporalConverter):
             return index
 
         return pd.DatetimeIndex(reanchored)
+
+    # Méthode auxiliaire de validation de la position d'ancrage
+    def _validate_anchor_fraction(self, anchor_fraction: Any) -> float:
+        """Validate an anchor position expressed as a fraction of the period.
+
+        Args:
+            anchor_fraction: Value to validate, expected to be a real number in
+                ``[0, 1]``. ``None`` is handled by the caller and never reaches
+                this method.
+
+        Returns:
+            The validated value as a float.
+
+        Raises:
+            ValueError: If the value is not a real number, or lies outside
+                ``[0, 1]``. No silent coercion is performed.
+
+        Examples:
+            >>> converter = FrequencyConverter()
+            >>> converter._validate_anchor_fraction(0.5)
+            0.5
+            >>> converter._validate_anchor_fraction(1.5)
+            Traceback (most recent call last):
+                ...
+            ValueError: Invalid anchor_fraction 1.5: expected None or a real number in [0, 1]
+        """
+        # Rejet des booléens, que isinstance(..., int) accepterait
+        if isinstance(anchor_fraction, bool) or not isinstance(
+            anchor_fraction, (int, float, np.integer, np.floating)
+        ):
+            raise ValueError(
+                f"Invalid anchor_fraction {anchor_fraction!r}: "
+                f"expected None or a real number in [0, 1]"
+            )
+
+        # Bornes incluses ; NaN est rejeté par la comparaison
+        if not 0.0 <= float(anchor_fraction) <= 1.0:
+            raise ValueError(
+                f"Invalid anchor_fraction {anchor_fraction}: "
+                f"expected None or a real number in [0, 1]"
+            )
+
+        return float(anchor_fraction)
+
+    # Méthode auxiliaire de décalage de l'index à une fraction de la période source
+    def _shift_index_to_anchor_fraction(self,
+                                        index: pd.DatetimeIndex,
+                                        source_freq: str,
+                                        target_freq: str,
+                                        anchor_fraction: float) -> Optional[pd.DatetimeIndex]:
+        """Move each timestamp to a fraction of its own source period.
+
+        Each timestamp is mapped to the source period that contains it, then
+        re-stamped at ``period_start + anchor_fraction * period_length``. The
+        length is the **calendar** length of that very period — 365 days in
+        2021, 366 in 2024, 28 days in February — not an average duration, so
+        the anchor of a short period is not pushed outside of it.
+
+        The result no longer depends on the position of the source index: a
+        yearly value stamped 2021-01-01 (``YS``) and one stamped 2021-12-31
+        (``YE``) both anchor at the same fraction of 2021.
+
+        Args:
+            index: Source datetime index, one entry per observed period.
+            source_freq: Source frequency, with optional position. Only its
+                base is used, so a multiplier (``'2M'``) is handled as its base.
+            target_freq: Target frequency, used to decide whether sub-daily
+                precision matters.
+            anchor_fraction: Validated fraction in ``[0, 1]``.
+
+        Returns:
+            Shifted DatetimeIndex, or None if the source base cannot be
+            expressed as a ``pd.Period`` — in which case the caller falls back
+            on the ``anchor_fraction=None`` behaviour.
+
+        Examples:
+            >>> converter = FrequencyConverter()
+            >>> yearly = pd.date_range('2021-12-31', periods=2, freq='YE')
+            >>> converter._shift_index_to_anchor_fraction(yearly, 'YE', 'QE', 0.5)
+            DatetimeIndex(['2021-07-02', '2022-07-02'], dtype='datetime64[ns]', freq=None)
+            >>> converter._shift_index_to_anchor_fraction(yearly, 'YE', 'QE', 0.0)
+            DatetimeIndex(['2021-01-01', '2022-01-01'], dtype='datetime64[ns]', freq=None)
+            >>> converter._shift_index_to_anchor_fraction(yearly, 'YE', 'QE', 1.0)
+            DatetimeIndex(['2021-12-31', '2022-12-31'], dtype='datetime64[ns]', freq=None)
+        """
+        # Normalisation de la base source (sans position S/E ni multiplicateur)
+        source_base = normalize_frequency(source_freq, return_format='base')
+
+        # Périodes source réelles, avec repli quand la base n'est pas convertible
+        # en Period (fréquences irrégulières ou multiples non supportés)
+        try:
+            periods = index.to_period(source_base)
+            starts = periods.start_time
+            ends = periods.end_time
+        except (ValueError, AttributeError):
+            return None
+
+        # Durée calendaire pleine de chaque période : end_time est la dernière
+        # nanoseconde de la période, d'où le +1 ns. La longueur pleine est de
+        # surcroît exactement représentable en float64, ce que n'est pas
+        # (end_time - start_time) pour une période annuelle
+        lengths = (ends - starts) + pd.Timedelta(1, unit='ns')
+        shifted = pd.DatetimeIndex(starts + anchor_fraction * lengths)
+
+        # Bornage à la fin de période : sans lui, anchor_fraction=1.0 tomberait
+        # sur le début de la période suivante
+        shifted = pd.DatetimeIndex(np.minimum(shifted.values, ends.values))
+
+        # Ramené à minuit tant que la grille cible n'est pas infra-journalière :
+        # une cible horaire perdrait sinon toute la position intra-journalière
+        target_base = normalize_frequency(target_freq, return_format='base')
+        if not is_higher_frequency(target_base, 'D'):
+            shifted = shifted.normalize()
+
+        return shifted
 
     # Méthode auxiliaire de résolution de la valeur par défaut de limit
     def _resolve_interpolation_limit(self,
