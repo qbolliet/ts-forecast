@@ -1,7 +1,17 @@
 # Baseline test failures for tests/frequency/
 # Date: 2026-09-01
-# Commit: 49c3a6e (branche qb-mixed-frequencies) + correctif B26
-# Result: 5 failed, 501 passed (506 tests collectés)
+# Commit: 49c3a6e (branche qb-mixed-frequencies) + correctifs B26 et B26-bis
+# Result: 5 failed, 505 passed (510 tests collectés)
+#
+# Relevé du 2026-09-01 (B26-bis, `source_freq` explicite sur le chemin
+# d'agrégation et `_observed_series` migré sur la détection modale du paquet) :
+# la LISTE des échecs de référence est INCHANGÉE. Le nombre de tests passants
+# passe de 501 à 505, du fait des 4 tests ajoutés (2 dans
+# test_frequency_aligner.py, 2 dans test_converter_subperiods.py). Aucun test
+# existant n'a changé de valeur ; un seul a été RENOMMÉ à assertions
+# constantes : test_aggregate_sparse_irregular_column_falls_back_to_index est
+# devenu test_aggregate_sparse_column_masks_only_incomplete_periods (le repli
+# sur la fréquence de l'index que son nom décrivait n'existe plus).
 #
 # Relevé du 2026-09-01 (correctif B26, décompte calendaire des sous-périodes sur
 # le chemin `full_periods_only` de FrequencyConverter.aggregate_to_lower_frequency) :

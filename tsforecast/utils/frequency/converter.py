@@ -295,6 +295,7 @@ class FrequencyConverter(TemporalConverter):
 
             # Détermination de la direction de conversion
             if is_higher_frequency(target_freq_base, source_freq_base):
+                # Upsampling
                 return self._upsample(
                     data=data,
                     target_freq=target_freq_with_position,
@@ -305,11 +306,13 @@ class FrequencyConverter(TemporalConverter):
                     source_freq=source_freq_with_position,
                 )
             else:
+                # Downsampling
                 return self._downsample(
                     data=data,
                     target_freq=target_freq_with_position,
                     method=method,
-                    full_periods_only=full_periods_only
+                    full_periods_only=full_periods_only,
+                    source_freq=source_freq_with_position
                 )
 
         # Cas 2: Traitement des DataFrames
@@ -436,7 +439,8 @@ class FrequencyConverter(TemporalConverter):
                                    data: Union[pd.Series, pd.DataFrame],
                                    target_freq: str,
                                    method: AggregationMethod = 'mean',
-                                   full_periods_only: bool = False) -> Union[pd.Series, pd.DataFrame]:
+                                   full_periods_only: bool = False,
+                                   source_freq: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
         """Aggregate data to a lower frequency using resample.
 
         Args:
@@ -463,6 +467,14 @@ class FrequencyConverter(TemporalConverter):
                 valid months out of 3 will produce NaN. Ignored for
                 ``method='all'``/``'any'``, which already encode their own
                 (boolean, not NaN) coverage semantics.
+            source_freq: Source frequency of the data, used to size the
+                expected sub-period count. If None, it is inferred from the
+                index. Provide it explicitly when the index frequency differs
+                from the variable's own frequency (e.g. a quarterly variable
+                carried on a monthly index, or a monthly one carried on a
+                daily grid), which is also the case where inference from the
+                index is both wrong and silent. Used by
+                ``full_periods_only`` and by ``method='all'``.
 
         Returns:
             Aggregated time series data
@@ -529,7 +541,9 @@ class FrequencyConverter(TemporalConverter):
             # jamais être retenue, même si les valeurs présentes sont toutes
             # vraies : ce garde-fou est intrinsèque à 'all', indépendant de
             # full_periods_only
-            result = self._require_full_subperiod_coverage(data, target_freq, resampled, result)
+            result = self._require_full_subperiod_coverage(
+                data, target_freq, resampled, result, source_freq=source_freq
+            )
         elif method == 'any':
             # Vrai ssi au moins une valeur présente l'est ; une période sans
             # aucune observation est explicitement fausse (déjà le
@@ -545,7 +559,7 @@ class FrequencyConverter(TemporalConverter):
             try:
                 # Nombre attendu de sous-périodes, période cible par période cible
                 expected_counts = self._expected_subperiod_counts(
-                    data, target_freq, result.index
+                    data, target_freq, result.index, source_freq=source_freq
                 )
             except (ValueError, KeyError):
                 expected_counts = None
@@ -568,28 +582,34 @@ class FrequencyConverter(TemporalConverter):
         data: Union[pd.Series, pd.DataFrame],
         target_freq: str,
         target_index: pd.DatetimeIndex,
+        source_freq: Optional[str] = None,
     ) -> Optional[pd.Series]:
         """Count the source sub-periods expected in each target period.
 
         Single entry point of both coverage guards (``full_periods_only`` and
-        ``method='all'``): the source frequency is detected on ``data``'s
-        index, then the count is delegated to
-        :meth:`count_subperiods_per_period`, which counts calendar period by
-        calendar period (February holds 28 or 29 daily sub-periods, a quarter
-        90 to 92, a leap year 366) and falls back on a constant ratio only
-        when the frequency bases cannot be expressed as pandas Periods.
+        ``method='all'``): the source frequency is taken from ``source_freq``
+        when the caller knows it, detected on ``data``'s index otherwise, then
+        the count is delegated to :meth:`count_subperiods_per_period`, which
+        counts calendar period by calendar period (February holds 28 or 29
+        daily sub-periods, a quarter 90 to 92, a leap year 366) and falls back
+        on a constant ratio only when the frequency bases cannot be expressed
+        as pandas Periods.
 
         Args:
             data: Original data being aggregated, whose index carries the
-                source frequency.
+                source frequency when ``source_freq`` is not supplied.
             target_freq: Target frequency offset string (position and anchor
                 allowed, they are stripped before counting).
             target_index: Index of the aggregated result, one entry per
                 target period.
+            source_freq: Source frequency supplied by the caller. If None, it
+                is detected on ``data.index`` — which is only correct when the
+                index grid and the variable's own frequency coincide.
 
         Returns:
             Series of expected sub-period counts aligned on ``target_index``,
-            or None when the source frequency cannot be detected.
+            or None when the source frequency is neither supplied nor
+            detectable.
 
         Raises:
             ValueError: If either frequency cannot be normalized (callers
@@ -604,9 +624,10 @@ class FrequencyConverter(TemporalConverter):
             >>> counts.tolist()
             [31.0, 28.0, 31.0]
         """
-        # Détection de la fréquence source : sans elle, aucun nombre de
-        # sous-périodes attendu n'est définissable
-        source_freq = detect_index_frequency(index=data.index, return_format='full')
+        # Fréquence source de l'appelant, sinon détectée sur l'index : sans
+        # elle, aucun nombre de sous-périodes attendu n'est définissable
+        if source_freq is None:
+            source_freq = detect_index_frequency(index=data.index, return_format='full')
         if not source_freq:
             return None
 
@@ -629,6 +650,7 @@ class FrequencyConverter(TemporalConverter):
         target_freq: str,
         resampled: Any,
         result: Union[pd.Series, pd.DataFrame],
+        source_freq: Optional[str] = None,
     ) -> Union[pd.Series, pd.DataFrame]:
         """Force False on target periods not fully covered by source sub-periods.
 
@@ -655,16 +677,20 @@ class FrequencyConverter(TemporalConverter):
             resampled: The pandas Resampler used to produce ``result``.
             result: Boolean result of the ``'all'`` aggregation, indexed on
                 the target frequency.
+            source_freq: Source frequency supplied by the caller, forwarded to
+                :meth:`_expected_subperiod_counts`. If None, it is detected on
+                ``data``'s index.
 
         Returns:
             ``result`` with any partially covered period forced to False,
             compared element by element (column by column for a DataFrame).
-            Unchanged if the source frequency cannot be detected.
+            Unchanged if the source frequency is neither supplied nor
+            detectable.
         """
         # Décompte attendu, période cible par période cible : sans fréquence
         # source détectable, aucun garde-fou de couverture n'est applicable
         expected_counts = self._expected_subperiod_counts(
-            data, target_freq, result.index
+            data, target_freq, result.index, source_freq=source_freq
         )
         if expected_counts is None:
             return result
@@ -1308,11 +1334,12 @@ class FrequencyConverter(TemporalConverter):
                     source_freq=source_freq
                 )
             else:
-                # Downsampling
+                # Downsampling (la fréquence source du groupe est déjà détectée)
                 converted = self._downsample(
                     data=subset, target_freq=target_freq,
                     method=conv_method,
-                    full_periods_only=full_periods_only
+                    full_periods_only=full_periods_only,
+                    source_freq=source_freq
                 )
 
             # Stockage des colonnes converties
@@ -1471,7 +1498,8 @@ class FrequencyConverter(TemporalConverter):
                 data: Union[pd.Series, pd.DataFrame],
                 target_freq: Union[FrequencyType, UserFrequencyType],
                 method: str,
-                full_periods_only: bool = False) -> Union[pd.Series, pd.DataFrame]:
+                full_periods_only: bool = False,
+                source_freq: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
         """Perform downsampling using resample and aggregation.
 
         Args:
@@ -1479,6 +1507,9 @@ class FrequencyConverter(TemporalConverter):
             target_freq: Target frequency (pandas format)
             method: Aggregation method
             full_periods_only: If True, incomplete periods produce NaN
+            source_freq: Source frequency already detected by the caller
+                (avoids a second detection, which can be wrong when the index
+                grid is finer than the variable's own frequency)
 
         Returns:
             Downsampled data
@@ -1486,7 +1517,8 @@ class FrequencyConverter(TemporalConverter):
         # Délégation directe pour les données sans panel
         if not is_panel_data(data):
             return self.aggregate_to_lower_frequency(
-                data, target_freq, method, full_periods_only
+                data, target_freq, method, full_periods_only,
+                source_freq=source_freq
             )
 
         # Données de panel : application par entité via groupby
@@ -1494,7 +1526,8 @@ class FrequencyConverter(TemporalConverter):
         return data.groupby(level=panel_levels, group_keys=False).apply(
             lambda x: self.aggregate_to_lower_frequency(
                 x.droplevel(panel_levels),
-                target_freq, method, full_periods_only
+                target_freq, method, full_periods_only,
+                source_freq=source_freq
             )
         )
 

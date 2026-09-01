@@ -8,6 +8,12 @@ HighFrequencyImputer :
   couvrant les périodes sources complètes des observations extrêmes) ;
 - convert_to_target oriente chaque clé vers l'agrégation ou l'interpolation
   selon la fréquence source observée de la variable.
+
+La fréquence source d'une variable est détectée sur ses valeurs observées puis
+TRANSMISE au convertisseur (`aggregate_to_lower_frequency(..., source_freq=)`),
+au lieu d'être redevinée à partir de la forme des données. La détection étant
+modale, un trou isolé ne coûte que sa propre période cible : il ne fait plus
+retomber la variable entière sur la fréquence de l'index.
 """
 import numpy as np
 import pandas as pd
@@ -119,8 +125,14 @@ class TestAggregateToTarget:
         assert result['gdp'].notna().sum() == 2
         pd.testing.assert_index_equal(result.index, df.index)
 
-    def test_aggregate_sparse_irregular_column_falls_back_to_index(self, aligner):
-        """Observations irrégulières : repli sur la fréquence de l'index sans erreur."""
+    def test_aggregate_sparse_column_masks_only_incomplete_periods(self, aligner):
+        """Colonne trouée : seules les périodes réellement amputées sont masquées.
+
+        Il n'y a plus de repli sur la fréquence de l'index : la fréquence de la
+        variable est détectée modalement sur ses observations puis transmise au
+        convertisseur. Les valeurs attendues sont inchangées — c'est le
+        mécanisme qui change, pas le contrat.
+        """
         dates = pd.date_range('2020-01-01', periods=12, freq='MS')
         values = np.arange(12, dtype=float)
         values[[2, 7]] = np.nan
@@ -135,6 +147,46 @@ class TestAggregateToTarget:
         assert np.isnan(result.loc[pd.Timestamp('2020-07-01'), 'x'])
         assert result.loc[pd.Timestamp('2020-04-01'), 'x'] == 12.0
         assert result.loc[pd.Timestamp('2020-10-01'), 'x'] == 30.0
+
+    def test_aggregate_sparse_column_with_one_hole_keeps_other_years(self, aligner):
+        """Un mois manquant ne coûte que son année, pas les huit autres.
+
+        Une variable mensuelle portée par une grille journalière et amputée
+        d'un seul mois : la fréquence de la variable reste détectée comme
+        mensuelle (détection modale), donc chaque année attend 12 mois. Seule
+        l'année trouée est écartée. Auparavant, `inferred_freq` rendait None
+        dès le premier trou, la fréquence source retombait sur celle de
+        l'index ('D'), chaque année attendait 365 sous-périodes et le jeu
+        entier disparaissait.
+        """
+        # Grille journalière de 9 années pleines, agrégée en mensuel
+        daily_index = pd.date_range('2015-01-01', '2023-12-31', freq='D')
+        daily = pd.Series(1.0, index=daily_index)
+        monthly = aligner._aggregate_series(daily, 'ME')
+        assert monthly.notna().sum() == 108
+
+        # Retrait d'un unique mois observé (mai 2018)
+        holed = monthly.copy()
+        holed.loc['2018-05-31'] = np.nan
+
+        result = aligner._aggregate_series(holed, 'YE')
+
+        # 8 années sur 9, et l'année écartée est bien celle du trou
+        assert result.notna().sum() == 8
+        kept_years = sorted(set(result.dropna().index.year))
+        assert kept_years == [2015, 2016, 2017, 2019, 2020, 2021, 2022, 2023]
+
+    def test_observed_series_tolerates_an_isolated_hole(self, aligner):
+        """Un trou isolé ne disqualifie plus les observations de la variable."""
+        dates = pd.date_range('2020-01-31', periods=24, freq='ME')
+        series = pd.Series(1.0, index=dates)
+        series.loc['2021-03-31'] = np.nan
+
+        observed = aligner._observed_series(series)
+
+        # Les observations sont retenues (23 valeurs), et non la série complète
+        assert len(observed) == 23
+        assert observed.notna().all()
 
     def test_skips_missing_column(self, aligner, monthly_df):
         """Une clé absente du DataFrame est ignorée, pas une erreur."""

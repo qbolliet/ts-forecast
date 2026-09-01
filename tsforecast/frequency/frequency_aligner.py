@@ -16,9 +16,11 @@ the generic :class:`tsforecast.utils.frequency.converter.FrequencyConverter`
   and last observations: a quarterly series in position start ending on
   2023-07-01 densifies up to 2023-09-01, the last month its Q3 observation
   covers.
-- Source frequencies are detected from each variable's observed values (not
-  from the index), so a quarterly variable carried on a monthly index is
-  handled as quarterly.
+- Source frequencies are detected from each variable's own observed values
+  (not from the index) and passed explicitly to the converter, so a quarterly
+  variable carried on a monthly index is handled as quarterly. Detection is
+  modal, so an isolated missing observation does not disqualify the variable's
+  frequency.
 """
 # Modules de base
 from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
@@ -41,7 +43,12 @@ from ..panel.utils import (
 )
 
 # Détection de la fréquence de l'index
-from ..utils.frequency.utils import detect_frequency, detect_dataset_frequency, target_offset_for_index
+from ..utils.frequency.utils import (
+    detect_frequency,
+    detect_dataset_frequency,
+    detect_index_frequency,
+    target_offset_for_index,
+)
 
 
 # Classe d'alignement des fréquences de jeu de données avec des fréquences cibles
@@ -155,38 +162,42 @@ class FrequencyAligner:
     # Méthode auxiliaire de sélection de la série à resampler
     @staticmethod
     def _observed_series(series: pd.Series) -> pd.Series:
-        """Select the series to resample: observed values when they are regular.
+        """Select the series to interpolate: observed values when they are regular.
 
-        Aggregating the observed values only (instead of the full series) lets
-        the converter detect the variable's own frequency rather than the
-        index frequency — decisive for sparse variables (a quarterly variable
-        carried on a monthly index would otherwise be seen as a monthly series
-        with two thirds of its observations missing, and every period would be
-        masked by ``full_periods_only``).
+        Feeding :meth:`_interpolate_series` the observed values only (instead
+        of the full series) makes the interpolation run on the variable's own
+        grid: a quarterly variable carried on a monthly index is interpolated
+        from its four yearly observations, not from a monthly series two
+        thirds of whose points are missing.
 
-        The restriction is applied only when the observed dates form a regular
-        index: otherwise the variable has holes of its own and the index
-        frequency remains the only usable reference.
+        The restriction is applied only when the observed dates carry a
+        detectable frequency. Detection goes through
+        :func:`detect_index_frequency`, whose modal heuristics tolerate an
+        isolated missing observation, where ``inferred_freq`` alone is strict
+        and rejects the whole variable over a single hole. When no frequency
+        can be detected at all, the variable has no grid of its own and the
+        full series remains the only usable reference.
 
         Args:
-            series: Column to aggregate, possibly sparse.
+            series: Column to interpolate, possibly sparse.
 
         Returns:
-            The observed values when they are regularly spaced, the original
-            series otherwise.
+            The observed values when their dates carry a detectable frequency,
+            the original series otherwise.
         """
         # Restriction aux valeurs observées
         observed = series.dropna()
         # Série vide : aucune restriction possible
         if observed.empty:
             return series
-        # Vérification de la régularité de l'index des observations
+        # Détection de la fréquence des dates observées (modale, donc tolérante
+        # à un trou isolé, contrairement à "inferred_freq")
         try:
-            inferred = observed.index.inferred_freq
+            inferred = detect_index_frequency(observed.index, return_format='with_position')
         except (ValueError, TypeError):
             inferred = None
-        # Repli sur la série complète si les observations sont irrégulières
-        return observed if inferred is not None else series
+        # Repli sur la série complète si aucune fréquence n'est détectable
+        return observed if inferred else series
 
     # Méthode auxiliaire d'agrégation d'une série indexée par dates
     def _aggregate_series(
@@ -209,17 +220,25 @@ class FrequencyAligner:
         # retombent sur des dates présentes dans l'index d'origine
         target_offset = target_offset_for_index(series.index, target_frequency)
 
-        # Restriction aux valeurs observées : la fréquence source doit être
-        # celle de la variable, pas celle de l'index
-        observed = self._observed_series(series)
-
         # Série sans aucune observation : rien à agréger
-        if observed.dropna().empty:
+        if series.dropna().empty:
             return None
+
+        # Fréquence propre de la variable, détectée sur ses valeurs observées
+        # puis TRANSMISE au convertisseur : celui-ci n'a plus à la déduire de
+        # la forme des données qu'on lui tend, l'index restant à la fréquence
+        # de la grille (journalière pour une variable mensuelle creuse)
+        try:
+            source_freq = detect_frequency(series, return_format='full')
+        except (ValueError, TypeError):
+            # Moins de deux observations : repli sur la détection interne du
+            # convertisseur, à l'identique du comportement antérieur
+            source_freq = None
 
         # Agrégation à la fréquence cible
         aggregated = self._freq_converter.aggregate_to_lower_frequency(
-            observed, target_offset, method='sum', full_periods_only=True
+            series, target_offset, method='sum',
+            full_periods_only=True, source_freq=source_freq
         )
 
         # Reproduction de l'index d'origine
@@ -293,11 +312,13 @@ class FrequencyAligner:
         so explicitly.
 
         The source frequency is detected from each variable's **observed
-        values**, not from the index: only the non-NaN observations are
-        resampled, so a quarterly variable carried on a monthly index is
-        aggregated as quarterly (4 sub-periods per year) instead of being
-        treated as an incomplete monthly series (which would mask every
-        period as NaN under ``full_periods_only``).
+        values**, not from the index, and passed explicitly to the converter:
+        a quarterly variable carried on a monthly index is aggregated as
+        quarterly (4 sub-periods per year) instead of being treated as an
+        incomplete monthly series (which would mask every period as NaN under
+        ``full_periods_only``). Detection being modal, an isolated missing
+        observation costs only its own target period, never the whole
+        variable.
 
         Args:
             df: Input DataFrame.

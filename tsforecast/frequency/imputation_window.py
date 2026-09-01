@@ -1218,9 +1218,11 @@ class ImputationWindowCalculator:
 
         # Une période cible est dans la fenêtre ssi TOUTES ses sous-périodes le
         # sont : délégué entièrement à 'all', qui encode déjà à la fois la
-        # comparaison booléenne et le garde-fou de couverture intégrale
+        # comparaison booléenne et le garde-fou de couverture intégrale.
+        # La fréquence source est transmise plutôt que redevinée : elle est
+        # déjà un paramètre de cette méthode, et fait autorité sur l'index
         return self._converter.aggregate_to_lower_frequency(
-            mask, target_offset, method='all'
+            mask, target_offset, method='all', source_freq=source_freq
         ).astype(bool)
 
     # Méthode d'extraction de la couverture associée à chaque série

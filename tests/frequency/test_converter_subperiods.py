@@ -230,6 +230,52 @@ class TestFullPeriodsOnlyUsesCalendarCounts:
         # Un seul mois perdu sur les 108 : le correctif ne relâche pas le contrôle
         assert result.notna().sum() == 107
 
+    def test_explicit_source_freq_overrides_index_detection(self, converter):
+        """`source_freq` prime sur la fréquence de l'index, et la corrige.
+
+        Une variable mensuelle creuse portée par une grille journalière : la
+        détection sur l'index annonce 'D' et exige 365 sous-périodes par
+        année, ce qui écarte tout. La fréquence transmise par l'appelant rend
+        le décompte correct (12 mois par année).
+        """
+        daily_index = pd.date_range(_DAILY_START, _DAILY_END, freq='D')
+        monthly_on_daily = pd.Series(np.nan, index=daily_index)
+        month_ends = daily_index[daily_index.is_month_end]
+        monthly_on_daily.loc[month_ends] = 1.0
+
+        # Sans source_freq : l'index (journalier) fait foi, tout est écarté
+        detected = converter.aggregate_to_lower_frequency(
+            monthly_on_daily, 'YE', 'sum', full_periods_only=True
+        )
+        assert detected.notna().sum() == 0
+
+        # Avec source_freq : 12 mois attendus par année, les 9 sont retenues
+        supplied = converter.aggregate_to_lower_frequency(
+            monthly_on_daily, 'YE', 'sum', full_periods_only=True, source_freq='ME'
+        )
+        assert supplied.notna().sum() == 9
+        assert supplied.tolist() == [12.0] * 9
+
+    def test_explicit_source_freq_honoured_by_all_path(self, converter):
+        """`method='all'` consomme aussi la fréquence source transmise.
+
+        Le garde-fou de couverture intégrale de 'all' partage le décompte du
+        chemin somme : la fréquence déclarée par l'appelant doit donc y primer
+        sur celle de l'index, exactement comme pour `full_periods_only`.
+        """
+        mask = pd.Series(True, index=pd.date_range('2023-01-31', periods=12, freq='ME'))
+
+        # Sans source_freq : l'index mensuel fait foi, 12 mois attendus et présents
+        assert converter.aggregate_to_lower_frequency(
+            mask, 'YE', method='all'
+        ).tolist() == [True]
+
+        # Avec source_freq : la déclaration de l'appelant prime, 365 jours
+        # attendus pour 12 observations, la période n'est pas couverte
+        assert converter.aggregate_to_lower_frequency(
+            mask, 'YE', method='all', source_freq='D'
+        ).tolist() == [False]
+
     def test_daily_covariate_reaches_training_set(self):
         """Une covariable journalière atteint le jeu d'entraînement de l'imputeur.
 
