@@ -294,7 +294,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             :meth:`_build_stage_frame`, so that fit and transform work on
             identical stage frames for identical data.
         imputation_provenance_fit_: DataFrame tracking origin of each value
-            ('original', 'model_on_true', 'model_on_mixed', 'aggregated',
+            ('original', 'model_on_true', 'model_on_imputed', 'aggregated',
             'disaggregated') as seen at the end of ``fit``. Single-level
             matrix, indexed like the fit input: ``fit`` never builds a
             multi-frequency output, so there is no per-level breakdown to
@@ -2779,7 +2779,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             disaggregated_mask: Boolean mask, aligned on ``predictions.index``,
                 of the cells produced by a rescaled disaggregation.
             trained_on_imputed: Whether the model saw imputed values at fit
-                time (drives MODEL_ON_MIXED vs MODEL_ON_TRUE).
+                time (drives the covariate taint: MODEL_ON_IMPUTED vs
+                MODEL_ON_TRUE).
             extra_frames: Further frames to apply the very same blank-then-
                 rewrite to, without touching the provenance — the covariate
                 mirror of :meth:`_transform` when it is a distinct object
@@ -2903,8 +2904,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
            cascade;
         2. ``trained_on_imputed`` is False, always. An interpolation
            consumed no covariate at all, so marking its cells
-           MODEL_ON_MIXED because the estimator that just failed had seen
-           imputed values would be a provenance lie;
+           MODEL_ON_IMPUTED because the estimator that just failed had
+           seen imputed values would be a provenance lie;
         3. nothing is written to ``imputed_store`` nor to the mirror — the
            fit produces no value for a fallback, so the following steps
            must not see any.
@@ -3056,7 +3057,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 cells and of the anchor dates, built by
                 :meth:`_write_stage_values`.
             trained_on_imputed: Whether the model saw imputed values at fit
-                time (drives MODEL_ON_MIXED vs MODEL_ON_TRUE).
+                time (drives the covariate taint: MODEL_ON_IMPUTED vs
+                MODEL_ON_TRUE).
         """
         # Cellules recalées sur un total observé
         disaggregated_index = index[disaggregated_mask.to_numpy()]
@@ -3066,8 +3068,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Cellules restantes : prédictions du modèle sans contrainte additive
         model_index = index[~disaggregated_mask.to_numpy()]
         if len(model_index) > 0:
+            # La sémantique d'origine de hfi
+            # (trained_on_imputed = train_on_partial_coverage and bool(imputed_store))
+            # porte sur les COVARIABLES, pas sur la cible : y_train de hfi n'est
+            # jamais alimenté par des valeurs de modèle
             tracker.mark_model_imputed(
-                column, model_index, trained_on_imputed=trained_on_imputed
+                column,
+                model_index,
+                covariate_taint='imputed' if trained_on_imputed else 'none',
             )
 
     # Méthode auxiliaire de calcul de la progression de fréquence de chaque variable

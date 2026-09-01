@@ -1,13 +1,15 @@
 """Provenance tracking for imputed values in time series data.
 
 This module provides the ImputationProvenanceTracker class to track the origin
-of each value in an imputed dataset, distinguishing between original values,
-values imputed by models trained on true data, values imputed by models trained
-on mixed data, and aggregated values.
+of each value in an imputed dataset, distinguishing original values, exact
+aggregations, disaggregated sub-periods, interpolated values, and the five
+levels of model-imputation taint (see ProvenanceType). It also exposes the
+taint primitives shared by the imputation plan: the CellOrigin / Taint aliases
+and the functions resolve_model_provenance, origin_to_taint and max_origin.
 """
 # Importation des modules
 # Modules de base
-from typing import Dict, List, Literal, Optional, Union, Tuple
+from typing import Dict, Iterable, List, Literal, Optional, Union, Tuple
 from enum import Enum
 # Manipulation de données
 import numpy as np
@@ -21,25 +23,53 @@ from ..panel.utils import detect_panel_structure
 class ProvenanceType(str, Enum):
     """Enumeration of value provenance types.
 
-    Attributes:
-        ORIGINAL: Value was present in the original dataset.
-        MODEL_ON_TRUE: Value was imputed by a model trained exclusively on true values.
-        MODEL_ON_MIXED: Value was imputed by a model trained on a mix of true and imputed values.
-        AGGREGATED: Value was obtained by aggregating true values from higher frequency.
-        DISAGGREGATED: Value is one sub-period of a lower-frequency observation that
-            was spread over its whole period. Two cases carry that mark: a cell
-            whose period was rescaled so that its sub-periods sum back to the
-            observed total (``enforce_period_totals=True``), and an ANCHOR DATE
+    Non-model cells:
+        ORIGINAL: Value was present in the input dataset.
+        AGGREGATED: Value is the exact additive aggregation of finer true
+            values over a complete period. An exact additive aggregation of
+            observations is not an approximation, so it never taints a model
+            that only ever saw such values.
+        DISAGGREGATED: Value describes a POSITION as much as an origin: it
+            sits in a sub-period of an observed lower-frequency total spread
+            over its whole period. Two cases carry the mark: a cell whose
+            period was rescaled so its sub-periods sum back to the observed
+            total (``enforce_period_totals=True``), and an ANCHOR DATE
             re-expressed at the stage frequency — the row that held the
-            low-frequency observation itself — whether or not the rescaling ran.
-            Only the first case guarantees the additive identity; the second only
-            states that the cell sits where a real observation was.
+            low-frequency observation itself — whether or not the rescaling
+            ran. It is therefore AMBIGUOUS as to confidence level: only the
+            first case guarantees the additive identity, the second only
+            states that the cell sits where a real observation was. Because
+            of that ambiguity DISAGGREGATED must NEVER be used as a filter to
+            compose ``y_train`` nor to compute a taint level — those read the
+            origin store, never the provenance matrix.
+        INTERPOLATED: Value was produced by interpolating observations
+            (strategy ``'interpolate'``, a covariate fallback, or the
+            interpolation fallback of a model whose fit failed).
+
+    Model cells, by worst ingredient the model saw and on which side:
+        MODEL_ON_TRUE: The model only saw true values, AGGREGATED ones
+            included (an exact additive aggregation of observations is not an
+            approximation).
+        MODEL_ON_INTERPOLATED: At least one interpolated value among the
+            covariates OR in ``y_train``, and no model value anywhere.
+        MODEL_ON_IMPUTED: At least one covariate imputed by a model (possibly
+            alongside true, aggregated and interpolated values); ``y_train``
+            stays clean.
+        MODEL_ON_IMPUTED_TARGET: ``y_train`` holds at least one model-imputed
+            value (``impute_intermediate_frequencies=True``); the covariates
+            do not.
+        MODEL_ON_IMPUTED_BOTH: Both sides carry a model-imputed value.
     """
     ORIGINAL = 'original'
-    MODEL_ON_TRUE = 'model_on_true'
-    MODEL_ON_MIXED = 'model_on_mixed'
     AGGREGATED = 'aggregated'
     DISAGGREGATED = 'disaggregated'
+    INTERPOLATED = 'interpolated'
+
+    MODEL_ON_TRUE = 'model_on_true'
+    MODEL_ON_INTERPOLATED = 'model_on_interpolated'
+    MODEL_ON_IMPUTED = 'model_on_imputed'
+    MODEL_ON_IMPUTED_TARGET = 'model_on_imputed_target'
+    MODEL_ON_IMPUTED_BOTH = 'model_on_imputed_both'
 
     # Représentation lisible (utilisée par l'affichage tabulaire de pandas,
     # p.ex. provenance_matrix_) : 'original' plutôt que 'ProvenanceType.ORIGINAL'.
@@ -50,13 +80,106 @@ class ProvenanceType(str, Enum):
         return self.value
 
 
+# Alias de typage : origine d'une cellule et niveau de souillure associé.
+# L'ordre des littéraux de CellOrigin est l'ordre CROISSANT de souillure,
+# exploité par "max_origin".
+CellOrigin = Literal['observed', 'interpolated', 'model']
+Taint = Literal['none', 'interpolated', 'imputed']
+
+# Ordre de souillure des origines, pour "max_origin"
+_ORIGIN_ORDER: Dict[str, int] = {'observed': 0, 'interpolated': 1, 'model': 2}
+
+# Correspondance origine -> souillure, pour "origin_to_taint"
+_ORIGIN_TO_TAINT: Dict[str, Taint] = {
+    'observed': 'none',
+    'interpolated': 'interpolated',
+    'model': 'imputed',
+}
+
+
+# Résolution de la provenance émise par une étape à modèle
+def resolve_model_provenance(covariate_taint: Taint, target_taint: Taint) -> ProvenanceType:
+    """Map the two training taints of a step onto its emitted MODEL_* provenance.
+
+    Args:
+        covariate_taint: Worst taint among the covariates the model read
+            (``'none'``, ``'interpolated'`` or ``'imputed'``).
+        target_taint: Worst taint among the ``y_train`` rows the model fit on.
+
+    Returns:
+        The MODEL_* provenance every cell produced by the step's model carries.
+
+    Examples:
+        >>> resolve_model_provenance('none', 'none')
+        <ProvenanceType.MODEL_ON_TRUE: 'model_on_true'>
+        >>> resolve_model_provenance('imputed', 'imputed')
+        <ProvenanceType.MODEL_ON_IMPUTED_BOTH: 'model_on_imputed_both'>
+    """
+    if target_taint == 'imputed':
+        return (ProvenanceType.MODEL_ON_IMPUTED_BOTH if covariate_taint == 'imputed'
+                else ProvenanceType.MODEL_ON_IMPUTED_TARGET)
+    if covariate_taint == 'imputed':
+        return ProvenanceType.MODEL_ON_IMPUTED
+    if 'interpolated' in (covariate_taint, target_taint):
+        return ProvenanceType.MODEL_ON_INTERPOLATED
+    return ProvenanceType.MODEL_ON_TRUE
+
+
+# Correspondance origine d'une cellule -> niveau de souillure
+def origin_to_taint(origin: CellOrigin) -> Taint:
+    """Map a cell origin onto its taint level.
+
+    Args:
+        origin: One of ``'observed'``, ``'interpolated'``, ``'model'``.
+
+    Returns:
+        ``'none'`` for ``'observed'``, ``'interpolated'`` for
+        ``'interpolated'``, ``'imputed'`` for ``'model'``.
+
+    Raises:
+        KeyError: If ``origin`` is not a valid CellOrigin.
+
+    Examples:
+        >>> origin_to_taint('observed')
+        'none'
+        >>> origin_to_taint('model')
+        'imputed'
+    """
+    return _ORIGIN_TO_TAINT[origin]
+
+
+# Maximum d'un itérable d'origines sur l'ordre croissant de souillure
+def max_origin(origins: Iterable[CellOrigin]) -> CellOrigin:
+    """Return the most-tainted origin over the increasing taint order.
+
+    Args:
+        origins: Iterable of cell origins.
+
+    Returns:
+        The origin with the highest taint level; ``'observed'`` on an empty
+        iterable (the least-tainted origin, neutral for the operation).
+
+    Examples:
+        >>> max_origin(['observed', 'model', 'interpolated'])
+        'model'
+        >>> max_origin([])
+        'observed'
+    """
+    best: CellOrigin = 'observed'
+    for origin in origins:
+        if _ORIGIN_ORDER[origin] > _ORIGIN_ORDER[best]:
+            best = origin
+    return best
+
+
 # Classe de suivi de la provenance des valeurs imputées
 class ImputationProvenanceTracker:
     """Track the provenance (origin) of each value in an imputed dataset.
 
     This class maintains a matrix parallel to the data that records how each
-    value was obtained: from the original data, through model-based imputation
-    (on true or mixed data), or through aggregation.
+    value was obtained: from the input data, through exact aggregation or
+    disaggregation, through interpolation, or through model-based imputation
+    at one of the five taint levels (see ProvenanceType).
 
     Attributes:
         provenance_matrix_: DataFrame with same shape as data, containing ProvenanceType values.
@@ -173,14 +296,15 @@ class ImputationProvenanceTracker:
                 - Single timestamp
                 - DatetimeIndex for multiple values
                 - Slice for a range of values
-            provenance: Type of provenance to assign (MODEL_ON_TRUE, MODEL_ON_MIXED, AGGREGATED).
+            provenance: Type of provenance to assign (e.g. MODEL_ON_TRUE,
+                INTERPOLATED, AGGREGATED, MODEL_ON_IMPUTED).
 
         Raises:
             ValueError: If provenance matrix not initialized or invalid inputs.
 
         Examples:
             >>> tracker.mark_imputed('var1', pd.Timestamp('2023-03-31'), ProvenanceType.MODEL_ON_TRUE)
-            >>> tracker.mark_imputed('var1', data.index[2:5], ProvenanceType.MODEL_ON_MIXED)
+            >>> tracker.mark_imputed('var1', data.index[2:5], ProvenanceType.MODEL_ON_IMPUTED)
         """
         # Validation de l'initialisation
         if self.provenance_matrix_ is None:
@@ -226,9 +350,13 @@ class ImputationProvenanceTracker:
 
         Convenience method for marking values as DISAGGREGATED, i.e. the
         sub-periods of a lower-frequency observation spread over its whole
-        period and rescaled so that they sum back to the observed total.
-        Unlike MODEL_ON_*, this provenance carries a guarantee: the block of
-        sub-periods it belongs to adds up exactly to a true observation.
+        period. The mark is AMBIGUOUS as to confidence level: it describes a
+        POSITION (``sub-period of an observed total``) as much as an origin.
+        Only a rescaled period guarantees the additive identity; an anchor
+        date re-expressed at the stage frequency merely sits where a real
+        observation was. It must therefore NEVER be used as a filter to
+        compose ``y_train`` nor to compute a taint level — those read the
+        origin store, never the provenance matrix.
 
         Args:
             column: Name of the column containing the disaggregated values.
@@ -239,30 +367,57 @@ class ImputationProvenanceTracker:
         """
         self.mark_imputed(column, index, ProvenanceType.DISAGGREGATED)
 
+    # Méthode de marquage de certaines observations comme "interpolées"
+    def mark_interpolated(
+        self,
+        column: str,
+        index: Union[pd.Timestamp, pd.DatetimeIndex, slice]
+    ) -> None:
+        """Mark specific values as obtained through interpolation.
+
+        Convenience method for marking values as INTERPOLATED, i.e. produced
+        by interpolating observations — strategy ``'interpolate'``, a
+        covariate fallback, or the interpolation fallback of a model whose
+        fit failed. Symmetric of :meth:`mark_aggregated` and
+        :meth:`mark_disaggregated`.
+
+        Args:
+            column: Name of the column containing the interpolated values.
+            index: Index location(s) of the interpolated value(s).
+
+        Examples:
+            >>> tracker.mark_interpolated('quarterly_var', monthly_index)
+        """
+        self.mark_imputed(column, index, ProvenanceType.INTERPOLATED)
+
     # Méthode de marquage de certaines observations comme imputées par un modèle
     def mark_model_imputed(
         self,
         column: str,
         index: Union[pd.Timestamp, pd.DatetimeIndex, slice],
-        trained_on_imputed: bool = False
+        covariate_taint: Taint = 'none',
+        target_taint: Taint = 'none',
     ) -> None:
-        """Mark specific values as imputed by a model.
+        """Mark specific values as imputed by a model, at the given taint levels.
 
-        Convenience method for marking model-imputed values.
+        The emitted provenance is resolved from the two training taints of
+        the step by :func:`resolve_model_provenance`.
 
         Args:
             column: Name of the column containing the imputed values.
             index: Index location(s) of the imputed value(s).
-            trained_on_imputed: If True, model was trained on mixed data (MODEL_ON_MIXED).
-                If False, model was trained only on true values (MODEL_ON_TRUE).
+            covariate_taint: Worst taint among the covariates the model read
+                (``'none'``, ``'interpolated'`` or ``'imputed'``).
+            target_taint: Worst taint among the ``y_train`` rows the model
+                fit on.
 
         Examples:
-            >>> # Model trained only on original values
-            >>> tracker.mark_model_imputed('var1', dates[2], trained_on_imputed=False)
-            >>> # Model trained on mix of original and imputed values
-            >>> tracker.mark_model_imputed('var1', dates[5], trained_on_imputed=True)
+            >>> # Model that only saw true values
+            >>> tracker.mark_model_imputed('var1', dates[2])
+            >>> # Model that read a model-imputed covariate
+            >>> tracker.mark_model_imputed('var1', dates[5], covariate_taint='imputed')
         """
-        provenance = ProvenanceType.MODEL_ON_MIXED if trained_on_imputed else ProvenanceType.MODEL_ON_TRUE
+        provenance = resolve_model_provenance(covariate_taint, target_taint)
         self.mark_imputed(column, index, provenance)
 
     # Méthode de remise à zéro de la provenance de certaines observations
@@ -354,7 +509,7 @@ class ImputationProvenanceTracker:
 
         Examples:
             >>> # Get mask of all model-imputed values
-            >>> mask = tracker.get_mask([ProvenanceType.MODEL_ON_TRUE, ProvenanceType.MODEL_ON_MIXED])
+            >>> mask = tracker.get_mask([ProvenanceType.MODEL_ON_TRUE, ProvenanceType.MODEL_ON_IMPUTED])
             >>> # Get mask of original values for specific column
             >>> mask = tracker.get_mask(ProvenanceType.ORIGINAL, column='var1')
         """

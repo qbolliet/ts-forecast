@@ -1,7 +1,24 @@
 # Baseline test failures for tests/frequency/
 # Date: 2026-09-01
-# Commit: 49c3a6e (branche qb-mixed-frequencies) + correctifs B26 et B26-bis
-# Result: 5 failed, 505 passed (510 tests collectés)
+# Commit: 0cbfa60 (branche qb-mixed-frequencies) + lot L2 (provenance §6)
+# Result: 5 failed, 520 passed (525 tests collectés)
+#
+# Relevé du 2026-09-01 (lot L2 hfi2, [SPEC] §6 : échelle de souillure à cinq
+# libellés MODEL_*, suppression de MODEL_ON_MIXED, primitives de souillure
+# partagées resolve_model_provenance / origin_to_taint / max_origin) :
+# la LISTE des échecs de référence est INCHANGÉE — `check_regressions.py`
+# rapporte « Aucun » nouvel échec et « Aucun » échec résolu. Le nombre de
+# tests passants passe de 505 à 520 (+15) : +8 du nouveau fichier
+# test_provenance.py, le reste de tests ajoutés entre-temps hors de ce lot.
+# Un test existant a été RENOMMÉ à intention conservée :
+# test_transform_fallback_marks_trained_on_imputed_false est devenu
+# test_transform_fallback_cells_carry_no_covariate_taint (le nom citait un
+# `trained_on_imputed` de signature disparue ; l'assertion vérifie toujours
+# qu'une cellule de repli de hfi n'hérite pas de la souillure du modèle en
+# échec, MODEL_ON_MIXED -> MODEL_ON_IMPUTED dans l'assertion). Les autres
+# occurrences de MODEL_ON_MIXED dans test_high_frequency_imputer.py sont
+# devenues MODEL_ON_IMPUTED (mise à jour mécanique, aucune valeur de test
+# changée : les cas testés ne produisent que MODEL_ON_TRUE).
 #
 # Relevé du 2026-09-01 (B26-bis, `source_freq` explicite sur le chemin
 # d'agrégation et `_observed_series` migré sur la détection modale du paquet) :

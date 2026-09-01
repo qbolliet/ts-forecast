@@ -69,8 +69,10 @@ class ImputationStep:
             uses the ratio with :attr:`scale_factor` to bring a reused
             model's output back to the current stage's scale.
         trained_on_imputed: Whether imputed values entered the training set,
-            which drives the MODEL_ON_MIXED vs MODEL_ON_TRUE provenance of
-            the cells this step produces.
+            which drives the covariate taint (MODEL_ON_IMPUTED vs
+            MODEL_ON_TRUE) of the cells this step produces. Kept as a bool on
+            this dataclass for as long as ``HighFrequencyImputer`` exists;
+            its call sites pass ``covariate_taint='imputed'`` when it is set.
         source_frequency: Normalized detected frequency of the variable for
             this group. Defines the periods the predictions are
             disaggregated over when ``enforce_period_totals`` is on.

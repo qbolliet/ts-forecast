@@ -1357,7 +1357,7 @@ class TestNoImputationWithoutCovariates:
         imputed_types = {
             ProvenanceType.DISAGGREGATED,
             ProvenanceType.MODEL_ON_TRUE,
-            ProvenanceType.MODEL_ON_MIXED,
+            ProvenanceType.MODEL_ON_IMPUTED,
         }
         assert not provenance.isin(list(imputed_types)).any()
 
@@ -1388,7 +1388,7 @@ class TestNoImputationWithoutCovariates:
         imputed_types = {
             ProvenanceType.DISAGGREGATED,
             ProvenanceType.MODEL_ON_TRUE,
-            ProvenanceType.MODEL_ON_MIXED,
+            ProvenanceType.MODEL_ON_IMPUTED,
         }
         for column in ('pib_trimestriel', 'balance_commerciale_annuelle'):
             # Aucune valeur PRODUITE hors fenêtre. Depuis §3.14 le vidage du
@@ -2011,7 +2011,7 @@ class TestPeriodTotalsEnforced:
         assert unobserved
         assert all(
             provenance.loc[date] in (
-                ProvenanceType.MODEL_ON_TRUE, ProvenanceType.MODEL_ON_MIXED
+                ProvenanceType.MODEL_ON_TRUE, ProvenanceType.MODEL_ON_IMPUTED
             )
             for date in unobserved
         )
@@ -2344,14 +2344,16 @@ class TestFallbackAdditiveCoherence:
             failing_result['variable_trimestrielle'],
         )
 
-    def test_transform_fallback_marks_trained_on_imputed_false(
+    def test_transform_fallback_cells_carry_no_covariate_taint(
         self, mixed_freq_timeseries
     ):
-        """Aucune cellule produite par un repli ne porte MODEL_ON_MIXED.
+        """Une cellule de repli de `hfi` n'hérite pas de la souillure du modèle.
 
-        Une interpolation n'a consommé aucune covariable : la marquer
-        MODEL_ON_MIXED parce que le modèle qui vient d'échouer avait vu des
-        valeurs imputées serait un mensonge de provenance.
+        Comportement ACTUEL de `hfi` (hfi2 fera porter INTERPOLATED à ces
+        cellules) : une interpolation de repli n'a consommé aucune covariable,
+        donc la marquer MODEL_ON_IMPUTED parce que le modèle qui vient
+        d'échouer avait vu des valeurs imputées serait un mensonge de
+        provenance. Ces cellules restent MODEL_ON_TRUE ou DISAGGREGATED.
         """
         imputer = HighFrequencyImputer(
             target_frequency='M',
@@ -2386,8 +2388,8 @@ class TestFallbackAdditiveCoherence:
         checked = 0
         for column in ('pib_trimestriel', 'balance_commerciale_annuelle'):
             marks = provenance[column].dropna()
-            assert not (marks == ProvenanceType.MODEL_ON_MIXED).any(), (
-                f"'{column}' porte des cellules MODEL_ON_MIXED produites "
+            assert not (marks == ProvenanceType.MODEL_ON_IMPUTED).any(), (
+                f"'{column}' porte des cellules MODEL_ON_IMPUTED produites "
                 f"par un repli"
             )
             checked += 1
@@ -2526,7 +2528,7 @@ class TestDisaggregationProvenance:
         present = set(imputer.imputation_provenance_.stack().unique())
         assert ProvenanceType.ORIGINAL in present
         assert ProvenanceType.DISAGGREGATED in present
-        assert present & {ProvenanceType.MODEL_ON_TRUE, ProvenanceType.MODEL_ON_MIXED}
+        assert present & {ProvenanceType.MODEL_ON_TRUE, ProvenanceType.MODEL_ON_IMPUTED}
 
         # Les ancres désagrégées ne sont plus déclarées originales. Seules les
         # ancres SITUÉES DANS LA FENÊTRE sont concernées : depuis §2.7 aucune
