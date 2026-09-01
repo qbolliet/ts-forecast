@@ -1,14 +1,23 @@
 # Baseline test failures for tests/frequency/
-# Date: 2026-08-26
-# Commit: 2e1a0af (branche qb-mixed-frequencies, arbre propre)
-# Result: 5 failed, 486 passed (491 tests collectés)
+# Date: 2026-09-01
+# Commit: 49c3a6e (branche qb-mixed-frequencies) + correctif B26
+# Result: 5 failed, 501 passed (506 tests collectés)
+#
+# Relevé du 2026-09-01 (correctif B26, décompte calendaire des sous-périodes sur
+# le chemin `full_periods_only` de FrequencyConverter.aggregate_to_lower_frequency) :
+# la LISTE des échecs de référence est INCHANGÉE — le correctif n'en résout ni
+# n'en ajoute aucun. Seul le nombre de tests passants bouge, de 496 à 501, du
+# fait des 5 tests ajoutés dans test_converter_subperiods.py
+# (TestFullPeriodsOnlyUsesCalendarCounts). Aucun test existant n'a changé de
+# valeur : aucun n'assertait une valeur sur une période auparavant écartée.
 #
 # Relevé du 2026-08-26 (prompt 22) : la référence du 2026-08-24 (6 failed,
 # 382 passed au commit 187c2d2) était périmée sur un point :
 # test_impute_delayed_values_true_emits_deprecation_warning passe désormais et
 # a été retiré de la liste ci-dessous. Le triage historique qui suit est
 # conservé tel quel : il documente les 32 échecs d'origine, pas la référence
-# courante.
+# courante. Le relevé du 2026-08-26 comptait 486 tests passants, contre 496
+# avant l'ajout des 5 tests du correctif B26.
 #
 # Historique : la référence initiale (32 failed, 362 passed, même commit)
 # a été triée ci-dessous. Les 20 échecs de la famille "test obsolète" ont été

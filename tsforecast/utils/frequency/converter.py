@@ -454,11 +454,15 @@ class FrequencyConverter(TemporalConverter):
                 False, matching ``pandas.Series.any()`` on an empty input).
             full_periods_only: If True, periods where the number of non-NaN
                 observations is strictly less than the expected sub-period count
-                (derived from the frequency conversion factor) are set to NaN.
-                For example, when aggregating monthly data to quarterly, a
-                quarter with only 2 valid months out of 3 will produce NaN.
-                Ignored for ``method='all'``/``'any'``, which already encode
-                their own (boolean, not NaN) coverage semantics.
+                are set to NaN. That count is calendar-based and computed
+                period by period (see
+                :meth:`count_subperiods_per_period`): a daily-to-monthly
+                aggregation expects 28 days in February (29 in a leap year)
+                and 31 in January, not a constant ~30. For example, when
+                aggregating monthly data to quarterly, a quarter with only 2
+                valid months out of 3 will produce NaN. Ignored for
+                ``method='all'``/``'any'``, which already encode their own
+                (boolean, not NaN) coverage semantics.
 
         Returns:
             Aggregated time series data
@@ -538,30 +542,85 @@ class FrequencyConverter(TemporalConverter):
         # Masquage des périodes incomplètes si demandé ('all'/'any' encodent déjà
         # leur propre sémantique de couverture, en booléen plutôt qu'en NaN)
         if full_periods_only and method not in ('all', 'any'):
-            # Détection de la fréquence source
-            source_freq = detect_index_frequency(index=data.index, return_format='full')
+            try:
+                # Nombre attendu de sous-périodes, période cible par période cible
+                expected_counts = self._expected_subperiod_counts(
+                    data, target_freq, result.index
+                )
+            except (ValueError, KeyError):
+                expected_counts = None
 
-            if source_freq:
-                # Extraction des fréquences de base pour le calcul du facteur
-                target_base = normalize_frequency(target_freq, return_format='base')
-                source_base = normalize_frequency(source_freq, return_format='base')
-
-                try:
-                    # Nombre attendu de sous-périodes par période cible
-                    expected_count = int(round(
-                        get_duration_conversion_factor(
-                            target_base, source_base
-                        )
-                    ))
-                except (ValueError, KeyError):
-                    expected_count = None
-
-                # Application du masque si le facteur a pu être calculé
-                if expected_count is not None:
-                    valid_counts = resampled.count()
-                    result = result.where(valid_counts >= expected_count)
+            # Masquage des périodes incomplètes si le décompte a pu être établi
+            if expected_counts is not None:
+                valid_counts = resampled.count()
+                # Comparaison élément par élément, colonne par colonne pour un DataFrame
+                if isinstance(result, pd.DataFrame):
+                    fully_covered = valid_counts.ge(expected_counts, axis=0)
+                else:
+                    fully_covered = valid_counts >= expected_counts
+                result = result.where(fully_covered)
 
         return result
+
+    # Méthode auxiliaire de décompte des sous-périodes attendues par période cible
+    def _expected_subperiod_counts(
+        self,
+        data: Union[pd.Series, pd.DataFrame],
+        target_freq: str,
+        target_index: pd.DatetimeIndex,
+    ) -> Optional[pd.Series]:
+        """Count the source sub-periods expected in each target period.
+
+        Single entry point of both coverage guards (``full_periods_only`` and
+        ``method='all'``): the source frequency is detected on ``data``'s
+        index, then the count is delegated to
+        :meth:`count_subperiods_per_period`, which counts calendar period by
+        calendar period (February holds 28 or 29 daily sub-periods, a quarter
+        90 to 92, a leap year 366) and falls back on a constant ratio only
+        when the frequency bases cannot be expressed as pandas Periods.
+
+        Args:
+            data: Original data being aggregated, whose index carries the
+                source frequency.
+            target_freq: Target frequency offset string (position and anchor
+                allowed, they are stripped before counting).
+            target_index: Index of the aggregated result, one entry per
+                target period.
+
+        Returns:
+            Series of expected sub-period counts aligned on ``target_index``,
+            or None when the source frequency cannot be detected.
+
+        Raises:
+            ValueError: If either frequency cannot be normalized (callers
+                that tolerate this case catch it themselves).
+
+        Examples:
+            >>> import pandas as pd
+            >>> converter = FrequencyConverter()
+            >>> daily = pd.Series(1.0, index=pd.date_range('2023-01-01', '2023-03-31'))
+            >>> monthly_index = pd.date_range('2023-01-31', periods=3, freq='ME')
+            >>> counts = converter._expected_subperiod_counts(daily, 'ME', monthly_index)
+            >>> counts.tolist()
+            [31.0, 28.0, 31.0]
+        """
+        # Détection de la fréquence source : sans elle, aucun nombre de
+        # sous-périodes attendu n'est définissable
+        source_freq = detect_index_frequency(index=data.index, return_format='full')
+        if not source_freq:
+            return None
+
+        # Extraction des fréquences de base (sans position ni ancrage)
+        source_base = normalize_frequency(source_freq, return_format='base')
+        target_base = normalize_frequency(target_freq, return_format='base')
+
+        # Décompte calendaire, période cible par période cible (délégué à
+        # count_subperiods_per_period, seul dépositaire de cette logique et de
+        # son repli sur le facteur constant)
+        return pd.Series(
+            self.count_subperiods_per_period(target_index, target_base, source_base),
+            index=target_index,
+        )
 
     # Méthode auxiliaire de garde-fou de couverture intégrale pour la méthode 'all'
     def _require_full_subperiod_coverage(
@@ -581,6 +640,14 @@ class FrequencyConverter(TemporalConverter):
         months) would evaluate to True whenever the present values happen to
         all be True — exactly the failure mode this method exists to close.
 
+        The expected count is calendar-based and established period by
+        period through :meth:`_expected_subperiod_counts`: February expects
+        28 daily sub-periods (29 in a leap year), January 31, a quarter 90 to
+        92 and a leap year 366. Only when the frequency bases cannot be
+        expressed as pandas Periods does the count fall back on a constant
+        ratio, identical for every period — a fallback handled inside
+        :meth:`count_subperiods_per_period` itself.
+
         Args:
             data: Original data being aggregated, used to detect the source
                 frequency.
@@ -590,26 +657,18 @@ class FrequencyConverter(TemporalConverter):
                 the target frequency.
 
         Returns:
-            ``result`` with any partially covered period forced to False.
+            ``result`` with any partially covered period forced to False,
+            compared element by element (column by column for a DataFrame).
             Unchanged if the source frequency cannot be detected.
         """
-        # Détection de la fréquence source : sans elle, impossible de connaître
-        # le nombre de sous-périodes attendu par période cible
-        source_freq = detect_index_frequency(index=data.index, return_format='full')
-        if not source_freq:
+        # Décompte attendu, période cible par période cible : sans fréquence
+        # source détectable, aucun garde-fou de couverture n'est applicable
+        expected_counts = self._expected_subperiod_counts(
+            data, target_freq, result.index
+        )
+        if expected_counts is None:
             return result
 
-        # Extraction des fréquences de base (sans position ni ancrage)
-        source_base = normalize_frequency(source_freq, return_format='base')
-        target_base = normalize_frequency(target_freq, return_format='base')
-
-        # Comptage exact du nombre de sous-périodes attendu, période cible par
-        # période cible (délégué à count_subperiods_per_period, seul dépositaire
-        # de cette logique)
-        expected_counts = pd.Series(
-            self.count_subperiods_per_period(result.index, target_base, source_base),
-            index=result.index,
-        )
         valid_counts = resampled.count()
 
         # Comparaison élément par élément, colonne par colonne pour un DataFrame
