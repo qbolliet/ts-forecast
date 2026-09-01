@@ -328,7 +328,7 @@ CIBLE — tsforecast/utils/frequency/converter.py, méthode `interpolate_to_high
    moyenne : réutiliser les primitives existantes du fichier (`pd.Period`,
    `count_subperiods_per_period`, `_reanchor_index_to_target`) plutôt que d'introduire un
    décompte maison. Si la base de fréquence source ne s'exprime pas en `pd.Period`, retomber
-   proprement sur le comportement `anchor_fraction=None` et le documenter.
+   proprement sur le comportement `anchor_fraction=None` et le documenter ou si cela te semble préférable utiliser le facteur de conversion non calendaire.
 
 4) `limit_direction` reste résolu par `_resolve_limit_direction` avec ses défauts actuels. Aux
    bords de série, au-delà de la dernière ancre décalée, c'est lui qui décide — le documenter
