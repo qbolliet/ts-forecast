@@ -7,7 +7,7 @@ of the frequency pair — never of the data. This module holds that arithmetic.
 
 Three divisors are governed by the scaling mode :
 
-1. :meth:`StageScaler.covariate_divisors` — the covariates, at fit and at predict;
+1. :meth:`StageScaler.feature_divisors` — the covariates, at fit and at predict;
 2. :meth:`StageScaler.target_divisor` — ``y``, scalar or per-row ;
 3. :meth:`StageScaler.fit_scale_factor` — the factor baked into the model, which
    never moves once the stage is fitted.
@@ -42,7 +42,7 @@ from ..panel.utils import normalize_entity_key
 
 # Modalités de mise à l'échelle
 ScaleMode = Literal['constant', 'calendar']
-# Réglage effectif d'une colonne : "False" ne vaut que pour les FEATURES /!\ A revoir
+# Réglage effectif d'une colonne, cible comprise : "False" ne divise rien
 ScaleSetting = Union[Literal[False], ScaleMode]
 # Forme complète du paramètre public
 ScaleFeatures = Union[Literal[False], ScaleMode, Dict[str, ScaleSetting]]
@@ -104,8 +104,7 @@ def _entities_of(index: pd.Index) -> Optional[List[EntityKey]]:
     # Absence de niveau d'entité : série temporelle
     if not isinstance(index, pd.MultiIndex):
         return None
-    return [normalize_entity_key(key) for key in index.droplevel(-1)]
-    # /!\ Est ce que return index.droplevel(-1).map(normalize_entity_key).tolist() n'est pas une meilleure expression ?
+    return index.droplevel(-1).map(normalize_entity_key).tolist()
 
 
 # Classe de mise à l'échelle des données
@@ -131,10 +130,14 @@ class StageScaler(BaseEstimator, TransformerMixin):
       29, Q1 90 or 91). It produces one divisor per row. Suited to raw,
       non-adjusted variables, where the number of days carries signal.
 
-    ``False`` puts no divisor on the features. It never spares the target:
-    ``y`` is always scaled, whatever ``scale_features`` says. That is the
-    contract of the current ``False`` of ``HighFrequencyImputer``, not an
-    oversight — the model must predict at the stage scale in every mode.
+    ``False`` puts no divisor at all — neither on the covariates it covers,
+    nor on ``y`` when it is the setting resolved for the imputed column. The
+    target is a column like any other here: an index, a rate or an already
+    comparable variable has no reason to be divided, and the caller is trusted
+    to keep both sides of one model at a coherent scale. Under ``False`` the
+    model therefore predicts at the scale of the variable itself, and the
+    frozen :attr:`fit_scale_factor_` is ``1.0``, so the scale carry-over of
+    the predictions is a no-op.
 
     The transformer protocol is a thin layer over the divisor methods:
     :meth:`fit` stores the three divisors of one stage, :meth:`transform`
@@ -171,9 +174,6 @@ class StageScaler(BaseEstimator, TransformerMixin):
         column_frequencies: Detected frequency of each covariate, for
             :meth:`fit`: ``{column: frequency}``, each frequency being a
             string or an entity -> frequency mapping.
-        target_column: Name of the imputed column, for :meth:`fit`. It selects
-            the mode applied to ``y``: the mode of the imputed column, never
-            that of the features.
         default_divisor: Divisor retained for a covariate whose frequency
             cannot be compared. ``HighFrequencyImputer`` passes the stage
             scale factor there.
@@ -202,7 +202,6 @@ class StageScaler(BaseEstimator, TransformerMixin):
         source_freq: Optional[str] = None,
         pred_freq: Optional[FrequencyBinding] = None,
         column_frequencies: Optional[Mapping[str, FrequencyBinding]] = None,
-        target_column: Optional[str] = None,
         default_divisor: float = 1.0,
         converter: Optional[FrequencyConverter] = None,
     ) -> None:
@@ -213,7 +212,6 @@ class StageScaler(BaseEstimator, TransformerMixin):
             source_freq: Detected frequency of the imputed variable.
             pred_freq: Prediction frequency of the stage.
             column_frequencies: Detected frequency of each covariate.
-            target_column: Name of the imputed column.
             default_divisor: Divisor for covariates of unknown frequency.
             converter: Frequency converter to use.
 
@@ -230,7 +228,6 @@ class StageScaler(BaseEstimator, TransformerMixin):
         self.source_freq = source_freq
         self.pred_freq = pred_freq
         self.column_frequencies = column_frequencies
-        self.target_column = target_column
         self.default_divisor = default_divisor
         self.converter = converter
 
@@ -350,22 +347,6 @@ class StageScaler(BaseEstimator, TransformerMixin):
         # Défaut du document
         return DEFAULT_SCALE_MODE
 
-    # Méthode auxiliaire de résolution de la modalité de la CIBLE
-    def _target_mode(self, column: Optional[str]) -> ScaleMode:
-        """Return the mode applied to ``y`` for one imputed column.
-
-        ``False`` disables the divisor of the FEATURES only: the target is
-        always scaled, so ``False`` reads as ``'constant'`` here.
-
-        Args:
-            column: Name of the imputed column.
-
-        Returns:
-            ``'constant'`` or ``'calendar'``.
-        """
-        mode = self.resolve_mode(column)
-        return DEFAULT_SCALE_MODE if mode is False else mode
-
     # -------------------------------------------------------------------------
     # Arithmétique des diviseurs
     # -------------------------------------------------------------------------
@@ -468,7 +449,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
         return sorted(entities) if entities else [()]
 
     # Méthode auxiliaire du diviseur d'une covariable
-    def _covariate_divisor(
+    def _feature_divisor(
         self,
         f_col: Optional[str],
         f_var: str,
@@ -530,7 +511,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
             return default
 
     # Méthode de calcul des diviseurs de toutes les covariables
-    def covariate_divisors(
+    def feature_divisors(
         self,
         columns: Sequence[str],
         column_frequencies: Mapping[str, FrequencyBinding],
@@ -572,7 +553,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
 
         Examples:
             >>> scaler = StageScaler()
-            >>> divisors = scaler.covariate_divisors(
+            >>> divisors = scaler.feature_divisors(
             ...     columns=['m1', 'a2'],
             ...     column_frequencies={'m1': 'M', 'a2': 'Y'},
             ...     source_freq='Y',
@@ -598,7 +579,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
         for entity in entities:
             pf = self._freq_for(pred_freq, entity)
             per_entity[entity] = {
-                column: self._covariate_divisor(
+                column: self._feature_divisor(
                     self._freq_for(column_frequencies.get(column), entity),
                     source_freq,
                     pf,
@@ -624,6 +605,64 @@ class StageScaler(BaseEstimator, TransformerMixin):
             )
         return self._spread(per_entity, columns, index)
 
+    # Méthode auxiliaire de ventilation d'un diviseur unique sur la grille
+    def _spread_one(
+        self,
+        per_entity: Mapping[EntityKey, Divisor],
+        index: pd.Index,
+    ) -> pd.Series:
+        """Spread one per-entity divisor over a stage grid.
+
+        The single place where an entity becomes a row selection: the feature
+        divisors and the target divisor both go through it, so a divisor
+        landing on the wrong rows is a defect of one routine, not of two.
+
+        Args:
+            per_entity: Divisor of one quantity, per entity. A single key
+                covers the whole grid, whatever that key is.
+            index: Stage grid.
+
+        Returns:
+            Unnamed ``Series`` of floats aligned on ``index``.
+
+        Raises:
+            ValueError: If several entities are involved and ``index`` carries
+                no entity level.
+        """
+        # Entité unique : le diviseur couvre toute la grille, sans ventilation
+        if len(per_entity) == 1:
+            divisor = next(iter(per_entity.values()))
+            if np.isscalar(divisor):
+                return pd.Series(float(divisor), index=index, dtype=float)
+            return pd.Series(np.asarray(divisor, dtype=float), index=index)
+
+        # Cohérence de l'index avec la ventilation demandée
+        entities_per_row = _entities_of(index)
+        if entities_per_row is None:
+            raise ValueError(
+                "Entity-wise divisors require a MultiIndex (entity..., date), "
+                f"got a {type(index).__name__}"
+            )
+
+        # Initialisation de la Series résultat
+        result = pd.Series(np.nan, index=index, dtype=float)
+        # Ventilation par entité : comparaison terme à terme plutôt que par un
+        # Index de tuples, que pandas diffuserait élément par élément
+        for entity, divisor in per_entity.items():
+            # Masque correspondant à l'entité
+            mask = np.array(
+                [row_entity == entity for row_entity in entities_per_row],
+                dtype=bool,
+            )
+            if not mask.any():
+                continue
+            result.loc[mask] = (
+                divisor
+                if np.isscalar(divisor)
+                else np.asarray(divisor, dtype=float)[mask]
+            )
+        return result
+
     # Méthode auxiliaire de ventilation des diviseurs sur la grille
     def _spread(
         self,
@@ -646,47 +685,20 @@ class StageScaler(BaseEstimator, TransformerMixin):
             ValueError: If several entities are involved and ``index`` carries
                 no entity level.
         """
-        # Extraction des entités
-        entities_per_row = _entities_of(index)
-        multi_entity = len(per_entity) > 1
-
-        # Cohérence de l'index avec la ventilation demandée
-        if multi_entity and entities_per_row is None:
-            raise ValueError(
-                "Entity-wise divisors require a MultiIndex (entity..., date), "
-                f"got a {type(index).__name__}"
-            )
-
         # Initialisation du DataFrame résultat
         result = pd.DataFrame(index=index, columns=list(columns), dtype=float)
-        # Population du DataFrame
-        # Parcours des colonnes
+        # Ventilation colonne par colonne, par la routine commune
         for column in columns:
-            # Entité unique : le diviseur couvre toute la grille
-            if not multi_entity:
-                divisor = next(iter(per_entity.values()))[column]
-                result[column] = (
-                    divisor if np.isscalar(divisor) else np.asarray(divisor, dtype=float)
-                )
-                continue
-
-            # Ventilation par entité : comparaison terme à terme plutôt que par
-            # un Index de tuples, que pandas diffuserait élément par élément
-            for entity, divisors in per_entity.items():
-                # Masque correspondant à l'entité
-                mask = np.array(
-                    [row_entity == entity for row_entity in entities_per_row],
-                    dtype=bool,
-                )
-                if not mask.any():
-                    continue
-                # Imputation du diviseur correspondant à la colonne pour cette entité
-                divisor = divisors[column]
-                result.loc[mask, column] = (
-                    divisor
-                    if np.isscalar(divisor)
-                    else np.asarray(divisor, dtype=float)[mask]
-                )
+            spread = self._spread_one(
+                {
+                    entity: divisors[column]
+                    for entity, divisors in per_entity.items()
+                },
+                index,
+            )
+            # Affectation positionnelle : un index dupliqué ne doit déclencher
+            # aucun réalignement
+            result[column] = spread.to_numpy()
         return result
 
     # Méthode auxiliaire du diviseur d'étape, scalaire ou ventilé par entité
@@ -730,15 +742,15 @@ class StageScaler(BaseEstimator, TransformerMixin):
                 f"the per-row divisors over, got frequencies {distinct}"
             )
         entities = self._binding_entities([pred_freq])
-        per_entity = {
-            entity: {
-                '_y': self._pair_divisor(
+        return self._spread_one(
+            {
+                entity: self._pair_divisor(
                     self._freq_for(pred_freq, entity), source_freq, mode, index
                 )
-            }
-            for entity in entities
-        }
-        return self._spread(per_entity, ['_y'], index)['_y'].rename(None)
+                for entity in entities
+            },
+            index,
+        )
 
     # Méthode du diviseur de la cible
     def target_divisor(
@@ -751,12 +763,24 @@ class StageScaler(BaseEstimator, TransformerMixin):
     ) -> Divisor:
         """Compute the divisor of ``y`` for one imputed column.
 
-        The mode applied is that of the imputed column, never that of the
-        features, and ``False`` reads as ``'constant'``: the target is always
-        scaled.
+        The mode applied is the one resolved for the imputed column, read like
+        that of any other column: ``False`` there leaves ``y`` untouched and
+        yields the divisor ``1.0``.
+
+        The arithmetic is different between the features and the target,
+        which is why this method is not a call to
+        :meth:`feature_divisors` on the imputed column. A covariate carried at
+        its own frequency is never re-aggregated and divides by ``1.0`` ;
+        the target, being PRODUCED on the stage grid, carries
+        ``pred_freq`` there and divides by the count of ``pred_freq``
+        sub-periods in one ``source_freq`` period. The two rules coincide only
+        when :meth:`feature_divisors` is handed ``pred_freq`` as the column's
+        frequency — and even then the failure modes differ: an incomparable
+        frequency falls back on ``default`` for a covariate, but must raise for
+        the target, whose scale silently governs what the model learns.
 
         When ``produced_freq`` is given, each row of ``y`` is divided by the
-        divisor of the frequency AT WHICH IT WAS PRODUCED (read from
+        divisor of the frequency at which it was produced (read from
         ``imputed_freq_store``), not by the stage scalar: a yearly variable
         already imputed at the quarterly stage carries quarters on those rows,
         and mixing them raw with its yearly anchors would teach the model a
@@ -797,7 +821,11 @@ class StageScaler(BaseEstimator, TransformerMixin):
             [10.0, 9.33, 10.0]
         """
         # Extraction du mode de mise à l'échelle de la cible
-        mode = self._target_mode(column)
+        mode = self.resolve_mode(column)
+
+        # Cible dispensée d'échelle : aucun diviseur, y compris par ligne
+        if mode is False:
+            return 1.0
 
         # Toutes les lignes produites à la fréquence de la variable : scalaire
         # d'étape, ou Series calendaire
@@ -851,7 +879,8 @@ class StageScaler(BaseEstimator, TransformerMixin):
         divisor describes one training set, this one describes the model.
 
         Under ``'calendar'`` the factor is a ``Series`` frozen on the fit
-        grid: a carry-over computed on another grid must realign it.
+        grid: a carry-over computed on another grid must realign it. Under
+        ``False`` it is ``1.0``, the target having been left at its own scale.
 
         Args:
             column: Name of the imputed column, for mode resolution.
@@ -870,9 +899,12 @@ class StageScaler(BaseEstimator, TransformerMixin):
             >>> StageScaler().fit_scale_factor('a1', source_freq='Y', pred_freq='M')
             12.0
         """
-        return self._stage_divisor(
-            source_freq, pred_freq, self._target_mode(column), index
-        )
+        # Cible dispensée d'échelle : rien n'est cuit dans le modèle
+        mode = self.resolve_mode(column)
+        if mode is False:
+            return 1.0
+
+        return self._stage_divisor(source_freq, pred_freq, mode, index)
 
     # -------------------------------------------------------------------------
     # Application et inversion de l'échelle
@@ -980,8 +1012,11 @@ class StageScaler(BaseEstimator, TransformerMixin):
         Args:
             X: Feature frame of the stage. Its columns select the covariates
                 and its index carries the grid the per-row divisors run on.
-            y: Target of the stage. Only its index is read, to carry the
-                per-row target divisor; defaults to the index of ``X``.
+            y: Target of the stage. Only its index and its name are read:
+                the index carries the per-row target divisor and defaults to
+                that of ``X``, the name designates the imputed column whose
+                mode applies to ``y``. An unnamed ``y`` falls back on the
+                global setting of ``scale_features``.
             produced_freq: Frequency at which each row of ``y`` was produced,
                 indexed like ``y``. None when every row carries the
                 variable's own frequency.
@@ -1000,7 +1035,6 @@ class StageScaler(BaseEstimator, TransformerMixin):
             ... )
             >>> scaler = StageScaler(
             ...     source_freq='Y', pred_freq='M', column_frequencies={'m1': 'M'},
-            ...     target_column='a1',
             ... ).fit(X)
             >>> scaler.fit_scale_factor_
             12.0
@@ -1023,19 +1057,22 @@ class StageScaler(BaseEstimator, TransformerMixin):
         frequencies = self.column_frequencies or {}
 
         # Diviseurs des covariables, sur la grille de l'étape
-        self.feature_divisors_ = self.covariate_divisors(
+        self.feature_divisors_ = self.feature_divisors(
             columns, frequencies, self.source_freq, self.pred_freq, index=X.index
         )
 
         # Grille de la cible : celle de y quand elle est fournie
         target_index = y.index if y is not None else X.index
 
+        # Colonne imputée : le nom porté par "y", seule source de ce nom
+        target_column = y.name if y is not None else None
+
         # Facteur cuit dans le modèle, puis diviseur effectif de y
         self.fit_scale_factor_ = self.fit_scale_factor(
-            self.target_column, self.source_freq, self.pred_freq, index=target_index
+            target_column, self.source_freq, self.pred_freq, index=target_index
         )
         self.target_divisor_ = self.target_divisor(
-            self.target_column,
+            target_column,
             self.source_freq,
             self.pred_freq,
             index=target_index,
@@ -1102,7 +1139,6 @@ class StageScaler(BaseEstimator, TransformerMixin):
             >>> X = pd.DataFrame({'m1': [1200.0]}, index=pd.to_datetime(['2021-12-31']))
             >>> scaler = StageScaler(
             ...     source_freq='Y', pred_freq='M', column_frequencies={'m1': 'M'},
-            ...     target_column='a1',
             ... ).fit(X)
             >>> scaler.transform(X)['m1'].tolist()
             [100.0]
@@ -1131,7 +1167,6 @@ class StageScaler(BaseEstimator, TransformerMixin):
             >>> X = pd.DataFrame({'m1': [1200.0]}, index=pd.to_datetime(['2021-12-31']))
             >>> scaler = StageScaler(
             ...     source_freq='Y', pred_freq='M', column_frequencies={'m1': 'M'},
-            ...     target_column='a1',
             ... ).fit(X)
             >>> scaler.inverse_transform(scaler.transform(X))['m1'].tolist()
             [1200.0]

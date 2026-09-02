@@ -31,7 +31,6 @@ def _make_scaler(**overrides) -> StageScaler:
         source_freq='Y',
         pred_freq='M',
         column_frequencies={'m1': 'M', 'q1': 'Q', 'a2': 'Y'},
-        target_column='a1',
     )
     params.update(overrides)
     return StageScaler(**params)
@@ -112,7 +111,7 @@ class TestRuleB25:
         scaler = StageScaler()
         # Covariable annuelle, variable trimestrielle, étape mensuelle :
         # Y n'est pas plus fine que Q, la colonne n'est jamais agrégée
-        divisors = scaler.covariate_divisors(
+        divisors = scaler.feature_divisors(
             columns=['a2'],
             column_frequencies={'a2': 'Y'},
             source_freq='Q',
@@ -125,7 +124,7 @@ class TestRuleB25:
         scaler = StageScaler()
         # Covariable journalière, variable annuelle, étape mensuelle :
         # f_stage = M, diviseur = factor(M, Y) = 12
-        divisors = scaler.covariate_divisors(
+        divisors = scaler.feature_divisors(
             columns=['d1'],
             column_frequencies={'d1': 'D'},
             source_freq='Y',
@@ -138,7 +137,7 @@ class TestRuleB25:
         scaler = StageScaler()
         # Covariable trimestrielle, variable annuelle, étape mensuelle :
         # Q n'est pas plus fine que M, donc f_stage = Q, diviseur = factor(Q, Y) = 4
-        divisors = scaler.covariate_divisors(
+        divisors = scaler.feature_divisors(
             columns=['q1'],
             column_frequencies={'q1': 'Q'},
             source_freq='Y',
@@ -149,7 +148,7 @@ class TestRuleB25:
     def test_unknown_column_frequency_falls_back_on_default(self):
         """Une colonne sans fréquence détectée retombe sur le diviseur par défaut."""
         scaler = StageScaler(default_divisor=12.0)
-        divisors = scaler.covariate_divisors(
+        divisors = scaler.feature_divisors(
             columns=['inconnue'],
             column_frequencies={},
             source_freq='Y',
@@ -256,7 +255,7 @@ class TestDictForm:
 
         # Une seule colonne en 'calendar' suffit à basculer le retour en DataFrame
         index = _monthly_grid()
-        divisors = scaler.covariate_divisors(
+        divisors = scaler.feature_divisors(
             columns=['m1', 'q1'],
             column_frequencies={'m1': 'M', 'q1': 'Q'},
             source_freq='Y',
@@ -302,14 +301,14 @@ class TestDictForm:
 
 
 class TestScaleFeaturesFalse:
-    """`False` ne dispense que les features : `y` est toujours mis à l'échelle."""
+    """`False` ne divise rien : ni les features, ni la cible."""
 
-    def test_scale_features_false_still_scales_y(self):
-        """Contrat repris de hfi, pas un oubli : la cible est toujours divisée."""
+    def test_scale_features_false_spares_y_too(self):
+        """La cible est une colonne comme une autre : `False` la laisse intacte."""
         scaler = _make_scaler(scale_features=False)
 
         # Aucun diviseur sur les features
-        divisors = scaler.covariate_divisors(
+        divisors = scaler.feature_divisors(
             columns=['m1', 'q1', 'd1'],
             column_frequencies={'m1': 'M', 'q1': 'Q', 'd1': 'D'},
             source_freq='Y',
@@ -317,15 +316,40 @@ class TestScaleFeaturesFalse:
         )
         assert divisors.tolist() == [1.0, 1.0, 1.0]
 
-        # La cible reste divisée, en modalité 'constant'
+        # La cible non plus n'est pas divisée, facteur cuit compris
         assert scaler.resolve_mode('a1') is False
-        assert scaler.target_divisor('a1', source_freq='Y', pred_freq='M') == 12.0
-        assert scaler.fit_scale_factor('a1', source_freq='Y', pred_freq='M') == 12.0
+        assert scaler.target_divisor('a1', source_freq='Y', pred_freq='M') == 1.0
+        assert scaler.fit_scale_factor('a1', source_freq='Y', pred_freq='M') == 1.0
+
+    def test_false_on_y_ignores_produced_frequencies(self):
+        """Même mêlée de fréquences de production, `False` ne divise aucune ligne."""
+        scaler = _make_scaler(scale_features=False)
+        index = pd.to_datetime(['2021-12-31', '2021-03-31'])
+        produced = pd.Series(['Y', 'Q'], index=index)
+
+        divisor = scaler.target_divisor(
+            'a1', source_freq='Y', pred_freq='M', produced_freq=produced
+        )
+        assert divisor == 1.0
+
+    def test_false_on_y_only_through_the_dict_form(self):
+        """Un dict peut dispenser la seule cible, les features restant divisées."""
+        scaler = _make_scaler(
+            scale_features={'a1': False, DEFAULT_SCALE_KEY: 'constant'}
+        )
+        divisors = scaler.feature_divisors(
+            columns=['m1'],
+            column_frequencies={'m1': 'M'},
+            source_freq='Y',
+            pred_freq='M',
+        )
+        assert divisors['m1'] == 12.0
+        assert scaler.target_divisor('a1', source_freq='Y', pred_freq='M') == 1.0
 
     def test_false_in_dict_form_only_spares_that_feature(self):
         """`False` dans un dict ne neutralise que la colonne visée."""
         scaler = _make_scaler(scale_features={'m1': False, DEFAULT_SCALE_KEY: 'constant'})
-        divisors = scaler.covariate_divisors(
+        divisors = scaler.feature_divisors(
             columns=['m1', 'q1'],
             column_frequencies={'m1': 'M', 'q1': 'Q'},
             source_freq='Y',
@@ -410,7 +434,7 @@ class TestPanel:
     def test_homogeneous_panel_keeps_the_compact_form(self):
         """Quand les entités s'accordent, le retour reste une Series par colonne."""
         scaler = StageScaler()
-        divisors = scaler.covariate_divisors(
+        divisors = scaler.feature_divisors(
             columns=['ip'],
             column_frequencies={'ip': {('FR',): 'M', ('DE',): 'M'}},
             source_freq='Y',
@@ -424,7 +448,7 @@ class TestPanel:
         """Une colonne mensuelle pour FR et trimestrielle pour DE se ventile par ligne."""
         scaler = StageScaler()
         index = self._panel_index()
-        divisors = scaler.covariate_divisors(
+        divisors = scaler.feature_divisors(
             columns=['ip'],
             column_frequencies={'ip': {('FR',): 'M', ('DE',): 'Q'}},
             source_freq='Y',
@@ -508,6 +532,34 @@ class TestSklearnProtocol:
         assert scaler.target_divisor_.tolist() == [12.0, 3.0, 3.0]
         assert scaler.transform(y).iloc[1] == pytest.approx(9.33, abs=1e-2)
 
+    def test_fit_reads_the_imputed_column_from_the_name_of_y(self):
+        """Le nom de `y` désigne à lui seul la colonne imputée."""
+        X = self._stage_frame()
+        # Cible nommée 'a1', dispensée d'échelle par le dict
+        y = pd.Series([120.0, 132.0, 150.0], index=X.index, name='a1')
+        scaler = _make_scaler(
+            scale_features={'a1': False, DEFAULT_SCALE_KEY: 'constant'},
+            column_frequencies={'m1': 'M', 'q1': 'Q'},
+        ).fit(X, y)
+
+        # La cible garde son échelle, les covariables sont bien divisées
+        assert scaler.target_divisor_ == 1.0
+        assert scaler.fit_scale_factor_ == 1.0
+        assert scaler.feature_divisors_.to_dict() == {'m1': 12.0, 'q1': 4.0}
+        pd.testing.assert_series_equal(scaler.transform(y), y)
+
+    def test_unnamed_y_falls_back_on_the_global_setting(self):
+        """Une cible anonyme ne résout aucune entrée : c'est le réglage global."""
+        X = self._stage_frame()
+        y = pd.Series([120.0, 132.0, 150.0], index=X.index)
+        # L'entrée 'a1' ne peut plus être atteinte, seul '__default__' compte
+        scaler = _make_scaler(
+            scale_features={'a1': False, DEFAULT_SCALE_KEY: 'constant'},
+            column_frequencies={'m1': 'M', 'q1': 'Q'},
+        ).fit(X, y)
+
+        assert scaler.target_divisor_ == 12.0
+
     def test_transform_before_fit_raises(self):
         """transform hors ajustement lève NotFittedError."""
         with pytest.raises(NotFittedError):
@@ -544,20 +596,20 @@ class TestStatelessness:
         """Une même instance sert deux étapes et rend les mêmes résultats que deux neuves."""
         shared = StageScaler()
 
-        first = shared.covariate_divisors(
+        first = shared.feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
             source_freq='Y',
             pred_freq='M',
         )
-        second = shared.covariate_divisors(
+        second = shared.feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
             source_freq='Q',
             pred_freq='M',
         )
         # Le second appel ne doit rien devoir au premier
-        third = shared.covariate_divisors(
+        third = shared.feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
             source_freq='Y',
@@ -567,7 +619,7 @@ class TestStatelessness:
         assert first['m1'] == 12.0
         assert second['m1'] == 3.0
         assert third['m1'] == 12.0
-        assert StageScaler().covariate_divisors(
+        assert StageScaler().feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
             source_freq='Q',
@@ -579,7 +631,7 @@ class TestStatelessness:
         scaler = StageScaler()
         assert scaler.target_divisor('a1', source_freq='Y', pred_freq='M') == 12.0
         assert scaler.fit_scale_factor('a1', source_freq='Y', pred_freq='M') == 12.0
-        assert scaler.covariate_divisors(
+        assert scaler.feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
             source_freq='Y',

@@ -942,7 +942,7 @@ scale_features: Union[Literal[False], ScaleMode,
 
 | Modalité | Diviseur | Cas d'usage |
 |---|---|---|
-| `False` | aucun sur les features ; **`y` reste toujours mis à l'échelle** (comportement du `False` actuel) | features déjà comparables |
+| `False` | **aucun diviseur**, ni sur les features couvertes, ni sur `y` lorsque c'est la modalité résolue pour la colonne imputée (D15, rupture avec le `False` de `hfi`) | variables déjà comparables : indices, taux, ratios |
 | `'constant'` (défaut) | diviseur **constant** par couple de fréquences, `FrequencyConverter.get_conversion_factor` (M→Y = 12, D→M = 30.0…) | variables **corrigées des variations saisonnières** : le facteur moyen lisse ce que la CVS a déjà lissé |
 | `'calendar'` | diviseur par **décompte calendaire réel** de la période, `FrequencyConverter.count_subperiods_per_period` (février → 28 ou 29, T1 → 90 ou 91) | variables **brutes** (non CVS), où le nombre de jours porte du signal |
 
@@ -968,8 +968,25 @@ La modalité s'applique à **tous les diviseurs** relatifs à la feature :
 3. le report d'échelle des prédictions (`fit_scale_factor` : le facteur **cuit dans le modèle**,
    qui ne bouge plus une fois l'étape ajustée).
 
-La modalité de `y` est celle de la **colonne imputée**. Un mélange légitime « feature en
-`'calendar'`, `y` en `'constant'` » doit être couvert par un test dédié (I5).
+La modalité de `y` est celle de la **colonne imputée**, lue **exactement comme celle de
+n'importe quelle autre colonne** : `False` sur cette colonne laisse la cible à son échelle
+d'origine, le modèle prédit alors dans l'unité de la variable et le facteur cuit vaut `1.0` — le
+report d'échelle des prédictions devient un `no-op`. La cible n'est plus un cas particulier (D15).
+Un mélange légitime « feature en `'calendar'`, `y` en `'constant'` », ou « features divisées, `y`
+laissée telle quelle » via la forme dict, doit être couvert par un test dédié (I5).
+
+La colonne imputée n'a plus de paramètre dédié : le composant étant un transformer sklearn
+ajusté par `fit(X, y)`, le **nom de `y`** la désigne, et une cible anonyme retombe sur le réglage
+global de `scale_features`. Le paramètre `target_column` est **supprimé** — il aurait dupliqué une
+information que `y` porte déjà (D15).
+
+L'arithmétique, elle, continue de distinguer `y` des features : une covariable portée à sa propre
+fréquence n'est jamais ré-agrégée et divise par `1.0` (règle B25), tandis que la cible, **produite
+sur la grille d'étape**, y porte `pred_freq` et divise par le décompte de sous-périodes
+`pred_freq` d'une période de `f_var`. Les deux règles ne coïncident que si l'on déclare `pred_freq`
+comme fréquence de la colonne — et leurs replis diffèrent : fréquence incomparable → diviseur par
+défaut pour une covariable, **erreur** pour la cible. Les méthodes `feature_divisors` et
+`target_divisor` restent donc distinctes.
 
 ### 9.3 — Prérequis et audit
 
@@ -1368,6 +1385,7 @@ sont ceux de la version 1, conservés pour la traçabilité.
 | **D12** | introduction de `CellOrigin` / `origin_store` : le filtre de `y_train` et le calcul des souillures lisent l'**origine** des cellules, jamais la matrice de provenance | `DISAGGREGATED` est ambigu (interpolation recalée vs prédiction recalée) ; sans ce registre, `'covariates_only'` serait un synonyme silencieux de `True` (§5.3) |
 | **D13** | précédence de matérialisation à quatre rangs, dont le **report d'étape** (rang 3) | c'est ce qui donne un effet observable à `'covariates_only'` et ce qui corrige la première cause de B28 (§4.4) |
 | **D14** | l'invariant NaN se formule en **inclusion d'ensembles de dates renseignées**, pas en comparaison de taux bruts | sous `'tolerate_nan'`, les deux grilles n'ont pas le même pas (§4.7) |
+| **D15** | `scale_features=False` **dispense aussi `y`** : la cible est une colonne comme une autre, et sa modalité est celle résolue pour la colonne imputée, `False` compris | rupture assumée avec le `False` de `hfi` : il existe de bonnes raisons de ne pas mettre une variable à l'échelle (indice, taux), et l'utilisateur est mieux placé que le composant pour le décider. Corollaire : `target_column` est **supprimé**, le nom de `y` désignant la colonne imputée au `fit` (§9.2) |
 
 ---
 
@@ -1434,7 +1452,7 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 | **I2** | invariant NaN (§3) | par étape et par colonne, l'ensemble des dates renseignées dans `X_pred` contient l'image de celui de `X_train` (formulation D14) ; mesuré par estimateur espion, sous les trois stratégies. C'est le test qui échoue sur `hfi` aujourd'hui |
 | **I3** | invariance à l'ordre des colonnes | permuter les colonnes d'entrée ne change ni les valeurs ni les provenances, sous les trois stratégies (sous `'model'`, grâce au tie-break alphabétique §8.1) |
 | **I4** | additivité | sous `aggregation_constraint='sum'`, chaque colonne imputée somme au total observé de chaque période **complète** — imputations, interpolations et covariables portées comprises ; et la ligne d'ancre ne porte plus le total (§11.2) |
-| **I5** | échelle train/test | pour chaque étape, moyennes des features de `X_train` et de `X_pred` comparables (tolérance dépendant de la modalité) ; inclut le cas mixte « feature `'calendar'`, `y` `'constant'` » |
+| **I5** | échelle train/test | pour chaque étape, moyennes des features de `X_train` et de `X_pred` comparables (tolérance dépendant de la modalité) ; inclut le cas mixte « feature `'calendar'`, `y` `'constant'` » et le cas « features divisées, `y` en `False` » (D15) |
 | **I6** | provenance | les cinq familles `MODEL_*` sont émises exactement dans les cas du §6.3 et aucun autre ; `MODEL_ON_IMPUTED*` seulement sous `'model'` ; `*_TARGET`/`*_BOTH` seulement sous `impute_intermediate_frequencies=True` ; les cellules de repli portent `INTERPOLATED` ; `MODEL_ON_MIXED` n'existe plus |
 | **I7** | `transform` hors fenêtre de fit | impute au lieu de vider, ne détruit jamais une observation d'entrée, avertit **une fois** sur les lignes inimputables |
 | **I8** | aller-retour | `inverse_transform(transform(X))` restitue l'index, les noms (panels multi-niveaux compris) et, sous `restore_original_values=True`, les valeurs d'origine |

@@ -724,8 +724,9 @@ CIBLE — nouveau fichier tsforecast/frequency/stage_scaler.py, classe `StageSca
        scale_features: Union[Literal[False], ScaleMode,
                              Dict[str, Union[Literal[False], ScaleMode]]] = 'constant'
 
-   - `False` : aucun diviseur sur les FEATURES ; `y` reste TOUJOURS mis à l'échelle (comportement
-     du `False` actuel de hfi — ne pas le « corriger », c'est le contrat) ;
+   - `False` : AUCUN diviseur, ni sur les features couvertes, ni sur `y` quand c'est la modalité
+     résolue pour la colonne imputée (décision D15 : rupture assumée avec le `False` de hfi — la
+     cible est une colonne comme une autre, un indice ou un taux n'a pas à être divisé) ;
    - `'constant'` (défaut) : diviseur constant par couple de fréquences, via
      `FrequencyConverter.get_conversion_factor` (M->Y = 12, D->M = 30.0…). Cas d'usage : variables
      corrigées des variations saisonnières ;
@@ -741,13 +742,18 @@ CIBLE — nouveau fichier tsforecast/frequency/stage_scaler.py, classe `StageSca
 2) Les TROIS diviseurs gouvernés par la modalité ([SPEC] §9.2), à exposer par trois méthodes
    distinctes et nommées :
 
-   a. `covariate_divisors(...)` — diviseur des covariables à l'entraînement ET à la prédiction.
+   a. `feature_divisors(...)` — diviseur des covariables à l'entraînement ET à la prédiction.
       RÈGLE B25, à reprendre telle quelle : `1.0` pour une colonne JAMAIS ré-agrégée (ses ancres
       gardent l'échelle de f_c), `get_conversion_factor(f_stage, f_var)` sinon, avec
       `f_stage = pred_freq` si f_var est plus FINE que l'étape, et `f_var` sinon.
    b. `target_divisor(...)` — diviseur de `y`. Scalaire d'étape, OU `pd.Series` par ligne dès que
       `y_train` mêle plusieurs fréquences de production ([SPEC] §5.4). La modalité appliquée est
-      celle de la COLONNE IMPUTÉE, pas celle des features.
+      celle de la COLONNE IMPUTÉE, résolue comme celle de n'importe quelle colonne : `False` y
+      rend `1.0`, fréquences de production comprises. La colonne imputée est désignée par le NOM
+      DE `y` reçu au `fit` — PAS de paramètre `target_column`, il dupliquerait ce que `y` porte ;
+      une cible anonyme retombe sur le réglage global. La méthode reste DISTINCTE de
+      `feature_divisors` : la règle B25 rend `1.0` pour une colonne à sa propre fréquence, alors
+      que la cible, produite sur la grille d'étape, y porte `pred_freq` (§9.2).
    c. `fit_scale_factor(...)` — le facteur CUIT DANS LE MODÈLE, qui ne bouge plus une fois l'étape
       ajustée, et qui sert au report d'échelle des prédictions.
 
@@ -793,7 +799,11 @@ TESTS — nouveau fichier tests/frequency/test_stage_scaler.py :
      à 1e-2 près pour la seconde) ;
    - `test_dict_form_and_default_key` : `{'m1': 'calendar', '__default__': 'constant'}` ;
    - `test_unknown_dict_key_raises_listing_columns` ;
-   - `test_scale_features_false_still_scales_y` : c'est le contrat, pas un oubli ;
+   - `test_scale_features_false_spares_y_too` : `False` ne divise ni les features ni la cible
+     (D15), y compris avec des fréquences de production mêlées ; et la forme dict permet de
+     dispenser la seule cible en divisant les features ;
+   - `test_fit_reads_the_imputed_column_from_the_name_of_y` : le nom de `y` désigne la colonne
+     imputée ; une cible anonyme retombe sur le réglage global ;
    - `test_apply_invert_roundtrip` : `invert(apply(v, d), d) == v` sur scalaire et Series.
 
 Puis `uv run tests/frequency/check_regressions.py` et rapporter. Lot purement additif : aucun
