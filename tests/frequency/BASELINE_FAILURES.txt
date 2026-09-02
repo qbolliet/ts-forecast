@@ -3,6 +3,23 @@
 # Commit: 0cbfa60 (branche qb-mixed-frequencies) + lot L2 (provenance §6)
 # Result: 5 failed, 520 passed (525 tests collectés)
 #
+# Relevé du 2026-09-01 (lot L3 hfi2, [SPEC] §7.2 : type de retour unifié des
+# masques de fenêtre sur panel — imputation_strict_window_mask_ /
+# imputation_window_mask_ / training_window_mask_ et coverage_by_date_ portent
+# désormais une pd.Series unique à MultiIndex (entity..., date), plus jamais un
+# Dict[entity, Series] ; nouvel attribut entities_without_window_ ; alignement de
+# get_imputation_window_mask factorisé ; get_mask_at_frequency conserve la boucle
+# par entité — convert_frequency n'expose ni method='all' ni l'ancrage d'offset —
+# mais unifie son type de retour) : la LISTE des échecs de référence est
+# INCHANGÉE — `check_regressions.py` rapporte « Aucun » nouvel échec et « Aucun »
+# échec résolu. Le nombre de tests passants passe de 520 à 527 (+7 tests ajoutés
+# dans test_imputation_window.py, classe TestPanelMaskReturnType + le renommage
+# de test_none_window_entity_has_none_for_all_three_masks en
+# test_entity_without_window_is_all_false). Comportement fonctionnel de `hfi`
+# STRICTEMENT inchangé (tous ses appels passent déjà `data` et reçoivent une
+# Series alignée). Notebooks 2 (cellule panel) et utils/imputation_window.ipynb
+# mis à jour.
+#
 # Relevé du 2026-09-01 (lot L2 hfi2, [SPEC] §6 : échelle de souillure à cinq
 # libellés MODEL_*, suppression de MODEL_ON_MIXED, primitives de souillure
 # partagées resolve_model_provenance / origin_to_taint / max_origin) :

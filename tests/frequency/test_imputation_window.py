@@ -39,6 +39,21 @@ def _make_panel(entities, n_periods=36):
     }, index=idx)
 
 
+# Fonction auxiliaire d'extraction des clés d'entité d'un masque de panel
+def _entities_of(series):
+    """Return the set of entity key tuples present in a MultiIndex mask Series.
+
+    Args:
+        series: Boolean ``pd.Series`` on a MultiIndex ``(entity..., date)``.
+
+    Returns:
+        Set of entity key tuples, normalized to tuples even for a
+        single-level panel.
+    """
+    entity_index = series.index.droplevel(-1)
+    return {key if isinstance(key, tuple) else (key,) for key in entity_index}
+
+
 class TestGetImputationWindowMaskAlignment:
     """§1.3 : get_imputation_window_mask(data) aligne le masque sur data.index."""
 
@@ -250,14 +265,14 @@ class TestEntityKeysAreAlwaysTuples:
     passer le ``KeyError`` de §1.5.
     """
 
-    # Attributs dict de ImputationWindowCalculator indexés par entité
+    # Attributs dict de ImputationWindowCalculator indexés par entité. Les trois
+    # masques et coverage_by_date_ n'en sont plus : ils portent une pd.Series à
+    # MultiIndex unique (spec §7.2), couverte par _entities_of() ailleurs.
     ENTITY_KEYED_ATTRS = (
         'imputation_window_start_',
         'imputation_window_end_',
         'imputation_strict_window_start_',
         'imputation_strict_window_end_',
-        'imputation_window_mask_',
-        'coverage_by_date_',
         'column_coverage_',
         'index_freq_',
     )
@@ -328,9 +343,9 @@ class TestEntityKeysAreAlwaysTuples:
         per_entity = calc.get_columns_with_coverage(start, end)
         assert set(per_entity) == set(entities)
 
-        # Masque à fréquence inférieure : dict indexé par tuple lui aussi
+        # Masque à fréquence inférieure : Series à MultiIndex, une entité par tuple
         mask_at_year = calc.get_mask_at_frequency('YS')
-        assert set(mask_at_year) == set(entities)
+        assert _entities_of(mask_at_year) == set(entities)
 
     def test_unknown_entity_raises_instead_of_silently_returning_empty(self):
         """Une clé inconnue lève un KeyError : c'est un vrai bug, pas un repli."""
@@ -519,7 +534,7 @@ class TestGetMaskAtFrequencyNormalizesDictKeys:
 
         result = calc.get_mask_at_frequency({'A': 'QS', 'B': 'QS'})
 
-        assert set(result) == {('A',), ('B',)}
+        assert _entities_of(result) == {('A',), ('B',)}
 
 
 class TestExtensionNoOp:
@@ -731,42 +746,55 @@ class TestTrainingScope:
 class TestThreeWindowMasksPanel:
     """§3.3 : les trois masques sont calculés par entité, y compris les entités sans fenêtre."""
 
-    def test_none_window_entity_has_none_for_all_three_masks(self):
-        """Une entité sans fréquence identifiable porte None sur les trois masques."""
+    def test_entity_without_window_is_all_false(self):
+        """Une entité sans fréquence identifiable a toutes ses lignes à False.
+
+        Elle contribue ses lignes du frame ajusté (valeur False, pas une
+        absence de lignes) aux trois masques, et figure dans
+        ``entities_without_window_`` (spec §7.2).
+        """
         df = _make_panel_with_none_entity()
         calc = ImputationWindowCalculator(coverage_threshold=0.5, min_columns=2)
         calc.fit(df)
 
+        # B est l'entité sans fenêtre déterminable
+        assert calc.entities_without_window_ == (('B',),)
+
+        b_rows = df.loc['B'].index
         for attr in (
             'imputation_strict_window_mask_',
             'imputation_window_mask_',
             'training_window_mask_',
         ):
-            masks = getattr(calc, attr)
-            assert set(masks) == {('A',), ('B',)}, attr
-            assert masks[('B',)] is None, attr
-            assert masks[('A',)] is not None, attr
+            mask = getattr(calc, attr)
+            # Series unique à MultiIndex couvrant les deux entités
+            assert isinstance(mask, pd.Series), attr
+            assert _entities_of(mask) == {('A',), ('B',)}, attr
+            # Toutes les lignes de B présentes, toutes à False
+            b_slice = mask.xs('B', level=0)
+            pd.testing.assert_index_equal(b_slice.index, b_rows)
+            assert not b_slice.any(), attr
+            # A garde au moins une ligne True (fenêtre déterminée)
+            assert mask.xs('A', level=0).any(), attr
 
         # column_coverage_ reste keyée par TOUTES les entités
         assert set(calc.column_coverage_) == {('A',), ('B',)}
 
     def test_training_scope_none_follows_imputation_scope_panel(self):
-        """Non-régression du défaut, entité par entité."""
+        """Non-régression du défaut : à None, la fenêtre d'entraînement suit celle de prédiction."""
         df = _make_panel_with_none_entity()
         calc = ImputationWindowCalculator(
             coverage_threshold=0.5, imputation_scope='extended_both', min_columns=2
         )
         calc.fit(df)
 
-        for entity, training_mask in calc.training_window_mask_.items():
-            imputation_mask = calc.imputation_window_mask_[entity]
-            if training_mask is None:
-                assert imputation_mask is None
-                continue
-            pd.testing.assert_series_equal(training_mask, imputation_mask)
+        # Les deux masques (Series à MultiIndex) coïncident exactement
+        pd.testing.assert_series_equal(
+            calc.training_window_mask_, calc.imputation_window_mask_
+        )
 
     def test_unrestricted_training_scope_is_all_true_panel(self):
-        """'unrestricted' vaut tout-vrai pour les entités fittées, None pour les autres."""
+        """'unrestricted' vaut tout-vrai pour l'entité fittée, tout-faux pour l'entité sans fenêtre."""
         df = _make_panel_with_none_entity()
         calc = ImputationWindowCalculator(
             coverage_threshold=0.5, imputation_scope='strict',
@@ -774,8 +802,10 @@ class TestThreeWindowMasksPanel:
         )
         calc.fit(df)
 
-        assert calc.training_window_mask_[('A',)].all()
-        assert calc.training_window_mask_[('B',)] is None
+        assert calc.training_window_mask_.xs('A', level=0).all()
+        # B n'a pas de fenêtre : ses lignes restent à False, même sous 'unrestricted'
+        assert not calc.training_window_mask_.xs('B', level=0).any()
+        assert ('B',) in calc.entities_without_window_
 
         # Aligné sur les données : l'entité sans fenêtre reste entièrement False
         aligned = calc.get_imputation_window_mask(df, kind='training')
@@ -882,4 +912,106 @@ class TestGetMaskAtFrequencyKind:
             calc.get_mask_at_frequency('QS'),
             calc.get_mask_at_frequency('QS', kind='imputation'),
         )
+
+
+class TestPanelMaskReturnType:
+    """[SPEC] §7.2 : type de retour unifié — pd.Series à MultiIndex sur panel."""
+
+    @pytest.mark.parametrize('kind', ['strict', 'imputation', 'training'])
+    def test_panel_masks_are_multiindex_series(self, kind):
+        """Les trois masques sont des Series booléennes à MultiIndex couvrant
+        tout l'index du frame ajusté, pour les trois valeurs de `kind`."""
+        df = _make_panel([('A', 'x'), ('B', 'y')])
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='extended_both', min_columns=2
+        )
+        calc.fit(df)
+
+        mask = calc.get_imputation_window_mask(kind=kind)
+
+        assert isinstance(mask, pd.Series)
+        assert isinstance(mask.index, pd.MultiIndex)
+        assert mask.dtype == bool
+        # Couverture intégrale de l'index du frame ajusté (la grille peut
+        # s'étendre au-delà, cf. docstring de classe)
+        assert set(df.index).issubset(set(mask.index))
+        assert _entities_of(mask) == {('A', 'x'), ('B', 'y')}
+        assert list(mask.index.names) == list(df.index.names)
+        # Les attributs bruts sont les mêmes objets
+        pd.testing.assert_series_equal(mask, calc.get_imputation_window_mask(kind=kind))
+
+    def test_get_imputation_window_mask_no_data_panel_returns_multiindex_series(self):
+        """Sans `data`, l'appel panel renvoie désormais une Series à MultiIndex."""
+        df = _make_panel([('A',), ('B',)])
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        calc.fit(df)
+
+        result = calc.get_imputation_window_mask()
+
+        assert isinstance(result, pd.Series)
+        assert isinstance(result.index, pd.MultiIndex)
+        pd.testing.assert_series_equal(result, calc.imputation_window_mask_)
+
+    def test_get_mask_at_frequency_returns_multiindex_series(self):
+        """get_mask_at_frequency renvoie une Series à MultiIndex (entity..., date)."""
+        df = _make_panel([('A', 'x'), ('B', 'y')])
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        calc.fit(df)
+
+        mask_year = calc.get_mask_at_frequency('YS')
+
+        assert isinstance(mask_year, pd.Series)
+        assert isinstance(mask_year.index, pd.MultiIndex)
+        assert mask_year.dtype == bool
+        assert _entities_of(mask_year) == {('A', 'x'), ('B', 'y')}
+        # L'index temporel est ancré en début de période (comme la grille source)
+        year_dates = set(mask_year.index.get_level_values(-1))
+        assert {pd.Timestamp('2020-01-01'), pd.Timestamp('2021-01-01')}.issubset(year_dates)
+        # Les deux années intégralement couvertes sont vraies pour les deux entités
+        assert mask_year.xs(('A', 'x'), level=[0, 1]).loc[pd.Timestamp('2020-01-01')]
+        assert mask_year.xs(('B', 'y'), level=[0, 1]).loc[pd.Timestamp('2021-01-01')]
+
+    def test_window_bounds_still_dict_per_entity(self):
+        """Les BORNES (scalaires) n'ont PAS été converties : elles restent des dicts."""
+        df = _make_panel([('A',), ('B',)])
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        calc.fit(df)
+
+        for attr in (
+            'imputation_window_start_',
+            'imputation_window_end_',
+            'imputation_strict_window_start_',
+            'imputation_strict_window_end_',
+        ):
+            bounds = getattr(calc, attr)
+            assert isinstance(bounds, dict), attr
+            assert set(bounds) == {('A',), ('B',)}, attr
+            assert all(isinstance(v, pd.Timestamp) for v in bounds.values()), attr
+
+    def test_timeseries_masks_unchanged(self):
+        """Sur série temporelle : aucun changement de type ni de valeur."""
+        dates = pd.date_range('2020-01-01', periods=24, freq='MS')
+        df = pd.DataFrame({
+            'a': np.arange(24, dtype=float),
+            'b': np.arange(24, dtype=float) * 2,
+        }, index=dates)
+        calc = ImputationWindowCalculator(
+            coverage_threshold=0.5, imputation_scope='extended_both'
+        )
+        calc.fit(df)
+
+        for attr in (
+            'imputation_strict_window_mask_',
+            'imputation_window_mask_',
+            'training_window_mask_',
+        ):
+            mask = getattr(calc, attr)
+            assert isinstance(mask, pd.Series), attr
+            assert isinstance(mask.index, pd.DatetimeIndex), attr
+            assert mask.dtype == bool, attr
+
+        # Aucune entité sans fenêtre sur une série temporelle
+        assert calc.entities_without_window_ == ()
+        # coverage_by_date_ reste une Series sur DatetimeIndex
+        assert isinstance(calc.coverage_by_date_.index, pd.DatetimeIndex)
 

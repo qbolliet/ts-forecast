@@ -90,17 +90,27 @@ class ImputationWindowCalculator:
     For panel data, every dict-valued attribute
     (``imputation_window_start_``, ``imputation_window_end_``,
     ``imputation_strict_window_start_``, ``imputation_strict_window_end_``,
-    ``imputation_strict_window_mask_``, ``imputation_window_mask_``,
-    ``training_window_mask_``, ``coverage_by_date_``, ``column_coverage_``
-    and ``index_freq_``) is keyed by the entity **tuple**, even when the panel
-    has a single entity level: ``('France',)``, never ``'France'``. These are
-    exactly the keys returned by
-    :func:`tsforecast.panel.utils.get_unique_panel_entities`, so a consumer
+    ``column_coverage_`` and ``index_freq_``) is keyed by the entity
+    **tuple**, even when the panel has a single entity level:
+    ``('France',)``, never ``'France'``. These are exactly the keys returned
+    by :func:`tsforecast.panel.utils.get_unique_panel_entities`, so a consumer
     can index them directly and a ``KeyError`` genuinely signals a bug rather
-    than a key-format mismatch (review §3.4/§5.4). Methods taking an entity
-    from the caller (:meth:`get_columns_with_coverage`,
-    :meth:`get_mask_at_frequency`) normalize it via ``normalize_entity_key``,
-    so scalars remain accepted at the public boundary only.
+    than a key-format mismatch.
+
+    The three window masks (``imputation_strict_window_mask_``,
+    ``imputation_window_mask_``, ``training_window_mask_``) and
+    ``coverage_by_date_`` are NOT dicts: for panel data they are a single
+    ``pd.Series`` on a MultiIndex ``(entity..., date)``, in the
+    level order of the input frame, so a caller can align them without
+    rebuilding a per-entity structure. An entity whose window could not be
+    determined (index frequency not identified, or empty coverage grid)
+    still contributes its rows, all ``False``; ``entities_without_window_``
+    lists those entities.
+
+    Methods taking an entity from the caller
+    (:meth:`get_columns_with_coverage`, :meth:`get_mask_at_frequency`)
+    normalize it via ``normalize_entity_key``, so scalars remain accepted at
+    the public boundary only.
 
     Attributes:
         imputation_window_start_: Start of the imputation window, following
@@ -127,20 +137,27 @@ class ImputationWindowCalculator:
             ``training_scope``. Same type as training_window_start_.
         imputation_strict_window_mask_: Boolean mask on the high-frequency
             grid identifying observations in the STRICT window
-            (coverage == 1.0), before any extension. pd.Series for time
-            series, Dict[tuple, Optional[pd.Series]] for panel.
+            (coverage == 1.0), before any extension. ``pd.Series`` on a
+            DatetimeIndex for time series; ``pd.Series`` on a MultiIndex
+            ``(entity..., date)`` for panel, covering every row
+            of the fitted frame — entities without a window contribute
+            ``False`` rows.
         imputation_window_mask_: Boolean mask on the high-frequency grid
             identifying observations in the imputation (prediction) window,
-            i.e. the strict window extended per ``imputation_scope``.
-            pd.Series for time series, Dict[tuple, Optional[pd.Series]] for
-            panel.
+            i.e. the strict window extended per ``imputation_scope``. Same
+            type as imputation_strict_window_mask_.
         training_window_mask_: Boolean mask on the high-frequency grid
             identifying observations in the TRAINING window, i.e. the strict
             window extended per ``training_scope`` — all True when that scope
-            is 'unrestricted'. Same type as imputation_window_mask_.
+            is 'unrestricted'. Same type as imputation_strict_window_mask_.
         coverage_by_date_: Ratio of columns covered per high-freq date.
-            pd.Series for time series, Dict[tuple, Optional[pd.Series]]
-            for panel.
+            ``pd.Series`` on a DatetimeIndex for time series; ``pd.Series``
+            on a MultiIndex ``(entity..., date)`` for panel, restricted to
+            entities that have a coverage grid.
+        entities_without_window_: Tuple of entity key tuples whose imputation
+            window could not be determined (index frequency not identified,
+            or empty coverage grid). Their rows appear in the three masks as
+            ``False``. Empty tuple for time series data.
         index_freq_: Detected highest frequency. str for time series,
             Dict[tuple, Optional[str]] for panel.
         column_coverage_: Dict mapping column names to (start, end)
@@ -247,15 +264,21 @@ class ImputationWindowCalculator:
         # Bornes de la fenêtre stricte, indépendantes de imputation_scope
         self.imputation_strict_window_start_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
         self.imputation_strict_window_end_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
+        # Masques de fenêtre : pd.Series sur DatetimeIndex pour une série
+        # temporelle ; pd.Series unique sur MultiIndex (entity..., date) pour un panel
         # Masque de la fenêtre stricte, avant toute extension
-        self.imputation_strict_window_mask_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
+        self.imputation_strict_window_mask_: Optional[pd.Series] = None
         # Masque de la fenêtre d'imputation (prédiction), étendu selon imputation_scope
-        self.imputation_window_mask_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
+        self.imputation_window_mask_: Optional[pd.Series] = None
         # Masque de la fenêtre d'entraînement, étendu selon training_scope
-        self.training_window_mask_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
+        self.training_window_mask_: Optional[pd.Series] = None
+        # Entités de panel sans fenêtre déterminable (fréquence d'index non
+        # identifiée ou grille de couverture vide) : leurs lignes figurent à
+        # False dans les trois masques, cet attribut les recense explicitement
+        self.entities_without_window_: Tuple[tuple, ...] = ()
 
         # Attributs auxiliaires
-        self.coverage_by_date_: Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]] = None
+        self.coverage_by_date_: Optional[pd.Series] = None
         self.index_freq_: Optional[Union[str, Dict[tuple, Optional[str]]]] = None
         # Dict[str, Tuple] pour TS ; Dict[tuple, Optional[Dict[str, Tuple]]] par entité pour panel
         self.column_coverage_: Optional[Union[
@@ -268,6 +291,9 @@ class ImputationWindowCalculator:
         self._is_panel: bool = False
         self._is_fitted: bool = False
         self._converter = FrequencyConverter()
+        # Noms des niveaux de l'index du frame ajusté, capturés au fit pour
+        # renommer le MultiIndex des masques de panel
+        self._index_names: Optional[List[str]] = None
 
     # Résolution du défaut "suit la fenêtre de prédiction" pour le scope d'entraînement
     @property
@@ -333,6 +359,9 @@ class ImputationWindowCalculator:
 
         # Détection du type de données (panel ou séries temporelles)
         self._is_panel = is_panel_data(data=data)
+        # Capture des noms de niveaux d'index pour le renommage du MultiIndex
+        # des masques de panel
+        self._index_names = list(data.index.names)
 
         # Vérification du nombre minimal de colonnes
         if len(data.columns) < self.min_columns:
@@ -389,16 +418,22 @@ class ImputationWindowCalculator:
         # Valorisation des attributs auxiliaires
         self.coverage_by_date_ = result['coverage']
         self.column_coverage_ = result['column_coverage']
+        # Notion sans objet hors panel (réinitialisation en cas de ré-estimation)
+        self.entities_without_window_ = ()
 
     # Méthode auxiliaire d'estimation de la fenêtre sur des données de panel
     def _fit_panel(self, data: pd.DataFrame) -> None:
         """Compute per-entity windows and masks for panel data (MultiIndex).
 
         Iterates over each panel entity, extracts its sub-DataFrame, and
-        calls _compute_window. Results are aggregated into dicts keyed by
-        entity tuple: window bounds (strict and scope-dependent), the three
-        boolean masks (strict, imputation and training) on each entity's
-        high-frequency grid, and coverage series.
+        calls _compute_window. Window bounds (strict and scope-dependent) and
+        ``column_coverage_`` are aggregated into dicts keyed by entity tuple.
+        The three boolean masks and ``coverage_by_date_`` are instead
+        assembled into a single ``pd.Series`` on a MultiIndex
+        ``(entity..., date)`` (spec §7.2): an entity whose window cannot be
+        determined (index frequency not identified, or empty coverage grid)
+        contributes its frame rows as ``False`` and is recorded in
+        ``entities_without_window_``.
 
         Args:
             data: Panel DataFrame with MultiIndex whose last level is time.
@@ -406,18 +441,22 @@ class ImputationWindowCalculator:
         # Extraction des entités des données
         entities = get_unique_panel_entities(data)
 
-        # Initialisation des dictionnaires de résultats
+        # Initialisation des dictionnaires de bornes (scalaires par entité)
         self.imputation_window_start_ = {}
         self.imputation_window_end_ = {}
         self.training_window_start_ = {}
         self.training_window_end_ = {}
         self.imputation_strict_window_start_ = {}
         self.imputation_strict_window_end_ = {}
-        self.imputation_strict_window_mask_ = {}
-        self.imputation_window_mask_ = {}
-        self.training_window_mask_ = {}
-        self.coverage_by_date_ = {}
         self.column_coverage_ = {}
+
+        # Contributions par entité, fusionnées ensuite en une unique Series à
+        # MultiIndex (entity..., date)
+        strict_mask_parts: List[pd.Series] = []
+        imputation_mask_parts: List[pd.Series] = []
+        training_mask_parts: List[pd.Series] = []
+        coverage_parts: List[pd.Series] = []
+        entities_without_window: List[tuple] = []
 
         # Parcours des entités
         for entity in entities:
@@ -425,6 +464,9 @@ class ImputationWindowCalculator:
             entity_row_mask = self._get_entity_row_mask(data, entity)
             entity_df = data[entity_row_mask].copy()
             entity_df.index = entity_df.index.get_level_values(-1)
+            # Dates réelles de l'entité dans le frame ajusté : servent à couvrir
+            # ses lignes à False quand aucune fenêtre n'est déterminable
+            entity_frame_dates = entity_df.index
 
             # Fréquences des colonnes pour cette entité
             col_freqs = {
@@ -436,21 +478,17 @@ class ImputationWindowCalculator:
             # y compris à un seul niveau : ('France',) et jamais 'France'.
             entity_key = entity
 
-            # Cas où la fréquence de l'index n'a pas pu être identifiée
+            # Cas où la fréquence de l'index n'a pas pu être identifiée : aucune
+            # fenêtre exploitable, mais l'entité a toutes ses lignes à False
             if self.index_freq_[entity_key] is None:
-                self.imputation_window_start_[entity_key] = None
-                self.imputation_window_end_[entity_key] = None
-                self.training_window_start_[entity_key] = None
-                self.training_window_end_[entity_key] = None
-                self.imputation_strict_window_start_[entity_key] = None
-                self.imputation_strict_window_end_[entity_key] = None
-                self.imputation_strict_window_mask_[entity_key] = None
-                self.imputation_window_mask_[entity_key] = None
-                self.training_window_mask_[entity_key] = None
-                self.coverage_by_date_[entity_key] = None
-                # column_coverage_ doit rester keyée par TOUTES les entités, faute
-                # de quoi get_columns_with_coverage lève un KeyError sur celles-ci
-                self.column_coverage_[entity_key] = None
+                # Ajout au registre des entités sans fenêtre
+                self._store_entity_without_window(entity_key)
+                entities_without_window.append(entity_key)
+                # Série de booléens False
+                self._append_false_mask_parts(
+                    entity_key, entity_frame_dates,
+                    strict_mask_parts, imputation_mask_parts, training_mask_parts,
+                )
                 continue
 
             # Calcul de la fenêtre d'imputation
@@ -463,15 +501,35 @@ class ImputationWindowCalculator:
             self.training_window_end_[entity_key] = result['training_end']
             self.imputation_strict_window_start_[entity_key] = result['imputation_strict_start']
             self.imputation_strict_window_end_[entity_key] = result['imputation_strict_end']
-
-            # Complétion des trois masques
-            self.imputation_strict_window_mask_[entity_key] = result['imputation_strict_window_mask']
-            self.imputation_window_mask_[entity_key] = result['imputation_window_mask']
-            self.training_window_mask_[entity_key] = result['training_window_mask']
-
-            # Complétion des attributs auxiliaires
-            self.coverage_by_date_[entity_key] = result['coverage']
             self.column_coverage_[entity_key] = result['column_coverage']
+
+            # Cas où la grille de couverture est vide : même traitement que la
+            # fréquence non identifiée, l'entité n'a pas de masque exploitable
+            if result['imputation_window_mask'] is None:
+                entities_without_window.append(entity_key)
+                self._append_false_mask_parts(
+                    entity_key, entity_frame_dates,
+                    strict_mask_parts, imputation_mask_parts, training_mask_parts,
+                )
+                continue
+
+            # Contribution des trois masques et de la couverture, préfixés par
+            # la clé d'entité pour former le MultiIndex final
+            strict_mask_parts.append(self._entity_series_with_multiindex(
+                result['imputation_strict_window_mask'], entity_key))
+            imputation_mask_parts.append(self._entity_series_with_multiindex(
+                result['imputation_window_mask'], entity_key))
+            training_mask_parts.append(self._entity_series_with_multiindex(
+                result['training_window_mask'], entity_key))
+            coverage_parts.append(self._entity_series_with_multiindex(
+                result['coverage'], entity_key))
+
+        # Fusion des contributions en une Series unique à MultiIndex
+        self.imputation_strict_window_mask_ = self._assemble_panel_series(strict_mask_parts)
+        self.imputation_window_mask_ = self._assemble_panel_series(imputation_mask_parts)
+        self.training_window_mask_ = self._assemble_panel_series(training_mask_parts)
+        self.coverage_by_date_ = self._assemble_panel_series(coverage_parts)
+        self.entities_without_window_ = tuple(entities_without_window)
 
         # Vérification qu'au moins une entité a une fenêtre valide. Une fenêtre
         # stricte absente partout reste rédhibitoire : l'extension ne peut jamais
@@ -481,17 +539,97 @@ class ImputationWindowCalculator:
         # aucune valeur n'y est imputable
         valid_starts = [v for v in self.imputation_strict_window_start_.values() if v is not None]
         if not valid_starts:
-            trainable = [
-                mask for mask in self.training_window_mask_.values()
-                if mask is not None and bool(mask.any())
-            ]
-            if not trainable:
+            if not bool(self.training_window_mask_.any()):
                 raise ValueError("No imputation window found for any entity in the panel")
+            # Warning
             warnings.warn(
                 "No entity has a strict imputation window; training proceeds on the "
                 "unrestricted training window, but no value can be imputed.",
                 UserWarning
             )
+
+    # Méthode auxiliaire d'enregistrement des bornes None d'une entité sans fenêtre
+    def _store_entity_without_window(self, entity_key: tuple) -> None:
+        """Record None window bounds and coverage for an entity with no window.
+
+        ``column_coverage_`` must stay keyed by every entity, otherwise
+        :meth:`get_columns_with_coverage` raises a ``KeyError`` on those.
+
+        Args:
+            entity_key: Entity key tuple whose index frequency could not be
+                identified or whose coverage grid is empty.
+        """
+        # Bornes indéterminées (dicts par entité, inchangé)
+        self.imputation_window_start_[entity_key] = None
+        self.imputation_window_end_[entity_key] = None
+        self.training_window_start_[entity_key] = None
+        self.training_window_end_[entity_key] = None
+        self.imputation_strict_window_start_[entity_key] = None
+        self.imputation_strict_window_end_[entity_key] = None
+        self.column_coverage_[entity_key] = None
+
+    # Méthode auxiliaire d'ajout d'une contribution tout-False pour une entité
+    def _append_false_mask_parts(
+        self,
+        entity_key: tuple,
+        entity_frame_dates: pd.DatetimeIndex,
+        *mask_parts_lists: List[pd.Series],
+    ) -> None:
+        """Append an all-False contribution covering the entity's frame rows.
+
+        An entity without a determinable window must still contribute its
+        rows (value ``False``, not an absence of rows) so callers can align
+        the mask without rebuilding it.
+
+        Args:
+            entity_key: Entity key tuple, prepended as MultiIndex levels.
+            entity_frame_dates: Dates of the entity's rows in the fitted frame.
+            *mask_parts_lists: Accumulator lists to append the contribution to.
+        """
+        # Contribution tout-faux sur les dates réelles du frame ajusté
+        false_series = pd.Series(False, index=entity_frame_dates)
+        for parts in mask_parts_lists:
+            parts.append(self._entity_series_with_multiindex(false_series, entity_key))
+
+    # Méthode auxiliaire de préfixage de l'index d'une Series par la clé d'entité
+    def _entity_series_with_multiindex(
+        self,
+        series: pd.Series,
+        entity_key: tuple,
+    ) -> pd.Series:
+        """Prefix a per-entity Series index with the entity key levels.
+
+        Args:
+            series: Series indexed by a simple DatetimeIndex (one entity's
+                high-frequency grid, or one entity's frame dates).
+            entity_key: Entity key tuple prepended as leading index levels.
+
+        Returns:
+            Series carrying the same values on a MultiIndex ``(entity..., date)``.
+        """
+        # Construction du MultiIndex (niveaux d'entité..., date)
+        tuples = [(*entity_key, date) for date in series.index]
+        multi_index = pd.MultiIndex.from_tuples(tuples)
+        return pd.Series(series.to_numpy(), index=multi_index)
+
+    # Méthode auxiliaire de fusion des contributions par entité en une Series unique
+    def _assemble_panel_series(self, parts: List[pd.Series]) -> pd.Series:
+        """Concatenate per-entity Series into one MultiIndex Series.
+
+        Args:
+            parts: Per-entity Series already carrying a ``(entity..., date)``
+                MultiIndex.
+
+        Returns:
+            Single Series spanning every contributed entity, its MultiIndex
+            levels named after the fitted frame's index. An empty (dtype-bool)
+            Series when no entity contributed.
+        """
+        # Concaténation ; repli sur une Series vide si aucune contribution
+        combined = pd.concat(parts) if parts else pd.Series(dtype=bool)
+        if isinstance(combined.index, pd.MultiIndex) and self._index_names is not None:
+            combined.index = combined.index.set_names(self._index_names)
+        return combined
 
     # Méthode auxiliaire permettant d'extraire des observations relatives à une entité du panel
     # Délégation à la fonction utilitaire partagée de tsforecast.panel.utils
@@ -984,7 +1122,7 @@ class ImputationWindowCalculator:
     def _select_mask(
         self,
         kind: str,
-    ) -> Optional[Union[pd.Series, Dict[tuple, Optional[pd.Series]]]]:
+    ) -> Optional[pd.Series]:
         """Return the fitted mask attribute designated by ``kind``.
 
         Args:
@@ -992,7 +1130,9 @@ class ImputationWindowCalculator:
                 unextended window, 'training' for the training window.
 
         Returns:
-            The corresponding fitted mask attribute, untouched.
+            The corresponding fitted mask attribute, untouched — a
+            ``pd.Series`` on a DatetimeIndex (time series) or on a MultiIndex
+            ``(entity..., date)`` (panel).
 
         Raises:
             ValueError: If kind is not one of the three accepted values.
@@ -1014,14 +1154,14 @@ class ImputationWindowCalculator:
         self,
         data: Optional[Union[pd.DataFrame, pd.Series]] = None,
         kind: Literal['imputation', 'strict', 'training'] = 'imputation',
-    ) -> Union[pd.Series, Dict[tuple, Optional[pd.Series]]]:
+    ) -> pd.Series:
         """Get one of the boolean window masks, optionally aligned to data.
 
         Args:
             data: If provided, the mask is re-indexed on ``data.index``
-                (dates absent from the fitted grid are False). For panel
-                data, a single boolean Series aligned on the MultiIndex
-                rows of ``data`` is returned instead of a dict.
+                (rows absent from the fitted grid are False). For panel data
+                this aligns the MultiIndex ``(entity..., date)`` rows of
+                ``data`` directly.
             kind: Which window to read:
                 - 'imputation' (default): the prediction window, extended
                   per ``imputation_scope``. The default preserves the
@@ -1032,8 +1172,9 @@ class ImputationWindowCalculator:
 
         Returns:
             Boolean Series aligned on ``data.index`` if ``data`` is given.
-            Otherwise the raw fitted mask (Series for time series, dict
-            mapping entity tuples to Series for panel).
+            Otherwise the raw fitted mask: a ``pd.Series`` on a DatetimeIndex
+            for time series, or a ``pd.Series`` on a
+            MultiIndex ``(entity..., date)`` for panel.
 
         Raises:
             ValueError: If calculator not fitted, or if kind is invalid.
@@ -1042,55 +1183,30 @@ class ImputationWindowCalculator:
         if not self._is_fitted:
             raise ValueError("Calculator not fitted. Call fit() first.")
 
-        # Sélection de la source : toute la logique d'alignement ci-dessous
-        # opère indifféremment sur l'un des trois masques
+        # Sélection de la source : déjà une Series (à MultiIndex pour un panel),
+        # l'alignement ci-dessous est donc le même pour les deux structures
         source = self._select_mask(kind)
 
         # Sans données : retour du masque brut sur la grille interne
         if data is None:
             return source
 
-        # Extraction de l'index
-        index = data.index
-
-        # Cas des données de panel : reconstruction d'un masque aligné sur le MultiIndex
-        if is_panel_data(data=data):
-            values = np.zeros(len(index), dtype=bool)
-            entity_levels = [index.get_level_values(i) for i in range(index.nlevels - 1)]
-            dates = index.get_level_values(-1)
-            # Parcours des masques par entité
-            for entity, entity_mask in (source or {}).items():
-                if entity_mask is None:
-                    continue
-                # Sélection des lignes de l'entité (clé garantie tuple, cf. §3.4)
-                rows = np.ones(len(index), dtype=bool)
-                for level_values, wanted in zip(entity_levels, entity):
-                    rows &= (level_values == wanted)
-                # Alignement du masque de l'entité sur les dates de ses lignes
-                aligned = (
-                    entity_mask.reindex(dates[rows])
-                    .fillna(False)
-                    .to_numpy(dtype=bool)
-                )
-                values[np.flatnonzero(rows)] = aligned
-            return pd.Series(values, index=index)
-
-        # Cas des séries temporelles : simple réindexation sur l'index des données
+        # Avec données : réindexation directe sur l'index de l'appelant. Les
+        # paires (entity..., date) absentes de la grille ajustée tombent à False
         return (
             source
-            .reindex(index)
+            .reindex(data.index)
             .fillna(False)
             .astype(bool)
         )
 
 
     # Méthode de conversion du masque d'imputation vers une fréquence inférieure
-    # /!\ Voir si dans le cas de données de panel, plutôt que de retourner comme masque un dictionnaire Dict[entity, Series], il n'est pas préférable de retourner une séries avec un multiIndex, ce qui permettrait d'utiliser convert_frequency ici
     def get_mask_at_frequency(
         self,
         frequency: Union[str, Dict[tuple, str]],
         kind: Literal['imputation', 'strict', 'training'] = 'imputation',
-    ) -> Union[pd.Series, Dict[tuple, Optional[pd.Series]]]:
+    ) -> pd.Series:
         """Get the selected window mask resampled to a lower frequency.
 
         A lower-frequency period is True if and only if all its high-frequency
@@ -1102,7 +1218,17 @@ class ImputationWindowCalculator:
         result stays reindexable against the original data.
 
         For panel data, the conversion is computed independently per entity,
-        as each entity may have a different source frequency.
+        as each entity may have a different source frequency; the per-entity
+        results are then assembled into a single ``pd.Series`` on a MultiIndex
+        ``(entity..., date)``. The internal per-entity loop is
+        kept rather than delegating to
+        :meth:`FrequencyConverter.convert_frequency` (which does route an
+        ``{entity: freq}`` mapping over a panel): that path aggregates per
+        entity through ``convert_frequency`` on a simple index, which exposes
+        neither the boolean ``method='all'`` aggregation (a target period is
+        True iff every sub-period is) nor the start/end offset anchoring via
+        ``target_offset_for_index`` that keeps the result reindexable — so
+        delegating would change the mask semantics.
 
         Args:
             frequency: Target (lower) frequency offset string (e.g., 'QE',
@@ -1113,10 +1239,10 @@ class ImputationWindowCalculator:
                 or 'training'. See :meth:`get_imputation_window_mask`.
 
         Returns:
-            Boolean Series at the target frequency (time series), or dict
-            mapping each entity tuple to a boolean Series at the target
-            frequency (panel). Entities without a valid fitted mask map to
-            None.
+            Boolean Series at the target frequency: on a DatetimeIndex for
+            time series, or on a MultiIndex
+            ``(entity..., date)`` for panel. Entities without a valid
+            fitted mask are simply absent from the panel result.
 
         Raises:
             ValueError: If calculator not fitted, if kind is invalid, or if
@@ -1149,17 +1275,56 @@ class ImputationWindowCalculator:
                 for entity, freq in frequency.items()
             }
 
-        # Cas des données de panel : conversion indépendante par entité, chacune
-        # pouvant avoir sa propre fréquence source et sa propre fréquence cible
-        # (accès direct : les clés d'entité sont des tuples de bout en bout)
-        return {
-            entity: self._convert_mask_to_frequency(
+        # Cas des données de panel : conversion indépendante par entité (source
+        # et cible propres à chacune), puis réassemblage en une Series unique
+        converted_parts: List[pd.Series] = []
+        for entity in self.index_freq_:
+            entity_mask = self._entity_grid_series(source, entity)
+            target = frequency[entity] if isinstance(frequency, dict) else frequency
+            converted = self._convert_mask_to_frequency(
                 mask=entity_mask,
                 source_freq=self.index_freq_[entity],
-                target_freq=frequency[entity] if isinstance(frequency, dict) else frequency,
+                target_freq=target,
             )
-            for entity, entity_mask in source.items()
-        }
+            # Entité sans masque exploitable : simplement absente du résultat
+            if converted is None:
+                continue
+            converted_parts.append(
+                self._entity_series_with_multiindex(converted, entity)
+            )
+        return self._assemble_panel_series(converted_parts)
+
+    # Méthode auxiliaire d'extraction de la tranche d'une entité depuis un masque à MultiIndex
+    def _entity_grid_series(
+        self,
+        source: Optional[pd.Series],
+        entity_key: tuple,
+    ) -> Optional[pd.Series]:
+        """Extract one entity's slice from a MultiIndex mask, on a simple index.
+
+        Args:
+            source: Unified MultiIndex mask Series, or None.
+            entity_key: Entity key tuple to extract.
+
+        Returns:
+            Boolean Series indexed by a simple DatetimeIndex for that entity,
+            or None if the entity is absent from the source.
+        """
+        # Absence de source exploitable
+        if source is None or not isinstance(source.index, pd.MultiIndex):
+            return None
+
+        # Sélection des lignes de l'entité (clés d'entité = tuples, cf. §3.4)
+        rows = np.ones(len(source), dtype=bool)
+        for level, wanted in enumerate(entity_key):
+            rows &= (source.index.get_level_values(level) == wanted)
+        if not rows.any():
+            return None
+
+        # Retour sur un index temporel simple
+        entity_series = source[rows]
+        entity_series.index = entity_series.index.get_level_values(-1)
+        return entity_series
 
     # Méthode auxiliaire de conversion d'un masque booléen vers une fréquence inférieure
     def _convert_mask_to_frequency(
