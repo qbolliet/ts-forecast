@@ -1071,9 +1071,8 @@ CIBLE — nouveau fichier tsforecast/frequency/aggregation_constraint.py
        aggregation_constraint: Literal['sum', None] = 'sum'
 
    'sum' équivaut à `enforce_period_totals=True`, `None` à `False`. VALIDATION À L'ÉTAT ACTUEL :
-   seules les valeurs 'sum' et None sont acceptées. TOUTE autre valeur — Y COMPRIS UN DICT — lève
-   un `ValueError` dont le message énonce que les formes 'mean', 'last' et dictionnaire sont
-   RÉSERVÉES POUR UNE EXTENSION ULTÉRIEURE. La docstring décrit l'extension prévue (contraintes
+   seules les valeurs 'sum' 'mean', 'last' et None sont acceptées. TOUTE autre valeur — SAUF UN DICT associant à un nom de colonne l'une de ces valeurs — lève
+   un `ValueError` dont le message énonce que seules formes 'sum' 'mean', 'last' et None sont acceptées. La docstring décrit l'extension (contraintes
    par colonne avec clé '__default__', sur le modèle de `estimator` et `scale_features`).
    Le type littéral est retenu MAINTENANT pour ouvrir l'extension sans rupture d'API.
 
@@ -1121,6 +1120,8 @@ CIBLE — nouveau fichier tsforecast/frequency/aggregation_constraint.py
 
 6) Le composant est utilisable sur série temporelle ET sur panel (masques `pd.Series` à
    MultiIndex, conformément au §7.2), et sur plusieurs colonnes à la fois.
+
+Si cela est possible, j'aimerais implémenter cette classe sous la forme d'un Transformer sklearn.
 
 TESTS — nouveau fichier tests/frequency/test_aggregation_constraint.py, sur le jeu TS de [SPEC]
 §2.2 (fixture `reference_timeseries`) :
