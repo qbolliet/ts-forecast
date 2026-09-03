@@ -1,7 +1,8 @@
 """Tests for tsforecast.frequency.covariate_materializer.
 
 Couvre §4.1 (classification identité / agrégation / stratégie), §4.2
-('tolerate_nan'), §4.3 ('interpolate' et le repli), §4.5
+('tolerate_nan'), §4.3 ('interpolate' et le repli), §4.4 ('model' et la
+précédence de matérialisation à quatre rangs, décision D13), §4.5
 (covariate_eligibility), §4.6 (unicité de la voie, socle du test I11), §6.2
 (les trois registres et les origines de cellule) et §4.7 / D14 (formulation
 testable de l'invariant central) de [SPEC]
@@ -46,6 +47,30 @@ def _quarterly_grid(start: str = '2021-03-31', periods: int = 12) -> pd.Datetime
 def _annual_grid(start: str = '2021-12-31', periods: int = 3) -> pd.DatetimeIndex:
     """Build a year-end grid."""
     return pd.date_range(start=start, periods=periods, freq='YE')
+
+
+# Grille des trois ancres annuelles, sous-ensemble de la grille trimestrielle
+def _annual_anchor_grid() -> pd.DatetimeIndex:
+    """Build the three annual anchors of the ``TS`` dataset."""
+    return pd.DatetimeIndex(
+        pd.to_datetime(['2021-12-31', '2022-12-31', '2023-12-31'])
+    )
+
+
+# Amorçage manuel des trois registres, comme l'aurait fait une étape antérieure
+def _prime_stores(
+    materializer: CovariateMaterializer,
+    column: str,
+    values: pd.Series,
+    freq,
+    origin,
+) -> None:
+    """Prime the three stores of one column, as an earlier stage would have."""
+    materializer.imputed_store[column] = values
+    materializer.imputed_freq_store[column] = pd.Series(freq, index=values.index)
+    materializer.origin_store[column] = pd.Series(
+        origin, index=values.index, dtype=object
+    )
 
 
 # Grille de panel : produit cartésien des entités et des dates
@@ -272,19 +297,23 @@ class TestStores:
         )
         assert set(fallback.origin_store['a2'].unique()) == {'interpolated'}
 
-        # 4. Une prédiction de modèle vaut 'model', report d'étape compris ;
-        # ces deux voies relèvent du lot suivant et sont refusées ici
+        # 4. Une prédiction de modèle vaut 'model', report d'étape compris
         assert _WAY_ORIGIN['stage_model'] == 'model'
         assert _WAY_ORIGIN['carried_model'] == 'model'
-        with pytest.raises(NotImplementedError, match=r"stage_model"):
-            materializer.materialize(
-                columns=['a1'],
-                grid_index=grid,
-                stage_freq='Q',
-                detected_frequencies=TS_FREQUENCIES,
-                source_data=reference_timeseries,
-                materialization={'a1': 'stage_model'},
-            )
+        model = CovariateMaterializer(covariate_strategy='model')
+        _prime_stores(
+            model, 'a1', pd.Series(20.0 + np.arange(12), index=grid), 'Q', 'model'
+        )
+        _features, _ways, origins = model.materialize(
+            columns=['a1'],
+            grid_index=grid,
+            stage_freq='Q',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+            materialization={'a1': 'stage_model'},
+        )
+        assert origins == {'a1': 'model'}
+        assert set(model.origin_store['a1'].unique()) == {'model'}
 
     def test_fallback_writes_to_all_three_stores(self, reference_timeseries):
         """« Le repli matérialise » : les trois registres sont alimentés."""
@@ -399,6 +428,399 @@ class TestUniquenessOfTheWay:
                 source_data=reference_timeseries,
                 materialization={'m1': 'identity'},
             )
+
+
+    def test_way_unicity_fit_and_pred(self, reference_timeseries):
+        """§4.6 : sous 'model', le repli s'applique AUSSI au fit.
+
+        Jeu `TS`, étape `Q`, ordre `a1` avant `a2` : au moment où `a1` est
+        imputée, `a2` n'est matérialisée par aucun rang supérieur, elle relève
+        donc du `covariate_fallback` — des deux côtés, y compris sur la grille
+        d'entraînement où ses seules ancres suffiraient (les 3 ancres annuelles
+        sont renseignées). Sinon le modèle apprendrait sur la covariable exacte
+        et prédirait sur la covariable interpolée.
+        """
+        materializer = CovariateMaterializer(covariate_strategy='model')
+        # L'étape est Q des deux côtés : la grille d'entraînement est la grille
+        # Q masquée aux 3 ancres annuelles de a1, la grille de prédiction est
+        # la grille Q complète
+        grid_train = _annual_anchor_grid()
+        grid_pred = _quarterly_grid()
+
+        x_train, ways, origins = materializer.materialize(
+            columns=['m1', 'q1', 'a2'],
+            grid_index=grid_train,
+            stage_freq='Q',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+        x_pred, ways_pred, _origins_pred = materializer.materialize(
+            columns=['m1', 'q1', 'a2'],
+            grid_index=grid_pred,
+            stage_freq='Q',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+            materialization=ways,
+        )
+
+        # Rang 4 des deux côtés, jamais le rang 1 que les ancres autoriseraient
+        assert ways['a2'] == 'interpolate'
+        assert ways_pred == ways
+        # La NATURE des valeurs, pas seulement le motif de NaN
+        assert origins['a2'] == 'interpolated'
+        assert x_train['a2'].notna().all()
+        assert x_pred['a2'].notna().all()
+
+        # Valeur par valeur : celle du repli, produite par la même routine
+        reference = CovariateMaterializer(covariate_strategy='model')
+        expected = reference.interpolate_column(
+            'a2', grid_train, 'Q', TS_FREQUENCIES, reference_timeseries
+        )
+        np.testing.assert_allclose(
+            x_train['a2'].to_numpy(), expected.to_numpy()
+        )
+
+        # Cas numériquement visible : avec un ancrage à mi-période, le repli
+        # du fit ne redonne PAS les ancres 60 / 66 de a2
+        anchored = CovariateMaterializer(
+            covariate_strategy='model',
+            interpolation_anchor={'a2': 0.5, DEFAULT_MATERIALIZATION_KEY: None},
+        )
+        x_anchored, ways_anchored, _ = anchored.materialize(
+            columns=['a2'],
+            grid_index=grid_train[:2],
+            stage_freq='Q',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+        assert ways_anchored == {'a2': 'interpolate'}
+        np.testing.assert_allclose(
+            x_anchored['a2'].to_numpy(), [62.99178082, 68.99178082]
+        )
+
+
+class TestPrecedenceRanks:
+    """§4.4 : la précédence à quatre rangs, arrêt au premier rang applicable."""
+
+    def test_rank_two_reads_stage_mirror(self, reference_timeseries):
+        """Rang 2 : les valeurs viennent du miroir d'étape, pas de la source."""
+        grid = _monthly_grid()
+        materializer = CovariateMaterializer(covariate_strategy='model')
+        mirror = pd.Series(7.0 + np.arange(len(grid)), index=grid)
+        _prime_stores(materializer, 'a1', mirror, 'M', 'model')
+
+        # Source aveugle : a1 n'y porte plus aucune observation
+        blind = reference_timeseries.copy()
+        blind['a1'] = np.nan
+
+        features, ways, origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=grid,
+            stage_freq='M',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=blind,
+        )
+
+        assert ways == {'a1': 'stage_model'}
+        assert origins == {'a1': 'model'}
+        # Le miroir, cellule par cellule, alors que la source est vide
+        np.testing.assert_allclose(features['a1'].to_numpy(), mirror.to_numpy())
+
+    def test_rank_two_origin_follows_store(self, reference_timeseries):
+        """Rang 2 : l'origine est LUE, jamais déduite de la présence d'un modèle."""
+        grid = _monthly_grid()
+        materializer = CovariateMaterializer(covariate_strategy='model')
+        mirror = pd.Series(7.0 + np.arange(len(grid)), index=grid)
+        # Étape produite par repli : le miroir porte 'interpolated'
+        _prime_stores(materializer, 'a1', mirror, 'M', 'interpolated')
+
+        features, ways, origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=grid,
+            stage_freq='M',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+
+        # La voie reste celle du rang 2, seule l'origine change
+        assert ways == {'a1': 'stage_model'}
+        assert origins == {'a1': 'interpolated'}
+        assert set(materializer.origin_store['a1'].unique()) == {'interpolated'}
+        np.testing.assert_allclose(features['a1'].to_numpy(), mirror.to_numpy())
+
+    def test_rank_three_carries_from_previous_stage(self, reference_timeseries):
+        """Rang 3 : l'imputation trimestrielle de a1 est REPORTÉE sur la grille M.
+
+        Réponse à la première cause de B28 : a1 n'est plus laissée NaN deux
+        mois sur trois à l'étape mensuelle.
+        """
+        quarterly_grid = _quarterly_grid()
+        grid = _monthly_grid()
+        materializer = CovariateMaterializer(covariate_strategy='model')
+        quarterly = pd.Series(20.0 + np.arange(12), index=quarterly_grid)
+        _prime_stores(materializer, 'a1', quarterly, 'Q', 'model')
+
+        features, ways, origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=grid,
+            stage_freq='M',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+
+        assert ways == {'a1': 'carried_model'}
+        # Aucune cellule NaN : c'est exactement le défaut corrigé
+        assert features['a1'].notna().all()
+        # L'interpolation d'une valeur de modèle RESTE de modèle
+        assert origins == {'a1': 'model'}
+        assert set(materializer.origin_store['a1'].unique()) == {'model'}
+        # Les cellules reportées sont écrites à la fréquence de l'étape courante
+        assert set(materializer.imputed_freq_store['a1'].unique()) == {'M'}
+
+    def test_rank_three_rescales_to_origin_stage_totals(self, reference_timeseries):
+        """Rang 3 : le recalage porte sur les totaux de f', pas sur ceux de f."""
+        quarterly_grid = _quarterly_grid()
+        grid = _monthly_grid()
+
+        # Applier espion : il enregistre ce sur quoi il est appelé
+        class _RecordingApplier:
+            def __init__(self):
+                self.calls = []
+
+            def rescale(self, values, observations, period_freq):
+                self.calls.append((observations.copy(), period_freq))
+                return values, values.notna()
+
+        applier = _RecordingApplier()
+        materializer = CovariateMaterializer(
+            covariate_strategy='model', aggregation_constraint_applier=applier
+        )
+        quarterly = pd.Series(20.0 + np.arange(12), index=quarterly_grid)
+        _prime_stores(materializer, 'a1', quarterly, 'Q', 'model')
+
+        _features, ways, _origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=grid,
+            stage_freq='M',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+
+        assert ways == {'a1': 'carried_model'}
+        assert len(applier.calls) == 1
+        observations, period_freq = applier.calls[0]
+        # Les totaux de l'étape d'origine, jamais ceux de l'étape courante
+        assert period_freq == 'Q'
+        assert observations.index.equals(quarterly_grid)
+        # Ni les ancres annuelles de la source, ni la grille mensuelle
+        np.testing.assert_allclose(observations.to_numpy(), quarterly.to_numpy())
+
+    def test_rank_four_fallback_interpolate(self, reference_timeseries):
+        """Rang 4, registres vides : covariate_fallback='interpolate'."""
+        grid = _monthly_grid()
+        materializer = CovariateMaterializer(
+            covariate_strategy='model', covariate_fallback='interpolate'
+        )
+
+        features, ways, origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=grid,
+            stage_freq='M',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+
+        assert ways == {'a1': 'interpolate'}
+        assert origins == {'a1': 'interpolated'}
+        assert features['a1'].notna().all()
+
+    def test_rank_four_fallback_tolerate_nan(self, reference_timeseries):
+        """Rang 4, registres vides : covariate_fallback='tolerate_nan'."""
+        grid = _monthly_grid()
+        materializer = CovariateMaterializer(
+            covariate_strategy='model', covariate_fallback='tolerate_nan'
+        )
+
+        features, ways, origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=grid,
+            stage_freq='M',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+
+        assert ways == {'a1': 'raw_anchors'}
+        assert origins == {'a1': 'observed'}
+        # Les trois ancres annuelles, et NaN partout ailleurs
+        assert features['a1'].notna().sum() == 3
+
+    def test_precedence_stops_at_first_applicable_rank(self, reference_timeseries):
+        """Présente au pas f ET à un pas antérieur, la covariable prend le rang 2."""
+        grid = _monthly_grid()
+        quarterly_grid = _quarterly_grid()
+        materializer = CovariateMaterializer(covariate_strategy='model')
+
+        # Miroir mixte : 2021 imputée à Q, 2022-2023 imputées à M
+        carried = pd.Series(99.0, index=quarterly_grid[quarterly_grid.year == 2021])
+        stage = pd.Series(1.0, index=grid[grid.year >= 2022])
+        values = pd.concat([carried, stage]).sort_index()
+        freqs = pd.Series('M', index=values.index)
+        freqs.loc[carried.index] = 'Q'
+        materializer.imputed_store['a1'] = values
+        materializer.imputed_freq_store['a1'] = freqs
+        materializer.origin_store['a1'] = pd.Series(
+            'model', index=values.index, dtype=object
+        )
+
+        features, ways, _origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=grid,
+            stage_freq='M',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+
+        # Arrêt au rang 2 : aucun report du miroir trimestriel de 2021
+        assert ways == {'a1': 'stage_model'}
+        assert set(features['a1'].loc['2022'].unique()) == {1.0}
+        assert features['a1'].loc['2021'].isna().all()
+
+    def test_model_way_degrades_per_entity(self, mixed_freq_panel_heterogeneous):
+        """La voie est une propriété de colonne, l'applicabilité se mesure par entité."""
+        data = mixed_freq_panel_heterogeneous
+        dates = _monthly_grid()
+        grid = _panel_grid(data, dates)
+        materializer = CovariateMaterializer(covariate_strategy='model')
+
+        # a1 imputée au pas M pour la seule entité FR
+        french = pd.MultiIndex.from_product(
+            [['FR'], dates], names=data.index.names
+        )
+        _prime_stores(
+            materializer, 'a1',
+            pd.Series(7.0 + np.arange(len(dates)), index=french), 'M', 'model',
+        )
+
+        features, ways, origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=grid,
+            stage_freq='M',
+            detected_frequencies=PANEL_FREQUENCIES,
+            source_data=data,
+        )
+
+        # Une seule voie pour la colonne, la plus dégradée des verdicts
+        assert ways == {'a1': 'stage_model'}
+        assert origins == {'a1': 'model'}
+        # FR lit le miroir ; DE et IT dégradent au rang 4 (repli interpolé)
+        np.testing.assert_allclose(
+            features.loc['FR', 'a1'].to_numpy(), 7.0 + np.arange(len(dates))
+        )
+        assert features.loc['DE', 'a1'].iloc[0] == pytest.approx(120.0)
+        assert features['a1'].notna().all()
+        # Chaque entité porte l'origine de la voie qui l'a effectivement servie
+        assert set(materializer.origin_store['a1'].unique()) == {
+            'model', 'interpolated'
+        }
+
+    def test_ranks_two_and_three_unreachable_outside_model(self, reference_timeseries):
+        """§8.1 : hors 'model', aucune stratégie ne consulte les registres."""
+        grid = _monthly_grid()
+        quarterly = pd.Series(20.0 + np.arange(12), index=_quarterly_grid())
+        monthly = pd.Series(7.0 + np.arange(len(grid)), index=grid)
+
+        for strategy in ('tolerate_nan', 'interpolate'):
+            materializer = CovariateMaterializer(covariate_strategy=strategy)
+            # Registres amorcés aux deux rangs : rien ne doit les lire
+            _prime_stores(materializer, 'a1', quarterly, 'Q', 'model')
+            _prime_stores(materializer, 'a2', monthly, 'M', 'model')
+
+            ways = materializer.decide_ways(
+                columns=['m1', 'q1', 'a1', 'a2'],
+                grid_index=grid,
+                stage_freq='M',
+                detected_frequencies=TS_FREQUENCIES,
+            )
+            assert not {'stage_model', 'carried_model'} & set(ways.values()), strategy
+
+            expected = 'raw_anchors' if strategy == 'tolerate_nan' else 'interpolate'
+            assert ways == {
+                'm1': 'identity', 'q1': expected, 'a1': expected, 'a2': expected
+            }
+
+
+class TestReferenceExampleSpec47:
+    """§4.7 : les quatre lignes du tableau de référence, valeurs d'or comprises."""
+
+    # Colonnes et grilles de l'exemple : imputation de a1 à l'étape Q
+    COLUMNS = ['m1', 'q1', 'a2']
+
+    def _fit_and_predict(self, materializer, data):
+        """Materialize on the training grid, then replay on the prediction grid."""
+        # L'étape est Q des deux côtés ; X_train est la grille Q masquée aux
+        # 3 ancres annuelles de a1, X_pred la grille Q complète (12 lignes)
+        x_train, ways, origins = materializer.materialize(
+            columns=self.COLUMNS,
+            grid_index=_annual_anchor_grid(),
+            stage_freq='Q',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=data,
+        )
+        x_pred, ways_pred, _ = materializer.materialize(
+            columns=self.COLUMNS,
+            grid_index=_quarterly_grid(),
+            stage_freq='Q',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=data,
+            materialization=ways,
+        )
+        # La voie est la même des deux côtés, par construction
+        assert ways_pred == ways
+        return x_train, x_pred, ways, origins
+
+    def test_reference_example_of_spec_4_7(self, reference_timeseries):
+        """Les quatre configurations du tableau : voie de a2 et taux de NaN."""
+        data = reference_timeseries
+
+        # Ligne 1 — 'tolerate_nan' : a2 à ses ancres des deux côtés. Le taux
+        # brut diffère uniquement parce que les grilles n'ont pas le même pas
+        tolerate = CovariateMaterializer(covariate_strategy='tolerate_nan')
+        x_train, x_pred, ways, _origins = self._fit_and_predict(tolerate, data)
+        assert ways == {'m1': 'aggregate', 'q1': 'identity', 'a2': 'raw_anchors'}
+        assert x_train['a2'].isna().mean() == pytest.approx(0.0)
+        assert x_pred['a2'].isna().mean() == pytest.approx(0.75)
+
+        # Ligne 2 — 'interpolate' : a2 interpolée sur la grille Q
+        interpolate = CovariateMaterializer(covariate_strategy='interpolate')
+        x_train, x_pred, ways, origins = self._fit_and_predict(interpolate, data)
+        assert ways['a2'] == 'interpolate'
+        assert origins['a2'] == 'interpolated'
+        assert x_train['a2'].isna().mean() == pytest.approx(0.0)
+        assert x_pred['a2'].isna().mean() == pytest.approx(0.0)
+
+        # Ligne 3 — 'model', ordre a2 avant a1 : a2 est son imputation Q (rang 2)
+        ordered = CovariateMaterializer(covariate_strategy='model')
+        _prime_stores(
+            ordered, 'a2', pd.Series(5.0 + np.arange(12), index=_quarterly_grid()),
+            'Q', 'model',
+        )
+        x_train, x_pred, ways, origins = self._fit_and_predict(ordered, data)
+        assert ways['a2'] == 'stage_model'
+        assert origins['a2'] == 'model'
+        assert x_train['a2'].isna().mean() == pytest.approx(0.0)
+        assert x_pred['a2'].isna().mean() == pytest.approx(0.0)
+
+        # Ligne 4 — 'model', ordre a1 avant a2 : a2 servie par covariate_fallback
+        # (rang 4), des deux côtés. C'est le cas qui produisait 33-67 % de NaN
+        # silencieux dans hfi
+        unordered = CovariateMaterializer(covariate_strategy='model')
+        x_train, x_pred, ways, origins = self._fit_and_predict(unordered, data)
+        assert ways['a2'] == 'interpolate'
+        assert origins['a2'] == 'interpolated'
+        assert x_train['a2'].isna().mean() == pytest.approx(0.0)
+        assert x_pred['a2'].isna().mean() == pytest.approx(0.0)
+        # Valeurs d'or de a2 aux trois ancres annuelles (§2.2)
+        np.testing.assert_allclose(x_train['a2'].to_numpy(), [60.0, 66.0, 72.0])
 
 
 class TestCovariateEligibility:
