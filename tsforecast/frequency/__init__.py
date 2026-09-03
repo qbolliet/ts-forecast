@@ -23,6 +23,11 @@ from .provenance import (
     origin_to_taint,
     max_origin,
 )
+from .covariate_materializer import (
+    CovariateMaterializer,
+    AggregationConstraintApplier,
+    DEFAULT_MATERIALIZATION_KEY,
+)
 from .stage_scaler import StageScaler, ScaleMode
 from .imputation_window import ImputationWindowCalculator, ImputationScope
 from .target_frequency_validator import TargetFrequencyValidator
@@ -51,6 +56,10 @@ __all__ = [
     'resolve_model_provenance',
     'origin_to_taint',
     'max_origin',
+    # Matérialisation des covariables
+    'CovariateMaterializer',
+    'AggregationConstraintApplier',
+    'DEFAULT_MATERIALIZATION_KEY',
     # Mise à l'échelle d'étape
     'StageScaler',
     'ScaleMode',
