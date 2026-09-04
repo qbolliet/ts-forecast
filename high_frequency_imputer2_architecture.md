@@ -12,7 +12,9 @@
 > d'entraînement** (§5.8, décisions D17 à D19, défaut mesuré B29). Une même colonne peut porter
 > une fréquence différente selon l'entité d'un panel ; les vraies valeurs des entités qui
 > l'observent plus finement doivent entraîner le modèle, **à leur propre fréquence** — plus fine
-> que la grille de prédiction comprise (D18). Sections amendées : §0, §1.5 (nouvelle),
+> que la grille de prédiction comprise (D18) ; et **restriction d'`aggregation_constraint` à
+> `'sum'` / `None`** (D8 amendée, D20), l'additivité étant le contrat de toute la classe.
+> Sections amendées : §0, §1.5 (nouvelle),
 > §2.1, §2.5 (nouvelle), §5.3, §5.4, §5.8 (nouvelle), §7.2, §9.2, §12.2, §12.3, §13.2, §14.3,
 > §16, §17.
 >
@@ -77,9 +79,11 @@ appliqué à l'identique aux deux grilles.
    l'énumération (§6, D6).
 2. **`impute_intermediate_frequencies` à trois modalités** `False` / `'covariates_only'` /
    `True`, défaut `False` (§5, D3).
-3. **`aggregation_constraint: Union[Literal['sum', 'mean', 'last', None], Dict[str, ...]] = 'sum'`**
-   remplace `enforce_period_totals` : quatre contraintes scalaires et une forme dictionnaire par
-   colonne, avec clé `'__default__'` (§11, D8).
+3. **`aggregation_constraint: Union[Literal['sum', None], Dict[str, ...]] = 'sum'`**
+   remplace `enforce_period_totals` : **deux** valeurs scalaires — `'sum'` et `None` — et une
+   forme dictionnaire par colonne, avec clé `'__default__'` (§11, D8, D20). `'mean'` et `'last'`
+   sont **refusés** : l'additivité est le contrat de la classe entière (§2.2) et
+   `additive_transformer` en est l'unique échappatoire.
 4. **Les ancres sont toujours désagrégées** : une variable imputée à l'étape `f` est prédite sur
    **toute** sa période, ancres comprises, pour qu'une colonne ne mélange jamais total de période
    et valeurs de sous-période. **Non paramétrable** — `disaggregate_anchors` n'existe pas (§11.2,
@@ -176,7 +180,7 @@ additives).
 | `train_on_partial_coverage` | **supprimé** (déjà condamné par [ARCH] §3.7) ; remplacé par `training_scope` | §7 |
 | `train_on_partial_fit_order` | **renommé** `fit_predict_order`, mêmes modalités `'frequency'`/`'cv'`, champ d'application restreint | §8.1 |
 | `scale_features: bool` | **élargi** en `Union[Literal[False], 'constant', 'calendar', Dict[...]]` | §9.1 |
-| `enforce_period_totals: bool` | **remplacé** par `aggregation_constraint`, élargi en `Union[Literal['sum', 'mean', 'last', None], Dict[str, ...]]` | §11.1, D8 |
+| `enforce_period_totals: bool` | **remplacé** par `aggregation_constraint`, élargi en `Union[Literal['sum', None], Dict[str, ...]]` — la seule extension est la **forme par colonne** | §11.1, D8, D20 |
 | `cv_n_splits: int` | **supprimé**, absorbé par `cv` (contrat sklearn) | §8.3, D4 |
 | `covariate_eligibility` | **conservé**, sémantique recadrée sur le seul cas « feature absente pour la totalité d'une entité » | §4.5 |
 | `keep_lower_frequencies` | **conservé** tel quel, paramètre d'affichage pur, correctif B4 inclus | §12.4 |
@@ -367,7 +371,7 @@ l'état de chaque entité permet :
 | Cas | Traitement | Origine des cellules |
 |---|---|---|
 | `f_c == f` | identité | `'observed'` |
-| `f_c` plus **fine** que `f` | agrégation exacte selon la contrainte d'agrégation (somme par défaut), via `FrequencyConverter.aggregate_to_lower_frequency(..., full_periods_only=True)` | `'observed'` |
+| `f_c` plus **fine** que `f` | agrégation exacte **par somme**, via `FrequencyConverter.aggregate_to_lower_frequency(..., method='sum', full_periods_only=True)` — l'additivité étant le contrat de la classe (§2.2), cette voie ne consulte **pas** `aggregation_constraint` (D20) | `'observed'` |
 | `f_c` plus **basse** que `f` | **`covariate_strategy`** | §4.2 à §4.4 |
 
 Une période incomplète en agrégation (`full_periods_only=True`) produit NaN : c'est une source
@@ -773,9 +777,9 @@ fréquence du bloc** (`get_mask_at_frequency({e: f_block(e)}, kind='training')`)
 `ELIGIBLE_ORIGINS` (§5.3).
 
 Comme tous les diviseurs du document (§5.4, §9.1), le diviseur fractionnaire suppose la colonne
-**additive** : sur une colonne qui ne l'est pas (indice, taux, ratio), c'est
-`scale_features=False` pour cette colonne qui est le réglage juste — la règle est la même pour un
-bloc plus fin que pour une ancre annuelle divisée par 12.
+**additive** — exactement au même titre que la division par 12 d'une ancre annuelle. Ce n'est pas
+une hypothèse propre à la mutualisation : c'est le contrat de la classe entière (§2.2), dont
+`additive_transformer` est l'unique échappatoire (D20).
 
 **R4 — Covariables du bloc.** `CovariateMaterializer.materialize` est appelé **une seule fois**
 sur la grille d'entraînement mutualisée — l'union des grilles de bloc — avec
@@ -1377,22 +1381,32 @@ indispensable, et les valeurs d'ancre elles-mêmes ne survivent pas telles quell
 ### 11.1 — `aggregation_constraint`
 
 ```python
-ConstraintKind = Literal['sum', 'mean', 'last']
-aggregation_constraint: Union[Optional[ConstraintKind],
-                              Dict[str, Optional[ConstraintKind]]] = 'sum'
+ConstraintKind = Literal['sum']
+ConstraintSetting = Optional[ConstraintKind]          # 'sum' | None
+aggregation_constraint: Union[ConstraintSetting,
+                              Dict[str, ConstraintSetting]] = 'sum'
 ```
 
 Remplace `enforce_period_totals: bool` (D8). `'sum'` ≡ `enforce_period_totals=True`, `None` ≡
-`False`. Le paramètre est d'emblée extensible, sans rupture d'API :
+`False`. La seule extension est la **forme par colonne** :
 
-- trois contraintes scalaires — `'sum'` pour une variable additive, `'mean'` pour un taux,
-  `'last'` pour un stock — plus `None`, qui n'impose rien. `additive_transformer` reste le moyen
-  de rendre additive une colonne qui ne l'est pas ; `'mean'` et `'last'` servent les colonnes
-  qu'aucune transformation ne rend additives ;
-- une **forme dictionnaire** `Dict[str, Optional[ConstraintKind]]` par colonne, avec
-  `'__default__'`, sur le modèle de `estimator` et `scale_features`.
+- deux valeurs scalaires — `'sum'`, qui impose que les sous-périodes somment au total observé, et
+  `None`, qui n'impose rien ;
+- une **forme dictionnaire** `Dict[str, ConstraintSetting]` par colonne, avec `'__default__'`, sur
+  le modèle de `estimator` et `scale_features` : elle sert à **désactiver** la contrainte colonne
+  par colonne, jamais à en changer la nature.
 
-**Validation à `__init__`** : seules ces quatre valeurs, et les dictionnaires qui les associent à
+**`'mean'` et `'last'` sont refusés** (D20). Ils avaient été prévus pour « les colonnes
+qu'aucune transformation ne rend additives », mais une telle colonne casse **tout le reste** de la
+classe, pas seulement le recalage : chaque diviseur de fréquence (§5.4, §9.1) suppose qu'une
+valeur de basse fréquence est la **somme** de ses sous-périodes, la désagrégation systématique des
+ancres (§11.2) aussi, et l'agrégation exacte d'une covariable plus fine (§4.1) également. Les
+accepter au seul endroit du recalage revenait à corriger un mécanisme sur quatre et à laisser
+croire au reste. Le contrat est donc unique et énoncé une fois pour toutes au §2.2 :
+**`hfi2` travaille sur des colonnes additives, et `additive_transformer` est l'unique échappatoire
+pour celles qui ne le sont pas.**
+
+**Validation à `__init__`** : seules ces deux valeurs, et les dictionnaires qui les associent à
 un nom de colonne, sont acceptés. Toute autre valeur lève un `ValueError` énonçant les formes
 admises. La validation et la résolution sont portées par les fonctions de module
 `validate_aggregation_constraint` et `resolve_aggregation_constraint`
@@ -1401,10 +1415,8 @@ portent le paramètre, une seule implémentation les empêche de diverger.
 
 Sémantique, reprise de `hfi:_rescale_to_period_totals` : les sous-périodes prédites d'une période
 sont multipliées par `total observé / agrégat prédit`, de sorte que la colonne porte une véritable
-**désagrégation** de l'observation plutôt qu'une prédiction libre. L'agrégat est celui que nomme
-la contrainte — somme, moyenne, ou dernière sous-période. **Les trois contraintes passent par ce
-ratio unique**, si bien que les gardes ci-dessous et le masque des cellules recalées leur sont
-rigoureusement identiques. Gardes conservées :
+**désagrégation** de l'observation plutôt qu'une prédiction libre. L'agrégat prédit est la
+**somme** des sous-périodes, seule contrainte admise (D20). Gardes conservées :
 
 | Cas | Comportement |
 |---|---|
@@ -1616,8 +1628,8 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         # --- Échelle et contraintes (§9, §11) ---
         scale_features: Union[Literal[False], ScaleMode,
                               Dict[str, Union[Literal[False], ScaleMode]]] = 'constant',
-        aggregation_constraint: Union[Optional[ConstraintKind],
-                                      Dict[str, Optional[ConstraintKind]]] = 'sum',
+        aggregation_constraint: Union[ConstraintSetting,
+                                      Dict[str, ConstraintSetting]] = 'sum',
 
         # --- Sortie et divers ---
         keep_lower_frequencies: bool = True,
@@ -1645,7 +1657,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
 | `min_cv_train_size` | `int ≥ 1` |
 | `coverage_threshold`, `training_coverage_threshold` | float dans `[0, 1]` (ou `None` pour le second) |
 | `scale_features` | `False`, `'constant'`, `'calendar'`, ou dict de ces valeurs |
-| `aggregation_constraint` | `'sum'`, `'mean'`, `'last'`, `None`, ou dict de ces valeurs (clé `'__default__'` admise, clés vérifiées au `fit`) ; message listant les formes admises (§11.1) |
+| `aggregation_constraint` | `'sum'`, `None`, ou dict de ces deux valeurs (clé `'__default__'` admise, clés vérifiées au `fit`) ; message listant les formes admises et **nommant `additive_transformer`** comme réponse à une colonne non additive (§11.1, D20) |
 | booléens (`keep_lower_frequencies`, `restore_original_values`, `verbose`) | validation groupée, comme dans `hfi` |
 
 Combinaisons **inertes** documentées mais **non signalées** (D9) : cf. §5.6.
@@ -1695,7 +1707,7 @@ sont ceux de la version 1, conservés pour la traçabilité.
 | **D5** | noms validés : `covariate_strategy`, `covariate_fallback`, `impute_intermediate_frequencies`, `fit_predict_order`, `interpolation_anchor` — **sauf** `enforce_aggregation_constraints`, remplacé par **`aggregation_constraint`** | §11.1, §13 |
 | **D6** | provenance en **échelle de souillure** : vraies + agrégées → `MODEL_ON_TRUE` ; + interpolées → `MODEL_ON_INTERPOLATED` ; + au moins une covariable imputée → `MODEL_ON_IMPUTED` ; souillure venue de `y_train` distinguée par `MODEL_ON_IMPUTED_TARGET` / `MODEL_ON_IMPUTED_BOTH` ; **`MODEL_ON_MIXED` supprimé**, y compris pour `hfi`. Les cellules de repli portent `INTERPOLATED` | §6 |
 | **D7** | **pas** de `disaggregate_anchors` : une variable est imputée sur toute sa période, ancres comprises, comportement **non paramétrable** | §11.2 |
-| **D8** | `aggregation_constraint` remplace `enforce_period_totals` : `'sum'` (défaut), `'mean'`, `'last'`, `None`, ou dict par colonne avec `'__default__'`. Les quatre formes sont **implémentées**, la validation les accepte toutes | §11.1 |
+| **D8** | `aggregation_constraint` remplace `enforce_period_totals` : `'sum'` (défaut), `None`, ou dict par colonne avec `'__default__'` — **amendée le 2026-09-04 par D20**, qui en retire `'mean'` et `'last'` | §11.1 |
 | **D9** | paramètres inertes : **silence + docstring**, jamais d'avertissement | §5.6, §8.1 |
 | **D10** | dictionnaires par feature indexés par **nom de colonne**, jamais par `(entité, colonne)` | §9.1, §10 |
 | **D11** | `transform` face à des fréquences divergentes : **avertissement + poursuite** avec les fréquences du fit ; **`ValueError`** si une colonne du fit manque | §12.1 |
@@ -1711,6 +1723,7 @@ sont ceux de la version 1, conservés pour la traçabilité.
 | **D16** | la contrainte d'agrégation **ne change aucune provenance** : cellules recalées et lignes d'ancre gardent le `MODEL_*` ou l'`INTERPOLATED` de la valeur écrite ; `DISAGGREGATED` n'est **jamais émis** par `hfi2` et ne survit dans l'énumération partagée que pour `hfi` | recaler, c'est déplacer une valeur, pas la produire — au même titre que la mise à l'échelle du `StageScaler`. `DISAGGREGATED` **remplaçait** la marque de la cellule et effaçait l'information utile (modèle ? interpolation ? souillure ?) au profit d'une information de position que le masque des cellules recalées et `anchor_cells_mask` portent déjà, comme diagnostics (§6.4, §11.2) |
 | **D17** | **mutualisation inter-entités du jeu d'entraînement**, **non paramétrable** : toute entité observant la colonne entraîne le modèle, à sa propre fréquence, ramenée à l'échelle de l'étape par un diviseur de bloc (§5.8) | le comportement actuel mutualise **déjà**, mais avec un diviseur faux et une fraction des lignes (B29, §1.5) ; le modèle d'un panel est global par construction, dans `hfi` comme dans `hfi2` ; l'auteur tranche l'arbitrage volume / biais de niveau **en faveur du volume**, l'échappatoire (un imputeur par entité) restant disponible sans paramètre |
 | **D18** | `f_block(e)` = `f_var(e, v)`, la fréquence propre de l'entité, **plus fine que la grille de prédiction comprise** : une entité qui observe la colonne plus finement contribue **toutes** ses observations, sans agrégation préalable. Le découpage en blocs ne dépend donc pas de l'étape | **le volume d'abord** : agréger une entité mensuelle à une étape trimestrielle jetterait deux lignes sur trois, et la variation intra-trimestrielle avec elles. Le prix est nul sur les deux axes qu'on pouvait craindre : le diviseur devient **fractionnaire** (`factor(Q, M) = 1/3`), forme que la plomberie d'échelle par ligne du §5.4 absorbe déjà ; et une entité au bloc plus fin n'est **jamais imputable** à cette étape, donc jamais présente sur une grille de prédiction — la voie de matérialisation dégradée que sa grille de bloc peut imposer à ses covariables rend l'**entraînement** plus dégradé que la prédiction, sens que l'invariant du §3 autorise. Corollaire : `full_periods_only` et la contrainte d'agrégation ne jouent **aucun** rôle dans la construction de `y_train` |
+| **D20** | `aggregation_constraint` n'admet que `'sum'` et `None` : `'mean'` et `'last'` sont **retirés** de l'API, du module `aggregation_constraint.py` et de `CovariateMaterializer`. L'agrégation exacte d'une covariable plus fine (§4.1) est une **somme**, sans consulter le paramètre | l'additivité n'est pas une option du recalage, c'est le **contrat de toute la classe** (§2.2), et `additive_transformer` en est l'unique échappatoire — appliqué en phase 2 du `fit`, avant toute imputation, et inversé au `inverse_transform`. Une colonne non additive fausse déjà chaque diviseur de fréquence (§5.4, §9.1), la désagrégation des ancres (§11.2) et l'agrégation des covariables (§4.1) : accepter `'mean'` au seul endroit du recalage corrigeait un mécanisme sur quatre et laissait croire au reste. Constat de mise en œuvre : `CovariateMaterializer` code **déjà** `method='sum'` en dur au rang 1 — la spec promettait ce que le code ne faisait pas |
 | **D19** | **un seul ajustement par (étape, variable)** : le modèle est partagé par les étapes du plan qui ne diffèrent que par `source_frequency` et `entities` | le jeu mutualisé ne dépend pas du groupe (§5.8 R6) : deux ajustements y seraient redondants et, sous un estimateur stochastique, divergents. C'est la mémoïsation explicitement autorisée par le §5.7, et non un retour de D2 : un modèle n'est jamais réutilisé d'une **étape** à l'autre |
 
 ---
@@ -1829,6 +1842,7 @@ mise à jour du notebook concerné quand il touche l'exécution d'étape (§15.2
 | **L5** | `stage_scaler.py` : diviseurs `'constant'`/`'calendar'`, scalaires et `Series`, B25, B12, forme dict par feature | L1 | tests unitaires isolés + I5 |
 | **L6** | `covariate_materializer.py` : les trois stratégies, `covariate_fallback`, précédence à quatre rangs (§4.4), `imputed_store`/`imputed_freq_store`/`origin_store`, `covariate_eligibility` | L1, L2, L3 | tests unitaires isolés + I2, I11 |
 | **L7** | `aggregation_constraint.py` : recalage aux totaux, gardes (§11.1), masque des cellules recalées, désagrégation systématique des ancres (§11.2) | L2 | tests unitaires + I4 |
+| **L7b** | restriction d'`aggregation_constraint` à `'sum'` / `None` (D20) : `aggregation_constraint.py` et `covariate_materializer.py` — valeurs admises, message d'erreur nommant `additive_transformer`, suppression des agrégateurs `'mean'`/`'last'` | L6, L7 | `tests/frequency/test_aggregation_constraint.py`, `test_covariate_materializer.py` |
 | **L8** | `variable_orderer.py` : ordres `'frequency'` et `'cv'`, `check_cv`, tie-break alphabétique, correctifs §8.2 | — | tests unitaires + I3 |
 | **L8b** | jeu de référence `PANEL-F` (§2.5) : colonne à fréquence hétérogène par entité, fixtures et valeurs d'or | — | `tests/frequency/test_reference_datasets.py` |
 | **L8c** | `stage_scaler.py` : `source_freq` en liaison par entité, diviseurs par bloc (§5.8 R5, §9.2) | L5 | tests unitaires isolés |

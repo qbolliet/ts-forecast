@@ -91,6 +91,7 @@ la raison de chaque modification.
 | 11a | **L8b** | jeu de référence `PANEL-F` : une colonne à fréquence hétérogène par entité | §2.5, §1.5 | **Sonnet** | Non | — |
 | 11b | **L8c** | `stage_scaler.py` : `source_freq` en liaison par entité, diviseurs par bloc | §5.8 R5, §9.2 | **Opus** | Non | 7 |
 | 11c | **L8d** | `training_set_builder.py` : jeu d'entraînement **mutualisé** entre entités | §5.8 | **Opus** | **Oui** | 6, 8, 9, 11a, 11b |
+| 11d | **L7b** | **correctif** : `aggregation_constraint` restreinte à `'sum'` / `None` | §11.1, D20 | **Sonnet** | Non | 8, 9, 10 |
 | 12 | **L9** | `hfi2` : `__init__`, validations, phases 0 à 4, attributs ajustés | §12.3, §13 | **Opus** | **Oui** | 6–11c |
 | 13 | **L10** | `hfi2` : PHASE 5, exécution d'étape unique, provenance, stores | §12.3, §6.3 | **Opus** | **Oui** | 12 |
 | 14 | **L11** | Axe 2 : progression, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape | §5 | **Opus** | **Oui** | 13 |
@@ -99,7 +100,9 @@ la raison de chaque modification.
 | 17 | **L13b** | Documentation : docstrings de référence, `mkdocs`, `__init__.py` | §15.3 | **Sonnet** | Non | 16 |
 
 **Dépendances dures** : 2 → 3 ; 4 → 6 ; 3 → 7 ; 3, 4, 5 → 8 ; 8 → 9 ; 4 → 10 ; 5 → 11 ;
-7 → 11b ; 6, 8, 9, 11a, 11b → 11c ; 6, 7, 9, 10, 11, 11c → 12 ; 12 → 13 → 14 → 15 → 16 → 17.
+7 → 11b ; 6, 8, 9, 11a, 11b → 11c ; 8, 9, 10 → 11d ; 6, 7, 9, 10, 11, 11c, 11d → 12 ;
+12 → 13 → 14 → 15 → 16 → 17. Le prompt **11d** est indépendant de 11a/11b/11c et peut être exécuté
+avant eux ; il doit seulement précéder le prompt 12, qui reprend la signature corrigée.
 **Parallélisables entre eux** : {1, 2, 4, 5} ; {7, 10, 11} une fois 3 et 4 faits ; 1 et 11a avec
 tout.
 
@@ -1638,6 +1641,102 @@ de la seule colonne.
 
 ---
 
+## Prompt 11d — correctif : `aggregation_constraint` restreinte à `'sum'` / `None` (L7b)
+
+**Modèle : Sonnet · Plan mode : Non · Dépendances : prompts 8, 9, 10**
+
+> Correctif décidé le 2026-09-04, après exécution des prompts 1 à 11 : la spec promettait
+> `'mean'` et `'last'`, décision D20 les retire. Surface mécanique, aucun raisonnement d'échelle
+> nouveau — Sonnet suffit. Indépendant de 11a/11b/11c, mais doit précéder le prompt 12.
+
+````text
+Contexte : je prépare l'implémentation de HighFrequencyImputer2 ([SPEC] =
+high_frequency_imputer2_architecture.md). Les prompts 1 à 11 sont exécutés. Ce lot est un
+CORRECTIF d'API sur deux fichiers déjà écrits.
+Référence : [SPEC] §11.1 (nouvelle rédaction), §2.2 (contrat d'additivité), §4.1 (agrégation
+exacte d'une covariable plus fine), décision D20 du §14.3.
+
+LA DÉCISION EN UNE PHRASE : `aggregation_constraint` n'admet plus que `'sum'` et `None` (plus la
+forme dictionnaire par colonne de ces deux valeurs) ; `'mean'` et `'last'` disparaissent de l'API
+et du code.
+
+POURQUOI, à reprendre dans les docstrings : l'additivité n'est pas une option du recalage, c'est
+le CONTRAT DE TOUTE LA CLASSE ([SPEC] §2.2) — chaque diviseur de fréquence (§5.4, §9.1) suppose
+qu'une valeur de basse fréquence est la SOMME de ses sous-périodes, la désagrégation systématique
+des ancres (§11.2) aussi, et l'agrégation exacte d'une covariable plus fine (§4.1) également.
+`additive_transformer` est l'UNIQUE échappatoire pour une colonne non additive : il est appliqué
+en phase 2 du fit, avant toute imputation, et inversé au `inverse_transform`. Accepter `'mean'`
+au seul endroit du recalage corrigeait un mécanisme sur quatre et laissait croire au reste.
+
+CIBLE 1 — tsforecast/frequency/aggregation_constraint.py
+
+1) Types : `ConstraintKind = Literal['sum']` et `ConstraintSetting = Optional[ConstraintKind]`.
+   GARDER les deux NOMS et les exports de `frequency/__init__.py` inchangés (aucun import ne doit
+   casser) ; seule la liste des valeurs se restreint. `_CONSTRAINT_SETTINGS` devient
+   `('sum', None)`.
+
+2) Supprimer le code devenu mort : la fonction `_last` et le dispatch `_AGGREGATORS`. Le calcul de
+   l'agrégat prédit appelle la somme DIRECTEMENT, sans table de dispatch — s'il reste un point
+   d'appel qui lit `resolve_constraint(...)` pour choisir un agrégateur, le remplacer par un test
+   binaire « contrainte active ou non ».
+
+3) `validate_aggregation_constraint` : message d'erreur mis à jour. Il énonce les formes admises
+   ('sum', None, ou un dict de ces valeurs avec clé optionnelle '__default__') ET NOMME
+   `additive_transformer` comme la réponse à une colonne non additive. Une valeur 'mean' ou 'last'
+   n'est plus une valeur « réservée » : c'est une ERREUR comme une autre, avec ce message.
+
+4) `resolve_aggregation_constraint`, `validate_constraint_columns`, `AggregationConstraint` (son
+   `__init__`, `_validate_aggregation_constraint`, `resolve_constraint`, `rescale`, `fit`,
+   `transform`, `anchor_cells_mask`) : purger 'mean' et 'last' des annotations, des docstrings et
+   de TOUS les doctests (plusieurs exemples utilisent `{'a1': 'mean', '__default__': None}` —
+   les réécrire avec `{'a1': None, '__default__': 'sum'}`, qui illustre la même mécanique de dict).
+   INCHANGÉS : la sémantique du ratio `total observé / agrégat prédit`, les QUATRE GARDES du
+   §11.1, le `UserWarning` de changement de signe, le masque des cellules recalées,
+   `anchor_cells_mask`, et l'invariance de provenance (D16).
+
+CIBLE 2 — tsforecast/frequency/covariate_materializer.py
+
+5) Même purge dans les annotations, docstrings et doctests (`aggregation_constraint`,
+   `_validate_aggregation_constraint`, `resolve_aggregation_constraint`, la docstring de classe).
+   Le paramètre RESTE, avec le même défaut `'sum'` : il gouverne le recalage des covariables
+   INTERPOLÉES (§4.3), pas l'agrégation.
+
+6) CONSTAT À VÉRIFIER PUIS À DOCUMENTER : la voie `'aggregate'` du rang 1 appelle déjà
+   `aggregate_to_lower_frequency(..., method='sum', ...)` EN DUR, sans consulter
+   `aggregation_constraint`. Ce n'était pas un raccourci, c'est désormais le contrat (D20) :
+   ajouter un commentaire français à ce point d'appel le disant, et corriger la docstring du rang 1
+   qui laisse entendre que la contrainte est consultée. NE PAS introduire de dépendance du rang 1
+   au paramètre.
+
+TESTS
+
+7) tests/frequency/test_aggregation_constraint.py :
+   - les tests paramétrés sur 'mean' / 'last' sont SUPPRIMÉS, pas adaptés (le comportement
+     n'existe plus) ;
+   - `test_dict_form_raises_with_reserved_extension_message` devient
+     `test_mean_and_last_are_rejected` : `'mean'`, `'last'`, et un dict les contenant, lèvent un
+     `ValueError` dont le message cite 'sum', None ET `additive_transformer` ;
+   - AJOUTER `test_dict_form_of_sum_and_none` : `{'a1': None, '__default__': 'sum'}` est accepté et
+     résolu colonne par colonne ;
+   - tous les autres tests ('sum', None, gardes, masques, panel) doivent passer INCHANGÉS — s'il
+     faut en modifier un qui ne portait pas sur 'mean'/'last', c'est le signe d'une régression :
+     l'annoncer au lieu de l'adapter.
+
+8) tests/frequency/test_covariate_materializer.py : même traitement ; ajouter
+   `test_rank1_aggregation_is_always_a_sum` — une covariable plus fine est agrégée par SOMME même
+   lorsque `aggregation_constraint=None`, la contrainte ne gouvernant que le recalage des
+   interpolées.
+
+Puis `uv run tests/frequency/check_regressions.py` et rapporter. NE PAS modifier hfi : il porte
+`enforce_period_totals: bool` et n'utilise aucun de ces deux modules.
+
+Rappels de convention (CLAUDE.md) : commentaires internes en français à formulation nominale ;
+docstrings en anglais Google Style avec Args/Returns/Raises/Examples ; type hints systématiques ;
+localiser le code par nom de symbole, jamais par numéro de ligne.
+````
+
+---
+
 ## Prompt 12 — `hfi2` : `__init__`, validations, phases 0 à 4 (L9)
 
 **Modèle : Opus · Plan mode : OUI · Dépendances : prompts 6, 7, 9, 10, 11, 11c**
@@ -1660,7 +1759,9 @@ CIBLE — nouveau fichier tsforecast/frequency/high_frequency_imputer2.py
 1) `class HighFrequencyImputer2(XYPanelTimeSeriesTransformer)` — même classe de base que hfi
    (tsforecast/xy/transformers.py). Signature d'`__init__` EXACTEMENT celle du §13 de [SPEC],
    dans le même ordre et avec les mêmes défauts. La recopier depuis le document, ne pas la
-   reconstituer de mémoire. Rappel des paramètres qui N'EXISTENT PLUS et ne doivent pas
+   reconstituer de mémoire. `aggregation_constraint` n'admet que
+   `'sum'`, `None` et le dict de ces deux valeurs (D20, prompt 11d) : ni 'mean', ni 'last'.
+   Rappel des paramètres qui N'EXISTENT PLUS et ne doivent pas
    réapparaître : `cascade_refitting`, `train_on_partial_coverage`, `train_on_partial_fit_order`,
    `enforce_period_totals`, `cv_n_splits`, `disaggregate_anchors`.
 
