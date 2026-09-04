@@ -1387,8 +1387,10 @@ high_frequency_imputer2_architecture.md). Le jeu d'entraînement d'une variable 
 MUTUALISÉ entre entités ([SPEC] §5.8) : chaque entité y contribue à SA fréquence — sa
 « fréquence de bloc » `f_block(e)` — et les diviseurs cessent d'être uniformes sur le jeu. Ce lot
 prépare `StageScaler` à cette forme, SANS rien changer au comportement existant.
-Référence : [SPEC] §5.8 règle R5, §9.2 point 1, §5.4 (table de généralisation des fréquences de
-ligne), décisions D17 et D18 du §14.3.
+Référence : [SPEC] §5.8 règles R2 et R5, §9.2 point 1, §5.4 (table de généralisation des
+fréquences de ligne), décisions D17 et D18 du §14.3. NOTER que `f_block(e)` peut être PLUS FINE
+que la fréquence d'étape (D18) : les diviseurs peuvent donc être FRACTIONNAIRES (1/3 pour un bloc
+mensuel à une étape trimestrielle), forme qu'aucun garde-fou ne doit rejeter.
 
 CIBLE — tsforecast/frequency/stage_scaler.py, EXTENSION ADDITIVE
 
@@ -1429,6 +1431,10 @@ TESTS — à ajouter dans tests/frequency/test_stage_scaler.py, sur la fixture
    - `test_feature_divisors_per_entity_gold_values` : `m1` (mensuelle) avec
      `source_freq={FR: 'Y', DE: 'Q', IT: 'M'}` et `pred_freq='M'` -> diviseurs 12.0 sur les
      lignes FR, 3.0 sur les lignes DE, 1.0 sur les lignes IT ;
+   - `test_fractional_divisor_for_a_block_finer_than_the_stage` : un bloc PLUS FIN que l'étape est
+     un cas normal (D18) — `source_freq={IT: 'M'}` avec `pred_freq='Q'` rend un diviseur 1/3, et
+     `target_divisor(produced_freq=Series('M'))` à l'étape 'Q' rend 1/3 lui aussi. Aucun garde-fou
+     ne doit rejeter, arrondir ni plancher à 1.0 un diviseur fractionnaire ;
    - `test_scalar_source_freq_unchanged` : les tests existants du fichier passent inchangés, et
      la forme du retour scalaire n'a pas bougé (`Series` par colonne) ;
    - `test_mapping_source_freq_requires_index_with_entity_level` : `index=None` ou index sans
@@ -1485,10 +1491,13 @@ CIBLE 1 — nouveau fichier tsforecast/frequency/training_set_builder.py
         column_origins: Mapping[str, CellOrigin]     # origine agrégée par covariable
 
     class TrainingSetBuilder:
-        def __init__(self, materializer, aggregation_constraint='sum',
-                     training_mask=None, log=None): ...
+        def __init__(self, materializer, training_mask=None, log=None): ...
         def build(self, *, column, feature_cols, stage_freq, detected_frequencies,
                   source_data, eligible_origins) -> TrainingSet: ...
+
+    PAS de paramètre `aggregation_constraint` : la cible n'est JAMAIS agrégée (R3 ci-dessous), le
+    composant n'a donc besoin ni de `resolve_aggregation_constraint`, ni du module
+    aggregation_constraint.py — d'où l'absence du prompt 10 dans les dépendances de ce lot.
 
     `training_mask` est un CALLABLE injecté, `Callable[[Mapping[EntityKey, str]], pd.Series]`,
     qui rend le masque `kind='training'` à la fréquence demandée POUR CHAQUE ENTITÉ (l'appelant
@@ -1508,35 +1517,43 @@ R1 PÉRIMÈTRE — toute entité portant AU MOINS UNE observation de `column` co
    non, et de sa fréquence cible propre. Une entité qui ne l'observe jamais ne contribue rien et
    ne lève rien (symétrique du §4.5).
 
-R2 FRÉQUENCE DE BLOC — `f_block(e)` = la plus BASSE des deux fréquences `f_var(e, column)` et
-   `stage_freq(e)`. On n'entraîne JAMAIS sur une grille plus fine que la grille de prédiction
-   (D18). Utiliser `is_higher_frequency` / `normalize_frequency`, jamais une comparaison
-   d'étiquettes brutes.
+R2 FRÉQUENCE DE BLOC — `f_block(e)` = `f_var(e, column)`, la fréquence PROPRE de l'entité pour
+   cette colonne, SANS EXCEPTION : y compris quand elle est plus FINE que `stage_freq(e)` (D18).
+   On entraîne alors sur une grille plus fine que la grille de prédiction — c'est voulu, c'est ce
+   qui maximise le nombre de lignes (36 lignes mensuelles à une étape trimestrielle, contre 12
+   agrégats). NE PAS écrire de `min` de fréquences, NE PAS comparer `f_var` à `stage_freq` pour
+   décider du bloc : `blocks[e] = detected_frequencies[(e, column)]`, normalisée par
+   `normalize_frequency`. Conséquence à exploiter : les blocs NE DÉPENDENT PAS de l'étape ; seuls
+   les diviseurs en dépendent.
 
-R3 LIGNES D'UN BLOC, selon la position de `f_var(e, column)` face à `stage_freq(e)` :
-   - plus BASSE  : les ANCRES de la colonne pour cette entité, à sa propre fréquence ;
-   - ÉGALE       : les cellules OBSERVÉES de la colonne pour cette entité ;
-   - plus FINE   : l'AGRÉGAT EXACT de la colonne sur chaque période COMPLÈTE de `stage_freq(e)`,
-                   via `FrequencyConverter.aggregate_to_lower_frequency(..., full_periods_only=True)`
-                   avec la méthode que donne `resolve_aggregation_constraint` pour cette colonne
-                   ('sum' par défaut, 'mean', 'last' ; None -> 'sum', l'additivité étant le
-                   contrat par défaut du §2.2). Une période INCOMPLÈTE ne produit AUCUNE ligne.
-   Puis, dans les trois cas : restriction par `training_mask({e: f_block(e)})`, puis filtre
-   `eligible_origins`.
+R3 LIGNES D'UN BLOC — une SEULE règle, quelle que soit la position de `f_var(e, column)` face à
+   `stage_freq(e)` : les lignes sont les CELLULES OBSERVÉES de la colonne pour cette entité (ses
+   ANCRES), prises à `f_block(e)`. AUCUNE agrégation de la cible, donc AUCUN appel à
+   `aggregate_to_lower_frequency` ni à `resolve_aggregation_constraint` dans ce composant, et
+   AUCUN effet de `full_periods_only` : une période incomplète ne fait perdre aucune ligne.
+   Ne pas écrire trois branches là où il n'y en a qu'une.
+   Puis : restriction par `training_mask({e: f_block(e)})`, puis filtre `eligible_origins`.
+   La position de `f_var(e, column)` face à `stage_freq(e)` ne se lit que dans le DIVISEUR
+   (R5 + lot 11b) : > 1 pour un bloc plus grossier que l'étape, 1.0 pour un bloc à l'étape,
+   FRACTIONNAIRE (< 1) pour un bloc plus fin — `get_conversion_factor('Q', 'M') == 1/3`. Vérifier
+   qu'aucun garde-fou du StageScaler ne rejette ni n'arrondit un diviseur fractionnaire.
 
 R4 COVARIABLES — UN SEUL appel à `CovariateMaterializer.materialize`, sur la grille mutualisée
    (l'union des grilles de bloc), avec `stage_freq={e: f_block(e)}` et les fréquences détectées
    sous leur forme par entité. Le composant sait déjà lire une fréquence d'étape par entité et
    dégrader la voie entité par entité (`_applicable_way`) : NE PAS écrire de boucle par bloc
-   autour de `materialize`, NE PAS produire de features autrement. Les voies rendues sont
-   retournées telles quelles dans `TrainingSet.ways` : c'est elles que l'appelant imposera à la
-   grille de prédiction (§4.6).
+   autour de `materialize`, NE PAS produire de features autrement. Une entité dont le bloc est
+   plus FIN que l'étape voit ses covariables matérialisées par une voie de rang inférieur (une
+   covariable trimestrielle est interpolée sur sa grille mensuelle) : c'est ATTENDU et sans
+   danger — cette entité n'est jamais imputable à cette étape, donc jamais présente sur la grille
+   de prédiction, et l'entraînement plus dégradé que la prédiction est le sens que l'invariant du
+   [SPEC] §3 autorise. Les voies rendues sont retournées telles quelles dans `TrainingSet.ways` :
+   c'est elles que l'appelant imposera à la grille de prédiction (§4.6).
 
-R5 FRÉQUENCE DE LIGNE — `row_frequency` vaut `f_block(e)` pour une ligne observée ou agrégée, et
-   la fréquence lue dans `imputed_freq_store` pour une ligne d'origine 'interpolated' ou 'model'
+R5 FRÉQUENCE DE LIGNE — `row_frequency` vaut `f_block(e)` pour une ligne observée, et la
+   fréquence lue dans `imputed_freq_store` pour une ligne d'origine 'interpolated' ou 'model'
    produite à une étape antérieure ([SPEC] §5.4, table de généralisation). `row_origin` suit la
-   même source : 'observed' pour les deux premiers cas (une agrégation exacte vaut 'observed',
-   §6.2), l'origine du store sinon.
+   même source : 'observed' pour le premier cas, l'origine du store sinon.
 
 R6 UN SEUL AJUSTEMENT — le jeu rendu ne dépend PAS du groupe de fréquence source : il est
    fonction de (colonne, étape) seulement. Ce composant n'a donc AUCUN paramètre de groupe ni
@@ -1575,21 +1592,25 @@ inutile ici : le composant est testable seul.
      sur les lignes FR ; 10.0 / 11.0 / 12.5 sur les lignes IT (identité) ; et
      28/3, 30/3, 31/3, … sur les lignes DE (soit 9.333…, 10.0, 10.333…) ;
    - `test_blocks_and_rows_at_quarterly_stage` : à l'étape 'Q', `blocks == {FR: 'Y', DE: 'Q',
-     IT: 'Q'}` et 27 lignes (3 + 12 + 12) ; cible mise à l'échelle : 30.0 / 33.0 / 37.5 pour FR,
-     les 12 valeurs brutes de DE inchangées (diviseur 1.0), et 30/30/30/33/33/33/37.5×4 pour IT
-     (agrégats trimestriels exacts) ;
-   - `test_italian_rows_are_exact_aggregates_not_samples` : les lignes IT à l'étape 'Q' portent la
-     SOMME des trois mois, jamais la valeur d'un mois isolé — c'est la différence exacte avec le
-     comportement de `hfi` (§1.5) ;
+     IT: 'M'}` — INCHANGÉS par rapport à l'étape 'M', les blocs ne dépendant pas de l'étape — et
+     51 lignes (3 + 12 + 36) ; cible mise à l'échelle : 30.0 / 33.0 / 37.5 pour FR (diviseur 4),
+     les 12 valeurs brutes de DE inchangées (diviseur 1.0), et 30.0 (×12) / 33.0 (×12) /
+     37.5 (×12) pour IT (diviseur 1/3, ses 36 lignes mensuelles conservées) ;
+   - `test_italian_rows_stay_monthly_at_quarterly_stage` : à l'étape 'Q', le bloc IT porte 36
+     lignes indexées sur les fins de MOIS, jamais 12 lignes de fins de trimestre — la cible brute
+     y vaut 10.0 / 11.0 / 12.5, c'est le DIVISEUR fractionnaire qui la porte à l'échelle
+     trimestrielle. Vérifier aussi qu'aucun appel à `aggregate_to_lower_frequency` n'a lieu sur la
+     colonne cible (monkeypatch ou compteur) ;
    - `test_single_call_to_materialize` : `materialize` est appelé UNE SEULE FOIS par `build`
      (monkeypatch ou compteur), avec `stage_freq` égal au mapping des blocs et `record=False` ;
    - `test_stores_untouched_by_training_materialization` : `snapshot()` du matérialiseur
      identique avant et après `build` ;
    - `test_no_carry_phantom_after_build` : après un `build` à l'étape 'M', aucune covariable ne
      devient éligible au rang 3 (`carried_model`) du seul fait du `build` ;
-   - `test_incomplete_period_produces_no_row` : en tronquant les deux derniers mois d'IT, le
-     dernier trimestre ne produit AUCUNE ligne pour IT à l'étape 'Q' (full_periods_only), les
-     autres restant ;
+   - `test_truncated_entity_keeps_all_its_observations` : en tronquant les deux derniers mois
+     d'IT, le bloc IT à l'étape 'Q' porte 34 lignes et non 33 — la cible n'étant jamais agrégée,
+     le trimestre incomplet ne fait perdre AUCUNE de ses observations (contraste explicite avec
+     `full_periods_only`, qui ne régit plus que les covariables, [SPEC] §4.1) ;
    - `test_entity_without_the_column_contributes_nothing` : une entité dont la colonne est
      entièrement NaN n'apparaît ni dans `blocks` ni dans les lignes, et ne lève rien ;
    - `test_entity_with_other_target_frequency_still_contributes` (R1) ;
@@ -1599,6 +1620,9 @@ inutile ici : le composant est testable seul.
    - **I16** `test_timeseries_is_the_degenerate_case` : sur `reference_timeseries`, le jeu
      mutualisé est IDENTIQUE au jeu d'origine — `blocks == {(): 'Y'}` pour `a1`, 3 lignes,
      diviseur 12 à l'étape M : tous les chiffres des §4.7, §5.4 et §5.5 restent vrais ;
+   - `test_blocks_are_stage_independent` : pour une même colonne, `blocks` est le MÊME mapping aux
+     étapes 'Q' et 'M', et le nombre de lignes est le même (51 sur `PANEL-F`) — seuls les
+     diviseurs diffèrent (D18) ;
    - `test_single_entity_panel` : panel à une entité, même résultat que la série temporelle ;
    - `test_way_uniqueness_contract` : les voies rendues couvrent EXACTEMENT `feature_cols`, et
      sont réutilisables telles quelles en mode rejeu sur une autre grille (§4.6).
@@ -1828,8 +1852,9 @@ PHASE 5 — pour chaque étape de fréquence `f` de la progression, dans cet ord
         rend `X`, `y` brute, `row_frequency`, `row_origin`, `blocks` et les VOIES retenues. Il
         réunit les blocs de TOUTES les entités observant `v` — celle qui l'observe annuellement,
         celle qui l'observe déjà à la fréquence de l'étape, celle qui l'observe plus finement
-        (agrégats exacts de périodes complètes) — chacune à sa fréquence de bloc. NE PAS
-        reconstruire ce jeu ici, NE PAS le restreindre aux entités du groupe imputé.
+        (ses observations telles quelles, à SA fréquence, sans agrégation) — chacune à sa
+        fréquence de bloc. NE PAS reconstruire ce jeu ici, NE PAS le restreindre aux entités du
+        groupe imputé, NE PAS agréger les entités plus fines que l'étape (D18).
         GRILLE DE PRÉDICTION : masque `kind='imputation'`. Nommer explicitement le `kind` à
         chaque appel de masque, celui du builder compris.
       - SÉLECTION DES feature_cols : non-vides sur LES DEUX fenêtres, filtrées par
@@ -2049,9 +2074,10 @@ CE QUE CE LOT DOIT LIVRER
    Sans le diviseur par ligne, la valeur annuelle 120 et la valeur trimestrielle 28 seraient mêlées
    telles quelles dans la même cible : le modèle apprendrait un mélange de deux échelles.
    COMPOSITION AVEC LA MUTUALISATION ([SPEC] §5.4, table de généralisation) : la fréquence d'une
-   ligne a DEUX sources, et une seule règle les unifie — `f_block(e)` pour une ligne observée ou
-   agrégée, la fréquence lue dans `imputed_freq_store` pour une ligne d'origine 'interpolated' ou
-   'model'. Le `TrainingSetBuilder` rend déjà cette `row_frequency` unifiée : la passer telle
+   ligne a DEUX sources, et une seule règle les unifie — `f_block(e)` pour une ligne observée, la
+   fréquence lue dans `imputed_freq_store` pour une ligne d'origine 'interpolated' ou 'model'. Le
+   diviseur qui en découle peut être FRACTIONNAIRE quand le bloc est plus fin que l'étape (D18) :
+   ne rien y planchérer. Le `TrainingSetBuilder` rend déjà cette `row_frequency` unifiée : la passer telle
    quelle à `target_divisor(produced_freq=...)`. NE PAS écrire un second chemin d'échelle pour
    l'axe 2 : le vecteur de fréquences est le même objet dans les deux cas.
 
@@ -2296,7 +2322,8 @@ Sections attendues :
      `step.training_blocks` et l'estimateur espion, ne rien recalculer à la main) ;
    - un graphique superposant les trois blocs une fois mis à l'échelle : FR annuel, DE
      trimestriel et IT mensuel décrivent la même trajectoire — c'est le contrôle de bon sens ;
-   - le comptage comparé : 51 lignes d'entraînement à l'étape M contre 3 sans mutualisation, et
+   - le comptage comparé : 51 lignes d'entraînement à CHAQUE étape (les blocs ne dépendant pas
+     de l'étape, D18) contre 3 sans mutualisation, et
      contre les 9 lignes de trois échelles différentes que produit `hfi` sur le même jeu
      ([SPEC] §1.5) — exécuter les deux classes côte à côte pour le montrer ;
    - la vérification qu'IT entraîne le modèle sans jamais être réécrite (ses cellules restent
