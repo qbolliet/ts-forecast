@@ -299,6 +299,83 @@ def _build_panel_heterogeneous(seed: int = 42) -> pd.DataFrame:
     return df_panel
 
 
+def _build_panel_multifrequency(seed: int = 42) -> pd.DataFrame:
+    """Build the ``PANEL-F`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.5.
+
+    Three entities ``FR`` / ``DE`` / ``IT`` sharing the same month-end
+    (``ME``) index as :func:`_build_panel_heterogeneous` (2021-01-31 to
+    2023-12-31, 36 rows per entity, 108 total). Same ``m1`` / ``q1``
+    columns as :func:`_build_reference_timeseries`, identical across the
+    three entities, plus ``v``: a single column observed at a different
+    frequency per entity (annual for ``FR``, quarterly for ``DE``, monthly
+    for ``IT``), chosen so the three entities carry the same annual total
+    at every year (120.0 / 132.0 / 150.0) — the support of inter-entity
+    mutualisation of the training set (§5.8) and of the ``B29`` defect it
+    measures (§1.5). No ``climat_affaires`` column: this dataset is not
+    ``PANEL`` and does not replace it.
+
+    Args:
+        seed: Unused; kept for signature parity with the other builders of
+            this module (the construction is fully deterministic).
+
+    Returns:
+        Panel ``DataFrame`` with a ``MultiIndex`` (``country``, ``date``)
+        and entities ``FR`` / ``DE`` / ``IT``.
+
+    Examples:
+        >>> df = _build_panel_multifrequency()
+        >>> int(df.loc['IT', 'v'].notna().sum())
+        36
+        >>> df.loc['FR', 'v'].dropna().tolist()
+        [120.0, 132.0, 150.0]
+    """
+    # Graine conservée pour l'homogénéité de signature : aucun tirage aléatoire.
+    del seed
+
+    entities = ('FR', 'DE', 'IT')
+    dates = pd.date_range(start='2021-01-31', end='2023-12-31', freq='ME')
+    quarter_end_mask = dates.month.isin([3, 6, 9, 12])
+    quarter_end_dates = dates[quarter_end_mask]
+    annual_anchors = pd.to_datetime(['2021-12-31', '2022-12-31', '2023-12-31'])
+
+    # ----- Valeurs d'or de v, par entité (§2.5) : même total annuel pour les trois -----
+    v_by_entity = {
+        'FR': pd.Series([120.0, 132.0, 150.0], index=annual_anchors),
+        'DE': pd.Series(
+            [28.0, 30.0, 31.0, 31.0, 31.0, 33.0, 34.0, 34.0, 36.0, 37.0, 38.0, 39.0],
+            index=quarter_end_dates,
+        ),
+        'IT': pd.Series([10.0] * 12 + [11.0] * 12 + [12.5] * 12, index=dates),
+    }
+
+    all_data = []
+    for entity in entities:
+        df_entity = pd.DataFrame(index=dates)
+        df_entity.index.name = 'date'
+        df_entity['country'] = entity
+
+        # ----- m1 : mensuelle, dense, jamais NaN — identique au jeu TS -----
+        df_entity['m1'] = 100.0 + np.arange(len(dates), dtype=float)
+
+        # ----- q1 : trimestrielle, valeur uniquement aux fins de trimestre -----
+        df_entity['q1'] = np.nan
+        df_entity.loc[quarter_end_mask, 'q1'] = 10.0 * np.arange(1, quarter_end_mask.sum() + 1)
+
+        # ----- v : fréquence hétérogène par entité (annuelle / trimestrielle / mensuelle) -----
+        df_entity['v'] = np.nan
+        entity_v = v_by_entity[entity]
+        df_entity.loc[entity_v.index, 'v'] = entity_v.to_numpy()
+
+        all_data.append(df_entity)
+
+    df_panel = pd.concat(all_data, ignore_index=False)
+    df_panel = df_panel.reset_index().rename(columns={'index': 'date'})
+    df_panel = df_panel.set_index(['country', 'date'])
+    df_panel = df_panel.sort_index()
+
+    return df_panel
+
+
 @pytest.fixture
 def mixed_freq_timeseries() -> pd.DataFrame:
     """Mixed-frequency macroeconomic time series (mirrors df_timeseries).
@@ -442,3 +519,26 @@ def mixed_freq_panel_heterogeneous() -> pd.DataFrame:
       the per-entity NaN invariant (§3).
     """
     return _build_panel_heterogeneous()
+
+
+@pytest.fixture
+def mixed_freq_panel_multifrequency() -> pd.DataFrame:
+    """``PANEL-F`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.5.
+
+    ``MultiIndex`` (``country``, ``date``) with 3 entities (``FR``, ``DE``,
+    ``IT``), each sharing the same 36 month-end (``ME``) dates as
+    :func:`mixed_freq_panel_heterogeneous` (108 rows total). Columns ``m1``
+    / ``q1`` as in :func:`reference_timeseries`, identical across the three
+    entities, plus:
+
+    - ``v`` (the heterogeneous-frequency column): observed annually for
+      ``FR`` (3 year-end anchors), quarterly for ``DE`` (12 quarter-end
+      anchors), monthly for ``IT`` (36 observations, constant per year).
+      Chosen so the three entities carry the same annual total (120.0 /
+      132.0 / 150.0) — the support of inter-entity mutualisation of the
+      training set (§5.8) and of the ``B29`` defect it measures (§1.5).
+
+    No ``climat_affaires`` column: this dataset is not ``PANEL`` and does
+    not replace it.
+    """
+    return _build_panel_multifrequency()
