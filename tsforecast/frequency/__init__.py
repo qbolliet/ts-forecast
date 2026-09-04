@@ -39,6 +39,7 @@ from .aggregation_constraint import (
     validate_constraint_columns,
 )
 from .stage_scaler import StageScaler, ScaleMode
+from .variable_orderer import VariableOrderer, VariableSpec
 from .imputation_window import ImputationWindowCalculator, ImputationScope
 from .target_frequency_validator import TargetFrequencyValidator
 from .frequency_aligner import FrequencyAligner
@@ -82,6 +83,9 @@ __all__ = [
     # Mise à l'échelle d'étape
     'StageScaler',
     'ScaleMode',
+    # Ordonnancement des variables
+    'VariableOrderer',
+    'VariableSpec',
     # Imputation window calculation
     'ImputationWindowCalculator',
     'ImputationScope',
