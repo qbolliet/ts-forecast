@@ -12,6 +12,12 @@
 > `conv:` = `tsforecast/utils/frequency/converter.py`.
 > Les codes `Bxx`/`Cxx` renvoient à `high_frequency_imputer_annotations_architecture.md`
 > (noté **[ARCH]**), les codes `Dxx` au §14 de [SPEC].
+>
+> **Révision du 2026-09-04** — les prompts **1 à 11 sont exécutés** (lots `L0` à `L8`) et ne
+> doivent plus être modifiés. Cette révision intègre la **mutualisation inter-entités du jeu
+> d'entraînement** ([SPEC] §5.8, décisions D17 à D19, défaut mesuré B29) : elle **insère** les
+> prompts **11a**, **11b** et **11c** (lots `L8b`, `L8c`, `L8d`) après le prompt 11, et **amende**
+> les prompts 12 à 16, non exécutés. La numérotation existante est conservée telle quelle.
 
 ---
 
@@ -82,7 +88,10 @@ la raison de chaque modification.
 | 9 | **L6b** | `covariate_materializer.py` : stratégie `'model'`, précédence à 4 rangs | §4.4, §4.6 | **Opus** | **Oui** | 8 |
 | 10 | **L7** | `aggregation_constraint.py` : recalage aux totaux, gardes, ancres | §11 | **Opus** | **Oui** | 4 |
 | 11 | **L8** | `variable_orderer.py` : ordres `'frequency'` et `'cv'`, `cv` sklearn | §8 | **Sonnet** | Non | 5 |
-| 12 | **L9** | `hfi2` : `__init__`, validations, phases 0 à 4, attributs ajustés | §12.3, §13 | **Opus** | **Oui** | 6–11 |
+| 11a | **L8b** | jeu de référence `PANEL-F` : une colonne à fréquence hétérogène par entité | §2.5, §1.5 | **Sonnet** | Non | — |
+| 11b | **L8c** | `stage_scaler.py` : `source_freq` en liaison par entité, diviseurs par bloc | §5.8 R5, §9.2 | **Opus** | Non | 7 |
+| 11c | **L8d** | `training_set_builder.py` : jeu d'entraînement **mutualisé** entre entités | §5.8 | **Opus** | **Oui** | 6, 8, 9, 11a, 11b |
+| 12 | **L9** | `hfi2` : `__init__`, validations, phases 0 à 4, attributs ajustés | §12.3, §13 | **Opus** | **Oui** | 6–11c |
 | 13 | **L10** | `hfi2` : PHASE 5, exécution d'étape unique, provenance, stores | §12.3, §6.3 | **Opus** | **Oui** | 12 |
 | 14 | **L11** | Axe 2 : progression, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape | §5 | **Opus** | **Oui** | 13 |
 | 15 | **L12** | `transform`, `inverse_transform`, `keep_lower_frequencies`, D11 | §12.1, §12.4 | **Opus** | **Oui** | 14 |
@@ -90,8 +99,9 @@ la raison de chaque modification.
 | 17 | **L13b** | Documentation : docstrings de référence, `mkdocs`, `__init__.py` | §15.3 | **Sonnet** | Non | 16 |
 
 **Dépendances dures** : 2 → 3 ; 4 → 6 ; 3 → 7 ; 3, 4, 5 → 8 ; 8 → 9 ; 4 → 10 ; 5 → 11 ;
-6, 7, 9, 10, 11 → 12 ; 12 → 13 → 14 → 15 → 16 → 17.
-**Parallélisables entre eux** : {1, 2, 4, 5} ; {7, 10, 11} une fois 3 et 4 faits ; 1 avec tout.
+7 → 11b ; 6, 8, 9, 11a, 11b → 11c ; 6, 7, 9, 10, 11, 11c → 12 ; 12 → 13 → 14 → 15 → 16 → 17.
+**Parallélisables entre eux** : {1, 2, 4, 5} ; {7, 10, 11} une fois 3 et 4 faits ; 1 et 11a avec
+tout.
 
 ### Critère de choix du modèle
 
@@ -127,6 +137,12 @@ prompt pour que chaque session soit autonome.
    jamais un par variable × étape.
 6. `__init__` **valide sans transformer** (B3) : paramètres stockés tels que reçus, normalisation
    au `fit` dans des attributs suffixés `_`.
+7. **Une fréquence détectée est une propriété du couple `(entité, colonne)`**, jamais de la seule
+   colonne : un panel peut porter la même colonne à des fréquences différentes selon l'entité
+   ([SPEC] §2.1, §2.5). Tout raisonnement sur `f_var` se fait par entité, et le jeu
+   d'entraînement d'une variable est **mutualisé** entre entités ([SPEC] §5.8). Cela ne remet pas
+   en cause D10 : les **hyperparamètres** par feature restent indexés par nom de colonne, seules
+   les **fréquences détectées** le sont par `(entité, colonne)`.
 
 Localiser le code **par nom de symbole**, jamais par numéro de ligne. Ne jamais masquer un échec
 de test : le rapporter tel quel.
@@ -1272,12 +1288,338 @@ localiser le code par nom de symbole, jamais par numéro de ligne.
 
 ---
 
+## Prompt 11a — Jeu de référence `PANEL-F` : une colonne à fréquence hétérogène par entité (L8b)
+
+**Modèle : Sonnet · Plan mode : Non · Dépendances : aucune**
+
+> Plan mode inutile : le jeu et ses valeurs d'or sont donnés au chiffre près ci-dessous, et le
+> lot ne touche aucun code de production.
+
+````text
+Contexte : je prépare l'implémentation de HighFrequencyImputer2 ([SPEC] =
+high_frequency_imputer2_architecture.md). Ce lot ajoute UN JEU DE RÉFÉRENCE, `PANEL-F`, support
+de la mutualisation inter-entités du jeu d'entraînement ([SPEC] §5.8) et de ses valeurs d'or.
+Référence : [SPEC] §2.5 (le jeu), §1.5 (le défaut B29 qu'il sert à mesurer), §5.8 (l'usage qui en
+est fait), §16 invariants I14 à I16. AUCUN code de production n'est modifié par ce lot, et AUCUNE
+fixture existante n'est modifiée : `mixed_freq_panel_heterogeneous` et `reference_timeseries`
+sont GELÉES.
+
+CIBLE 1 — tests/frequency/conftest.py : fonction `_build_panel_multifrequency(seed: int = 42)`
+et fixture `mixed_freq_panel_multifrequency`, écrites sur le modèle EXACT de
+`_build_panel_heterogeneous` / `mixed_freq_panel_heterogeneous` (mêmes conventions d'index, de
+nommage, de tri et de docstring Google Style avec Examples).
+
+STRUCTURE (identique au jeu PANEL pour tout ce qui n'est pas dit autrement) :
+   - index de dates : pd.date_range('2021-01-31', '2023-12-31', freq='ME'), nommé 'date' —
+     36 dates ;
+   - entités : 'FR', 'DE', 'IT' dans un niveau nommé 'country' ; MultiIndex (country, date)
+     trié ; 108 lignes ;
+   - `m1` : mensuelle, dense, jamais NaN, `100.0 + rang` — IDENTIQUE pour les trois entités et
+     identique au jeu TS ;
+   - `q1` : trimestrielle, NaN hors fins de trimestre, `10.0 * k` pour k = 1..12 — IDENTIQUE pour
+     les trois entités et identique au jeu TS ;
+   - `v` : LA colonne à fréquence hétérogène, NaN partout sauf aux dates ci-dessous ;
+   - aucune colonne `climat_affaires` : ce jeu n'est PAS le jeu PANEL, il ne le remplace pas.
+
+VALEURS D'OR DE `v`, à recopier telles quelles (elles sont choisies pour que les trois entités
+portent le MÊME total annuel et que tous les agrégats tombent juste) :
+
+   FR — ANNUELLE, 3 ancres de fin d'année :
+       2021-12-31 = 120.0 ; 2022-12-31 = 132.0 ; 2023-12-31 = 150.0
+
+   DE — TRIMESTRIELLE, 12 ancres de fin de trimestre, dans l'ordre chronologique :
+       2021 : 28.0, 30.0, 31.0, 31.0        (somme 120.0)
+       2022 : 31.0, 33.0, 34.0, 34.0        (somme 132.0)
+       2023 : 36.0, 37.0, 38.0, 39.0        (somme 150.0)
+
+   IT — MENSUELLE, 36 valeurs, constantes par année :
+       2021 : 10.0 (×12)   -> somme 120.0, trimestres 30.0
+       2022 : 11.0 (×12)   -> somme 132.0, trimestres 33.0
+       2023 : 12.5 (×12)   -> somme 150.0, trimestres 37.5
+
+   Aucun tirage aléatoire : la construction est entièrement déterministe. Conserver l'argument
+   `seed` pour l'homogénéité de signature avec les autres constructeurs du module, et le
+   neutraliser par `del seed` comme le fait `_build_reference_timeseries`.
+
+CIBLE 2 — tests/frequency/test_reference_datasets.py : une classe
+`TestMultiFrequencyPanel` verrouillant le jeu. Tests attendus, valeurs EXACTES :
+   - `test_shape_and_index` : 108 lignes, MultiIndex ('country', 'date'), trié, 36 dates par
+     entité ;
+   - `test_v_observation_counts_per_entity` : `v` observée 3 fois pour FR, 12 fois pour DE,
+     36 fois pour IT ;
+   - `test_v_gold_values` : les trois séries ci-dessus, au chiffre près ;
+   - `test_annual_totals_agree_across_entities` : la somme annuelle de `v` vaut 120 / 132 / 150
+     pour CHACUNE des trois entités ;
+   - `test_italian_quarterly_aggregates` : l'agrégation trimestrielle (somme) de `v` pour IT vaut
+     30.0 (×4 en 2021), 33.0 (×4 en 2022), 37.5 (×4 en 2023) ;
+   - `test_m1_and_q1_match_the_ts_reference` : `m1` et `q1` de chaque entité sont EXACTEMENT
+     celles de la fixture `reference_timeseries` ;
+   - `test_detected_frequencies_disagree_across_entities` : `detect_frequency` (celui utilisé par
+     hfi, tsforecast.utils.frequency.utils) rend Y pour ('FR', 'v'), Q pour ('DE', 'v'), M pour
+     ('IT', 'v'), M pour m1 et Q pour q1 chez les trois. C'EST LE POINT CENTRAL DU JEU : la même
+     colonne porte trois fréquences détectées différentes ([SPEC] §2.1).
+
+SI LA DÉTECTION NE REND PAS CES FRÉQUENCES : ne pas ajuster le jeu pour faire passer le test.
+Rapporter le comportement observé tel quel, avec les valeurs rendues — ce serait un défaut du
+détecteur, à traiter dans son propre lot.
+
+Puis `uv run tests/frequency/check_regressions.py` et rapporter. NE PAS modifier hfi, ni les
+fixtures existantes, ni les notebooks.
+
+Rappels de convention (CLAUDE.md) : commentaires internes en français à formulation nominale ;
+docstrings en anglais Google Style avec Args/Returns/Raises/Examples ; type hints systématiques ;
+localiser le code par nom de symbole, jamais par numéro de ligne.
+````
+
+---
+
+## Prompt 11b — `stage_scaler.py` : `source_freq` en liaison par entité (L8c)
+
+**Modèle : Opus · Plan mode : Non · Dépendances : prompts 7, 11a**
+
+> Opus malgré la petite surface : une erreur de diviseur ne casse rien, elle fausse
+> silencieusement ce que le modèle apprend. Plan mode inutile : l'extension est décrite
+> exhaustivement ci-dessous et n'ouvre aucune API nouvelle.
+
+````text
+Contexte : je prépare l'implémentation de HighFrequencyImputer2 ([SPEC] =
+high_frequency_imputer2_architecture.md). Le jeu d'entraînement d'une variable devient
+MUTUALISÉ entre entités ([SPEC] §5.8) : chaque entité y contribue à SA fréquence — sa
+« fréquence de bloc » `f_block(e)` — et les diviseurs cessent d'être uniformes sur le jeu. Ce lot
+prépare `StageScaler` à cette forme, SANS rien changer au comportement existant.
+Référence : [SPEC] §5.8 règle R5, §9.2 point 1, §5.4 (table de généralisation des fréquences de
+ligne), décisions D17 et D18 du §14.3.
+
+CIBLE — tsforecast/frequency/stage_scaler.py, EXTENSION ADDITIVE
+
+1) `feature_divisors(..., source_freq: FrequencyBinding, ...)` : le paramètre accepte désormais,
+   en plus d'une chaîne, un `Mapping[EntityKey, str]` — exactement la forme que `pred_freq`
+   accepte déjà. Sémantique :
+   - forme scalaire : comportement ACTUEL, strictement inchangé, y compris la forme du retour
+     (`Series` indexée par colonne quand tous les diviseurs sont scalaires) ;
+   - forme par entité : le calcul est fait ENTITÉ PAR ENTITÉ, chacune avec SON `source_freq`, et
+     le retour est TOUJOURS une `DataFrame` de diviseurs par ligne, indexée comme `index` et
+     colonnée comme `columns` ;
+   - `index` devient obligatoire dès que `source_freq` est un mapping, et doit porter un niveau
+     d'entité : même contrôle et même style de message d'erreur que pour `pred_freq` aujourd'hui ;
+   - résolution des clés d'entité : clé brute puis clé normalisée, puis mapping à une seule
+     entrée valant pour tout le monde — la MÊME cascade que `_column_frequency` /
+     `_stage_frequency` du CovariateMaterializer. Une entité absente du mapping et non couverte
+     par cette cascade est une ERREUR nommant l'entité, jamais un repli silencieux.
+
+2) `target_divisor(..., source_freq: FrequencyBinding, ...)` : même extension, pour la symétrie.
+   PRÉCÉDENCE INCHANGÉE : quand `produced_freq` est fourni, c'est lui qui décide, ligne par ligne
+   ([SPEC] §5.4) ; `source_freq` ne sert alors à rien et ne doit pas être consulté. Le documenter
+   dans la docstring.
+
+3) PROPRIÉTÉ DE COHÉRENCE, à énoncer en docstring et à tester (point 5) : pour toute entité `e`,
+   les diviseurs rendus sous la forme par entité, restreints aux lignes de `e`, sont EXACTEMENT
+   ceux que rend l'appel scalaire avec `source_freq = f_block(e)` sur ces mêmes lignes. La forme
+   par entité est un assemblage, jamais une arithmétique nouvelle : la règle B25 reste appliquée
+   À L'INTÉRIEUR de chaque bloc, sans changement.
+
+4) Correctif B12 conservé : ne jamais court-circuiter la mise à l'échelle au motif que les
+   diviseurs valent 1.0 partout — c'est un cas particulier fréquent avec les blocs à la fréquence
+   de l'étape (diviseur 1.0), et le court-circuit ferait diverger la forme du retour.
+
+TESTS — à ajouter dans tests/frequency/test_stage_scaler.py, sur la fixture
+`mixed_freq_panel_multifrequency` (jeu `PANEL-F`, [SPEC] §2.5) :
+   - `test_feature_divisors_per_entity_matches_scalar_calls` : la propriété du point 3, colonne
+     par colonne et entité par entité — c'est LE test qui verrouille l'extension ;
+   - `test_feature_divisors_per_entity_gold_values` : `m1` (mensuelle) avec
+     `source_freq={FR: 'Y', DE: 'Q', IT: 'M'}` et `pred_freq='M'` -> diviseurs 12.0 sur les
+     lignes FR, 3.0 sur les lignes DE, 1.0 sur les lignes IT ;
+   - `test_scalar_source_freq_unchanged` : les tests existants du fichier passent inchangés, et
+     la forme du retour scalaire n'a pas bougé (`Series` par colonne) ;
+   - `test_mapping_source_freq_requires_index_with_entity_level` : `index=None` ou index sans
+     niveau d'entité -> ValueError nommant le paramètre ;
+   - `test_unknown_entity_in_mapping_raises` : entité de la grille absente du mapping -> erreur
+     nommant l'entité ;
+   - `test_target_divisor_produced_freq_takes_precedence` : avec `produced_freq` fourni, le
+     résultat est identique quel que soit `source_freq` ;
+   - `test_calendar_mode_with_per_entity_source_freq` : la modalité 'calendar' se combine à la
+     forme par entité (diviseurs par ligne dans les deux dimensions).
+
+Puis `uv run tests/frequency/check_regressions.py` et rapporter. NE PAS modifier hfi.
+
+Rappels de convention (CLAUDE.md) : commentaires internes en français à formulation nominale ;
+docstrings en anglais Google Style avec Args/Returns/Raises/Examples ; type hints systématiques ;
+localiser le code par nom de symbole, jamais par numéro de ligne.
+````
+
+---
+
+## Prompt 11c — `training_set_builder.py` : le jeu d'entraînement mutualisé (L8d)
+
+**Modèle : Opus · Plan mode : OUI · Dépendances : prompts 6, 8, 9, 11a, 11b**
+
+> Plan mode justifié : ce composant décide de ce que le modèle apprend. Il compose trois
+> mécanismes déjà écrits (matérialisation, fenêtres, échelle) sans en dupliquer aucun, et son
+> contrat de sortie est consommé par les trois lots suivants — c'est le moment de l'arrêter.
+
+````text
+Contexte : je prépare l'implémentation de HighFrequencyImputer2 ([SPEC] =
+high_frequency_imputer2_architecture.md). Ce lot crée le composant qui compose le JEU
+D'ENTRAÎNEMENT MUTUALISÉ d'une variable à une étape.
+Référence, à lire AVANT d'écrire : [SPEC] §5.8 EN ENTIER (le défaut, les six règles, l'exemple
+chiffré sur `PANEL-F`), §1.5 (défaut B29 : ce que fait `hfi` aujourd'hui et pourquoi c'est faux),
+§2.5 (le jeu `PANEL-F`), §5.3 (filtre d'origine) et §5.4 (échelle par ligne), §4.6 (unicité de la
+voie), décisions D17, D18, D19.
+
+LE PROBLÈME EN UNE PHRASE : sur un panel, une colonne peut être annuelle pour une entité,
+trimestrielle pour une deuxième et mensuelle pour une troisième ; les deux dernières portent des
+VRAIES VALEURS à la fréquence même où la première doit être imputée, et elles doivent entraîner
+le modèle. `hfi` les mélange déjà, mais avec le diviseur du groupe et une fraction des lignes
+(§1.5) : c'est le défaut B29.
+
+CIBLE 1 — nouveau fichier tsforecast/frequency/training_set_builder.py
+
+    @dataclass(frozen=True)
+    class TrainingSet:
+        X: pd.DataFrame              # features, indexées sur la grille mutualisée
+        y: pd.Series                 # cible BRUTE, non mise à l'échelle
+        row_frequency: pd.Series     # fréquence de production de chaque ligne (str)
+        row_origin: pd.Series        # CellOrigin de chaque ligne de y
+        blocks: Mapping[EntityKey, str]              # entité -> f_block(e)
+        ways: Mapping[str, MaterializationWay]       # voie retenue par covariable
+        column_origins: Mapping[str, CellOrigin]     # origine agrégée par covariable
+
+    class TrainingSetBuilder:
+        def __init__(self, materializer, aggregation_constraint='sum',
+                     training_mask=None, log=None): ...
+        def build(self, *, column, feature_cols, stage_freq, detected_frequencies,
+                  source_data, eligible_origins) -> TrainingSet: ...
+
+    `training_mask` est un CALLABLE injecté, `Callable[[Mapping[EntityKey, str]], pd.Series]`,
+    qui rend le masque `kind='training'` à la fréquence demandée POUR CHAQUE ENTITÉ (l'appelant
+    le branchera sur `ImputationWindowCalculator.get_mask_at_frequency(..., kind='training')`,
+    qui accepte déjà une fréquence par entité). None = aucune restriction de fenêtre. Ne PAS
+    importer `ImputationWindowCalculator` dans ce module : l'injection garde le composant
+    testable seul.
+    Le composant NE MET PAS À L'ÉCHELLE : il rend `y` brute et `row_frequency` ; l'appelant
+    applique `StageScaler.target_divisor(produced_freq=row_frequency)` et
+    `feature_divisors(source_freq=blocks)`. Une seule implémentation de l'échelle, celle du
+    lot 7 étendue au lot 11b.
+
+LES SIX RÈGLES À IMPLÉMENTER ([SPEC] §5.8), littéralement :
+
+R1 PÉRIMÈTRE — toute entité portant AU MOINS UNE observation de `column` contribue,
+   INDÉPENDAMMENT de sa fréquence pour cette colonne, du fait que la colonne y soit imputable ou
+   non, et de sa fréquence cible propre. Une entité qui ne l'observe jamais ne contribue rien et
+   ne lève rien (symétrique du §4.5).
+
+R2 FRÉQUENCE DE BLOC — `f_block(e)` = la plus BASSE des deux fréquences `f_var(e, column)` et
+   `stage_freq(e)`. On n'entraîne JAMAIS sur une grille plus fine que la grille de prédiction
+   (D18). Utiliser `is_higher_frequency` / `normalize_frequency`, jamais une comparaison
+   d'étiquettes brutes.
+
+R3 LIGNES D'UN BLOC, selon la position de `f_var(e, column)` face à `stage_freq(e)` :
+   - plus BASSE  : les ANCRES de la colonne pour cette entité, à sa propre fréquence ;
+   - ÉGALE       : les cellules OBSERVÉES de la colonne pour cette entité ;
+   - plus FINE   : l'AGRÉGAT EXACT de la colonne sur chaque période COMPLÈTE de `stage_freq(e)`,
+                   via `FrequencyConverter.aggregate_to_lower_frequency(..., full_periods_only=True)`
+                   avec la méthode que donne `resolve_aggregation_constraint` pour cette colonne
+                   ('sum' par défaut, 'mean', 'last' ; None -> 'sum', l'additivité étant le
+                   contrat par défaut du §2.2). Une période INCOMPLÈTE ne produit AUCUNE ligne.
+   Puis, dans les trois cas : restriction par `training_mask({e: f_block(e)})`, puis filtre
+   `eligible_origins`.
+
+R4 COVARIABLES — UN SEUL appel à `CovariateMaterializer.materialize`, sur la grille mutualisée
+   (l'union des grilles de bloc), avec `stage_freq={e: f_block(e)}` et les fréquences détectées
+   sous leur forme par entité. Le composant sait déjà lire une fréquence d'étape par entité et
+   dégrader la voie entité par entité (`_applicable_way`) : NE PAS écrire de boucle par bloc
+   autour de `materialize`, NE PAS produire de features autrement. Les voies rendues sont
+   retournées telles quelles dans `TrainingSet.ways` : c'est elles que l'appelant imposera à la
+   grille de prédiction (§4.6).
+
+R5 FRÉQUENCE DE LIGNE — `row_frequency` vaut `f_block(e)` pour une ligne observée ou agrégée, et
+   la fréquence lue dans `imputed_freq_store` pour une ligne d'origine 'interpolated' ou 'model'
+   produite à une étape antérieure ([SPEC] §5.4, table de généralisation). `row_origin` suit la
+   même source : 'observed' pour les deux premiers cas (une agrégation exacte vaut 'observed',
+   §6.2), l'origine du store sinon.
+
+R6 UN SEUL AJUSTEMENT — le jeu rendu ne dépend PAS du groupe de fréquence source : il est
+   fonction de (colonne, étape) seulement. Ce composant n'a donc AUCUN paramètre de groupe ni
+   d'entité cible. C'est ce qui permettra au lot suivant d'ajuster un seul modèle par
+   (étape, variable) et de le partager entre les étapes du plan (D19).
+
+CIBLE 2 — tsforecast/frequency/covariate_materializer.py : ajout d'un paramètre
+`record: bool = True` à `materialize`. Quand `record=False`, la production N'ÉCRIT PAS dans
+`imputed_store` / `imputed_freq_store` / `origin_store` (la LECTURE des stores, elle, est
+inchangée : les rangs 2 et 3 continuent de fonctionner). Motif, à écrire en commentaire : la
+grille d'entraînement porte des cellules produites à la fréquence des BLOCS ; les enregistrer
+polluerait le miroir et ferait croire à `_carry_frequency` qu'un report d'étape est disponible
+(rang 3) là où rien n'a jamais été imputé. `TrainingSetBuilder` appelle donc `materialize` avec
+`record=False`. Le défaut `True` garde le comportement existant : aucun appelant actuel ne change.
+
+CIBLE 3 — tsforecast/frequency/imputation_plan2.py : ajout du champ
+`training_blocks: Mapping[EntityKey, str] = field(default_factory=dict)` à `ImputationStep`,
+EN DERNIÈRE POSITION et AVEC DÉFAUT, pour ne casser aucune construction existante. Il porte la
+composition du jeu mutualisé (entité -> fréquence de bloc) : c'est un champ de DIAGNOSTIC, rejoué
+tel quel, qui rend le test I14 lisible et alimente le notebook 5. Mettre à jour la docstring de
+la classe, l'égalité si elle est écrite à la main, et la sérialisation de diagnostic si elle
+existe.
+
+TESTS — nouveau fichier tests/frequency/test_training_set_builder.py, sur la fixture
+`mixed_freq_panel_multifrequency` (jeu `PANEL-F`) et sur `reference_timeseries`. Estimateur
+inutile ici : le composant est testable seul.
+
+   VALEURS D'OR, reprises du §5.8 et à vérifier au chiffre près :
+
+   - `test_blocks_on_panel_f_at_monthly_stage` : à l'étape 'M', `blocks == {FR: 'Y', DE: 'Q',
+     IT: 'M'}` ;
+   - `test_row_counts_on_panel_f_at_monthly_stage` : 51 lignes — 3 pour FR, 12 pour DE, 36 pour
+     IT — contre 3 sans mutualisation ;
+   - `test_scaled_target_on_panel_f_at_monthly_stage` : après application de
+     `StageScaler.target_divisor(produced_freq=row_frequency)`, la cible vaut 10.0 / 11.0 / 12.5
+     sur les lignes FR ; 10.0 / 11.0 / 12.5 sur les lignes IT (identité) ; et
+     28/3, 30/3, 31/3, … sur les lignes DE (soit 9.333…, 10.0, 10.333…) ;
+   - `test_blocks_and_rows_at_quarterly_stage` : à l'étape 'Q', `blocks == {FR: 'Y', DE: 'Q',
+     IT: 'Q'}` et 27 lignes (3 + 12 + 12) ; cible mise à l'échelle : 30.0 / 33.0 / 37.5 pour FR,
+     les 12 valeurs brutes de DE inchangées (diviseur 1.0), et 30/30/30/33/33/33/37.5×4 pour IT
+     (agrégats trimestriels exacts) ;
+   - `test_italian_rows_are_exact_aggregates_not_samples` : les lignes IT à l'étape 'Q' portent la
+     SOMME des trois mois, jamais la valeur d'un mois isolé — c'est la différence exacte avec le
+     comportement de `hfi` (§1.5) ;
+   - `test_single_call_to_materialize` : `materialize` est appelé UNE SEULE FOIS par `build`
+     (monkeypatch ou compteur), avec `stage_freq` égal au mapping des blocs et `record=False` ;
+   - `test_stores_untouched_by_training_materialization` : `snapshot()` du matérialiseur
+     identique avant et après `build` ;
+   - `test_no_carry_phantom_after_build` : après un `build` à l'étape 'M', aucune covariable ne
+     devient éligible au rang 3 (`carried_model`) du seul fait du `build` ;
+   - `test_incomplete_period_produces_no_row` : en tronquant les deux derniers mois d'IT, le
+     dernier trimestre ne produit AUCUNE ligne pour IT à l'étape 'Q' (full_periods_only), les
+     autres restant ;
+   - `test_entity_without_the_column_contributes_nothing` : une entité dont la colonne est
+     entièrement NaN n'apparaît ni dans `blocks` ni dans les lignes, et ne lève rien ;
+   - `test_entity_with_other_target_frequency_still_contributes` (R1) ;
+   - `test_eligible_origins_filter` : sous `eligible_origins={'observed'}`, aucune ligne d'origine
+     'interpolated' ou 'model' n'entre ; en élargissant le jeu, ces lignes entrent AVEC la
+     fréquence lue dans `imputed_freq_store` (R5) — amorcer les stores à la main pour ce test ;
+   - **I16** `test_timeseries_is_the_degenerate_case` : sur `reference_timeseries`, le jeu
+     mutualisé est IDENTIQUE au jeu d'origine — `blocks == {(): 'Y'}` pour `a1`, 3 lignes,
+     diviseur 12 à l'étape M : tous les chiffres des §4.7, §5.4 et §5.5 restent vrais ;
+   - `test_single_entity_panel` : panel à une entité, même résultat que la série temporelle ;
+   - `test_way_uniqueness_contract` : les voies rendues couvrent EXACTEMENT `feature_cols`, et
+     sont réutilisables telles quelles en mode rejeu sur une autre grille (§4.6).
+
+Puis `uv run tests/frequency/check_regressions.py` et rapporter. NE PAS modifier hfi.
+
+Rappels de convention (CLAUDE.md) : commentaires internes en français à formulation nominale ;
+docstrings en anglais Google Style avec Args/Returns/Raises/Examples ; type hints systématiques ;
+localiser le code par nom de symbole, jamais par numéro de ligne.
+Rappel transverse : une fréquence détectée est une propriété du couple (entité, colonne), jamais
+de la seule colonne.
+````
+
+---
+
 ## Prompt 12 — `hfi2` : `__init__`, validations, phases 0 à 4 (L9)
 
-**Modèle : Opus · Plan mode : OUI · Dépendances : prompts 6, 7, 9, 10, 11**
+**Modèle : Opus · Plan mode : OUI · Dépendances : prompts 6, 7, 9, 10, 11, 11c**
 
 > Plan mode justifié : c'est la création de la classe principale et de son contrat sklearn ;
-> 24 paramètres, 14 attributs ajustés, cinq phases et six composants à câbler. Le plan valide
+> 24 paramètres, 14 attributs ajustés, cinq phases et sept composants à câbler. Le plan valide
 > l'assemblage avant écriture.
 
 ````text
@@ -1385,6 +1727,28 @@ CIBLE — nouveau fichier tsforecast/frequency/high_frequency_imputer2.py
    `HighFrequencyImputer` : les deux classes COEXISTENT pendant la transition ([SPEC] §12.2,
    §15.3). Ne rien déprécier dans ce lot.
 
+10) FRÉQUENCES DÉTECTÉES PAR (ENTITÉ, COLONNE), impératif ([SPEC] §2.1, §2.5, §5.8) : sur un
+   panel, la MÊME COLONNE peut porter des fréquences DIFFÉRENTES selon l'entité — annuelle pour
+   FR, trimestrielle pour DE, mensuelle pour IT. `detected_frequencies_` est donc indexé par
+   `(entité, colonne)` dès que les entités divergent, comme dans `hfi`
+   (`hfi:detected_frequencies_`, `hfi:_column_frequencies_by_entity`), et la classification des
+   variables de la PHASE 0 se fait PAR COUPLE (entité, colonne), jamais par colonne seule :
+   `f_var(e, c)` plus basse que la cible de `e` -> imputable POUR CETTE ENTITÉ ; égale -> déjà à
+   la cible ; plus fine -> agrégeable. Les couples imputables sont regroupés par
+   `(colonne, f_var)` — un groupe par fréquence source — et chaque groupe donnera UNE étape de
+   plan au lot suivant.
+   Ne PAS confondre avec D10 : les DICTIONNAIRES D'HYPERPARAMÈTRES par feature
+   (`scale_features`, `interpolation_*`, `estimator`, `aggregation_constraint`) restent indexés
+   par NOM DE COLONNE, jamais par (entité, colonne). Seules les FRÉQUENCES DÉTECTÉES le sont.
+   Les composants consommateurs acceptent déjà cette forme : `CovariateMaterializer` et
+   `StageScaler` lisent une fréquence par entité.
+
+11) CÂBLAGE DU `TrainingSetBuilder` (lot 11c, [SPEC] §5.8, §12.2) : l'instancier en PHASE 0 avec
+   le matérialiseur de l'instance, la contrainte d'agrégation, et un CALLABLE de masque branché
+   sur `self._imputation_window_calc.get_mask_at_frequency(frequences, kind='training')` —
+   nommer le `kind` explicitement. Ce lot ne l'utilise pas encore (la PHASE 5 est le lot
+   suivant) : il le CÂBLE et le rend disponible.
+
 TESTS — nouveau fichier tests/frequency/test_high_frequency_imputer2.py :
    - un test de validation PAR LIGNE du tableau du §13.1 : valeur invalide -> ValueError dont le
      message liste les valeurs admises ;
@@ -1405,7 +1769,15 @@ TESTS — nouveau fichier tests/frequency/test_high_frequency_imputer2.py :
    - `test_no_boolean_test_on_impute_intermediate_frequencies` : test STATIQUE (grep sur le
      source du module) vérifiant qu'aucun `if self.impute_intermediate_frequencies:` ni
      `if not self.impute_intermediate_frequencies:` n'apparaît — c'est l'invariant I13 de
-     [SPEC] §16.
+     [SPEC] §16 ;
+   - `test_detected_frequencies_are_per_entity` sur la fixture
+     `mixed_freq_panel_multifrequency` (jeu `PANEL-F`, [SPEC] §2.5) : `detected_frequencies_`
+     rend Y pour ('FR', 'v'), Q pour ('DE', 'v'), M pour ('IT', 'v') ;
+   - `test_variable_classification_is_per_entity_pair` sur le même jeu : `v` est imputable pour
+     FR et pour DE, et NE L'EST PAS pour IT (déjà à la fréquence cible) ; les couples imputables
+     se regroupent en `(v, Y) -> {FR}` et `(v, Q) -> {DE}` ;
+   - `test_training_set_builder_is_wired` : le composant est instancié au fit, son callable de
+     masque appelle bien `get_mask_at_frequency(..., kind='training')`.
 
 Puis `uv run tests/frequency/check_regressions.py` et rapporter.
 
@@ -1450,31 +1822,48 @@ PHASE 5 — pour chaque étape de fréquence `f` de la progression, dans cet ord
       `covariate_strategy == 'model'`. Sinon, ordre des colonnes d'entrée, sans effet sur les
       valeurs (invariant I10).
 
-  5c. pour chaque variable `v` :
-      - GRILLE D'ENTRAÎNEMENT : ancres de `v`, masque `kind='training'`.
-        GRILLE DE PRÉDICTION : masque `kind='imputation'`. Nommer explicitement le `kind` aux
-        deux appels.
+  5c. pour chaque variable `v` (COLONNE, UNE SEULE FOIS PAR ÉTAPE — pas une fois par groupe
+      d'entités) :
+      - JEU D'ENTRAÎNEMENT MUTUALISÉ ([SPEC] §5.8, lot 11c) : `TrainingSetBuilder.build(...)`
+        rend `X`, `y` brute, `row_frequency`, `row_origin`, `blocks` et les VOIES retenues. Il
+        réunit les blocs de TOUTES les entités observant `v` — celle qui l'observe annuellement,
+        celle qui l'observe déjà à la fréquence de l'étape, celle qui l'observe plus finement
+        (agrégats exacts de périodes complètes) — chacune à sa fréquence de bloc. NE PAS
+        reconstruire ce jeu ici, NE PAS le restreindre aux entités du groupe imputé.
+        GRILLE DE PRÉDICTION : masque `kind='imputation'`. Nommer explicitement le `kind` à
+        chaque appel de masque, celui du builder compris.
       - SÉLECTION DES feature_cols : non-vides sur LES DEUX fenêtres, filtrées par
         `covariate_eligibility`.
       - MATÉRIALISATION des covariables sur LES DEUX GRILLES PAR LA MÊME VOIE ([SPEC] §4.6) :
-        un appel à `materialize` sur la grille d'entraînement (mode choix) qui retourne les voies,
-        puis un appel sur la grille de prédiction en MODE REJEU avec ces voies. Enregistrer
-        `materialization[col]` dans l'étape. C'est le seul chemin autorisé pour produire X_train
-        et X_pred.
+        l'appel de la grille d'entraînement est celui que fait le builder (mode choix,
+        `stage_freq={e: f_block(e)}`, `record=False`), qui retourne les voies ; puis un appel sur
+        la grille de prédiction en MODE REJEU avec ces voies. Enregistrer `materialization[col]`
+        dans l'étape. C'est le seul chemin autorisé pour produire X_train et X_pred.
       - SOUILLURES ([SPEC] §6.2) :
         `covariate_taint` = max des origines des cellules EFFECTIVEMENT LUES dans
         `X_train ∪ X_pred`, restreint aux feature_cols EFFECTIVES du modèle — leçon C17 de [ARCH]
         §3.8 : JAMAIS sur l'état global du store ;
         `target_taint` = max des origines des lignes retenues dans `y_train`.
         Les deux lisent `origin_store`, JAMAIS la matrice de provenance.
-      - MISE À L'ÉCHELLE via le StageScaler (scalaire ou Series par ligne).
-      - AJUSTEMENT de l'estimateur. En cas d'ÉCHEC -> repli interpolation par la méthode de `v`
-        (`CovariateMaterializer.interpolate_column`, pas une seconde implémentation), étape
-        marquée `is_fallback=True`, cellules marquées `INTERPOLATED` (décision D6 : les cellules
-        de repli ne portent PAS un MODEL_*, c'est plus exact et cela rend le repli visible dans
-        les statistiques de provenance).
-      - PRÉDICTION SUR TOUTE LA PÉRIODE, ANCRES COMPRISES ([SPEC] §11.2, non paramétrable).
-      - RECALAGE AUX TOTAUX via AggregationConstraint -> masque des cellules recalées.
+      - MISE À L'ÉCHELLE via le StageScaler : diviseur de la cible PAR LIGNE
+        (`target_divisor(produced_freq=row_frequency)`) et diviseurs des features PAR BLOC
+        (`feature_divisors(source_freq=blocks)`, forme par entité du lot 11b). JAMAIS un scalaire
+        d'étape appliqué à tout le jeu : c'est exactement le défaut B29 ([SPEC] §1.5), où une
+        vraie valeur trimestrielle se retrouve divisée par 4 parce que le groupe est annuel.
+      - AJUSTEMENT de l'estimateur — UN SEUL par (étape, variable), quel que soit le nombre de
+        groupes de fréquence source ([SPEC] §5.8 R6, décision D19). En cas d'ÉCHEC -> repli
+        interpolation par la méthode de `v` (`CovariateMaterializer.interpolate_column`, pas une
+        seconde implémentation), étapes marquées `is_fallback=True`, cellules marquées
+        `INTERPOLATED` (décision D6 : les cellules de repli ne portent PAS un MODEL_*, c'est plus
+        exact et cela rend le repli visible dans les statistiques de provenance).
+      - PUIS, POUR CHAQUE GROUPE DE FRÉQUENCE SOURCE (entités partageant `f_var(e, v)` et pour
+        lesquelles `v` est imputable à cette étape), EN PARTAGEANT LE MODÈLE AJUSTÉ CI-DESSUS :
+      - PRÉDICTION SUR TOUTE LA PÉRIODE, ANCRES COMPRISES ([SPEC] §11.2, non paramétrable),
+        restreinte aux entités du groupe.
+      - RECALAGE AUX TOTAUX DU GROUPE via AggregationConstraint -> masque des cellules recalées.
+        Les totaux sont ceux de la fréquence source DU GROUPE : annuels pour l'entité annuelle,
+        trimestriels pour l'entité trimestrielle. C'est la raison pour laquelle les étapes
+        restent distinctes alors que le modèle est partagé.
       - ÉCRITURE des valeurs et MARQUAGE DE PROVENANCE :
         cellules produites par le modèle -> `resolve_model_provenance(covariate_taint,
         target_taint)`, RECALÉES OU NON et LIGNES D'ANCRE COMPRISES — le recalage ne change
@@ -1486,15 +1875,24 @@ PHASE 5 — pour chaque étape de fréquence `f` de la progression, dans cet ord
         que le modèle de cette étape produit.
       - MISE À JOUR de imputed_store / imputed_freq_store / origin_store, Y COMPRIS EN REPLI
         (« le repli matérialise »).
-      - GEL de l'ImputationStep (v2) dans le plan, via `append_step`.
+      - GEL de l'ImputationStep (v2) dans le plan, via `append_step` : une étape PAR GROUPE,
+        portant le MÊME objet modèle, les mêmes `feature_cols`, la même `materialization`, les
+        mêmes souillures et le même `training_blocks` ; seuls `source_frequency`, `entities` et
+        le recalage lui sont propres. Une entité qui n'est imputable à AUCUNE étape (elle observe
+        déjà la colonne à la fréquence cible) n'apparaît dans aucun `entities` : elle entraîne
+        sans jamais être réécrite, et ses cellules restent ORIGINAL.
 
   PHASE 6 finalisation : plan figé, attributs de sortie renseignés, sortie multi-fréquences si
   demandée.
 
 POINTS DE VIGILANCE PROPRES À CE LOT
-   - `y_train` sous ce régime = les seules ancres de `v` (origine 'observed'), donc
-     `target_taint == 'none'` toujours. Ne pas coder cette valeur en dur : la CALCULER par le
-     filtre d'origine, pour que le lot 14 n'ait qu'à élargir `ELIGIBLE_ORIGINS`.
+   - `y_train` sous ce régime = les seules cellules d'origine 'observed' de `v`, MUTUALISÉES
+     entre entités ([SPEC] §5.8), donc `target_taint == 'none'` toujours. Ne pas coder cette
+     valeur en dur : la CALCULER par le filtre d'origine, pour que le lot 14 n'ait qu'à élargir
+     `ELIGIBLE_ORIGINS`.
+   - Les SOUILLURES se calculent sur le jeu MUTUALISÉ : une entité qui contribue des cellules
+     interpolées ou de modèle dégrade la souillure de l'étape, donc la provenance de TOUTES les
+     cellules produites par cette étape, y compris pour les autres entités ([SPEC] §5.8).
    - Tous les avertissements sont ACCUMULÉS puis émis en UN SEUL message en fin de phase.
    - `imputation_order_` reste vide hors 'model'.
 
@@ -1529,6 +1927,24 @@ X_pred et le taux de NaN de chaque appel :
      covariate_strategy='interpolate' -> provenance émise MODEL_ON_INTERPOLATED sur les DOUZE
      mois, ancre 2021-12-31 COMPRISE (ni ORIGINAL, ni DISAGGREGATED), somme 2021 = 120.0 ;
      provenances INCHANGÉES sous aggregation_constraint=None, seules les valeurs changeant ;
+   - **I14** `test_pooled_training_set_on_panel_f` sur la fixture
+     `mixed_freq_panel_multifrequency` (jeu `PANEL-F`, [SPEC] §2.5, §5.8) : à l'étape M, le
+     `y_train` reçu par l'estimateur espion contient EXACTEMENT 51 lignes (3 FR + 12 DE + 36 IT)
+     et vaut, après mise à l'échelle, 10.0 / 11.0 / 12.5 sur les lignes FR et IT, et
+     28/3, 30/3, 31/3, … sur les lignes DE. Aucune ligne ne mêle deux échelles. C'est le test qui
+     échoue sur `hfi` aujourd'hui, où ce même jeu produit 9 lignes de trois échelles
+     différentes (§1.5) ;
+   - **I15** `test_single_fit_shared_between_source_frequency_groups` : à l'étape M de
+     `PANEL-F`, l'estimateur est ajusté UNE SEULE FOIS (compteur d'appels à `fit`), les deux
+     étapes de plan `(v, Y) -> (FR,)` et `(v, Q) -> (DE,)` portent le MÊME objet modèle (`is`),
+     les mêmes `feature_cols` et le même `training_blocks`, et leurs recalages restent distincts
+     (somme annuelle exacte pour FR, somme trimestrielle exacte pour DE) ;
+   - `test_contributing_entity_is_never_rewritten` : sur `PANEL-F`, aucune cellule d'IT n'est
+     réécrite ni re-marquée — elles restent ORIGINAL — alors qu'IT fournit 36 des 51 lignes
+     d'entraînement ;
+   - **I16** `test_timeseries_results_unchanged_by_pooling` : sur `reference_timeseries`, tous
+     les chiffres des §4.7, §5.4 et §5.5 sont inchangés (la mutualisation est neutre à une
+     entité) ;
    - `test_estimator_failure_falls_back_and_marks_interpolated` : is_fallback=True, cellules
      INTERPOLATED, stores alimentés ;
    - cas limites : index non trié, index dupliqué, entité à une seule observation, variable
@@ -1591,6 +2007,12 @@ CE QUE CE LOT DOIT LIVRER
    rien n'est à imputer à Y). Étape Q : variables {a1, a2} ; étape M : {q1, a1, a2}.
    Sur un panel, la progression est calculée PAR GROUPE D'ENTITÉS PARTAGEANT LA MÊME FRÉQUENCE
    CIBLE (`target_frequency` en dict autorise des cibles différentes par entité).
+   `F` est construit sur les fréquences détectées des couples (ENTITÉ, COLONNE) imputables, pas
+   des colonnes ([SPEC] §5.2 point 1, §2.1) : sur le jeu `PANEL-F` ([SPEC] §2.5), la colonne `v`
+   est annuelle pour FR, trimestrielle pour DE et mensuelle pour IT, donc `F = {Y, Q, M}` — une
+   lecture par colonne n'aurait vu qu'une seule fréquence et aurait manqué l'étape Q. Vérification
+   attendue sur `PANEL-F` : sous 'covariates_only'/True, progression `['Q', 'M']` ; étape Q :
+   `v` imputable pour FR seulement ; étape M : `v` imputable pour FR et DE, jamais pour IT.
 
 2) FILTRE D'ORIGINE DE y_train ([SPEC] §5.3) :
 
@@ -1609,8 +2031,14 @@ CE QUE CE LOT DOIT LIVRER
       ce lot (décision D12).
    b. Chaque ligne de y_train porte LA FRÉQUENCE À LAQUELLE ELLE A ÉTÉ PRODUITE, lue dans
       `imputed_freq_store` ; le diviseur d'échelle est PAR LIGNE (point 3).
-   c. y_train est composé des cellules de la colonne `v` dans le FRAME D'ÉTAPE, restreintes par
-      la fenêtre `kind='training'`, puis filtrées par leur origine.
+   c. y_train est composé par le `TrainingSetBuilder` (lot 11c) : cellules de la colonne `v`,
+      BLOC D'ENTITÉ PAR BLOC D'ENTITÉ ([SPEC] §5.8), restreintes par la fenêtre `kind='training'`
+      LUE À LA FRÉQUENCE DE CHAQUE BLOC, puis filtrées par leur origine. Ce lot ne réécrit pas
+      cette composition : il se contente de PASSER `eligible_origins` au builder. Le filtre
+      d'origine (quelles cellules d'une entité sont éligibles) et la mutualisation (quelles
+      entités contribuent, à quelle fréquence) sont ORTHOGONAUX — c'est pour cela que le builder
+      reçoit `ELIGIBLE_ORIGINS` en paramètre au lieu de lire `impute_intermediate_frequencies`
+      ([SPEC] §5.3 point 4).
 
 3) ÉCHELLE PAR LIGNE ([SPEC] §5.4) : les lignes de y_train issues d'une imputation antérieure sont
    à l'échelle de LEUR étape (des trimestres pour une variable annuelle imputée en Q) ; leur
@@ -1620,6 +2048,12 @@ CE QUE CE LOT DOIT LIVRER
    partout par hasard.
    Sans le diviseur par ligne, la valeur annuelle 120 et la valeur trimestrielle 28 seraient mêlées
    telles quelles dans la même cible : le modèle apprendrait un mélange de deux échelles.
+   COMPOSITION AVEC LA MUTUALISATION ([SPEC] §5.4, table de généralisation) : la fréquence d'une
+   ligne a DEUX sources, et une seule règle les unifie — `f_block(e)` pour une ligne observée ou
+   agrégée, la fréquence lue dans `imputed_freq_store` pour une ligne d'origine 'interpolated' ou
+   'model'. Le `TrainingSetBuilder` rend déjà cette `row_frequency` unifiée : la passer telle
+   quelle à `target_divisor(produced_freq=...)`. NE PAS écrire un second chemin d'échelle pour
+   l'axe 2 : le vecteur de fréquences est le même objet dans les deux cas.
 
 4) REPORT D'ÉTAPE, rang 3 de la précédence : le CovariateMaterializer l'implémente déjà (lot 9).
    Ce lot le rend ATTEIGNABLE en produisant des imputations à des étapes antérieures, et vérifie
@@ -1660,6 +2094,16 @@ TESTS — à ajouter dans tests/frequency/test_high_frequency_imputer2.py :
      'carried_model' ;
    - **I6 complément** `test_target_taint_families` : MODEL_ON_IMPUTED_TARGET et
      MODEL_ON_IMPUTED_BOTH ne sont émis que sous impute_intermediate_frequencies=True ;
+   - `test_progression_on_panel_f_uses_per_entity_frequencies` : sur `PANEL-F`, la progression
+     est `['Q', 'M']`, l'étape Q n'impute que FR, l'étape M impute FR et DE, jamais IT ;
+   - `test_row_frequency_mixes_block_and_store_sources` : sur `PANEL-F` sous
+     `impute_intermediate_frequencies=True`, le `y_train` de l'étape M contient à la fois des
+     lignes de fréquence de BLOC (Y pour FR, Q pour DE, M pour IT) et des lignes de fréquence de
+     PRODUCTION (Q, imputations de FR à l'étape antérieure), chacune avec SON diviseur, et la
+     cible mise à l'échelle reste homogène ;
+   - `test_target_taint_of_a_contributing_entity_propagates` : une cellule d'origine 'model'
+     apportée par une entité dégrade `target_taint` pour TOUTE l'étape, donc la provenance des
+     cellules produites pour les autres entités ([SPEC] §5.8) ;
    - **I13** `test_no_boolean_test_on_parameter` : le test statique du lot précédent doit toujours
      passer après ce lot — c'est ici qu'il est le plus facile à casser.
 
@@ -1695,10 +2139,15 @@ fait diverger hfi (B7, B27).
 
 TABLEAU DE RÉPARTITION ([SPEC] §12.1), à respecter à la lettre :
 
-  REJOUÉ depuis le fit : classification des variables, fréquences détectées, progression de
-    fréquences, ordre des variables, modèles ajustés, feature_cols, VOIE DE MATÉRIALISATION PAR
-    COVARIABLE, facteurs et modalités d'échelle, méthodes et ancrages d'interpolation par feature,
-    souillures de l'étape (covariate_taint, target_taint).
+  REJOUÉ depuis le fit : classification des variables, fréquences détectées (PAR (ENTITÉ,
+    COLONNE)), progression de fréquences, ordre des variables, modèles ajustés (UN PAR (ÉTAPE,
+    VARIABLE), partagé par les étapes de plan d'une même étape — [SPEC] §5.8 R6), feature_cols,
+    VOIE DE MATÉRIALISATION PAR COVARIABLE, `training_blocks` (diagnostic), facteurs et modalités
+    d'échelle, méthodes et ancrages d'interpolation par feature, souillures de l'étape
+    (covariate_taint, target_taint).
+    LE JEU D'ENTRAÎNEMENT N'EST PAS RECONSTRUIT AU TRANSFORM : aucun appel au
+    `TrainingSetBuilder` dans ce chemin. Un modèle partagé par plusieurs étapes de plan est
+    rejoué autant de fois qu'il y a d'étapes, chacune sur SES entités et avec SON recalage.
 
   RECALCULÉ sur les données du transform : fenêtres d'imputation et d'entraînement, frames
     d'étape, valeurs interpolées, prédictions, provenance du transform, masques de prédiction,
@@ -1721,8 +2170,12 @@ CE QUE CE LOT DOIT LIVRER
 
 3) CONTRÔLE DES FRÉQUENCES AU TRANSFORM (décision D11, [SPEC] §12.1) : la détection est REFAITE
    sur les données du transform et COMPARÉE à celle du fit.
-     - divergence sur une colonne présente -> UserWarning UNIQUE, message listant les colonnes et
-       LES DEUX fréquences, puis POURSUITE AVEC LES FRÉQUENCES DU FIT ;
+     - la comparaison se fait PAR COUPLE (ENTITÉ, COLONNE), jamais par colonne seule : sur un
+       panel, la même colonne peut légitimement porter des fréquences différentes selon l'entité
+       ([SPEC] §2.1, §2.5), et une comparaison par colonne signalerait une fausse divergence à
+       chaque transform ;
+     - divergence sur une colonne présente -> UserWarning UNIQUE, message listant les couples
+       (entité, colonne) et LES DEUX fréquences, puis POURSUITE AVEC LES FRÉQUENCES DU FIT ;
      - colonne du fit ABSENTE des données du transform -> ValueError nommant les colonnes
        manquantes ;
      - colonnes supplémentaires au transform -> ignorées SILENCIEUSEMENT (elles ne sont dans aucun
@@ -1766,10 +2219,15 @@ TESTS — à ajouter dans tests/frequency/test_high_frequency_imputer2.py :
      intermédiaire n'apparaît ;
    - **I9** `test_sklearn_conformance` : `clone`, `get_params`/`set_params`, `Pipeline`,
      `GridSearchCV` sur panel avec `target_frequency` dict ; `NotFittedError` avant fit ;
-   - `test_transform_state_purged_at_fit` (B19).
+   - `test_transform_state_purged_at_fit` (B19) ;
+   - `test_shared_model_replayed_by_each_step` : sur `PANEL-F`, les deux étapes de plan de
+     l'étape M rejouent le MÊME objet modèle, chacune sur ses entités, avec des recalages
+     distincts, et `fit_transform ≡ fit + transform` reste vrai ;
+   - `test_per_entity_frequency_divergence_is_not_a_false_positive` : un transform sur `PANEL-F`
+     n'émet AUCUN avertissement de divergence de fréquence.
 
-Puis `uv run tests/frequency/check_regressions.py` et rapporter. À ce stade, les treize invariants
-I1 à I13 de [SPEC] §16 doivent être couverts : me donner le tableau de correspondance
+Puis `uv run tests/frequency/check_regressions.py` et rapporter. À ce stade, les seize invariants
+I1 à I16 de [SPEC] §16 doivent être couverts : me donner le tableau de correspondance
 invariant -> test(s), et signaler explicitement tout invariant non couvert plutôt que de le
 déclarer acquis.
 
@@ -1789,7 +2247,7 @@ localiser le code par nom de symbole, jamais par numéro de ligne.
 
 ````text
 Contexte : HighFrequencyImputer2 est implémenté et testé (tsforecast/frequency/
-high_frequency_imputer2.py et ses cinq composants). Il manque le notebook d'audit pas-à-pas, qui
+high_frequency_imputer2.py et ses six composants). Il manque le notebook d'audit pas-à-pas, qui
 est le livrable de vérification humaine de la classe.
 Référence : [SPEC] = high_frequency_imputer2_architecture.md §15.2, et le notebook existant
 notebooks/4 - QB - HighFrequencyImputer pas a pas.ipynb, dont il faut reprendre la STRUCTURE et
@@ -1797,7 +2255,8 @@ les contrôles croisés.
 
 CIBLE — nouveau notebook `notebooks/5 - QB - HighFrequencyImputer2 pas a pas.ipynb`, exécuté sur
 LES DEUX JEUX du notebook 3 (série temporelle et panel hétérogène avec `climat_affaires` absente
-pour IT).
+pour IT), PLUS le jeu `PANEL-F` ([SPEC] §2.5, fixture `mixed_freq_panel_multifrequency`), à
+reconstruire dans le notebook par la même fonction que la fixture.
 
 Sections attendues :
 
@@ -1828,8 +2287,21 @@ Sections attendues :
    - pas-à-pas vs `fit_transform` : égalité stricte ;
    - `fit_transform(X)` vs `fit(X).transform(X)` : égalité stricte.
 
-6) Une section finale sur le PANEL HÉTÉROGÈNE : mesure de l'invariant NaN PAR ENTITÉ, et
-   illustration des deux valeurs de `covariate_eligibility` sur `climat_affaires` / IT.
+6) Une section sur le PANEL HÉTÉROGÈNE : mesure de l'invariant NaN PAR ENTITÉ, et illustration
+   des deux valeurs de `covariate_eligibility` sur `climat_affaires` / IT.
+
+7) Une section finale sur la MUTUALISATION INTER-ENTITÉS ([SPEC] §5.8), sur le jeu `PANEL-F` :
+   - pour chaque étape, la composition du jeu d'entraînement bloc par bloc, en tableau : entité,
+     `f_block`, nombre de lignes, diviseur, cible avant et après mise à l'échelle (lire
+     `step.training_blocks` et l'estimateur espion, ne rien recalculer à la main) ;
+   - un graphique superposant les trois blocs une fois mis à l'échelle : FR annuel, DE
+     trimestriel et IT mensuel décrivent la même trajectoire — c'est le contrôle de bon sens ;
+   - le comptage comparé : 51 lignes d'entraînement à l'étape M contre 3 sans mutualisation, et
+     contre les 9 lignes de trois échelles différentes que produit `hfi` sur le même jeu
+     ([SPEC] §1.5) — exécuter les deux classes côte à côte pour le montrer ;
+   - la vérification qu'IT entraîne le modèle sans jamais être réécrite (ses cellules restent
+     ORIGINAL), et que les deux étapes de plan de l'étape M partagent le même modèle tout en
+     recalant sur des totaux différents (annuels pour FR, trimestriels pour DE).
 
 Contraintes :
    - le notebook doit s'exécuter INTÉGRALEMENT, sans cellule en erreur — le rapporter
@@ -1870,15 +2342,20 @@ l'implémentation et de sa documentation — la documentation ne doit rien affir
    Y faire figurer explicitement les mises en garde déjà décidées : prérequis NaN de
    'tolerate_nan' ; regard vers l'aval de l'interpolation ; combinaisons inertes (§5.6) sans
    avertissement ; `keep_lower_frequencies` paramètre d'affichage pur ; écrasement du total
-   observé sous `aggregation_constraint=None` et les deux moyens de le récupérer (§11.2).
+   observé sous `aggregation_constraint=None` et les deux moyens de le récupérer (§11.2) ;
+   et la MUTUALISATION INTER-ENTITÉS ([SPEC] §5.8, décisions D17 à D19) : sur un panel, toute
+   entité observant une colonne entraîne le modèle de cette colonne, à sa propre fréquence — ce
+   qui suppose des NIVEAUX COMPARABLES entre entités, arbitrage tranché en faveur du volume, avec
+   l'échappatoire nommée (un imputeur ajusté par entité) pour qui ne le veut pas.
 
-2) Docstrings des cinq composants (`CovariateMaterializer`, `StageScaler`, `VariableOrderer`,
-   `AggregationConstraint`, `ImputationStep` v2 / `ImputationPlan`) : vérifier que chacune énonce
-   sa RESPONSABILITÉ UNIQUE telle que définie au §12.2, et renvoie à la section de [SPEC] qui la
-   spécifie. Corriger toute docstring qui décrit un comportement que le code n'a pas.
+2) Docstrings des SIX composants (`CovariateMaterializer`, `StageScaler`, `VariableOrderer`,
+   `AggregationConstraint`, `TrainingSetBuilder`, `ImputationStep` v2 / `ImputationPlan`) :
+   vérifier que chacune énonce sa RESPONSABILITÉ UNIQUE telle que définie au §12.2, et renvoie à
+   la section de [SPEC] qui la spécifie. Corriger toute docstring qui décrit un comportement que
+   le code n'a pas.
 
 3) `tsforecast/frequency/__init__.py` : exports complets et cohérents des symboles nouveaux
-   (`HighFrequencyImputer2`, les cinq composants, `ImputationStep2`/`ImputationPlan2`,
+   (`HighFrequencyImputer2`, les six composants, `ImputationStep2`/`ImputationPlan2`,
    `MaterializationWay`, `CellOrigin`, `Taint`, `resolve_model_provenance`), `__all__` à jour, et
    docstring de module mentionnant la COEXISTENCE de `HighFrequencyImputer` et
    `HighFrequencyImputer2` pendant la transition ([SPEC] §15.3). Ne rien déprécier : la
@@ -1889,7 +2366,7 @@ l'implémentation et de sa documentation — la documentation ne doit rien affir
    construction passe.
 
 5) `CLAUDE.md`, section « Structure du Projet » puis « Objectifs Fonctionnels » : ajouter
-   `high_frequency_imputer2.py` et les cinq composants sous `tsforecast/frequency/`, et déplacer
+   `high_frequency_imputer2.py` et les six composants sous `tsforecast/frequency/`, et déplacer
    « Gestion complète de données multi-fréquences (imputation, agrégation) » de « À implémenter »
    vers « Implémenté » en précisant que `HighFrequencyImputer` reste en place pendant la
    transition. Ne pas toucher au reste du fichier.
@@ -1897,7 +2374,7 @@ l'implémentation et de sa documentation — la documentation ne doit rien affir
 6) `README.md` : une entrée courte, cohérente avec le reste du fichier. Ne pas le réécrire.
 
 Enfin : `uv run tests/frequency/check_regressions.py` une dernière fois, et me donner le bilan
-final — compte d'échecs vs référence, tableau invariant I1-I13 -> test(s), et liste des points de
+final — compte d'échecs vs référence, tableau invariant I1-I16 -> test(s), et liste des points de
 [SPEC] que l'implémentation ne couvre PAS, s'il en reste. Ne rien déclarer acquis sans l'avoir
 vérifié.
 
@@ -1927,6 +2404,10 @@ localiser le code par nom de symbole, jamais par numéro de ligne.
 | Le filtre de `y_train` et les souillures lisent `origin_store` | 4, 8, 13, 14 |
 | `impute_intermediate_frequencies` n'est jamais testé comme booléen | 12, 13, 14 |
 | Une seule implémentation d'exécution d'étape | 13, 15 |
+| Une fréquence détectée est propriété du couple (entité, colonne) | 11a, 11b, 11c, 12, 13, 15 |
+| Le jeu d'entraînement est mutualisé entre entités, chacune à sa fréquence de bloc | 11c, 13, 14 |
+| Un seul ajustement par (étape, variable), partagé entre groupes de fréquence source | 13, 15 |
+| Aucun diviseur scalaire d'étape sur un jeu mutualisé : par ligne pour `y`, par bloc pour `X` | 11b, 13, 14 |
 | Le repli matérialise (stores alimentés) | 8, 13 |
 | Avertissements agrégés et uniques | 11, 12, 13, 15 |
 | `__init__` valide sans transformer | 7, 10, 11, 12 |

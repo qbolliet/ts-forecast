@@ -8,6 +8,13 @@
 > et 22 exécutés). **Révisé le 2026-09-01** pour intégrer les arbitrages de l'auteur : toutes les
 > décisions ouvertes du §11 de la version 1 sont désormais tranchées et consignées au §14.
 >
+> **Révision du 2026-09-04** : intégration de la **mutualisation inter-entités du jeu
+> d'entraînement** (§5.8, décisions D17 à D19, défaut mesuré B29). Une même colonne peut porter
+> une fréquence différente selon l'entité d'un panel ; les vraies valeurs des entités qui
+> l'observent plus finement doivent entraîner le modèle. Sections amendées : §0, §1.5 (nouvelle),
+> §2.1, §2.5 (nouvelle), §5.3, §5.4, §5.8 (nouvelle), §7.2, §9.2, §12.2, §12.3, §13.2, §14.3,
+> §16, §17.
+>
 > **Objet** : spécifier `HighFrequencyImputer2` (`tsforecast/frequency/high_frequency_imputer2.py`),
 > réécriture from scratch de `HighFrequencyImputer` destinée à la remplacer dans le package.
 >
@@ -61,7 +68,7 @@ Le défaut structurel mesuré (B28 : 0 % de NaN au `fit` contre jusqu'à 67 % au
 **inexprimable par construction** : la préparation des features passe par un composant unique,
 appliqué à l'identique aux deux grilles.
 
-**Les huit décisions structurantes arrêtées** (détail et justification au §14) :
+**Les neuf décisions structurantes arrêtées** (détail et justification au §14) :
 
 1. **Provenance en échelle de souillure** : `MODEL_ON_TRUE` → `MODEL_ON_INTERPOLATED` →
    `MODEL_ON_IMPUTED`, plus deux libellés distinguant la souillure venue de la **cible** :
@@ -82,6 +89,10 @@ appliqué à l'identique aux deux grilles.
 8. **Les dictionnaires par feature sont indexés par nom de colonne**, jamais par
    `(entité, colonne)` (D10). **`transform` face à des fréquences divergentes** : avertissement
    et poursuite avec les fréquences du fit, erreur si une colonne du fit manque (D11).
+9. **Le jeu d'entraînement est mutualisé entre entités** : une colonne peut porter une fréquence
+   différente selon l'entité, et toutes les entités qui l'observent entraînent le même modèle,
+   chacune à sa propre fréquence, ramenée à l'échelle de l'étape par un diviseur **par ligne**.
+   **Non paramétrable** (§5.8, D17 à D19).
 
 ---
 
@@ -177,6 +188,43 @@ Deux constantes de l'énumération de provenance disparaissent ou changent :
 
 ---
 
+### 1.5 — Le second défaut structurel mesuré (B29) : la mutualisation implicite et fausse
+
+Le défaut B28 du §1.1 porte sur les **covariables**. Un second défaut, de même nature mais sur
+l'axe **cible**, apparaît dès qu'un panel porte une colonne à des fréquences différentes selon
+l'entité — cas courant en pratique : un agrégat publié annuellement dans un pays, trimestriellement
+dans un autre, mensuellement dans un troisième.
+
+Mesure sur un panel `FR`/`DE`/`IT`, colonne `v` annuelle pour `FR` (≈ 120/an), trimestrielle pour
+`DE` (≈ 30/trimestre), mensuelle pour `IT` (≈ 10/mois), covariable `m1` mensuelle partout,
+`target_frequency='M'`, estimateur espion enregistrant `y_train` :
+
+| Étape | Groupe `(variable, f_var)` | Lignes de `y_train` | Cible mise à l'échelle |
+|---|---|---|---|
+| `Q` | `(v, Y)` → `{FR}` | 9 : **3 FR, 3 DE, 3 IT** | FR 29.9 · DE 7.4 · IT 2.4 |
+| `M` | `(v, Y)` → `{FR}` | 9 : 3 FR, 3 DE, 3 IT | FR 9.96 · DE 2.48 · IT 0.78 |
+| `M` | `(v, Q)` → `{DE}` | 27 : 3 FR, 12 DE, 12 IT | FR 39.8 · DE 10.2 · IT 3.2 |
+
+Trois constats, tous structurels dans `hfi` :
+
+- **le mélange a lieu** : `hfi:_prepare_training_data` lit `y_source = X_original[var_name]`,
+  c'est-à-dire la colonne **entière, toutes entités confondues**, et ne la filtre que par
+  `notna()` et par la fenêtre ; aucune restriction aux entités du groupe n'existe avant le `fit` ;
+- **l'échelle est fausse** : le diviseur est le **scalaire de l'étape**, calculé sur la clé
+  représentative du groupe (`Y` ici). Les vraies valeurs trimestrielles de `DE`, déjà à l'échelle
+  de l'étape `Q`, sont divisées par 4 ; les mensuelles d'`IT`, qu'il faudrait agréger, le sont
+  aussi. Le modèle apprend une cible qui mêle trois régimes d'échelle contre les mêmes features ;
+- **le volume n'y est pas** : seules 3 lignes par entité étrangère survivent, les covariables
+  étant agrégées à `f_var` du groupe (grille annuelle) et les lignes sans covariable observée
+  étant écartées. Le gisement réel à l'étape `Q` — 12 vraies valeurs trimestrielles de `DE` plus
+  12 agrégats trimestriels exacts d'`IT`, contre 3 ancres `FR` — n'est pas exploité.
+
+Autrement dit, `hfi` a le **coût** de la mutualisation (biais d'échelle silencieux) sans son
+**bénéfice** (volume). `hfi2` répond par le §5.8 : la mutualisation devient explicite, chaque
+entité contribue **à sa propre fréquence**, et le diviseur devient une propriété de la **ligne**.
+
+---
+
 ## 2 — Vocabulaire normatif et jeux de référence
 
 Tout le document utilise ce vocabulaire ; l'implémentation doit reprendre ces mots dans les noms
@@ -187,7 +235,10 @@ de variables et les docstrings.
 | Terme | Définition normative |
 |---|---|
 | **fréquence cible** `f_target` | la fréquence à laquelle toutes les colonnes imputables doivent être disponibles en sortie (`target_frequency`, éventuellement par entité). |
-| **fréquence détectée** `f_var` | la fréquence propre d'une colonne, inférée en phase 0 par `FrequencyDetector` sur les dates où elle est observée. |
+| **fréquence détectée** `f_var(e, c)` | la fréquence propre d'une colonne **pour une entité**, inférée en phase 0 par `FrequencyDetector` sur les dates où cette entité l'observe. Une série temporelle est le cas dégénéré d'entité `()` et l'on écrit `f_var(c)`. **Un panel peut porter la même colonne à des fréquences différentes selon l'entité** (§2.5) : `detected_frequencies_` est indexé par `(entité, colonne)` dès que les entités divergent, et tout raisonnement sur `f_var` se fait **par entité**. |
+| **bloc d'entraînement** | la contribution d'une entité au jeu d'entraînement d'une variable à une étape : ses lignes, prises à sa **fréquence de bloc**, avec ses covariables matérialisées sur cette grille (§5.8). |
+| **fréquence de bloc** `f_block(e)` | la plus **basse** des deux fréquences `f_var(e, v)` et `f_stage` : on n'entraîne jamais sur une grille plus fine que la grille de prédiction (D18). |
+| **mutualisation** | l'assemblage des blocs de **toutes** les entités observant `v` en un jeu d'entraînement unique, chaque ligne ramenée à l'échelle de l'étape par le diviseur de son bloc (§5.8, D17). |
 | **étape** (*stage*) | un couple (fréquence de prédiction `f_stage`, jeu de variables à imputer à cette fréquence). Les étapes s'enchaînent de la plus basse à la plus haute fréquence. |
 | **grille** | l'index des lignes d'un jeu de données à une fréquence donnée. Grille **d'entraînement** = lignes retenues pour le `fit` d'un modèle ; grille **de prédiction** = lignes pour lesquelles il produit des valeurs. |
 | **ancre** (*anchor*) | une ligne où une colonne porte une valeur **observée** à sa propre fréquence. `a1` annuelle observée au 2021-12-31 a une ancre à cette date. |
@@ -230,6 +281,34 @@ Les tableaux d'exemple donnent, pour une étape et une variable : `X_train` (fea
 `fit`), `y_train` (cible du `fit`), `X_pred` (features vues au `predict`) et la provenance
 écrite. Les valeurs numériques sont exactes et vérifiables : les tests du §16 les reprennent
 telles quelles comme cas d'or.
+
+### 2.5 — Jeu de référence `PANEL-F` (fréquences hétérogènes par entité)
+
+Support de la mutualisation (§5.8) et de ses valeurs d'or. Trois entités `FR`, `DE`, `IT`, index
+mensuel fin de mois 2021-01-31 → 2023-12-31 (36 dates par entité, 108 lignes),
+`target_frequency='M'`, toutes les colonnes additives :
+
+| Colonne | `FR` | `DE` | `IT` |
+|---|---|---|---|
+| `m1` | mensuelle, dense (`100 + rang`) | idem | idem |
+| `q1` | trimestrielle, 12 ancres (`10 × k`) | idem | idem |
+| `v` | **annuelle**, 3 ancres | **trimestrielle**, 12 ancres | **mensuelle**, 36 valeurs |
+
+Valeurs d'or de `v`, choisies pour que les trois entités portent le **même total annuel** et que
+tous les agrégats tombent juste :
+
+| Année | `FR` (ancre de fin d'année) | `DE` (4 ancres de fin de trimestre) | `IT` (valeur mensuelle constante) |
+|---|---|---|---|
+| 2021 | **120** | 28, 30, 31, 31 (somme 120) | **10.0** (somme 120, trimestres 30) |
+| 2022 | **132** | 31, 33, 34, 34 (somme 132) | **11.0** (somme 132, trimestres 33) |
+| 2023 | **150** | 36, 37, 38, 39 (somme 150) | **12.5** (somme 150, trimestres 37.5) |
+
+Fréquences détectées : `{(FR, v): Y, (DE, v): Q, (IT, v): M, (·, q1): Q, (·, m1): M}`.
+`v` est **imputable** pour `FR` (annuelle → mensuelle) et pour `DE` (trimestrielle → mensuelle),
+et **ne l'est pas** pour `IT`, qui l'observe déjà à la fréquence cible.
+
+Ce jeu est le support des invariants I14, I15 et I16 (§16) ; ses valeurs sont **gelées** au même
+titre que celles du jeu `TS`.
 
 ---
 
@@ -278,7 +357,10 @@ strictement plus basse que la grille : une covariable de fréquence supérieure 
 toujours disponible, par agrégation exacte (`m1` sommée au trimestre) ou par identité (`q1` sur
 une grille `Q`).
 
-Classification d'une covariable `c` face à une grille `f` :
+Classification d'une covariable `c` face à une grille `f`, **entité par entité** (`f_c` désigne
+`f_var(e, c)`, qui peut différer d'une entité à l'autre, §2.1) — c'est ce que fait déjà
+`CovariateMaterializer._applicable_way`, qui dégrade la voie retenue pour la colonne à ce que
+l'état de chaque entité permet :
 
 | Cas | Traitement | Origine des cellules |
 |---|---|---|
@@ -442,6 +524,10 @@ impute_intermediate_frequencies: Literal[False, 'covariates_only', True] = False
 | `'covariates_only'` | progression **complète** (Y → Q → M sur `TS`) | ses ancres + ses cellules d'origine `'interpolated'` — **jamais** ses propres imputations de modèle |
 | `True` | progression **complète** | ses ancres + ses cellules `'interpolated'` + **ses propres imputations des étapes antérieures** (origine `'model'`) |
 
+Les trois modalités décrivent le contenu de `y_train` **pour une entité donnée** ; sur un panel,
+ce contenu est ensuite **mutualisé entre entités** selon le §5.8, les deux mécanismes étant
+orthogonaux (§5.3, point 4).
+
 Autrement dit : `'covariates_only'` et `True` produisent **le même plan d'étapes** et diffèrent
 uniquement par le **filtre d'origine de `y_train`** ; `False` et `'covariates_only'` appliquent
 **le même filtre** et diffèrent uniquement par le plan.
@@ -465,15 +551,21 @@ Ce paramètre reprend et fusionne deux mécanismes de `hfi`/[ARCH] : la cascade 
 
 Algorithme, identique au fit et au transform (rejoué depuis le plan au transform) :
 
-1. Soit `F` l'ensemble des fréquences détectées des colonnes **imputables** du périmètre, plus la
-   fréquence cible `f_target`.
+1. Soit `F` l'ensemble des fréquences détectées des couples **(entité, colonne) imputables** du
+   périmètre, plus la fréquence cible `f_target`. Sur un panel où les entités divergent pour une
+   même colonne, `F` contient donc **toutes** leurs fréquences : sur `PANEL-F` (§2.5),
+   `F = {Y, Q, M}` alors qu'une lecture par colonne n'aurait vu qu'une fréquence pour `v`.
 2. Si `impute_intermediate_frequencies is False` : `progression = [f_target]`.
 3. Sinon : `progression = sorted(F \ {la plus basse}, de la plus basse à la plus haute)`, en ne
    retenant que les fréquences **strictement plus hautes** que la plus basse fréquence source et
    **inférieures ou égales** à `f_target`, et en garantissant que `f_target` en est le dernier
    élément.
-4. À chaque étape `f`, les **variables imputables à `f`** sont les colonnes dont `f_var` est
-   strictement plus basse que `f` et qui ne sont pas encore imputées **à `f`**.
+4. À chaque étape `f`, les **variables imputables à `f`** sont les couples `(entité, colonne)`
+   dont `f_var(e, c)` est strictement plus basse que `f` et qui ne sont pas encore imputés
+   **à `f`**. Les couples ainsi retenus sont regroupés par `(colonne, f_var)` : un groupe par
+   fréquence source, chacun donnant une étape de plan, **toutes partageant le modèle ajusté sur
+   le jeu mutualisé** (§5.8 R6). Sur `PANEL-F` à l'étape `M` : deux groupes, `(v, Y) → {FR}` et
+   `(v, Q) → {DE}`, `IT` n'étant imputable à aucune étape.
 
 Sur `TS` : `F = {Q, Y, M}` ; sous `False` → `['M']` ; sous `'covariates_only'`/`True` →
 `['Q', 'M']` (la fréquence `Y`, la plus basse, n'est pas une étape : rien n'est à imputer à `Y`).
@@ -485,8 +577,10 @@ dict incomplet → `ValueError` nommant les entités manquantes).
 
 ### 5.3 — Composition de `y_train` : le filtre d'origine
 
-`y_train` d'une variable `v` à l'étape `f` est composé des cellules de la **colonne `v` dans le
-frame d'étape**, restreintes par la fenêtre `'training'` (§7), filtrées par leur origine :
+`y_train` d'une variable `v` à l'étape `f` est composé des cellules de la **colonne `v`**,
+**bloc d'entité par bloc d'entité** (§5.8 : chaque entité contribue à sa propre fréquence
+`f_block(e)`), restreintes par la fenêtre `'training'` lue **à la fréquence du bloc** (§7),
+puis filtrées par leur origine :
 
 ```python
 ELIGIBLE_ORIGINS = {
@@ -509,7 +603,14 @@ Trois points d'implémentation impératifs :
    `imputed_freq_store` ; le diviseur d'échelle est **par ligne** (§5.4).
 3. Sous `False`, `y_train` d'une variable annuelle sur `TS` contient exactement 3 lignes : la
    garde `min_cv_train_size` et les gardes de taille de l'estimateur doivent être documentées
-   comme le prix de la modalité, et le repli interpolation reste le filet.
+   comme le prix de la modalité, et le repli interpolation reste le filet. **Sur un panel, la
+   mutualisation du §5.8 élargit ce compte** — 51 lignes au lieu de 3 sur le jeu `PANEL-F` — sans
+   changer le filtre d'origine, qui s'applique **à l'identique dans chaque bloc**.
+4. **Le filtre d'origine et la mutualisation sont orthogonaux** : `ELIGIBLE_ORIGINS` décide
+   *quelles cellules* d'une entité sont éligibles, le §5.8 décide *quelles entités* contribuent
+   et *à quelle fréquence*. Les deux se composent sans se connaître ; c'est pourquoi
+   `TrainingSetBuilder` (§12.2) reçoit `ELIGIBLE_ORIGINS` en paramètre plutôt que de lire
+   `impute_intermediate_frequencies`.
 
 ### 5.4 — Le piège d'échelle des lignes imputées
 
@@ -534,6 +635,20 @@ Exemple chiffré sur `TS`, `impute_intermediate_frequencies=True`, `scale_featur
 
 Sans le diviseur par ligne, la valeur annuelle 120 et la valeur trimestrielle 28 seraient mêlées
 telles quelles dans la même cible : le modèle apprendrait un mélange de deux échelles.
+
+**Généralisation à l'axe des entités (§5.8)** : la fréquence d'une ligne de `y_train` n'est pas
+une propriété de la **colonne** mais du couple (**ligne**, **entité**). Elle a deux sources, et
+une seule règle les unifie :
+
+| Type de ligne | Fréquence de la ligne `f_row` | Lue dans |
+|---|---|---|
+| cellule **observée** ou **agrégée exactement** de l'entité `e` | `f_block(e)` = la plus basse de `f_var(e, v)` et `f` | `detected_frequencies_` |
+| cellule d'origine `'interpolated'` ou `'model'` produite à une étape antérieure | la fréquence de production de la cellule | `imputed_freq_store` |
+
+Dans les deux cas le diviseur vaut `get_conversion_factor(f, f_row)` et le vecteur de diviseurs
+est passé tel quel à `StageScaler.target_divisor(produced_freq=…)`. Le §5.4 (axe des étapes) et
+le §5.8 (axe des entités) partagent donc **le même mécanisme** et le même chemin de code : il n'y
+a pas deux plomberies d'échelle à écrire.
 
 ### 5.5 — Exemple complet du plan sur `TS`
 
@@ -594,6 +709,133 @@ publique.
 En revanche, la seconde capacité perdue de la version 1 du document — « étapes intermédiaires
 pour enrichir les covariables, mais cible entraînée sur les seules valeurs fiables » — est
 **restaurée** : c'est exactement `impute_intermediate_frequencies='covariates_only'`.
+
+### 5.8 — Mutualisation inter-entités du jeu d'entraînement
+
+> **Le jeu d'entraînement d'une variable `v` à une étape `f` est mutualisé entre toutes les
+> entités qui observent `v`, chacune contribuant à la fréquence à laquelle elle l'observe,
+> ramenée à l'échelle de l'étape par un diviseur propre à son bloc.**
+
+C'est la réponse au défaut B29 (§1.5). Sur un panel, une colonne annuelle pour une entité,
+trimestrielle pour une deuxième et mensuelle pour une troisième porte, chez les deux dernières,
+des **vraies valeurs à la fréquence même où la première doit être imputée** : les ignorer, c'est
+entraîner sur trois ancres ce qui pouvait l'être sur cinquante et une. **Non paramétrable**
+(D17) : le mode « chaque entité son modèle » n'existe pas dans `hfi2`, pas plus que dans `hfi`,
+le modèle d'un panel y étant global par construction.
+
+#### Les six règles
+
+**R1 — Périmètre des contributeurs.** Toute entité du panel portant **au moins une observation**
+de `v` contribue, **indépendamment** : de sa fréquence pour `v`, du fait que `v` y soit imputable
+ou non, et de sa fréquence cible propre (`target_frequency` en dict). Une entité qui n'observe
+jamais `v` ne contribue rien — symétrique exact du §4.5 côté covariables.
+
+**R2 — Fréquence de bloc.** `f_block(e)` = la plus **basse** des deux fréquences `f_var(e, v)` et
+`f`. Motif (D18) : on n'entraîne **jamais** sur une grille plus fine que la grille de prédiction,
+sinon le modèle apprendrait une relation à une échelle et un régime d'agrégation des covariables
+que la prédiction ne rencontrera jamais.
+
+**R3 — Lignes d'un bloc**, selon la position de `f_var(e, v)` face à `f` :
+
+| Cas | Lignes retenues | `f_block(e)` | Diviseur de la ligne |
+|---|---|---|---|
+| `f_var(e, v)` plus **basse** que `f` (entité imputable) | les **ancres** de `v` pour `e`, à sa propre fréquence — comportement d'origine, inchangé | `f_var(e, v)` | `get_conversion_factor(f, f_var(e, v))` |
+| `f_var(e, v)` **égale** à `f` | les cellules **observées** de `v` pour `e` sur la grille de l'étape | `f` | `1.0` |
+| `f_var(e, v)` plus **fine** que `f` | l'**agrégat exact** de `v` sur chaque période **complète** de `f` (`full_periods_only=True`), par la contrainte résolue pour la colonne (`'sum'` par défaut, `'mean'`, `'last'` — §11.1) ; une période incomplète ne produit **aucune** ligne | `f` | `1.0` |
+
+Dans les trois cas, les lignes sont ensuite filtrées par le masque `'training'` lu **à la
+fréquence du bloc** (`get_mask_at_frequency({e: f_block(e)}, kind='training')`) et par
+`ELIGIBLE_ORIGINS` (§5.3).
+
+**R4 — Covariables du bloc.** `CovariateMaterializer.materialize` est appelé **une seule fois**
+sur la grille d'entraînement mutualisée — l'union des grilles de bloc — avec
+`stage_freq = {e: f_block(e)}` et `detected_frequencies` sous leur forme par entité. Le composant
+lit déjà une fréquence d'étape par entité et dégrade la voie retenue entité par entité
+(`_applicable_way`) : **aucune seconde implémentation, aucun contournement de la règle du §4.6**.
+La voie est décidée sur cette grille, enregistrée dans l'étape, et rejouée telle quelle sur la
+grille de prédiction.
+
+**R5 — Échelle.** Diviseur **par ligne** pour la cible (§5.4, table de généralisation) et
+diviseurs **par bloc** pour les features : `StageScaler.feature_divisors` reçoit `source_freq`
+sous forme de liaison par entité `{e: f_block(e)}`, exactement comme il reçoit déjà `pred_freq`.
+La règle B25 est appliquée **à l'intérieur de chaque bloc**, sans changement.
+
+**R6 — Un seul ajustement par (étape, variable).** Le jeu ainsi construit ne dépend **pas** du
+groupe de fréquence source : à une étape donnée, tous les groupes d'une même variable reçoivent
+**le même** `X_train`, le même `y_train` et les mêmes voies de matérialisation. L'estimateur est
+donc ajusté **une fois par (étape, variable)**, et le modèle ajusté est **partagé** par les
+étapes du plan qui ne diffèrent que par leur `source_frequency` et leurs entités. C'est
+exactement la mémoïsation autorisée par le §5.7 — « un modèle dont le jeu d'entraînement et les
+voies de matérialisation n'ont pas changé » — et **non** un retour de `cascade_refitting=False`
+(D2) : un modèle n'est jamais réutilisé d'une **étape** à l'autre.
+
+#### Ce que la mutualisation ne change pas
+
+- **La prédiction** reste par groupe : seules les entités où `v` est imputable à `f` reçoivent
+  des valeurs. Sur `PANEL-F` à l'étape `M`, `IT` alimente l'entraînement mais **aucune** de ses
+  cellules n'est réécrite ; elles restent `ORIGINAL`.
+- **Le recalage** reste par groupe et par entité : les prédictions de `FR` somment à ses totaux
+  **annuels**, celles de `DE` à ses totaux **trimestriels** (§11.1). C'est la raison pour
+  laquelle les étapes restent distinctes alors même que le modèle est partagé.
+- **La provenance** reste une propriété de l'étape (§6.3). Les souillures se calculent sur le jeu
+  mutualisé : une entité qui contribue des cellules observées ne dégrade rien ; une entité qui
+  contribue des cellules `'interpolated'` ou `'model'` (axe 2) dégrade `target_taint`, donc la
+  provenance de **toutes** les cellules produites par l'étape, y compris pour les autres entités.
+  À énoncer dans la docstring de la classe.
+- **L'invariant central** (§3) et sa mesure **par entité** sont inchangés : les blocs ajoutent des
+  **lignes**, jamais des colonnes, et la voie de matérialisation reste unique par (étape,
+  variable, covariable).
+- **Une série temporelle** est le cas dégénéré à une entité : le jeu mutualisé y est identique au
+  jeu d'origine, et tous les exemples chiffrés des §4.7, §5.4 et §5.5 restent vrais au chiffre
+  près (invariant I16).
+
+#### Exemple chiffré sur `PANEL-F` (§2.5)
+
+Variable `v`, `covariate_strategy='interpolate'`, `scale_features='constant'`.
+
+**Étape `M`** (la seule étape sous `impute_intermediate_frequencies=False`) — 51 lignes
+d'entraînement, un seul ajustement, deux étapes de plan :
+
+| Bloc | `f_block` | Lignes | Valeurs brutes | Diviseur | Cible mise à l'échelle |
+|---|---|---|---|---|---|
+| `FR` | `Y` | 3 | 120 · 132 · 150 | 12 | **10.0 · 11.0 · 12.5** |
+| `DE` | `Q` | 12 | 28 · 30 · 31 · 31 · 31 · 33 · 34 · 34 · 36 · 37 · 38 · 39 | 3 | 9.333 · 10.0 · 10.333 · 10.333 · 10.333 · 11.0 · 11.333 · 11.333 · 12.0 · 12.333 · 12.667 · 13.0 |
+| `IT` | `M` | 36 | 10.0 (×12) · 11.0 (×12) · 12.5 (×12) | 1 | **10.0 · 11.0 · 12.5** |
+
+Les trois blocs se superposent à la même échelle mensuelle — c'est le contrôle de bon sens du
+jeu : `FR` annuel, `DE` trimestriel et `IT` mensuel décrivent la même trajectoire, et le modèle
+apprend sur 51 lignes cohérentes au lieu de 3.
+
+Deux étapes de plan en découlent, **partageant le modèle ajusté** (R6) :
+
+| Étape de plan | `source_frequency` | `entities` | Recalage |
+|---|---|---|---|
+| `M` / `v` / `Y` | `Y` | `(FR,)` | totaux **annuels** de `FR` |
+| `M` / `v` / `Q` | `Q` | `(DE,)` | totaux **trimestriels** de `DE` |
+
+**Étape `Q`** (existe sous `impute_intermediate_frequencies='covariates_only'` ou `True`) —
+27 lignes, une seule étape de plan (`(FR,)`, `source_frequency='Y'`), `DE` et `IT` n'y étant pas
+imputables :
+
+| Bloc | `f_block` | Lignes | Diviseur | Cible mise à l'échelle |
+|---|---|---|---|---|
+| `FR` | `Y` | 3 | 4 | **30.0 · 33.0 · 37.5** |
+| `DE` | `Q` | 12 | 1 | 28 · 30 · 31 · 31 · 31 · 33 · 34 · 34 · 36 · 37 · 38 · 39 |
+| `IT` | `Q` | 12 (agrégats de 3 mois) | 1 | **30.0 (×3) · 33.0 (×3) · 37.5 (×4)** |
+
+À comparer aux **9 lignes de trois échelles différentes** que `hfi` produit sur le même jeu
+(§1.5).
+
+#### Le biais assumé (D17)
+
+Mutualiser suppose les **niveaux comparables** entre entités : un pays dix fois plus grand tire
+la cible, et `scale_features` ne corrige que l'échelle de **fréquence**, jamais celle d'entité.
+L'arbitrage est tranché — **le gain de volume l'emporte sur le risque de biais** — pour trois
+raisons : le modèle d'un panel est déjà global dans `hfi` (les entités de même fréquence y sont
+déjà mutualisées, sans que personne n'ait jugé utile de le paramétrer) ; le comportement actuel
+mutualise **déjà**, mais faux (§1.5) ; et un utilisateur qui veut un modèle par entité l'obtient
+sans paramètre, en ajustant un imputeur par entité. À documenter dans la docstring de la classe,
+avec cette échappatoire nommée explicitement.
 
 ---
 
@@ -831,6 +1073,10 @@ Chaque appelant **nomme explicitement** son masque : aucun appel sans `kind`. Le
   des masques se délègue à `FrequencyConverter.convert_frequency` (vérifier au passage sa gestion
   des fréquences cibles par entité ; sinon garder la boucle interne mais **unifier le type de
   retour**).
+- **Masque lu à la fréquence du bloc** : le jeu d'entraînement mutualisé (§5.8) réunit des blocs
+  de fréquences différentes ; chaque bloc lit le masque `'training'` **à sa propre fréquence**,
+  via `get_mask_at_frequency({entité: f_block(entité)}, kind='training')`, qui accepte déjà une
+  fréquence par entité. Jamais un masque de stage appliqué à une grille de bloc.
 - **`transform` hors fenêtre de fit (B1)** : la fenêtre est une contrainte de **disponibilité des
   données**, pas un paramètre appris — au `transform`, elle est **recalculée sur les données
   transformées** avec les hyperparamètres du fit (option A de [ARCH] §3.14), avec deux
@@ -973,9 +1219,13 @@ La modalité s'applique à **tous les diviseurs** relatifs à la feature :
 1. le diviseur des covariables à l'entraînement et à la prédiction
    (`_covariate_scaling_divisors`, **règle B25** : `1.0` pour une colonne jamais ré-agrégée,
    `get_conversion_factor(f_stage, f_var)` sinon, avec `f_stage = pred_freq` si `f_var` est plus
-   fine que l'étape et `f_var` sinon) ;
+   fine que l'étape et `f_var` sinon). Sur un jeu d'entraînement **mutualisé** (§5.8), la règle
+   s'applique **bloc par bloc** : `feature_divisors` reçoit `source_freq` sous forme de liaison
+   par entité `{e: f_block(e)}` — la même forme que `pred_freq` accepte déjà — et retourne alors
+   nécessairement une `DataFrame` de diviseurs par ligne ;
 2. le diviseur de `y` (scalaire d'étape, ou `pd.Series` par ligne dès que `y_train` mêle
-   plusieurs fréquences de production, §5.4) ;
+   plusieurs fréquences de production — de production **d'étape** (§5.4) comme de **bloc**
+   (§5.8)) ;
 3. le report d'échelle des prédictions (`fit_scale_factor` : le facteur **cuit dans le modèle**,
    qui ne bouge plus une fois l'étape ajustée).
 
@@ -1184,7 +1434,7 @@ Ce qui est **état du fit** (rejoué tel quel) vs **recalculé au transform** :
 | Rejoué depuis le fit | Recalculé sur les données du transform |
 |---|---|
 | classification des variables, fréquences détectées, progression de fréquences, ordre des variables | fenêtres d'imputation / d'entraînement (§7, B1) |
-| modèles ajustés, `feature_cols`, **voie de matérialisation par covariable** (§4.6), facteurs et modalités d'échelle | frames d'étape, valeurs interpolées, prédictions, provenance du transform |
+| modèles ajustés (**un par (étape, variable)**, partagé par les groupes de fréquence source, §5.8 R6), `feature_cols`, **voie de matérialisation par covariable** (§4.6), composition du jeu d'entraînement mutualisé (`training_blocks`), facteurs et modalités d'échelle | frames d'étape, valeurs interpolées, prédictions, provenance du transform |
 | méthodes et ancrages d'interpolation par feature, souillures de l'étape (`covariate_taint`, `target_taint`) | masques de prédiction, recalage aux totaux, `origin_store` du transform |
 
 **Comportement en cas de divergence des fréquences détectées au `transform` (D11)** : la
@@ -1203,8 +1453,9 @@ principale restant un orchestrateur mince :
 |---|---|---|
 | `HighFrequencyImputer2` | `high_frequency_imputer2.py` | API sklearn, validations `__init__`, normalisation au `fit`, orchestration `fit`/`transform`/`inverse_transform` |
 | `CovariateMaterializer` | `covariate_materializer.py` | matérialisation des covariables sur une grille selon `covariate_strategy` / `covariate_fallback` / `interpolation_*` ; **unique** producteur de `X_train` et `X_pred` ; tient `imputed_store`, `imputed_freq_store` et `origin_store` ; applique la précédence du §4.4 |
-| `StageScaler` | `stage_scaler.py` | diviseurs `'constant'`/`'calendar'`, scalaires et par ligne ; application et inversion de l'échelle ; report d'échelle des prédictions |
+| `StageScaler` | `stage_scaler.py` | diviseurs `'constant'`/`'calendar'`, scalaires et par ligne ; application et inversion de l'échelle ; report d'échelle des prédictions ; `source_freq` en **liaison par entité** pour les jeux mutualisés (§5.8 R5) |
 | `VariableOrderer` | `variable_orderer.py` | ordres `'frequency'` et `'cv'` (avec `cv`, `cv_scoring`, `min_cv_train_size`), tie-break alphabétique |
+| `TrainingSetBuilder` | `training_set_builder.py` | jeu d'entraînement **mutualisé** d'une variable à une étape (§5.8) : blocs par entité, fréquence de bloc, lignes éligibles (`ELIGIBLE_ORIGINS`), appel **unique** à `CovariateMaterializer.materialize`, fréquence de production par ligne, diviseurs par bloc |
 | `AggregationConstraint` | `aggregation_constraint.py` | recalage aux totaux de période, gardes du §11.1, masque des cellules recalées |
 | `ImputationStep` (v2) + plan | `imputation_plan2.py` | étape immuable : + `covariate_taint`, + `target_taint`, + `materialization`, + `is_fallback` ; − `trained_on_imputed`, − `feature_means` |
 | réutilisés | `imputation_window.py` (3 masques, MultiIndex), `frequency_aligner.py`, `provenance.py` (enum étendue), `target_frequency_validator.py`, `regularizer.py`, `utils/frequency/converter.py` (+ `anchor_fraction`, correctif B26) | rôle inchangé |
@@ -1229,23 +1480,34 @@ PHASE 5  pour chaque étape de fréquence f de la progression :
   5a. frame d'étape : données d'origine + agrégations exactes à f + miroir des imputations
       (CovariateMaterializer, unique aussi pour le transform)
   5b. variables imputables à f ; ordre (VariableOrderer, SEULEMENT si strategy='model')
-  5c. pour chaque variable v :
-      - grille d'entraînement (ancres de v [+ cellules éligibles selon ELIGIBLE_ORIGINS, §5.3]),
-        masque 'training' ; grille de prédiction, masque 'imputation'
+  5c. pour chaque variable v (COLONNE, une seule fois par étape) :
+      - JEU D'ENTRAÎNEMENT MUTUALISÉ (TrainingSetBuilder, §5.8) : un bloc par entité observant v,
+        fréquence de bloc f_block(e) = la plus basse de f_var(e, v) et f (R2), lignes du bloc
+        selon R3 (ancres / observations / agrégats exacts de périodes complètes), masque
+        'training' lu A LA FREQUENCE DU BLOC, filtre ELIGIBLE_ORIGINS (§5.3) ; grille
+        d'entraînement = union des grilles de bloc ; fréquence de production PAR LIGNE
+      - grille de prédiction : masque 'imputation'
       - sélection des feature_cols (non-vides sur LES DEUX fenêtres, covariate_eligibility)
-      - matérialisation des covariables sur LES DEUX grilles par la MÊME voie (§4.6),
-        enregistrement de materialization[col]
-      - calcul des souillures covariate_taint / target_taint (§6.2)
-      - mise à l'échelle (StageScaler : scalaire ou Series par ligne)
-      - ajustement de l'estimateur ; en cas d'échec -> repli interpolation (méthode de v),
-        étape marquée is_fallback=True, cellules marquées INTERPOLATED
-      - prédiction sur TOUTE la période, ancres comprises (§11.2)
-      - recalage aux totaux (AggregationConstraint) -> masque des cellules recalées
-      - écriture des valeurs, marquage de provenance (§6.3, IDENTIQUE pour les cellules recalées
-        et non recalées, lignes d'ancre comprises : le recalage ne change aucune provenance)
-      - mise à jour de imputed_store / imputed_freq_store / origin_store
-        (y compris en repli : "le repli matérialise")
-      - gel de l'ImputationStep dans le plan
+      - matérialisation des covariables sur LES DEUX grilles par la MÊME voie (§4.6), l'appel
+        d'entraînement portant stage_freq = {e: f_block(e)} ; enregistrement de
+        materialization[col]
+      - calcul des souillures covariate_taint / target_taint (§6.2), sur le jeu MUTUALISÉ
+      - mise à l'échelle (StageScaler : diviseur cible PAR LIGNE, diviseurs de features PAR BLOC)
+      - ajustement de l'estimateur — UN SEUL pour (étape, variable), quel que soit le nombre de
+        groupes de fréquence source (§5.8 R6) ; en cas d'échec -> repli interpolation (méthode de
+        v), étapes marquées is_fallback=True, cellules marquées INTERPOLATED
+      - pour chaque GROUPE DE FRÉQUENCE SOURCE (entités partageant f_var(e, v), et pour
+        lesquelles v est imputable à f), en PARTAGEANT le modèle ajusté ci-dessus :
+          . prédiction sur TOUTE la période, ancres comprises (§11.2)
+          . recalage aux totaux DE CE GROUPE (AggregationConstraint) -> masque des cellules
+            recalées
+          . écriture des valeurs, marquage de provenance (§6.3, IDENTIQUE pour les cellules
+            recalées et non recalées, lignes d'ancre comprises : le recalage ne change aucune
+            provenance)
+          . mise à jour de imputed_store / imputed_freq_store / origin_store
+            (y compris en repli : "le repli matérialise")
+          . gel de l'ImputationStep dans le plan (mêmes model, feature_cols, materialization et
+            souillures ; source_frequency, entities et recalage propres au groupe)
 PHASE 6  finalisation : plan figé, attributs de sortie, sortie multi-fréquences si demandé
 ```
 
@@ -1356,7 +1618,7 @@ Combinaisons **inertes** documentées mais **non signalées** (D9) : cf. §5.6.
 | Attribut | Contenu |
 |---|---|
 | `effective_target_frequency_` | fréquence cible normalisée (scalaire ou dict par entité) |
-| `detected_frequencies_` | `{colonne: fréquence}` détectée au fit |
+| `detected_frequencies_` | fréquence détectée au fit : `{colonne: fréquence}` sur une série temporelle, `{(entité, colonne): fréquence}` sur un panel — **les entités peuvent diverger pour une même colonne** (§2.1, §2.5) |
 | `variable_categories_` | classification des colonnes, format [ARCH] §3.2 |
 | `frequency_progression_` | liste des `f_stage` (§5.2) |
 | `imputation_order_` | ordre des variables par étape (vide hors `covariate_strategy='model'`) |
@@ -1409,6 +1671,9 @@ sont ceux de la version 1, conservés pour la traçabilité.
 | **D14** | l'invariant NaN se formule en **inclusion d'ensembles de dates renseignées**, pas en comparaison de taux bruts | sous `'tolerate_nan'`, les deux grilles n'ont pas le même pas (§4.7) |
 | **D15** | `scale_features=False` **dispense aussi `y`** : la cible est une colonne comme une autre, et sa modalité est celle résolue pour la colonne imputée, `False` compris | rupture assumée avec le `False` de `hfi` : il existe de bonnes raisons de ne pas mettre une variable à l'échelle (indice, taux), et l'utilisateur est mieux placé que le composant pour le décider. Corollaire : `target_column` est **supprimé**, le nom de `y` désignant la colonne imputée au `fit` (§9.2) |
 | **D16** | la contrainte d'agrégation **ne change aucune provenance** : cellules recalées et lignes d'ancre gardent le `MODEL_*` ou l'`INTERPOLATED` de la valeur écrite ; `DISAGGREGATED` n'est **jamais émis** par `hfi2` et ne survit dans l'énumération partagée que pour `hfi` | recaler, c'est déplacer une valeur, pas la produire — au même titre que la mise à l'échelle du `StageScaler`. `DISAGGREGATED` **remplaçait** la marque de la cellule et effaçait l'information utile (modèle ? interpolation ? souillure ?) au profit d'une information de position que le masque des cellules recalées et `anchor_cells_mask` portent déjà, comme diagnostics (§6.4, §11.2) |
+| **D17** | **mutualisation inter-entités du jeu d'entraînement**, **non paramétrable** : toute entité observant la colonne entraîne le modèle, à sa propre fréquence, ramenée à l'échelle de l'étape par un diviseur de bloc (§5.8) | le comportement actuel mutualise **déjà**, mais avec un diviseur faux et une fraction des lignes (B29, §1.5) ; le modèle d'un panel est global par construction, dans `hfi` comme dans `hfi2` ; l'auteur tranche l'arbitrage volume / biais de niveau **en faveur du volume**, l'échappatoire (un imputeur par entité) restant disponible sans paramètre |
+| **D18** | `f_block(e)` = la plus **basse** de `f_var(e, v)` et `f_stage` : on n'entraîne jamais sur une grille plus fine que la grille de prédiction ; une entité plus fine contribue par **agrégation exacte** sur les périodes **complètes** | à une grille plus fine, les covariables porteraient un régime d'agrégation que la prédiction ne rencontre jamais, et la cible une échelle fractionnaire ; l'agrégation exacte d'une colonne additive n'est pas une approximation (elle vaut `'observed'`, §6.2) |
+| **D19** | **un seul ajustement par (étape, variable)** : le modèle est partagé par les étapes du plan qui ne diffèrent que par `source_frequency` et `entities` | le jeu mutualisé ne dépend pas du groupe (§5.8 R6) : deux ajustements y seraient redondants et, sous un estimateur stochastique, divergents. C'est la mémoïsation explicitement autorisée par le §5.7, et non un retour de D2 : un modèle n'est jamais réutilisé d'une **étape** à l'autre |
 
 ---
 
@@ -1421,6 +1686,7 @@ sont ceux de la version 1, conservés pour la traçabilité.
 | **P3** | extension `ImputationWindowCalculator` : trois masques + `training_scope` + retour MultiIndex (§7) — prompts 10/13/20 de [ARCH] jamais exécutés, réalisés ici sur `iwc`, **partagé avec `hfi` sans changement de comportement par défaut** | à faire (L3) |
 | **P4** | extension `ProvenanceType` + `mark_model_imputed` (§6) — **rupture assumée** pour `hfi` (suppression de `MODEL_ON_MIXED`) | à faire (L2) |
 | **P5** | jeu `PANEL` avec feature manquante par entité (§15.1) — **à faire en premier**, les jeux d'exemple servant ensuite à tous les tests et notebooks | à faire (L0) |
+| **P6** | jeu `PANEL-F` à fréquences hétérogènes par entité (§2.5) : fixture, valeurs d'or gelées et tests de référence — prérequis des invariants I14 à I16 | à faire (L8b) |
 
 ### 15.1 — Notebook 3 : feature absente pour certaines entités
 
@@ -1448,7 +1714,11 @@ Sur le modèle de `notebooks/4 - QB - HighFrequencyImputer pas a pas.ipynb`, un 
   qui diffèrent effectivement, §5.6) avec la matrice de provenance résultante et les cinq
   familles `MODEL_*` ;
 - conserve les contrôles croisés du notebook 4 : pas-à-pas vs `fit_transform`, et
-  `fit_transform(X)` vs `fit(X).transform(X)`.
+  `fit_transform(X)` vs `fit(X).transform(X)` ;
+- **déroule le jeu `PANEL-F` (§2.5)** : pour chaque étape, la composition du jeu d'entraînement
+  **mutualisé** bloc par bloc (entité, `f_block`, nombre de lignes, diviseur, cible avant et
+  après mise à l'échelle), la superposition des trois blocs à la même échelle, le fait qu'`IT`
+  entraîne sans jamais être réécrite, et la comparaison avec le comptage de `hfi` (§1.5).
 
 **Règle permanente** reprise de [ARCH] §6 : tout prompt d'implémentation qui modifie l'exécution
 d'étape met à jour la cellule pas-à-pas correspondante **dans le même lot**.
@@ -1484,11 +1754,22 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 | **I11** | unicité de la voie de matérialisation | pour chaque (étape, variable, covariable), `materialization` est identique au fit et au transform, et la nature des valeurs produites l'est aussi (§4.6) |
 | **I12** | `'covariates_only'` ≠ `True` | sur un jeu où la cascade change quelque chose, `'covariates_only'` produit des `y_train` sans aucune ligne d'origine `'model'`, et des valeurs finales **différentes** de `True` ; sous `covariate_strategy='interpolate'`, `'covariates_only'` produit les mêmes valeurs finales que `False` (§5.6) |
 | **I13** | `impute_intermediate_frequencies` n'est jamais testé comme booléen | test statique/grep : aucun `if self.impute_intermediate_frequencies:` dans le code (`'covariates_only'` est *truthy*) |
+| **I14** | mutualisation (§5.8) | sur `PANEL-F`, `y_train` de `v` contient **exactement** les lignes annoncées au §5.8 — 51 à l'étape `M` (3 `FR` + 12 `DE` + 36 `IT`), 27 à l'étape `Q` — et chaque ligne est à l'**échelle de l'étape** : valeurs d'or `10.0 / 11.0 / 12.5` (blocs `FR` et `IT` à `M`), `30.0 / 33.0 / 37.5` (bloc `FR` à `Q`), agrégats `IT` `30 / 33 / 37.5` à `Q`. Aucune ligne ne mêle deux échelles ; une période incomplète ne produit aucune ligne |
+| **I15** | indépendance au groupe de fréquence source | à une étape donnée, les groupes `(v, Y)` et `(v, Q)` de `PANEL-F` reçoivent le **même** `X_train`, le **même** `y_train` et les **mêmes** voies de matérialisation, et **partagent le même objet modèle** (`is`) ; leurs recalages restent distincts (totaux annuels de `FR`, trimestriels de `DE`) et `IT` n'est **jamais** réécrite |
+| **I16** | non-régression de la série temporelle | sur `TS` (entité unique), le jeu mutualisé est **identique** au jeu d'origine : tous les exemples chiffrés des §4.7, §5.4 et §5.5 restent vrais au chiffre près |
 
 Cas limites à couvrir explicitement, en plus : index non trié, index dupliqué, entité à une seule
 observation, variable annuelle à 2 ancres seulement (`y_train` de taille 2 sous
 `impute_intermediate_frequencies=False`), période incomplète en début et en fin de série,
 fréquence irrégulière détectée, colonne entièrement NaN, `estimator=None`.
+
+Cas limites propres à la mutualisation (§5.8) : entité observant la colonne **plus finement** que
+la fréquence cible (contributrice, jamais imputée) ; entité dont la première ou la dernière
+période est **incomplète** (aucune ligne produite pour cette période, les autres restant) ;
+entité n'observant **jamais** la colonne (aucune contribution, aucune erreur) ; entité dont la
+**fréquence cible** diffère de celle du groupe imputé (elle contribue quand même, R1) ; panel où
+**toutes** les entités observent la colonne à la fréquence cible (aucune variable imputable, plan
+vide) ; panel à **une seule** entité (le jeu mutualisé se réduit au bloc unique).
 
 ---
 
@@ -1509,9 +1790,12 @@ mise à jour du notebook concerné quand il touche l'exécution d'étape (§15.2
 | **L6** | `covariate_materializer.py` : les trois stratégies, `covariate_fallback`, précédence à quatre rangs (§4.4), `imputed_store`/`imputed_freq_store`/`origin_store`, `covariate_eligibility` | L1, L2, L3 | tests unitaires isolés + I2, I11 |
 | **L7** | `aggregation_constraint.py` : recalage aux totaux, gardes (§11.1), masque des cellules recalées, désagrégation systématique des ancres (§11.2) | L2 | tests unitaires + I4 |
 | **L8** | `variable_orderer.py` : ordres `'frequency'` et `'cv'`, `check_cv`, tie-break alphabétique, correctifs §8.2 | — | tests unitaires + I3 |
-| **L9** | `high_frequency_imputer2.py` — `__init__`, validations (§13.1), phases 0 à 4, attributs ajustés | L4–L8 | I9, tests de validation d'arguments |
-| **L10** | `high_frequency_imputer2.py` — PHASE 5 : exécution d'étape unique, axe 1 complet, provenance, stores | L9 | I2, I3, I6, I10, I11 |
-| **L11** | axe 2 : progression de fréquences, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape | L10 | I12, I13, exemples chiffrés du §5.5 |
+| **L8b** | jeu de référence `PANEL-F` (§2.5) : colonne à fréquence hétérogène par entité, fixtures et valeurs d'or | — | `tests/frequency/test_reference_datasets.py` |
+| **L8c** | `stage_scaler.py` : `source_freq` en liaison par entité, diviseurs par bloc (§5.8 R5, §9.2) | L5 | tests unitaires isolés |
+| **L8d** | `training_set_builder.py` : jeu d'entraînement mutualisé (§5.8 R1 à R5), `ImputationStep.training_blocks` | L4, L5, L6, L8b, L8c | tests unitaires + I14, I16 |
+| **L9** | `high_frequency_imputer2.py` — `__init__`, validations (§13.1), phases 0 à 4, attributs ajustés, fréquences détectées **par (entité, colonne)** | L4–L8d | I9, tests de validation d'arguments |
+| **L10** | `high_frequency_imputer2.py` — PHASE 5 : exécution d'étape unique, axe 1 complet, provenance, stores, **un ajustement par (étape, variable)** partagé par les groupes de fréquence source (§5.8 R6) | L9 | I2, I3, I6, I10, I11, I14, I15 |
+| **L11** | axe 2 : progression de fréquences, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape ; composition avec la mutualisation (fréquence de ligne : bloc **ou** store) | L10 | I12, I13, exemples chiffrés du §5.5 et du §5.8 |
 | **L12** | `transform`, `inverse_transform`, `keep_lower_frequencies`, contrôle des fréquences (D11), avertissements uniques | L11 | I1, I7, I8 |
 | **L13** | notebook 5 pas à pas (§15.2) et documentation (`mkdocs`, docstrings de référence) | L12 | exécution complète du notebook |
 
