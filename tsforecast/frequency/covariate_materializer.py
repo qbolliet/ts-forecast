@@ -34,6 +34,14 @@ from .provenance import CellOrigin, max_origin
 # Arithmétique et conversion de fréquences
 from ..utils.frequency.converter import FrequencyConverter
 from ..utils.frequency.utils import is_higher_frequency, normalize_frequency
+# Primitives du paramètre de contrainte d'agrégation, partagées avec
+# "AggregationConstraint" : une seule validation, une seule résolution
+from .aggregation_constraint import (
+    AggregationConstraintSetting,
+    ConstraintSetting,
+    resolve_aggregation_constraint,
+    validate_aggregation_constraint,
+)
 # Utilitaires de panel : découpage et normalisation des clés d'entité
 from ..panel.utils import iter_entity_blocks, normalize_entity_key
 
@@ -105,14 +113,19 @@ class AggregationConstraintApplier(Protocol):
         values: pd.Series,
         observations: pd.Series,
         period_freq: str,
+        column: Optional[str] = None,
     ) -> Tuple[pd.Series, pd.Series]:
-        """Rescale sub-period values so each complete period sums to its total.
+        """Rescale sub-period values so each complete period matches its total.
 
         Args:
             values: Values produced on the stage grid, indexed by date.
             observations: Observed low-frequency totals of the column,
                 indexed by their own anchor dates.
             period_freq: Frequency of the periods the totals refer to.
+            column: Name of the column, so that an applier configured with a
+                per-column dict resolves the right constraint. The
+                materializer always passes it; it stays optional so an
+                applier carrying a single scalar setting can ignore it.
 
         Returns:
             Tuple ``(rescaled, rescaled_mask)``: the rescaled values, and the
@@ -232,7 +245,8 @@ class CovariateMaterializer:
               those NaN out downstream.
             - ``'interpolate'`` (default): the covariate is interpolated over
               the grid from its observed values, then rescaled to preserve
-              period totals when ``aggregation_constraint`` is active.
+              the period aggregate named by ``aggregation_constraint`` when
+              that parameter is active.
               Looking downstream: linear interpolation between two
               anchors uses the future anchor — in a pseudo-real-time setting
               that is information from the future. It is not a defect for
@@ -264,9 +278,15 @@ class CovariateMaterializer:
             observed value is considered reached — ``0.0`` start, ``0.5``
             middle, ``1.0`` end, None attributing the value to the anchor date.
             Scalar or per-feature dict, same rules.
-        aggregation_constraint: ``'sum'`` (default) or None. Only these two
-            values are accepted for now; ``'mean'``, ``'last'`` and the dict
-            form are RESERVED FOR A LATER EXTENSION. /!\
+        aggregation_constraint: Constraint the interpolated covariates are
+            rescaled to. ``'sum'`` (default) preserves the period totals,
+            ``'mean'`` the period mean, ``'last'`` the last sub-period, and
+            None applies no constraint. A dict ``{column: setting}`` sets it
+            per column, with an optional ``'__default__'`` key — the same
+            convention as ``interpolation_method``. Validated by
+            :func:`validate_aggregation_constraint`, shared with
+            :class:`AggregationConstraint` so the two contracts cannot drift.
+\
         converter: Shared :class:`FrequencyConverter`. A module-level shared
             instance is used when None.
         aggregation_constraint_applier: Object honouring
@@ -294,7 +314,7 @@ class CovariateMaterializer:
         covariate_eligibility: Literal['any_entity', 'all_entities'] = 'any_entity',
         interpolation_method: PerFeature = DEFAULT_INTERPOLATION_METHOD,
         interpolation_anchor: PerFeature = None,
-        aggregation_constraint: Optional[Literal['sum']] = 'sum',
+        aggregation_constraint: AggregationConstraintSetting = 'sum',
         converter: Optional[FrequencyConverter] = None,
         aggregation_constraint_applier: Optional[AggregationConstraintApplier] = None,
     ) -> None:
@@ -419,25 +439,54 @@ class CovariateMaterializer:
     # Méthode auxiliaire de validation de la contrainte d'agrégation /!\
     @staticmethod
     def _validate_aggregation_constraint(aggregation_constraint: Any) -> None:
-        """Check ``aggregation_constraint`` against its current contract.
+        """Check ``aggregation_constraint`` against its contract.
+
+        Delegates to :func:`validate_aggregation_constraint`, the single
+        implementation shared with :class:`AggregationConstraint`: a setting
+        accepted by the component applying the constraint must be accepted by
+        the component carrying it, and one validation is the only way to keep
+        the two from drifting.
 
         Args:
             aggregation_constraint: Value handed to ``__init__``.
 
         Raises:
-            ValueError: For any value other than ``'sum'`` or None, the
-                message naming the reserved extensions.
+            ValueError: For any value other than ``'sum'``, ``'mean'``,
+                ``'last'``, None, or a dict of these values.
         """
-        if aggregation_constraint not in ('sum', None):
-            raise ValueError(
-                f"aggregation_constraint must be 'sum' or None, got "
-                f"{aggregation_constraint!r}. The 'mean' and 'last' forms, and "
-                f"the per-column dict form, are reserved for a later extension."
-            )
+        validate_aggregation_constraint(aggregation_constraint)
+
+    # Méthode de résolution de la contrainte effective d'une colonne
+    def resolve_aggregation_constraint(
+        self,
+        column: Optional[str] = None,
+    ) -> ConstraintSetting:
+        """Return the aggregation constraint applied to one column.
+
+        Symmetric of :meth:`resolve_method` and :meth:`resolve_anchor` for the
+        per-column dict form of ``aggregation_constraint``.
+
+        Args:
+            column: Column name, or None for the global setting.
+
+        Returns:
+            ``'sum'``, ``'mean'``, ``'last'`` or None: the column's own entry,
+            else the ``'__default__'`` entry, else ``'sum'``.
+
+        Examples:
+            >>> materializer = CovariateMaterializer(
+            ...     aggregation_constraint={'a1': 'mean', '__default__': None}
+            ... )
+            >>> materializer.resolve_aggregation_constraint('a1')
+            'mean'
+            >>> materializer.resolve_aggregation_constraint('q1') is None
+            True
+        """
+        return resolve_aggregation_constraint(self.aggregation_constraint, column)
 
     # Méthode de contrôle des clés des dictionnaires par feature
     def validate_columns(self, columns: Iterable[str]) -> None:
-        """Check the per-feature dict keys against the columns actually present.
+        """Check the per-column dict keys against the columns actually present.
 
         Called once by the imputer at ``fit``, with the full set of columns:
         the materialization methods only ever see one stage's subset, against
@@ -447,8 +496,10 @@ class CovariateMaterializer:
             columns: Column names present in the data.
 
         Raises:
-            ValueError: If a per-feature dict names columns absent from
-                ``columns``, listing the offending keys.
+            ValueError: If a per-column dict (``interpolation_method``,
+                ``interpolation_anchor`` or ``aggregation_constraint``)
+                names columns absent from ``columns``, listing the
+                offending keys.
 
         Examples:
             >>> mat = CovariateMaterializer(interpolation_method={'a1': 'cubic'})
@@ -460,10 +511,12 @@ class CovariateMaterializer:
         """
         # Ensemble des colonnes connues
         known = set(columns)
-        # Contrôle des deux réglages par feature
+        # Contrôle des trois réglages par colonne : la contrainte d'agrégation
+        # partage la clé de repli '__default__' des deux autres
         for name, setting in (
             ('interpolation_method', self.interpolation_method),
             ('interpolation_anchor', self.interpolation_anchor),
+            ('aggregation_constraint', self.aggregation_constraint),
         ):
             # Seule la forme dictionnaire porte des clés à vérifier
             if not isinstance(setting, Mapping):
@@ -1001,9 +1054,9 @@ class CovariateMaterializer:
         # Recalage aux totaux de période de la fréquence D'ORIGINE : inerte
         # tant que l'objet n'est pas fourni
         applier = self.aggregation_constraint_applier
-        if applier is not None and self.aggregation_constraint == 'sum':
+        if applier is not None and self.resolve_aggregation_constraint(column) is not None:
             interpolated, _rescaled_mask = applier.rescale(
-                interpolated, observations, f_source
+                interpolated, observations, f_source, column
             )
 
         # Réindexation sur la grille demandée : les timestamps décalés par

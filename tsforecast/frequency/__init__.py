@@ -28,6 +28,16 @@ from .covariate_materializer import (
     AggregationConstraintApplier,
     DEFAULT_MATERIALIZATION_KEY,
 )
+from .aggregation_constraint import (
+    AggregationConstraint,
+    ConstraintKind,
+    ConstraintSetting,
+    AggregationConstraintSetting,
+    DEFAULT_CONSTRAINT_KEY,
+    validate_aggregation_constraint,
+    resolve_aggregation_constraint,
+    validate_constraint_columns,
+)
 from .stage_scaler import StageScaler, ScaleMode
 from .imputation_window import ImputationWindowCalculator, ImputationScope
 from .target_frequency_validator import TargetFrequencyValidator
@@ -60,6 +70,15 @@ __all__ = [
     'CovariateMaterializer',
     'AggregationConstraintApplier',
     'DEFAULT_MATERIALIZATION_KEY',
+    # Contrainte d'agrégation
+    'AggregationConstraint',
+    'ConstraintKind',
+    'ConstraintSetting',
+    'AggregationConstraintSetting',
+    'DEFAULT_CONSTRAINT_KEY',
+    'validate_aggregation_constraint',
+    'resolve_aggregation_constraint',
+    'validate_constraint_columns',
     # Mise à l'échelle d'étape
     'StageScaler',
     'ScaleMode',

@@ -587,8 +587,8 @@ class TestPrecedenceRanks:
             def __init__(self):
                 self.calls = []
 
-            def rescale(self, values, observations, period_freq):
-                self.calls.append((observations.copy(), period_freq))
+            def rescale(self, values, observations, period_freq, column=None):
+                self.calls.append((observations.copy(), period_freq, column))
                 return values, values.notna()
 
         applier = _RecordingApplier()
@@ -608,9 +608,11 @@ class TestPrecedenceRanks:
 
         assert ways == {'a1': 'carried_model'}
         assert len(applier.calls) == 1
-        observations, period_freq = applier.calls[0]
+        observations, period_freq, column = applier.calls[0]
         # Les totaux de l'étape d'origine, jamais ceux de l'étape courante
         assert period_freq == 'Q'
+        # La colonne est transmise, pour la résolution d'une contrainte par colonne
+        assert column == 'a1'
         assert observations.index.equals(quarterly_grid)
         # Ni les ancres annuelles de la source, ni la grille mensuelle
         np.testing.assert_allclose(observations.to_numpy(), quarterly.to_numpy())
@@ -945,7 +947,9 @@ class TestInitValidation:
             ({'covariate_eligibility': 'some'}, 'covariate_eligibility'),
             ({'interpolation_method': {}}, 'cannot be empty'),
             ({'interpolation_anchor': 1.5}, r'\[0, 1\]'),
-            ({'aggregation_constraint': 'mean'}, 'reserved for a later extension'),
+            ({'aggregation_constraint': 'median'}, 'aggregation_constraint must be one of'),
+            ({'aggregation_constraint': {'a1': 'median'}}, 'aggregation_constraint values must be one of'),
+            ({'aggregation_constraint': {}}, 'cannot be empty'),
         ],
     )
     def test_invalid_settings_raise(self, kwargs, message):

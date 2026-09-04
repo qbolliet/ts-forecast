@@ -69,8 +69,9 @@ appliqué à l'identique aux deux grilles.
    l'énumération (§6, D6).
 2. **`impute_intermediate_frequencies` à trois modalités** `False` / `'covariates_only'` /
    `True`, défaut `False` (§5, D3).
-3. **`aggregation_constraint: Literal['sum', None] = 'sum'`** remplace `enforce_period_totals`,
-   avec une extension réservée (dict par colonne, contraintes `'mean'`/`'last'`) (§11, D8).
+3. **`aggregation_constraint: Union[Literal['sum', 'mean', 'last', None], Dict[str, ...]] = 'sum'`**
+   remplace `enforce_period_totals` : quatre contraintes scalaires et une forme dictionnaire par
+   colonne, avec clé `'__default__'` (§11, D8).
 4. **Les ancres sont toujours désagrégées** : une variable imputée à l'étape `f` est prédite sur
    **toute** sa période, ancres comprises, pour qu'une colonne ne mélange jamais total de période
    et valeurs de sous-période. **Non paramétrable** — `disaggregate_anchors` n'existe pas (§11.2,
@@ -163,7 +164,7 @@ additives).
 | `train_on_partial_coverage` | **supprimé** (déjà condamné par [ARCH] §3.7) ; remplacé par `training_scope` | §7 |
 | `train_on_partial_fit_order` | **renommé** `fit_predict_order`, mêmes modalités `'frequency'`/`'cv'`, champ d'application restreint | §8.1 |
 | `scale_features: bool` | **élargi** en `Union[Literal[False], 'constant', 'calendar', Dict[...]]` | §9.1 |
-| `enforce_period_totals: bool` | **remplacé** par `aggregation_constraint: Literal['sum', None]` | §11.1, D8 |
+| `enforce_period_totals: bool` | **remplacé** par `aggregation_constraint`, élargi en `Union[Literal['sum', 'mean', 'last', None], Dict[str, ...]]` | §11.1, D8 |
 | `cv_n_splits: int` | **supprimé**, absorbé par `cv` (contrat sklearn) | §8.3, D4 |
 | `covariate_eligibility` | **conservé**, sémantique recadrée sur le seul cas « feature absente pour la totalité d'une entité » | §4.5 |
 | `keep_lower_frequencies` | **conservé** tel quel, paramètre d'affichage pur, correctif B4 inclus | §12.4 |
@@ -1079,33 +1080,41 @@ indispensable, et les valeurs d'ancre elles-mêmes ne survivent pas telles quell
 ### 11.1 — `aggregation_constraint`
 
 ```python
-aggregation_constraint: Literal['sum', None] = 'sum'
+ConstraintKind = Literal['sum', 'mean', 'last']
+aggregation_constraint: Union[Optional[ConstraintKind],
+                              Dict[str, Optional[ConstraintKind]]] = 'sum'
 ```
 
 Remplace `enforce_period_totals: bool` (D8). `'sum'` ≡ `enforce_period_totals=True`, `None` ≡
-`False`. Le type littéral est retenu **maintenant** parce qu'il ouvre, sans rupture d'API :
+`False`. Le paramètre est d'emblée extensible, sans rupture d'API :
 
-- d'autres contraintes (`'mean'` pour des taux, `'last'` pour des stocks) — actuellement hors
-  contrat, `additive_transformer` étant chargé de rendre les colonnes additives ;
-- une **forme dictionnaire** `Dict[str, Optional[str]]` par colonne, avec `'__default__'`, sur le
-  modèle de `estimator` et `scale_features`.
+- trois contraintes scalaires — `'sum'` pour une variable additive, `'mean'` pour un taux,
+  `'last'` pour un stock — plus `None`, qui n'impose rien. `additive_transformer` reste le moyen
+  de rendre additive une colonne qui ne l'est pas ; `'mean'` et `'last'` servent les colonnes
+  qu'aucune transformation ne rend additives ;
+- une **forme dictionnaire** `Dict[str, Optional[ConstraintKind]]` par colonne, avec
+  `'__default__'`, sur le modèle de `estimator` et `scale_features`.
 
-**Validation à `__init__` (état actuel)** : seules les valeurs `'sum'` et `None` sont acceptées.
-Toute autre valeur — y compris un dict — lève un `ValueError` dont le message énonce que les
-formes `'mean'`, `'last'` et dictionnaire sont **réservées pour une extension ultérieure**. La
-docstring décrit l'extension prévue.
+**Validation à `__init__`** : seules ces quatre valeurs, et les dictionnaires qui les associent à
+un nom de colonne, sont acceptés. Toute autre valeur lève un `ValueError` énonçant les formes
+admises. La validation et la résolution sont portées par les fonctions de module
+`validate_aggregation_constraint` et `resolve_aggregation_constraint`
+(`aggregation_constraint.py`), **partagées** avec `CovariateMaterializer` : les deux composants
+portent le paramètre, une seule implémentation les empêche de diverger.
 
-Sémantique de `'sum'`, reprise de `hfi:_rescale_to_period_totals` : les sous-périodes prédites
-d'une période sont multipliées par `total observé / total prédit`, de sorte que la colonne porte
-une véritable **désagrégation** de l'observation plutôt qu'une prédiction libre. Gardes
-conservées :
+Sémantique, reprise de `hfi:_rescale_to_period_totals` : les sous-périodes prédites d'une période
+sont multipliées par `total observé / agrégat prédit`, de sorte que la colonne porte une véritable
+**désagrégation** de l'observation plutôt qu'une prédiction libre. L'agrégat est celui que nomme
+la contrainte — somme, moyenne, ou dernière sous-période. **Les trois contraintes passent par ce
+ratio unique**, si bien que les gardes ci-dessous et le masque des cellules recalées leur sont
+rigoureusement identiques. Gardes conservées :
 
 | Cas | Comportement |
 |---|---|
 | période **partiellement** prédite (au moins une sous-période NaN) | non recalée, prédictions brutes conservées |
 | période sans aucune observation (fin de série retardée) | non recalée |
-| total prédit nul, total observé non nul | non recalée (ratio indéfini) |
-| total prédit de **signe opposé** au total observé | **recalée** — la contrainte prime — mais toutes les sous-périodes changent de signe : un `UserWarning` agrégé est émis |
+| agrégat prédit nul, total observé non nul | non recalée (ratio indéfini) |
+| agrégat prédit de **signe opposé** au total observé | **recalée** — la contrainte prime — mais toutes les sous-périodes changent de signe : un `UserWarning` agrégé est émis |
 
 Le masque des cellules effectivement recalées pilote le marquage `DISAGGREGATED` ; les cellules
 laissées de côté gardent leur provenance `MODEL_*` ou `INTERPOLATED` (§6.4).
@@ -1295,7 +1304,8 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         # --- Échelle et contraintes (§9, §11) ---
         scale_features: Union[Literal[False], ScaleMode,
                               Dict[str, Union[Literal[False], ScaleMode]]] = 'constant',
-        aggregation_constraint: Literal['sum', None] = 'sum',
+        aggregation_constraint: Union[Optional[ConstraintKind],
+                                      Dict[str, Optional[ConstraintKind]]] = 'sum',
 
         # --- Sortie et divers ---
         keep_lower_frequencies: bool = True,
@@ -1323,7 +1333,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
 | `min_cv_train_size` | `int ≥ 1` |
 | `coverage_threshold`, `training_coverage_threshold` | float dans `[0, 1]` (ou `None` pour le second) |
 | `scale_features` | `False`, `'constant'`, `'calendar'`, ou dict de ces valeurs |
-| `aggregation_constraint` | `'sum'` ou `None` exactement ; message d'erreur mentionnant l'extension réservée (§11.1) |
+| `aggregation_constraint` | `'sum'`, `'mean'`, `'last'`, `None`, ou dict de ces valeurs (clé `'__default__'` admise, clés vérifiées au `fit`) ; message listant les formes admises (§11.1) |
 | booléens (`keep_lower_frequencies`, `restore_original_values`, `verbose`) | validation groupée, comme dans `hfi` |
 
 Combinaisons **inertes** documentées mais **non signalées** (D9) : cf. §5.6.
@@ -1373,7 +1383,7 @@ sont ceux de la version 1, conservés pour la traçabilité.
 | **D5** | noms validés : `covariate_strategy`, `covariate_fallback`, `impute_intermediate_frequencies`, `fit_predict_order`, `interpolation_anchor` — **sauf** `enforce_aggregation_constraints`, remplacé par **`aggregation_constraint`** | §11.1, §13 |
 | **D6** | provenance en **échelle de souillure** : vraies + agrégées → `MODEL_ON_TRUE` ; + interpolées → `MODEL_ON_INTERPOLATED` ; + au moins une covariable imputée → `MODEL_ON_IMPUTED` ; souillure venue de `y_train` distinguée par `MODEL_ON_IMPUTED_TARGET` / `MODEL_ON_IMPUTED_BOTH` ; **`MODEL_ON_MIXED` supprimé**, y compris pour `hfi`. Les cellules de repli portent `INTERPOLATED` | §6 |
 | **D7** | **pas** de `disaggregate_anchors` : une variable est imputée sur toute sa période, ancres comprises, comportement **non paramétrable** | §11.2 |
-| **D8** | `aggregation_constraint: Literal['sum', None] = 'sum'`, extensible (`'mean'`, `'last'`, forme dict) — extension **réservée**, refusée à la validation aujourd'hui | §11.1 |
+| **D8** | `aggregation_constraint` remplace `enforce_period_totals` : `'sum'` (défaut), `'mean'`, `'last'`, `None`, ou dict par colonne avec `'__default__'`. Les quatre formes sont **implémentées**, la validation les accepte toutes | §11.1 |
 | **D9** | paramètres inertes : **silence + docstring**, jamais d'avertissement | §5.6, §8.1 |
 | **D10** | dictionnaires par feature indexés par **nom de colonne**, jamais par `(entité, colonne)` | §9.1, §10 |
 | **D11** | `transform` face à des fréquences divergentes : **avertissement + poursuite** avec les fréquences du fit ; **`ValueError`** si une colonne du fit manque | §12.1 |
