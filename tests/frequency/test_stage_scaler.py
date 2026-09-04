@@ -650,3 +650,249 @@ class TestHfiUntouched:
         assert hasattr(HighFrequencyImputer, '_covariate_divisor')
         assert hasattr(HighFrequencyImputer, '_apply_frequency_scaling')
         assert hasattr(HighFrequencyImputer, '_stage_scale_factor')
+
+
+class TestMutualizedTrainingSet:
+    """[SPEC] §5.8 : `source_freq` par entité, une fréquence de bloc par entité."""
+
+    # Fréquences de bloc du jeu PANEL-F : v est annuelle, trimestrielle, mensuelle
+    BLOCKS = {('FR',): 'Y', ('DE',): 'Q', ('IT',): 'M'}
+
+    def _rows_of(self, index: pd.MultiIndex, entity: str) -> pd.MultiIndex:
+        """Restrict a panel grid to the rows of one entity."""
+        return index[index.get_level_values(0) == entity]
+
+    def test_feature_divisors_per_entity_matches_scalar_calls(
+        self, mixed_freq_panel_multifrequency: pd.DataFrame
+    ) -> None:
+        """La forme par entité est un assemblage : bloc à bloc, elle vaut l'appel scalaire."""
+        index = mixed_freq_panel_multifrequency.index
+        columns = ['m1', 'q1']
+        column_frequencies = {'m1': 'M', 'q1': 'Q'}
+        scaler = StageScaler()
+
+        # Forme par entité : toujours une DataFrame de diviseurs par ligne
+        mutualized = scaler.feature_divisors(
+            columns=columns,
+            column_frequencies=column_frequencies,
+            source_freq=self.BLOCKS,
+            pred_freq='M',
+            index=index,
+        )
+        assert isinstance(mutualized, pd.DataFrame)
+        pd.testing.assert_index_equal(mutualized.index, index)
+        assert list(mutualized.columns) == columns
+
+        # Propriété de cohérence, entité par entité et colonne par colonne
+        for entity, f_block in [('FR', 'Y'), ('DE', 'Q'), ('IT', 'M')]:
+            rows = self._rows_of(index, entity)
+            scalar = scaler.feature_divisors(
+                columns=columns,
+                column_frequencies=column_frequencies,
+                source_freq=f_block,
+                pred_freq='M',
+                index=rows,
+            )
+            for column in columns:
+                assert mutualized.loc[entity, column].tolist() == pytest.approx(
+                    [float(scalar[column])] * len(rows)
+                )
+
+    def test_feature_divisors_per_entity_gold_values(
+        self, mixed_freq_panel_multifrequency: pd.DataFrame
+    ) -> None:
+        """m1 divise par 12 chez FR (bloc Y), 3 chez DE (bloc Q), 1 chez IT (bloc M)."""
+        index = mixed_freq_panel_multifrequency.index
+        divisors = StageScaler().feature_divisors(
+            columns=['m1'],
+            column_frequencies={'m1': 'M'},
+            source_freq=self.BLOCKS,
+            pred_freq='M',
+            index=index,
+        )
+
+        assert divisors.loc['FR', 'm1'].unique().tolist() == [12.0]
+        assert divisors.loc['DE', 'm1'].unique().tolist() == [3.0]
+        # Bloc à la fréquence de l'étape : diviseur 1.0, jamais court-circuité (B12)
+        assert divisors.loc['IT', 'm1'].unique().tolist() == [1.0]
+
+    def test_fractional_divisor_for_a_block_finer_than_the_stage(
+        self, mixed_freq_panel_multifrequency: pd.DataFrame
+    ) -> None:
+        """Un bloc plus fin que l'étape (D18) rend un diviseur fractionnaire, jamais planché."""
+        index = mixed_freq_panel_multifrequency.index
+        it_rows = self._rows_of(index, 'IT')
+        scaler = StageScaler()
+        third = 1.0 / 3.0
+
+        # Diviseur de bloc de IT à l'étape Q : factor(Q, M) = 1/3
+        target = scaler.target_divisor(
+            'v', source_freq={('IT',): 'M'}, pred_freq='Q', index=it_rows
+        )
+        assert isinstance(target, pd.Series)
+        assert target.tolist() == pytest.approx([third] * len(it_rows))
+
+        # Même valeur par la voie des fréquences de production (§5.4)
+        produced = pd.Series('M', index=it_rows)
+        by_production = scaler.target_divisor(
+            'v', source_freq='Q', pred_freq='Q', produced_freq=produced
+        )
+        assert by_production.tolist() == pytest.approx([third] * len(it_rows))
+
+        # Côté features : une covariable plus fine que le bloc, à une étape plus
+        # grossière, produit elle aussi un diviseur fractionnaire
+        features = scaler.feature_divisors(
+            columns=['d1'],
+            column_frequencies={'d1': 'D'},
+            source_freq={('IT',): 'M'},
+            pred_freq='Q',
+            index=it_rows,
+        )
+        assert features['d1'].tolist() == pytest.approx([third] * len(it_rows))
+
+    def test_scalar_source_freq_unchanged(
+        self, mixed_freq_panel_multifrequency: pd.DataFrame
+    ) -> None:
+        """La forme scalaire garde son comportement et sa forme de retour (Series par colonne)."""
+        index = mixed_freq_panel_multifrequency.index
+        scaler = StageScaler()
+
+        # Panel homogène : forme compacte conservée, avec et sans index
+        compact = scaler.feature_divisors(
+            columns=['m1', 'q1'],
+            column_frequencies={'m1': 'M', 'q1': 'Q'},
+            source_freq='Y',
+            pred_freq='M',
+            index=index,
+        )
+        assert isinstance(compact, pd.Series)
+        assert compact.to_dict() == {'m1': 12.0, 'q1': 4.0}
+
+        indexless = scaler.feature_divisors(
+            columns=['m1', 'q1'],
+            column_frequencies={'m1': 'M', 'q1': 'Q'},
+            source_freq='Y',
+            pred_freq='M',
+        )
+        pd.testing.assert_series_equal(indexless, compact)
+
+        # Cible : scalaire d'étape, inchangé
+        assert scaler.target_divisor('v', source_freq='Y', pred_freq='M') == 12.0
+
+    def test_mapping_source_freq_requires_index_with_entity_level(self) -> None:
+        """Une liaison par entité exige un index portant un niveau d'entité."""
+        scaler = StageScaler()
+
+        # Aucun index
+        with pytest.raises(ValueError, match=r"source_freq"):
+            scaler.feature_divisors(
+                columns=['m1'],
+                column_frequencies={'m1': 'M'},
+                source_freq=self.BLOCKS,
+                pred_freq='M',
+            )
+
+        # Index sans niveau d'entité
+        with pytest.raises(ValueError, match=r"source_freq"):
+            scaler.feature_divisors(
+                columns=['m1'],
+                column_frequencies={'m1': 'M'},
+                source_freq=self.BLOCKS,
+                pred_freq='M',
+                index=_monthly_grid(),
+            )
+
+        # Même contrôle du côté de la cible
+        with pytest.raises(ValueError, match=r"source_freq"):
+            scaler.target_divisor(
+                'v', source_freq=self.BLOCKS, pred_freq='M', index=_monthly_grid()
+            )
+
+    def test_unknown_entity_in_mapping_raises(
+        self, mixed_freq_panel_multifrequency: pd.DataFrame
+    ) -> None:
+        """Une entité de la grille absente du mapping est une erreur la nommant."""
+        index = mixed_freq_panel_multifrequency.index
+        # IT retiré : le mapping garde deux entrées, la cascade ne peut plus couvrir
+        partial = {('FR',): 'Y', ('DE',): 'Q'}
+
+        with pytest.raises(ValueError, match=r"IT"):
+            StageScaler().feature_divisors(
+                columns=['m1'],
+                column_frequencies={'m1': 'M'},
+                source_freq=partial,
+                pred_freq='M',
+                index=index,
+            )
+
+        with pytest.raises(ValueError, match=r"IT"):
+            StageScaler().target_divisor(
+                'v', source_freq=partial, pred_freq='M', index=index
+            )
+
+        # Repli documenté : une liaison à une seule entrée vaut pour tout le monde
+        covered = StageScaler().feature_divisors(
+            columns=['m1'],
+            column_frequencies={'m1': 'M'},
+            source_freq={('FR',): 'Y'},
+            pred_freq='M',
+            index=index,
+        )
+        assert covered['m1'].unique().tolist() == [12.0]
+
+    def test_target_divisor_produced_freq_takes_precedence(
+        self, mixed_freq_panel_multifrequency: pd.DataFrame
+    ) -> None:
+        """Avec produced_freq, source_freq n'est plus consulté, quelle que soit sa forme."""
+        index = mixed_freq_panel_multifrequency.index
+        produced = pd.Series('Q', index=index)
+        scaler = StageScaler()
+
+        reference = scaler.target_divisor(
+            'v', source_freq='Y', pred_freq='M', index=index, produced_freq=produced
+        )
+        # Une liaison par entité, et même une liaison incomplète, ne change rien
+        for source_freq in ('M', self.BLOCKS, {('FR',): 'Y', ('DE',): 'Q'}):
+            other = scaler.target_divisor(
+                'v',
+                source_freq=source_freq,
+                pred_freq='M',
+                index=index,
+                produced_freq=produced,
+            )
+            pd.testing.assert_series_equal(other, reference)
+
+        assert reference.unique().tolist() == [3.0]
+
+    def test_calendar_mode_with_per_entity_source_freq(
+        self, mixed_freq_panel_multifrequency: pd.DataFrame
+    ) -> None:
+        """La modalité 'calendar' se combine à la forme par entité : par ligne sur les deux axes."""
+        index = mixed_freq_panel_multifrequency.index
+        blocks = {('FR',): 'Y', ('DE',): 'M', ('IT',): 'M'}
+        scaler = StageScaler(scale_features='calendar')
+
+        divisors = scaler.feature_divisors(
+            columns=['d1'],
+            column_frequencies={'d1': 'D'},
+            source_freq=blocks,
+            pred_freq='D',
+            index=index,
+        )
+        assert isinstance(divisors, pd.DataFrame)
+
+        # FR : bloc annuel, décompte réel des jours de l'année (2021-2023, non bissextiles)
+        assert divisors.loc['FR', 'd1'].unique().tolist() == [365.0]
+        # DE : bloc mensuel, décompte réel des jours du mois — variable par ligne
+        de_rows = divisors.loc['DE', 'd1']
+        assert de_rows.loc['2021-01-31'] == 31.0
+        assert de_rows.loc['2021-02-28'] == 28.0
+        assert de_rows.loc['2021-04-30'] == 30.0
+
+        # Cible sous 'calendar' et bloc par entité : une valeur par ligne également
+        target = scaler.target_divisor(
+            'v', source_freq=blocks, pred_freq='D', index=index
+        )
+        assert isinstance(target, pd.Series)
+        assert target.loc['FR'].unique().tolist() == [365.0]
+        assert target.loc[('DE', pd.Timestamp('2021-02-28'))] == 28.0
