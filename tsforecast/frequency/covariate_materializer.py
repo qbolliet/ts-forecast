@@ -279,14 +279,19 @@ class CovariateMaterializer:
             middle, ``1.0`` end, None attributing the value to the anchor date.
             Scalar or per-feature dict, same rules.
         aggregation_constraint: Constraint the interpolated covariates are
-            rescaled to. ``'sum'`` (default) preserves the period totals,
-            ``'mean'`` the period mean, ``'last'`` the last sub-period, and
-            None applies no constraint. A dict ``{column: setting}`` sets it
-            per column, with an optional ``'__default__'`` key — the same
-            convention as ``interpolation_method``. Validated by
+            rescaled to. ``'sum'`` (default) preserves the period totals, and
+            None applies no constraint — additivity is the contract of the
+            whole class, not a per-column choice, and a
+            non-additive column goes through ``additive_transformer`` instead.
+            A dict ``{column: setting}`` sets it per column, with an optional
+            ``'__default__'`` key — the same convention as
+            ``interpolation_method``. Validated by
             :func:`validate_aggregation_constraint`, shared with
             :class:`AggregationConstraint` so the two contracts cannot drift.
-\
+            Governs the rescaling of the INTERPOLATED covariates only
+            — the rank-1 exact aggregation of a finer covariate
+            always sums directly, and never consults this parameter.
+
         converter: Shared :class:`FrequencyConverter`. A module-level shared
             instance is used when None.
         aggregation_constraint_applier: Object honouring
@@ -451,8 +456,10 @@ class CovariateMaterializer:
             aggregation_constraint: Value handed to ``__init__``.
 
         Raises:
-            ValueError: For any value other than ``'sum'``, ``'mean'``,
-                ``'last'``, None, or a dict of these values.
+            ValueError: For any value other than ``'sum'``, None, or a dict of
+                these values. A
+                non-additive column goes through ``additive_transformer``
+                instead.
         """
         validate_aggregation_constraint(aggregation_constraint)
 
@@ -470,17 +477,17 @@ class CovariateMaterializer:
             column: Column name, or None for the global setting.
 
         Returns:
-            ``'sum'``, ``'mean'``, ``'last'`` or None: the column's own entry,
-            else the ``'__default__'`` entry, else ``'sum'``.
+            ``'sum'`` or None: the column's own entry, else the
+            ``'__default__'`` entry, else ``'sum'``.
 
         Examples:
             >>> materializer = CovariateMaterializer(
-            ...     aggregation_constraint={'a1': 'mean', '__default__': None}
+            ...     aggregation_constraint={'a1': None, '__default__': 'sum'}
             ... )
-            >>> materializer.resolve_aggregation_constraint('a1')
-            'mean'
-            >>> materializer.resolve_aggregation_constraint('q1') is None
+            >>> materializer.resolve_aggregation_constraint('a1') is None
             True
+            >>> materializer.resolve_aggregation_constraint('q1')
+            'sum'
         """
         return resolve_aggregation_constraint(self.aggregation_constraint, column)
 
@@ -835,9 +842,13 @@ class CovariateMaterializer:
           than ``f`` -> ``'aggregate'``, cells ``'observed'`` in both cases,
           the aggregation going through
           :meth:`FrequencyConverter.aggregate_to_lower_frequency` with
-          ``full_periods_only=True``. An incomplete period yields NaN: that is
-          a legitimate source of NaN, identical at fit and at predict, and it
-          is never masked;
+          ``method='sum'`` and ``full_periods_only=True``. That ``'sum'`` is
+          fixed, not read from ``aggregation_constraint``: an exact
+          aggregation of a finer covariate is additive by construction,
+          and the parameter governs the rescaling of
+          interpolated covariates only. An incomplete period yields NaN: that
+          is a legitimate source of NaN, identical at fit and at predict, and
+          it is never masked;
         - RANK 2, ``c`` already produced at the current stage ``f``
           -> ``'stage_model'``, its values read from the mirror. The trigger is
           the mere presence of cells produced at ``f``, whatever their origin:
@@ -1263,7 +1274,10 @@ class CovariateMaterializer:
             if way in ('identity', 'raw_anchors'):
                 values = observations.reindex(dates)
             # Agrégation exacte d'une colonne plus fine, sur périodes complètes.
-            # Une période incomplète produit NaN : source légitime, non masquée
+            # Une période incomplète produit NaN : source légitime, non masquée.
+            # "method='sum'" en dur, sans lire "aggregation_constraint" : ce
+            # rang suppose l'additivité par construction,
+            # ce paramètre ne gouvernant que le recalage des interpolées
             elif way == 'aggregate':
                 aggregated = self._conv.aggregate_to_lower_frequency(
                     source, f_stage, method='sum',

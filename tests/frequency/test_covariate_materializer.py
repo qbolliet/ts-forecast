@@ -117,6 +117,30 @@ class TestRankOneClassification:
         for column in ('q1', 'm1'):
             assert set(materializer.origin_store[column].unique()) == {'observed'}
 
+    def test_rank1_aggregation_is_always_a_sum(self, reference_timeseries):
+        """Une covariable plus fine est agrégée par SOMME même sous None (D20).
+
+        ``aggregation_constraint`` ne gouverne que le recalage des covariables
+        INTERPOLÉES (§4.3) : l'agrégation exacte du rang 1 n'y est jamais
+        soumise.
+        """
+        materializer = CovariateMaterializer(aggregation_constraint=None)
+        grid = _quarterly_grid()
+
+        features, ways, origins = materializer.materialize(
+            columns=['m1'],
+            grid_index=grid,
+            stage_freq='Q',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+
+        assert ways == {'m1': 'aggregate'}
+        assert origins == {'m1': 'observed'}
+        # m1 vaut 100 + i, sommée par trimestre, comme sous le défaut 'sum'
+        assert features['m1'].iloc[0] == pytest.approx(100 + 101 + 102)
+        assert features['m1'].iloc[1] == pytest.approx(103 + 104 + 105)
+
     def test_incomplete_period_aggregation_is_nan(self, reference_timeseries):
         """Une période incomplète produit NaN, source légitime et non masquée."""
         materializer = CovariateMaterializer()

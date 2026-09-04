@@ -108,41 +108,57 @@ class TestValidation:
     """Contrat de validation du paramètre ``aggregation_constraint``."""
 
     # Formes scalaires acceptées
-    @pytest.mark.parametrize('setting', ['sum', 'mean', 'last', None])
+    @pytest.mark.parametrize('setting', ['sum', None])
     def test_scalar_settings_accepted(self, setting):
-        """Les quatre réglages scalaires sont acceptés."""
+        """Les deux réglages scalaires sont acceptés."""
         assert AggregationConstraint(setting).resolve_constraint() == setting
 
     # Forme dictionnaire de valeurs valides acceptée
     def test_dict_of_valid_values_accepted(self):
         """Un dict associant une colonne à un réglage valide est accepté."""
         constraint = AggregationConstraint(
-            {'a1': 'mean', 'a2': 'last', DEFAULT_CONSTRAINT_KEY: None}
+            {'a1': 'sum', 'a2': None, DEFAULT_CONSTRAINT_KEY: None}
         )
-        assert constraint.resolve_constraint('a1') == 'mean'
-        assert constraint.resolve_constraint('a2') == 'last'
+        assert constraint.resolve_constraint('a1') == 'sum'
+        assert constraint.resolve_constraint('a2') is None
         assert constraint.resolve_constraint('q1') is None
+
+    # Forme dict de 'sum' et None uniquement (D20)
+    def test_dict_form_of_sum_and_none(self):
+        """{'a1': None, '__default__': 'sum'} est accepté et résolu par colonne."""
+        constraint = AggregationConstraint({'a1': None, DEFAULT_CONSTRAINT_KEY: 'sum'})
+        assert constraint.resolve_constraint('a1') is None
+        assert constraint.resolve_constraint('q1') == 'sum'
 
     # Repli sur le défaut du document en l'absence de clé de repli
     def test_dict_without_default_key_falls_back_on_sum(self):
         """Sans clé de repli, une colonne non couverte retombe sur 'sum'."""
         assert AggregationConstraint({'a1': None}).resolve_constraint('q1') == 'sum'
 
-    # Message d'erreur citant 'mean', 'last' et la forme dictionnaire
-    def test_dict_form_raises_with_reserved_extension_message(self):
-        """Une valeur non valide, seule ou dans un dict, lève un ValueError explicite."""
-        # Forme scalaire non valide
-        with pytest.raises(ValueError) as scalar_error:
-            AggregationConstraint('median')
-        message = str(scalar_error.value)
-        assert "'sum'" in message and "'mean'" in message and "'last'" in message
-        assert 'dict' in message and DEFAULT_CONSTRAINT_KEY in message
+    # 'mean' et 'last' ne sont plus des réglages valides (D20)
+    def test_mean_and_last_are_rejected(self):
+        """'mean', 'last', seuls ou dans un dict, lèvent un ValueError explicite."""
+        # Forme scalaire 'mean'
+        with pytest.raises(ValueError) as mean_error:
+            AggregationConstraint('mean')
+        mean_message = str(mean_error.value)
+        assert "'sum'" in mean_message and 'None' in mean_message
+        assert 'additive_transformer' in mean_message
+        assert 'dict' in mean_message and DEFAULT_CONSTRAINT_KEY in mean_message
 
-        # Forme dictionnaire portant une valeur non valide
+        # Forme scalaire 'last'
+        with pytest.raises(ValueError) as last_error:
+            AggregationConstraint('last')
+        last_message = str(last_error.value)
+        assert "'sum'" in last_message and 'None' in last_message
+        assert 'additive_transformer' in last_message
+
+        # Forme dictionnaire portant 'mean' et 'last'
         with pytest.raises(ValueError) as dict_error:
-            AggregationConstraint({'a1': 'median'})
+            AggregationConstraint({'a1': 'mean', 'a2': 'last'})
         dict_message = str(dict_error.value)
-        assert "'mean'" in dict_message and "'last'" in dict_message
+        assert "'sum'" in dict_message and 'None' in dict_message
+        assert 'additive_transformer' in dict_message
         assert 'dict' in dict_message and DEFAULT_CONSTRAINT_KEY in dict_message
 
     # Dictionnaire vide
@@ -289,27 +305,6 @@ class TestRescaleTimeSeries:
         assert not mask.any()
         # Le total observé est bien écrasé : la somme ne fait plus 120
         assert rescaled.sum() == pytest.approx(112.5)
-
-    # Contraintes 'mean' et 'last'
-    def test_mean_and_last_constraints(self):
-        """'mean' recale sur la moyenne, 'last' sur la dernière sous-période."""
-        values = _raw_predictions()
-        observations = _annual_observations(total=10.0)
-
-        mean_rescaled, mean_mask = AggregationConstraint('mean').rescale(
-            values, observations, 'Y'
-        )
-        assert mean_rescaled.mean() == pytest.approx(10.0)
-        assert mean_mask.all()
-
-        last_rescaled, last_mask = AggregationConstraint('last').rescale(
-            values, observations, 'Y'
-        )
-        assert last_rescaled.iloc[-1] == pytest.approx(10.0)
-        assert last_mask.all()
-        # Profil conservé : toutes les sous-périodes suivent le même ratio
-        ratio = 10.0 / values.iloc[-1]
-        pd.testing.assert_series_equal(last_rescaled, values * ratio)
 
 
 # Tests de la désagrégation des ancres (§11.2, D7)

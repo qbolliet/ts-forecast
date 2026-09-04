@@ -32,7 +32,7 @@ an observation — and neither drives a marking.
 """
 # Importation des modules
 # Modules de base
-from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Tuple, Union
 import warnings
 
 # Calcul numérique
@@ -51,8 +51,8 @@ from ..utils.frequency.utils import normalize_frequency
 from ..panel.utils import normalize_entity_key
 
 
-# Contraintes reconnues, et réglage effectif d'une colonne ("None" ne recale rien)
-ConstraintKind = Literal['sum', 'mean', 'last']
+# Contrainte reconnue, et réglage effectif d'une colonne ("None" ne recale rien)
+ConstraintKind = Literal['sum']
 ConstraintSetting = Optional[ConstraintKind]
 # Forme complète du paramètre public
 AggregationConstraintSetting = Union[ConstraintSetting, Dict[str, ConstraintSetting]]
@@ -63,34 +63,7 @@ DEFAULT_CONSTRAINT_KEY = '__default__'
 DEFAULT_CONSTRAINT: ConstraintSetting = 'sum'
 
 # Réglages admissibles, base des validations d'__init__
-_CONSTRAINT_SETTINGS: Tuple[Any, ...] = ('sum', 'mean', 'last', None)
-
-
-# Agrégateur de la contrainte 'last'
-def _last(values: np.ndarray) -> float:
-    """Return the last sub-period of a block.
-
-    Args:
-        values: Sub-period values of one period, in grid order.
-
-    Returns:
-        The last value of the block, as a float.
-
-    Examples:
-        >>> _last(np.array([9.0, 10.0, 12.0]))
-        12.0
-    """
-    return float(values[-1])
-
-
-# Correspondance contrainte -> agrégateur. Les trois contraintes partagent une
-# formule unique — ratio = observé / agrégat, puis toutes les sous-périodes
-# multipliées par ce ratio.
-_AGGREGATORS: Dict[str, Callable[[np.ndarray], float]] = {
-    'sum': lambda values: float(np.sum(values)),
-    'mean': lambda values: float(np.mean(values)),
-    'last': _last,
-}
+_CONSTRAINT_SETTINGS: Tuple[Any, ...] = ('sum', None)
 
 
 # Fonction auxiliaire d'appartenance des dates à leur période basse fréquence
@@ -167,21 +140,23 @@ def validate_aggregation_constraint(
     implementation is the only way to keep the two contracts from drifting.
 
     Args:
-        aggregation_constraint: Value handed to ``__init__``: ``'sum'``,
-            ``'mean'``, ``'last'``, None, or a dict mapping a column name to
-            one of these values with an optional ``'__default__'`` key.
+        aggregation_constraint: Value handed to ``__init__``: ``'sum'``, None,
+            or a dict mapping a column name to one of these values with an
+            optional ``'__default__'`` key. Additivity is the contract of the
+            whole class : a non-additive column must go through
+            ``additive_transformer`` instead of a relaxed constraint here.
 
     Raises:
         ValueError: If the value, or one of the values of the dict form, is
             not admissible; or if the dict is empty.
 
     Examples:
+        >>> validate_aggregation_constraint('sum')
+        >>> validate_aggregation_constraint({'a1': None, '__default__': 'sum'})
         >>> validate_aggregation_constraint('mean')
-        >>> validate_aggregation_constraint({'a1': 'sum', '__default__': None})
-        >>> validate_aggregation_constraint('median')
         Traceback (most recent call last):
             ...
-        ValueError: aggregation_constraint must be one of ('sum', 'mean', 'last', None), or a dict mapping a column name to one of these values with an optional '__default__' key, got 'median'
+        ValueError: aggregation_constraint must be one of ('sum', None), or a dict mapping a column name to one of these values with an optional '__default__' key, got 'mean'. A non-additive column must go through additive_transformer instead.
     """
     # Forme dictionnaire : chaque valeur doit être admissible
     if isinstance(aggregation_constraint, dict):
@@ -198,7 +173,9 @@ def validate_aggregation_constraint(
                 f"aggregation_constraint values must be one of "
                 f"{_CONSTRAINT_SETTINGS}, in a dict mapping a column name to "
                 f"one of these values with an optional "
-                f"{DEFAULT_CONSTRAINT_KEY!r} key, got {invalid}"
+                f"{DEFAULT_CONSTRAINT_KEY!r} key, got {invalid}. A "
+                f"non-additive column must go through additive_transformer "
+                f"instead."
             )
         return
 
@@ -208,7 +185,8 @@ def validate_aggregation_constraint(
             f"aggregation_constraint must be one of {_CONSTRAINT_SETTINGS}, or "
             f"a dict mapping a column name to one of these values with an "
             f"optional {DEFAULT_CONSTRAINT_KEY!r} key, got "
-            f"{aggregation_constraint!r}"
+            f"{aggregation_constraint!r}. A non-additive column must go "
+            f"through additive_transformer instead."
         )
 
 
@@ -228,13 +206,12 @@ def resolve_aggregation_constraint(
         column: Column name, or None for the global setting.
 
     Returns:
-        ``'sum'``, ``'mean'``, ``'last'`` or None: the column's own entry, else
-        the ``'__default__'`` entry, else ``'sum'``.
+        ``'sum'`` or None: the column's own entry, else the ``'__default__'``
+        entry, else ``'sum'``.
 
     Examples:
-        >>> resolve_aggregation_constraint({'a1': 'mean', '__default__': None}, 'a1')
-        'mean'
-        >>> resolve_aggregation_constraint({'a1': 'mean'}, 'q1')
+        >>> resolve_aggregation_constraint({'a1': None, '__default__': 'sum'}, 'a1')
+        >>> resolve_aggregation_constraint({'a1': None}, 'q1')
         'sum'
     """
     # Forme scalaire : la même contrainte pour toutes les colonnes
@@ -296,10 +273,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
     The sub-periods predicted for one period of a lower-frequency variable are
     multiplied by ``observed total / predicted aggregate``, so that the column
     carries a genuine disaggregation of the observation instead of a
-    free-floating prediction. The aggregate is the one named by the constraint:
-    the sum for an additive variable, the mean for a rate, the last sub-period for a stock. All
-    three go through the same ratio, so the guards below hold identically for
-    the three.
+    free-floating prediction. The aggregate is always the sum: additivity is
+    the contract of the whole class — a non-additive column goes through ``additive_transformer``
+    upstream, never through a relaxed constraint here.
 
     Four guards:
 
@@ -373,10 +349,11 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
     Args:
         aggregation_constraint: Constraint applied to the predicted
             sub-periods. ``'sum'`` (the default) rescales so their sum equals
-            the observed total, ``'mean'`` so their mean does, ``'last'`` so
-            the last sub-period does, and ``None`` applies no constraint at
-            all. A dict ``{column: setting}`` sets the constraint per column,
-            with an optional ``'__default__'`` key covering the rest.
+            the observed total, and ``None`` applies no constraint at all. A
+            dict ``{column: setting}`` sets the constraint per column, with an
+            optional ``'__default__'`` key covering the rest. A non-additive
+            column must go through ``additive_transformer`` instead — see
+            :func:`validate_aggregation_constraint`.
         period_frequencies: Detected frequency of the periods the observed
             totals refer to, for :meth:`fit` / :meth:`transform`: a single
             frequency, or a ``{column: frequency}`` mapping.
@@ -458,15 +435,15 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
 
         Raises:
             ValueError: If the value, or one of the values of the dict form, is
-                not ``'sum'``, ``'mean'``, ``'last'`` or None; or if the dict is
-                empty.
+                not ``'sum'`` or None; or if the dict is empty. A non-additive column goes
+                through ``additive_transformer`` instead.
 
         Examples:
+            >>> AggregationConstraint._validate_aggregation_constraint('sum')
             >>> AggregationConstraint._validate_aggregation_constraint('mean')
-            >>> AggregationConstraint._validate_aggregation_constraint('median')
             Traceback (most recent call last):
                 ...
-            ValueError: aggregation_constraint must be one of ('sum', 'mean', 'last', None), or a dict mapping a column name to one of these values with an optional '__default__' key, got 'median'
+            ValueError: aggregation_constraint must be one of ('sum', None), or a dict mapping a column name to one of these values with an optional '__default__' key, got 'mean'. A non-additive column must go through additive_transformer instead.
         """
         # Délégation à la fonction de module : "CovariateMaterializer" porte le
         # même paramètre et doit accepter exactement les mêmes formes
@@ -508,17 +485,17 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             column: Column name, or None for the global setting.
 
         Returns:
-            ``'sum'``, ``'mean'``, ``'last'`` or None: the column's own entry,
-            else the ``'__default__'`` entry, else ``'sum'``.
+            ``'sum'`` or None: the column's own entry, else the
+            ``'__default__'`` entry, else ``'sum'``.
 
         Examples:
             >>> constraint = AggregationConstraint(
-            ...     {'a1': 'mean', '__default__': None}
+            ...     {'a1': None, '__default__': 'sum'}
             ... )
-            >>> constraint.resolve_constraint('a1')
-            'mean'
-            >>> constraint.resolve_constraint('q1') is None
+            >>> constraint.resolve_constraint('a1') is None
             True
+            >>> constraint.resolve_constraint('q1')
+            'sum'
         """
         return resolve_aggregation_constraint(self.aggregation_constraint, column)
 
@@ -601,18 +578,15 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
     def _observed_totals(
         observations: pd.Series,
         period_freq: str,
-        aggregator: Callable[[np.ndarray], float],
     ) -> Dict[Any, float]:
         """Aggregate the observations of each period into its target total.
+
+        The aggregate is always the sum: additivity is the
+        contract of the whole class, not a per-call choice.
 
         Args:
             observations: Observed low-frequency values, anchors non-null.
             period_freq: Frequency of the periods.
-            aggregator: Aggregator of the constraint, applied here too: a
-                period carrying several observations is summed under ``'sum'``,
-                averaged under ``'mean'``, and read on its last observation
-                under ``'last'``. One observation per period is the norm; this
-                only settles the degenerate case.
 
         Returns:
             Target total of each period, keyed like ``_period_membership``.
@@ -632,9 +606,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
                 continue
             blocks.setdefault(period_key, []).append(float(value))
 
-        # Agrégation piur chaque période
+        # Agrégation pour chaque période : toujours la somme
         return {
-            period_key: aggregator(np.asarray(values, dtype=float))
+            period_key: float(np.sum(values))
             for period_key, values in blocks.items()
         }
 
@@ -644,18 +618,18 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         values: pd.Series,
         observations: pd.Series,
         period_freq: str,
-        kind: ConstraintKind,
     ) -> Tuple[pd.Series, pd.Series, List[Any], List[Any]]:
         """Rescale one column and report its degenerate periods.
 
         Split out of :meth:`rescale` so that the warnings can be aggregated
-        over several columns: this method never warns, it only reports.
+        over several columns: this method never warns, it only reports. Called
+        only when the constraint is active on the column — the caller has
+        already handled the ``None`` case.
 
         Args:
             values: Sub-period values produced on the stage grid.
             observations: Observed low-frequency totals of the column.
             period_freq: Frequency of the periods the totals refer to.
-            kind: Constraint applied, one of ``'sum'``, ``'mean'``, ``'last'``.
 
         Returns:
             Tuple ``(rescaled, rescaled_mask, zero_periods, flipped_periods)``:
@@ -663,11 +637,8 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             the periods whose predicted aggregate was zero against a non-zero
             total, and the periods whose profile was flipped.
         """
-        # Extraction de l'agrégateur
-        aggregator = _AGGREGATORS[kind]
-
         # Totaux visés, période par période
-        period_totals = self._observed_totals(observations, period_freq, aggregator)
+        period_totals = self._observed_totals(observations, period_freq)
 
         # Initialisation du résultat et du masque des cellules recalées
         rescaled = values.copy()
@@ -701,8 +672,8 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             if not block.notna().all():
                 continue
 
-            # Agrégation des observations sur la période
-            aggregate = aggregator(block.to_numpy(dtype=float))
+            # Agrégation des observations sur la période : toujours la somme
+            aggregate = float(np.sum(block.to_numpy(dtype=float)))
 
             # Agrégat nul : le ratio est indéfini, prédictions brutes conservées
             if aggregate == 0:
@@ -822,17 +793,17 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             >>> rescaled.tolist(), bool(mask.any())
             ([20.0, 30.0, 50.0], False)
         """
-        # Type d'agrégation pour la colonne
-        kind = self.resolve_constraint(column)
+        # Contrainte active ou non pour la colonne
+        active = self.resolve_constraint(column) is not None
 
         # Contrainte désactivée : valeurs brutes conservées, aucune cellule
         # recalée — la ligne d'ancre porte néanmoins une valeur de sous-période,
         # ce que dit "anchor_cells_mask" et non ce masque-ci
-        if kind is None:
+        if not active:
             return values, pd.Series(False, index=values.index)
 
         rescaled, mask, zero_periods, flipped_periods = self._rescale_one(
-            values, observations, period_freq, kind
+            values, observations, period_freq
         )
 
         # Avertissements agrégés sur l'unique colonne traitée
@@ -985,10 +956,11 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
 
         # Recalage colonne par colonne, sans avertir
         for column in X.columns:
-            kind = self.resolve_constraint(column)
+            # Contrainte active ou non sur cette colonne
+            active = self.resolve_constraint(column) is not None
 
             # Contrainte désactivée sur cette colonne : valeurs brutes gardées
-            if kind is None:
+            if not active:
                 masks[column] = pd.Series(False, index=X.index)
                 continue
 
@@ -997,7 +969,6 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
                 X[column],
                 self._observations_for(column),
                 self._period_freq_for(column),
-                kind,
             )
             # Affectation positionnelle : un index dupliqué ne doit déclencher
             # aucun réalignement
