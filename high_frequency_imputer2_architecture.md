@@ -322,9 +322,9 @@ unifiée dans `hfi:_write_interpolation_fallback` (B27, prompt 22).
   (§4.5) et (b) les bords de série au-delà de ce que `limit_direction` autorise.
 - **Ordre indifférent** : l'interpolation est déterministe à partir des seules observations,
   sans dépendance aux imputations précédentes. `fit_predict_order` est ignoré (§8.1).
-- **Origine des cellules produites** : `'interpolated'` ; provenance publique `INTERPOLATED`
-  (ou `DISAGGREGATED` pour les cellules recalées d'une période complète, §11.2). Un modèle qui en
-  consomme émet `MODEL_ON_INTERPOLATED` (§6.3).
+- **Origine des cellules produites** : `'interpolated'` ; provenance publique `INTERPOLATED`,
+  **y compris après recalage aux totaux** — la contrainte d'agrégation ne change aucune
+  provenance (§11.2). Un modèle qui en consomme émet `MODEL_ON_INTERPOLATED` (§6.3).
 - Cette même méthode sert de **repli** partout où une imputation par modèle échoue, dans toutes
   les stratégies (l'actuel `INTERPOLATE_FALLBACK`).
 
@@ -498,10 +498,12 @@ ELIGIBLE_ORIGINS = {
 
 Trois points d'implémentation impératifs :
 
-1. **Le filtre porte sur `origin_store`, pas sur la matrice de provenance.** `DISAGGREGATED` est
-   ambigu par construction (§6.5) : il marque aussi bien une cellule issue d'une interpolation
-   recalée qu'une prédiction de modèle recalée. Utiliser la provenance publique comme filtre
-   ferait de `'covariates_only'` un synonyme de `True` — c'est le piège principal de ce
+1. **Le filtre porte sur `origin_store`, pas sur la matrice de provenance.** L'origine est une
+   propriété de la **cellule**, la provenance une propriété de l'**étape** qui l'a produite
+   (§6.3), propagée telle quelle à toutes ses cellules : les deux registres n'ont ni la même
+   granularité ni la même durée de vie, et le store est disponible pendant l'étape, avant même
+   que la provenance ne soit écrite. Lire la provenance ici, c'est risquer de faire de
+   `'covariates_only'` un synonyme silencieux de `True` — c'est le piège principal de ce
    paragraphe.
 2. **Chaque ligne de `y_train` porte la fréquence à laquelle elle a été produite**, lue dans
    `imputed_freq_store` ; le diviseur d'échelle est **par ligne** (§5.4).
@@ -605,7 +607,7 @@ class ProvenanceType(str, Enum):
     # --- Cellules non produites par un modèle ---
     ORIGINAL      = 'original'        # présente dans le jeu d'entrée
     AGGREGATED    = 'aggregated'      # agrégation exacte de vraies valeurs plus fines
-    DISAGGREGATED = 'disaggregated'   # sous-période d'un total observé, réparti sur sa période
+    DISAGGREGATED = 'disaggregated'   # HÉRITAGE de `hfi`, JAMAIS émis par `hfi2` (§6.4)
     INTERPOLATED  = 'interpolated'    # NOUVEAU : produite par interpolation d'observations
 
     # --- Cellules produites par un modèle, par degré de souillure ---
@@ -700,21 +702,29 @@ def resolve_model_provenance(covariate_taint: Taint, target_taint: Taint) -> Pro
 |---|---|---|
 | valeur présente dans le jeu d'entrée | `ORIGINAL` | `'observed'` |
 | agrégation exacte d'une colonne plus fine sur une période complète | `AGGREGATED` | `'observed'` |
-| cellule d'une période **recalée** pour sommer au total observé (§11) | `DISAGGREGATED` | inchangée : `'model'` si la prédiction venait d'un modèle, `'interpolated'` si elle venait d'une interpolation |
-| **date-ancre** ré-exprimée à la fréquence d'étape, que le recalage ait eu lieu ou non | `DISAGGREGATED` | idem |
+| cellule d'une période **recalée** pour sommer au total observé (§11) | **inchangée** : celle que la valeur portait avant recalage (`MODEL_*` ou `INTERPOLATED`) | inchangée : `'model'` si la prédiction venait d'un modèle, `'interpolated'` si elle venait d'une interpolation |
+| **date-ancre** ré-exprimée à la fréquence d'étape, que le recalage ait eu lieu ou non | celle de la valeur qui y est **écrite** (`MODEL_*` ou `INTERPOLATED`) — jamais `ORIGINAL`, la cellule ne portant plus l'observation | idem |
 | cellule produite par interpolation (stratégie `'interpolate'`, `covariate_fallback`, ou **repli d'échec** d'un modèle) | `INTERPOLATED` | `'interpolated'` |
 
-Deux règles héritées et conservées :
+Deux règles :
 
-- **B2** : le marquage de provenance des ancres est **indépendant de la réussite du recalage**.
+- **invariance de provenance (D16)** : la provenance d'une cellule est **indépendante du
+  recalage** — de son application comme de sa réussite. La ligne d'ancre n'y échappe pas : elle
+  porte la provenance de la valeur qui l'occupe désormais, sous `'sum'` comme sous `None`.
 - **D6, tranché** : les cellules du **repli** (variable dont le modèle a échoué) portent
   `INTERPOLATED`, et non un `MODEL_*`. C'est plus exact et cela rend le repli visible dans les
   statistiques de provenance. Une étape en repli est marquée `is_fallback=True` dans le plan.
 
-`DISAGGREGATED` est donc **ambigu quant au degré de confiance** — c'est assumé, il décrit une
-position (« sous-période d'un total observé ») autant qu'une origine. Le filtre de `y_train`
-(§5.3) et le calcul des souillures (§6.2) lisent `origin_store`, **jamais** la matrice de
-provenance. La docstring de `DISAGGREGATED` doit le dire.
+**`DISAGGREGATED` n'est donc jamais émis par `hfi2` (D16).** Recaler une cellule, c'est déplacer
+une valeur, pas la produire : la contrainte d'agrégation laisse la provenance intacte, exactement
+comme la mise à l'échelle du `StageScaler`. Le libellé était de surcroît **ambigu** — il
+remplaçait la marque que la cellule portait, si bien qu'il ne disait ni si l'identité additive
+était respectée, ni si la valeur venait d'un modèle ou d'une interpolation. Il **reste dans
+l'énumération partagée** tant que `hfi` existe, avec une docstring disant les deux choses : son
+ambiguïté, et le fait que `hfi2` ne l'émet jamais. `AggregationConstraint` ne marque aucune
+provenance : ses deux masques — cellules recalées, lignes d'ancre — sont des masques de
+**diagnostic**. Le filtre de `y_train` (§5.3) et le calcul des souillures (§6.2) lisent
+`origin_store`, **jamais** la matrice de provenance.
 
 ### 6.5 — Exemple cellule par cellule
 
@@ -726,17 +736,17 @@ interpolées → `covariate_taint = 'interpolated'` ; `y_train` = 3 ancres → `
 
 | Date | Prédiction brute | Après recalage (somme 2021 = 120) | Provenance | Origine |
 |---|---|---|---|---|
-| 2021-01-31 | 9.0 | 9.6 | `DISAGGREGATED` | `'model'` |
-| 2021-02-28 | 9.5 | 10.13 | `DISAGGREGATED` | `'model'` |
-| … | … | … | `DISAGGREGATED` | `'model'` |
-| 2021-12-31 (**ancre**) | 10.5 | 11.2 | `DISAGGREGATED` | `'model'` |
+| 2021-01-31 | 9.0 | 9.6 | `MODEL_ON_INTERPOLATED` | `'model'` |
+| 2021-02-28 | 9.5 | 10.13 | `MODEL_ON_INTERPOLATED` | `'model'` |
+| … | … | … | `MODEL_ON_INTERPOLATED` | `'model'` |
+| 2021-12-31 (**ancre**) | 10.5 | 11.2 | `MODEL_ON_INTERPOLATED` | `'model'` |
 | **somme 2021** | 112.5 | **120.0** | — | — |
 
-Sous `aggregation_constraint=None`, les mêmes cellules portent **`MODEL_ON_INTERPOLATED`** et
-gardent leur valeur brute, **sauf** la ligne d'ancre 2021-12-31 qui porte `DISAGGREGATED` (elle
-est une ancre ré-exprimée à la fréquence d'étape, cf. B2) tout en valant 10.5 : la somme 2021 ne
-fait alors plus 120, et la valeur observée n'est récupérable que par `inverse_transform` ou par
-le masque `ORIGINAL` du niveau source (§11.2).
+La colonne « Provenance » est **la même sous `aggregation_constraint=None`** — c'est tout le sens
+de l'invariance : seules les valeurs changent, les cellules gardant alors leur prédiction brute,
+ligne d'ancre comprise (2021-12-31 vaut 10.5, et non 120). La somme 2021 ne fait alors plus 120,
+et la valeur observée n'est récupérable que par `inverse_transform` ou par le masque `ORIGINAL`
+du niveau source (§11.2).
 
 ### 6.6 — `mark_model_imputed` : nouvelle signature
 
@@ -1116,8 +1126,9 @@ rigoureusement identiques. Gardes conservées :
 | agrégat prédit nul, total observé non nul | non recalée (ratio indéfini) |
 | agrégat prédit de **signe opposé** au total observé | **recalée** — la contrainte prime — mais toutes les sous-périodes changent de signe : un `UserWarning` agrégé est émis |
 
-Le masque des cellules effectivement recalées pilote le marquage `DISAGGREGATED` ; les cellules
-laissées de côté gardent leur provenance `MODEL_*` ou `INTERPOLATED` (§6.4).
+Le masque des cellules effectivement recalées est un masque de **diagnostic** : recalées ou non,
+toutes les cellules gardent la provenance qu'elles portaient avant le recalage — `MODEL_*` ou
+`INTERPOLATED` (§6.4, invariance de provenance D16).
 
 ### 11.2 — Désagrégation des ancres : comportement **non paramétrable**
 
@@ -1134,15 +1145,16 @@ position dans la période.
 Conséquences à documenter explicitement :
 
 - sous `aggregation_constraint='sum'`, **aucune information n'est perdue** : la somme des
-  sous-périodes reconstitue exactement le total observé, et la ligne d'ancre porte
-  `DISAGGREGATED` ;
+  sous-périodes reconstitue exactement le total observé ;
 - sous `aggregation_constraint=None`, le total observé **est écrasé** par une prédiction libre.
   Il reste récupérable de deux manières, toutes deux à mentionner dans la docstring : par
   `inverse_transform`, et par le masque `ORIGINAL` du niveau de fréquence source dans la sortie
   multi-fréquences (`keep_lower_frequencies=True`) ;
-- le marquage `DISAGGREGATED` de la ligne d'ancre est **indépendant de la réussite du recalage**
-  (B2) : il dit « cette cellule occupe la place d'une observation réelle », pas « cette cellule
-  respecte l'identité additive ».
+- la ligne d'ancre porte la provenance de la valeur qui l'occupe désormais — le `MODEL_*` de
+  l'étape, ou `INTERPOLATED` —, jamais `ORIGINAL` et jamais une marque propre : le recalage ne
+  change aucune provenance (D16). `AggregationConstraint.anchor_cells_mask` **localise** les
+  totaux observés écrasés — ce dont `inverse_transform` et les diagnostics ont besoin —, il ne
+  les qualifie pas, et ne dépend ni de `aggregation_constraint` ni de la réussite du recalage.
 
 **Exemple** (jeu `TS`, `a1` = 120 en 2021, étape `M`) : les 12 mois de 2021 reçoivent une valeur ;
 le 2021-12-31 vaut 11.2 (et non 120) ; sous `'sum'` la somme des 12 mois vaut exactement 120.
@@ -1229,8 +1241,8 @@ PHASE 5  pour chaque étape de fréquence f de la progression :
         étape marquée is_fallback=True, cellules marquées INTERPOLATED
       - prédiction sur TOUTE la période, ancres comprises (§11.2)
       - recalage aux totaux (AggregationConstraint) -> masque des cellules recalées
-      - écriture des valeurs, marquage de provenance (§6.3 pour les cellules non recalées,
-        DISAGGREGATED pour les recalées et pour les ancres)
+      - écriture des valeurs, marquage de provenance (§6.3, IDENTIQUE pour les cellules recalées
+        et non recalées, lignes d'ancre comprises : le recalage ne change aucune provenance)
       - mise à jour de imputed_store / imputed_freq_store / origin_store
         (y compris en repli : "le repli matérialise")
       - gel de l'ImputationStep dans le plan
@@ -1392,10 +1404,11 @@ sont ceux de la version 1, conservés pour la traçabilité.
 
 | Code | Décision | Motif |
 |---|---|---|
-| **D12** | introduction de `CellOrigin` / `origin_store` : le filtre de `y_train` et le calcul des souillures lisent l'**origine** des cellules, jamais la matrice de provenance | `DISAGGREGATED` est ambigu (interpolation recalée vs prédiction recalée) ; sans ce registre, `'covariates_only'` serait un synonyme silencieux de `True` (§5.3) |
+| **D12** | introduction de `CellOrigin` / `origin_store` : le filtre de `y_train` et le calcul des souillures lisent l'**origine** des cellules, jamais la matrice de provenance | l'origine est une propriété de la **cellule**, la provenance une propriété de l'**étape** ; sans ce registre, `'covariates_only'` serait un synonyme silencieux de `True` (§5.3) |
 | **D13** | précédence de matérialisation à quatre rangs, dont le **report d'étape** (rang 3) | c'est ce qui donne un effet observable à `'covariates_only'` et ce qui corrige la première cause de B28 (§4.4) |
 | **D14** | l'invariant NaN se formule en **inclusion d'ensembles de dates renseignées**, pas en comparaison de taux bruts | sous `'tolerate_nan'`, les deux grilles n'ont pas le même pas (§4.7) |
 | **D15** | `scale_features=False` **dispense aussi `y`** : la cible est une colonne comme une autre, et sa modalité est celle résolue pour la colonne imputée, `False` compris | rupture assumée avec le `False` de `hfi` : il existe de bonnes raisons de ne pas mettre une variable à l'échelle (indice, taux), et l'utilisateur est mieux placé que le composant pour le décider. Corollaire : `target_column` est **supprimé**, le nom de `y` désignant la colonne imputée au `fit` (§9.2) |
+| **D16** | la contrainte d'agrégation **ne change aucune provenance** : cellules recalées et lignes d'ancre gardent le `MODEL_*` ou l'`INTERPOLATED` de la valeur écrite ; `DISAGGREGATED` n'est **jamais émis** par `hfi2` et ne survit dans l'énumération partagée que pour `hfi` | recaler, c'est déplacer une valeur, pas la produire — au même titre que la mise à l'échelle du `StageScaler`. `DISAGGREGATED` **remplaçait** la marque de la cellule et effaçait l'information utile (modèle ? interpolation ? souillure ?) au profit d'une information de position que le masque des cellules recalées et `anchor_cells_mask` portent déjà, comme diagnostics (§6.4, §11.2) |
 
 ---
 

@@ -29,19 +29,21 @@ class ProvenanceType(str, Enum):
             values over a complete period. An exact additive aggregation of
             observations is not an approximation, so it never taints a model
             that only ever saw such values.
-        DISAGGREGATED: Value describes a POSITION as much as an origin: it
-            sits in a sub-period of an observed lower-frequency total spread
-            over its whole period. Two cases carry the mark: a cell whose
-            period was rescaled so its sub-periods sum back to the observed
-            total (``enforce_period_totals=True``), and an ANCHOR DATE
-            re-expressed at the stage frequency — the row that held the
-            low-frequency observation itself — whether or not the rescaling
-            ran. It is therefore AMBIGUOUS as to confidence level: only the
-            first case guarantees the additive identity, the second only
-            states that the cell sits where a real observation was. Because
-            of that ambiguity DISAGGREGATED must NEVER be used as a filter to
-            compose ``y_train`` nor to compute a taint level — those read the
-            origin store, never the provenance matrix.
+        DISAGGREGATED: LEGACY of ``HighFrequencyImputer``, kept only as long
+            as that class exists: the cell sits in a sub-period of an observed
+            lower-frequency total spread over its whole period, either because
+            its period was rescaled so its sub-periods sum back to the total
+            (``enforce_period_totals=True``) or because it is an ANCHOR DATE
+            re-expressed at the stage frequency. It is AMBIGUOUS as to
+            confidence level — it replaces the mark the value would otherwise
+            carry, so it says neither whether the additive identity holds nor
+            whether the value came from a model or from an interpolation — and
+            must NEVER be used as a filter to compose ``y_train`` nor to
+            compute a taint level; those read the origin store, never the
+            provenance matrix. ``HighFrequencyImputer2`` NEVER emits it:
+            rescaling to the period totals leaves provenance untouched, so a
+            rescaled cell and an overwritten anchor row keep the ``MODEL_*``
+            or INTERPOLATED mark of the value written there.
         INTERPOLATED: Value was produced by interpolating observations
             (strategy ``'interpolate'``, a covariate fallback, or the
             interpolation fallback of a model whose fit failed).
@@ -356,7 +358,9 @@ class ImputationProvenanceTracker:
         date re-expressed at the stage frequency merely sits where a real
         observation was. It must therefore NEVER be used as a filter to
         compose ``y_train`` nor to compute a taint level — those read the
-        origin store, never the provenance matrix.
+        origin store, never the provenance matrix. LEGACY of
+        ``HighFrequencyImputer``: ``HighFrequencyImputer2`` never calls it, the
+        aggregation constraint leaving provenance untouched.
 
         Args:
             column: Name of the column containing the disaggregated values.

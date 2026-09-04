@@ -16,14 +16,19 @@ materialization path.
 Two returns matter to the caller, and they are different objects:
 
 1. :meth:`AggregationConstraint.rescale` returns the rescaled values and the
-   mask of the cells the constraint actually moved — that mask drives the
-   ``DISAGGREGATED`` provenance marking of rescaled cells;
+   mask of the cells the constraint actually moved;
 2. :meth:`AggregationConstraint.anchor_cells_mask` returns the anchor rows
-   re-expressed at the stage frequency, which carry ``DISAGGREGATED`` too and
-   do so independently of the constraint.
+   re-expressed at the stage frequency, i.e. the rows where an observation was
+   overwritten by a sub-period value.
 
-The component never marks provenance itself: it hands back masks, the caller
-marks.
+Provenance invariance: applying the constraint never changes the provenance of
+a cell. A rescaled cell keeps the ``MODEL_*`` or ``INTERPOLATED`` mark it
+carried before the rescaling, exactly as rescaling by ``StageScaler`` leaves
+provenance untouched. There is no ``DISAGGREGATED`` provenance in ``hfi2``: it
+would state nothing the cell's own provenance does not already state, and would
+hide whether the value came from a model or from an interpolation. Both masks
+above are therefore diagnostic — they say which cells moved and which rows held
+an observation — and neither drives a marking.
 """
 # Importation des modules
 # Modules de base
@@ -290,7 +295,7 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
 
     The sub-periods predicted for one period of a lower-frequency variable are
     multiplied by ``observed total / predicted aggregate``, so that the column
-    carries a genuine diaggregation of the observation instead of a
+    carries a genuine disaggregation of the observation instead of a
     free-floating prediction. The aggregate is the one named by the constraint:
     the sum for an additive variable, the mean for a rate, the last sub-period for a stock. All
     three go through the same ratio, so the guards below hold identically for
@@ -315,31 +320,42 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
 
         A variable imputed at stage ``f`` is predicted over the whole of every
         period it covers, anchors included. The row that held the period total
-        receives, like the others, a sub-period value.A column must never mix, at one imputation frequency, a
-        period total and sub-period values: that heterogeneity makes the column
-        unusable as a covariate, falsifies any downstream aggregation, and makes
-        the scale of a row depend on its position within the period.
+        receives, like the others, a sub-period value. A column must never mix,
+        at one imputation frequency, a period total and sub-period values: that
+        heterogeneity makes the column unusable as a covariate, falsifies any
+        downstream aggregation, and makes the scale of a row depend on its
+        position within the period.
 
     Two consequences follow, and they are the price of the rule:
 
     - under ``'sum'``, no information is lost: the sub-periods sum back exactly
-      to the observed total, and the anchor row carries ``DISAGGREGATED``;
+      to the observed total;
     - under ``None``, the observed total is overwritten by a free prediction.
       It stays recoverable in two ways, both of them supported: through
       ``inverse_transform`` of the imputer, and through the ``ORIGINAL`` mask
       of the source frequency level in the multi-frequency output
       (``keep_lower_frequencies=True``).
 
-    The ``DISAGGREGATED`` marking of
-    an anchor row is independant of whether the rescaling succeeded. It states
-    "this cell sits where a real observation was", not "this cell satisfies the
-    additive identity". :meth:`anchor_cells_mask` therefore does not depend on
-    ``aggregation_constraint``: under ``None`` too the anchor row is marked
-    ``DISAGGREGATED`` while carrying a free value. /!\
+    In both cases the anchor row carries the provenance of the value now
+    written there — the ``MODEL_*`` of the step, or ``INTERPOLATED`` — never
+    ``ORIGINAL``, the observation no longer being what the cell holds, and
+    never a mark of its own. :meth:`anchor_cells_mask` locates the overwritten
+    observations, it does not qualify them, and it depends neither on
+    ``aggregation_constraint`` nor on whether the rescaling succeeded.
 
-    The component never marks provenance itself: it returns the mask of the
-    cells it actually moved, and the caller marks. Cells left out keep their
-    ``MODEL_*`` or ``INTERPOLATED`` provenance.
+    Provenance invariance:
+
+        Applying the constraint never changes a provenance. A rescaled cell
+        keeps the ``MODEL_*`` or ``INTERPOLATED`` mark it carried before the
+        rescaling, exactly as it does under ``StageScaler``: the constraint
+        moves a value, it does not produce it. There is no ``DISAGGREGATED``
+        provenance in ``hfi2`` — it would state nothing the cell's own
+        provenance does not already state, and would hide whether the value
+        came from a model or from an interpolation.
+
+    The component therefore never marks provenance, and neither of the two
+    masks it returns is a provenance mask: they are diagnostic, and say which
+    cells the constraint moved and which rows held an observation.
 
     Both a time series and a panel are served, and several columns at once: a
     ``DatetimeIndex`` or a ``MultiIndex`` ``(entity..., date)`` is accepted
@@ -389,7 +405,8 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         >>> mask.tolist()
         [True, True, True]
 
-        The anchor row is disaggregated whatever the constraint:
+        The anchor rows are located whatever the constraint, and carry no
+        provenance of their own:
 
         >>> constraint.anchor_cells_mask(observations, grid).tolist()
         [False, False, True]
@@ -785,10 +802,10 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         Returns:
             Tuple ``(rescaled, rescaled_mask)``: the rescaled values, and the
             boolean mask of the cells the constraint actually moved. That mask
-            drives the ``DISAGGREGATED`` marking; cells left out keep their
-            ``MODEL_*`` or ``INTERPOLATED`` provenance. Under a ``None``
-            constraint the values come back untouched and the mask is
-            all-False.
+            is diagnostic and drives no marking: moved or not, every cell keeps
+            the ``MODEL_*`` or ``INTERPOLATED`` provenance it carried before
+            the rescaling. Under a ``None`` constraint the values come back
+            untouched and the mask is all-False.
 
         Examples:
             >>> grid = pd.date_range('2021-01-31', periods=3, freq='ME')
@@ -809,8 +826,8 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         kind = self.resolve_constraint(column)
 
         # Contrainte désactivée : valeurs brutes conservées, aucune cellule
-        # recalée — la ligne d'ancre reste néanmoins désagrégée, ce que dit
-        # "anchor_cells_mask" et non ce masque-ci
+        # recalée — la ligne d'ancre porte néanmoins une valeur de sous-période,
+        # ce que dit "anchor_cells_mask" et non ce masque-ci
         if kind is None:
             return values, pd.Series(False, index=values.index)
 
@@ -836,18 +853,17 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         """Locate the anchor rows re-expressed at the stage frequency.
 
         An anchor row is a row where the low-frequency variable carries a real
-        observation in the untouched input frame. Re-expressing it at the stage
-        frequency does not make it a plain model output: it is a real
-        observation spread over its period, which is what ``DISAGGREGATED``
-        denotes.
+        observation in the untouched input frame. Re-expressed at the stage
+        frequency, that row no longer holds the observation but a sub-period
+        value: the mask says where an observed total was overwritten, which is
+        what ``inverse_transform`` and the diagnostics need to find those
+        totals again.
 
-        This mask does not depend on
-        ``aggregation_constraint``, and does not depend on whether the
-        rescaling succeeded. Under ``None`` too the anchor row is marked
-        ``DISAGGREGATED``, while carrying a free value. The mark states "this
-        cell occupies the place of a real observation", not "this cell
-        satisfies the additive identity". Hence a mask read off the data rather
-        than off the rescaling's return value.
+        It is not a provenance mask. The cell carries the provenance of the
+        value now written there — the ``MODEL_*`` of the step, or
+        ``INTERPOLATED`` — and its being an anchor position changes nothing to
+        it. Being read off the data alone, the mask depends neither on
+        ``aggregation_constraint`` nor on whether the rescaling succeeded.
 
         Args:
             observations: Observed low-frequency values, one Series for a

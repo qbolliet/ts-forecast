@@ -412,10 +412,13 @@ PARTIE A — tsforecast/frequency/provenance.py
      - MODEL_ON_IMPUTED_TARGET : y_train contient au moins une valeur imputée par modèle, les
        covariables non ;
      - MODEL_ON_IMPUTED_BOTH : les deux.
-   La docstring de DISAGGREGATED doit dire explicitement qu'elle est AMBIGUË quant au degré de
-   confiance : elle décrit une POSITION (« sous-période d'un total observé ») autant qu'une
-   origine, et ne doit JAMAIS servir de filtre pour composer y_train ni pour calculer une
-   souillure ([SPEC] §6.4).
+   DISAGGREGATED reste dans l'énumération tant que `hfi` existe, mais `hfi2` NE L'ÉMET JAMAIS
+   (décision D16) : sa docstring doit dire les deux choses — qu'elle est un HÉRITAGE de `hfi`,
+   et qu'elle est AMBIGUË quant au degré de confiance, décrivant une POSITION (« sous-période
+   d'un total observé ») autant qu'une origine, remplaçant la marque que la cellule portait, si
+   bien qu'elle ne dit ni si l'identité additive est respectée, ni si la valeur vient d'un
+   modèle ou d'une interpolation. Elle ne doit JAMAIS servir de filtre pour composer y_train ni
+   pour calculer une souillure ([SPEC] §6.4).
 
 2) Deux alias de typage exportés par le module :
 
@@ -1061,17 +1064,17 @@ localiser le code par nom de symbole, jamais par numéro de ligne.
 
 **Modèle : Opus · Plan mode : OUI · Dépendances : prompt 4**
 
-> Plan mode justifié : quatre gardes, un masque de cellules recalées qui pilote le marquage de
-> provenance, et une règle B2 contre-intuitive (le marquage est indépendant de la réussite du
-> recalage). La répartition entre « ce que le composant décide » et « ce que l'appelant marque »
-> doit être arrêtée avant écriture.
+> Plan mode justifié : quatre gardes, et une règle d'INVARIANCE DE PROVENANCE (le recalage ne
+> change aucune provenance, D16) dont dépend le sens des deux masques rendus — ce sont des
+> masques de diagnostic, pas des instructions de marquage. La frontière entre « ce que le
+> composant décide » et « ce que l'appelant écrit » doit être arrêtée avant écriture.
 
 ````text
 Contexte : je prépare l'implémentation de HighFrequencyImputer2 ([SPEC] =
 high_frequency_imputer2_architecture.md). Ce lot extrait la contrainte d'agrégation dans un
 composant autonome et remplace le booléen `enforce_period_totals` par un paramètre extensible.
 Référence : [SPEC] §11 en entier (§11.1 et §11.2), §6.4 (provenance des cellules non produites
-par un modèle), décisions D7 et D8 du §14.2. Lire aussi `hfi:_rescale_to_period_totals` : la
+par un modèle, et INVARIANCE DE PROVENANCE), décisions D7, D8 et D16 du §14. Lire aussi `hfi:_rescale_to_period_totals` : la
 logique existe, ce lot la déplace et l'encadre — il ne la réinvente pas.
 
 CIBLE — nouveau fichier tsforecast/frequency/aggregation_constraint.py
@@ -1100,25 +1103,31 @@ CIBLE — nouveau fichier tsforecast/frequency/aggregation_constraint.py
            jamais un avertissement par période).
 
 3) Retour de la méthode principale : le DataFrame recalé ET le MASQUE BOOLÉEN des cellules
-   EFFECTIVEMENT RECALÉES. C'est ce masque qui pilote le marquage DISAGGREGATED chez l'appelant ;
-   les cellules laissées de côté gardent leur provenance MODEL_* ou INTERPOLATED ([SPEC] §6.4).
-   Le composant NE MARQUE PAS lui-même la provenance : il rend le masque, l'appelant marque.
+   EFFECTIVEMENT RECALÉES. INVARIANCE DE PROVENANCE ([SPEC] §6.4, décision D16) : appliquer la
+   contrainte NE CHANGE AUCUNE PROVENANCE — recalées ou non, toutes les cellules gardent le
+   MODEL_* ou l'INTERPOLATED qu'elles portaient AVANT le recalage, exactement comme sous la mise
+   à l'échelle du StageScaler (recaler, c'est déplacer une valeur, pas la produire). Il n'existe
+   PAS de provenance DISAGGREGATED dans hfi2, et le masque rendu est un masque de DIAGNOSTIC :
+   il dit quelles cellules ont bougé, il ne pilote aucun marquage. Le composant NE MARQUE PAS la
+   provenance et n'en fait marquer aucune.
 
 4) DÉSAGRÉGATION DES ANCRES, comportement NON PARAMÉTRABLE ([SPEC] §11.2, décision D7) :
    une variable imputée à l'étape `f` est prédite sur la TOTALITÉ de chaque période couverte,
    ANCRES COMPRISES. La ligne qui portait le total de la période reçoit, comme les autres, une
    valeur de sous-période. `disaggregate_anchors` N'EXISTE PAS et ne doit pas être introduit.
    Le composant expose `anchor_cells_mask(...)` identifiant les lignes d'ancre ré-exprimées à la
-   fréquence d'étape, car elles portent DISAGGREGATED elles aussi.
-   RÈGLE B2, contre-intuitive et impérative : le marquage DISAGGREGATED de la ligne d'ancre est
-   INDÉPENDANT DE LA RÉUSSITE DU RECALAGE. Il dit « cette cellule occupe la place d'une
-   observation réelle », pas « cette cellule respecte l'identité additive ». Donc
-   `anchor_cells_mask` ne dépend PAS de `aggregation_constraint` : sous `None` aussi, la ligne
-   d'ancre est marquée DISAGGREGATED tout en portant une valeur libre.
+   fréquence d'étape, c'est-à-dire les lignes où un total observé a été ÉCRASÉ par une valeur de
+   sous-période — ce dont `inverse_transform` et les diagnostics ont besoin pour les retrouver.
+   CE N'EST PAS UN MASQUE DE PROVENANCE : la ligne d'ancre porte la provenance de la valeur qui
+   l'occupe désormais (le MODEL_* de l'étape, ou INTERPOLATED), jamais ORIGINAL — la cellule ne
+   porte plus l'observation — et jamais une marque propre. Lu sur les seules données, le masque
+   ne dépend NI de `aggregation_constraint` NI de la réussite du recalage : il est identique
+   sous 'sum' et sous None.
 
 5) Docstring de classe : documenter les deux conséquences du §11.2 —
    - sous 'sum', AUCUNE information n'est perdue : la somme des sous-périodes reconstitue
      exactement le total observé ;
+   - la provenance des cellules est LA MÊME sous 'sum' et sous None (invariance, D16) ;
    - sous None, le total observé EST ÉCRASÉ par une prédiction libre ; il reste récupérable de
      deux manières, toutes deux à mentionner : par `inverse_transform`, et par le masque ORIGINAL
      du niveau de fréquence source dans la sortie multi-fréquences
@@ -1145,7 +1154,7 @@ TESTS — nouveau fichier tests/frequency/test_aggregation_constraint.py, sur le
      émis pour N périodes concernées ;
    - `test_rescaled_mask_matches_modified_cells` : le masque retourné coïncide exactement avec
      les cellules dont la valeur a changé ;
-   - `test_anchor_mask_independent_of_constraint` (B2) : identique sous 'sum' et sous None ;
+   - `test_anchor_mask_independent_of_constraint` : identique sous 'sum' et sous None ;
    - `test_constraint_none_leaves_raw_values` ;
    - `test_dict_form_raises_with_reserved_extension_message` : le message cite 'mean', 'last' et
      la forme dictionnaire ;
@@ -1181,7 +1190,7 @@ CIBLE — nouveau fichier tsforecast/frequency/variable_orderer.py, classe `Vari
 
 1) `fit_predict_order: Literal['frequency', 'cv'] = 'frequency'` — mêmes modalités que
    `train_on_partial_fit_order` de hfi, dont c'est le renommage :
-   - 'frequency' : fréquence la plus BASSE d'abord, puis nombre d'entités DÉCROISSANT ;
+   - 'frequency' : fréquence la plus BASSE d'abord, puis nombre d'entités CROISSANT (contre DECROISSANT actuellement) ;
    - 'cv' : variables les MIEUX prédites d'abord, autour de `cross_val_score`.
 
 2) CHAMP D'APPLICATION RESTREINT ([SPEC] §8.1), à documenter et à faire respecter par l'appelant :
@@ -1467,10 +1476,12 @@ PHASE 5 — pour chaque étape de fréquence `f` de la progression, dans cet ord
       - PRÉDICTION SUR TOUTE LA PÉRIODE, ANCRES COMPRISES ([SPEC] §11.2, non paramétrable).
       - RECALAGE AUX TOTAUX via AggregationConstraint -> masque des cellules recalées.
       - ÉCRITURE des valeurs et MARQUAGE DE PROVENANCE :
-        cellules recalées ET lignes d'ancre -> `DISAGGREGATED` (marquage des ancres INDÉPENDANT
-        de la réussite du recalage, règle B2) ;
-        cellules non recalées produites par le modèle -> `resolve_model_provenance(covariate_taint,
-        target_taint)` ; cellules de repli -> `INTERPOLATED`.
+        cellules produites par le modèle -> `resolve_model_provenance(covariate_taint,
+        target_taint)`, RECALÉES OU NON et LIGNES D'ANCRE COMPRISES — le recalage ne change
+        aucune provenance (invariance, décision D16), et il n'existe PAS de DISAGGREGATED dans
+        hfi2 ; cellules de repli -> `INTERPOLATED`, recalées ou non.
+        Une ligne d'ancre ré-exprimée à la fréquence d'étape ne reste JAMAIS `ORIGINAL` : elle ne
+        porte plus l'observation.
         La provenance est une PROPRIÉTÉ DE L'ÉTAPE, propagée identiquement à toutes les cellules
         que le modèle de cette étape produit.
       - MISE À JOUR de imputed_store / imputed_freq_store / origin_store, Y COMPRIS EN REPLI
@@ -1515,8 +1526,9 @@ X_pred et le taux de NaN de chaque appel :
      une étape M, trois modèles, dans l'ordre `a1`, `a2`, `q1`, avec les voies de matérialisation
      annoncées (`m1` identity ; `q1`, `a2` fallback pour `a1` ; `a1` stage_model pour `a2`…) ;
    - `test_reference_provenance_of_spec_6_5` : `a1` imputée à l'étape M sous
-     covariate_strategy='interpolate' -> provenance émise MODEL_ON_INTERPOLATED, ancre
-     2021-12-31 marquée DISAGGREGATED, somme 2021 = 120.0 ;
+     covariate_strategy='interpolate' -> provenance émise MODEL_ON_INTERPOLATED sur les DOUZE
+     mois, ancre 2021-12-31 COMPRISE (ni ORIGINAL, ni DISAGGREGATED), somme 2021 = 120.0 ;
+     provenances INCHANGÉES sous aggregation_constraint=None, seules les valeurs changeant ;
    - `test_estimator_failure_falls_back_and_marks_interpolated` : is_fallback=True, cellules
      INTERPOLATED, stores alimentés ;
    - cas limites : index non trié, index dupliqué, entité à une seule observation, variable
@@ -1589,10 +1601,12 @@ CE QUE CE LOT DOIT LIVRER
        }
 
    TROIS POINTS IMPÉRATIFS :
-   a. LE FILTRE PORTE SUR `origin_store`, PAS SUR LA MATRICE DE PROVENANCE. `DISAGGREGATED` est
-      ambigu par construction : il marque aussi bien une cellule issue d'une interpolation recalée
-      qu'une prédiction de modèle recalée. Utiliser la provenance publique comme filtre ferait de
-      'covariates_only' un SYNONYME de True — c'est le piège principal de ce lot (décision D12).
+   a. LE FILTRE PORTE SUR `origin_store`, PAS SUR LA MATRICE DE PROVENANCE. L'origine est une
+      propriété de la CELLULE, la provenance une propriété de l'ÉTAPE qui l'a produite, propagée
+      telle quelle à toutes ses cellules ; le store est de surcroît disponible pendant l'étape,
+      avant que la provenance ne soit écrite. Utiliser la provenance publique comme filtre
+      risquerait de faire de 'covariates_only' un SYNONYME de True — c'est le piège principal de
+      ce lot (décision D12).
    b. Chaque ligne de y_train porte LA FRÉQUENCE À LAQUELLE ELLE A ÉTÉ PRODUITE, lue dans
       `imputed_freq_store` ; le diviseur d'échelle est PAR LIGNE (point 3).
    c. y_train est composé des cellules de la colonne `v` dans le FRAME D'ÉTAPE, restreintes par
@@ -1637,8 +1651,9 @@ TESTS — à ajouter dans tests/frequency/test_high_frequency_imputer2.py :
      valeurs finales DIFFÉRENTES de True ; et sous covariate_strategy='interpolate',
      'covariates_only' produit les MÊMES valeurs finales que False ;
    - `test_y_train_filter_reads_origin_store_not_provenance` : test ciblé sur le piège D12 —
-     amorcer une cellule DISAGGREGATED d'origine 'interpolated' et une d'origine 'model', vérifier
-     que sous 'covariates_only' seule la première entre dans y_train ;
+     amorcer deux cellules de MÊME provenance publique mais d'origines différentes
+     ('interpolated' et 'model'), et vérifier que sous 'covariates_only' seule la première entre
+     dans y_train ;
    - `test_per_row_scale_factor_on_mixed_frequency_y_train` : reproduit le tableau chiffré du
      §5.4 (120/Y -> 10.0 ; 28/Q -> 9.33 ; 30/Q -> 10.0) ;
    - `test_carried_model_rank_reached_under_covariates_only` : au moins une étape porte une voie

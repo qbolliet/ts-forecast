@@ -2,7 +2,8 @@
 
 Couvre [SPEC] ``high_frequency_imputer2_architecture.md`` §11.1 (contrainte
 d'agrégation et ses quatre gardes), §11.2 (désagrégation non paramétrable des
-ancres, règle B2), §6.4 et §6.5 (provenance et exemple chiffré de référence),
+ancres et invariance de provenance), §6.4 et §6.5 (provenance et exemple chiffré
+de référence),
 §7.2 (masques de panel à MultiIndex), décisions D7 et D8 du §14.2.
 
 Lot purement additif : ``hfi`` reste intact, sa méthode
@@ -311,13 +312,17 @@ class TestRescaleTimeSeries:
         pd.testing.assert_series_equal(last_rescaled, values * ratio)
 
 
-# Tests de la désagrégation des ancres (§11.2, règle B2, D7)
+# Tests de la désagrégation des ancres (§11.2, D7)
 class TestAnchorCellsMask:
-    """Masque des ancres ré-exprimées à la fréquence d'étape."""
+    """Masque des ancres ré-exprimées à la fréquence d'étape.
+
+    Masque de DIAGNOSTIC — il localise les totaux observés écrasés par une
+    valeur de sous-période, il ne qualifie aucune provenance (§11.2).
+    """
 
     # Indépendance du masque vis-à-vis de la contrainte
     def test_anchor_mask_independent_of_constraint(self, reference_timeseries):
-        """B2 : le masque d'ancre est identique sous 'sum' et sous None."""
+        """Le masque d'ancre est identique sous 'sum' et sous None."""
         grid = reference_timeseries.index
         observations = reference_timeseries['a1']
 
@@ -332,7 +337,7 @@ class TestAnchorCellsMask:
 
     # Indépendance vis-à-vis de la réussite du recalage
     def test_anchor_mask_independent_of_rescaling_success(self):
-        """B2 : une période non recalée garde sa ligne d'ancre désagrégée."""
+        """Une période non recalée garde sa ligne d'ancre repérée."""
         # Période partiellement prédite : le recalage n'a pas lieu
         values = _raw_predictions()
         values.iloc[3] = np.nan
@@ -342,7 +347,7 @@ class TestAnchorCellsMask:
         _, rescaled_mask = constraint.rescale(values, observations, 'Y')
         anchor_mask = constraint.anchor_cells_mask(observations, values.index)
 
-        # Aucune cellule recalée, mais l'ancre reste marquée
+        # Aucune cellule recalée, mais l'ancre reste repérée
         assert not rescaled_mask.any()
         assert anchor_mask.loc['2021-12-31']
 
@@ -471,7 +476,7 @@ class TestPanel:
     def test_anchor_mask_independent_of_constraint_panel(
         self, mixed_freq_panel_heterogeneous
     ):
-        """B2 sur panel : masque MultiIndex identique sous 'sum' et sous None."""
+        """Sur panel : masque MultiIndex identique sous 'sum' et sous None."""
         grid = mixed_freq_panel_heterogeneous.index
         observations = mixed_freq_panel_heterogeneous['a1']
 
