@@ -1355,18 +1355,41 @@ class ImputationWindowCalculator:
             mask's index, or None if either the mask or the source frequency
             is missing.
 
+        A target frequency equal to the source one is the identity, and the
+        mask is returned unchanged. The mutualized training set of
+        ``TrainingSetBuilder`` reads the ``'training'`` mask at the frequency
+        of each BLOCK, and a block may sit exactly on the grid frequency:
+        asking for the grid's own frequency is a legitimate
+        request, not an error.
+
+        Args:
+            mask: Boolean Series on the source-frequency grid, or None.
+            source_freq: Frequency of the mask index, or None.
+            target_freq: Target (lower or equal) frequency offset string.
+
+        Returns:
+            Boolean Series at the target frequency, anchored like the source
+            mask's index, or None if either the mask or the source frequency
+            is missing.
+
         Raises:
-            ValueError: If source_freq is not higher than target_freq.
+            ValueError: If source_freq is strictly lower than target_freq.
 
         Examples:
             >>> grid = pd.date_range('2023-01-01', periods=12, freq='MS')
             >>> mask = pd.Series(True, index=grid)
             >>> calc._convert_mask_to_frequency(mask, 'M', 'Y').tolist()
             [True]
+            >>> calc._convert_mask_to_frequency(mask, 'M', 'M') is mask
+            True
         """
         # Absence de masque ou de fréquence source exploitable
         if mask is None or source_freq is None:
             return None
+
+        # Fréquence cible identique à la source : conversion sans objet
+        if normalize_frequency(source_freq) == normalize_frequency(target_freq):
+            return mask
 
         # Vérification que la fréquence source est plus élevée que la fréquence cible
         if not is_higher_frequency(source_freq, target_freq):
