@@ -208,7 +208,7 @@ class TestImputationPlan:
         assert list(frame.columns) == [
             'stage', 'variable', 'n_features', 'covariate_taint', 'target_taint',
             'emitted_provenance', 'is_fallback', 'interpolation_method',
-            'interpolation_anchor', 'materialization',
+            'interpolation_anchor', 'materialization', 'training_blocks',
         ]
         assert len(frame) == 3
 

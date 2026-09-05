@@ -81,6 +81,30 @@ def _scale_equal(left: Union[float, pd.Series], right: Union[float, pd.Series]) 
     return left == right
 
 
+# Fonction auxiliaire de rendu d'une clé d'entité
+def _entity_label(entity: EntityKey) -> str:
+    """Render an entity key as a readable label.
+
+    Args:
+        entity: Entity key — a tuple of level values, ``()`` for a time
+            series.
+
+    Returns:
+        The level values joined by ``'|'``, or ``'()'`` for the degenerate
+        entity of a time series.
+
+    Examples:
+        >>> _entity_label(('FR',))
+        'FR'
+        >>> _entity_label(())
+        '()'
+    """
+    # Entité dégénérée d'une série temporelle : étiquette explicite
+    if not entity:
+        return '()'
+    return '|'.join(str(level) for level in entity)
+
+
 # Étape du plan d'imputation
 @dataclass(frozen=True, eq=False)
 class ImputationStep:
@@ -141,6 +165,13 @@ class ImputationStep:
             variable.
         interpolation_anchor: Anchor fraction retained for this variable
             (0.0 / 0.5 / 1.0), or None when not applicable.
+        training_blocks: Composition of the mutualized training set the model
+            was fitted on: mapping entity -> block frequency ``f_block(e)``.
+            Every entity observing the variable contributes, at its
+            own frequency, whatever the stage — the blocks do not depend on
+            the stage, only the divisors do. A pure diagnostic field, replayed
+            as-is, empty for a step built without a mutualized set. Stored as
+            a read-only mapping.
 
     Examples:
         >>> from sklearn.linear_model import LinearRegression
@@ -184,6 +215,8 @@ class ImputationStep:
     is_fallback: bool
     interpolation_method: str
     interpolation_anchor: Optional[float]
+    # Champ de diagnostic, en dernière position et avec défaut
+    training_blocks: Mapping[EntityKey, str] = field(default_factory=dict)
 
     # Contrôles d'invariants et gel des conteneurs mutables
     def __post_init__(self) -> None:
@@ -235,6 +268,12 @@ class ImputationStep:
             {col: provided[col] for col in feature_cols}
         )
         object.__setattr__(self, 'materialization', frozen_materialization)
+
+        # Gel de la composition du jeu mutualisé, au même titre que
+        # materialization : un champ de diagnostic reste immuable
+        object.__setattr__(
+            self, 'training_blocks', MappingProxyType(dict(self.training_blocks))
+        )
 
         # Cohérence du repli : la sentinelle impose is_fallback
         if _is_interpolate_fallback(self.model) and not self.is_fallback:
@@ -301,6 +340,7 @@ class ImputationStep:
             and self.is_fallback == other.is_fallback
             and self.interpolation_method == other.interpolation_method
             and self.interpolation_anchor == other.interpolation_anchor
+            and dict(self.training_blocks) == dict(other.training_blocks)
         )
 
     # Hachage sur un sous-ensemble sûrement hachable et stable
@@ -400,23 +440,29 @@ class ImputationPlan:
             :func:`~tsforecast.frequency.provenance.resolve_model_provenance`,
             or :attr:`ProvenanceType.INTERPOLATED` for a fallback step),
             ``is_fallback``, ``interpolation_method``,
-            ``interpolation_anchor`` and ``materialization`` (rendered as a
-            comma-separated ``col=way`` string).
+            ``interpolation_anchor``, ``materialization`` (rendered as a
+            comma-separated ``col=way`` string) and ``training_blocks``
+            (rendered as a comma-separated ``entity=frequency`` string).
 
         Examples:
             >>> ImputationPlan().to_diagnostic_frame().columns.tolist()
-            ['stage', 'variable', 'n_features', 'covariate_taint', 'target_taint', 'emitted_provenance', 'is_fallback', 'interpolation_method', 'interpolation_anchor', 'materialization']
+            ['stage', 'variable', 'n_features', 'covariate_taint', 'target_taint', 'emitted_provenance', 'is_fallback', 'interpolation_method', 'interpolation_anchor', 'materialization', 'training_blocks']
         """
         columns = [
             'stage', 'variable', 'n_features', 'covariate_taint', 'target_taint',
             'emitted_provenance', 'is_fallback', 'interpolation_method',
-            'interpolation_anchor', 'materialization',
+            'interpolation_anchor', 'materialization', 'training_blocks',
         ]
         rows = []
         for step in self.steps:
             # Rendu lisible de la voie de matérialisation
             materialization_repr = ", ".join(
                 f"{col}={way}" for col, way in step.materialization.items()
+            )
+            # Rendu lisible de la composition du jeu mutualisé
+            training_blocks_repr = ", ".join(
+                f"{_entity_label(entity)}={freq}"
+                for entity, freq in step.training_blocks.items()
             )
             rows.append({
                 'stage': step.pred_freq_label,
@@ -429,6 +475,7 @@ class ImputationPlan:
                 'interpolation_method': step.interpolation_method,
                 'interpolation_anchor': step.interpolation_anchor,
                 'materialization': materialization_repr,
+                'training_blocks': training_blocks_repr,
             })
         return pd.DataFrame(rows, columns=columns)
 

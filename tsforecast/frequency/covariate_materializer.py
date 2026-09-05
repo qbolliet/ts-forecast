@@ -1392,6 +1392,7 @@ class CovariateMaterializer:
         detected_frequencies: DetectedFrequencies,
         source_data: pd.DataFrame,
         materialization: Optional[Mapping[str, MaterializationWay]] = None,
+        record: bool = True,
     ) -> Tuple[pd.DataFrame, Dict[str, MaterializationWay], Dict[str, CellOrigin]]:
         """Materialize covariates on one grid — the only producer of features.
 
@@ -1426,6 +1427,17 @@ class CovariateMaterializer:
             source_data: Input data holding the observations. Never modified.
             materialization: Ways to replay, one entry per column of
                 ``columns``. None to let the component choose.
+            record: Whether the production feeds the three stores. True
+                (default), every caller of the
+                imputer's stages relying on it. False produces the features
+                and writes nothing — the mode
+                :class:`~tsforecast.frequency.training_set_builder.TrainingSetBuilder`
+                uses, its mutualized grid carrying cells produced at the
+                frequency of the blocks rather than at that of any stage.
+                Recording those would pollute the mirror and let
+                ``_carry_frequency`` believe a rank-3 carry is available where
+                nothing was ever imputed. Reading the stores is unaffected:
+                ranks 2 and 3 keep working under ``record=False``.
 
         Returns:
             Tuple ``(features, ways, column_origins)``:
@@ -1480,8 +1492,14 @@ class CovariateMaterializer:
             )
             # Alimentation des trois registres, quelle que soit la voie : le
             # registre d'origines doit porter 'observed' pour les cellules
-            # d'entrée et pour les agrégations exactes
-            self._record(column, values, origins, freqs)
+            # d'entrée et pour les agrégations exactes.
+            # Production non enregistrée sous record=False : une grille
+            # d'entraînement mutualisée porte des cellules produites à la
+            # fréquence des blocs, et non à celle d'une étape ; les inscrire
+            # ferait croire à "_carry_frequency" qu'un report d'étape (rang 3)
+            # est disponible là où rien n'a jamais été imputé
+            if record:
+                self._record(column, values, origins, freqs)
 
             # Ajout des valeurs transformées au jeu de données résultat
             features[column] = values
