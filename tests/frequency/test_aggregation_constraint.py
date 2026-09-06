@@ -308,6 +308,102 @@ class TestRescaleTimeSeries:
 
 
 # Tests de la désagrégation des ancres (§11.2, D7)
+# Tests de la garde de troncature calendaire (§11.1)
+class TestCalendarTruncation:
+    """Une période que les bornes du jeu amputent ne porte pas son total."""
+
+    # Grille amputée de ses deux premiers mois
+    @staticmethod
+    def _truncated_2021(reference_timeseries: pd.DataFrame):
+        """Return the ten last months of 2021 and their annual observation."""
+        year = reference_timeseries.loc['2021-03-31':'2021-12-31']
+        values = pd.Series(
+            np.linspace(9.0, 10.5, len(year)), index=year.index, name='a1'
+        )
+        return values, year['a1']
+
+    def test_truncated_period_keeps_its_raw_predictions(self, reference_timeseries):
+        """Dix mois pour une année : le total n'est pas réparti sur eux."""
+        values, observations = self._truncated_2021(reference_timeseries)
+        assert len(values) == 10
+
+        rescaled, mask = AggregationConstraint('sum').rescale(
+            values, observations, 'Y', grid_freq='M'
+        )
+
+        # Prédictions brutes conservées, aucune cellule déplacée
+        pd.testing.assert_series_equal(rescaled, values)
+        assert not mask.any()
+
+    def test_the_guard_is_opt_in_through_grid_freq(self, reference_timeseries):
+        """Sans fréquence de grille, la troncature reste invisible.
+
+        Le décompte des sous-périodes attendues n'est pas déductible des seules
+        valeurs : les sous-périodes manquantes sont ABSENTES de la grille, et
+        non vides. Un appelant qui ne dit pas à quelle fréquence tourne sa
+        grille obtient donc l'ancien comportement.
+        """
+        values, observations = self._truncated_2021(reference_timeseries)
+
+        rescaled, _mask = AggregationConstraint('sum').rescale(
+            values, observations, 'Y'
+        )
+        assert rescaled.sum() == pytest.approx(120.0)
+
+    def test_complete_period_is_rescaled_as_before(self, reference_timeseries):
+        """Une année entière garde son recalage exact, garde active."""
+        grid = reference_timeseries.loc['2021'].index
+        values = pd.Series(_RAW_2021, index=grid, name='a1')
+        observations = reference_timeseries.loc['2021', 'a1']
+
+        rescaled, mask = AggregationConstraint('sum').rescale(
+            values, observations, 'Y', grid_freq='M'
+        )
+
+        assert len(values) == 12
+        assert rescaled.sum() == pytest.approx(120.0)
+        assert mask.all()
+
+    def test_quarter_truncated_on_a_monthly_grid(self, reference_timeseries):
+        """La garde vaut pour toute paire de fréquences, pas seulement l'année."""
+        # Deux mois pour un trimestre de trois
+        grid = reference_timeseries.loc['2021-01-31':'2021-02-28'].index
+        values = pd.Series([5.0, 5.0], index=grid, name='q1')
+        observations = pd.Series([np.nan, 10.0], index=grid, name='q1')
+
+        rescaled, mask = AggregationConstraint('sum').rescale(
+            values, observations, 'Q', grid_freq='M'
+        )
+        assert not mask.any()
+        pd.testing.assert_series_equal(rescaled, values)
+
+    def test_guard_reads_the_grid_frequency_of_each_entity(self):
+        """Sur un panel, la fréquence de grille peut être donnée par entité."""
+        months = pd.date_range('2021-01-31', periods=12, freq='ME')
+        quarters = pd.date_range('2021-03-31', periods=2, freq='QE')
+
+        # FR : douze mois, l'année est complète. DE : deux trimestres sur quatre
+        france = pd.Series(10.0, index=pd.MultiIndex.from_product(
+            [['FR'], months], names=['country', 'date']))
+        germany = pd.Series(30.0, index=pd.MultiIndex.from_product(
+            [['DE'], quarters], names=['country', 'date']))
+        values = pd.concat([france, germany])
+
+        observations = pd.Series(np.nan, index=values.index)
+        observations.loc[('FR', months[-1])] = 120.0
+        observations.loc[('DE', quarters[-1])] = 120.0
+
+        rescaled, mask = AggregationConstraint('sum').rescale(
+            values, observations, 'Y', grid_freq={('FR',): 'M', ('DE',): 'Q'}
+        )
+
+        # FR est complète et recalée, DE est tronquée et laissée brute
+        assert mask.loc['FR'].all()
+        assert rescaled.loc['FR'].sum() == pytest.approx(120.0)
+        assert not mask.loc['DE'].any()
+        assert rescaled.loc['DE'].tolist() == [30.0, 30.0]
+
+
 class TestAnchorCellsMask:
     """Masque des ancres ré-exprimées à la fréquence d'étape.
 

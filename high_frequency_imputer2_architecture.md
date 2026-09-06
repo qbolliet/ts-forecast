@@ -389,9 +389,10 @@ seules **dates-ancres** (à l'échelle de sa propre fréquence) et NaN partout a
   **prérequis dur** de la modalité, à répéter dans la docstring de `covariate_strategy`.
 - **Ordre indifférent** : aucune covariable ne dépend d'une imputation antérieure ;
   `fit_predict_order` est ignoré (§8.1).
-- **Diviseur d'échelle** : règle B25 conservée — `1.0` pour une colonne jamais ré-agrégée (ses
-  ancres gardent l'échelle de `f_c`), `get_conversion_factor(f_stage, f_c)` sinon, avec
-  `f_stage = pred_freq` si `f_c` est plus fine que l'étape et `f_c` sinon (§9.2).
+- **Diviseur d'échelle** : la voie `'raw_anchors'` est le cas où la cellule couvre une période de
+  la **colonne** et non de la grille — son diviseur vaut donc
+  `get_conversion_factor(f_stage, f_c)`, et `1.0` pour une colonne déjà au pas de l'étape
+  (§9.2, D23).
 
 Sur le jeu `TS`, étape `M`, covariable `a1` : `a1` vaut 120 au 2021-12-31, NaN sur les 11 autres
 mois de 2021 — **au fit comme au predict**, taux de NaN 11/12 des deux côtés.
@@ -483,10 +484,82 @@ laissée à ses ancres si `'tolerate_nan'` — **même lorsque ses ancres suffir
 modèle apprend sur la covariable exacte et prédit sur la covariable interpolée. C'est la
 généralisation de l'invariant du §3, du motif de NaN à la **nature** des valeurs.
 
+#### Sens de la décision : la grille de prédiction décide, la grille d'entraînement subit
+
+La phrase précédente fixe le **sens** de la règle, et il n'est pas symétrique : c'est la
+disponibilité **au predict** qui commande. La voie est donc décidée par
+`CovariateMaterializer.decide_ways` sur la **grille de prédiction**, enregistrée dans l'étape,
+puis **imposée** à la grille d'entraînement — `TrainingSetBuilder.build(materialization=…)` et
+`materialize(materialization=…)` sont les deux appels de rejeu, et il n'existe aucun autre
+chemin. Décider dans l'autre sens serait à la fois faux et impraticable : une voie `'aggregate'`
+choisie sur une grille trimestrielle et rejouée telle quelle sur la grille mensuelle demanderait
+d'agréger une colonne trimestrielle vers le mois, ce qui ne produit que des NaN.
+
+#### La voie est unique, son application est par entité
+
+La voie est une propriété de la **colonne** — une entrée par `feature_col` — mais son
+application est ramenée, entité par entité, à ce que les fréquences de cette entité autorisent
+(`_applicable_way`). C'est indispensable dès que le jeu d'entraînement est mutualisé (§5.8) :
+les blocs n'ont pas tous la même fréquence, et une même covariable y occupe les trois positions
+possibles face à la grille. Sur `PANEL-F`, à l'étape `M`, la voie `'interpolate'` retenue pour
+`q1` (trimestrielle) donne :
+
+| Bloc | `f_block(e)` | Position de `q1` face au bloc | Voie appliquée |
+|---|---|---|---|
+| `FR` | `Y` | plus **fine** | `aggregate` — somme exacte sur l'année |
+| `DE` | `Q` | **égale** | `identity` — lue telle quelle |
+| `IT` | `M` | plus **basse** | `interpolate` — la voie de l'étape, applicable telle quelle |
+
+Une voie de **rang 1** (`identity`, `aggregate`) est elle aussi normalisée de la sorte : imposée
+sur une grille plus **grossière** que la colonne, elle devient une agrégation, faute de quoi la
+cellule porterait la valeur **ponctuelle** de la colonne à la date de grille — une quantité de
+sous-période là où la ligne en couvre une entière, et l'échelle du §9.2 serait fausse. Imposée
+sur une grille plus **fine** que la colonne, elle retombe sur le rang 4 de la stratégie.
+
+#### Une covariable à sa propre fréquence garde ses **vraies valeurs** au `fit`
+
+C'est le cas symétrique du précédent, et il est celui qui compte le plus en pratique : la
+covariable `c` doit être **matérialisée** sur la grille de prédiction — elle y est plus basse —
+mais la grille d'**entraînement**, elle, tourne à la fréquence même de `c`, parce que la variable
+imputée l'observe à ce pas.
+
+> **Le rang 1 l'emporte toujours. Une entité qui observe `c` à la fréquence de sa grille de bloc y
+> lit ses OBSERVATIONS ; ni l'interpolation ni le miroir ne remplacent une vraie valeur.**
+
+Exemple, jeu `TS`, `target_frequency='Q'` — la grille de prédiction est trimestrielle, `a1` et
+`a2` sont annuelles, et le bloc d'entraînement de `a1` est donc annuel :
+
+| Grille | Pas | Voie appliquée à `a2` | Valeurs de `a2` | Après échelle (§9.2) |
+|---|---|---|---|---|
+| entraînement (bloc de `a1`) | `Y` | `identity` | **60 · 66 · 72**, ses observations | 15.0 · 16.5 · 18.0 |
+| prédiction (étape) | `Q` | `interpolate` | interpolées puis recalées aux totaux annuels | somme 2021 = **60** |
+
+Trois conséquences à retenir :
+
+1. **Aucune information observée n'est perdue** : sur sa propre grille, l'interpolation d'une
+   colonne *est* l'identité — il n'y a rien à interpoler entre deux points quand la grille ne
+   contient que ces points. La voie de rang 4 dégrade vers le rang 1, et non l'inverse.
+2. **Les deux côtés portent le même niveau**, et cela ne tient pas au hasard : sous
+   `aggregation_constraint='sum'`, une covariable interpolée est recalée aux totaux de **sa
+   propre** fréquence (§11.1). La valeur vue au `fit` est donc l'**agrégat exact** des valeurs
+   vues au `predict`. Seule la forme **intra-période** diffère — et la grille d'entraînement,
+   plus grossière, ne pouvait de toute façon pas l'exprimer.
+3. **La souillure ne s'en trouve pas blanchie** : `covariate_taint` est le maximum sur
+   `X_train ∪ X_pred` (§6.2), et la grille de prédiction y apporte de l'interpolé. L'étape émet
+   `MODEL_ON_INTERPOLATED`, ce qui est exact : son modèle *prédit* bien sur une covariable
+   reconstruite, même s'il a *appris* sur l'observation.
+
+Sous `covariate_strategy='model'`, la même règle vaut face au **miroir** : `_applicable_way`
+teste le rang 1 **avant** de lire les registres, si bien qu'une covariable déjà imputée à l'étape
+courante est malgré tout lue à ses observations sur toute grille de bloc où elle est observée.
+Une imputation ne recouvre jamais une mesure.
+
 Le champ correspondant de l'étape est
 `materialization: Mapping[str, Literal['identity', 'aggregate', 'stage_model', 'carried_model', 'interpolate', 'raw_anchors']]`,
-une entrée par colonne de `feature_cols`. Il est **rejoué tel quel au transform** ; c'est lui
-qui rend le test I11 (§16) possible.
+une entrée par colonne de `feature_cols`, portant la voie **de la grille de prédiction**. Il est
+**rejoué tel quel au transform** ; c'est lui qui rend le test I11 (§16) possible. La voie
+enregistrée peut donc différer de celle qu'une entité applique réellement : c'est voulu, la
+dégradation étant déterministe et rejouable à l'identique.
 
 ### 4.7 — L'exemple de référence sous chaque stratégie
 
@@ -783,17 +856,20 @@ une hypothèse propre à la mutualisation : c'est le contrat de la classe entiè
 
 **R4 — Covariables du bloc.** `CovariateMaterializer.materialize` est appelé **une seule fois**
 sur la grille d'entraînement mutualisée — l'union des grilles de bloc — avec
-`stage_freq = {e: f_block(e)}` et `detected_frequencies` sous leur forme par entité. Le composant
-lit déjà une fréquence d'étape par entité et dégrade la voie retenue entité par entité
+`stage_freq = {e: f_block(e)}`, `detected_frequencies` sous leur forme par entité, et la
+`materialization` **décidée sur la grille de prédiction** (§4.6). Le composant lit déjà une
+fréquence d'étape par entité et ramène la voie imposée à ce que chaque entité autorise
 (`_applicable_way`) : **aucune seconde implémentation, aucun contournement de la règle du §4.6**.
-La voie est décidée sur cette grille, enregistrée dans l'étape, et rejouée telle quelle sur la
-grille de prédiction.
+C'est ce mécanisme qui donne à une même covariable trois traitements différents sur un jeu
+mutualisé — agrégée chez le bloc annuel, lue telle quelle chez le bloc trimestriel, interpolée
+chez le bloc mensuel — pour un seul niveau une fois l'échelle du §9.2 appliquée.
 
 **R5 — Échelle.** Diviseur **par ligne** pour la cible (§5.4, table de généralisation), **> 1**
 pour un bloc plus grossier que l'étape et **< 1** pour un bloc plus fin, et diviseurs **par bloc**
-pour les features : `StageScaler.feature_divisors` reçoit `source_freq`
-sous forme de liaison par entité `{e: f_block(e)}`, exactement comme il reçoit déjà `pred_freq`.
-La règle B25 est appliquée **à l'intérieur de chaque bloc**, sans changement.
+pour les features : `StageScaler.feature_divisors` reçoit `grid_freq`
+sous forme de liaison par entité `{e: f_block(e)}`, exactement comme il reçoit déjà `stage_freq`,
+plus les **voies** retenues, qui seules disent si une cellule couvre une période de la grille ou
+une période de la colonne (§9.2).
 
 **R6 — Un seul ajustement par (étape, variable).** Le jeu ainsi construit ne dépend **pas** du
 groupe de fréquence source : à une étape donnée, tous les groupes d'une même variable reçoivent
@@ -930,6 +1006,16 @@ Taint      = Literal['none', 'interpolated', 'imputed']
   `'observed'` ; une agrégation exacte vaut `'observed'` ; une interpolation ou un repli
   d'interpolation valent `'interpolated'` ; une prédiction de modèle vaut `'model'`, y compris
   après recalage aux totaux (§11) et y compris après report d'étape (§4.4, rang 3).
+
+> **Les trois registres ne portent que ce qui a été IMPUTÉ**, jamais ce qui a été préparé comme
+> feature. Une étape écrit sa propre production — la prédiction de son modèle, ou l'interpolation
+> de son repli — et rien d'autre : la matérialisation de ses covariables se fait sous
+> `record=False`. Y inscrire une covariable écraserait dans le miroir l'imputation que le modèle
+> de cette colonne vient d'y écrire, puisque toute écriture est un `combine_first` où le nouveau
+> l'emporte ; le résultat dépendrait alors de l'**ordre de traitement**, que l'invariant I10
+> interdit hors `'model'`. Cette règle est aussi ce qui fait tomber juste le rang 2 de la
+> précédence (§4.4) : une covariable n'est lue dans le miroir que si elle y a été **imputée**,
+> et le plan de référence du §5.5 s'en déduit tel quel.
 - **`covariate_taint`** d'une étape = `max` des origines des cellules **effectivement lues** dans
   `X_train ∪ X_pred`, restreint aux **`feature_cols` effectives** du modèle (leçon C17 de [ARCH]
   §3.8 : jamais sur l'état global du store) — avec la correspondance
@@ -1257,13 +1343,12 @@ jamais des couples `(entité, colonne)` (D10).
 
 La modalité s'applique à **tous les diviseurs** relatifs à la feature :
 
-1. le diviseur des covariables à l'entraînement et à la prédiction
-   (`_covariate_scaling_divisors`, **règle B25** : `1.0` pour une colonne jamais ré-agrégée,
-   `get_conversion_factor(f_stage, f_var)` sinon, avec `f_stage = pred_freq` si `f_var` est plus
-   fine que l'étape et `f_var` sinon). Sur un jeu d'entraînement **mutualisé** (§5.8), la règle
-   s'applique **bloc par bloc** : `feature_divisors` reçoit `source_freq` sous forme de liaison
-   par entité `{e: f_block(e)}` — la même forme que `pred_freq` accepte déjà — et retourne alors
-   nécessairement une `DataFrame` de diviseurs par ligne ;
+1. le diviseur des covariables à l'entraînement et à la prédiction (`feature_divisors`),
+   **fondé sur la période que la cellule couvre réellement sur sa grille** — voir la règle
+   ci-dessous. Sur un jeu d'entraînement **mutualisé** (§5.8), elle s'applique **bloc par
+   bloc** : `feature_divisors` reçoit `grid_freq` sous forme de liaison par entité
+   `{e: f_block(e)}` — la même forme que `stage_freq` accepte déjà — et retourne alors une
+   `DataFrame` de diviseurs par ligne ;
 2. le diviseur de `y` (scalaire d'étape, ou `pd.Series` par ligne dès que `y_train` mêle
    plusieurs fréquences de production — de production **d'étape** (§5.4) comme de **bloc**
    (§5.8)) ;
@@ -1282,13 +1367,41 @@ ajusté par `fit(X, y)`, le **nom de `y`** la désigne, et une cible anonyme ret
 global de `scale_features`. Le paramètre `target_column` est **supprimé** — il aurait dupliqué une
 information que `y` porte déjà (D15).
 
-L'arithmétique, elle, continue de distinguer `y` des features : une covariable portée à sa propre
-fréquence n'est jamais ré-agrégée et divise par `1.0` (règle B25), tandis que la cible, **produite
-sur la grille d'étape**, y porte `pred_freq` et divise par le décompte de sous-périodes
-`pred_freq` d'une période de `f_var`. Les deux règles ne coïncident que si l'on déclare `pred_freq`
-comme fréquence de la colonne — et leurs replis diffèrent : fréquence incomparable → diviseur par
-défaut pour une covariable, **erreur** pour la cible. Les méthodes `feature_divisors` et
-`target_divisor` restent donc distinctes.
+#### La règle : diviser par la période que la cellule couvre
+
+> **Le diviseur d'une covariable est le nombre de sous-périodes d'étape contenues dans la période
+> qu'une de ses cellules couvre sur la grille où elle se trouve.** La voie de matérialisation
+> (§4.6) est ce qui désigne cette période, et elle seule :
+>
+> - `'raw_anchors'` lit la colonne là où elle est observée : la cellule couvre une période de la
+>   **colonne**, `f_col` ;
+> - toute autre voie — identité, agrégation exacte, interpolation, miroir — produit une cellule
+>   qui couvre une période de la **grille**, `f_grid`.
+>
+> Le diviseur vaut alors `get_conversion_factor(f_stage, f_carried)`, la primitive même dont le
+> diviseur par ligne de la cible se sert (§5.4) : les deux axes partagent un seul mécanisme, et il
+> n'y a pas deux plomberies d'échelle à écrire.
+
+Appliquée aux **deux** grilles, cette règle rend les features d'entraînement et de prédiction
+comparables **par construction** — c'est l'invariant I5 du §16, et il vaut à l'égalité près, non à
+une tolérance près. Sur `TS`, à l'étape `M`, `q1` agrégée sur la grille annuelle
+d'entraînement couvre une année et divise par 12 ; interpolée sur la grille mensuelle de
+prédiction elle couvre un mois et divise par 1 ; les deux moyennes coïncident.
+
+Cette règle **remplace** l'ancienne règle B25, qui normalisait vers `f_var` — la convention de
+`HighFrequencyImputer`, où les covariables d'entraînement étaient agrégées sur la grille de la
+variable imputée. Elle ne décrit plus rien dans `hfi2`, dont la grille d'entraînement est celle
+des **blocs** (§5.8) et dont les covariables y sont matérialisées par les voies du §4.6 : deux
+cellules d'une même colonne peuvent y couvrir des périodes différentes, ce que `f_var` ne peut pas
+exprimer. `feature_divisors` porte donc la règle ci-dessus, et **il n'existe qu'une méthode de
+diviseur de covariable**.
+
+L'arithmétique continue en revanche de distinguer `y` des features, et les deux méthodes restent
+distinctes : la cible est **produite sur la grille d'étape** et divise par le décompte de
+sous-périodes `pred_freq` d'une période de `f_var` — ou, par ligne, de sa fréquence de production.
+Leurs replis diffèrent également : fréquence incomparable → diviseur par défaut pour une
+covariable, **erreur** pour la cible, dont l'échelle gouverne silencieusement ce que le modèle
+apprend.
 
 ### 9.3 — Prérequis et audit
 
@@ -1421,9 +1534,26 @@ sont multipliées par `total observé / agrégat prédit`, de sorte que la colon
 | Cas | Comportement |
 |---|---|
 | période **partiellement** prédite (au moins une sous-période NaN) | non recalée, prédictions brutes conservées |
+| période **tronquée par les bornes du jeu** (sous-périodes absentes de la grille, non NaN) | non recalée, prédictions brutes conservées — voir la note ci-dessous |
 | période sans aucune observation (fin de série retardée) | non recalée |
 | agrégat prédit nul, total observé non nul | non recalée (ratio indéfini) |
 | agrégat prédit de **signe opposé** au total observé | **recalée** — la contrainte prime — mais toutes les sous-périodes changent de signe : un `UserWarning` agrégé est émis |
+
+**Note sur la troncature.** Les deux premières gardes se relaient, et il faut les deux. La
+première voit une période *partiellement prédite* — au moins une sous-période **NaN sur la
+grille**. La seconde voit une période que les **bornes du jeu** amputent, dont les sous-périodes
+manquantes ne sont pas vides mais **absentes** : un jeu qui commence au 2021-03-31 porte dix mois
+de 2021, tous prédits, et la première garde n'y voit rien. Sans la seconde, le total annuel leur
+serait réparti à eux dix — une sur-attribution de 20 % à chaque mois.
+
+Le décompte est **calendaire**, lu sur la période elle-même : douze mois dans une année, trois
+dans un trimestre, 28 à 31 jours dans un mois. Il n'est pas déductible des seules valeurs, d'où le
+paramètre `grid_freq` de `rescale` : un appelant qui ne dit pas à quelle fréquence tourne sa
+grille n'active pas la garde. `hfi2` le passe toujours — la fréquence de l'étape pour les
+prédictions, celle de la grille cible pour les covariables interpolées.
+
+À l'autre bout de la série, une période dont l'**ancre** sort du jeu n'a de toute façon aucun
+total à imposer, et la fenêtre stricte (§7.1) l'exclut le plus souvent d'elle-même.
 
 Le masque des cellules effectivement recalées est un masque de **diagnostic** : recalées ou non,
 toutes les cellules gardent la provenance qu'elles portaient avant le recalage — `MODEL_*` ou
@@ -1501,8 +1631,8 @@ principale restant un orchestrateur mince :
 | Composant | Fichier | Responsabilité |
 |---|---|---|
 | `HighFrequencyImputer2` | `high_frequency_imputer2.py` | API sklearn, validations `__init__`, normalisation au `fit`, orchestration `fit`/`transform`/`inverse_transform` |
-| `CovariateMaterializer` | `covariate_materializer.py` | matérialisation des covariables sur une grille selon `covariate_strategy` / `covariate_fallback` / `interpolation_*` ; **unique** producteur de `X_train` et `X_pred` ; tient `imputed_store`, `imputed_freq_store` et `origin_store` ; applique la précédence du §4.4 |
-| `StageScaler` | `stage_scaler.py` | diviseurs `'constant'`/`'calendar'`, scalaires et par ligne ; application et inversion de l'échelle ; report d'échelle des prédictions ; `source_freq` en **liaison par entité** pour les jeux mutualisés (§5.8 R5) |
+| `CovariateMaterializer` | `covariate_materializer.py` | matérialisation des covariables sur une grille selon `covariate_strategy` / `covariate_fallback` / `interpolation_*` ; **unique** producteur de `X_train` et `X_pred` (`materialize`, en mode choix ou en mode rejeu) ; producteur de la **frame d'étape** (`stage_frame`) ; tient `imputed_store`, `imputed_freq_store` et `origin_store`, alimentés par `interpolate_column` et par `record_production` — jamais par la matérialisation d'une covariable (§6.2) ; applique la précédence du §4.4 et la ramène par entité (`_applicable_way`, §4.6) |
+| `StageScaler` | `stage_scaler.py` | diviseurs `'constant'`/`'calendar'`, scalaires et par ligne ; application et inversion de l'échelle ; report d'échelle des prédictions ; **une seule** méthode de diviseur de covariable, `feature_divisors`, fondée sur la période que la cellule couvre (§9.2), avec `grid_freq` en **liaison par entité** pour les jeux mutualisés (§5.8 R5) |
 | `VariableOrderer` | `variable_orderer.py` | ordres `'frequency'` et `'cv'` (avec `cv`, `cv_scoring`, `min_cv_train_size`), tie-break alphabétique |
 | `TrainingSetBuilder` | `training_set_builder.py` | jeu d'entraînement **mutualisé** d'une variable à une étape (§5.8) : blocs par entité, fréquence de bloc, lignes éligibles (`ELIGIBLE_ORIGINS`), appel **unique** à `CovariateMaterializer.materialize`, fréquence de production par ligne, diviseurs par bloc |
 | `AggregationConstraint` | `aggregation_constraint.py` | recalage aux totaux de période, gardes du §11.1, masque des cellules recalées |
@@ -1538,9 +1668,11 @@ PHASE 5  pour chaque étape de fréquence f de la progression :
         pour un bloc plus fin que l'étape)
       - grille de prédiction : masque 'imputation'
       - sélection des feature_cols (non-vides sur LES DEUX fenêtres, covariate_eligibility)
-      - matérialisation des covariables sur LES DEUX grilles par la MÊME voie (§4.6), l'appel
-        d'entraînement portant stage_freq = {e: f_block(e)} ; enregistrement de
-        materialization[col]
+      - VOIE décidée UNE FOIS sur la grille de PRÉDICTION (decide_ways, §4.6), enregistrée
+        dans materialization[col], puis IMPOSÉE aux deux grilles : au builder pour X_train
+        (stage_freq = {e: f_block(e)}), au materialize de la grille de prédiction pour X_pred.
+        Les deux appels tournent sous record=False : les registres ne portent que ce qui est
+        IMPUTÉ (§6.2)
       - calcul des souillures covariate_taint / target_taint (§6.2), sur le jeu MUTUALISÉ
       - mise à l'échelle (StageScaler : diviseur cible PAR LIGNE, diviseurs de features PAR BLOC)
       - ajustement de l'estimateur — UN SEUL pour (étape, variable), quel que soit le nombre de
@@ -1554,12 +1686,20 @@ PHASE 5  pour chaque étape de fréquence f de la progression :
           . écriture des valeurs, marquage de provenance (§6.3, IDENTIQUE pour les cellules
             recalées et non recalées, lignes d'ancre comprises : le recalage ne change aucune
             provenance)
-          . mise à jour de imputed_store / imputed_freq_store / origin_store
-            (y compris en repli : "le repli matérialise")
+          . mise à jour de imputed_store / imputed_freq_store / origin_store, par la seule
+            production de l'étape (y compris en repli : "le repli matérialise")
           . gel de l'ImputationStep dans le plan (mêmes model, feature_cols, materialization et
             souillures ; source_frequency, entities et recalage propres au groupe)
-PHASE 6  finalisation : plan figé, attributs de sortie, sortie multi-fréquences si demandé
+PHASE 6  finalisation : plan figé, attributs de sortie, avertissements agrégés en UN message.
+         La sortie multi-fréquences relève du transform, seul producteur de frame.
 ```
+
+**Exécution d'étape, en pratique.** `_execute_step` reçoit une `ImputationStep` **déjà figée** et
+ne décide plus rien : il produit (prédiction ou interpolation de repli), recale, marque la
+provenance et écrit les trois registres. Le `fit` construit l'étape puis l'appelle ; le
+`transform` rejouera le plan **par cette même méthode**. Un échec de **prédiction** y dégrade
+l'étape en repli avant qu'elle n'entre au plan, de sorte que le plan dise toujours ce qui a
+réellement été fait.
 
 ### 12.4 — `transform`, `inverse_transform`, `keep_lower_frequencies`
 
@@ -1587,9 +1727,18 @@ PHASE 6  finalisation : plan figé, attributs de sortie, sortie multi-fréquence
 - **B19** : purge de l'état de `transform` en tête de `fit`.
 - **B20** : `NotFittedError` propre avant `fit`, via `check_is_fitted` avec une **liste explicite**
   d'attributs.
+- **Index trié, sans tri implicite** : la classe fige `auto_sort=False` et
+  `strict_validation=True`. Un index non trié lève un `ValueError` explicite plutôt que d'être
+  trié en silence — le tri déplacerait les fenêtres et les agrégats sans que l'appelant le sache.
+- **Fréquence indétectable, jamais fatale** : `detect_frequency` **lève** sur une série de moins
+  de deux observations — une colonne entièrement NaN, ou une entité qui n'observe une colonne
+  qu'une fois. La détection de la phase 0 retombe alors sur un parcours **couple par couple**, où
+  une paire indétectable vaut `None` et rejoint `_undetected_frequencies_` (§13.2) : un couple
+  inutilisable ne fait pas échouer le `fit` des autres. La cause reste dans `FrequencyDetector`,
+  hors périmètre de ce document.
 - **Avertissements uniques** (estimateur absent, lignes hors fenêtre, fréquences divergentes,
-  périodes à signe inversé), jamais un par variable × étape : accumulation puis message agrégé en
-  fin de phase.
+  périodes à signe inversé, étapes dégradées en repli), jamais un par variable × étape :
+  accumulation puis message agrégé en fin de phase.
 
 ---
 
@@ -1726,6 +1875,19 @@ sont ceux de la version 1, conservés pour la traçabilité.
 | **D20** | `aggregation_constraint` n'admet que `'sum'` et `None` : `'mean'` et `'last'` sont **retirés** de l'API, du module `aggregation_constraint.py` et de `CovariateMaterializer`. L'agrégation exacte d'une covariable plus fine (§4.1) est une **somme**, sans consulter le paramètre | l'additivité n'est pas une option du recalage, c'est le **contrat de toute la classe** (§2.2), et `additive_transformer` en est l'unique échappatoire — appliqué en phase 2 du `fit`, avant toute imputation, et inversé au `inverse_transform`. Une colonne non additive fausse déjà chaque diviseur de fréquence (§5.4, §9.1), la désagrégation des ancres (§11.2) et l'agrégation des covariables (§4.1) : accepter `'mean'` au seul endroit du recalage corrigeait un mécanisme sur quatre et laissait croire au reste. Constat de mise en œuvre : `CovariateMaterializer` code **déjà** `method='sum'` en dur au rang 1 — la spec promettait ce que le code ne faisait pas |
 | **D19** | **un seul ajustement par (étape, variable)** : le modèle est partagé par les étapes du plan qui ne diffèrent que par `source_frequency` et `entities` | le jeu mutualisé ne dépend pas du groupe (§5.8 R6) : deux ajustements y seraient redondants et, sous un estimateur stochastique, divergents. C'est la mémoïsation explicitement autorisée par le §5.7, et non un retour de D2 : un modèle n'est jamais réutilisé d'une **étape** à l'autre |
 
+### 14.4 — Décisions arrêtées à l'implémentation (lot L10, 2026-09-06)
+
+Quatre points que la spécification laissait sous-déterminés, ou disait dans l'autre sens, et que
+l'écriture de la PHASE 5 a tranchés. Chacun est mesuré par un invariant du §16.
+
+| Code | Décision | Motif |
+|---|---|---|
+| **D21** | la voie de matérialisation est décidée sur la **grille de prédiction**, puis imposée à la grille d'entraînement — et non l'inverse | c'est le sens qu'énonce déjà le §4.6 (« servie par le repli au predict → même chemin au fit ») et celui que déroulent les tableaux du §4.7 et du §5.5. Le sens inverse est en outre impraticable : une voie `'aggregate'` choisie sur une grille annuelle et rejouée sur la grille mensuelle demanderait d'agréger une colonne trimestrielle vers le mois, et ne produit que des NaN (§4.6) |
+| **D22** | une voie de **rang 1** imposée sur une grille plus grossière que la colonne devient une **agrégation** ; imposée sur une grille plus fine, elle retombe sur le rang 4 | sans cette normalisation, `_applicable_way` rendait la valeur **ponctuelle** de la colonne à la date de grille — une quantité de sous-période là où la ligne en couvre une entière. C'est ce qui rend le jeu mutualisé homogène : une même covariable y est agrégée, lue ou interpolée selon le bloc, pour un seul niveau (§4.6, §5.8 R4) |
+| **D23** | le diviseur d'une covariable part de la **période que sa cellule couvre** sur sa grille, désignée par la voie ; la règle **B25** (normalisation vers `f_var`) est retirée, et `feature_divisors` est l'**unique** méthode de diviseur de covariable | B25 décrivait la convention de `hfi`, où les covariables d'entraînement étaient agrégées sur la grille de `f_var`. La grille d'entraînement de `hfi2` est celle des **blocs** : deux cellules d'une même colonne y couvrent des périodes différentes, ce que `f_var` ne peut pas exprimer. Mesuré : sous B25, les moyennes de `X_train` et de `X_pred` divergeaient d'un facteur 12 sur le jeu `TS` ; sous D23 elles sont **égales** (I5, §9.2) |
+| **D25** | une période que les **bornes du jeu** tronquent n'est **pas recalée** : le décompte calendaire de ses sous-périodes est comparé à ce que la grille en porte, et la garde est armée par le paramètre `grid_freq` de `rescale` | la garde « période partiellement prédite » ne voit que des NaN, et une sous-période retranchée par les bornes du jeu n'en est pas un. Imposer un total annuel à dix mois sur douze sur-attribue 20 % à chacun, silencieusement, à chaque début et chaque fin de série — le défaut est systématique, pas marginal (§11.1) |
+| **D24** | les trois registres ne portent **que ce qui a été imputé** : la matérialisation des covariables d'une étape tourne sous `record=False` | une covariable enregistrée écrase dans le miroir l'imputation que son propre modèle vient d'y écrire — toute écriture étant un `combine_first` où le nouveau l'emporte —, ce qui rend le résultat dépendant de l'ordre de traitement et met I10 en échec. Corollaire heureux : le rang 2 de la précédence ne se déclenche que sur une covariable réellement **imputée**, et le plan de référence du §5.5 tombe juste tel qu'il est écrit (§6.2) |
+
 ---
 
 ## 15 — Prérequis et travaux annexes
@@ -1809,10 +1971,15 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 | **I15** | indépendance au groupe de fréquence source | à une étape donnée, les groupes `(v, Y)` et `(v, Q)` de `PANEL-F` reçoivent le **même** `X_train`, le **même** `y_train` et les **mêmes** voies de matérialisation, et **partagent le même objet modèle** (`is`) ; leurs recalages restent distincts (totaux annuels de `FR`, trimestriels de `DE`) et `IT` n'est **jamais** réécrite |
 | **I16** | non-régression de la série temporelle | sur `TS` (entité unique), le jeu mutualisé est **identique** au jeu d'origine : tous les exemples chiffrés des §4.7, §5.4 et §5.5 restent vrais au chiffre près |
 
-Cas limites à couvrir explicitement, en plus : index non trié, index dupliqué, entité à une seule
-observation, variable annuelle à 2 ancres seulement (`y_train` de taille 2 sous
-`impute_intermediate_frequencies=False`), période incomplète en début et en fin de série,
-fréquence irrégulière détectée, colonne entièrement NaN, `estimator=None`.
+**État au lot L10** : I2, I3, I4, I5, I6, I10, I11, I14, I15 et I16 sont couverts par
+`tests/frequency/test_high_frequency_imputer2.py`, sur `TS`, sur `PANEL` et sur `PANEL-F`. I1, I7
+et I8 attendent le `transform` (L12) ; I12 et I13 attendent l'axe 2 (L11).
+
+Cas limites à couvrir explicitement, en plus : index non trié (**refusé**, §12.5), index dupliqué,
+entité à une seule observation, variable annuelle à 2 ancres seulement (`y_train` de taille 2 sous
+`impute_intermediate_frequencies=False`), période incomplète en début et en fin de série
+(**recalée sur les lignes présentes**, §11.1), fréquence irrégulière détectée, colonne entièrement
+NaN, `estimator=None`.
 
 Cas limites propres à la mutualisation (§5.8) : entité observant la colonne **plus finement** que
 la fréquence cible (contributrice, jamais imputée) ; entité dont la série commence ou finit **en cours de période** de
@@ -1848,7 +2015,7 @@ mise à jour du notebook concerné quand il touche l'exécution d'étape (§15.2
 | **L8c** | `stage_scaler.py` : `source_freq` en liaison par entité, diviseurs par bloc (§5.8 R5, §9.2) | L5 | tests unitaires isolés |
 | **L8d** | `training_set_builder.py` : jeu d'entraînement mutualisé (§5.8 R1 à R5), `ImputationStep.training_blocks` | L4, L5, L6, L8b, L8c | tests unitaires + I14, I16 |
 | **L9** | `high_frequency_imputer2.py` — `__init__`, validations (§13.1), phases 0 à 4, attributs ajustés, fréquences détectées **par (entité, colonne)** | L4–L8d | I9, tests de validation d'arguments |
-| **L10** | `high_frequency_imputer2.py` — PHASE 5 : exécution d'étape unique, axe 1 complet, provenance, stores, **un ajustement par (étape, variable)** partagé par les groupes de fréquence source (§5.8 R6) | L9 | I2, I3, I6, I10, I11, I14, I15 |
+| **L10** ✅ | `high_frequency_imputer2.py` — PHASE 5 : exécution d'étape unique, axe 1 complet, provenance, stores, **un ajustement par (étape, variable)** partagé par les groupes de fréquence source (§5.8 R6). Livré le 2026-09-06 ; décisions D21 à D24 (§14.4) | L9 | I2, I3, I4, I5, I6, I10, I11, I14, I15, I16 |
 | **L11** | axe 2 : progression de fréquences, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape ; composition avec la mutualisation (fréquence de ligne : bloc **ou** store) | L10 | I12, I13, exemples chiffrés du §5.5 et du §5.8 |
 | **L12** | `transform`, `inverse_transform`, `keep_lower_frequencies`, contrôle des fréquences (D11), avertissements uniques | L11 | I1, I7, I8 |
 | **L13** | notebook 5 pas à pas (§15.2) et documentation (`mkdocs`, docstrings de référence) | L12 | exécution complète du notebook |

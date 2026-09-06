@@ -51,6 +51,12 @@ from ..utils.frequency.utils import normalize_frequency
 from ..panel.utils import normalize_entity_key
 
 
+# Clé d'entité normalisée : "()" en série temporelle
+EntityKey = Tuple[Any, ...]
+# Fréquence de grille : unique, ou une par entité
+GridFrequency = Union[str, Mapping[EntityKey, str]]
+
+
 # Contrainte reconnue, et réglage effectif d'une colonne ("None" ne recale rien)
 ConstraintKind = Literal['sum']
 ConstraintSetting = Optional[ConstraintKind]
@@ -612,12 +618,76 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             for period_key, values in blocks.items()
         }
 
+    # Méthode auxiliaire du décompte attendu de sous-périodes d'une période
+    @staticmethod
+    def _expected_subperiods(
+        period_key: Any,
+        grid_freq: Optional[GridFrequency],
+    ) -> Optional[int]:
+        """Count the grid sub-periods one whole period should hold.
+
+        The count is calendar, read off the period itself: twelve months in a
+        year, three in a quarter, 28 to 31 days in a month. It is what tells a
+        period the data covers entirely from a period the bounds of the frame
+        truncate.
+
+        Args:
+            period_key: Membership key of the period, as
+                :func:`_period_membership` builds it — a ``Period`` for a time
+                series, an ``(entity, Period)`` pair for a panel.
+            grid_freq: Frequency of the grid the values sit on, scalar or per
+                entity. None disables the count, hence the guard.
+
+        Returns:
+            The expected number of sub-periods, or None when it cannot be
+            computed — no grid frequency, an unusable key, or two frequencies
+            pandas cannot range over.
+
+        Examples:
+            >>> AggregationConstraint._expected_subperiods(
+            ...     pd.Period('2021', 'Y-DEC'), 'M'
+            ... )
+            12
+            >>> AggregationConstraint._expected_subperiods(pd.Period('2021'), None) is None
+            True
+        """
+        # Garde désactivée : aucun décompte n'est demandé
+        if grid_freq is None:
+            return None
+
+        # Décomposition de la clé : le panel y accole son entité
+        if isinstance(period_key, tuple):
+            entity, period = period_key
+        else:
+            entity, period = (), period_key
+        if not isinstance(period, pd.Period):
+            return None
+
+        # Fréquence de grille de cette entité
+        if isinstance(grid_freq, Mapping):
+            freq = grid_freq.get(normalize_entity_key(entity))
+        else:
+            freq = grid_freq
+        if freq is None:
+            return None
+
+        # Décompte calendaire des sous-périodes contenues dans la période
+        try:
+            return len(pd.period_range(
+                period.start_time,
+                period.end_time,
+                freq=normalize_frequency(freq, return_format='base'),
+            ))
+        except (ValueError, TypeError):
+            return None
+
     # Méthode auxiliaire de recalage d'une colonne, sans avertissement
     def _rescale_one(
         self,
         values: pd.Series,
         observations: pd.Series,
         period_freq: str,
+        grid_freq: Optional[GridFrequency] = None,
     ) -> Tuple[pd.Series, pd.Series, List[Any], List[Any]]:
         """Rescale one column and report its degenerate periods.
 
@@ -630,6 +700,10 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             values: Sub-period values produced on the stage grid.
             observations: Observed low-frequency totals of the column.
             period_freq: Frequency of the periods the totals refer to.
+            grid_freq: Frequency of the grid ``values`` sit on, scalar or per
+                entity. When given, a period the grid holds only partially —
+                because the bounds of the frame truncate it — is left
+                un-rescaled. None disables that guard.
 
         Returns:
             Tuple ``(rescaled, rescaled_mask, zero_periods, flipped_periods)``:
@@ -665,6 +739,14 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             positions = rows_by_period.get(period_key)
             if not positions:
                 continue
+            # Périodes calendairement incomplètes : les sous-périodes que
+            # les bornes du jeu retranchent ne sont pas des NaN, la garde
+            # suivante ne peut donc pas les voir. Imposer le total d'une année
+            # entière aux dix mois présentsfausserait la répartition
+            expected = self._expected_subperiods(period_key, grid_freq)
+            if expected is not None and len(positions) < expected:
+                continue
+
             # Extraction des observations associées à ces positions
             block = values.iloc[positions]
 
@@ -750,6 +832,7 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         observations: pd.Series,
         period_freq: str,
         column: Optional[str] = None,
+        grid_freq: Optional[GridFrequency] = None,
     ) -> Tuple[pd.Series, pd.Series]:
         """Rescale sub-period values so each complete period matches its total.
 
@@ -769,6 +852,10 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             period_freq: Frequency of the periods the totals refer to.
             column: Name of the column, to resolve the constraint under the
                 dict form. None reads the global setting.
+            grid_freq: Frequency of the grid ``values`` sit on, scalar or per
+                entity. When given, a period the grid holds only partially is
+                left un-rescaled — the guard on calendar truncation. None
+                disables it.
 
         Returns:
             Tuple ``(rescaled, rescaled_mask)``: the rescaled values, and the
@@ -792,6 +879,15 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             ... )
             >>> rescaled.tolist(), bool(mask.any())
             ([20.0, 30.0, 50.0], False)
+
+            The same three months, declared as a monthly grid: 2021 should
+            hold twelve of them, the year is truncated, nothing is rescaled.
+
+            >>> rescaled, mask = AggregationConstraint('sum').rescale(
+            ...     values, observations, 'Y', grid_freq='M'
+            ... )
+            >>> rescaled.tolist(), bool(mask.any())
+            ([20.0, 30.0, 50.0], False)
         """
         # Contrainte active ou non pour la colonne
         active = self.resolve_constraint(column) is not None
@@ -803,7 +899,7 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             return values, pd.Series(False, index=values.index)
 
         rescaled, mask, zero_periods, flipped_periods = self._rescale_one(
-            values, observations, period_freq
+            values, observations, period_freq, grid_freq
         )
 
         # Avertissements agrégés sur l'unique colonne traitée

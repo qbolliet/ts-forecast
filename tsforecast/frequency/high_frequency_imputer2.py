@@ -2024,7 +2024,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             if feature_cols:
                 X_train = self._stage_scaler.apply(
                     X_train,
-                    self._stage_scaler.carried_divisors(
+                    self._stage_scaler.feature_divisors(
                         columns=feature_cols,
                         column_frequencies=freqs_by_column,
                         ways=ways,
@@ -2296,7 +2296,8 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             self._restrict_to_entities(X_work.index, step.entities)
         )
         values, _rescaled_mask = self._aggregation_constraint.rescale(
-            values, observations, step.source_frequency, column=column
+            values, observations, step.source_frequency, column=column,
+            grid_freq=stage_freq,
         )
 
         # Ecriture : cellules effectivement produites
@@ -2365,7 +2366,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         # Mise à l'échelle des features à la fréquence source du groupe, puis
         # prédiction
         try:
-            divisors = self._stage_scaler.carried_divisors(
+            divisors = self._stage_scaler.feature_divisors(
                 columns=step.feature_cols,
                 column_frequencies=freqs_by_column,
                 ways=step.materialization,

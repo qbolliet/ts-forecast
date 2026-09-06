@@ -1104,11 +1104,12 @@ class TestReferenceExamples:
         assert ways['a1'] == {
             'm1': 'identity', 'q1': 'interpolate', 'a2': 'interpolate'
         }
-        # 'a2' ensuite : 'a1' est lue dans le miroir. 'q1' l'est aussi, ayant
-        # été matérialisée à l'étape de 'a1' — « le repli matérialise » est le
-        # déclencheur du rang 2 (§4.4), quelle que soit l'origine des cellules
-        assert ways['a2']['m1'] == 'identity'
-        assert ways['a2']['a1'] == 'stage_model'
+        # 'a2' ensuite : seule 'a1' est imputée, donc seule 'a1' est lue dans
+        # le miroir — les registres ne portent que ce qui a été IMPUTÉ (D24),
+        # jamais la matérialisation d'une covariable
+        assert ways['a2'] == {
+            'm1': 'identity', 'q1': 'interpolate', 'a1': 'stage_model'
+        }
         # 'q1' enfin : les deux annuelles sont imputées
         assert ways['q1'] == {
             'm1': 'identity', 'a1': 'stage_model', 'a2': 'stage_model'
@@ -1256,6 +1257,179 @@ class TestMutualizedTrainingSet:
             assert step.target_taint == 'none'
 
 
+class TestPerEntityMaterialization:
+    """La voie unique de l'étape se dégrade entité par entité sur la grille des blocs."""
+
+    def test_one_covariate_takes_three_ways_on_the_pooled_grid(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Une covariable trimestrielle est agrégée, lue, puis interpolée selon le bloc.
+
+        C'est le cas que la mutualisation crée : la grille d'entraînement de
+        ``v`` réunit un bloc annuel (FR), un bloc trimestriel (DE) et un bloc
+        mensuel (IT). ``q1``, trimestrielle, y couvre les trois positions
+        possibles face à la grille — plus fine, égale, plus basse — et doit
+        recevoir la transformation propre à chacune, sans que la voie de
+        l'étape, décidée une seule fois sur la grille de prédiction, soit
+        remise en cause.
+        """
+        imputer = _fit_with_spy(mixed_freq_panel_multifrequency)
+        step = next(
+            step for step in imputer.imputation_plan_ if step.var_name == 'v'
+        )
+        materializer = imputer._covariate_materializer
+        frequencies = imputer._detected_frequencies_by_column()
+
+        # Voie de l'étape : décidée sur la grille de prédiction, mensuelle
+        assert step.materialization['q1'] == 'interpolate'
+        assert step.materialization['m1'] == 'identity'
+
+        # Dégradation, bloc par bloc, de cette voie unique
+        expected = {
+            ('FR',): ('Y', 'aggregate'),    # bloc annuel : q1 y est plus fine
+            ('DE',): ('Q', 'identity'),     # bloc trimestriel : q1 y est à son pas
+            ('IT',): ('M', 'interpolate'),  # bloc mensuel : q1 y est plus basse
+        }
+        assert dict(step.training_blocks) == {
+            entity: freq for entity, (freq, _way) in expected.items()
+        }
+        for entity, (f_block, way) in expected.items():
+            f_col = materializer._column_frequency(frequencies, 'q1', entity)
+            assert materializer._applicable_way(
+                step.materialization['q1'], f_col, f_block
+            ) == way
+
+    def test_the_three_ways_land_on_the_same_scale(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Les trois voies produisent des valeurs comparables une fois mises à l'échelle.
+
+        C'est la contrepartie de la dégradation : trois transformations
+        différentes, un seul niveau. Sans le diviseur fondé sur la période que
+        la cellule couvre, l'agrégat annuel de ``q1`` chez FR entrerait dans le
+        modèle douze fois plus grand que sa valeur mensuelle chez IT.
+        """
+        imputer = _fit_with_spy(mixed_freq_panel_multifrequency)
+        step = next(
+            step for step in imputer.imputation_plan_ if step.var_name == 'v'
+        )
+        X_train = step.model.fit_X_
+
+        means = {
+            entity: float(_entity_block(X_train['q1'], entity).mean())
+            for entity in ('FR', 'DE', 'IT')
+        }
+        # Les trois blocs portent le même niveau mensuel, à la dispersion des
+        # valeurs près : aucun rapport de 3 ni de 12 entre eux
+        reference = means['IT']
+        for entity, mean in means.items():
+            assert mean == pytest.approx(reference, rel=0.35), entity
+
+        # Et la prédiction lit la même échelle que l'entraînement
+        for prediction_frame in step.model.predict_X_:
+            assert float(prediction_frame['q1'].mean()) == pytest.approx(
+                reference, rel=0.35
+            )
+
+
+class TestTrueValuesOnTheTrainingGrid:
+    """Une covariable à sa propre fréquence garde ses VRAIES valeurs au fit.
+
+    Le cas : la grille de prédiction est trimestrielle et la covariable
+    annuelle — elle doit donc y être matérialisée —, tandis que la grille
+    d'entraînement, elle, est annuelle, parce que la variable imputée l'est
+    aussi. La covariable y est disponible à sa propre maille : le rang 1 de la
+    précédence l'emporte, et ce sont ses observations qui entrent dans
+    ``X_train``, jamais une version reconstruite.
+    """
+
+    @staticmethod
+    def _annual_step(imputer: HighFrequencyImputer2):
+        """Return the plan step imputing 'a1', whose training block is annual."""
+        return next(
+            step for step in imputer.imputation_plan_ if step.var_name == 'a1'
+        )
+
+    def test_annual_covariate_enters_the_fit_with_its_observations(
+        self, reference_timeseries
+    ):
+        """Sur la grille annuelle, 'a2' vaut ses ancres, pas une interpolation."""
+        imputer = _fit_with_spy(reference_timeseries, target_frequency='Q')
+        step = self._annual_step(imputer)
+
+        # La voie de l'étape est bien celle de la grille de PRÉDICTION
+        assert step.materialization['a2'] == 'interpolate'
+        # Mais la grille d'entraînement est annuelle, comme 'a2'
+        assert dict(step.training_blocks) == {(): 'Y'}
+
+        # Les valeurs vues au fit sont les VRAIES, à l'échelle de l'étape :
+        # 60 / 66 / 72 divisées par les 4 trimestres d'une année
+        observed = reference_timeseries['a2'].dropna()
+        assert observed.tolist() == [60.0, 66.0, 72.0]
+        assert step.model.fit_X_['a2'].tolist() == [15.0, 16.5, 18.0]
+
+    def test_the_two_grids_stay_consistent_under_the_sum_constraint(
+        self, reference_timeseries
+    ):
+        """La valeur d'entraînement est l'agrégat exact des valeurs de prédiction.
+
+        C'est ce qui rend l'asymétrie inoffensive : le modèle apprend sur
+        l'observation annuelle et prédit sur son interpolation trimestrielle,
+        mais sous ``aggregation_constraint='sum'`` la seconde somme exactement
+        à la première. Les deux côtés portent le même niveau ; seule la forme
+        intra-annuelle diffère, et la grille annuelle ne pouvait de toute
+        façon pas l'exprimer.
+        """
+        imputer = _fit_with_spy(reference_timeseries, target_frequency='Q')
+        step = self._annual_step(imputer)
+        predicted = step.model.predict_X_[0]['a2']
+
+        yearly = predicted.groupby(predicted.index.year).sum()
+        assert yearly.tolist() == pytest.approx([60.0, 66.0, 72.0])
+        # Même niveau des deux côtés, une fois l'échelle appliquée (I5)
+        assert step.model.fit_X_['a2'].mean() == pytest.approx(predicted.mean())
+
+    def test_the_step_is_nonetheless_marked_as_having_read_an_interpolation(
+        self, reference_timeseries
+    ):
+        """La souillure est le MAX sur les deux grilles : la prédiction commande.
+
+        Garder les vraies valeurs au fit ne blanchit pas l'étape : la souillure
+        se calcule sur ``X_train ∪ X_pred`` (§6.2), et la grille de prédiction
+        y apporte de l'interpolé. La provenance émise reste
+        ``MODEL_ON_INTERPOLATED``.
+        """
+        imputer = _fit_with_spy(reference_timeseries, target_frequency='Q')
+        step = self._annual_step(imputer)
+
+        assert step.covariate_taint == 'interpolated'
+        assert step.target_taint == 'none'
+        assert str(step.emitted_provenance) == 'model_on_interpolated'
+
+    def test_the_mirror_never_overrides_an_observation(self, reference_timeseries):
+        """Sous 'model', le rang 1 passe AVANT la lecture du miroir.
+
+        Même quand 'a2' a déjà été imputée à l'étape courante — donc lisible au
+        rang 2 —, une entité qui l'observe à la fréquence de sa grille
+        d'entraînement y lit son observation. Le miroir ne remplace jamais une
+        vraie valeur.
+        """
+        imputer = _fit_with_spy(
+            reference_timeseries, target_frequency='Q', covariate_strategy='model'
+        )
+        # 'a1' est imputée en premier ; à l'étape de 'a2', 'a1' est au miroir
+        second = next(
+            step for step in imputer.imputation_plan_ if step.var_name == 'a2'
+        )
+        assert second.materialization['a1'] == 'stage_model'
+
+        # Et pourtant la grille d'entraînement de 'a2', annuelle, lit les
+        # observations de 'a1' : 120 / 132 / 150 divisées par 4
+        assert second.model.fit_X_['a1'].tolist() == [30.0, 33.0, 37.5]
+        observed = reference_timeseries['a1'].dropna()
+        assert observed.tolist() == [120.0, 132.0, 150.0]
+
+
 class TestFallbackPath:
     """Le repli d'interpolation, et ce qu'il écrit."""
 
@@ -1340,13 +1514,13 @@ class TestPhaseFiveEdgeCases:
         assert 'empty' not in imputer._covariate_materializer.imputed_store
 
     def test_incomplete_leading_and_trailing_periods(self, reference_timeseries):
-        """Périodes tronquées aux deux bouts : le fit aboutit et les années pleines sont exactes.
+        """Une période que les bornes du jeu tronquent n'est pas recalée (§11.1).
 
-        La garde du §11.1 porte sur une période PARTIELLEMENT PRÉDITE — au
-        moins une sous-période NaN sur la grille — et non sur une période que
-        les bornes du jeu tronquent : les dix mois de 2021 présents portent
-        alors tout le total annuel. C'est la seule lecture qui garde
-        l'additivité vis-à-vis de ce que la trame contient.
+        Deux gardes distinctes se relaient : celle des sous-périodes NaN, et
+        celle de la troncature CALENDAIRE, dont les sous-périodes manquantes
+        sont absentes de la grille plutôt que vides. Sans la seconde, le total
+        annuel de 2021 serait réparti sur les dix mois présents, soit une
+        sur-attribution de 20 % à chacun.
         """
         truncated = reference_timeseries.loc['2021-03-31':'2023-08-31']
         imputer = _fit_with_spy(truncated)
@@ -1354,9 +1528,9 @@ class TestPhaseFiveEdgeCases:
 
         # L'année 2022, complète, reste exacte
         assert store['a1'].loc['2022'].sum() == pytest.approx(132.0)
-        # 2021, tronquée de deux mois, porte son total sur les dix restants
+        # 2021, amputée de deux mois, garde ses prédictions brutes
         assert len(store['a1'].loc['2021']) == 10
-        assert store['a1'].loc['2021'].sum() == pytest.approx(120.0)
+        assert store['a1'].loc['2021'].sum() != pytest.approx(120.0)
         # 2023 n'a plus d'ancre dans la trame : la fenêtre stricte s'arrête
         # avant, et aucune de ses lignes n'est imputée
         assert store['a1'].index.max() == pd.Timestamp('2022-12-31')

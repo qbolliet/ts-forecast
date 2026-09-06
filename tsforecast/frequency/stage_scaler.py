@@ -7,7 +7,8 @@ of the frequency pair — never of the data. This module holds that arithmetic.
 
 Three divisors are governed by the scaling mode :
 
-1. :meth:`StageScaler.feature_divisors` — the covariates, at fit and at predict;
+1. :meth:`StageScaler.feature_divisors` — the covariates, at fit and at predict,
+   each divided by the period its cells actually span on the grid they sit on;
 2. :meth:`StageScaler.target_divisor` — ``y``, scalar or per-row ;
 3. :meth:`StageScaler.fit_scale_factor` — the factor baked into the model, which
    never moves once the stage is fitted.
@@ -204,6 +205,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
         source_freq: Optional[FrequencyBinding] = None,
         pred_freq: Optional[FrequencyBinding] = None,
         column_frequencies: Optional[Mapping[str, FrequencyBinding]] = None,
+        materialization: Optional[Mapping[str, str]] = None,
         default_divisor: float = 1.0,
         converter: Optional[FrequencyConverter] = None,
     ) -> None:
@@ -214,13 +216,18 @@ class StageScaler(BaseEstimator, TransformerMixin):
             source_freq: Detected frequency of the imputed variable.
             pred_freq: Prediction frequency of the stage.
             column_frequencies: Detected frequency of each covariate.
+            materialization: Materialization way of each covariate, read by
+                :meth:`fit` alone: only ``'raw_anchors'`` changes a divisor,
+                by saying that the cells span a period of the column rather
+                than one of the grid. The divisor methods take it as an
+                argument, so a single instance still serves every stage.
             default_divisor: Divisor for covariates of unknown frequency.
             converter: Frequency converter to use.
 
         Raises:
             ValueError: If ``scale_features`` is not admissible.
         """
-        # Validation de la modalité, clés du dict NON vérifiées ici : aucune
+        # Validation de la modalité, clés du dict non vérifiées ici : aucune
         # colonne n'est connue à l'initialisation (voir "validate_columns")
         self._validate_scale_features(scale_features)
 
@@ -230,6 +237,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
         self.source_freq = source_freq
         self.pred_freq = pred_freq
         self.column_frequencies = column_frequencies
+        self.materialization = materialization
         self.default_divisor = default_divisor
         self.converter = converter
 
@@ -495,13 +503,21 @@ class StageScaler(BaseEstimator, TransformerMixin):
         return sorted(set(entities))
 
     # Méthode auxiliaire de résolution de la fréquence de bloc d'une entité
-    def _block_freq(self, source_freq: FrequencyBinding, entity: EntityKey) -> str:
+    def _block_freq(
+        self,
+        source_freq: FrequencyBinding,
+        entity: EntityKey,
+        parameter: str = 'source_freq',
+    ) -> str:
         """Resolve the block frequency ``f_block(e)`` of one entity.
 
         Args:
-            source_freq: Detected frequency of the imputed variable: a string,
-                or an entity -> frequency mapping ``{e: f_block(e)}``.
+            source_freq: Frequency binding read: a string, or an entity ->
+                frequency mapping ``{e: f_block(e)}``.
             entity: Normalized entity key.
+            parameter: Name of the parameter the binding came from, for the
+                message — ``'source_freq'`` for the target, ``'grid_freq'``
+                for the covariates.
 
         Returns:
             The frequency of the variable for that entity.
@@ -515,7 +531,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
         # Vérification que la fréquence est spécifiée
         if freq is None:
             raise ValueError(
-                f"source_freq does not cover entity {entity!r}: an entity of "
+                f"{parameter} does not cover entity {entity!r}: an entity of "
                 "the grid must either have its own entry or be covered by a "
                 f"single-entry mapping, got keys {sorted(source_freq)}"
             )
@@ -609,151 +625,6 @@ class StageScaler(BaseEstimator, TransformerMixin):
     # Méthode de calcul des diviseurs de toutes les covariables
     def feature_divisors(
         self,
-        columns: Sequence[str],
-        column_frequencies: Mapping[str, FrequencyBinding],
-        source_freq: FrequencyBinding,
-        pred_freq: FrequencyBinding,
-        index: Optional[pd.Index] = None,
-        default: Optional[float] = None,
-    ) -> Union[pd.Series, pd.DataFrame]:
-        """Compute the divisor carrying each covariate to its prediction scale.
-
-        Applies the divisor calculation method column by column and entity by entity: a panel may
-        carry the same column at different frequencies depending on the
-        entity, in which case a single divisor per column cannot be right for
-        every row.
-
-        ``source_freq`` takes the same two forms as ``pred_freq``. Under a
-        mutualized training set, each entity contributes at its
-        own frequency — its block frequency ``f_block(e)`` — and the divisors
-        stop being uniform over the set: the mapping form ``{e: f_block(e)}``
-        expresses exactly that. The per-entity form is an assembly, never a new
-        arithmetic — for every entity ``e``, the divisors it yields on the rows
-        of ``e`` are exactly those of the scalar call made with
-        ``source_freq=f_block(e)`` on those same rows, rule B25 being applied
-        unchanged inside each block. A block finer than the stage is a normal
-        case and yields a fractional divisor (``1/3`` for a monthly block
-        at a quarterly stage), which is neither rejected nor floored at
-        ``1.0``.
-
-        Args:
-            columns: Covariate columns to compute a divisor for.
-            column_frequencies: Detected frequency of each column: a string,
-                or an entity -> frequency mapping.
-            source_freq: Detected frequency of the variable being imputed
-                (``f_var``): a string, or an entity -> block frequency mapping
-                ``{e: f_block(e)}``.
-            pred_freq: Prediction frequency of the stage: a string, or an
-                entity -> frequency mapping.
-            index: Stage grid. Required as soon as one column is in
-                ``'calendar'`` mode, the entities disagree on a frequency, or
-                ``source_freq`` is a mapping — in which case it must carry an
-                entity level.
-            default: Divisor for a column whose frequency cannot be compared.
-                Defaults to ``default_divisor``.
-
-        Returns:
-            ``Series`` of floats indexed by column name when ``source_freq`` is
-            a string, every divisor is a scalar and every entity agrees;
-            ``DataFrame`` indexed like ``index`` and columned like ``columns``
-            otherwise — always a ``DataFrame`` under the per-entity form. Both
-            divide a feature frame directly: pandas aligns a ``Series`` on the
-            columns and a ``DataFrame`` on both axes.
-
-        Raises:
-            ValueError: If per-row divisors are needed and ``index`` is None
-                or carries no entity level; or if an entity of the grid is
-                covered by neither ``source_freq`` nor its single-entry form.
-
-        Examples:
-            >>> scaler = StageScaler()
-            >>> divisors = scaler.feature_divisors(
-            ...     columns=['m1', 'a2'],
-            ...     column_frequencies={'m1': 'M', 'a2': 'Y'},
-            ...     source_freq='Y',
-            ...     pred_freq='M',
-            ... )
-            >>> divisors.to_dict()
-            {'m1': 12.0, 'a2': 1.0}
-
-            Mutualized set, one block frequency per entity:
-
-            >>> idx = pd.MultiIndex.from_product(
-            ...     [['DE', 'FR'], pd.date_range('2021-01-31', periods=1, freq='ME')]
-            ... )
-            >>> divisors = scaler.feature_divisors(
-            ...     columns=['m1'],
-            ...     column_frequencies={'m1': 'M'},
-            ...     source_freq={('FR',): 'Y', ('DE',): 'Q'},
-            ...     pred_freq='M',
-            ...     index=idx,
-            ... )
-            >>> divisors['m1'].tolist()
-            [3.0, 12.0]
-        """
-        # Diviseur de repli
-        fallback = self.default_divisor if default is None else default
-
-        # Liaison par entité de source_freq : les entités à servir sont celles
-        # de la grille, une entité non couverte étant une erreur
-        per_entity_source = isinstance(source_freq, Mapping)
-        if per_entity_source:
-            entities = self._grid_entities(index, 'source_freq')
-        else:
-            # Entités concernées : celles nommées par une fréquence par entité
-            entities = self._binding_entities(
-                [pred_freq, *(column_frequencies.get(col) for col in columns)]
-            )
-
-        # Modalité par colonne : elle décide seule de la forme du retour
-        modes = {column: self.resolve_mode(column) for column in columns}
-        calendar_used = any(mode == 'calendar' for mode in modes.values())
-
-        # Diviseurs par (entité, colonne)
-        per_entity: Dict[EntityKey, Dict[str, Divisor]] = {}
-        for entity in entities:
-            pf = self._freq_for(pred_freq, entity)
-            # Fréquence de bloc de l'entité, ou fréquence unique de la variable
-            f_var = (
-                self._block_freq(source_freq, entity)
-                if per_entity_source
-                else source_freq
-            )
-            per_entity[entity] = {
-                column: self._feature_divisor(
-                    self._freq_for(column_frequencies.get(column), entity),
-                    f_var,
-                    pf,
-                    modes[column],
-                    index,
-                    fallback,
-                )
-                for column in columns
-            }
-
-        # Forme compacte : tous les diviseurs sont scalaires et les entités
-        # s'accordent — cas des séries temporelles et des panels homogènes.
-        # La forme par entité en est exclue : son retour est toujours ventilé
-        rows = list(per_entity.values())
-        if (
-            not per_entity_source
-            and not calendar_used
-            and all(row == rows[0] for row in rows[1:])
-        ):
-            return pd.Series(rows[0], dtype=float)
-
-        # Forme par ligne : le diviseur dépend de la date, de l'entité, ou des
-        # deux, et aucune Series indexée sur une seule dimension ne le porte
-        if index is None:
-            raise ValueError(
-                "Per-row covariate divisors require an index ('calendar' mode "
-                "or entities disagreeing on a column frequency)"
-            )
-        return self._spread(per_entity, columns, index)
-
-    # Méthode des diviseurs fondés sur la période réellement couverte
-    def carried_divisors(
-        self,
         *,
         columns: Sequence[str],
         column_frequencies: Mapping[str, FrequencyBinding],
@@ -813,7 +684,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
 
         Examples:
             >>> scaler = StageScaler()
-            >>> divisors = scaler.carried_divisors(
+            >>> divisors = scaler.feature_divisors(
             ...     columns=['m1', 'q1'],
             ...     column_frequencies={'m1': 'M', 'q1': 'Q'},
             ...     ways={'m1': 'aggregate', 'q1': 'aggregate'},
@@ -824,7 +695,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
 
             The same two covariates read on the monthly stage grid:
 
-            >>> divisors = scaler.carried_divisors(
+            >>> divisors = scaler.feature_divisors(
             ...     columns=['m1', 'q1'],
             ...     column_frequencies={'m1': 'M', 'q1': 'Q'},
             ...     ways={'m1': 'identity', 'q1': 'interpolate'},
@@ -859,7 +730,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
         for entity in entities:
             f_stage = self._freq_for(stage_freq, entity)
             f_grid = (
-                self._block_freq(grid_freq, entity)
+                self._block_freq(grid_freq, entity, parameter='grid_freq')
                 if isinstance(grid_freq, Mapping)
                 else grid_freq
             )
@@ -1366,7 +1237,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
             >>> scaler.fit_scale_factor_
             12.0
             >>> scaler.feature_divisors_.to_dict()
-            {'m1': 12.0}
+            {'m1': 1.0}
         """
         # Contrôle des métadonnées indispensables : elles sont des paramètres
         # d'initialisation, pas des données, et leur absence est une erreur
@@ -1383,9 +1254,17 @@ class StageScaler(BaseEstimator, TransformerMixin):
         # Fréquences associées à chaque colonne
         frequencies = self.column_frequencies or {}
 
-        # Diviseurs des covariables, sur la grille de l'étape
+        # Diviseurs des covariables. La grille de "X" est celle de l'étape :
+        # chaque cellule y couvre une période de "pred_freq", sauf celles des
+        # colonnes dont "materialization" dit qu'elles sont lues à leurs
+        # ancres brutes
         self.feature_divisors_ = self.feature_divisors(
-            columns, frequencies, self.source_freq, self.pred_freq, index=X.index
+            columns=columns,
+            column_frequencies=frequencies,
+            ways=self.materialization or {},
+            grid_freq=self.pred_freq,
+            stage_freq=self.pred_freq,
+            index=X.index,
         )
 
         # Grille de la cible : celle de y quand elle est fournie
@@ -1463,11 +1342,12 @@ class StageScaler(BaseEstimator, TransformerMixin):
             TypeError: If ``X`` is neither a ``Series`` nor a ``DataFrame``.
 
         Examples:
-            >>> X = pd.DataFrame({'m1': [1200.0]}, index=pd.to_datetime(['2021-12-31']))
+            >>> X = pd.DataFrame({'a2': [1200.0]}, index=pd.to_datetime(['2021-12-31']))
             >>> scaler = StageScaler(
-            ...     source_freq='Y', pred_freq='M', column_frequencies={'m1': 'M'},
+            ...     source_freq='Y', pred_freq='M', column_frequencies={'a2': 'Y'},
+            ...     materialization={'a2': 'raw_anchors'},
             ... ).fit(X)
-            >>> scaler.transform(X)['m1'].tolist()
+            >>> scaler.transform(X)['a2'].tolist()
             [100.0]
         """
         check_is_fitted(self)

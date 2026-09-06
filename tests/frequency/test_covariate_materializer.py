@@ -611,8 +611,11 @@ class TestPrecedenceRanks:
             def __init__(self):
                 self.calls = []
 
-            def rescale(self, values, observations, period_freq, column=None):
-                self.calls.append((observations.copy(), period_freq, column))
+            def rescale(self, values, observations, period_freq, column=None,
+                        grid_freq=None):
+                self.calls.append(
+                    (observations.copy(), period_freq, column, grid_freq)
+                )
                 return values, values.notna()
 
         applier = _RecordingApplier()
@@ -632,11 +635,13 @@ class TestPrecedenceRanks:
 
         assert ways == {'a1': 'carried_model'}
         assert len(applier.calls) == 1
-        observations, period_freq, column = applier.calls[0]
+        observations, period_freq, column, grid_freq = applier.calls[0]
         # Les totaux de l'étape d'origine, jamais ceux de l'étape courante
         assert period_freq == 'Q'
         # La colonne est transmise, pour la résolution d'une contrainte par colonne
         assert column == 'a1'
+        # La fréquence de la grille CIBLE, pour la garde de complétude calendaire
+        assert grid_freq == 'M'
         assert observations.index.equals(quarterly_grid)
         # Ni les ancres annuelles de la source, ni la grille mensuelle
         np.testing.assert_allclose(observations.to_numpy(), quarterly.to_numpy())

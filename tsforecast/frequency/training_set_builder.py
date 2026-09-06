@@ -62,7 +62,7 @@ class TrainingSet:
     The target is handed over raw: scaling is the caller's job, and there is
     exactly one implementation of it — :class:`StageScaler`. The caller
     applies ``target_divisor(produced_freq=row_frequency)`` to :attr:`y` and
-    ``feature_divisors(source_freq=blocks)`` to :attr:`X`.
+    ``feature_divisors(grid_freq=blocks, ways=...)`` to :attr:`X`.
 
     Attributes:
         X: Features, indexed on the mutualized grid (the union of the block

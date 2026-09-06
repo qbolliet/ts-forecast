@@ -114,6 +114,7 @@ class AggregationConstraintApplier(Protocol):
         observations: pd.Series,
         period_freq: str,
         column: Optional[str] = None,
+        grid_freq: Optional[StageFrequency] = None,
     ) -> Tuple[pd.Series, pd.Series]:
         """Rescale sub-period values so each complete period matches its total.
 
@@ -126,6 +127,8 @@ class AggregationConstraintApplier(Protocol):
                 per-column dict resolves the right constraint. The
                 materializer always passes it; it stays optional so an
                 applier carrying a single scalar setting can ignore it.
+            grid_freq: Frequency of the grid ``values`` sit on, so that a
+                period the grid holds only partially is left un-rescaled.
 
         Returns:
             Tuple ``(rescaled, rescaled_mask)``: the rescaled values, and the
@@ -1099,7 +1102,7 @@ class CovariateMaterializer:
         applier = self.aggregation_constraint_applier
         if applier is not None and self.resolve_aggregation_constraint(column) is not None:
             interpolated, _rescaled_mask = applier.rescale(
-                interpolated, observations, f_source, column
+                interpolated, observations, f_source, column, grid_freq=f_target
             )
 
         # Réindexation sur la grille demandée : les timestamps décalés par

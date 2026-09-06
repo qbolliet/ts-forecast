@@ -1,7 +1,8 @@
 """Tests for tsforecast.frequency.stage_scaler.
 
 Focus §9 (modalités 'constant'/'calendar', forme dict par feature), §9.2
-(règle B25 et les trois diviseurs) et §5.4 (échelle par ligne, correctif B12)
+(les trois diviseurs, et la période que la cellule COUVRE sur sa grille) et
+§5.4 (échelle par ligne, correctif B12)
 de [SPEC] high_frequency_imputer2_architecture.md. Le composant est aussi un
 transformer sklearn : fit gèle les trois diviseurs, transform divise,
 inverse_transform remultiplie. Lot purement additif : hfi et son
@@ -103,56 +104,58 @@ class TestCalendarMode:
             scaler.target_divisor('m1', source_freq='M', pred_freq='D')
 
 
-class TestRuleB25:
-    """Règle B25 : le diviseur d'une covariable dépend de sa ré-agrégation."""
+class TestCarriedPeriodRule:
+    """Le diviseur d'une covariable part de la période que sa cellule COUVRE."""
 
-    def test_b25_never_reaggregated_column_divides_by_one(self):
-        """Une covariable jamais ré-agrégée vers f_var garde son échelle : 1.0."""
+    def test_every_materialized_column_spans_one_grid_period(self):
+        """Identité, agrégation, interpolation, miroir : la cellule couvre la grille."""
         scaler = StageScaler()
-        # Covariable annuelle, variable trimestrielle, étape mensuelle :
-        # Y n'est pas plus fine que Q, la colonne n'est jamais agrégée
+        # Trois colonnes de fréquences différentes sur une grille ANNUELLE :
+        # matérialisées, elles y couvrent toutes une année, et se ramènent
+        # donc à l'échelle mensuelle par le même diviseur
         divisors = scaler.feature_divisors(
-            columns=['a2'],
-            column_frequencies={'a2': 'Y'},
-            source_freq='Q',
-            pred_freq='M',
+            columns=['d1', 'm1', 'q1'],
+            column_frequencies={'d1': 'D', 'm1': 'M', 'q1': 'Q'},
+            ways={'d1': 'aggregate', 'm1': 'aggregate', 'q1': 'aggregate'},
+            grid_freq='Y',
+            stage_freq='M',
         )
-        assert divisors['a2'] == 1.0
+        assert divisors.to_dict() == {'d1': 12.0, 'm1': 12.0, 'q1': 12.0}
 
-    def test_b25_finer_column_uses_pred_freq(self):
-        """Une covariable plus fine que l'étape porte f_stage = pred_freq."""
+    def test_raw_anchors_column_spans_one_column_period(self):
+        """Lue à ses ancres, la colonne couvre SA période, pas celle de la grille."""
         scaler = StageScaler()
-        # Covariable journalière, variable annuelle, étape mensuelle :
-        # f_stage = M, diviseur = factor(M, Y) = 12
         divisors = scaler.feature_divisors(
-            columns=['d1'],
-            column_frequencies={'d1': 'D'},
-            source_freq='Y',
-            pred_freq='M',
+            columns=['q1', 'a2'],
+            column_frequencies={'q1': 'Q', 'a2': 'Y'},
+            ways={'q1': 'raw_anchors', 'a2': 'raw_anchors'},
+            grid_freq='M',
+            stage_freq='M',
         )
-        assert divisors['d1'] == 12.0
+        # Une ancre trimestrielle porte un trimestre, une annuelle une année
+        assert divisors.to_dict() == {'q1': 3.0, 'a2': 12.0}
 
-    def test_b25_lower_column_uses_own_freq(self):
-        """Une covariable plus basse que l'étape garde sa propre fréquence."""
+    def test_grid_at_the_stage_frequency_divides_by_one(self):
+        """Sur la grille de l'étape, une cellule matérialisée est déjà à l'échelle."""
         scaler = StageScaler()
-        # Covariable trimestrielle, variable annuelle, étape mensuelle :
-        # Q n'est pas plus fine que M, donc f_stage = Q, diviseur = factor(Q, Y) = 4
         divisors = scaler.feature_divisors(
-            columns=['q1'],
-            column_frequencies={'q1': 'Q'},
-            source_freq='Y',
-            pred_freq='M',
+            columns=['m1', 'q1'],
+            column_frequencies={'m1': 'M', 'q1': 'Q'},
+            ways={'m1': 'identity', 'q1': 'interpolate'},
+            grid_freq='M',
+            stage_freq='M',
         )
-        assert divisors['q1'] == 4.0
+        assert divisors.to_dict() == {'m1': 1.0, 'q1': 1.0}
 
     def test_unknown_column_frequency_falls_back_on_default(self):
-        """Une colonne sans fréquence détectée retombe sur le diviseur par défaut."""
+        """Une colonne d'ancres sans fréquence détectée retombe sur le défaut."""
         scaler = StageScaler(default_divisor=12.0)
         divisors = scaler.feature_divisors(
             columns=['inconnue'],
             column_frequencies={},
-            source_freq='Y',
-            pred_freq='M',
+            ways={'inconnue': 'raw_anchors'},
+            grid_freq='M',
+            stage_freq='M',
         )
         assert divisors['inconnue'] == 12.0
 
@@ -258,17 +261,18 @@ class TestDictForm:
         divisors = scaler.feature_divisors(
             columns=['m1', 'q1'],
             column_frequencies={'m1': 'M', 'q1': 'Q'},
-            source_freq='Y',
-            pred_freq='M',
+            ways={'m1': 'aggregate', 'q1': 'aggregate'},
+            grid_freq='Y',
+            stage_freq='M',
             index=index,
         )
         assert isinstance(divisors, pd.DataFrame)
         pd.testing.assert_index_equal(divisors.index, index)
         assert list(divisors.columns) == ['m1', 'q1']
-        # 'm1' est agrégée : décompte calendaire des mois dans une année
+        # 'm1' en 'calendar' : décompte calendaire des mois dans une année
         assert divisors['m1'].tolist() == [12.0] * len(index)
-        # 'q1' reste en 'constant' : factor(Q, Y) = 4
-        assert divisors['q1'].tolist() == [4.0] * len(index)
+        # 'q1' en 'constant' : les deux couvrent une année sur cette grille
+        assert divisors['q1'].tolist() == [12.0] * len(index)
 
     def test_unknown_dict_key_raises_listing_columns(self):
         """Les clés absentes des colonnes réelles sont listées dans le ValueError."""
@@ -311,8 +315,9 @@ class TestScaleFeaturesFalse:
         divisors = scaler.feature_divisors(
             columns=['m1', 'q1', 'd1'],
             column_frequencies={'m1': 'M', 'q1': 'Q', 'd1': 'D'},
-            source_freq='Y',
-            pred_freq='M',
+            ways={'m1': 'aggregate', 'q1': 'aggregate', 'd1': 'aggregate'},
+            grid_freq='Y',
+            stage_freq='M',
         )
         assert divisors.tolist() == [1.0, 1.0, 1.0]
 
@@ -340,8 +345,9 @@ class TestScaleFeaturesFalse:
         divisors = scaler.feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
-            source_freq='Y',
-            pred_freq='M',
+            ways={'m1': 'aggregate'},
+            grid_freq='Y',
+            stage_freq='M',
         )
         assert divisors['m1'] == 12.0
         assert scaler.target_divisor('a1', source_freq='Y', pred_freq='M') == 1.0
@@ -352,11 +358,12 @@ class TestScaleFeaturesFalse:
         divisors = scaler.feature_divisors(
             columns=['m1', 'q1'],
             column_frequencies={'m1': 'M', 'q1': 'Q'},
-            source_freq='Y',
-            pred_freq='M',
+            ways={'m1': 'aggregate', 'q1': 'aggregate'},
+            grid_freq='Y',
+            stage_freq='M',
         )
         assert divisors['m1'] == 1.0
-        assert divisors['q1'] == 4.0
+        assert divisors['q1'] == 12.0
 
 
 class TestApplyInvert:
@@ -437,30 +444,32 @@ class TestPanel:
         divisors = scaler.feature_divisors(
             columns=['ip'],
             column_frequencies={'ip': {('FR',): 'M', ('DE',): 'M'}},
-            source_freq='Y',
-            pred_freq={('FR',): 'M', ('DE',): 'M'},
+            ways={'ip': 'aggregate'},
+            grid_freq='Y',
+            stage_freq={('FR',): 'M', ('DE',): 'M'},
             index=self._panel_index(),
         )
         assert isinstance(divisors, pd.Series)
         assert divisors['ip'] == 12.0
 
     def test_panel_heterogeneous_frequencies_give_dataframe(self):
-        """Une colonne mensuelle pour FR et trimestrielle pour DE se ventile par ligne."""
+        """Lue à ses ancres, une colonne M chez FR et Q chez DE se ventile par ligne."""
         scaler = StageScaler()
         index = self._panel_index()
         divisors = scaler.feature_divisors(
             columns=['ip'],
             column_frequencies={'ip': {('FR',): 'M', ('DE',): 'Q'}},
-            source_freq='Y',
-            pred_freq={('FR',): 'M', ('DE',): 'M'},
+            ways={'ip': 'raw_anchors'},
+            grid_freq={('FR',): 'M', ('DE',): 'M'},
+            stage_freq={('FR',): 'M', ('DE',): 'M'},
             index=index,
         )
         assert isinstance(divisors, pd.DataFrame)
         pd.testing.assert_index_equal(divisors.index, index)
-        # DE : covariable trimestrielle, jamais agrégée à l'étape M -> factor(Q, Y) = 4
-        assert divisors.loc['DE', 'ip'].tolist() == [4.0] * 3
-        # FR : covariable mensuelle, agrégée -> factor(M, Y) = 12
-        assert divisors.loc['FR', 'ip'].tolist() == [12.0] * 3
+        # DE : une ancre trimestrielle porte un trimestre -> factor(M, Q) = 3
+        assert divisors.loc['DE', 'ip'].tolist() == [3.0] * 3
+        # FR : une ancre mensuelle est déjà à l'échelle de l'étape
+        assert divisors.loc['FR', 'ip'].tolist() == [1.0] * 3
 
     def test_heterogeneous_stage_frequencies_give_per_row_target_divisor(self):
         """Des fréquences d'étape divergentes produisent un diviseur de y par ligne."""
@@ -484,36 +493,45 @@ class TestSklearnProtocol:
         """Build a small stage frame with two covariates."""
         index = _monthly_grid(periods=3)
         return pd.DataFrame(
-            {'m1': [1200.0, 2400.0, 3600.0], 'q1': [40.0, 80.0, 120.0]},
+            {'m1': [1200.0, 2400.0, 3600.0], 'a2': [120.0, 240.0, 360.0]},
             index=index,
         )
+
+    def _fitted(self, X, y=None) -> StageScaler:
+        """Fit a scaler on the stage frame, 'a2' read at its raw anchors."""
+        return _make_scaler(
+            column_frequencies={'m1': 'M', 'a2': 'Y'},
+            materialization={'m1': 'identity', 'a2': 'raw_anchors'},
+        ).fit(X, y)
 
     def test_fit_stores_the_three_divisors(self):
         """fit gèle les diviseurs de covariables, de y et le facteur cuit."""
         X = self._stage_frame()
-        scaler = _make_scaler(column_frequencies={'m1': 'M', 'q1': 'Q'}).fit(X)
+        scaler = self._fitted(X)
 
-        assert scaler.feature_divisors_.to_dict() == {'m1': 12.0, 'q1': 4.0}
+        # 'm1' est matérialisée sur la grille de l'étape : elle y est déjà à
+        # l'échelle. 'a2' est lue à ses ancres annuelles : elle porte une année
+        assert scaler.feature_divisors_.to_dict() == {'m1': 1.0, 'a2': 12.0}
         assert scaler.target_divisor_ == 12.0
         assert scaler.fit_scale_factor_ == 12.0
         assert scaler.n_features_in_ == 2
-        assert list(scaler.feature_names_in_) == ['m1', 'q1']
+        assert list(scaler.feature_names_in_) == ['m1', 'a2']
 
     def test_transform_divides_and_inverse_transform_restores(self):
         """transform divise la trame, inverse_transform la restitue exactement."""
         X = self._stage_frame()
-        scaler = _make_scaler(column_frequencies={'m1': 'M', 'q1': 'Q'}).fit(X)
+        scaler = self._fitted(X)
 
         scaled = scaler.transform(X)
-        assert scaled['m1'].tolist() == [100.0, 200.0, 300.0]
-        assert scaled['q1'].tolist() == [10.0, 20.0, 30.0]
+        assert scaled['m1'].tolist() == [1200.0, 2400.0, 3600.0]
+        assert scaled['a2'].tolist() == [10.0, 20.0, 30.0]
         pd.testing.assert_frame_equal(scaler.inverse_transform(scaled), X)
 
     def test_transform_on_a_series_uses_the_target_divisor(self):
         """Une Series est traitée comme la cible, une trame comme les covariables."""
         X = self._stage_frame()
         y = pd.Series([120.0, 132.0, 150.0], index=X.index)
-        scaler = _make_scaler(column_frequencies={'m1': 'M', 'q1': 'Q'}).fit(X, y)
+        scaler = self._fitted(X, y)
 
         scaled = scaler.transform(y)
         assert scaled.tolist() == [10.0, 11.0, 12.5]
@@ -539,13 +557,14 @@ class TestSklearnProtocol:
         y = pd.Series([120.0, 132.0, 150.0], index=X.index, name='a1')
         scaler = _make_scaler(
             scale_features={'a1': False, DEFAULT_SCALE_KEY: 'constant'},
-            column_frequencies={'m1': 'M', 'q1': 'Q'},
+            column_frequencies={'m1': 'M', 'a2': 'Y'},
+            materialization={'m1': 'identity', 'a2': 'raw_anchors'},
         ).fit(X, y)
 
         # La cible garde son échelle, les covariables sont bien divisées
         assert scaler.target_divisor_ == 1.0
         assert scaler.fit_scale_factor_ == 1.0
-        assert scaler.feature_divisors_.to_dict() == {'m1': 12.0, 'q1': 4.0}
+        assert scaler.feature_divisors_.to_dict() == {'m1': 1.0, 'a2': 12.0}
         pd.testing.assert_series_equal(scaler.transform(y), y)
 
     def test_unnamed_y_falls_back_on_the_global_setting(self):
@@ -599,21 +618,24 @@ class TestStatelessness:
         first = shared.feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
-            source_freq='Y',
-            pred_freq='M',
+            ways={'m1': 'aggregate'},
+            grid_freq='Y',
+            stage_freq='M',
         )
         second = shared.feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
-            source_freq='Q',
-            pred_freq='M',
+            ways={'m1': 'aggregate'},
+            grid_freq='Q',
+            stage_freq='M',
         )
         # Le second appel ne doit rien devoir au premier
         third = shared.feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
-            source_freq='Y',
-            pred_freq='M',
+            ways={'m1': 'aggregate'},
+            grid_freq='Y',
+            stage_freq='M',
         )
 
         assert first['m1'] == 12.0
@@ -622,8 +644,9 @@ class TestStatelessness:
         assert StageScaler().feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
-            source_freq='Q',
-            pred_freq='M',
+            ways={'m1': 'aggregate'},
+            grid_freq='Q',
+            stage_freq='M',
         )['m1'] == second['m1']
 
     def test_divisor_methods_need_no_fit(self):
@@ -634,8 +657,9 @@ class TestStatelessness:
         assert scaler.feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
-            source_freq='Y',
-            pred_freq='M',
+            ways={'m1': 'aggregate'},
+            grid_freq='Y',
+            stage_freq='M',
         )['m1'] == 12.0
 
 
@@ -675,8 +699,9 @@ class TestMutualizedTrainingSet:
         mutualized = scaler.feature_divisors(
             columns=columns,
             column_frequencies=column_frequencies,
-            source_freq=self.BLOCKS,
-            pred_freq='M',
+            ways={'m1': 'aggregate', 'q1': 'aggregate'},
+            grid_freq=self.BLOCKS,
+            stage_freq='M',
             index=index,
         )
         assert isinstance(mutualized, pd.DataFrame)
@@ -689,8 +714,9 @@ class TestMutualizedTrainingSet:
             scalar = scaler.feature_divisors(
                 columns=columns,
                 column_frequencies=column_frequencies,
-                source_freq=f_block,
-                pred_freq='M',
+                ways={'m1': 'aggregate', 'q1': 'aggregate'},
+                grid_freq=f_block,
+                stage_freq='M',
                 index=rows,
             )
             for column in columns:
@@ -706,8 +732,9 @@ class TestMutualizedTrainingSet:
         divisors = StageScaler().feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
-            source_freq=self.BLOCKS,
-            pred_freq='M',
+            ways={'m1': 'aggregate'},
+            grid_freq=self.BLOCKS,
+            stage_freq='M',
             index=index,
         )
 
@@ -744,35 +771,40 @@ class TestMutualizedTrainingSet:
         features = scaler.feature_divisors(
             columns=['d1'],
             column_frequencies={'d1': 'D'},
-            source_freq={('IT',): 'M'},
-            pred_freq='Q',
+            ways={'d1': 'aggregate'},
+            grid_freq={('IT',): 'M'},
+            stage_freq='Q',
             index=it_rows,
         )
-        assert features['d1'].tolist() == pytest.approx([third] * len(it_rows))
+        # Grille d'une seule entité : forme compacte, un diviseur par colonne
+        assert features['d1'] == pytest.approx(third)
 
-    def test_scalar_source_freq_unchanged(
+    def test_scalar_grid_freq_keeps_the_compact_form(
         self, mixed_freq_panel_multifrequency: pd.DataFrame
     ) -> None:
         """La forme scalaire garde son comportement et sa forme de retour (Series par colonne)."""
         index = mixed_freq_panel_multifrequency.index
         scaler = StageScaler()
 
-        # Panel homogène : forme compacte conservée, avec et sans index
+        # Grille unique : forme compacte conservée, avec et sans index
         compact = scaler.feature_divisors(
             columns=['m1', 'q1'],
             column_frequencies={'m1': 'M', 'q1': 'Q'},
-            source_freq='Y',
-            pred_freq='M',
+            ways={'m1': 'aggregate', 'q1': 'aggregate'},
+            grid_freq='Y',
+            stage_freq='M',
             index=index,
         )
         assert isinstance(compact, pd.Series)
-        assert compact.to_dict() == {'m1': 12.0, 'q1': 4.0}
+        # Matérialisées sur une grille annuelle, les deux couvrent une année
+        assert compact.to_dict() == {'m1': 12.0, 'q1': 12.0}
 
         indexless = scaler.feature_divisors(
             columns=['m1', 'q1'],
             column_frequencies={'m1': 'M', 'q1': 'Q'},
-            source_freq='Y',
-            pred_freq='M',
+            ways={'m1': 'aggregate', 'q1': 'aggregate'},
+            grid_freq='Y',
+            stage_freq='M',
         )
         pd.testing.assert_series_equal(indexless, compact)
 
@@ -784,21 +816,23 @@ class TestMutualizedTrainingSet:
         scaler = StageScaler()
 
         # Aucun index
-        with pytest.raises(ValueError, match=r"source_freq"):
+        with pytest.raises(ValueError, match=r"grid_freq"):
             scaler.feature_divisors(
                 columns=['m1'],
                 column_frequencies={'m1': 'M'},
-                source_freq=self.BLOCKS,
-                pred_freq='M',
+                ways={'m1': 'aggregate'},
+                grid_freq=self.BLOCKS,
+                stage_freq='M',
             )
 
         # Index sans niveau d'entité
-        with pytest.raises(ValueError, match=r"source_freq"):
+        with pytest.raises(ValueError, match=r"grid_freq"):
             scaler.feature_divisors(
                 columns=['m1'],
                 column_frequencies={'m1': 'M'},
-                source_freq=self.BLOCKS,
-                pred_freq='M',
+                ways={'m1': 'aggregate'},
+                grid_freq=self.BLOCKS,
+                stage_freq='M',
                 index=_monthly_grid(),
             )
 
@@ -820,8 +854,9 @@ class TestMutualizedTrainingSet:
             StageScaler().feature_divisors(
                 columns=['m1'],
                 column_frequencies={'m1': 'M'},
-                source_freq=partial,
-                pred_freq='M',
+                ways={'m1': 'aggregate'},
+                grid_freq=partial,
+                stage_freq='M',
                 index=index,
             )
 
@@ -834,11 +869,12 @@ class TestMutualizedTrainingSet:
         covered = StageScaler().feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
-            source_freq={('FR',): 'Y'},
-            pred_freq='M',
+            ways={'m1': 'aggregate'},
+            grid_freq={('FR',): 'Y'},
+            stage_freq='M',
             index=index,
         )
-        assert covered['m1'].unique().tolist() == [12.0]
+        assert covered['m1'] == 12.0
 
     def test_target_divisor_produced_freq_takes_precedence(
         self, mixed_freq_panel_multifrequency: pd.DataFrame
@@ -875,8 +911,9 @@ class TestMutualizedTrainingSet:
         divisors = scaler.feature_divisors(
             columns=['d1'],
             column_frequencies={'d1': 'D'},
-            source_freq=blocks,
-            pred_freq='D',
+            ways={'d1': 'aggregate'},
+            grid_freq=blocks,
+            stage_freq='D',
             index=index,
         )
         assert isinstance(divisors, pd.DataFrame)
