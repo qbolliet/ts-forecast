@@ -751,6 +751,154 @@ class StageScaler(BaseEstimator, TransformerMixin):
             )
         return self._spread(per_entity, columns, index)
 
+    # Méthode des diviseurs fondés sur la période réellement couverte
+    def carried_divisors(
+        self,
+        *,
+        columns: Sequence[str],
+        column_frequencies: Mapping[str, FrequencyBinding],
+        ways: Mapping[str, str],
+        grid_freq: FrequencyBinding,
+        stage_freq: FrequencyBinding,
+        index: Optional[pd.Index] = None,
+        default: Optional[float] = None,
+    ) -> Union[pd.Series, pd.DataFrame]:
+        """Divide each covariate by the period its cells actually span.
+
+        The divisor of a covariate is read off the period one of its cells
+        covers on the grid it sits on, and not off the frequency of the
+        imputed variable. As the training grid of the ``HighFrequencyImputer2``
+        is the mutualized block
+        grid, one frequency per entity, and the covariates are
+        materialized onto it by the imputation ways. Two cells of the same column
+        may then span different periods, and only the way says which:
+
+        - ``'raw_anchors'`` reads the column where it is observed, so the cell
+          spans one period of the column, ``f_col``;
+        - every other way — identity, exact aggregation, interpolation, mirror
+          — produces a cell spanning one period of the grid, ``f_grid``.
+
+        The divisor is then the count of stage sub-periods in that span, the
+        very primitive the per-row target divisor uses: the two axes
+        share one mechanism, and there are not two scaling plumbings.
+
+        Applied on both grids, it makes the training and prediction features
+        comparable by construction a yearly
+        aggregate of a monthly covariate being divided by 12 where the same
+        covariate read monthly is divided by 1.
+
+        Args:
+            columns: Covariate columns to compute a divisor for.
+            column_frequencies: Detected frequency of each column: a string,
+                or an entity -> frequency mapping.
+            ways: Materialization way retained for each column.
+            grid_freq: Frequency of the grid the cells sit on: the stage
+                frequency on a prediction grid, the block frequency mapping
+                ``{e: f_block(e)}`` on a mutualized training grid.
+            stage_freq: Frequency of the stage, the common scale everything is
+                brought back to.
+            index: Grid. Required as soon as one column is in ``'calendar'``
+                mode or a binding is given per entity.
+            default: Divisor for a column whose frequency cannot be compared.
+                Defaults to ``default_divisor``.
+
+        Returns:
+            ``Series`` of floats indexed by column name when every divisor is
+            scalar and every entity agrees, ``DataFrame`` indexed like
+            ``index`` and columned like ``columns`` otherwise.
+
+        Raises:
+            ValueError: If per-row divisors are needed and ``index`` is None
+                or carries no entity level.
+
+        Examples:
+            >>> scaler = StageScaler()
+            >>> divisors = scaler.carried_divisors(
+            ...     columns=['m1', 'q1'],
+            ...     column_frequencies={'m1': 'M', 'q1': 'Q'},
+            ...     ways={'m1': 'aggregate', 'q1': 'aggregate'},
+            ...     grid_freq='Y', stage_freq='M',
+            ... )
+            >>> divisors.to_dict()
+            {'m1': 12.0, 'q1': 12.0}
+
+            The same two covariates read on the monthly stage grid:
+
+            >>> divisors = scaler.carried_divisors(
+            ...     columns=['m1', 'q1'],
+            ...     column_frequencies={'m1': 'M', 'q1': 'Q'},
+            ...     ways={'m1': 'identity', 'q1': 'interpolate'},
+            ...     grid_freq='M', stage_freq='M',
+            ... )
+            >>> divisors.to_dict()
+            {'m1': 1.0, 'q1': 1.0}
+        """
+        # Diviseur de repli
+        fallback = self.default_divisor if default is None else default
+
+        # Entités à servir : celles de la grille dès qu'une liaison est par
+        # entité, une entité non couverte étant une erreur
+        per_entity_binding = isinstance(grid_freq, Mapping) or isinstance(stage_freq, Mapping)
+        if isinstance(grid_freq, Mapping):
+            entities = self._grid_entities(index, 'grid_freq')
+        elif per_entity_binding:
+            entities = self._binding_entities(
+                [stage_freq, *(column_frequencies.get(col) for col in columns)]
+            )
+        else:
+            entities = self._binding_entities(
+                [*(column_frequencies.get(col) for col in columns)]
+            )
+
+        # Modalité par colonne : elle décide seule de la forme du retour
+        modes = {column: self.resolve_mode(column) for column in columns}
+        calendar_used = any(mode == 'calendar' for mode in modes.values())
+
+        # Diviseurs par (entité, colonne)
+        per_entity: Dict[EntityKey, Dict[str, Divisor]] = {}
+        for entity in entities:
+            f_stage = self._freq_for(stage_freq, entity)
+            f_grid = (
+                self._block_freq(grid_freq, entity)
+                if isinstance(grid_freq, Mapping)
+                else grid_freq
+            )
+            row: Dict[str, Divisor] = {}
+            # Parcours des colonnes
+            for column in columns:
+                # Modalité désactivée : la colonne n'est jamais divisée
+                if modes[column] is False:
+                    row[column] = 1.0
+                    continue
+                # Période couverte par la cellule : celle de la colonne quand
+                # ses ancres sont lues telles quelles, celle de la grille
+                # sinon
+                f_col = self._freq_for(column_frequencies.get(column), entity)
+                carried = f_col if ways.get(column) == 'raw_anchors' else f_grid
+                try:
+                    row[column] = self._pair_divisor(
+                        f_stage, carried, modes[column], index
+                    )
+                except (ValueError, TypeError):
+                    # Fréquences incomparables : repli documenté
+                    row[column] = fallback
+            per_entity[entity] = row
+
+        # Forme compacte : tous les diviseurs sont scalaires et les entités
+        # s'accordent — cas des séries temporelles et des panels homogènes
+        rows = list(per_entity.values())
+        if not calendar_used and all(row == rows[0] for row in rows[1:]):
+            return pd.Series(rows[0], dtype=float)
+
+        # Forme par ligne : le diviseur dépend de la date, de l'entité, ou des
+        # deux, et aucune Series à une dimension ne le porte
+        if index is None:
+            raise ValueError(
+                "Per-row covariate divisors require an index ('calendar' mode "
+                "or entities disagreeing on a frequency)"
+            )
+        return self._spread(per_entity, columns, index)
+
     # Méthode auxiliaire de ventilation d'un diviseur unique sur la grille
     def _spread_one(
         self,

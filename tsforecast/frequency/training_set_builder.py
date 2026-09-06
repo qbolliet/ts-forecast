@@ -167,7 +167,8 @@ class TrainingSetBuilder:
             frequency asked for each entity, i.e. the injected form of
             ``ImputationWindowCalculator.get_mask_at_frequency(...,
             kind='training')``, which already accepts one frequency per
-            entity. None applies no window restriction at all. An entity
+            entity. None — the callable itself, or what one call returns —
+            applies no window restriction at all. An entity
             absent from the mask returned is left unrestricted (the calculator
             simply omits the entities without a valid fitted mask); for an
             entity present, a date absent from the mask is outside the window
@@ -377,8 +378,13 @@ class TrainingSetBuilder:
         if self.training_mask is None:
             return dict(candidates)
 
-        # Appel unique, à la fréquence de bloc de chaque entité
+        # Appel unique, à la fréquence de bloc de chaque entité. Un retour
+        # None dit qu'aucune fenêtre n'est calculable — calculateur non ajusté,
+        # fréquence de bloc inconvertible : aucune restriction plutôt que le
+        # rejet silencieux de toutes les lignes
         mask = self.training_mask(dict(blocks))
+        if mask is None:
+            return dict(candidates)
         # Découpage du masque par entité, index de date seul
         mask_blocks = {
             normalize_entity_key(entity): entity_block
@@ -454,6 +460,7 @@ class TrainingSetBuilder:
         detected_frequencies: DetectedFrequencies,
         source_data: pd.DataFrame,
         eligible_origins: Iterable[CellOrigin],
+        materialization: Optional[Mapping[str, MaterializationWay]] = None,
     ) -> TrainingSet:
         """Compose the mutualized training set of one variable at one stage.
 
@@ -477,6 +484,17 @@ class TrainingSetBuilder:
                 origin filter and the mutualization are orthogonal: this
                 decides wihich cells of an entity are eligible. The other dimension decides
                 which entities contribute and at which frequency.
+            materialization: Ways to impose on the covariates, one entry per
+                column of ``feature_cols``. None (default) lets the
+                materializer choose them on the block grid. The caller of an
+                imputation stage passes the ways decided on the prediction
+                grid: a covariate served by ``covariate_fallback``
+                at predict must be prepared the same way at fit, even when its
+                anchors would suffice. :meth:`CovariateMaterializer._applicable_way`
+                then brings each imposed way back to what the entity's own
+                block frequency allows — an ``'interpolate'`` way on a block
+                grid no finer than the covariate becomes the rank-1 identity
+                or aggregation.
 
         Returns:
             The :class:`TrainingSet`. Empty — with empty ``blocks`` and
@@ -580,8 +598,15 @@ class TrainingSetBuilder:
             stage_freq=dict(blocks),
             detected_frequencies=detected_frequencies,
             source_data=source_data,
+            materialization=materialization,
             record=False,
         )
+
+        # Voies rendues : celles imposées quand il y en a, pour que l'appelant
+        # gèle dans l'étape la voie de la grille de prédiction et non son
+        # image dégradée sur les grilles de bloc
+        if materialization is not None:
+            ways = {column: materialization[column] for column in columns}
 
         return TrainingSet(
             X=X,

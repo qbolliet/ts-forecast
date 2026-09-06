@@ -602,6 +602,22 @@ class CovariateMaterializer:
         """
         return 'interpolate' if self.covariate_fallback == 'interpolate' else 'raw_anchors'
 
+    # Voie de rang 4 de la stratégie courante
+    @property
+    def _rank4_way(self) -> MaterializationWay:
+        """Way rank 4 resolves to under the current strategy.
+
+        Returns:
+            ``'raw_anchors'`` under ``'tolerate_nan'``, ``'interpolate'``
+            under ``'interpolate'``, and ``covariate_fallback`` under
+            ``'model'``.
+        """
+        if self.covariate_strategy == 'tolerate_nan':
+            return 'raw_anchors'
+        if self.covariate_strategy == 'interpolate':
+            return 'interpolate'
+        return self._fallback_way
+
     # -------------------------------------------------------------------------
     # Les trois registres
     # -------------------------------------------------------------------------
@@ -981,15 +997,31 @@ class CovariateMaterializer:
                 return 'stage_model'
             return self._applicable_way(self._fallback_way, f_col, f_stage)
 
-        # Seule l'interpolation exige que la grille soit plus fine que la colonne
-        if way != 'interpolate':
+        # Les ancres brutes s'appliquent à toute grille : la colonne y est lue
+        # telle quelle, sans conversion à valider
+        if way == 'raw_anchors':
             return way
+
+        # Fréquences inconnues : aucune conversion n'est définissable
         if f_col is None or f_stage is None:
             return 'raw_anchors'
-        if is_higher_frequency(f_stage, f_col):
+
+        # Rang 1, seul applicable dès que la colonne est au moins aussi fine
+        # que la grille — que la voie imposée soit 'identity', 'aggregate' ou
+        # 'interpolate'. Une voie de rang 1 imposée sur une grille plus
+        # grossière doit devenir une agrégation : lue telle quelle, elle
+        # rendrait la valeur ponctuelle de la colonne à la date de grille, une
+        # quantité de sous-période là où la ligne en couvre une entière
+        if _same_frequency(f_col, f_stage):
+            return 'identity'
+        if is_higher_frequency(f_col, f_stage):
+            return 'aggregate'
+
+        # Colonne plus basse que la grille : seule l'interpolation la couvre,
+        # une voie de rang 1 imposée retombant sur l'approche secondaire
+        if way == 'interpolate':
             return 'interpolate'
-        # Grille au plus aussi fine que la colonne : rang 1
-        return 'identity' if _same_frequency(f_col, f_stage) else 'aggregate'
+        return self._rank4_way
 
     # -------------------------------------------------------------------------
     # Interpolation (voie et repli)
@@ -1427,10 +1459,15 @@ class CovariateMaterializer:
             source_data: Input data holding the observations. Never modified.
             materialization: Ways to replay, one entry per column of
                 ``columns``. None to let the component choose.
-            record: Whether the production feeds the three stores. True
-                (default), every caller of the
-                imputer's stages relying on it. False produces the features
-                and writes nothing — the mode
+            record: Whether the production feeds the three stores. False
+                produces the features and writes nothing, which is what the
+                stages of ``HighFrequencyImputer2`` use for their COVARIATES:
+                the registries hold what has been IMPUTED, never what was
+                merely prepared as a feature. Recording a covariate would
+                overwrite in the mirror the imputation its own model just
+                wrote, and would make the result depend on the processing
+                order. Only a step's own production — a prediction, or the
+                interpolation of :meth:`interpolate_column` — is recorded — the mode
                 :class:`~tsforecast.frequency.training_set_builder.TrainingSetBuilder`
                 uses, its mutualized grid carrying cells produced at the
                 frequency of the blocks rather than at that of any stage.
@@ -1510,6 +1547,126 @@ class CovariateMaterializer:
         # Construction du jeu de données résultat
         frame = pd.DataFrame(features, index=grid_index, columns=list(columns))
         return frame, ways, column_origins
+
+    # Méthode de construction de la frame de travail d'une étape
+    def stage_frame(
+        self,
+        *,
+        grid_index: pd.Index,
+        stage_freq: StageFrequency,
+        detected_frequencies: DetectedFrequencies,
+        source_data: pd.DataFrame,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        """Build the working frame of one stage: originals, exact aggregations, mirror.
+
+        The stage frame is the view PHASE 5 of ``HighFrequencyImputer2`` opens
+        each stage on: the input values, the EXACT aggregations of the finer
+        columns onto the stage grid, and the mirror of what earlier stages
+        imputed. It deliberately fabricates no interpolated value — a column
+        whose precedence lands on rank 4 is left at its raw anchors — because
+        interpolation is the job of :meth:`materialize`, the single producer
+        of ``X_train`` and ``X_pred``. The frame serves the covariate
+        SELECTION (non-emptiness on both windows) and the diagnostics, never
+        the features handed to an estimator.
+
+        One documented exception to the "no interpolation" rule: under
+        ``covariate_strategy='model'``, a column whose column-level way is a
+        model way but whose mirror is empty FOR ONE ENTITY is degraded by
+        :meth:`_applicable_way` down to ``covariate_fallback``, exactly as the
+        precedence prescribes. Selecting on such a cell is harmless: an
+        interpolation covers no date a raw anchor would leave empty.
+
+        Nothing is written to the three stores: the frame is a view.
+
+        Args:
+            grid_index: Grid the frame is built on — a ``DatetimeIndex`` for a
+                time series, a panel ``MultiIndex`` (entity levels then date)
+                otherwise.
+            stage_freq: Frequency of the grid, scalar or per entity.
+            detected_frequencies: Detected frequency of each column, scalar or
+                per entity.
+            source_data: Input data holding the observations. Never modified.
+            columns: Columns to carry, in output order. None (default) takes
+                every column of ``source_data``.
+
+        Returns:
+            Frame indexed on ``grid_index``, one column per entry of
+            ``columns``, NaN wherever nothing exact could be produced.
+
+        Examples:
+            >>> dates = pd.date_range('2021-01-31', periods=12, freq='ME')
+            >>> data = pd.DataFrame({'m1': range(12), 'a1': np.nan}, index=dates)
+            >>> data.loc['2021-12-31', 'a1'] = 120.0
+            >>> frame = CovariateMaterializer().stage_frame(
+            ...     grid_index=dates, stage_freq='M',
+            ...     detected_frequencies={'m1': 'M', 'a1': 'Y'},
+            ...     source_data=data,
+            ... )
+            >>> int(frame['m1'].notna().sum()), int(frame['a1'].notna().sum())
+            (12, 1)
+        """
+        # Colonnes traitées : celles de la source, dans leur ordre d'entrée
+        wanted = tuple(source_data.columns) if columns is None else tuple(columns)
+
+        # Voies décidées par la précédence, puis plafonnées aux rangs exacts :
+        # seul le rang 4 'interpolate' est ramené aux ancres brutes, les rangs
+        # 1 (identité, agrégation) et 2-3 (miroir) étant tous exacts
+        ways = self.decide_ways(
+            columns=wanted,
+            grid_index=grid_index,
+            stage_freq=stage_freq,
+            detected_frequencies=detected_frequencies,
+        )
+
+        # Production colonne par colonne, sans écriture de registre
+        frame_columns: Dict[str, pd.Series] = {}
+        for column in wanted:
+            way = 'raw_anchors' if ways[column] == 'interpolate' else ways[column]
+            values, _origins, _freqs = self._produce_column(
+                column, way, grid_index, stage_freq, detected_frequencies, source_data,
+            )
+            frame_columns[column] = values
+
+        return pd.DataFrame(frame_columns, index=grid_index, columns=list(wanted))
+
+    # Méthode d'enregistrement d'une production extérieure dans les trois registres
+    def record_production(
+        self,
+        column: str,
+        values: pd.Series,
+        origins: pd.Series,
+        production_freq: pd.Series,
+    ) -> None:
+        """Record a production made outside this component in the three stores.
+
+        The stage executor of ``HighFrequencyImputer2`` writes the values a
+        model produced — and the aggregation constraint possibly rescaled —
+        through this method, so that the three registries keep being fed by a
+        single implementation, the one :meth:`materialize` and
+        :meth:`interpolate_column` already use. NaN cells are excluded, and
+        each write is a ``combine_first``: cells the production does not cover
+        survive.
+
+        Args:
+            column: Column being written.
+            values: Values produced, indexed on the production grid.
+            origins: :data:`CellOrigin` of each cell, same index.
+            production_freq: Frequency each cell was produced at, same index.
+
+        Examples:
+            >>> dates = pd.date_range('2021-01-31', periods=2, freq='ME')
+            >>> mat = CovariateMaterializer()
+            >>> mat.record_production(
+            ...     'a1', pd.Series([1.0, 2.0], index=dates),
+            ...     pd.Series(['model', 'model'], index=dates),
+            ...     pd.Series(['M', 'M'], index=dates),
+            ... )
+            >>> mat.origin_store['a1'].tolist()
+            ['model', 'model']
+        """
+        # Délégation à l'écriture interne : une seule implémentation
+        self._record(column, values, origins, production_freq)
 
     # Méthode auxiliaire de résolution des voies d'une matérialisation
     def _resolve_ways(

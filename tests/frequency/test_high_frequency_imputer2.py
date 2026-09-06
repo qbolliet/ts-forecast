@@ -20,13 +20,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.base import clone
+from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.exceptions import NotFittedError
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import KFold
 
 # Objets testés
 from tsforecast.frequency.high_frequency_imputer2 import HighFrequencyImputer2
+from tsforecast.frequency.imputation_plan import INTERPOLATE_FALLBACK
 
 # Clés d'entité du jeu PANEL-F, sous forme de tuples (§2.5)
 FR, DE, IT = ('FR',), ('DE',), ('IT',)
@@ -391,9 +392,11 @@ class TestFitPhases:
         # PHASE 4 : matrice de provenance initialisée
         assert isinstance(imputer.imputation_provenance_, pd.DataFrame)
 
-        # PHASE 5 non livrée par ce lot : le plan est vide
-        assert len(imputer.imputation_plan_) == 0
-        assert imputer.imputation_models_ == {}
+        # PHASE 5 : une etape de plan par groupe imputable, et un modele par
+        # (etape, variable) dans le registre
+        assert len(imputer.imputation_plan_) >= 1
+        assert set(imputer.imputation_models_)
+        assert all(step.pred_freq_label == 'M' for step in imputer.imputation_plan_)
 
     def test_entities_are_set_on_panel_only(self, reference_timeseries,
                                             mixed_freq_panel_multifrequency):
@@ -737,3 +740,644 @@ class TestStaticInvariants:
         assert 'HighFrequencyImputer' in frequency_module.__all__
         assert 'HighFrequencyImputer2' in frequency_module.__all__
         assert frequency_module.HighFrequencyImputer2 is HighFrequencyImputer2
+
+
+# =============================================================================
+# PHASE 5 — Exécution des étapes (lot L10)
+# =============================================================================
+# Estimateur espion : il retient ce que chaque appel lui a montré
+class _SpyEstimator(BaseEstimator, RegressorMixin):
+    """Estimateur espion, tolérant les NaN et prédisant une constante.
+
+    Il retient ``fit_X_``, ``fit_y_`` et la liste ``predict_X_`` des trames de
+    prédiction, ce qui rend l'invariant central (I2) et l'échelle (I5)
+    mesurables. Le compteur de classe ``n_fits`` mesure la règle « un seul
+    ajustement par (étape, variable) » (I15).
+    """
+
+    n_fits = 0
+
+    def __init__(self, constant: float = 1.0):
+        self.constant = constant
+
+    def fit(self, X, y):
+        """Retient le jeu d'entraînement et la moyenne de la cible."""
+        type(self)._record_fit()
+        self.fit_X_ = X.copy()
+        self.fit_y_ = y.copy()
+        self.predict_X_ = []
+        values = np.asarray(y, dtype=float)
+        finite = values[~np.isnan(values)]
+        self.mean_ = float(finite.mean()) if finite.size else 0.0
+        return self
+
+    def predict(self, X):
+        """Retient la trame de prédiction et rend la moyenne apprise."""
+        if not hasattr(self, 'predict_X_'):
+            self.predict_X_ = []
+        self.predict_X_.append(X.copy())
+        return np.full(len(X), self.mean_)
+
+    @classmethod
+    def _record_fit(cls):
+        """Incrémente le compteur d'ajustements de la classe."""
+        _SpyEstimator.n_fits += 1
+
+
+# Estimateur d'échec, pour le chemin de repli
+class _FailingEstimator(BaseEstimator, RegressorMixin):
+    """Estimateur dont l'ajustement échoue toujours."""
+
+    def fit(self, X, y):
+        """Lève systématiquement, pour éprouver le repli d'interpolation."""
+        raise RuntimeError('deliberate fit failure')
+
+    def predict(self, X):
+        """Jamais atteint : l'ajustement a déjà échoué."""
+        raise RuntimeError('deliberate predict failure')
+
+
+# Fonction auxiliaire d'ajustement silencieux avec l'espion
+def _fit_with_spy(data: pd.DataFrame, **overrides) -> HighFrequencyImputer2:
+    """Ajuste un imputeur muni de l'estimateur espion, sans avertissement."""
+    _SpyEstimator.n_fits = 0
+    imputer = _make_imputer(estimator=_SpyEstimator(), **overrides)
+    return _fit_quietly(imputer, data)
+
+
+# Fonction auxiliaire de regroupement d'un index par entité
+def _by_entity(index: pd.Index) -> dict:
+    """Rend l'ensemble des dates de chaque entité d'un index."""
+    if not isinstance(index, pd.MultiIndex):
+        return {(): set(index)}
+    grouped: dict = {}
+    for key in index:
+        grouped.setdefault(tuple(key[:-1]), set()).add(key[-1])
+    return grouped
+
+
+# Fonction auxiliaire des dates renseignées d'une colonne
+def _filled_dates(frame: pd.DataFrame, column: str) -> dict:
+    """Rend, par entité, les dates où la colonne est renseignée."""
+    return _by_entity(frame.index[frame[column].notna().to_numpy()])
+
+
+# Fonction auxiliaire d'extraction du bloc d'une entité
+def _entity_block(series: pd.Series, entity: str) -> pd.Series:
+    """Rend la tranche d'une entité, indexée par date seule."""
+    return series.xs(entity, level=0, drop_level=True)
+
+
+class TestNaNInvariant:
+    """I2 — le motif de disponibilité de X_pred contient celui de X_train."""
+
+    @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate', 'model'])
+    @pytest.mark.parametrize(
+        'fixture_name', ['reference_timeseries', 'mixed_freq_panel_heterogeneous']
+    )
+    def test_nan_invariant_by_stage_and_column(self, strategy, fixture_name, request):
+        """Formulation D14 : inclusion des dates, par étape, colonne ET entité."""
+        data = request.getfixturevalue(fixture_name)
+        imputer = _fit_with_spy(data, covariate_strategy=strategy)
+
+        checked = 0
+        for step in imputer.imputation_plan_:
+            if step.is_fallback:
+                continue
+            model = step.model
+            for column in step.feature_cols:
+                trained = _filled_dates(model.fit_X_, column)
+                for prediction_frame in model.predict_X_:
+                    grid = _by_entity(prediction_frame.index)
+                    predicted = _filled_dates(prediction_frame, column)
+                    for entity, dates in trained.items():
+                        # Image des dates d'entraînement SUR la grille de
+                        # prédiction : le taux brut de NaN ne dit rien quand
+                        # les deux grilles n'ont pas le même pas (§4.7)
+                        image = dates & grid.get(entity, set())
+                        assert image <= predicted.get(entity, set())
+                        checked += 1
+        assert checked > 0
+
+
+class TestOrderInvariance:
+    """I3 et I10 — les valeurs ne dépendent ni de l'ordre des colonnes ni du traitement."""
+
+    @staticmethod
+    def _outputs(imputer: HighFrequencyImputer2, columns) -> dict:
+        """Valeurs imputées et provenances, colonne par colonne."""
+        store = imputer._covariate_materializer.imputed_store
+        return {
+            column: (
+                store[column].sort_index().round(9),
+                imputer.imputation_provenance_[column].astype(str).sort_index(),
+            )
+            for column in columns
+        }
+
+    @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate', 'model'])
+    def test_column_order_invariance(self, reference_timeseries, strategy):
+        """I3 — permuter les colonnes d'entrée ne change ni valeurs ni provenances."""
+        columns = ['q1', 'a1', 'a2']
+        straight = _fit_with_spy(reference_timeseries, covariate_strategy=strategy)
+        permuted = _fit_with_spy(
+            reference_timeseries[['a2', 'a1', 'q1', 'm1']],
+            covariate_strategy=strategy,
+        )
+
+        for column in columns:
+            values, provenance = self._outputs(straight, columns)[column]
+            other_values, other_provenance = self._outputs(permuted, columns)[column]
+            pd.testing.assert_series_equal(values, other_values)
+            pd.testing.assert_series_equal(provenance, other_provenance)
+
+    @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate'])
+    def test_processing_order_indifferent_outside_model(
+        self, reference_timeseries, strategy
+    ):
+        """I10 — hors 'model', deux ordres de traitement donnent la MÊME sortie."""
+        columns = ['q1', 'a1', 'a2']
+        forward = _fit_with_spy(reference_timeseries, covariate_strategy=strategy)
+        # Ordre de traitement inversé : il suit l'ordre des colonnes d'entrée
+        backward = _fit_with_spy(
+            reference_timeseries[['a2', 'a1', 'q1', 'm1']],
+            covariate_strategy=strategy,
+        )
+        assert [step.var_name for step in forward.imputation_plan_] != [
+            step.var_name for step in backward.imputation_plan_
+        ]
+        for column in columns:
+            pd.testing.assert_series_equal(
+                self._outputs(forward, columns)[column][0],
+                self._outputs(backward, columns)[column][0],
+            )
+
+    def test_imputation_order_empty_outside_model(self, reference_timeseries):
+        """imputation_order_ reste vide hors covariate_strategy='model'."""
+        assert not _fit_with_spy(reference_timeseries).imputation_order_
+        assert _fit_with_spy(
+            reference_timeseries, covariate_strategy='model'
+        ).imputation_order_ == {'M': ['a1', 'a2', 'q1']}
+
+
+class TestMaterializationWays:
+    """I11 — la voie de matérialisation est enregistrée et conforme à la précédence."""
+
+    def test_materialization_way_recorded_per_step(self, reference_timeseries):
+        """Une entrée par feature_col, et la voie attendue par la précédence."""
+        imputer = _fit_with_spy(reference_timeseries)
+        expected = {
+            'q1': {'m1': 'identity', 'a1': 'interpolate', 'a2': 'interpolate'},
+            'a1': {'m1': 'identity', 'q1': 'interpolate', 'a2': 'interpolate'},
+            'a2': {'m1': 'identity', 'q1': 'interpolate', 'a1': 'interpolate'},
+        }
+        for step in imputer.imputation_plan_:
+            assert set(step.materialization) == set(step.feature_cols)
+            assert dict(step.materialization) == expected[step.var_name]
+
+    def test_ways_are_raw_anchors_under_tolerate_nan(self, reference_timeseries):
+        """Sous 'tolerate_nan', aucune covariable n'est matérialisée au-delà de ses ancres."""
+        imputer = _fit_with_spy(reference_timeseries, covariate_strategy='tolerate_nan')
+        for step in imputer.imputation_plan_:
+            for column, way in step.materialization.items():
+                assert way in ('identity', 'aggregate', 'raw_anchors')
+
+
+class TestProvenanceFamilies:
+    """I6 — les cinq familles MODEL_* sont émises exactement dans les cas du §6.3."""
+
+    @staticmethod
+    def _families(imputer: HighFrequencyImputer2, column: str) -> set:
+        """Provenances distinctes portées par une colonne."""
+        return {str(value) for value in imputer.imputation_provenance_[column]}
+
+    def test_interpolate_emits_model_on_interpolated(self, reference_timeseries):
+        """Une covariable plus basse que la grille suffit à souiller l'étape."""
+        imputer = _fit_with_spy(reference_timeseries)
+        for column in ('q1', 'a1', 'a2'):
+            assert self._families(imputer, column) == {'model_on_interpolated'}
+
+    def test_tolerate_nan_emits_model_on_true(self, reference_timeseries):
+        """Aucune valeur interpolée ne circule : le modèle n'a vu que du vrai."""
+        imputer = _fit_with_spy(reference_timeseries, covariate_strategy='tolerate_nan')
+        for column in ('q1', 'a1', 'a2'):
+            assert self._families(imputer, column) == {'model_on_true'}
+
+    def test_model_on_imputed_only_under_model_strategy(self, reference_timeseries):
+        """MODEL_ON_IMPUTED n'est émis que sous covariate_strategy='model'."""
+        under_model = _fit_with_spy(reference_timeseries, covariate_strategy='model')
+        # 'a1' est imputée la première : ses covariables ne sont qu'interpolées
+        assert self._families(under_model, 'a1') == {'model_on_interpolated'}
+        # 'a2' et 'q1' lisent ensuite l'imputation de 'a1' dans le miroir
+        assert self._families(under_model, 'a2') == {'model_on_imputed'}
+        assert self._families(under_model, 'q1') == {'model_on_imputed'}
+
+        for strategy in ('interpolate', 'tolerate_nan'):
+            imputer = _fit_with_spy(reference_timeseries, covariate_strategy=strategy)
+            emitted = set().union(
+                *(self._families(imputer, column) for column in ('q1', 'a1', 'a2'))
+            )
+            assert 'model_on_imputed' not in emitted
+
+    @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate', 'model'])
+    def test_target_families_absent_under_false(self, reference_timeseries, strategy):
+        """*_TARGET et *_BOTH exigent impute_intermediate_frequencies=True."""
+        imputer = _fit_with_spy(reference_timeseries, covariate_strategy=strategy)
+        emitted = set().union(
+            *(self._families(imputer, column) for column in ('q1', 'a1', 'a2'))
+        )
+        assert not emitted & {'model_on_imputed_target', 'model_on_imputed_both'}
+
+    def test_no_disaggregated_cell_is_ever_emitted(self, reference_timeseries):
+        """DISAGGREGATED n'est jamais émis par hfi2, recalage compris (D16)."""
+        imputer = _fit_with_spy(reference_timeseries)
+        emitted = {
+            str(value) for value in imputer.imputation_provenance_.to_numpy().ravel()
+        }
+        assert 'disaggregated' not in emitted
+
+
+class TestAggregationAdditivity:
+    """I4 — chaque période complète somme au total observé."""
+
+    def test_period_totals_additivity(self, reference_timeseries):
+        """Sous 'sum', les 12 mois d'une année somment à son total annuel."""
+        imputer = _fit_with_spy(reference_timeseries)
+        store = imputer._covariate_materializer.imputed_store
+        for year, total in [('2021', 120.0), ('2022', 132.0), ('2023', 150.0)]:
+            assert store['a1'].loc[year].sum() == pytest.approx(total)
+
+    def test_anchor_row_no_longer_carries_the_total(self, reference_timeseries):
+        """La ligne d'ancre porte une valeur de sous-période, jamais le total (§11.2)."""
+        imputer = _fit_with_spy(reference_timeseries)
+        anchor = float(imputer._covariate_materializer.imputed_store['a1']['2021-12-31'])
+        assert anchor != pytest.approx(120.0)
+        assert 0.0 < anchor < 120.0
+
+    def test_group_totals_are_those_of_the_source_frequency(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Les totaux recalés sont annuels pour FR et trimestriels pour DE (§5.8)."""
+        imputer = _fit_with_spy(mixed_freq_panel_multifrequency)
+        store = imputer._covariate_materializer.imputed_store['v']
+
+        france = _entity_block(store, 'FR')
+        assert france.loc['2021'].sum() == pytest.approx(120.0)
+        # Le trimestre de FR est libre : seul son total ANNUEL est contraint
+        assert france.loc['2021-01':'2021-03'].sum() != pytest.approx(28.0)
+
+        germany = _entity_block(store, 'DE')
+        assert germany.loc['2021-01':'2021-03'].sum() == pytest.approx(28.0)
+        assert germany.loc['2021-04':'2021-06'].sum() == pytest.approx(30.0)
+
+
+class TestTrainPredictScale:
+    """I5 — les features de X_train et de X_pred sont à la même échelle."""
+
+    @staticmethod
+    def _means(step) -> list:
+        """Moyennes appariées (entraînement, prédiction) de chaque feature."""
+        model = step.model
+        pairs = []
+        for column in step.feature_cols:
+            trained = float(model.fit_X_[column].mean())
+            predicted = float(
+                np.mean([frame[column].mean() for frame in model.predict_X_])
+            )
+            pairs.append((column, trained, predicted))
+        return pairs
+
+    @pytest.mark.parametrize('strategy', ['interpolate', 'model'])
+    def test_train_test_feature_means_comparable(self, reference_timeseries, strategy):
+        """Toute covariable matérialisée porte la MÊME échelle des deux côtés."""
+        imputer = _fit_with_spy(reference_timeseries, covariate_strategy=strategy)
+        for step in imputer.imputation_plan_:
+            for column, trained, predicted in self._means(step):
+                assert trained == pytest.approx(predicted, rel=1e-6), (
+                    f'{step.var_name}/{column}'
+                )
+
+    def test_mixed_calendar_feature_and_constant_target(self, reference_timeseries):
+        """Cas mixte : feature en 'calendar', cible en 'constant' (D15)."""
+        imputer = _fit_with_spy(
+            reference_timeseries,
+            scale_features={'m1': 'calendar', '__default__': 'constant'},
+        )
+        for step in imputer.imputation_plan_:
+            for column, trained, predicted in self._means(step):
+                assert trained == pytest.approx(predicted, rel=0.05), (
+                    f'{step.var_name}/{column}'
+                )
+
+    def test_features_divided_target_untouched(self, reference_timeseries):
+        """Cas « features divisées, y en False » : la cible garde son échelle brute."""
+        imputer = _fit_with_spy(
+            reference_timeseries,
+            scale_features={'a1': False, '__default__': 'constant'},
+        )
+        step = next(
+            step for step in imputer.imputation_plan_ if step.var_name == 'a1'
+        )
+        # Cible non divisée : les trois ancres annuelles telles quelles
+        assert sorted(step.model.fit_y_.tolist()) == [120.0, 132.0, 150.0]
+
+
+class TestReferenceExamples:
+    """Les exemples chiffrés du document, repris comme cas d'or."""
+
+    def test_reference_plan_of_spec_5_5_under_false(self, reference_timeseries):
+        """§5.5 « Sous False » : une étape M, trois modèles, dans l'ordre a1, a2, q1."""
+        imputer = _fit_with_spy(reference_timeseries, covariate_strategy='model')
+        plan = list(imputer.imputation_plan_)
+
+        assert [step.var_name for step in plan] == ['a1', 'a2', 'q1']
+        assert {step.pred_freq_label for step in plan} == {'M'}
+        assert len(imputer.imputation_models_) == 3
+
+        # Nombre de lignes de y_train : 3 ancres annuelles, 12 trimestrielles
+        rows = {step.var_name: len(step.model.fit_y_) for step in plan}
+        assert rows == {'a1': 3, 'a2': 3, 'q1': 12}
+
+        ways = {step.var_name: dict(step.materialization) for step in plan}
+        # 'a1' d'abord : rien n'est encore imputé, ses deux covariables basses
+        # passent par le repli
+        assert ways['a1'] == {
+            'm1': 'identity', 'q1': 'interpolate', 'a2': 'interpolate'
+        }
+        # 'a2' ensuite : 'a1' est lue dans le miroir. 'q1' l'est aussi, ayant
+        # été matérialisée à l'étape de 'a1' — « le repli matérialise » est le
+        # déclencheur du rang 2 (§4.4), quelle que soit l'origine des cellules
+        assert ways['a2']['m1'] == 'identity'
+        assert ways['a2']['a1'] == 'stage_model'
+        # 'q1' enfin : les deux annuelles sont imputées
+        assert ways['q1'] == {
+            'm1': 'identity', 'a1': 'stage_model', 'a2': 'stage_model'
+        }
+
+    def test_reference_provenance_of_spec_6_5(self, reference_timeseries):
+        """§6.5 : MODEL_ON_INTERPOLATED sur les douze mois, ancre comprise, somme 120."""
+        imputer = _fit_with_spy(reference_timeseries)
+        provenance = imputer.imputation_provenance_['a1'].loc['2021']
+        assert len(provenance) == 12
+        assert {str(value) for value in provenance} == {'model_on_interpolated'}
+        # L'ancre ne reste NI ORIGINAL NI DISAGGREGATED
+        assert str(imputer.imputation_provenance_['a1']['2021-12-31']) == (
+            'model_on_interpolated'
+        )
+        store = imputer._covariate_materializer.imputed_store['a1']
+        assert store.loc['2021'].sum() == pytest.approx(120.0)
+
+    def test_provenance_unchanged_without_aggregation_constraint(
+        self, reference_timeseries
+    ):
+        """Sous aggregation_constraint=None, seules les VALEURS changent (D16)."""
+        constrained = _fit_with_spy(reference_timeseries)
+        free = _fit_with_spy(reference_timeseries, aggregation_constraint=None)
+
+        pd.testing.assert_series_equal(
+            constrained.imputation_provenance_['a1'].astype(str),
+            free.imputation_provenance_['a1'].astype(str),
+        )
+        free_sum = free._covariate_materializer.imputed_store['a1'].loc['2021'].sum()
+        assert free_sum != pytest.approx(120.0)
+
+    def test_timeseries_results_unchanged_by_pooling(self, reference_timeseries):
+        """I16 — à une entité, le jeu mutualisé est le jeu d'origine."""
+        imputer = _fit_with_spy(reference_timeseries)
+        for step in imputer.imputation_plan_:
+            assert dict(step.training_blocks) == {
+                (): 'Q' if step.var_name == 'q1' else 'Y'
+            }
+            assert step.entities is None
+        rows = {step.var_name: len(step.model.fit_y_) for step in imputer.imputation_plan_}
+        assert rows == {'a1': 3, 'a2': 3, 'q1': 12}
+        store = imputer._covariate_materializer.imputed_store
+        for year, total in [('2021', 120.0), ('2022', 132.0), ('2023', 150.0)]:
+            assert store['a1'].loc[year].sum() == pytest.approx(total)
+
+
+class TestMutualizedTrainingSet:
+    """I14 et I15 — mutualisation inter-entités et ajustement unique."""
+
+    @staticmethod
+    def _variable_steps(imputer: HighFrequencyImputer2) -> list:
+        """Étapes de la variable 'v' du jeu PANEL-F."""
+        return [step for step in imputer.imputation_plan_ if step.var_name == 'v']
+
+    def test_pooled_training_set_on_panel_f(self, mixed_freq_panel_multifrequency):
+        """I14 — 51 lignes (3 FR + 12 DE + 36 IT), toutes à l'échelle de l'étape."""
+        imputer = _fit_with_spy(mixed_freq_panel_multifrequency)
+        step = self._variable_steps(imputer)[0]
+        y_train = step.model.fit_y_
+
+        assert len(y_train) == 51
+        counts = pd.Series(
+            [key[0] for key in y_train.index]
+        ).value_counts().to_dict()
+        assert counts == {'IT': 36, 'DE': 12, 'FR': 3}
+        assert dict(step.training_blocks) == {('FR',): 'Y', ('DE',): 'Q', ('IT',): 'M'}
+
+        # Valeurs d'or du §5.8 : FR et IT à 10.0 / 11.0 / 12.5, DE aux tiers
+        france = _entity_block(y_train, 'FR')
+        assert [round(value, 6) for value in france] == [10.0, 11.0, 12.5]
+
+        italy = _entity_block(y_train, 'IT')
+        assert [round(value, 6) for value in italy.loc['2021']] == [10.0] * 12
+        assert [round(value, 6) for value in italy.loc['2022']] == [11.0] * 12
+        assert [round(value, 6) for value in italy.loc['2023']] == [12.5] * 12
+
+        germany = _entity_block(y_train, 'DE')
+        assert [round(value, 3) for value in germany[:4]] == [
+            round(28 / 3, 3), round(30 / 3, 3), round(31 / 3, 3), round(31 / 3, 3)
+        ]
+
+        # Aucune ligne ne mêle deux échelles : toutes tiennent dans la plage
+        # mensuelle du jeu
+        assert y_train.min() > 9.0 and y_train.max() < 14.0
+
+    def test_single_fit_shared_between_source_frequency_groups(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """I15 — un seul ajustement, un seul objet modèle, deux recalages distincts."""
+        imputer = _fit_with_spy(mixed_freq_panel_multifrequency)
+        steps = self._variable_steps(imputer)
+
+        # Deux étapes de plan, une par groupe de fréquence source
+        assert len(steps) == 2
+        assert {step.source_frequency for step in steps} == {'Y', 'Q'}
+        assert {step.entities for step in steps} == {(('FR',),), (('DE',),)}
+
+        # Un seul ajustement pour la variable, quel que soit le nombre de
+        # groupes : 'q1' et 'v' font deux ajustements en tout
+        assert _SpyEstimator.n_fits == 2
+
+        # MÊME objet modèle, mêmes features, mêmes blocs, mêmes souillures
+        first, second = steps
+        assert first.model is second.model
+        assert first.feature_cols == second.feature_cols
+        assert dict(first.training_blocks) == dict(second.training_blocks)
+        assert dict(first.materialization) == dict(second.materialization)
+        assert (first.covariate_taint, first.target_taint) == (
+            second.covariate_taint, second.target_taint
+        )
+
+        # Recalages distincts : total annuel exact pour FR, trimestriel pour DE
+        store = imputer._covariate_materializer.imputed_store['v']
+        assert _entity_block(store, 'FR').loc['2021'].sum() == pytest.approx(120.0)
+        assert _entity_block(store, 'DE').loc['2021-01':'2021-03'].sum() == (
+            pytest.approx(28.0)
+        )
+
+    def test_contributing_entity_is_never_rewritten(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """IT fournit 36 des 51 lignes d'entraînement et n'est jamais réécrite."""
+        imputer = _fit_with_spy(mixed_freq_panel_multifrequency)
+
+        # Aucune étape ne nomme IT parmi ses entités
+        for step in self._variable_steps(imputer):
+            assert ('IT',) not in (step.entities or ())
+
+        # Ses cellules restent ORIGINAL
+        provenance = _entity_block(imputer.imputation_provenance_['v'], 'IT')
+        assert {str(value) for value in provenance} == {'original'}
+
+        # Et aucune n'entre dans le miroir : les registres ne portent que ce
+        # qui a été IMPUTÉ, et IT ne l'est jamais pour 'v'
+        mirrored = _by_entity(imputer._covariate_materializer.imputed_store['v'].index)
+        assert set(mirrored) == {('FR',), ('DE',)}
+
+    def test_target_taint_is_computed_by_the_origin_filter(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Sous False, y_train n'est fait que d'observations : souillure 'none'."""
+        imputer = _fit_with_spy(mixed_freq_panel_multifrequency)
+        for step in imputer.imputation_plan_:
+            assert step.target_taint == 'none'
+
+
+class TestFallbackPath:
+    """Le repli d'interpolation, et ce qu'il écrit."""
+
+    def test_estimator_failure_falls_back_and_marks_interpolated(
+        self, reference_timeseries
+    ):
+        """D6 — is_fallback=True, cellules INTERPOLATED, registres alimentés."""
+        imputer = _make_imputer(estimator=_FailingEstimator())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.fit(reference_timeseries)
+            messages = [str(item.message) for item in caught]
+
+        assert all(step.is_fallback for step in imputer.imputation_plan_)
+        assert all(step.feature_cols == () for step in imputer.imputation_plan_)
+        for column in ('q1', 'a1', 'a2'):
+            assert {
+                str(value) for value in imputer.imputation_provenance_[column]
+            } == {'interpolated'}
+            # « Le repli matérialise » : les trois registres sont alimentés
+            assert column in imputer._covariate_materializer.imputed_store
+            assert column in imputer._covariate_materializer.origin_store
+
+        # Avertissements AGRÉGÉS : un seul message porte les trois échecs
+        degraded = [message for message in messages if 'degraded during the fit' in message]
+        assert len(degraded) == 1
+        assert degraded[0].count('interpolation fallback') == 3
+
+    def test_estimator_none_interpolates_everything(self, reference_timeseries):
+        """estimator=None : chaque variable retombe sur l'interpolation."""
+        imputer = _fit_quietly(_make_imputer(estimator=None), reference_timeseries)
+        assert all(step.is_fallback for step in imputer.imputation_plan_)
+        assert all(
+            step.model == INTERPOLATE_FALLBACK for step in imputer.imputation_plan_
+        )
+        # Les totaux de période restent respectés : le repli est recalé
+        store = imputer._covariate_materializer.imputed_store
+        assert store['a1'].loc['2022'].sum() == pytest.approx(132.0)
+
+
+class TestPhaseFiveEdgeCases:
+    """Cas limites de l'exécution des étapes."""
+
+    def test_unsorted_index_is_refused_explicitly(self, reference_timeseries):
+        """Un index désordonné est refusé par le contrat d'entrée, sans imputer à faux.
+
+        La classe fige ``auto_sort=False`` et ``strict_validation=True``
+        ([SPEC] §12.5) : trier en silence changerait les fenêtres et les
+        agrégats sans que l'appelant le sache.
+        """
+        with pytest.raises(ValueError, match='not sorted'):
+            _fit_with_spy(reference_timeseries.iloc[::-1])
+
+    def test_duplicated_index_does_not_crash(self, reference_timeseries):
+        """Un index dupliqué n'interrompt pas le fit."""
+        duplicated = pd.concat([reference_timeseries, reference_timeseries.iloc[[0]]])
+        imputer = _make_imputer(estimator=_SpyEstimator())
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            try:
+                imputer.fit(duplicated)
+            except ValueError as error:
+                # Un refus explicite est un comportement acceptable
+                assert 'duplicat' in str(error).lower() or 'unique' in str(error).lower()
+                return
+        assert len(imputer.imputation_plan_) >= 1
+
+    def test_yearly_variable_with_two_anchors_only(self, reference_timeseries):
+        """Deux ancres seulement : y_train de taille 2, sans repli forcé."""
+        data = reference_timeseries.copy()
+        data.loc['2023-12-31', 'a1'] = np.nan
+        imputer = _fit_with_spy(data)
+        step = next(step for step in imputer.imputation_plan_ if step.var_name == 'a1')
+        assert len(step.model.fit_y_) == 2
+
+    def test_all_nan_column_is_not_imputed(self, reference_timeseries):
+        """Une colonne entièrement NaN n'est classée nulle part et n'est jamais imputée."""
+        data = reference_timeseries.copy()
+        data['empty'] = np.nan
+        imputer = _fit_with_spy(data)
+        assert all(step.var_name != 'empty' for step in imputer.imputation_plan_)
+        assert 'empty' not in imputer._covariate_materializer.imputed_store
+
+    def test_incomplete_leading_and_trailing_periods(self, reference_timeseries):
+        """Périodes tronquées aux deux bouts : le fit aboutit et les années pleines sont exactes.
+
+        La garde du §11.1 porte sur une période PARTIELLEMENT PRÉDITE — au
+        moins une sous-période NaN sur la grille — et non sur une période que
+        les bornes du jeu tronquent : les dix mois de 2021 présents portent
+        alors tout le total annuel. C'est la seule lecture qui garde
+        l'additivité vis-à-vis de ce que la trame contient.
+        """
+        truncated = reference_timeseries.loc['2021-03-31':'2023-08-31']
+        imputer = _fit_with_spy(truncated)
+        store = imputer._covariate_materializer.imputed_store
+
+        # L'année 2022, complète, reste exacte
+        assert store['a1'].loc['2022'].sum() == pytest.approx(132.0)
+        # 2021, tronquée de deux mois, porte son total sur les dix restants
+        assert len(store['a1'].loc['2021']) == 10
+        assert store['a1'].loc['2021'].sum() == pytest.approx(120.0)
+        # 2023 n'a plus d'ancre dans la trame : la fenêtre stricte s'arrête
+        # avant, et aucune de ses lignes n'est imputée
+        assert store['a1'].index.max() == pd.Timestamp('2022-12-31')
+
+    def test_single_observation_entity(self, mixed_freq_panel_multifrequency):
+        """Une entité réduite à une observation ne fait pas échouer l'étape."""
+        data = mixed_freq_panel_multifrequency.copy()
+        italy = data.index.get_level_values(0) == 'IT'
+        data.loc[italy, 'v'] = np.nan
+        data.iloc[np.flatnonzero(italy)[0], data.columns.get_loc('v')] = 10.0
+        imputer = _fit_with_spy(data)
+        assert len(imputer.imputation_plan_) >= 1
+
+    def test_panel_with_no_imputable_variable_yields_an_empty_plan(self):
+        """Toutes les colonnes déjà à la fréquence cible : plan vide, aucune erreur."""
+        dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+        index = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['country', 'date'])
+        data = pd.DataFrame(
+            {'m1': np.arange(48, dtype=float), 'm2': np.arange(48, dtype=float)},
+            index=index,
+        )
+        imputer = _fit_with_spy(data)
+        assert len(imputer.imputation_plan_) == 0
+        assert imputer.imputation_models_ == {}
