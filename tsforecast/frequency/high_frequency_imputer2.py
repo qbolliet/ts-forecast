@@ -2,7 +2,7 @@
 # Importation des modules
 # Modules de base
 import warnings
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import (
     Any,
     Callable,
@@ -48,6 +48,7 @@ from .imputation_plan import INTERPOLATE_FALLBACK
 from .imputation_plan2 import (
     ImputationPlan,
     ImputationStep,
+    MaterializationWay,
     append_step,
     to_entity_tuple,
 )
@@ -67,7 +68,7 @@ from .provenance import (
 )
 from .stage_scaler import ScaleMode, StageScaler
 from .target_frequency_validator import TargetFrequencyValidator
-from .training_set_builder import TrainingSetBuilder
+from .training_set_builder import TrainingSet, TrainingSetBuilder
 from .variable_orderer import VariableOrderer, VariableSpec
 
 # Type aliases
@@ -105,6 +106,48 @@ ELIGIBLE_ORIGINS: Dict[Any, Tuple[CellOrigin, ...]] = {
 
 # Lot livrant "transform" / "inverse_transform" ([SPEC] §17) /!\
 _TRANSFORM_LOT = 'L12'
+
+
+# Contexte d'ajustement d'une variable à une étape
+@dataclass(frozen=True)
+class _VariableFit:
+    """Everything one (stage, variable) needs before an estimator is fitted.
+
+    Composed by :meth:`HighFrequencyImputer2._prepare_variable` and consumed
+    by two callers, which is exactly why it exists: the ordering of PHASE 5b
+    and the fit of PHASE 5c must rank and estimate on the SAME problem - same
+    covariates, same materialization, same rows, same scale. Whatever the
+    ordering scores, the fit then estimates.
+
+    The two callers share the code, never the result: PHASE 5b runs before any
+    variable of the stage has been imputed, so a context it composed is stale
+    as soon as the first variable has been written to the mirror. PHASE 5c
+    therefore recomposes its own.
+
+    Attributes:
+        training: The mutualized :class:`TrainingSet`, raw target included -
+            the source of ``row_origin`` and of the ``ways`` the plan step
+            freezes.
+        blocks: Mapping entity -> ``f_block(e)``, composition of the
+            mutualized set.
+        pred_grid: Prediction grid of the stage, restricted to the entities of
+            the variable's groups.
+        feature_cols: Covariates retained by :meth:`_select_feature_columns`,
+            i.e. those available at prediction time.
+        ways: Materialization way of each covariate, decided on the prediction
+            grid and imposed on both grids.
+        X_train: Scaled features, rows carrying no observed covariate and rows
+            of missing target already dropped.
+        y_train: Scaled target, sharing ``X_train``'s index.
+    """
+
+    training: TrainingSet
+    blocks: Dict[EntityKey, str]
+    pred_grid: pd.Index
+    feature_cols: Tuple[str, ...]
+    ways: Dict[str, MaterializationWay]
+    X_train: pd.DataFrame
+    y_train: pd.Series
 
 
 # Classe d'imputation multi-fréquences à deux axes orthogonaux
@@ -227,13 +270,19 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             ``'covariates_only'`` is truthy.
         fit_predict_order: Order in which variables are imputed,
             ``'frequency'`` (default) or ``'cv'``. Inert outside
-            ``covariate_strategy='model'``.
+            ``covariate_strategy='model'``. Under ``'cv'`` each variable is
+            scored on the very training set it will then be fitted on — the
+            covariates still available at prediction time, materialized the
+            same way, on the mutualized rows of the **training** window and
+            at the same scale — so the ranking and the estimation see one
+            single problem per variable.
         cv: sklearn cross-validation strategy used by the ``'cv'`` order:
             ``None``, an int ``>= 2``, a splitter, or an iterable of splits.
             Resolved by ``check_cv`` at ``fit`` only.
         cv_scoring: Scoring of the ``'cv'`` order, higher is better.
         min_cv_train_size: Minimum number of scorable observations for a
-            variable to be cross-validated. Below it, the variable falls back
+            variable to be cross-validated. Below it — and likewise when no
+            covariate at all survives the selection — the variable falls back
             to the ``'frequency'`` ordering group.
         imputation_scope: Scope of the **prediction** window.
         coverage_threshold: Coverage ratio, in ``[0, 1]``, gating the
@@ -280,6 +329,9 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             window (MultiIndex ``(entity..., date)`` on a panel).
         training_window_mask_: Boolean ``pd.Series`` of the training window.
         strict_window_mask_: Boolean ``pd.Series`` of the strict window.
+            Diagnostic only: nothing in the fit reads it — models train on
+            the **training** window, whose scope it merely coincides with
+            under the default ``training_scope=None``.
         imputation_window_: Readable ``(start, end)`` bounds of the
             **prediction** window, or a dict of them per entity.
         training_window_: Readable ``(start, end)`` bounds of the **training**
@@ -1491,19 +1543,16 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
                 window_calc.training_window_end_,
             )
 
-            # Avertissement global si aucune fenêtre stricte n'existe : sans
-            # lui, tous les entraînements échouent silencieusement un à un et
-            # tout finit en repli par interpolation 
-            # /!\ Cela ne me semble problématique que pour la stratégie "cv" qui est la seule à utiliser la fenêtre stricte
-            # /!\ D'ailleurs je ne suis pas sûr que ça soit souhaitable de se restreindre à la période stricte pour "cv" et ne pas prendre toute la fenêtre d'entraînement car cela peut biaiser les résultats non ? Il y a moins de valeurs manquantes.
-            start = window_calc.imputation_strict_window_start_
-            no_window = (
-                start is None if not isinstance(start, dict)
-                else all(v is None for v in start.values())
-            )
-            if no_window:
+            # Avertissement global si la fenêtre d'ENTRAÎNEMENT est vide :
+            # sans lui, tous les entraînements échouent silencieusement un à un
+            # et tout finit en repli par interpolation. C'est bien cette
+            # fenêtre que lit le jeu d'entraînement, et non la stricte, qui
+            # n'est plus qu'un attribut de diagnostic ; sous le scope par
+            # défaut (training_scope=None) les deux coïncident, et un scope
+            # élargi éteint légitimement l'avertissement
+            if not bool(self.training_window_mask_.to_numpy(dtype=bool).any()):
                 warnings.warn(
-                    "No strict imputation window found: no model can be trained; "
+                    "The training window is empty: no model can be trained; "
                     "all imputations will fall back to interpolation.",
                     UserWarning
                 )
@@ -1763,12 +1812,14 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         return dict(blocks)
 
     # Méthode auxiliaire d'ordonnancement des colonnes d'une étape
-    # /!\ A vérifier que l'imputation se fait bien par couple entité x variable dans le bon ordre (cf notebook d'exemple)
     def _order_columns(
         self,
         by_column: Dict[str, Dict[Tuple[str, str], Tuple[EntityKey, ...]]],
         X_work: pd.DataFrame,
         stage_label: str,
+        stage_freq: Union[str, Dict[EntityKey, str]],
+        stage_frame: pd.DataFrame,
+        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
     ) -> List[str]:
         """Order the imputable columns of one stage.
 
@@ -1778,10 +1829,29 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         order changes a value. Otherwise the input column
         order is used and ``imputation_order_`` stays empty.
 
+        Under the ``'cv'`` order, each column is scored on the very
+        ``(X_train, y_train)`` pair phase 5c will fit it on, composed here by
+        :meth:`_prepare_variable`: same covariate selection, same
+        materialization ways, same mutualized rows and same scale. Scoring a
+        raw view of ``X_work`` instead would rank a variable on covariates
+        the selection may drop before the fit, on panel rows whose
+        magnitudes are those of different frequencies, and on the strict
+        window rather than the training one.
+
+        One thing the ordering cannot see, and it is inherent: nothing of the
+        stage has been imputed yet, so the sets are those of the start of the
+        stage, whereas the variable of rank *k* will be fitted on what ranks
+        *1..k-1* produced. The order defines the context that would define
+        the order — the ranking is a heuristic, and phase 5c recomposes its
+        own context rather than reusing these.
+
         Args:
             by_column: Imputable groups of the stage, keyed by column.
-            X_work: Working frame, scored under the ``'cv'`` order.
+            X_work: Working frame.
             stage_label: Readable label of the stage.
+            stage_freq: Frequency of the stage.
+            stage_frame: Stage frame of 5a.
+            freqs_by_column: Detected frequencies, keyed by column.
 
         Returns:
             The columns to impute, in processing order.
@@ -1819,12 +1889,41 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
                     warnings.simplefilter('ignore', UserWarning)
                 self._variable_orderer.fit()
 
+        # Jeux de scoring de l'ordre 'cv' : ceux-là mêmes que la 5c ajustera.
+        # Rien n'est préparé sous l'ordre 'frequency', qui n'en lit aucun
+        training_sets: Optional[Dict[str, Tuple[pd.DataFrame, pd.Series]]] = None
+        if self.fit_predict_order == 'cv':
+            # Initialisation à un dictionnaire vide
+            training_sets = {}
+            # Parcours des colonnes
+            for column in columns:
+                # Union des entités des groupes, à l'identique de la 5c : la
+                # grille de prédiction, donc la sélection des covariables, en
+                # dépendent
+                group_entities = sorted(
+                    {
+                        entity
+                        for group in by_column[column].values()
+                        for entity in group
+                    },
+                    key=repr,
+                )
+                prepared = self._prepare_variable(
+                    column=column,
+                    entities=group_entities if self.is_panel_ else None,
+                    stage_freq=stage_freq,
+                    X_work=X_work,
+                    stage_frame=stage_frame,
+                    freqs_by_column=freqs_by_column,
+                )
+                training_sets[column] = (prepared.X_train, prepared.y_train)
+
+        # Les lignes scorées sont celles du jeu mutualisé, déjà restreintes à la fenêtre 'training'
         ordered = list(self._variable_orderer.order(
             specs,
-            X=X_work,
             estimator=self.estimator,
-            scoring_mask=self.strict_window_mask_,
             log=self._log if self.verbose else None,
+            training_sets=training_sets,
         ))
         self.imputation_order_[stage_label] = list(ordered)
         return ordered
@@ -1868,7 +1967,14 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         by_column: Dict[str, Dict[Tuple[str, str], Tuple[EntityKey, ...]]] = {}
         for group_key, entities in groups.items():
             by_column.setdefault(group_key[0], {})[group_key] = entities
-        ordered = self._order_columns(by_column, X_work, stage_label)
+        ordered = self._order_columns(
+            by_column,
+            X_work,
+            stage_label,
+            stage_freq=stage_freq,
+            stage_frame=stage_frame,
+            freqs_by_column=freqs_by_column,
+        )
 
         # 5c. Une variable à la fois, un seul ajustement par (étape, variable)
         for column in ordered:
@@ -1882,35 +1988,45 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
                 freqs_by_column=freqs_by_column,
             )
 
-    # Méthode d'ajustement d'une variable à une étape
-    def _fit_variable(
+    # Méthode auxiliaire de composition du contexte d'ajustement d'une variable
+    def _prepare_variable(
         self,
         *,
         column: str,
-        groups: Dict[Tuple[str, str], Tuple[EntityKey, ...]],
+        entities: Optional[Sequence[EntityKey]],
         stage_freq: Union[str, Dict[EntityKey, str]],
-        stage_label: str,
         X_work: pd.DataFrame,
         stage_frame: pd.DataFrame,
         freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
-    ) -> None:
-        """Fit one model for one (stage, variable), then execute its groups.
+    ) -> _VariableFit:
+        """Compose everything one (stage, variable) needs before fitting.
 
-        The training set is mutualized across every entity observing the
-        column: it does not depend on the source-frequency
-        group, hence one single fit shared by the plan steps, which differ
-        only by their ``source_frequency``, their entities and their
-        rescaling.
+        The single implementation of the mutualized training grid, the covariates that will still
+        be there at prediction time, the way each of them is materialized,
+        and the two scales. **The ordering of phase 5b and the fit of phase
+        5c both go through it**, so the order ranks variables on the very
+        sets they are then fitted on - not on a raw view of the data whose
+        covariates the selection may never keep, whose panel rows carry
+        incomparable magnitudes, and whose rows come from another window.
+
+        Nothing is written to the three stores: the stage frames are views
+        and every materialization here runs under ``record=False``. The
+        prediction grid is deliberately NOT materialized - that production
+        only feeds ``covariate_taint``, which is the caller's business.
 
         Args:
             column: Column being imputed.
-            groups: Imputable groups of that column, keyed by
-                ``(column, source frequency)``.
+            entities: Entities of the variable's groups, None for a time
+                series. The prediction grid is restricted to them, so a
+                caller passing a different set gets a different covariate
+                selection.
             stage_freq: Frequency of the stage.
-            stage_label: Readable label of the stage.
             X_work: Working frame.
             stage_frame: Stage frame of 5a.
             freqs_by_column: Detected frequencies, keyed by column.
+
+        Returns:
+            The :class:`_VariableFit` of that (stage, variable).
         """
         # Constructeur du jeu de données d'entraînement
         builder = self._training_set_builder
@@ -1931,11 +2047,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         )
         blocks = dict(probe.blocks)
 
-        # Grille de prédiction : union des entités des groupes de la colonne
-        group_entities = sorted(
-            {entity for entities in groups.values() for entity in entities}, key=repr
-        )
-        entities = group_entities if self.is_panel_ else None
+        # Grille de prédiction des entités concernées
         pred_grid = self._prediction_grid(X_work, stage_freq, entities)
 
         # Vues des deux fenêtres, chacune à sa fréquence : la grille
@@ -1954,12 +2066,11 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         candidates = [name for name in X_work.columns if name != column]
         feature_cols = self._select_feature_columns(candidates, train_view, pred_view)
 
-        # Voie de matérialisation : décidée une seule, sur la grille de prédiction
-        # puis imposée aux deux grilles: une covariable servie par le repli au predict doit
-        # être préparée par le même chemin au fit, même lorsque ses ancres
-        # suffiraient. Le matérialiseur ramène ensuite la voie à ce que la
-        # fréquence de chaque bloc autorise
-        # /!\
+        # Voie de matérialisation : décidée une seule, sur la grille de
+        # prédiction puis imposée aux deux grilles : une covariable servie par
+        # le repli au predict doit être préparée par le même chemin au fit,
+        # même lorsque ses ancres suffiraient. Le matérialiseur ramène ensuite
+        # la voie à ce que la fréquence de chaque bloc autorise
         ways = materializer.decide_ways(
             columns=feature_cols,
             grid_index=pred_grid,
@@ -1977,34 +2088,6 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             eligible_origins=eligible,
             materialization=ways,
         )
-
-        # Souillure de la cible : lue par le filtre d'origine, jamais codée en
-        # dur — le lot de l'axe 2 n'aura qu'à élargir ELIGIBLE_ORIGINS
-        target_taint = origin_to_taint(
-            max_origin([origin for origin in training.row_origin if origin is not None])
-        )
-
-        # Matérialisation de la grille de prédiction en mode rejeu des voies
-        # retenues sur la grille d'entraînement
-        pred_origins: Dict[str, CellOrigin] = {}
-        if feature_cols and len(training) > 0:
-            _X_pred, _ways, pred_origins = materializer.materialize(
-                columns=feature_cols,
-                grid_index=pred_grid,
-                stage_freq=stage_freq,
-                detected_frequencies=freqs_by_column,
-                source_data=X_work,
-                materialization=ways,
-                record=False,
-            )
-
-        # Souillure des covariables : origines des cellules effectivement lues
-        # sur les deux grilles, restreintes aux feature_cols du modèle — jamais
-        # l'état global du registre
-        covariate_taint = origin_to_taint(max_origin(
-            [training.column_origins.get(name, 'observed') for name in feature_cols]
-            + [pred_origins.get(name, 'observed') for name in feature_cols]
-        ))
 
         # Mise à l'échelle : diviseur de la cible par ligne, diviseurs des
         # features par bloc
@@ -2038,6 +2121,107 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         X_train, y_train = self._drop_empty_training_rows(X_train, y_train)
         usable = y_train.notna()
         X_train, y_train = X_train.loc[usable], y_train.loc[usable]
+
+        # La division par un diviseur nommé autrement efface le nom de la
+        # cible : il est rétabli, seul lien entre la série ajustée (ou scorée)
+        # et la colonne qu'elle impute
+        y_train = y_train.rename(column)
+
+        return _VariableFit(
+            training=training,
+            blocks=blocks,
+            pred_grid=pred_grid,
+            feature_cols=feature_cols,
+            ways=dict(ways),
+            X_train=X_train,
+            y_train=y_train,
+        )
+
+    # Méthode d'ajustement d'une variable à une étape
+    def _fit_variable(
+        self,
+        *,
+        column: str,
+        groups: Dict[Tuple[str, str], Tuple[EntityKey, ...]],
+        stage_freq: Union[str, Dict[EntityKey, str]],
+        stage_label: str,
+        X_work: pd.DataFrame,
+        stage_frame: pd.DataFrame,
+        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
+    ) -> None:
+        """Fit one model for one (stage, variable), then execute its groups.
+
+        The training set is mutualized across every entity observing the
+        column: it does not depend on the source-frequency
+        group, hence one single fit shared by the plan steps, which differ
+        only by their ``source_frequency``, their entities and their
+        rescaling.
+
+        Args:
+            column: Column being imputed.
+            groups: Imputable groups of that column, keyed by
+                ``(column, source frequency)``.
+            stage_freq: Frequency of the stage.
+            stage_label: Readable label of the stage.
+            X_work: Working frame.
+            stage_frame: Stage frame of 5a.
+            freqs_by_column: Detected frequencies, keyed by column.
+        """
+        # Union des entités des groupes : la grille de prédiction, et à
+        # travers elle la sélection des covariables, en dépendent
+        group_entities = sorted(
+            {entity for entities in groups.values() for entity in entities}, key=repr
+        )
+        entities = group_entities if self.is_panel_ else None
+
+        # Contexte d'ajustement. Il est recomposé ici même lorsque la 5b l'a
+        # déjà composé pour ordonner : depuis, les variables de rang inférieur
+        # ont écrit dans le miroir, et c'est précisément ce que la cascade
+        # cherche à exploiter
+        prepared = self._prepare_variable(
+            column=column,
+            entities=entities,
+            stage_freq=stage_freq,
+            X_work=X_work,
+            stage_frame=stage_frame,
+            freqs_by_column=freqs_by_column,
+        )
+        training = prepared.training
+        blocks = prepared.blocks
+        pred_grid = prepared.pred_grid
+        feature_cols = prepared.feature_cols
+        ways = prepared.ways
+        X_train, y_train = prepared.X_train, prepared.y_train
+
+        # Souillure de la cible : lue par le filtre d'origine, jamais codée en
+        # dur — le lot de l'axe 2 n'aura qu'à élargir ELIGIBLE_ORIGINS
+        target_taint = origin_to_taint(
+            max_origin([origin for origin in training.row_origin if origin is not None])
+        )
+
+        # Matérialisation de la grille de prédiction en mode rejeu des voies
+        # retenues sur la grille d'entraînement. Elle ne sert qu'à la souillure
+        # des covariables : aucune donnée d'entraînement n'en sort, ce qui est
+        # la raison pour laquelle la 5b n'en a pas besoin pour ordonner
+        pred_origins: Dict[str, CellOrigin] = {}
+        if feature_cols and len(training) > 0:
+            _X_pred, _ways, pred_origins = self._covariate_materializer.materialize(
+                columns=feature_cols,
+                grid_index=pred_grid,
+                stage_freq=stage_freq,
+                detected_frequencies=freqs_by_column,
+                source_data=X_work,
+                materialization=ways,
+                record=False,
+            )
+
+        # Souillure des covariables : origines des cellules effectivement lues
+        # sur les deux grilles, restreintes aux feature_cols du modèle — jamais
+        # l'état global du registre
+        covariate_taint = origin_to_taint(max_origin(
+            [training.column_origins.get(name, 'observed') for name in feature_cols]
+            + [pred_origins.get(name, 'observed') for name in feature_cols]
+        ))
 
         # Ajustement unique, quel que soit le nombre de groupes
         model, is_fallback = self._fit_estimator(

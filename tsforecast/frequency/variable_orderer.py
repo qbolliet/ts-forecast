@@ -64,8 +64,16 @@ class VariableOrderer(BaseEstimator):
       then alphabetical variable name — deterministic tie-break.
     - ``'cv'``: variables best predicted by cross-validation first (sklearn's
       "greater is better" convention), scores tied (``NaN`` included) broken
-      alphabetically. A variable with too few scorable observations
-      (``min_cv_train_size``) falls back to the ``'frequency'`` group instead.
+      alphabetically. A variable that cannot be scored falls back to the
+      ``'frequency'`` group instead: too few scorable observations
+      (``min_cv_train_size``), no covariate at all, or no scoring set given
+      for it.
+
+    What is scored is the caller's business, and a caller that fits the
+    variables afterwards should hand over the sets it will fit
+    (``training_sets``) rather than a raw frame: an order established on
+    covariates the fit will drop, or on rows the fit will never see, ranks
+    variables on a problem that does not exist.
 
     **Restricted scope**: this ordering only matters — and is only
     meant to be invoked by the caller — under ``covariate_strategy='model'``.
@@ -286,6 +294,7 @@ class VariableOrderer(BaseEstimator):
         estimator: Union[BaseEstimator, Mapping[str, BaseEstimator], None] = None,
         scoring_mask: Optional[pd.Series] = None,
         log: Optional[Callable[[str], None]] = None,
+        training_sets: Optional[Mapping[VariableKey, Tuple[pd.DataFrame, pd.Series]]] = None,
     ) -> List[VariableKey]:
         """Order ``variables`` according to ``fit_predict_order``.
 
@@ -295,7 +304,9 @@ class VariableOrderer(BaseEstimator):
                 by ``VariableSpec.name``.
             X: Working data to score variables on. Its columns other than a
                 variable's own ``name`` are used as its features. Required
-                (and used) only when ``fit_predict_order='cv'``.
+                (and used) only when ``fit_predict_order='cv'``, and only when
+                ``training_sets`` is not given — the autonomous mode of the
+                component, where it derives the scoring sets itself.
             estimator: Estimator(s) used to score variables under
                 ``fit_predict_order='cv'`` — a single estimator, a dict
                 mapping variable name -> estimator (optional
@@ -307,18 +318,32 @@ class VariableOrderer(BaseEstimator):
                 must compare variables on data of homogeneous quality, or a
                 variable's score would depend on the extent of its own
                 extension rather than on how well it is predicted. Defaults
-                to keeping every row. Ignored under ``'frequency'``.
+                to keeping every row. Ignored under ``'frequency'``, and
+                ignored whenever ``training_sets`` is given — those rows are
+                already restricted by the caller.
             log: Callback invoked with a message string when every CV fold
                 fails for a variable, so the fallback to the worst possible
                 score is never silent. No message is emitted if ``None``
                 (default). Ignored under ``'frequency'``.
+            training_sets: Scoring sets built by the caller, one
+                ``(X_sub, y_sub)`` pair per key. **The scored set is the one
+                the caller will fit**: its covariates, its rows and its scale
+                are those of the actual estimation, so the order compares
+                variables on the very problems they will be fitted on, and
+                not on a raw view of the data whose covariates may never
+                reach the model. When given it takes precedence over ``X``
+                and ``scoring_mask``, which are then unused; a key it does
+                not cover carries no scorable set and joins the
+                ``'frequency'`` fallback group. Ignored under
+                ``'frequency'``.
 
         Returns:
             List of the keys of ``variables``, ordered.
 
         Raises:
             NotFittedError: If :meth:`fit` has not been called.
-            ValueError: If ``fit_predict_order='cv'`` and ``X`` is ``None``.
+            ValueError: If ``fit_predict_order='cv'`` and both ``X`` and
+                ``training_sets`` are ``None``.
         """
         # Vérification que l'estimateur est entraîné
         check_is_fitted(self, attributes=['cv_'])
@@ -332,11 +357,17 @@ class VariableOrderer(BaseEstimator):
         if self.fit_predict_order == 'frequency':
             return self._order_by_frequency(variables)
 
-        # Vérification que des données sont spécifiées pour l'ordination par validation croisée
-        if X is None:
-            raise ValueError("X is required when fit_predict_order='cv'")
+        # Vérification que des données sont spécifiées pour l'ordination par
+        # validation croisée : les jeux pré-construits en dispensent
+        if X is None and training_sets is None:
+            raise ValueError(
+                "X is required when fit_predict_order='cv' and no training_sets "
+                "is given"
+            )
         # Ordination par validation croisée
-        return self._order_by_cv(variables, X, estimator, scoring_mask, log)
+        return self._order_by_cv(
+            variables, X, estimator, scoring_mask, log, training_sets
+        )
 
     # Ordre par fréquence (croissant en nombre d'entités) puis tie-break alphabétique
     def _order_by_frequency(
@@ -365,37 +396,48 @@ class VariableOrderer(BaseEstimator):
         return sorted(variables, key=sort_key)
 
     # Ordre par validation croisée
-    # /!\ Vérifier que les covariables utilisées en X pour faire la CV sont bien les seules qui seront disponibles pour prédire à la fréquence d'imputation.
     def _order_by_cv(
         self,
         variables: Mapping[VariableKey, VariableSpec],
-        X: pd.DataFrame,
+        X: Optional[pd.DataFrame],
         estimator: Union[BaseEstimator, Mapping[str, BaseEstimator], None],
         scoring_mask: Optional[pd.Series],
         log: Optional[Callable[[str], None]],
+        training_sets: Optional[Mapping[VariableKey, Tuple[pd.DataFrame, pd.Series]]] = None,
     ) -> List[VariableKey]:
         """Order variables by descending cross-validated score.
+
+        Two sources of scoring sets, never mixed: the ``training_sets`` the
+        caller built — the authoritative one, taken as-is — or, in their
+        absence, sets derived from ``X`` and ``scoring_mask``.
 
         Args:
             variables: Mapping of ``VariableKey`` -> :class:`VariableSpec`.
             X: Working data; every column but a variable's own name is used
-                as its features.
+                as its features. Unused, and allowed to be None, when
+                ``training_sets`` is given.
             estimator: Estimator(s) resolved per variable, see :meth:`order`.
             scoring_mask: Row mask restricting the scoring set, see
                 :meth:`order`.
             log: Fold-failure logging callback, see :meth:`order`.
+            training_sets: Scoring sets built by the caller, see
+                :meth:`order`.
 
         Returns:
             List of keys of ``variables``, CV-scored variables first
-            (highest score first), then the ``min_cv_train_size`` fallback
-            group (lowest frequency first) — the two groups are sorted
-            separately and never merged : their scores live on unrelated
-            scales (a "scoring" value versus a frequency-order integer), so
-            sorting them together would send fallback variables to an
-            arbitrary rank depending on that scale.
+            (highest score first), then the fallback group (lowest frequency
+            first) — the two groups are sorted separately and never merged :
+            their scores live on unrelated scales (a "scoring" value versus a
+            frequency-order integer), so sorting them together would send
+            fallback variables to an arbitrary rank depending on that scale.
+            A variable joins the fallback group when it has no scorable set
+            at all, no covariate, or fewer than ``min_cv_train_size``
+            observations.
         """
-        # Lorsqu'aucun masque n'est spécifié, l'ensemble des observations sont considérées
-        if scoring_mask is None:
+        # Lorsqu'aucun masque n'est spécifié, l'ensemble des observations sont
+        # considérées. Sans "X", il n'y a pas de masque à défaut : les lignes
+        # des jeux pré-construits sont déjà celles de l'ajustement
+        if scoring_mask is None and X is not None:
             scoring_mask = pd.Series(True, index=X.index)
 
         # Initialisation des deux groupes, non comparables entre eux (voir la docstring)
@@ -409,20 +451,34 @@ class VariableOrderer(BaseEstimator):
             # Extraction du nom de la variable
             var_name = spec.name
 
-            # Toutes les colonnes de X sauf la variable elle-même
-            feature_cols = [c for c in X.columns if c != var_name]
-            # Score -inf (pire score possible, convention "greater is
-            # better") si la série est univariée : elle ne doit jamais
-            # passer en tête
-            if not feature_cols:
-                cv_scored.append((var_key, -np.inf))
-                continue
+            # Jeu pré-construit par l'appelant : il prime, et il est pris tel
+            # quel — ses covariables, ses lignes et son échelle sont déjà
+            # celles de l'ajustement
+            if training_sets is not None:
+                pair = training_sets.get(var_key)
+                # Clé non couverte : aucun jeu scorable, donc le groupe de repli
+                if pair is None:
+                    fallback_scored.append(
+                        (var_key, get_frequency_order(spec.frequency))
+                    )
+                    continue
+                X_sub, y_sub = pair
+            else:
+                # Toutes les colonnes de X sauf la variable elle-même
+                feature_cols = [c for c in X.columns if c != var_name]
+                # Restriction aux lignes réellement exploitables : la cible doit
+                # être observée sur les lignes du masque de scoring
+                scoring_rows = scoring_mask & X[var_name].notna()
+                X_sub = X.loc[scoring_rows, feature_cols]
+                y_sub = X.loc[scoring_rows, var_name]
 
-            # Restriction aux lignes réellement exploitables : la cible doit
-            # être observée sur les lignes du masque de scoring
-            scoring_rows = scoring_mask & X[var_name].notna()
-            X_sub = X.loc[scoring_rows, feature_cols]
-            y_sub = X.loc[scoring_rows, var_name]
+            # Repli si la série est univariée : sans covariable, elle sera
+            # imputée par interpolation quel que soit son rang, et aucun score
+            # ne la décrit — un -inf la coincerait arbitrairement en fin du
+            # groupe scoré
+            if X_sub.shape[1] == 0:
+                fallback_scored.append((var_key, get_frequency_order(spec.frequency)))
+                continue
 
             # Fallback si moins de "min_cv_train_size" observations exploitables
             if len(X_sub) < self.min_cv_train_size:

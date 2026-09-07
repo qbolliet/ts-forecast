@@ -186,6 +186,142 @@ class TestCVParameter:
             VariableOrderer(cv_n_splits=5)
 
 
+class TestPrebuiltScoringSets:
+    """Jeux de scoring fournis par l'appelant : ce qui est scoré est ce qui sera ajusté."""
+
+    @staticmethod
+    def _sets():
+        """Trois jeux (X, y) disjoints de ceux que "X" produirait."""
+        index = pd.RangeIndex(12)
+        return {
+            'a1': (
+                pd.DataFrame({'f1': np.arange(12.0)}, index=index),
+                pd.Series(np.arange(12.0), index=index, name='a1'),
+            ),
+            'a2': (
+                pd.DataFrame({'f2': np.arange(12.0)}, index=index),
+                pd.Series(np.arange(12.0), index=index, name='a2'),
+            ),
+            'q1': (
+                pd.DataFrame({'f3': np.arange(12.0)}, index=index),
+                pd.Series(np.arange(12.0), index=index, name='q1'),
+            ),
+        }
+
+    def test_training_sets_take_precedence_over_X(self, reference_timeseries):
+        """Les couples fournis sont scorés tels quels ; "X" n'est jamais lu."""
+        orderer = VariableOrderer(
+            fit_predict_order='cv', cv=2, min_cv_train_size=2,
+        ).fit()
+        sets = self._sets()
+        seen = {}
+
+        def _spy(estimator, X, y, cv=None, scoring=None, error_score=None):
+            del estimator, cv, scoring, error_score
+            seen[y.name] = list(X.columns)
+            return np.full(2, {'q1': -0.08, 'a2': -0.15, 'a1': -0.20}[y.name])
+
+        with patch(
+            'tsforecast.frequency.variable_orderer.cross_val_score',
+            side_effect=_spy,
+        ):
+            ordered = orderer.order(
+                _reference_variables(),
+                X=reference_timeseries,
+                estimator=LinearRegression(),
+                training_sets=sets,
+            )
+
+        # Colonnes vues par la CV : celles des jeux fournis, jamais celles
+        # que "X" aurait produites (m1 et les autres cibles)
+        assert seen == {'a1': ['f1'], 'a2': ['f2'], 'q1': ['f3']}
+        assert ordered == ['q1', 'a2', 'a1']
+
+    def test_training_sets_alone_need_no_X(self):
+        """Sans "X", des jeux fournis suffisent : aucune ValueError."""
+        orderer = VariableOrderer(
+            fit_predict_order='cv', cv=2, min_cv_train_size=2,
+        ).fit()
+        with patch(
+            'tsforecast.frequency.variable_orderer.cross_val_score',
+            side_effect=_fake_cross_val_score({'q1': -0.08, 'a2': -0.15, 'a1': -0.20}),
+        ):
+            ordered = orderer.order(
+                _reference_variables(),
+                estimator=LinearRegression(),
+                training_sets=self._sets(),
+            )
+        assert ordered == ['q1', 'a2', 'a1']
+
+    def test_missing_X_and_missing_training_sets_raise(self):
+        """Ni "X" ni jeux fournis sous 'cv' : erreur explicite."""
+        orderer = VariableOrderer(fit_predict_order='cv', cv=2).fit()
+        with pytest.raises(ValueError, match='X is required'):
+            orderer.order(_reference_variables(), estimator=LinearRegression())
+
+    def test_variable_without_covariate_joins_the_fallback_group(self):
+        """Un jeu sans aucune covariable rejoint le groupe de repli, pas la fin du groupe scoré."""
+        orderer = VariableOrderer(
+            fit_predict_order='cv', cv=2, min_cv_train_size=2,
+        ).fit()
+        sets = self._sets()
+        # "q1" (trimestrielle, donc DERNIÈRE sous l'ordre 'frequency') perd
+        # toutes ses covariables : elle sera imputée par interpolation quel
+        # que soit son rang
+        index = sets['q1'][1].index
+        sets['q1'] = (pd.DataFrame(index=index), sets['q1'][1])
+
+        with patch(
+            'tsforecast.frequency.variable_orderer.cross_val_score',
+            side_effect=_fake_cross_val_score({'a2': -0.15, 'a1': -0.20}),
+        ):
+            ordered = orderer.order(
+                _reference_variables(),
+                estimator=LinearRegression(),
+                training_sets=sets,
+            )
+        # a2 et a1 scorées, q1 en repli : le groupe de repli passe après
+        assert ordered == ['a2', 'a1', 'q1']
+
+    def test_too_short_set_joins_the_fallback_group(self):
+        """Un jeu plus court que min_cv_train_size bascule aussi en repli."""
+        orderer = VariableOrderer(
+            fit_predict_order='cv', cv=2, min_cv_train_size=10,
+        ).fit()
+        sets = self._sets()
+        sets['a1'] = (sets['a1'][0].iloc[:3], sets['a1'][1].iloc[:3])
+
+        with patch(
+            'tsforecast.frequency.variable_orderer.cross_val_score',
+            side_effect=_fake_cross_val_score({'a2': -0.15, 'q1': -0.08}),
+        ):
+            ordered = orderer.order(
+                _reference_variables(),
+                estimator=LinearRegression(),
+                training_sets=sets,
+            )
+        assert ordered == ['q1', 'a2', 'a1']
+
+    def test_uncovered_key_joins_the_fallback_group(self):
+        """Une clé non couverte par les jeux fournis n'est pas scorée."""
+        orderer = VariableOrderer(
+            fit_predict_order='cv', cv=2, min_cv_train_size=2,
+        ).fit()
+        sets = self._sets()
+        del sets['a1']
+
+        with patch(
+            'tsforecast.frequency.variable_orderer.cross_val_score',
+            side_effect=_fake_cross_val_score({'a2': -0.15, 'q1': -0.08}),
+        ):
+            ordered = orderer.order(
+                _reference_variables(),
+                estimator=LinearRegression(),
+                training_sets=sets,
+            )
+        assert ordered == ['q1', 'a2', 'a1']
+
+
 class TestCVFallbacksAndLogging:
     """Correctifs CV §8.2 : sentinelles -inf, journalisation des plis en échec."""
 

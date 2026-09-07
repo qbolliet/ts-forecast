@@ -18,6 +18,13 @@
 > §2.1, §2.5 (nouvelle), §5.3, §5.4, §5.8 (nouvelle), §7.2, §9.2, §12.2, §12.3, §13.2, §14.3,
 > §16, §17.
 >
+> **Révision du 2026-09-06** : intégration de l'**alignement de l'ordonnancement sur les
+> conditions réelles d'ajustement** (§8.5, décisions D26 à D29). Sous `fit_predict_order='cv'`,
+> l'ordre était établi sur une vue **brute** des données, alors que la PHASE 5c ajuste sur le jeu
+> mutualisé, matérialisé et mis à l'échelle : le classement récompensait des covariables que la
+> sélection écarte avant le `fit`. Sections amendées : §0, §7.1, §7.2, §8.1, §8.2, §8.5
+> (nouvelle), §12.2, §14.5 (nouvelle), §16, §17.
+>
 > **Objet** : spécifier `HighFrequencyImputer2` (`tsforecast/frequency/high_frequency_imputer2.py`),
 > réécriture from scratch de `HighFrequencyImputer` destinée à la remplacer dans le package.
 >
@@ -71,7 +78,7 @@ Le défaut structurel mesuré (B28 : 0 % de NaN au `fit` contre jusqu'à 67 % au
 **inexprimable par construction** : la préparation des features passe par un composant unique,
 appliqué à l'identique aux deux grilles.
 
-**Les neuf décisions structurantes arrêtées** (détail et justification au §14) :
+**Les dix décisions structurantes arrêtées** (détail et justification au §14) :
 
 1. **Provenance en échelle de souillure** : `MODEL_ON_TRUE` → `MODEL_ON_INTERPOLATED` →
    `MODEL_ON_IMPUTED`, plus deux libellés distinguant la souillure venue de la **cible** :
@@ -98,6 +105,10 @@ appliqué à l'identique aux deux grilles.
    différente selon l'entité, et toutes les entités qui l'observent entraînent le même modèle,
    chacune à sa propre fréquence, ramenée à l'échelle de l'étape par un diviseur **par ligne**.
    **Non paramétrable** (§5.8, D17 à D19).
+10. **L'ordre `'cv'` classe les variables sur les jeux qu'il ajustera** : covariables retenues
+    par la sélection, matérialisées par les voies décidées sur la grille de prédiction, lignes
+    mutualisées de la fenêtre d'**entraînement**, à l'échelle de l'étape. La fenêtre `'strict'`
+    ne gouverne plus rien dans le `fit` (§8.5, D26 à D29).
 
 ---
 
@@ -1178,7 +1189,7 @@ TrainingScope   = ImputationScope   # mêmes modalités
 
 | `kind` | Définition | Appelants |
 |---|---|---|
-| `'strict'` | lignes où **toutes** les variables du périmètre ont au moins une observation dans leur période | ordonnancement CV (§8.3), diagnostics |
+| `'strict'` | lignes où **toutes** les variables du périmètre ont au moins une observation dans leur période | **diagnostics seuls** (`strict_window_mask_`) — plus aucun consommateur dans le `fit` depuis D27 |
 | `'imputation'` | `'strict'` étendu selon `imputation_scope` / `coverage_threshold` | grille de **prédiction** |
 | `'training'` | `'strict'` étendu selon `training_scope` / `training_coverage_threshold` (qui retombent sur les précédents quand ils valent `None`) | grille d'**entraînement** |
 
@@ -1200,6 +1211,12 @@ Chaque appelant **nomme explicitement** son masque : aucun appel sans `kind`. Le
   des masques se délègue à `FrequencyConverter.convert_frequency` (vérifier au passage sa gestion
   des fréquences cibles par entité ; sinon garder la boucle interne mais **unifier le type de
   retour**).
+- **Le classement lit la même fenêtre que l'ajustement.** Les lignes scorées par l'ordre
+  `'cv'` sont celles du jeu mutualisé, donc celles de la fenêtre `'training'` lue à la fréquence
+  de chaque bloc — jamais celles de la fenêtre `'strict'` (D27, §8.5). Élargir `training_scope`
+  élargit donc aussi le classement, ce qui est le but : c'est le régime de valeurs manquantes de
+  l'ajustement qui doit départager les variables. Sous le défaut `training_scope=None` et
+  `imputation_scope='strict'`, les deux fenêtres coïncident et le classement est inchangé.
 - **Masque lu à la fréquence du bloc** : le jeu d'entraînement mutualisé (§5.8) réunit des blocs
   de fréquences différentes ; chaque bloc lit le masque `'training'` **à sa propre fréquence**,
   via `get_mask_at_frequency({entité: f_block(entité)}, kind='training')`, qui accepte déjà une
@@ -1251,6 +1268,9 @@ incluses).
   La seule dépendance à l'ordre qui subsiste est l'axe 2 (les imputations intermédiaires d'une
   variable alimentent **sa propre** étape suivante), qui suit l'ordre des **fréquences**, pas
   l'ordre des variables.
+- **Ce qui est scoré** : sous `'cv'`, chaque variable est classée sur le couple
+  `(X_train, y_train)` que la PHASE 5c lui ajustera — jamais sur une vue brute des données
+  d'entrée. Voir le §8.5, qui est la règle normative sur ce point.
 - **Déterminisme intra-étape** : sous `'model'`, les ex æquo du tri (`'frequency'` : même
   fréquence et même nombre d'entités ; `'cv'` : scores égaux, `NaN` compris) sont départagés par
   **ordre alphabétique du nom de variable** — jamais par l'ordre des colonnes d'entrée. C'est la
@@ -1261,11 +1281,22 @@ incluses).
 ### 8.2 — Correctifs CV repris de [ARCH] §3.4
 
 Restriction aux lignes exploitables **avant** scoring ; `check_scoring` pour résoudre
-`cv_scoring` ; `cross_val_score(..., error_score=np.nan)` ; sentinelles `-np.inf` pour les
-variables non scorables ; **tri décroissant partout** (convention *greater is better* de
-sklearn) ; journal (`self._log`) des variables dont tous les plis ont échoué ; masque `'strict'`
-pour construire le jeu de scoring ; note de docstring sur le traitement des zéros par le MAPE de
-sklearn (division par zéro → score dégradé, pas d'erreur).
+`cv_scoring` ; `cross_val_score(..., error_score=np.nan)` ; sentinelle `-np.inf` pour une
+variable dont l'estimateur ne se résout pas ou dont **tous** les plis échouent ; **tri décroissant
+partout** (convention *greater is better* de sklearn) ; journal (`self._log`) des variables dont
+tous les plis ont échoué ; note de docstring sur le traitement des zéros par le MAPE de sklearn
+(division par zéro → score dégradé, pas d'erreur).
+
+Deux clauses de [ARCH] §3.4 sont **amendées** par le §8.5 : le jeu de scoring n'est plus construit
+sur le masque `'strict'` (D27), et une variable sans **aucune** covariable disponible rejoint le
+groupe de repli `'frequency'` au lieu de porter un `-np.inf` (D28).
+
+**Deux groupes, jamais fusionnés.** Les variables scorées et les variables de repli sont triées
+séparément, les premières devant les secondes : un score de `cv_scoring` et un rang de fréquence
+vivent sur des échelles sans rapport, et les mêler enverrait les variables de repli à une place
+arbitraire, dépendante de l'échelle du scoring. Rejoignent le groupe de repli : une variable
+comptant moins de `min_cv_train_size` observations exploitables, une variable sans aucune
+covariable (D28), et une variable pour laquelle l'appelant n'a fourni aucun jeu.
 
 ### 8.3 — Le paramètre `cv` (convention sklearn)
 
@@ -1311,6 +1342,51 @@ Sous `'frequency'`, `a1` est imputée sans covariable de modèle (`q1` et `a2` v
 rang 4, fallback) ; `a2` voit `a1` (rang 2) ; `q1` voit `a1` et `a2` (rang 2). Les provenances
 résultantes sont donc `MODEL_ON_INTERPOLATED` pour `a1` (fallback interpolé) et
 `MODEL_ON_IMPUTED` pour `a2` et `q1`.
+
+### 8.5 — Le jeu scoré est le jeu ajusté
+
+**Règle normative.** Sous `fit_predict_order='cv'`, une variable est classée sur le couple
+`(X_train, y_train)` que la PHASE 5c lui ajustera : mêmes covariables, mêmes voies de
+matérialisation, mêmes lignes, même échelle. L'ordonnancement (PHASE 5b) et l'ajustement
+(PHASE 5c) traversent **le même code** de composition — `_prepare_variable`, qui rend un
+`_VariableFit` (§12.2).
+
+**Le défaut corrigé.** Jusqu'au lot L10, les deux phases ne voyaient pas le même problème :
+
+| | 5b — ce qui était scoré | 5c — ce qui est ajusté |
+|---|---|---|
+| Covariables | toutes les autres colonnes de `X_work`, brutes | celles que retient la sélection : non-vacuité sur les **deux** fenêtres + `covariate_eligibility` (§4.5, §7.2) |
+| Valeurs | valeurs d'entrée non matérialisées — une colonne trimestrielle est `NaN` deux lignes sur trois | matérialisées par les voies décidées sur la grille de **prédiction** (§4.6, D21) |
+| Lignes | fenêtre `'strict'` ∩ cible observée, à la fréquence de l'index d'entrée | grille mutualisée : un bloc par entité à `f_block(e)`, fenêtre `'training'`, filtre d'origine (§5.8) |
+| Échelle | aucune | diviseur de cible par ligne, diviseurs de features par bloc (§5.4, §9.2) |
+
+Trois conséquences, toutes mesurées :
+
+1. **Le classement récompensait des covariables qui n'existeront pas.** Une variable bien prédite
+   par une colonne que la sélection écarte — vide sur la grille de prédiction, ou inéligible sous
+   `covariate_eligibility='all_entities'` — passait en tête, puis partait en repli par
+   interpolation. C'est la forme même de **B28** (features pleines au `fit`, `NaN` au `predict`)
+   réintroduite dans la seule décision qui gouverne la cascade.
+2. **Les colonnes à fréquence hétérogène étaient scorées à des échelles mélangées.** Sur
+   `PANEL-F`, la lecture brute de `v` empile 3 lignes annuelles de `FR` (~120), 12 lignes
+   trimestrielles de `DE` (~30) et 36 lignes mensuelles de `IT` (~10) **sans aucun diviseur** : le
+   `KFold` mélangé mesurait la dispersion inter-entités, pas la prédictibilité. C'est exactement
+   le régime que le §5.8 et le `StageScaler` existent pour corriger.
+3. **Le régime de valeurs manquantes n'était pas celui de l'ajustement** (D27, §7.2).
+
+**Ce qui reste hors du contexte partagé.** La matérialisation de la **grille de prédiction**
+(`materialize(..., record=False)` sur `pred_grid`) n'entre pas dans `_prepare_variable` : elle ne
+produit aucune donnée d'entraînement et ne sert qu'à calculer `covariate_taint` (§6.2). La
+décision des voies, elle, y entre — elle est prise sur la grille de prédiction (D21) et le jeu
+d'entraînement en dépend.
+
+**La limite inhérente, assumée.** En 5b, aucune variable de l'étape n'a encore été imputée : les
+contextes composés sont ceux du **début d'étape**, alors qu'en 5c la variable de rang *k* sera
+ajustée sur ce que les rangs *1..k-1* ont écrit au miroir. La circularité est irréductible —
+l'ordre définit le contexte qui définirait l'ordre — et acceptable pour un **classement**
+heuristique. Elle a une conséquence normative : les contextes de 5b ne sont **jamais** mémorisés
+pour 5c, qui recompose les siens (D29). Seule la variable de rang 1 voit les deux contextes
+coïncider, et c'est ce que mesure I17.
 
 ---
 
@@ -1630,10 +1706,10 @@ principale restant un orchestrateur mince :
 
 | Composant | Fichier | Responsabilité |
 |---|---|---|
-| `HighFrequencyImputer2` | `high_frequency_imputer2.py` | API sklearn, validations `__init__`, normalisation au `fit`, orchestration `fit`/`transform`/`inverse_transform` |
+| `HighFrequencyImputer2` | `high_frequency_imputer2.py` | API sklearn, validations `__init__`, normalisation au `fit`, orchestration `fit`/`transform`/`inverse_transform`. Porte `_prepare_variable` → `_VariableFit`, **implémentation unique** du contexte d'ajustement d'un couple (étape, variable) — jeu mutualisé, `feature_cols`, voies, échelle — appelée par la PHASE 5b pour classer et par la PHASE 5c pour ajuster (§8.5) |
 | `CovariateMaterializer` | `covariate_materializer.py` | matérialisation des covariables sur une grille selon `covariate_strategy` / `covariate_fallback` / `interpolation_*` ; **unique** producteur de `X_train` et `X_pred` (`materialize`, en mode choix ou en mode rejeu) ; producteur de la **frame d'étape** (`stage_frame`) ; tient `imputed_store`, `imputed_freq_store` et `origin_store`, alimentés par `interpolate_column` et par `record_production` — jamais par la matérialisation d'une covariable (§6.2) ; applique la précédence du §4.4 et la ramène par entité (`_applicable_way`, §4.6) |
 | `StageScaler` | `stage_scaler.py` | diviseurs `'constant'`/`'calendar'`, scalaires et par ligne ; application et inversion de l'échelle ; report d'échelle des prédictions ; **une seule** méthode de diviseur de covariable, `feature_divisors`, fondée sur la période que la cellule couvre (§9.2), avec `grid_freq` en **liaison par entité** pour les jeux mutualisés (§5.8 R5) |
-| `VariableOrderer` | `variable_orderer.py` | ordres `'frequency'` et `'cv'` (avec `cv`, `cv_scoring`, `min_cv_train_size`), tie-break alphabétique |
+| `VariableOrderer` | `variable_orderer.py` | ordres `'frequency'` et `'cv'` (avec `cv`, `cv_scoring`, `min_cv_train_size`), tie-break alphabétique, deux groupes jamais fusionnés (§8.2). Sous `'cv'`, il **reçoit** les couples `(X_train, y_train)` à scorer (`training_sets`) et ne dérive rien lui-même : ce qui est scoré est la responsabilité de l'appelant (§8.5, D26) |
 | `TrainingSetBuilder` | `training_set_builder.py` | jeu d'entraînement **mutualisé** d'une variable à une étape (§5.8) : blocs par entité, fréquence de bloc, lignes éligibles (`ELIGIBLE_ORIGINS`), appel **unique** à `CovariateMaterializer.materialize`, fréquence de production par ligne, diviseurs par bloc |
 | `AggregationConstraint` | `aggregation_constraint.py` | recalage aux totaux de période, gardes du §11.1, masque des cellules recalées |
 | `ImputationStep` (v2) + plan | `imputation_plan2.py` | étape immuable : + `covariate_taint`, + `target_taint`, + `materialization`, + `is_fallback` ; − `trained_on_imputed`, − `feature_means` |
@@ -1658,8 +1734,13 @@ PHASE 4  initialisation du tracker de provenance — APRÈS le transformateur ad
 PHASE 5  pour chaque étape de fréquence f de la progression :
   5a. frame d'étape : données d'origine + agrégations exactes à f + miroir des imputations
       (CovariateMaterializer, unique aussi pour le transform)
-  5b. variables imputables à f ; ordre (VariableOrderer, SEULEMENT si strategy='model')
-  5c. pour chaque variable v (COLONNE, une seule fois par étape) :
+  5b. variables imputables à f ; ordre (VariableOrderer, SEULEMENT si strategy='model').
+      Sous fit_predict_order='cv', le CONTEXTE D'AJUSTEMENT de chaque colonne est composé ici
+      (_prepare_variable, les cinq premiers tirets de la 5c) et les couples (X_train, y_train)
+      obtenus sont passés au VariableOrderer : ce qui classe est ce qui sera ajusté (§8.5).
+      Sous 'frequency', rien n'est composé. Aucun de ces contextes n'est mémorisé pour la 5c
+      (D29)
+  5c. pour chaque variable v (COLONNE, une seule fois par étape), contexte RECOMPOSÉ :
       - JEU D'ENTRAÎNEMENT MUTUALISÉ (TrainingSetBuilder, §5.8) : un bloc par entité observant v,
         fréquence de bloc f_block(e) = f_var(e, v), sa fréquence propre, PLUS FINE QUE f COMPRISE
         (R2) ; lignes du bloc = ses ancres, SANS agrégation de la cible (R3) ; masque 'training'
@@ -1823,7 +1904,7 @@ Combinaisons **inertes** documentées mais **non signalées** (D9) : cf. §5.6.
 | `imputation_order_` | ordre des variables par étape (vide hors `covariate_strategy='model'`) |
 | `imputation_plan_` | `List[ImputationStep]` — l'état ajusté complet |
 | `imputation_models_` | vue `{(étape, variable): estimateur}` sur le plan |
-| `imputation_window_mask_`, `training_window_mask_`, `strict_window_mask_` | `pd.Series` booléennes (MultiIndex sur panel, §7.2) |
+| `imputation_window_mask_`, `training_window_mask_`, `strict_window_mask_` | `pd.Series` booléennes (MultiIndex sur panel, §7.2). `strict_window_mask_` est un attribut de **diagnostic** : aucun consommateur dans le `fit` (D27) |
 | `imputation_window_`, `training_window_` | bornes `(début, fin)` lisibles |
 | `imputation_provenance_` | matrice de provenance après `fit` puis après `transform` |
 | `feature_columns_`, `target_column_`, `entities_`, `is_panel_` | contrat d'entrée |
@@ -1887,6 +1968,18 @@ l'écriture de la PHASE 5 a tranchés. Chacun est mesuré par un invariant du §
 | **D23** | le diviseur d'une covariable part de la **période que sa cellule couvre** sur sa grille, désignée par la voie ; la règle **B25** (normalisation vers `f_var`) est retirée, et `feature_divisors` est l'**unique** méthode de diviseur de covariable | B25 décrivait la convention de `hfi`, où les covariables d'entraînement étaient agrégées sur la grille de `f_var`. La grille d'entraînement de `hfi2` est celle des **blocs** : deux cellules d'une même colonne y couvrent des périodes différentes, ce que `f_var` ne peut pas exprimer. Mesuré : sous B25, les moyennes de `X_train` et de `X_pred` divergeaient d'un facteur 12 sur le jeu `TS` ; sous D23 elles sont **égales** (I5, §9.2) |
 | **D25** | une période que les **bornes du jeu** tronquent n'est **pas recalée** : le décompte calendaire de ses sous-périodes est comparé à ce que la grille en porte, et la garde est armée par le paramètre `grid_freq` de `rescale` | la garde « période partiellement prédite » ne voit que des NaN, et une sous-période retranchée par les bornes du jeu n'en est pas un. Imposer un total annuel à dix mois sur douze sur-attribue 20 % à chacun, silencieusement, à chaque début et chaque fin de série — le défaut est systématique, pas marginal (§11.1) |
 | **D24** | les trois registres ne portent **que ce qui a été imputé** : la matérialisation des covariables d'une étape tourne sous `record=False` | une covariable enregistrée écrase dans le miroir l'imputation que son propre modèle vient d'y écrire — toute écriture étant un `combine_first` où le nouveau l'emporte —, ce qui rend le résultat dépendant de l'ordre de traitement et met I10 en échec. Corollaire heureux : le rang 2 de la précédence ne se déclenche que sur une covariable réellement **imputée**, et le plan de référence du §5.5 tombe juste tel qu'il est écrit (§6.2) |
+
+### 14.5 — Décisions arrêtées à l'implémentation (lot L10b, 2026-09-06)
+
+L'alignement de l'ordonnancement sur les conditions réelles d'ajustement (§8.5). Mesuré par
+l'invariant I17 du §16.
+
+| Code | Décision | Motif |
+|---|---|---|
+| **D26** | sous `fit_predict_order='cv'`, une variable est classée sur le couple `(X_train, y_train)` que la PHASE 5c lui ajustera. Une **implémentation unique** compose ce contexte (`_prepare_variable` → `_VariableFit`), appelée par les deux phases ; `VariableOrderer.order` reçoit les jeux (`training_sets`) et n'en dérive plus aucun | classer sur une vue brute de `X_work`, c'est classer sur un problème qui n'existe pas : covariables que la sélection écarte avant le `fit` (**B28** réintroduit dans la décision qui gouverne la cascade), valeurs non matérialisées, et — sur un panel à fréquences hétérogènes — lignes de trois entités empilées à leurs échelles propres, où le `KFold` mélangé mesure la dispersion inter-entités et non la prédictibilité (§8.5) |
+| **D27** | les lignes scorées viennent de la fenêtre **`'training'`**, par construction du jeu mutualisé ; le masque `'strict'` ne gouverne plus rien dans le `fit` et `strict_window_mask_` devient un pur attribut de diagnostic. L'avertissement de fenêtre vide porte désormais sur la fenêtre d'**entraînement** effective | l'argument d'homogénéité qui justifiait la fenêtre stricte ne tient pas : la fenêtre d'entraînement est commune à toutes les variables d'une entité, donc l'élargir n'introduit aucune asymétrie entre variables — elle ajoute des lignes, jamais des colonnes (§7.2). Elle rend en revanche le classement représentatif du **régime de valeurs manquantes** que l'ajustement affronte, ce que la fenêtre stricte (couverture 1.0) masque par définition. Sous les défauts, les deux fenêtres coïncident : le changement ne mord que lorsque l'auteur a explicitement élargi `training_scope`. Corollaire : l'ancien avertissement « aucune fenêtre stricte » était déjà faux depuis L8d — c'est la fenêtre `'training'` que lit `TrainingSetBuilder` |
+| **D28** | une variable dont la sélection ne retient **aucune** covariable rejoint le groupe de repli `'frequency'`, au lieu de porter la sentinelle `-np.inf` | elle sera imputée par interpolation quel que soit son rang : aucun score ne la décrit, et un `-np.inf` la coincerait en fin du **groupe scoré** à une place que l'échelle du `cv_scoring` rend arbitraire. Le groupe de repli est précisément la catégorie « non scorable » (§8.2) |
+| **D29** | les contextes composés en 5b ne sont **jamais** mémorisés pour la 5c, qui recompose les siens | la 5b tourne avant que rien de l'étape n'ait été imputé ; dès la première variable écrite au miroir, le contexte des suivantes a changé — et c'est tout l'intérêt de la cascade. Réutiliser priverait les variables de rang ≥ 2 des covariables que les rangs précédents viennent de produire. La circularité (l'ordre définit le contexte qui définirait l'ordre) est irréductible et acceptable pour un **classement** ; seule la variable de rang 1 voit les deux contextes coïncider, ce que mesure I17. Le prix est une composition supplémentaire par (étape, colonne), payée sous `'cv'` seulement |
 
 ---
 
@@ -1969,9 +2062,10 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 | **I13** | `impute_intermediate_frequencies` n'est jamais testé comme booléen | test statique/grep : aucun `if self.impute_intermediate_frequencies:` dans le code (`'covariates_only'` est *truthy*) |
 | **I14** | mutualisation (§5.8) | sur `PANEL-F`, `y_train` de `v` contient **exactement** les lignes annoncées au §5.8 — **51 à toutes les étapes** (3 `FR` + 12 `DE` + 36 `IT`), les blocs ne dépendant pas de l'étape (D18) — et chaque ligne est à l'**échelle de l'étape** : à `M`, valeurs d'or `10.0 / 11.0 / 12.5` pour les blocs `FR` (diviseur 12) et `IT` (diviseur 1) ; à `Q`, `30.0 / 33.0 / 37.5` pour `FR` (diviseur 4) **et pour `IT` (diviseur `1/3`, ses 36 lignes mensuelles conservées)**, les 12 valeurs brutes de `DE` restant inchangées. Aucune ligne ne mêle deux échelles |
 | **I15** | indépendance au groupe de fréquence source | à une étape donnée, les groupes `(v, Y)` et `(v, Q)` de `PANEL-F` reçoivent le **même** `X_train`, le **même** `y_train` et les **mêmes** voies de matérialisation, et **partagent le même objet modèle** (`is`) ; leurs recalages restent distincts (totaux annuels de `FR`, trimestriels de `DE`) et `IT` n'est **jamais** réécrite |
+| **I17** | le jeu scoré est le jeu ajusté (§8.5) | sous `fit_predict_order='cv'` et `covariate_strategy='model'`, la variable classée **première** est ajustée sur **exactement** le couple qui l'a classée : mêmes colonnes, mêmes lignes, mêmes valeurs que `model.fit_X_` / `fit_y_` (les rangs suivants voient légitimement le miroir enrichi, D29). Sur `TS`, la covariable `m1` est scorée **agrégée puis divisée** (somme annuelle / 12), jamais à sa valeur de décembre ; sur `PANEL-F`, la cible scorée de `v` compte les **51 lignes** mutualisées, toutes dans la plage mensuelle. L'identité tient aussi sous `training_scope='unrestricted'`, qui n'ôte jamais de ligne au classement (D27) ; sous l'ordre `'frequency'`, **aucune** validation croisée n'est déclenchée |
 | **I16** | non-régression de la série temporelle | sur `TS` (entité unique), le jeu mutualisé est **identique** au jeu d'origine : tous les exemples chiffrés des §4.7, §5.4 et §5.5 restent vrais au chiffre près |
 
-**État au lot L10** : I2, I3, I4, I5, I6, I10, I11, I14, I15 et I16 sont couverts par
+**État au lot L10b** : I2, I3, I4, I5, I6, I10, I11, I14, I15, I16 et I17 sont couverts par
 `tests/frequency/test_high_frequency_imputer2.py`, sur `TS`, sur `PANEL` et sur `PANEL-F`. I1, I7
 et I8 attendent le `transform` (L12) ; I12 et I13 attendent l'axe 2 (L11).
 
@@ -2016,6 +2110,7 @@ mise à jour du notebook concerné quand il touche l'exécution d'étape (§15.2
 | **L8d** | `training_set_builder.py` : jeu d'entraînement mutualisé (§5.8 R1 à R5), `ImputationStep.training_blocks` | L4, L5, L6, L8b, L8c | tests unitaires + I14, I16 |
 | **L9** | `high_frequency_imputer2.py` — `__init__`, validations (§13.1), phases 0 à 4, attributs ajustés, fréquences détectées **par (entité, colonne)** | L4–L8d | I9, tests de validation d'arguments |
 | **L10** ✅ | `high_frequency_imputer2.py` — PHASE 5 : exécution d'étape unique, axe 1 complet, provenance, stores, **un ajustement par (étape, variable)** partagé par les groupes de fréquence source (§5.8 R6). Livré le 2026-09-06 ; décisions D21 à D24 (§14.4) | L9 | I2, I3, I4, I5, I6, I10, I11, I14, I15, I16 |
+| **L10b** ✅ | `high_frequency_imputer2.py` + `variable_orderer.py` — alignement de l'ordonnancement sur les conditions d'ajustement (§8.5) : extraction de `_prepare_variable` / `_VariableFit`, `VariableOrderer.order(training_sets=...)`, fenêtre `'training'` au lieu de `'strict'`, repli des variables sans covariable, avertissement de fenêtre reformulé. Livré le 2026-09-06 ; décisions D26 à D29 (§14.5) | L10 | I17, non-régression de I3 et I14 |
 | **L11** | axe 2 : progression de fréquences, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape ; composition avec la mutualisation (fréquence de ligne : bloc **ou** store) | L10 | I12, I13, exemples chiffrés du §5.5 et du §5.8 |
 | **L12** | `transform`, `inverse_transform`, `keep_lower_frequencies`, contrôle des fréquences (D11), avertissements uniques | L11 | I1, I7, I8 |
 | **L13** | notebook 5 pas à pas (§15.2) et documentation (`mkdocs`, docstrings de référence) | L12 | exécution complète du notebook |

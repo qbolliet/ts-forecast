@@ -16,6 +16,7 @@ Lot purement additif : hfi et ses tests restent intacts.
 import re
 import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -918,6 +919,153 @@ class TestOrderInvariance:
         assert _fit_with_spy(
             reference_timeseries, covariate_strategy='model'
         ).imputation_order_ == {'M': ['a1', 'a2', 'q1']}
+
+
+class TestOrderingSeesTheFittedSets:
+    """L'ordre 'cv' score les jeux que la 5c ajuste, pas une vue brute des données."""
+
+    @staticmethod
+    def _fit_recording_cv(data, scores, **overrides):
+        """Ajuste sous l'ordre 'cv' en retenant le jeu scoré de chaque variable.
+
+        Args:
+            data: Jeu de données ajusté.
+            scores: Score injecté par nom de variable.
+            **overrides: Paramètres supplémentaires de l'imputeur.
+
+        Returns:
+            Couple ``(imputeur, recorded)``, ``recorded`` associant à chaque
+            nom de variable le couple ``(X, y)`` réellement passé à la
+            validation croisée.
+        """
+        recorded = {}
+
+        def _spy(estimator, X, y, cv=None, scoring=None, error_score=None):
+            del estimator, cv, scoring, error_score
+            recorded[y.name] = (X.copy(), y.copy())
+            return np.full(2, scores[y.name])
+
+        params = dict(
+            covariate_strategy='model',
+            fit_predict_order='cv',
+            cv=2,
+            min_cv_train_size=2,
+        )
+        params.update(overrides)
+        with patch(
+            'tsforecast.frequency.variable_orderer.cross_val_score',
+            side_effect=_spy,
+        ):
+            imputer = _fit_with_spy(data, **params)
+        return imputer, recorded
+
+    def test_scored_set_is_the_fitted_set_of_the_first_variable(
+        self, reference_timeseries
+    ):
+        """La variable classée 1re est ajustée sur EXACTEMENT le jeu qui l'a classée.
+
+        Seule la 1re l'est : les suivantes voient en 5c ce que les rangs
+        précédents ont écrit au miroir, ce que la 5b ne peut pas connaître.
+        """
+        imputer, recorded = self._fit_recording_cv(
+            reference_timeseries, {'a1': -0.05, 'a2': -0.15, 'q1': -0.20},
+        )
+
+        first = imputer.imputation_order_['M'][0]
+        assert first == 'a1'
+        step = next(
+            step for step in imputer.imputation_plan_ if step.var_name == first
+        )
+        X_scored, y_scored = recorded[first]
+
+        # Mêmes covariables, mêmes lignes, mêmes valeurs que l'ajustement
+        assert tuple(X_scored.columns) == tuple(step.feature_cols)
+        pd.testing.assert_frame_equal(X_scored, step.model.fit_X_)
+        pd.testing.assert_series_equal(y_scored, step.model.fit_y_)
+
+    def test_scored_covariates_are_materialized_not_raw(self, reference_timeseries):
+        """'m1' est scorée agrégée sur la grille annuelle, non lue telle quelle.
+
+        La vue brute de "X_work" ne porterait, aux ancres de 'a1', que la
+        valeur de décembre : c'est une covariable que le modèle ne verra
+        jamais.
+        """
+        _imputer, recorded = self._fit_recording_cv(
+            reference_timeseries, {'a1': -0.05, 'a2': -0.15, 'q1': -0.20},
+        )
+        X_scored, _y = recorded['a1']
+
+        # Somme annuelle de 'm1' ramenée à l'échelle mensuelle de l'étape par
+        # le diviseur de "StageScaler", et non la valeur de décembre
+        annual = reference_timeseries['m1'].resample('YE').sum() / 12
+        december = reference_timeseries['m1'].resample('YE').last()
+        scored = X_scored['m1'].to_numpy(dtype=float)
+        assert scored == pytest.approx(annual.to_numpy(dtype=float))
+        assert scored != pytest.approx(december.to_numpy(dtype=float))
+
+    def test_panel_scored_target_is_brought_back_to_the_stage_scale(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Sur PANEL-F, la cible scorée est mutualisée ET remise à l'échelle de l'étape.
+
+        La lecture brute de la colonne 'v' empilerait les trois entités à
+        leurs échelles propres (annuelle pour FR, trimestrielle pour DE,
+        mensuelle pour IT) : le score mesurerait la dispersion inter-entités.
+        """
+        _imputer, recorded = self._fit_recording_cv(
+            mixed_freq_panel_multifrequency, {'v': -0.05, 'q1': -0.20},
+        )
+        _X_scored, y_scored = recorded['v']
+
+        # Les 51 lignes du jeu mutualisé (§5.8), une seule échelle
+        assert len(y_scored) == 51
+        counts = pd.Series(
+            [key[0] for key in y_scored.index]
+        ).value_counts().to_dict()
+        assert counts == {'IT': 36, 'DE': 12, 'FR': 3}
+        assert y_scored.min() > 9.0 and y_scored.max() < 14.0
+
+    def test_scoring_rows_follow_the_training_window_not_the_strict_one(
+        self, reference_timeseries
+    ):
+        """Élargir "training_scope" élargit aussi les lignes scorées.
+
+        Les lignes viennent du jeu mutualisé, restreint par la fenêtre
+        'training' : le classement voit donc le même régime de valeurs
+        manquantes que l'ajustement, quel que soit le scope.
+        """
+        scores = {'a1': -0.05, 'a2': -0.15, 'q1': -0.20}
+        strict, recorded_strict = self._fit_recording_cv(
+            reference_timeseries, scores,
+        )
+        wide, recorded_wide = self._fit_recording_cv(
+            reference_timeseries, scores, training_scope='unrestricted',
+        )
+
+        # Sous les deux scopes, le jeu scoré de la 1re variable est celui de
+        # son ajustement — la fenêtre stricte ne joue plus aucun rôle
+        for imputer, recorded in ((strict, recorded_strict), (wide, recorded_wide)):
+            first = imputer.imputation_order_['M'][0]
+            step = next(
+                step for step in imputer.imputation_plan_ if step.var_name == first
+            )
+            pd.testing.assert_series_equal(recorded[first][1], step.model.fit_y_)
+
+        # Le scope élargi ne retire jamais de ligne au classement
+        assert len(recorded_wide['q1'][1]) >= len(recorded_strict['q1'][1])
+
+    def test_frequency_order_prepares_nothing(self, reference_timeseries):
+        """Sous l'ordre 'frequency', aucune validation croisée n'est déclenchée."""
+        calls = []
+        with patch(
+            'tsforecast.frequency.variable_orderer.cross_val_score',
+            side_effect=lambda *a, **k: calls.append(1) or np.zeros(2),
+        ):
+            imputer = _fit_with_spy(
+                reference_timeseries, covariate_strategy='model',
+            )
+        assert not calls
+        assert imputer.imputation_order_ == {'M': ['a1', 'a2', 'q1']}
 
 
 class TestMaterializationWays:
