@@ -100,7 +100,7 @@ _FITTED_ATTRIBUTES: Tuple[str, ...] = (
 # jamais évaluée comme un booléen ('covariates_only' est truthy)
 ELIGIBLE_ORIGINS: Dict[Any, Tuple[CellOrigin, ...]] = {
     False: ('observed',),
-    'covariates_only': ('observed', 'interpolated'),
+    'covariates_only': ('observed',),
     True: ('observed', 'interpolated', 'model'),
 }
 
@@ -265,9 +265,12 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             anchoring.
         impute_intermediate_frequencies: Axis 2. ``False`` (default) goes
             straight to the target frequency; ``'covariates_only'`` walks the
-            intermediate stages but keeps ``y_train`` free of model-produced
-            rows; ``True`` also trains on them. **Never tested for truth**:
-            ``'covariates_only'`` is truthy.
+            intermediate stages but applies the very same origin filter as
+            ``False`` — ``y_train`` holds observed anchors only, so the benefit
+            of the cascade reaches the covariates and never the target;
+            ``True`` also trains on the target's own earlier imputations and on
+            the interpolated cells that replaced them on failure. **Never
+            tested for truth**: ``'covariates_only'`` is truthy.
         fit_predict_order: Order in which variables are imputed,
             ``'frequency'`` (default) or ``'cv'``. Inert outside
             ``covariate_strategy='model'``. Under ``'cv'`` each variable is

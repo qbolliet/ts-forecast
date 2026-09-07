@@ -2108,8 +2108,9 @@ LE PARAMÈTRE ([SPEC] §5.1)
     False             -> une seule étape, à la fréquence cible ;
                          y_train = ancres uniquement (origine 'observed')
     'covariates_only' -> progression COMPLÈTE ;
-                         y_train = ancres + cellules d'origine 'interpolated',
-                         JAMAIS ses propres imputations de modèle
+                         y_train = ancres UNIQUEMENT (origine 'observed'), ni ses propres
+                         imputations de modèle, ni les cellules de repli interpolées des
+                         étapes antérieures
     True              -> progression COMPLÈTE ;
                          y_train = ancres + 'interpolated' + SES PROPRES IMPUTATIONS des étapes
                          antérieures (origine 'model')
@@ -2144,7 +2145,7 @@ CE QUE CE LOT DOIT LIVRER
 
        ELIGIBLE_ORIGINS = {
            False:             {'observed'},
-           'covariates_only': {'observed', 'interpolated'},
+           'covariates_only': {'observed'},
            True:              {'observed', 'interpolated', 'model'},
        }
 
@@ -2205,16 +2206,17 @@ TESTS — à ajouter dans tests/frequency/test_high_frequency_imputer2.py :
    - `test_progression_per_target_frequency_group_on_panel` ;
    - `test_stage_plan_of_spec_5_5` : reproduit le tableau « Sous 'covariates_only' ou True » du
      §5.5 — 2 étapes, 5 modèles, dans l'ordre (Q, a1), (Q, a2), (M, q1), (M, a1), (M, a2), avec
-     y_train de 3 ancres partout sous 'covariates_only', et 3 ancres + 12 imputations Q pour
-     `a1` et `a2` à l'étape M sous True ;
+     y_train de 3 ancres partout sous 'covariates_only' (filtre identique à False : le plan
+     seul diffère), et 3 ancres + 12 imputations Q pour `a1` et `a2` à l'étape M sous True ;
    - **I12** `test_covariates_only_differs_from_true` : sur un jeu où la cascade change quelque
      chose, 'covariates_only' produit des y_train SANS AUCUNE ligne d'origine 'model', et des
      valeurs finales DIFFÉRENTES de True ; et sous covariate_strategy='interpolate',
      'covariates_only' produit les MÊMES valeurs finales que False ;
    - `test_y_train_filter_reads_origin_store_not_provenance` : test ciblé sur le piège D12 —
-     amorcer deux cellules de MÊME provenance publique mais d'origines différentes
-     ('interpolated' et 'model'), et vérifier que sous 'covariates_only' seule la première entre
-     dans y_train ;
+     amorcer deux cellules de MÊME provenance publique mais d'origines différentes ('observed'
+     et 'model'), et vérifier que sous 'covariates_only' seule la première entre dans y_train ;
+     amorcer symétriquement une cellule d'origine 'interpolated' (repli de la cible à une étape
+     antérieure) et vérifier qu'elle est EXCLUE sous 'covariates_only' et INCLUSE sous True ;
    - `test_per_row_scale_factor_on_mixed_frequency_y_train` : reproduit le tableau chiffré du
      §5.4 (120/Y -> 10.0 ; 28/Q -> 9.33 ; 30/Q -> 10.0) ;
    - `test_carried_model_rank_reached_under_covariates_only` : au moins une étape porte une voie

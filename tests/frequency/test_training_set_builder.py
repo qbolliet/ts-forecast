@@ -363,7 +363,7 @@ class TestOriginFilter:
         assert set(widened.row_frequency[model_rows.to_numpy()]) == {'Q'}
         assert widened.y[model_rows.to_numpy()].tolist() == [28.0, 30.0, 31.0]
 
-    def test_interpolated_rows_excluded_under_covariates_only_of_a_model_cell(
+    def test_model_rows_excluded_when_origin_not_eligible(
         self, mixed_freq_panel_multifrequency
     ):
         """Sous `{'observed', 'interpolated'}`, une cellule 'model' reste dehors."""

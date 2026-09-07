@@ -611,7 +611,7 @@ impute_intermediate_frequencies: Literal[False, 'covariates_only', True] = False
 | Valeur | Progression de fréquences | `y_train` d'une variable `v` à l'étape `f` |
 |---|---|---|
 | `False` (défaut) | **une seule étape**, à la fréquence cible | ses ancres uniquement (origine `'observed'`) |
-| `'covariates_only'` | progression **complète** (Y → Q → M sur `TS`) | ses ancres + ses cellules d'origine `'interpolated'` — **jamais** ses propres imputations de modèle |
+| `'covariates_only'` | progression **complète** (Y → Q → M sur `TS`) | ses ancres uniquement (origine `'observed'`) — **jamais** ses propres imputations de modèle, **ni** les cellules de repli interpolées produites aux étapes antérieures |
 | `True` | progression **complète** | ses ancres + ses cellules `'interpolated'` + **ses propres imputations des étapes antérieures** (origine `'model'`) |
 
 Les trois modalités décrivent le contenu de `y_train` **pour une entité donnée** ; sur un panel,
@@ -675,10 +675,21 @@ puis filtrées par leur origine :
 ```python
 ELIGIBLE_ORIGINS = {
     False:             {'observed'},
-    'covariates_only': {'observed', 'interpolated'},
+    'covariates_only': {'observed'},
     True:              {'observed', 'interpolated', 'model'},
 }
 ```
+
+**Pourquoi `'covariates_only'` exclut aussi `'interpolated'`** (et non seulement `'model'`) : la
+seule façon pour une cellule d'origine `'interpolated'` d'apparaître dans la **colonne cible**
+`v` à une étape antérieure est le **repli** d'un modèle qui a échoué à cette étape — c'est-à-dire
+une interpolation des seules ancres de `v`. La réadmettre dans `y_train` reviendrait à entraîner
+`v` sur une reconstruction déterministe de ses propres ancres : aucune information nouvelle, mais
+12 pseudo-lignes qui noieraient les 3 vraies sur `TS` et gonfleraient la taille effective vue par
+`min_cv_train_size` et par la CV. Sous `True`, ces mêmes cellules sont au contraire conservées :
+elles y remplacent, à identité de rôle, les cellules `'model'` qu'on a déjà décidé de consommer,
+et les exclure trouerait irrégulièrement le jeu d'entraînement. C'est ce qui rend exacte la
+formulation du §5.1 : `False` et `'covariates_only'` partagent **le même filtre**, littéralement.
 
 Trois points d'implémentation impératifs :
 
@@ -2058,7 +2069,7 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 | **I9** | conformité sklearn | `clone`, `get_params`/`set_params`, `Pipeline`, `GridSearchCV` sur panel avec `target_frequency` dict ; `NotFittedError` avant `fit` |
 | **I10** | indifférence de l'ordre hors `'model'` | sous `'tolerate_nan'` et `'interpolate'`, forcer deux ordres de traitement différents produit des sorties identiques |
 | **I11** | unicité de la voie de matérialisation | pour chaque (étape, variable, covariable), `materialization` est identique au fit et au transform, et la nature des valeurs produites l'est aussi (§4.6) |
-| **I12** | `'covariates_only'` ≠ `True` | sur un jeu où la cascade change quelque chose, `'covariates_only'` produit des `y_train` sans aucune ligne d'origine `'model'`, et des valeurs finales **différentes** de `True` ; sous `covariate_strategy='interpolate'`, `'covariates_only'` produit les mêmes valeurs finales que `False` (§5.6) |
+| **I12** | `'covariates_only'` ≠ `True` | sur un jeu où la cascade change quelque chose, `'covariates_only'` produit des `y_train` dont **toutes** les lignes sont d'origine `'observed'` (ni `'model'`, ni `'interpolated'`), et des valeurs finales **différentes** de `True` ; sous `covariate_strategy='interpolate'`, `'covariates_only'` produit les mêmes valeurs finales que `False` (§5.6) |
 | **I13** | `impute_intermediate_frequencies` n'est jamais testé comme booléen | test statique/grep : aucun `if self.impute_intermediate_frequencies:` dans le code (`'covariates_only'` est *truthy*) |
 | **I14** | mutualisation (§5.8) | sur `PANEL-F`, `y_train` de `v` contient **exactement** les lignes annoncées au §5.8 — **51 à toutes les étapes** (3 `FR` + 12 `DE` + 36 `IT`), les blocs ne dépendant pas de l'étape (D18) — et chaque ligne est à l'**échelle de l'étape** : à `M`, valeurs d'or `10.0 / 11.0 / 12.5` pour les blocs `FR` (diviseur 12) et `IT` (diviseur 1) ; à `Q`, `30.0 / 33.0 / 37.5` pour `FR` (diviseur 4) **et pour `IT` (diviseur `1/3`, ses 36 lignes mensuelles conservées)**, les 12 valeurs brutes de `DE` restant inchangées. Aucune ligne ne mêle deux échelles |
 | **I15** | indépendance au groupe de fréquence source | à une étape donnée, les groupes `(v, Y)` et `(v, Q)` de `PANEL-F` reçoivent le **même** `X_train`, le **même** `y_train` et les **mêmes** voies de matérialisation, et **partagent le même objet modèle** (`is`) ; leurs recalages restent distincts (totaux annuels de `FR`, trimestriels de `DE`) et `IT` n'est **jamais** réécrite |
