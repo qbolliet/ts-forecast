@@ -665,6 +665,29 @@ Sur un panel, la progression est calculée **par groupe d'entités partageant la
 cible** ; `target_frequency` en dict autorise des cibles différentes par entité (validation B16 :
 dict incomplet → `ValueError` nommant les entités manquantes).
 
+**Fusion des groupes en étapes globales** (D31). Les progressions par groupe sont ensuite
+**fusionnées** en une liste unique d'étapes, seule forme que parcourt la PHASE 5 :
+`frequency_progression_` reste une `List[Union[str, Dict[EntityKey, str]]]`, une étape de panel
+étant une liaison `{entité: fréquence}`. L'union des fréquences d'étape de tous les groupes est
+triée de la plus basse à la plus haute, et chaque étape ne lie **que les entités dont le groupe la
+traverse** :
+
+```
+target_frequency = {FR: 'M', DE: 'Q'}
+F(FR) = {Y, Q, M} -> progression FR = ['Q', 'M']
+F(DE) = {Y, Q}    -> progression DE = ['Q']
+
+frequency_progression_ = [ {FR: 'Q', DE: 'Q'},      # étape Q
+                           {FR: 'M'} ]              # étape M : DE absente
+```
+
+**L'omission suffit à ne rien écrire**, aucune garde supplémentaire n'est requise :
+`_classify_variables_at_frequency` ignore une entité absente de la liaison (`pred_freq is None` →
+`continue`), elle n'entre donc dans aucun groupe imputable, et la grille de prédiction est de
+toute façon restreinte aux entités du groupe. Une entité omise reste en revanche **contributrice**
+au jeu d'entraînement des étapes qu'elle ne traverse pas, si elle observe la colonne (§5.8 R1) :
+les deux mécanismes ne se connaissent pas.
+
 ### 5.3 — Composition de `y_train` : le filtre d'origine
 
 `y_train` d'une variable `v` à l'étape `f` est composé des cellules de la **colonne `v`**,
@@ -712,6 +735,12 @@ Trois points d'implémentation impératifs :
    et *à quelle fréquence*. Les deux se composent sans se connaître ; c'est pourquoi
    `TrainingSetBuilder` (§12.2) reçoit `ELIGIBLE_ORIGINS` en paramètre plutôt que de lire
    `impute_intermediate_frequencies`.
+5. **La fenêtre `'training'` est lue à la fréquence de chaque LIGNE, par couches** (D30). C'est la
+   même règle unificatrice que les diviseurs du §5.4 — fréquence de bloc pour une ligne observée,
+   fréquence de production pour une ligne d'étape antérieure — appliquée au masque. Voir la
+   définition d'une **couche** au §5.4bis : la lire à la seule fréquence de bloc rendrait l'axe 2
+   inatteignable, une ligne trimestrielle d'un bloc annuel étant purement **absente** de l'index
+   d'un masque annuel, donc écartée en silence.
 
 ### 5.4 — Le piège d'échelle des lignes imputées
 
@@ -751,6 +780,54 @@ est passé tel quel à `StageScaler.target_divisor(produced_freq=…)`. Le §5.4
 le §5.8 (axe des entités) partagent donc **le même mécanisme** et le même chemin de code : il n'y
 a pas deux plomberies d'échelle à écrire.
 
+### 5.4bis — Les couches : un bloc n'est homogène que si l'axe 2 n'y injecte rien
+
+> **Un bloc cesse d'être homogène dès qu'une étape antérieure y a écrit des cellules plus fines
+> que sa fréquence propre. Tout ce qui se lit « à la fréquence du bloc » se lit alors à la
+> fréquence de chaque LIGNE, une couche à la fois.** (D30)
+
+Une **couche** est **une fréquence par entité contributrice** :
+
+```
+couche = { entité -> fréquence }      # la forme même de "stage_freq" et des masques
+```
+
+Elles se construisent en une règle : pour chaque entité, ses fréquences de ligne distinctes, **sa
+fréquence de bloc en tête** ; la couche de rang *k* prend la *k*-ième fréquence de chaque entité
+qui en porte une. Une entité qui n'atteint pas le rang *k* est simplement absente de la couche.
+
+| Situation | Couches | Conséquence |
+|---|---|---|
+| `impute_intermediate_frequencies is False` **ou** `'covariates_only'` | **une seule**, égale à `{e: f_block(e)}` | strictement le comportement d'origine : un appel, un masque, les diviseurs de bloc |
+| `True`, `TS`, étape `M`, variable `a1` | `[{(): 'Y'}, {(): 'Q'}]` | les 3 ancres annuelles et les imputations trimestrielles sont servies séparément |
+| `True`, `PANEL-F`, étape `M`, variable `v` | `[{FR: 'Y', DE: 'Q', IT: 'M'}, {FR: 'Q'}]` | seule `FR` atteint le rang 1 : elle seule a été imputée à l'étape `Q` |
+
+**Trois lectures passent aux couches, et elles seules** :
+
+1. le masque `'training'` (§5.3 point 5) ;
+2. `CovariateMaterializer.materialize`, appelé **une fois par couche**, sur la sous-grille de la
+   couche (§5.8 R4) ;
+3. `StageScaler.feature_divisors`, dont `grid_freq` reçoit la couche et non les blocs (§9.2).
+
+Le diviseur **de la cible** n'y passe pas : il est par ligne depuis le §5.4, et la `row_frequency`
+que rend `TrainingSetBuilder` est exactement le vecteur des fréquences de couche.
+
+**Pourquoi c'est nécessaire et non cosmétique.** Sans les couches, à l'étape `M` de `a1` sous
+`True` : les lignes trimestrielles sont hors de l'index d'un masque annuel, donc **écartées** ; et
+si on les garde de force, leurs covariables sont matérialisées à l'échelle **annuelle** (`m1` =
+1266, la somme de l'année) sur des lignes qui couvrent un trimestre, ce qui ne rend que des NaN
+aux dates non annuelles et les fait tomber sous la garde « ligne sans aucune covariable observée ».
+Dans les deux cas `y_train` retombe sur ses 3 ancres et `target_taint` reste `'none'` : **la
+modalité `True` devient un synonyme silencieux de `'covariates_only'`** — exact pendant du piège
+D12 du §5.3, un cran plus bas.
+
+**Ce que les couches ne changent pas.** Une seule couche redonne un appel unique et les liaisons
+de bloc : la règle R4 du §5.8 (« `materialize` est appelé **une seule fois** ») reste vraie mot
+pour mot axe 2 éteint, et l'invariant I16 avec elle. La réduction sur les couches suit les règles
+déjà écrites : la voie retenue pour une colonne est **la plus dégradée** de ses couches
+(`_WAY_RANK`), son origine la **plus souillée** (`max_origin`) — mêmes règles que la réduction par
+entité de `decide_ways` (§4.6).
+
 ### 5.5 — Exemple complet du plan sur `TS`
 
 `covariate_strategy='model'`, `fit_predict_order='frequency'`, `impute_intermediate_frequencies`
@@ -768,15 +845,42 @@ variable :
 (trimestrielle) — puis tie-break alphabétique entre `a1` et `a2`. Le §8.4 déroule le même
 exemple sous `fit_predict_order='cv'`.)
 
-**Sous `'covariates_only'` ou `True`** — 2 étapes, 5 modèles :
+**Sous `'covariates_only'` ou `True`** — 2 étapes, 5 modèles.
 
-| # | Étape | Variable | `y_train` sous `'covariates_only'` | `y_train` sous `True` |
-|---|---|---|---|---|
-| 1 | `Q` | `a1` | 3 ancres Y | 3 ancres Y |
-| 2 | `Q` | `a2` | 3 ancres Y | 3 ancres Y |
-| 3 | `M` | `q1` | 12 ancres Q | 12 ancres Q |
-| 4 | `M` | `a1` | 3 ancres Y | 3 ancres Y **+ 12 imputations Q** |
-| 5 | `M` | `a2` | 3 ancres Y | 3 ancres Y **+ 12 imputations Q** |
+⚠️ **L'ordre des lignes ci-dessous est celui de `fit_predict_order='cv'`, pas celui de
+`'frequency'`** annoncé en tête du §5.5. Sous `'frequency'`, la règle du §8.1 — fréquence la plus
+basse d'abord — met `a1` et `a2` (annuelles) **avant** `q1` (trimestrielle) à l'étape `M`, comme
+elle le fait sous `False` dans le tableau précédent. Les deux ordres sont donnés :
+
+| `fit_predict_order` | Plan | Vérifié |
+|---|---|---|
+| `'frequency'` | `(Q,a1) (Q,a2) (M,a1) (M,a2) (M,q1)` | conforme au §8.1 et au premier tableau du §5.5 |
+| `'cv'` | `(Q,a1) (Q,a2) (M,q1) (M,a1) (M,a2)` | conforme au §8.4, qui donne `q1, a1, a2` sur ce jeu |
+
+Le second ordre est celui qu'on **souhaite** en général : `q1` s'entraîne sur 12 ancres vraies
+contre 3 pour `a1`/`a2`, c'est le modèle le mieux étayé de l'étape, et le faire cascader remplace
+chez `a1`/`a2` un `q1` interpolé (rang 4) par un `q1` de modèle (rang 2) ayant vu la forme
+intra-trimestrielle de `m1`. Deux réserves à connaître : sous `'cv'` l'ordre **dépend des
+données** — sous `True`, `y_train` change, les scores avec, et l'ordre observé devient
+`(M,a2) (M,q1) (M,a1)` ; et un `q1` de modèle porte l'origine `'model'`, donc fait passer `a1`/`a2`
+de `MODEL_ON_INTERPOLATED` à `MODEL_ON_IMPUTED` — la qualité réelle monte pendant que la souillure
+déclarée se dégrade, tension intrinsèque à une échelle **épistémique** et non métrique (§6.2).
+
+| # | Étape | Variable | `y_train` sous `'covariates_only'` | `y_train` sous `True`, `aggregation_constraint='sum'` | `y_train` sous `True`, `aggregation_constraint=None` |
+|---|---|---|---|---|---|
+| 1 | `Q` | `a1` | 3 ancres Y | 3 ancres Y | 3 ancres Y |
+| 2 | `Q` | `a2` | 3 ancres Y | 3 ancres Y | 3 ancres Y |
+| 3 | `M` | `q1` | 12 ancres Q | 12 ancres Q | 12 ancres Q |
+| 4 | `M` | `a1` | 3 ancres Y | 3 ancres Y **+ 9 imputations Q** = **12** | 3 ancres Y **+ 12 imputations Q** = **15** |
+| 5 | `M` | `a2` | 3 ancres Y | 3 ancres Y **+ 9 imputations Q** = **12** | 3 ancres Y **+ 12 imputations Q** = **15** |
+
+**Pourquoi 9 et non 12 sous `'sum'`.** La quatrième imputation trimestrielle de chaque année tombe
+sur la date de l'ancre annuelle — le 31 décembre est à la fois une fin de trimestre et une fin
+d'année. Sous `'sum'`, le recalage impose Σ(4 trimestres) = ancre, donc la ligne annuelle est une
+**combinaison linéaire exacte** des quatre trimestrielles : la garder toutes revient à compter le
+total de l'année deux fois. La règle est donc « l'observation gagne, l'imputation coïncidente est
+écartée ». Sous `None`, aucun recalage n'a lieu, la colinéarité disparaît et les cinq lignes de
+l'année sont conservées : c'est l'objet du §5.9.
 
 Aux étapes 4 et 5, `a1` et `a2` se voient mutuellement comme covariables **reportées de l'étape
 `Q`** (rang 3 du §4.4) sous les deux modalités — c'est l'apport propre de `'covariates_only'`.
@@ -886,6 +990,13 @@ C'est ce mécanisme qui donne à une même covariable trois traitements différe
 mutualisé — agrégée chez le bloc annuel, lue telle quelle chez le bloc trimestriel, interpolée
 chez le bloc mensuel — pour un seul niveau une fois l'échelle du §9.2 appliquée.
 
+**Amendement D30** : « une seule fois » se lit **une fois par couche** (§5.4bis), la couche étant
+`{e: f_block(e)}` — donc l'appel unique d'origine — tant que l'axe 2 n'a injecté aucune cellule
+plus fine dans un bloc. Sous `impute_intermediate_frequencies=True`, les blocs ayant reçu des
+imputations d'une étape antérieure produisent une couche supplémentaire, servie par un appel
+supplémentaire sur sa seule sous-grille. Le nombre d'appels est donc le nombre de fréquences de
+ligne distinctes d'une entité — un ou deux en pratique — jamais un par ligne.
+
 **R5 — Échelle.** Diviseur **par ligne** pour la cible (§5.4, table de généralisation), **> 1**
 pour un bloc plus grossier que l'étape et **< 1** pour un bloc plus fin, et diviseurs **par bloc**
 pour les features : `StageScaler.feature_divisors` reçoit `grid_freq`
@@ -976,6 +1087,187 @@ mutualise **déjà**, mais faux (§1.5) ; et un utilisateur qui veut un modèle 
 sans paramètre, en ajustant un imputeur par entité. À documenter dans la docstring de la classe,
 avec cette échappatoire nommée explicitement.
 
+### 5.9 — Cellules coïncidentes et niveau de fréquence de la grille d'entraînement
+
+> **Deux cellules d'une même entité peuvent partager une date sans décrire la même période. Sous
+> `aggregation_constraint=None`, elles sont TOUTES conservées, distinguées par un niveau de
+> fréquence ajouté à l'index du jeu d'entraînement. Sous `'sum'`, la plus fine est écartée : le
+> recalage en fait une combinaison linéaire exacte des autres.** (D32)
+
+#### Le problème
+
+Le 31 décembre est à la fois une fin d'année et une fin de trimestre. Sur `TS`, à l'étape `M` sous
+`impute_intermediate_frequencies=True`, la colonne `a1` porte à la date `2021-12-31` **deux**
+cellules candidates :
+
+| Cellule | Période décrite | Valeur brute | Origine | `f_row` | Diviseur | Mise à l'échelle |
+|---|---|---|---|---|---|---|
+| ancre annuelle | **l'année 2021** | 120.0 | `'observed'` | `Y` | 12 | 10.00 |
+| imputation du T4, étape `Q` | **le 4ᵉ trimestre 2021** | ≈ 30.0 | `'model'` | `Q` | 3 | ≈ 10.00 |
+
+Une grille indexée par la seule date ne peut pas porter les deux. Le comportement actuel les
+départage par « l'observation gagne » (`_candidate_rows` écarte du miroir toute date déjà occupée
+par une observation), ce qui coûte une ligne par période et par niveau.
+
+#### La règle
+
+**Le départage dépend de `aggregation_constraint`, et de lui seul :**
+
+| `aggregation_constraint` de la colonne | Comportement | Motif |
+|---|---|---|
+| `'sum'` (défaut) | la cellule **la plus fine** coïncidente est écartée ; l'observée est conservée | le recalage impose Σ(sous-périodes) = total observé : la ligne annuelle **est** la somme des quatre trimestrielles, à l'arrondi près. Les garder toutes compte le total de l'année deux fois et sur-pondère l'information de basse fréquence face à la variation intra-annuelle |
+| `None` | **toutes** les cellules sont conservées, à tous les niveaux de fréquence | aucun recalage n'a lieu, les prédictions sortent brutes, leur somme ne vaut plus l'ancre : chaque ligne porte une contrainte propre — « l'année totalise 120 » **et** « le T4 vaut ≈ 30 » |
+
+Dans le cas où aggregation_constraint est un dictionnaire, toutes les cellules sont conservées dès lors que 'sum' n'est pas la valeur associée à l'ensemble des colonnes du dictionnaire.
+
+**Mesuré sur `TS`** (`covariate_strategy='model'`, sortie de l'étape `Q` pour `a1`) :
+
+| Année | Ancre | Σ des 4 trimestres sous `'sum'` | Écart | Σ sous `None` | Écart |
+|---|---|---|---|---|---|
+| 2021 | 120.0 | 120.0000 | **−0.0000** | 119.3493 | **−0.6507** |
+| 2022 | 132.0 | 132.0000 | **+0.0000** | 134.3668 | **+2.3668** |
+| 2023 | 150.0 | 150.0000 | **−0.0000** | 149.4018 | **−0.5982** |
+
+La colinéarité est **exacte** sous `'sum'` et **rompue** sous `None` : la règle n'est pas une
+préférence, elle suit la structure algébrique du jeu.
+
+#### La forme de l'index
+
+Sous `None`, l'index du jeu d'entraînement gagne un niveau de fréquence, **placé du côté de
+l'entité** — c'est-à-dire que le bloc devient le couple `(entité, fréquence)`, exactement la clé
+d'une couche du §5.4bis :
+
+```
+série temporelle : MultiIndex (freq, date)              ex. ('Y', 2021-12-31), ('Q', 2021-12-31)
+panel            : MultiIndex (entité…, freq, date)     ex. ('FR', 'Y', 2021-12-31)
+```
+
+Portée du changement, à respecter strictement :
+
+- il concerne **`TrainingSet.X` / `.y` / `.row_frequency` / `.row_origin`** et la grille remise à
+  l'estimateur, **et rien d'autre** ;
+- `CovariateMaterializer.materialize` continue de travailler couche par couche sur la grille
+  **réelle** `(entité…, date)` — il lit `source_data`, indexé ainsi, et `detected_frequencies`,
+  clé par entité réelle. La fréquence n'est estampillée dans l'index **qu'après** la
+  matérialisation d'une couche, au moment de l'empilement ;
+- la **grille de prédiction** n'est jamais concernée : elle porte une seule fréquence par
+  définition, celle de l'étape ;
+- sous `'sum'` — le défaut — le niveau supplémentaire **n'est pas ajouté** : une seule cellule
+  survit par (entité, date), l'index reste celui d'aujourd'hui, et rien ne change pour personne.
+
+Cette forme est aussi celle que doit rendre `keep_lower_frequencies=True` (§12.4) : la sortie
+multi-fréquences empile les mêmes niveaux, avec la même clé. La spécifier ici évite d'en inventer
+une seconde au lot L12.
+
+#### Le prix, énoncé
+
+`aggregation_constraint` cesse d'être **orthogonale** à l'axe 2 : elle gouvernait le recalage des
+prédictions, elle gouverne désormais aussi la composition de `y_train`. C'est assumé — le lien
+entre les deux est algébrique, pas conventionnel — mais il doit être **dit dans la docstring**
+des deux paramètres, et il ne vaut que sous `impute_intermediate_frequencies=True` : sous `False`
+et `'covariates_only'`, `y_train` ne contient que des ancres, aucune coïncidence n'est possible et
+le paramètre reste sans effet sur la composition.
+
+**Note sur les périodes partielles.** Une période que les gardes du §11.1 laissent **non recalée**
+(partiellement prédite, tronquée par les bornes, agrégat nul) n'est pas colinéaire non plus, même
+sous `'sum'`. La règle ne cherche pas à le détecter : elle se lit sur le **paramètre**, pas sur le
+résultat. Écarter une ligne de trop dans ces cas marginaux est préférable à une règle qui
+dépendrait des valeurs — donc irreproductible entre le `fit` et le `transform`, et contraire à
+l'invariant §4.6.
+
+### 5.10 — Entités sans aucune observation de la variable imputée
+
+> **Une entité qui n'observe JAMAIS la variable peut néanmoins en recevoir une imputation
+> complète, apprise sur les autres entités du panel — mais seulement sur demande explicite, et
+> ses cellules sont marquées comme n'ayant aucune ancre.** (D33)
+
+#### L'état actuel et son diagnostic
+
+`_classify_variables_at_frequency` itère sur `detected_frequencies_`, et un couple `(e, c)` sans
+aucune observation n'a **pas** de fréquence détectée : il part dans `_undetected_frequencies_`,
+n'entre dans aucune des trois catégories, n'apparaît dans aucun groupe imputable et ne reçoit donc
+jamais de valeur. Mesuré sur `PANEL-F` dont on efface entièrement `v` pour `IT` :
+
+```
+undetected           : (('IT', 'v'),)
+categories['impute'] : [('DE','v'), ('FR','v')]        <- IT absente
+plan (étape, var, entités) : (Q,v,(FR,))  (M,v,(DE,))  (M,v,(FR,))
+cellules v produites : FR 36 · DE 36 · IT 0
+```
+
+**Ce blocage n'est pas la règle R1 du §5.8.** R1 gouverne le côté **entraînement** et son exclusion
+est saine : une entité sans observation n'a rien de vrai à apporter à `y_train`, et sous
+`impute_intermediate_frequencies=True` elle ne ferait que se réinjecter ses propres sorties. Le
+blocage est en amont, dans la **classification**, faute de `f_var(e, c)` à comparer à la cible.
+Il est par ailleurs **indépendant de l'axe 2** : il joue à l'identique sous `False`.
+
+#### Le paramètre
+
+```python
+impute_unobserved_entities: bool = False
+```
+
+`False` (défaut) : comportement actuel, inchangé — l'entité reste hors de toute grille de
+prédiction et ses cellules restent `ORIGINAL`/NaN. `True` : le couple `(e, c)` devient
+**imputable à la fréquence cible de `e`**, à une étape unique, celle de `f_target(e)`.
+
+C'est le pendant, côté **cible**, de `covariate_eligibility` côté **covariables** (§4.5) : la même
+question — « que faire d'un couple `(entité, colonne)` jamais observé ? » — posée aux deux bouts
+du modèle.
+
+#### Les cinq conséquences, à traiter explicitement
+
+1. **Classification et progression.** Le couple a une fréquence source **absente**, jamais
+   inférée. Il n'entre donc dans l'ensemble `F` du §5.2 pour **aucune** fréquence : il n'ajoute
+   pas d'étape et ne change pas la progression. Il rejoint un groupe de plan dédié dont
+   `source_frequency` vaut `None`, à l'étape `f_target(e)` — **la dernière** de la progression de
+   son groupe, où qu'en soient les autres entités.
+2. **Aucun recalage.** Il n'existe aucun total de période à imposer : `AggregationConstraint` est
+   **court-circuitée** pour ces cellules, quelle que soit la valeur de `aggregation_constraint`.
+   C'est une différence sémantique de fond avec toutes les autres cellules produites, qui sont
+   des **désagrégations** d'une observation ; celles-ci sont des **prédictions libres**.
+3. **Aucun diviseur.** Pas de fréquence source, donc pas de conversion : la prédiction est
+   produite directement à l'échelle de l'étape, diviseur `1.0`. Le `scale_factor` de l'étape de
+   plan vaut `1.0` et son `fit_scale_factor` reste celui du modèle partagé (§5.8 R6).
+4. **Provenance.** « Aucune ancre » est épistémiquement bien plus faible que « trois ancres
+   désagrégées », et la matrice de provenance mentirait à les confondre. Un membre est ajouté à
+   l'énumération du §6.1 :
+
+   ```python
+   MODEL_UNANCHORED = 'model_unanchored'   # produit par modèle, aucune observation de la colonne
+                                           # pour cette entité, aucun recalage possible
+   ```
+
+   Il **prime sur les cinq familles `MODEL_*`** : une cellule sans ancre porte
+   `MODEL_UNANCHORED` quelles que soient les souillures de covariables et de cible, qui restent
+   par ailleurs calculées et gelées dans l'étape pour le diagnostic. C'est le seul ajout à
+   l'énumération depuis la suppression de `MODEL_ON_MIXED` (§6.7), et il est **additif** : aucune
+   cellule qui portait une autre valeur n'en change.
+5. **Éligibilité des covariables.** L'entité doit disposer de covariables sur la grille cible,
+   sans quoi la ligne est vide et le repli s'applique. Le repli d'une entité sans ancre **ne peut
+   pas être l'interpolation** — il n'y a rien à interpoler : ses cellules restent NaN et
+   `ORIGINAL`, et un avertissement **agrégé** nomme les couples concernés en fin de `fit`.
+
+#### Exemple normatif sur `PANEL-F`
+
+Jeu `PANEL-F` (§2.5) dont `v` est **entièrement effacée pour `IT`**, `target_frequency='M'`,
+`impute_intermediate_frequencies=False`, `impute_unobserved_entities=True` :
+
+| Étape | Variable | `source_frequency` | Entités | `y_train` | Recalage | Provenance émise |
+|---|---|---|---|---|---|---|
+| `M` | `v` | `Y` | `(FR,)` | 15 lignes mutualisées (3 `FR` + 12 `DE`) | totaux **annuels** de `FR` | `MODEL_ON_*` selon §6.3 |
+| `M` | `v` | `Q` | `(DE,)` | **les mêmes** 15 lignes | totaux **trimestriels** de `DE` | `MODEL_ON_*` selon §6.3 |
+| `M` | `v` | **`None`** | `(IT,)` | **les mêmes** 15 lignes | **aucun** | **`MODEL_UNANCHORED`** |
+
+Les trois étapes de plan **partagent le modèle** (§5.8 R6, D19) : le jeu mutualisé ne dépend pas
+du groupe, et `IT` n'y contribue aucune ligne (R1). Les 36 cellules mensuelles de `v` pour `IT`
+sont produites par ce modèle et laissées telles quelles.
+
+**Vérification attendue** : les 36 cellules d'`IT` sont renseignées, portent toutes
+`MODEL_UNANCHORED`, et **aucune** somme annuelle n'est imposée — le total 2021 de `IT` n'a aucune
+raison de valoir 120. Sous `impute_unobserved_entities=False`, les 36 cellules restent NaN et la
+troisième étape de plan n'existe pas.
+
 ---
 
 ## 6 — Provenance
@@ -998,6 +1290,9 @@ class ProvenanceType(str, Enum):
     MODEL_ON_IMPUTED_TARGET = 'model_on_imputed_target'  # NOUVEAU
     MODEL_ON_IMPUTED_BOTH   = 'model_on_imputed_both'    # NOUVEAU
 
+    # --- Cellule produite sans aucune ancre de la colonne pour son entité ---
+    MODEL_UNANCHORED        = 'model_unanchored'         # NOUVEAU (§5.10, D33)
+
     # MODEL_ON_MIXED : SUPPRIMÉ (voir §6.7)
 ```
 
@@ -1013,6 +1308,14 @@ mauvais ingrédient qu'a vu le modèle, et de quel côté ?**
 - `MODEL_ON_IMPUTED_TARGET` — `y_train` contient au moins une valeur imputée par modèle
   (`impute_intermediate_frequencies=True`), les covariables non.
 - `MODEL_ON_IMPUTED_BOTH` — les deux.
+
+`MODEL_UNANCHORED` répond à une **autre** question, et c'est pourquoi il ne s'insère pas dans
+l'échelle : non pas « quel est le plus mauvais ingrédient ? » mais « cette cellule est-elle
+rattachée à une observation de sa propre colonne, pour sa propre entité ? ». Il n'est émis que
+sous `impute_unobserved_entities=True` (§5.10), **prime sur les cinq familles ci-dessus**, et
+signale deux choses qu'aucune d'elles ne dit : aucun recalage n'a pu être appliqué, et la valeur
+est une prédiction libre plutôt qu'une désagrégation d'un total observé. Les deux souillures
+restent calculées et gelées dans l'étape, pour le diagnostic.
 
 ### 6.2 — Origine des cellules et souillures
 
@@ -1646,6 +1949,18 @@ Le masque des cellules effectivement recalées est un masque de **diagnostic** :
 toutes les cellules gardent la provenance qu'elles portaient avant le recalage — `MODEL_*` ou
 `INTERPOLATED` (§6.4, invariance de provenance D16).
 
+**Deux effets hors recalage, à connaître.**
+
+1. **Composition de `y_train` sous l'axe 2** (D32, §5.9) : sous `'sum'`, une imputation d'étape
+   antérieure coïncidant avec une ancre est écartée du jeu d'entraînement — le recalage en fait
+   une combinaison linéaire exacte des autres lignes ; sous `None`, elle est conservée, et l'index
+   du jeu d'entraînement gagne un niveau de fréquence. Le paramètre cesse donc d'être orthogonal à
+   `impute_intermediate_frequencies`, et cela **doit** figurer dans les docstrings des deux. Sous
+   `False` et `'covariates_only'`, aucune coïncidence n'est possible : l'effet est nul.
+2. **Entités sans ancre** (D33, §5.10) : les cellules d'une entité n'observant jamais la colonne
+   ne sont **jamais** recalées, quelle que soit la valeur du paramètre — il n'existe aucun total
+   de période à leur imposer.
+
 ### 11.2 — Désagrégation des ancres : comportement **non paramétrable**
 
 > **Une variable imputée à l'étape `f` est prédite sur la totalité de chaque période couverte,
@@ -1853,6 +2168,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
 
         # --- Axe 2 : fréquences intermédiaires (§5) ---
         impute_intermediate_frequencies: Literal[False, 'covariates_only', True] = False,
+        impute_unobserved_entities: bool = False,          # §5.10, D33
 
         # --- Ordre d'imputation (§8) ---
         fit_predict_order: Literal['frequency', 'cv'] = 'frequency',
@@ -1899,7 +2215,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
 | `coverage_threshold`, `training_coverage_threshold` | float dans `[0, 1]` (ou `None` pour le second) |
 | `scale_features` | `False`, `'constant'`, `'calendar'`, ou dict de ces valeurs |
 | `aggregation_constraint` | `'sum'`, `None`, ou dict de ces deux valeurs (clé `'__default__'` admise, clés vérifiées au `fit`) ; message listant les formes admises et **nommant `additive_transformer`** comme réponse à une colonne non additive (§11.1, D20) |
-| booléens (`keep_lower_frequencies`, `restore_original_values`, `verbose`) | validation groupée, comme dans `hfi` |
+| booléens (`keep_lower_frequencies`, `restore_original_values`, `verbose`, `impute_unobserved_entities`) | validation groupée, comme dans `hfi` |
 
 Combinaisons **inertes** documentées mais **non signalées** (D9) : cf. §5.6.
 `training_coverage_threshold` sans `training_scope` est inerte, à documenter.
@@ -1911,7 +2227,8 @@ Combinaisons **inertes** documentées mais **non signalées** (D9) : cf. §5.6.
 | `effective_target_frequency_` | fréquence cible normalisée (scalaire ou dict par entité) |
 | `detected_frequencies_` | fréquence détectée au fit : `{colonne: fréquence}` sur une série temporelle, `{(entité, colonne): fréquence}` sur un panel — **les entités peuvent diverger pour une même colonne** (§2.1, §2.5) |
 | `variable_categories_` | classification des colonnes, format [ARCH] §3.2 |
-| `frequency_progression_` | liste des `f_stage` (§5.2) |
+| `frequency_progression_` | liste des `f_stage` (§5.2), une étape de panel étant une liaison `{entité: fréquence}` où **seules** figurent les entités que l'étape concerne (D31) |
+| `unanchored_pairs_` | `Tuple[tuple, ...]` — couples `(entité, colonne)` imputés sans aucune ancre sous `impute_unobserved_entities=True` (§5.10). Vide sinon ; sous-ensemble de `_undetected_frequencies_` |
 | `imputation_order_` | ordre des variables par étape (vide hors `covariate_strategy='model'`) |
 | `imputation_plan_` | `List[ImputationStep]` — l'état ajusté complet |
 | `imputation_models_` | vue `{(étape, variable): estimateur}` sur le plan |
@@ -1991,6 +2308,18 @@ l'invariant I17 du §16.
 | **D27** | les lignes scorées viennent de la fenêtre **`'training'`**, par construction du jeu mutualisé ; le masque `'strict'` ne gouverne plus rien dans le `fit` et `strict_window_mask_` devient un pur attribut de diagnostic. L'avertissement de fenêtre vide porte désormais sur la fenêtre d'**entraînement** effective | l'argument d'homogénéité qui justifiait la fenêtre stricte ne tient pas : la fenêtre d'entraînement est commune à toutes les variables d'une entité, donc l'élargir n'introduit aucune asymétrie entre variables — elle ajoute des lignes, jamais des colonnes (§7.2). Elle rend en revanche le classement représentatif du **régime de valeurs manquantes** que l'ajustement affronte, ce que la fenêtre stricte (couverture 1.0) masque par définition. Sous les défauts, les deux fenêtres coïncident : le changement ne mord que lorsque l'auteur a explicitement élargi `training_scope`. Corollaire : l'ancien avertissement « aucune fenêtre stricte » était déjà faux depuis L8d — c'est la fenêtre `'training'` que lit `TrainingSetBuilder` |
 | **D28** | une variable dont la sélection ne retient **aucune** covariable rejoint le groupe de repli `'frequency'`, au lieu de porter la sentinelle `-np.inf` | elle sera imputée par interpolation quel que soit son rang : aucun score ne la décrit, et un `-np.inf` la coincerait en fin du **groupe scoré** à une place que l'échelle du `cv_scoring` rend arbitraire. Le groupe de repli est précisément la catégorie « non scorable » (§8.2) |
 | **D29** | les contextes composés en 5b ne sont **jamais** mémorisés pour la 5c, qui recompose les siens | la 5b tourne avant que rien de l'étape n'ait été imputé ; dès la première variable écrite au miroir, le contexte des suivantes a changé — et c'est tout l'intérêt de la cascade. Réutiliser priverait les variables de rang ≥ 2 des covariables que les rangs précédents viennent de produire. La circularité (l'ordre définit le contexte qui définirait l'ordre) est irréductible et acceptable pour un **classement** ; seule la variable de rang 1 voit les deux contextes coïncider, ce que mesure I17. Le prix est une composition supplémentaire par (étape, colonne), payée sous `'cv'` seulement |
+
+### 14.6 — Décisions arrêtées à l'implémentation de l'axe 2 (lot L11, 2026-09-07)
+
+Deux décisions **constatées** en écrivant l'axe 2 (D30, D31) et deux décisions **demandées** par
+l'auteur à la revue du lot (D32, D33). Chacune est mesurée par un invariant du §16.
+
+| Code | Décision | Motif |
+|---|---|---|
+| **D30** | tout ce qui se lit « à la fréquence du bloc » — masque `'training'`, `materialize`, `feature_divisors` — se lit **par couche**, une fréquence par entité, la fréquence de bloc en tête (§5.4bis) | un bloc cesse d'être homogène dès qu'une étape antérieure y écrit des cellules plus fines. Mesuré : à l'étape `M` de `a1` sous `True`, les lignes trimestrielles sont **absentes** de l'index d'un masque annuel donc écartées, et leurs covariables matérialisées à l'échelle annuelle ne rendent que des NaN sur les dates non annuelles — `y_train` retombait sur ses 3 ancres et `target_taint` sur `'none'`. **`True` était un synonyme silencieux de `'covariates_only'`**, pendant exact du piège D12 un cran plus bas. Une seule couche redonne l'appel unique et les liaisons de bloc : R4 et I16 sont préservées mot pour mot |
+| **D31** | sur un panel, les progressions par groupe de fréquence cible sont **fusionnées en étapes globales**, chaque étape ne liant que les entités dont le groupe la traverse ; `frequency_progression_` garde son type `List[Union[str, Dict]]` | l'alternative — `Dict[cible, List[...]]` et une boucle par groupe — cassait le type public, `_FITTED_ATTRIBUTES` et la boucle de la PHASE 5, pour ne rien gagner : l'omission d'une entité d'une liaison suffit à ne rien lui écrire, `_classify_variables_at_frequency` ignorant déjà une entité sans fréquence de prédiction. Et l'ordre global des étapes reste unique, ce qu'une boucle par groupe ne garantissait plus |
+| **D32** | sous `aggregation_constraint=None`, les cellules coïncidentes de **tous** les niveaux de fréquence sont conservées dans `y_train`, l'index du jeu d'entraînement gagnant un niveau de fréquence du côté de l'entité ; sous `'sum'`, la plus fine est écartée (§5.9) | sous `'sum'` le recalage impose Σ(sous-périodes) = total observé : la ligne de basse fréquence **est** la somme des autres, mesuré exact au flottant près sur `TS` (écarts `−0.0000 / +0.0000 / −0.0000`). Les garder toutes compte le total de la période deux fois et sur-pondère la basse fréquence. Sous `None` aucun recalage n'a lieu, la colinéarité est **rompue** (écarts `−0.65 / +2.37 / −0.60`) et chaque ligne porte une contrainte propre. Prix assumé et à documenter : `aggregation_constraint` cesse d'être orthogonale à l'axe 2. Bénéfice annexe : la forme d'index ainsi définie est celle que `keep_lower_frequencies=True` doit rendre (§12.4), au lieu d'en inventer une seconde au lot L12 |
+| **D33** | `impute_unobserved_entities: bool = False` : une entité n'observant **jamais** la colonne peut recevoir une imputation complète apprise sur les autres entités, marquée `MODEL_UNANCHORED` et jamais recalée (§5.10) | le modèle mutualisé du §5.8 rend l'extrapolation naturelle — les covariables de l'entité existent, seule la cible manque — et c'est le cas d'usage « prédire un pays absent à partir des autres ». Le blocage actuel n'était **pas** R1, qui gouverne le seul côté entraînement et dont l'exclusion reste saine (une entité sans observation n'aurait que ses propres sorties à réinjecter), mais la **classification**, faute de `f_var(e, c)`. Défaut à `False` : l'ouvrir sans le demander changerait silencieusement le résultat de tout panel partiellement renseigné, et ces cellules n'ont ni ancre, ni recalage, ni diviseur — trois différences sémantiques que la provenance doit porter. Indépendant de l'axe 2 : la capacité joue à l'identique sous `False` |
 
 ---
 
@@ -2075,10 +2404,16 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 | **I15** | indépendance au groupe de fréquence source | à une étape donnée, les groupes `(v, Y)` et `(v, Q)` de `PANEL-F` reçoivent le **même** `X_train`, le **même** `y_train` et les **mêmes** voies de matérialisation, et **partagent le même objet modèle** (`is`) ; leurs recalages restent distincts (totaux annuels de `FR`, trimestriels de `DE`) et `IT` n'est **jamais** réécrite |
 | **I17** | le jeu scoré est le jeu ajusté (§8.5) | sous `fit_predict_order='cv'` et `covariate_strategy='model'`, la variable classée **première** est ajustée sur **exactement** le couple qui l'a classée : mêmes colonnes, mêmes lignes, mêmes valeurs que `model.fit_X_` / `fit_y_` (les rangs suivants voient légitimement le miroir enrichi, D29). Sur `TS`, la covariable `m1` est scorée **agrégée puis divisée** (somme annuelle / 12), jamais à sa valeur de décembre ; sur `PANEL-F`, la cible scorée de `v` compte les **51 lignes** mutualisées, toutes dans la plage mensuelle. L'identité tient aussi sous `training_scope='unrestricted'`, qui n'ôte jamais de ligne au classement (D27) ; sous l'ordre `'frequency'`, **aucune** validation croisée n'est déclenchée |
 | **I16** | non-régression de la série temporelle | sur `TS` (entité unique), le jeu mutualisé est **identique** au jeu d'origine : tous les exemples chiffrés des §4.7, §5.4 et §5.5 restent vrais au chiffre près |
+| **I18** | les couches (§5.4bis, D30) | (a) sous `False` et `'covariates_only'`, `materialize` est appelé **une seule fois** par (étape, variable) et le masque `'training'` demandé **une seule fois**, à la liaison `{e: f_block(e)}` — le comptage d'appels du lot L8d reste vrai à l'identique ; (b) sous `True`, à l'étape `M` de `a1` sur `TS`, `y_train` porte des lignes de fréquence `Y` **et** `Q`, `target_taint` vaut `'imputed'`, et `X_train` est **plein** sur les lignes trimestrielles (`m1` y vaut la somme du trimestre, jamais celle de l'année, jamais NaN) ; (c) sur `PANEL-F` sous `True`, les couches de `v` à l'étape `M` sont exactement `[{FR: 'Y', DE: 'Q', IT: 'M'}, {FR: 'Q'}]` |
+| **I19** | fusion des progressions de panel (D31) | sur `PANEL-F` avec `target_frequency={FR: 'M', DE: 'Q', IT: 'M'}` et `impute_intermediate_frequencies=True`, `frequency_progression_` vaut `[{FR: 'Q', DE: 'Q', IT: 'Q'}, {FR: 'M', IT: 'M'}]` ; **aucune** étape mensuelle ne porte `DE` dans ses entités, **aucune** cellule de `DE` n'est écrite à la fréquence `M`, et `DE` contribue pourtant au `y_train` de l'étape `M` (R1) |
+| **I20** | cellules coïncidentes (§5.9, D32) | sur `TS` sous `True`, à l'étape `M` : `len(y_train)` de `a1` vaut **12** sous `aggregation_constraint='sum'` et **15** sous `None` ; sous `'sum'` la somme des 4 imputations trimestrielles de chaque année **égale** l'ancre (à `1e-9`), sous `None` elle en **diffère** ; sous `None` l'index du jeu d'entraînement porte un niveau de fréquence et les deux cellules du `2021-12-31` (`('Y', …)` et `('Q', …)`) coexistent, avec des diviseurs `12` et `3` ; sous `'sum'` l'index est **inchangé** par rapport à aujourd'hui. Sous `False` et `'covariates_only'`, `aggregation_constraint` n'a **aucun** effet sur `y_train` |
+| **I21** | entités sans ancre (§5.10, D33) | sur `PANEL-F` dont `v` est effacée pour `IT` : sous `impute_unobserved_entities=False`, les 36 cellules d'`IT` restent NaN, `ORIGINAL`, et aucune étape de plan ne porte `IT` ; sous `True`, les 36 sont renseignées, portent **toutes** `MODEL_UNANCHORED`, l'étape de plan correspondante a `source_frequency is None` et `scale_factor == 1.0`, elle **partage l'objet modèle** (`is`) des étapes `(v, Y)` et `(v, Q)` de la même étape de fréquence, `IT` ne contribue **aucune** ligne à `y_train` (R1 inchangée), et **aucun** total annuel n'est imposé à `IT`. La progression est **identique** dans les deux cas : un couple sans fréquence détectée n'entre pas dans `F` |
 
-**État au lot L10b** : I2, I3, I4, I5, I6, I10, I11, I14, I15, I16 et I17 sont couverts par
-`tests/frequency/test_high_frequency_imputer2.py`, sur `TS`, sur `PANEL` et sur `PANEL-F`. I1, I7
-et I8 attendent le `transform` (L12) ; I12 et I13 attendent l'axe 2 (L11).
+**État au lot L11** : I2 à I6, I10 à I18 sont couverts par
+`tests/frequency/test_high_frequency_imputer2.py`, sur `TS`, sur `PANEL` et sur `PANEL-F` — I12,
+I13 et la partie (a) de I18 depuis le lot L11. I19 est couvert par
+`test_progression_per_target_frequency_group_on_panel`. I1, I7 et I8 attendent le `transform`
+(L12) ; **I20 attend le lot L11a** (§5.9) et **I21 le lot L11b** (§5.10).
 
 Cas limites à couvrir explicitement, en plus : index non trié (**refusé**, §12.5), index dupliqué,
 entité à une seule observation, variable annuelle à 2 ancres seulement (`y_train` de taille 2 sous
@@ -2122,8 +2457,10 @@ mise à jour du notebook concerné quand il touche l'exécution d'étape (§15.2
 | **L9** | `high_frequency_imputer2.py` — `__init__`, validations (§13.1), phases 0 à 4, attributs ajustés, fréquences détectées **par (entité, colonne)** | L4–L8d | I9, tests de validation d'arguments |
 | **L10** ✅ | `high_frequency_imputer2.py` — PHASE 5 : exécution d'étape unique, axe 1 complet, provenance, stores, **un ajustement par (étape, variable)** partagé par les groupes de fréquence source (§5.8 R6). Livré le 2026-09-06 ; décisions D21 à D24 (§14.4) | L9 | I2, I3, I4, I5, I6, I10, I11, I14, I15, I16 |
 | **L10b** ✅ | `high_frequency_imputer2.py` + `variable_orderer.py` — alignement de l'ordonnancement sur les conditions d'ajustement (§8.5) : extraction de `_prepare_variable` / `_VariableFit`, `VariableOrderer.order(training_sets=...)`, fenêtre `'training'` au lieu de `'strict'`, repli des variables sans covariable, avertissement de fenêtre reformulé. Livré le 2026-09-06 ; décisions D26 à D29 (§14.5) | L10 | I17, non-régression de I3 et I14 |
-| **L11** | axe 2 : progression de fréquences, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape ; composition avec la mutualisation (fréquence de ligne : bloc **ou** store) | L10 | I12, I13, exemples chiffrés du §5.5 et du §5.8 |
-| **L12** | `transform`, `inverse_transform`, `keep_lower_frequencies`, contrôle des fréquences (D11), avertissements uniques | L11 | I1, I7, I8 |
+| **L11** ✅ | axe 2 : progression de fréquences, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape ; composition avec la mutualisation (fréquence de ligne : bloc **ou** store) ; **couches** (§5.4bis) et fusion des progressions de panel (§5.2). Livré le 2026-09-07 ; décisions D30 et D31 (§14.6) | L10 | I12, I13, I18, I19, exemples chiffrés du §5.5 et du §5.8 |
+| **L11a** | cellules coïncidentes sous `aggregation_constraint=None` (§5.9, D32) : conservation de tous les niveaux de fréquence dans `y_train`, niveau de fréquence ajouté à l'index du jeu d'entraînement, docstrings des deux paramètres liés | L11 | I20, non-régression de I14 et I16 |
+| **L11b** | `impute_unobserved_entities` (§5.10, D33) : classification d'un couple sans ancre, étape de plan à `source_frequency=None`, court-circuit du recalage et du diviseur, `MODEL_UNANCHORED`, `unanchored_pairs_`, avertissement agrégé | L11 | I21, non-régression de I6 et I15 |
+| **L12** | `transform`, `inverse_transform`, `keep_lower_frequencies`, contrôle des fréquences (D11), avertissements uniques ; la sortie multi-fréquences reprend la **forme d'index du §5.9** | L11a, L11b | I1, I7, I8 |
 | **L13** | notebook 5 pas à pas (§15.2) et documentation (`mkdocs`, docstrings de référence) | L12 | exécution complète du notebook |
 
 **Points de vigilance à rappeler dans chaque prompt d'implémentation** :

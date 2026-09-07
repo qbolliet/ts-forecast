@@ -94,14 +94,20 @@ la raison de chaque modification.
 | 11d | **L7b** | **correctif** : `aggregation_constraint` restreinte à `'sum'` / `None` | §11.1, D20 | **Sonnet** | Non | 8, 9, 10 |
 | 12 | **L9** | `hfi2` : `__init__`, validations, phases 0 à 4, attributs ajustés | §12.3, §13 | **Opus** | **Oui** | 6–11c |
 | 13 | **L10** | `hfi2` : PHASE 5, exécution d'étape unique, provenance, stores | §12.3, §6.3 | **Opus** | **Oui** | 12 |
-| 14 | **L11** | Axe 2 : progression, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape | §5 | **Opus** | **Oui** | 13 |
-| 15 | **L12** | `transform`, `inverse_transform`, `keep_lower_frequencies`, D11 | §12.1, §12.4 | **Opus** | **Oui** | 14 |
+| 14 | **L11** | Axe 2 : progression, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape, **couches** | §5, §5.4bis | **Opus** | **Oui** | 13 |
+| 14a | **L11a** | cellules coïncidentes sous `aggregation_constraint=None`, niveau de fréquence dans l'index | §5.9, D32 | **Opus** | **Oui** | 14 |
+| 14b | **L11b** | `impute_unobserved_entities` : imputer une entité sans aucune ancre | §5.10, D33 | **Opus** | **Oui** | 14 |
+| 15 | **L12** | `transform`, `inverse_transform`, `keep_lower_frequencies`, D11 | §12.1, §12.4 | **Opus** | **Oui** | 14a, 14b |
 | 16 | **L13a** | Notebook 5 « pas à pas » | §15.2 | **Sonnet** | Non | 1, 15 |
 | 17 | **L13b** | Documentation : docstrings de référence, `mkdocs`, `__init__.py` | §15.3 | **Sonnet** | Non | 16 |
 
 **Dépendances dures** : 2 → 3 ; 4 → 6 ; 3 → 7 ; 3, 4, 5 → 8 ; 8 → 9 ; 4 → 10 ; 5 → 11 ;
 7 → 11b ; 6, 8, 9, 11a, 11b → 11c ; 8, 9, 10 → 11d ; 6, 7, 9, 10, 11, 11c, 11d → 12 ;
-12 → 13 → 14 → 15 → 16 → 17. Le prompt **11d** est indépendant de 11a/11b/11c et peut être exécuté
+12 → 13 → 14 → {14a, 14b} → 15 → 16 → 17. Les prompts **14a** et **14b** sont **indépendants
+entre eux** — l'un touche la composition de `y_train`, l'autre le périmètre de prédiction — et
+parallélisables ; tous deux doivent précéder le prompt 15, qui reprend la forme d'index du §5.9 et
+doit reconduire le comportement du §5.10 au `transform`. Le prompt **11d** est indépendant de
+11a/11b/11c et peut être exécuté
 avant eux ; il doit seulement précéder le prompt 12, qui reprend la signature corrigée.
 **Parallélisables entre eux** : {1, 2, 4, 5} ; {7, 10, 11} une fois 3 et 4 faits ; 1 et 11a avec
 tout.
@@ -2245,9 +2251,295 @@ localiser le code par nom de symbole, jamais par numéro de ligne.
 
 ---
 
-## Prompt 15 — `transform`, `inverse_transform`, `keep_lower_frequencies` (L12)
+## Prompt 14a — Cellules coïncidentes sous `aggregation_constraint=None` (L11a)
 
 **Modèle : Opus · Plan mode : OUI · Dépendances : prompt 14**
+
+> Plan mode justifié : le lot ajoute un **niveau à l'index** du jeu d'entraînement. La frontière
+> entre ce qui voit l'index étendu (le jeu remis à l'estimateur) et ce qui continue de travailler
+> sur l'index réel (le matérialiseur, qui lit `source_data`) est le contrat central du lot ; la
+> confondre produit des `KeyError` au mieux, des jointures muettes au pire.
+
+````text
+Contexte : suite du lot 14 sur tsforecast/frequency/high_frequency_imputer2.py et
+tsforecast/frequency/training_set_builder.py, dont l'axe 2 est complet. Ce lot corrige la
+composition de `y_train` quand deux cellules d'une même entité partagent une date sans décrire
+la même période.
+Référence : [SPEC] = high_frequency_imputer2_architecture.md, §5.9 EN ENTIER, plus §5.4bis
+(les couches), §5.5 (le tableau à trois colonnes de `y_train`), §11.1 (les deux effets hors
+recalage) et §14.6 décision D32. Lire ces sections avant d'écrire.
+
+LE PROBLÈME EN UNE LIGNE
+
+Le 31 décembre est à la fois une fin d'année et une fin de trimestre. Sur le jeu TS, à l'étape M
+sous `impute_intermediate_frequencies=True`, la colonne `a1` porte à la date `2021-12-31` DEUX
+cellules candidates qui décrivent des périodes DIFFÉRENTES :
+
+    ancre annuelle       -> l'ANNÉE 2021,      120.0, origine 'observed', f_row='Y', diviseur 12
+    imputation du T4 (Q) -> le 4e TRIMESTRE,  ~30.0, origine 'model',    f_row='Q', diviseur  3
+
+Aujourd'hui `TrainingSetBuilder._candidate_rows` écarte la seconde par
+`~mirror_block.index.isin(rows.index)` — « l'observation gagne ». C'est CORRECT sous
+`aggregation_constraint='sum'` et FAUX sous `None`.
+
+LA RÈGLE ([SPEC] §5.9)
+
+    'sum' (défaut) -> la cellule la plus fine coïncidente est ÉCARTÉE ; l'observée est conservée.
+                      Le recalage impose Somme(sous-périodes) = total observé, donc la ligne
+                      annuelle EST la somme des quatre trimestrielles : les garder toutes compte
+                      le total de l'année deux fois.
+    None           -> TOUTES les cellules sont conservées, à tous les niveaux de fréquence.
+                      Aucun recalage n'a lieu, la colinéarité est rompue, chaque ligne porte une
+                      contrainte propre.
+
+Mesuré sur TS (sortie de l'étape Q pour `a1`, somme des 4 trimestres vs ancre) :
+
+    'sum' : 120.0000 vs 120.0 (ecart -0.0000) | 132.0000 vs 132.0 (+0.0000) | 150.0000 vs 150.0
+    None  : 119.3493 vs 120.0 (ecart -0.6507) | 134.3668 vs 132.0 (+2.3668) | 149.4018 vs 150.0
+
+La colinéarité est EXACTE sous 'sum' et ROMPUE sous None : la règle suit la structure algébrique
+du jeu, ce n'est pas une préférence.
+
+CE QUE CE LOT DOIT LIVRER
+
+1) ORTHOGONALITÉ, exactement comme `ELIGIBLE_ORIGINS` ([SPEC] §5.3 point 4) :
+   `TrainingSetBuilder` ne lit JAMAIS `aggregation_constraint`. Il reçoit un paramètre
+   keyword-only
+
+       keep_coincident_cells: bool = False
+
+   que `HighFrequencyImputer2._prepare_variable` calcule pour LA COLONNE en cours, via
+   `resolve_aggregation_constraint` (aggregation_constraint.py) — le paramètre admet une forme
+   dict par colonne, donc la valeur est PAR COLONNE, jamais globale :
+
+       keep = resolve_aggregation_constraint(self.aggregation_constraint, column) is None
+
+   Défaut `False` = comportement d'aujourd'hui. Le composant reste ignorant du pourquoi.
+
+2) `_candidate_rows` : sous `keep_coincident_cells=True`, ne plus filtrer le miroir par
+   `~mirror_block.index.isin(rows.index)`. Les cellules observées et les cellules produites
+   coexistent. Sous `False`, le filtre est conservé TEL QUEL.
+
+3) INDEX DU JEU D'ENTRAÎNEMENT — le point délicat. Sous `keep_coincident_cells=True`, l'index
+   gagne un niveau de fréquence placé DU CÔTÉ DE L'ENTITÉ, c'est-à-dire que le bloc devient le
+   couple (entité, fréquence) — exactement la clé d'une couche du §5.4bis :
+
+       série temporelle : MultiIndex (freq, date)          ('Y', 2021-12-31), ('Q', 2021-12-31)
+       panel            : MultiIndex (entité…, freq, date) ('FR', 'Y', 2021-12-31)
+
+   Noms de niveaux : ceux de `source_data.index`, avec `'frequency'` inséré avant le niveau de
+   date. PORTÉE STRICTE, à respecter à la lettre :
+     - concerne `TrainingSet.X`, `.y`, `.row_frequency`, `.row_origin` et la grille remise à
+       l'estimateur, ET RIEN D'AUTRE ;
+     - `CovariateMaterializer.materialize` continue de travailler COUCHE PAR COUCHE sur la grille
+       RÉELLE `(entité…, date)` : il lit `source_data`, indexé ainsi, et `detected_frequencies`,
+       clé par entité réelle. La fréquence n'est estampillée dans l'index QU'APRÈS la
+       matérialisation d'une couche, au moment de l'empilement. Une couche porte une seule
+       fréquence par entité : l'estampille est donc un simple ajout de niveau constant par
+       couche, jamais une jointure ;
+     - la GRILLE DE PRÉDICTION n'est jamais concernée : elle porte une seule fréquence par
+       définition, celle de l'étape ;
+     - sous `keep_coincident_cells=False` — le défaut — le niveau n'est PAS ajouté et l'index
+       reste stricto sensu celui d'aujourd'hui. C'est ce qui rend le lot non régressif.
+
+   `TrainingSetBuilder._mutualized_index` est le point d'extension : il connaît déjà
+   `rows_per_entity` et la forme de `source_data.index`. Lui faire produire les deux formes.
+
+4) ÉCHELLE ET ENTITÉS DÉRIVÉES : rien à réécrire. `row_frequency` porte déjà la bonne fréquence
+   par ligne et `StageScaler.target_divisor(produced_freq=…)` la consomme telle quelle ; les
+   diviseurs sont donc DÉJÀ corrects (12 pour la ligne 'Y', 3 pour la ligne 'Q', la mise à
+   l'échelle rendant ~10.0 dans les deux cas). ATTENTION en revanche à tout code qui dérive
+   l'entité d'une ligne depuis l'index : `HighFrequencyImputer2._row_entities`,
+   `_block_binding`, `_feature_divisors_per_row` et `panel.utils.iter_entity_blocks` supposent
+   `(entité…, date)`. Sous l'index étendu, l'entité est `key[:-2]` et non `key[:-1]`. Localiser
+   TOUS les points concernés et les faire passer par UNE seule fonction de décomposition.
+
+5) DOCSTRINGS ([SPEC] §11.1) : dire dans la docstring de `aggregation_constraint` ET dans celle
+   d'`impute_intermediate_frequencies` que les deux cessent d'être orthogonaux — `'sum'` écarte
+   les cellules coïncidentes de `y_train`, `None` les conserve — et que l'effet est NUL sous
+   `impute_intermediate_frequencies` valant `False` ou `'covariates_only'`, aucune coïncidence
+   n'étant alors possible. Aucun avertissement (décision D9).
+
+6) NE PAS traiter les périodes partiellement recalées. Une période que les gardes du §11.1
+   laissent non recalée n'est pas colinéaire non plus, même sous 'sum' : la règle se lit sur le
+   PARAMÈTRE, jamais sur le résultat. Une règle qui dépendrait des valeurs serait
+   irreproductible entre le fit et le transform, contraire au §4.6. C'est un choix, pas un oubli :
+   le documenter en commentaire.
+
+TESTS — à ajouter dans tests/frequency/test_high_frequency_imputer2.py et
+tests/frequency/test_training_set_builder.py :
+   - **I20** `test_coincident_cells_kept_only_without_constraint` : sur TS sous
+     `impute_intermediate_frequencies=True`, `len(y_train)` de `a1` à l'étape M vaut 12 sous
+     `aggregation_constraint='sum'` et 15 sous `None` ; idem pour `a2` ;
+   - `test_collinearity_is_exact_under_sum` : sous 'sum', la somme des 4 imputations
+     trimestrielles de chaque année égale l'ancre à 1e-9 près ; sous None, elle en diffère de
+     plus de 0.1 pour au moins une année (valeurs de référence ci-dessus) ;
+   - `test_training_index_gains_a_frequency_level` : sous None, l'index du jeu d'entraînement a
+     un niveau de plus, les deux cellules du 2021-12-31 coexistent avec les clés `('Y', …)` et
+     `('Q', …)`, et leurs diviseurs valent respectivement 12.0 et 3.0 ; sous 'sum', l'index est
+     STRICTEMENT identique à celui d'aujourd'hui (comparaison `pd.Index.equals`) ;
+   - `test_scaled_target_stays_homogeneous_across_levels` : sous None, la cible mise à l'échelle
+     des deux cellules du 2021-12-31 vaut ~10.0 de part et d'autre ;
+   - `test_constraint_is_inert_on_y_train_without_axis_2` : sous `False` et sous
+     `'covariates_only'`, `y_train` est IDENTIQUE entre `aggregation_constraint='sum'` et `None`
+     (mêmes lignes, même index, mêmes valeurs) ;
+   - `test_per_column_constraint_is_read_per_column` : `aggregation_constraint={'a1': None,
+     '__default__': 'sum'}` — seule `a1` garde ses cellules coïncidentes, `a2` non ;
+   - **I14 / I16 non-régression** : les comptes du §5.8 (51 lignes sur PANEL-F) et les exemples
+     chiffrés du §5.4 restent vrais sous le défaut `'sum'` ;
+   - **I18 (a) non-régression** : sous le défaut, `materialize` est toujours appelé une seule fois
+     par (étape, variable) et le masque `'training'` demandé une seule fois.
+
+Puis `uv run tests/frequency/check_regressions.py` et rapporter.
+
+Rappels de convention (CLAUDE.md) : commentaires internes en français à formulation nominale ;
+docstrings en anglais Google Style avec Args/Returns/Raises/Examples ; type hints systématiques ;
+localiser le code par nom de symbole, jamais par numéro de ligne.
+````
+
+---
+
+## Prompt 14b — `impute_unobserved_entities` : imputer une entité sans aucune ancre (L11b)
+
+**Modèle : Opus · Plan mode : OUI · Dépendances : prompt 14**
+
+> Plan mode justifié : le lot fait entrer dans le plan un couple `(entité, colonne)` que TOUTE la
+> chaîne suppose porteur d'une fréquence détectée. La liste des endroits qui lisent
+> `detected_frequencies_` sans se demander si la clé existe est le vrai livrable du plan ; la
+> découvrir au débogage coûte plusieurs allers-retours.
+
+````text
+Contexte : suite du lot 14 sur tsforecast/frequency/high_frequency_imputer2.py, dont les deux axes
+sont complets. Ce lot ouvre une capacité nouvelle : imputer la TOTALITÉ d'une variable pour une
+entité qui ne l'observe JAMAIS, à partir de ce que le modèle mutualisé a appris sur les autres
+entités.
+Référence : [SPEC] = high_frequency_imputer2_architecture.md, §5.10 EN ENTIER, plus §5.8 R1
+(qui n'est PAS en cause), §4.5 (le pendant côté covariables), §6.1 (l'énumération) et §14.6
+décision D33. Lire ces sections avant d'écrire.
+
+LE DIAGNOSTIC, À NE PAS SE TROMPER DE COUPABLE
+
+`_classify_variables_at_frequency` itère sur `detected_frequencies_`. Un couple `(e, c)` sans
+aucune observation n'a PAS de fréquence détectée : il part dans `_undetected_frequencies_`,
+n'entre dans aucune des trois catégories, n'apparaît dans aucun groupe imputable et ne reçoit
+donc jamais de valeur. Mesuré sur PANEL-F dont `v` est entièrement effacée pour IT :
+
+    undetected           : (('IT', 'v'),)
+    categories['impute'] : [('DE','v'), ('FR','v')]        <- IT absente
+    plan                 : (Q,v,(FR,))  (M,v,(DE,))  (M,v,(FR,))
+    cellules v produites : FR 36 · DE 36 · IT 0
+
+Ce blocage n'est PAS la règle R1 du §5.8. R1 gouverne le côté ENTRAÎNEMENT et son exclusion reste
+saine : une entité sans observation n'a rien de vrai à apporter à `y_train`, et sous
+`impute_intermediate_frequencies=True` elle ne ferait que se réinjecter ses propres sorties. R1
+est INCHANGÉE par ce lot. Le blocage est en amont, dans la CLASSIFICATION, faute de `f_var(e, c)`
+à comparer à la cible. Il est par ailleurs INDÉPENDANT DE L'AXE 2 : il joue à l'identique sous
+`impute_intermediate_frequencies=False`, et le lot doit fonctionner sous les trois modalités.
+
+LE PARAMÈTRE ([SPEC] §5.10)
+
+    impute_unobserved_entities: bool = False
+
+Placé dans le bloc « Axe 2 » de la signature, validé avec les autres booléens (validation groupée,
+[SPEC] §13.1). `False` = comportement actuel, strictement inchangé. `True` = le couple devient
+imputable à la fréquence cible de son entité.
+
+CE QUE CE LOT DOIT LIVRER — les cinq conséquences du §5.10, aucune n'est optionnelle
+
+1) CLASSIFICATION ET PROGRESSION. Le couple a une fréquence source ABSENTE, jamais inférée.
+   Il n'entre dans l'ensemble `F` du §5.2 pour AUCUNE fréquence : il n'ajoute pas d'étape et ne
+   change pas la progression — `frequency_progression_` doit être IDENTIQUE avec et sans le
+   paramètre. Il rejoint un groupe de plan dédié, de clé `(colonne, None)`, à l'étape
+   `f_target(e)` UNIQUEMENT — la DERNIÈRE de la progression de son groupe, où qu'en soient les
+   autres entités. Concrètement : `_imputable_groups(prediction_frequency)` ajoute ce groupe si
+   et seulement si la fréquence de prédiction de l'entité égale sa fréquence cible.
+
+2) AUCUN RECALAGE. Il n'existe aucun total de période à imposer : `AggregationConstraint` est
+   COURT-CIRCUITÉE pour ces cellules, quelle que soit la valeur d'`aggregation_constraint`.
+   C'est une différence sémantique de fond : les autres cellules produites sont des
+   DÉSAGRÉGATIONS d'une observation, celles-ci sont des PRÉDICTIONS LIBRES.
+
+3) AUCUN DIVISEUR. Pas de fréquence source, donc pas de conversion : la prédiction est produite
+   directement à l'échelle de l'étape. `ImputationStep.scale_factor` vaut `1.0` ;
+   `fit_scale_factor` reste celui du modèle partagé (§5.8 R6). Ne PAS inventer une fréquence
+   source par défaut : `source_frequency` vaut `None` dans l'étape de plan, et tout code qui la
+   lit doit le supporter (dont `_build_step`, qui en fait une composante de `var_key`).
+
+4) PROVENANCE. Ajouter à `ProvenanceType` ([SPEC] §6.1) :
+
+       MODEL_UNANCHORED = 'model_unanchored'
+
+   Il PRIME sur les cinq familles `MODEL_*` : une cellule sans ancre le porte quelles que soient
+   les souillures, qui restent par ailleurs calculées et gelées dans l'étape pour le diagnostic.
+   NE PAS le faire entrer dans `resolve_model_provenance`, qui doit rester une fonction pure des
+   deux souillures : ajouter un champ `unanchored: bool = False` à `ImputationStep` et faire
+   trancher `ImputationStep.emitted_provenance`. L'ajout est ADDITIF : aucune cellule qui portait
+   une autre valeur n'en change, et `hfi` v1 n'est pas concernée.
+
+5) ÉLIGIBILITÉ DES COVARIABLES ET REPLI. L'entité doit disposer de covariables sur la grille
+   cible, sans quoi la ligne est vide. Le repli d'une entité sans ancre NE PEUT PAS être
+   l'interpolation — il n'y a rien à interpoler : ses cellules restent NaN et `ORIGINAL`, et un
+   avertissement AGRÉGÉ (un seul, en fin de fit, [SPEC] convention 5) nomme les couples
+   concernés. C'est le seul chemin d'échec du lot ; il ne lève jamais.
+
+6) ATTRIBUT AJUSTÉ `unanchored_pairs_: Tuple[tuple, ...]` — les couples effectivement imputés
+   sans ancre. Vide sous `False`. Sous-ensemble de `_undetected_frequencies_`. À ajouter à
+   `_FITTED_ATTRIBUTES` seulement s'il est TOUJOURS écrit, y compris vide.
+
+EXEMPLE NORMATIF ([SPEC] §5.10), à reproduire tel quel dans les tests
+
+Jeu PANEL-F dont `v` est ENTIÈREMENT effacée pour IT, `target_frequency='M'`,
+`impute_intermediate_frequencies=False`, `impute_unobserved_entities=True` :
+
+  | Étape | Var | source_frequency | Entités | y_train                  | Recalage      | Provenance        |
+  | M     | v   | 'Y'              | (FR,)   | 15 lignes (3 FR + 12 DE) | totaux annuels| MODEL_ON_* (§6.3) |
+  | M     | v   | 'Q'              | (DE,)   | LES MÊMES 15 lignes      | totaux trim.  | MODEL_ON_* (§6.3) |
+  | M     | v   | None             | (IT,)   | LES MÊMES 15 lignes      | AUCUN         | MODEL_UNANCHORED  |
+
+Les trois étapes de plan PARTAGENT LE MODÈLE (§5.8 R6, D19) : le jeu mutualisé ne dépend pas du
+groupe, et IT n'y contribue aucune ligne (R1). Les 36 cellules mensuelles de `v` pour IT sont
+produites par ce modèle et laissées telles quelles.
+
+TESTS — à ajouter dans tests/frequency/test_high_frequency_imputer2.py, avec une fixture dérivée
+de PANEL-F effaçant `v` pour IT :
+   - **I21** `test_unobserved_entity_is_left_alone_by_default` : sous le défaut `False`, les 36
+     cellules d'IT restent NaN et `ORIGINAL`, et aucune étape de plan ne porte IT ;
+   - **I21** `test_unobserved_entity_is_imputed_on_demand` : sous `True`, les 36 sont
+     renseignées, portent TOUTES `MODEL_UNANCHORED`, et `unanchored_pairs_ == (('IT', 'v'),)` ;
+   - `test_unanchored_step_shares_the_model_and_carries_no_scale` : l'étape `(v, None)` a
+     `source_frequency is None`, `scale_factor == 1.0`, et son `model` est le MÊME OBJET (`is`)
+     que celui des étapes `(v, 'Y')` et `(v, 'Q')` de la même étape de fréquence ;
+   - `test_unanchored_entity_contributes_nothing_to_training` : R1 inchangée — `training_blocks`
+     ne contient pas IT, et `len(y_train)` vaut 15, comme sans le paramètre ;
+   - `test_no_aggregation_constraint_on_unanchored_cells` : aucun total annuel n'est imposé à IT
+     — la somme 2021 de `v` pour IT n'a aucune raison de valoir 120 ; vérifier aussi sous
+     `aggregation_constraint='sum'` explicitement ;
+   - `test_progression_is_unchanged_by_the_parameter` : `frequency_progression_` est IDENTIQUE
+     avec et sans le paramètre, sous les TROIS modalités d'`impute_intermediate_frequencies` ;
+   - `test_unanchored_pair_without_covariates_warns_once_and_stays_nan` : entité sans aucune
+     covariable exploitable — cellules NaN, `ORIGINAL`, un seul avertissement nommant le couple ;
+   - **I6 non-régression** : `MODEL_UNANCHORED` n'est jamais émis sous
+     `impute_unobserved_entities=False`, et les cinq familles `MODEL_*` restent émises exactement
+     dans les cas du §6.3 ;
+   - **I15 non-régression** : l'ajout du groupe `(v, None)` ne change ni `X_train`, ni `y_train`,
+     ni les voies de matérialisation des groupes `(v, 'Y')` et `(v, 'Q')`.
+
+NOTE POUR LE LOT SUIVANT (L12) : `transform` doit reconduire ce comportement — une entité sans
+ancre au fit reste sans ancre au transform, et une entité NOUVELLE au transform relève du même
+mécanisme. Ne rien implémenter ici, mais laisser la remarque en commentaire à l'endroit adéquat.
+
+Puis `uv run tests/frequency/check_regressions.py` et rapporter.
+
+Rappels de convention (CLAUDE.md) : commentaires internes en français à formulation nominale ;
+docstrings en anglais Google Style avec Args/Returns/Raises/Examples ; type hints systématiques ;
+localiser le code par nom de symbole, jamais par numéro de ligne.
+````
+
+---
+
+## Prompt 15 — `transform`, `inverse_transform`, `keep_lower_frequencies` (L12)
+
+**Modèle : Opus · Plan mode : OUI · Dépendances : prompts 14a et 14b**
 
 > Plan mode justifié : la frontière « rejoué depuis le fit » / « recalculé sur les données du
 > transform » est le contrat central de l'architecture ; le §12.1 en donne le tableau, et toute
