@@ -1995,6 +1995,157 @@ class TestOriginFilter:
         assert emitted & tainted
 
 
+
+class TestCoincidentCells:
+    """§5.9 et D32 — cellules coïncidentes et niveau de fréquence de l'index."""
+
+    # Fabrique privée : les paramètres communs des mesures du §5.9
+    @staticmethod
+    def _cascade(data, constraint, modality=True, **overrides):
+        """Ajuste sur le jeu TS sous l'axe 2, et rend les contextes captés."""
+        return _capture_variable_fits(
+            data,
+            covariate_strategy='model',
+            fit_predict_order='frequency',
+            impute_intermediate_frequencies=modality,
+            aggregation_constraint=constraint,
+            **overrides,
+        )
+
+    # Fabrique privée : la même capture, sous un estimateur RÉEL
+    @staticmethod
+    def _capture_with_regression(data, **overrides):
+        """Capte les contextes d'un fit mené par une régression linéaire.
+
+        Les valeurs mesurées du §5.9 supposent un modèle réel : l'estimateur
+        espion des autres tests ne prédit rien d'exploitable.
+        """
+        fits = {}
+        original = HighFrequencyImputer2._prepare_variable
+
+        def _spy(self, **kwargs):
+            fit = original(self, **kwargs)
+            label = self._stage_frequency_label(kwargs['stage_freq'])
+            fits[(label, kwargs['column'])] = fit
+            return fit
+
+        with patch.object(HighFrequencyImputer2, '_prepare_variable', _spy):
+            _fit_quietly(_make_imputer(**overrides), data)
+        return fits
+
+    def test_coincident_cells_kept_only_without_constraint(self, reference_timeseries):
+        """I20 — 12 lignes sous 'sum', 15 sous None, à l'étape M (§5.9)."""
+        _, under_sum = self._cascade(reference_timeseries, 'sum')
+        _, under_none = self._cascade(reference_timeseries, None)
+        for column in ('a1', 'a2'):
+            # Trois ancres annuelles + neuf imputations Q : la quatrième de
+            # chaque année tombe sur l'ancre, l'observation gagne
+            assert len(under_sum[('M', column)].y_train) == 12
+            # Aucun recalage : les quatre imputations de chaque année entrent
+            assert len(under_none[('M', column)].y_train) == 15
+
+    def test_collinearity_is_exact_under_sum(self, reference_timeseries):
+        """La règle suit la structure algébrique du jeu, pas une préférence."""
+        gold = {2021: 120.0, 2022: 132.0, 2023: 150.0}
+
+        # Sortie de l'étape Q : les quatre imputations trimestrielles de a1
+        def _totals(constraint):
+            imputer = _fit_with_spy(
+                reference_timeseries,
+                target_frequency='Q',
+                covariate_strategy='model',
+                impute_intermediate_frequencies=True,
+                aggregation_constraint=constraint,
+            )
+            produced = imputer._covariate_materializer.imputed_store['a1']
+            years = pd.DatetimeIndex(produced.index.get_level_values(-1)).year
+            return {year: produced[years == year].sum() for year in gold}
+
+        # Sous 'sum', le recalage impose Somme(sous-périodes) = total observé :
+        # la ligne annuelle EST la somme des quatre trimestrielles
+        exact = _totals('sum')
+        for year, anchor in gold.items():
+            assert exact[year] == pytest.approx(anchor, abs=1e-9)
+
+        # Sous None, la colinéarité est rompue (écarts -0.65 / +2.37 / -0.60)
+        free = _totals(None)
+        assert any(abs(free[year] - anchor) > 0.1 for year, anchor in gold.items())
+
+    def test_training_index_gains_a_frequency_level(self, reference_timeseries):
+        """Sous None, l'index porte la fréquence ; sous 'sum', il est inchangé."""
+        _, under_sum = self._cascade(reference_timeseries, 'sum')
+        _, under_none = self._cascade(reference_timeseries, None)
+        stamped = under_none[('M', 'a1')].training
+        plain = under_sum[('M', 'a1')].training
+
+        # Sous 'sum', l'index reste STRICTEMENT celui d'aujourd'hui : les
+        # douze fins de trimestre, sans niveau ajoute
+        expected = pd.DatetimeIndex(
+            [
+                date
+                for date in pd.date_range('2021-01-31', '2023-12-31', freq='ME')
+                if date.month in (3, 6, 9, 12)
+            ],
+            name='date',
+        )
+        assert not plain.has_frequency_level
+        assert not isinstance(plain.X.index, pd.MultiIndex)
+        assert plain.X.index.equals(expected)
+
+        # Sous None, un niveau de plus, nommé 'frequency' et placé du côté de
+        # l'entité — le bloc devient le couple (entité, fréquence)
+        assert stamped.has_frequency_level
+        assert list(stamped.X.index.names) == ['frequency', 'date']
+        assert stamped.X.index.nlevels == plain.X.index.nlevels + 1
+
+        # Les deux cellules du 2021-12-31 coexistent
+        anchor = pd.Timestamp('2021-12-31')
+        assert ('Y', anchor) in stamped.X.index
+        assert ('Q', anchor) in stamped.X.index
+
+        # Leurs diviseurs valent 12 (l'année) et 3 (le trimestre)
+        raw = stamped.y
+        scaled = under_none[('M', 'a1')].y_train
+        assert raw[('Y', anchor)] / scaled[('Y', anchor)] == pytest.approx(12.0)
+        assert raw[('Q', anchor)] / scaled[('Q', anchor)] == pytest.approx(3.0)
+
+    def test_scaled_target_stays_homogeneous_across_levels(self, reference_timeseries):
+        """Les deux cellules du 2021-12-31 valent ~10.0 de part et d'autre."""
+        fits = self._capture_with_regression(
+            reference_timeseries,
+            covariate_strategy='model',
+            fit_predict_order='frequency',
+            impute_intermediate_frequencies=True,
+            aggregation_constraint=None,
+        )
+        scaled = fits[('M', 'a1')].y_train
+        anchor = pd.Timestamp('2021-12-31')
+        # 120 / 12 d'un côté, ~30 / 3 de l'autre : une seule échelle mensuelle
+        assert scaled[('Y', anchor)] == pytest.approx(10.0)
+        assert scaled[('Q', anchor)] == pytest.approx(10.0, rel=0.1)
+
+    @pytest.mark.parametrize('modality', [False, 'covariates_only'])
+    def test_constraint_is_inert_on_y_train_without_axis_2(
+        self, reference_timeseries, modality
+    ):
+        """Hors axe 2, aucune coïncidence n'est possible : l'effet est nul."""
+        _, under_sum = self._cascade(reference_timeseries, 'sum', modality=modality)
+        _, under_none = self._cascade(reference_timeseries, None, modality=modality)
+        assert set(under_sum) == set(under_none)
+        for key, fit in under_sum.items():
+            pd.testing.assert_series_equal(fit.y_train, under_none[key].y_train)
+
+    def test_per_column_constraint_is_read_per_column(self, reference_timeseries):
+        """La forme dictionnaire est lue PAR COLONNE, jamais globalement."""
+        _, fits = self._cascade(
+            reference_timeseries, {'a1': None, '__default__': 'sum'}
+        )
+        # a1 garde ses cellules coïncidentes, a2 les perd
+        assert len(fits[('M', 'a1')].y_train) == 15
+        assert fits[('M', 'a1')].training.has_frequency_level
+        assert len(fits[('M', 'a2')].y_train) == 12
+        assert not fits[('M', 'a2')].training.has_frequency_level
+
 class TestPerRowScale:
     """§5.4 — le diviseur d'échelle est par ligne, jamais par étape."""
 

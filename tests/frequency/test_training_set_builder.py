@@ -512,3 +512,120 @@ class TestWayContract:
             record=False,
         )
         assert replayed == dict(training.ways)
+
+
+class TestCoincidentCells:
+    """§5.9 et D32 — le composant, ignorant de `aggregation_constraint`."""
+
+    # Fabrique privée : un miroir trimestriel posé à la main sur le jeu TS
+    @staticmethod
+    def _builder_with_quarterly_mirror():
+        """Compose un builder dont le miroir de `a1` porte les 4 trimestres 2021.
+
+        La quatrième cellule tombe sur le 2021-12-31, date de l'ancre annuelle :
+        c'est la coïncidence du §5.9.
+        """
+        builder = _builder()
+        dates = pd.to_datetime(
+            ['2021-03-31', '2021-06-30', '2021-09-30', '2021-12-31']
+        )
+        builder.materializer.record_production(
+            'a1',
+            pd.Series([28.0, 30.0, 31.0, 31.0], index=dates),
+            pd.Series(['model'] * 4, index=dates),
+            pd.Series(['Q'] * 4, index=dates),
+        )
+        return builder
+
+    # Fabrique privée : la composition du jeu de `a1` à l'étape M
+    @staticmethod
+    def _build_ts(builder, data, keep_coincident_cells):
+        """Compose le jeu d'entraînement de `a1` sur TS, à l'étape M."""
+        return builder.build(
+            column='a1',
+            feature_cols=['m1'],
+            stage_freq='M',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=data,
+            eligible_origins={'observed', 'model', 'interpolated'},
+            keep_coincident_cells=keep_coincident_cells,
+        )
+
+    def test_coincident_cell_is_dropped_by_default(self, reference_timeseries):
+        """Défaut : l'observation gagne, l'index reste celui d'aujourd'hui."""
+        builder = self._builder_with_quarterly_mirror()
+        training = self._build_ts(builder, reference_timeseries, False)
+
+        # 3 ancres + 3 des 4 imputations : celle du 2021-12-31 est écartée
+        assert len(training) == 6
+        assert not training.has_frequency_level
+        assert isinstance(training.X.index, pd.DatetimeIndex)
+        assert not training.X.index.duplicated().any()
+        anchor = pd.Timestamp('2021-12-31')
+        assert training.row_frequency[anchor] == 'Y'
+        assert training.y[anchor] == 120.0
+
+    def test_coincident_cell_is_kept_and_stamped(self, reference_timeseries):
+        """Sous conservation : les deux cellules coexistent, index estampillé."""
+        builder = self._builder_with_quarterly_mirror()
+        training = self._build_ts(builder, reference_timeseries, True)
+
+        # Les quatre imputations entrent, la quatrième comprise
+        assert len(training) == 7
+        assert training.has_frequency_level
+        assert list(training.X.index.names) == ['frequency', 'date']
+
+        # Les deux cellules du 2021-12-31 décrivent des périodes différentes
+        anchor = pd.Timestamp('2021-12-31')
+        assert training.y[('Y', anchor)] == 120.0
+        assert training.y[('Q', anchor)] == 31.0
+        assert training.row_origin[('Y', anchor)] == 'observed'
+        assert training.row_origin[('Q', anchor)] == 'model'
+
+        # Les covariables sont matérialisées à la fréquence de chaque COUCHE :
+        # la somme de l'année sur la ligne annuelle, celle du trimestre sur la
+        # ligne trimestrielle, jamais un NaN
+        assert training.X['m1'].notna().all()
+        assert training.X.loc[('Y', anchor), 'm1'] > training.X.loc[('Q', anchor), 'm1']
+
+    def test_stamping_needs_an_actual_coincidence(self, reference_timeseries):
+        """Sans coïncidence, le paramètre est inerte : même jeu, même index."""
+        builder = _builder()
+        kept = self._build_ts(builder, reference_timeseries, True)
+        dropped = self._build_ts(_builder(), reference_timeseries, False)
+
+        # Miroir vide : y_train ne tient que les 3 ancres, rien à distinguer
+        assert len(kept) == len(dropped) == 3
+        assert not kept.has_frequency_level
+        assert kept.X.index.equals(dropped.X.index)
+        pd.testing.assert_series_equal(kept.y, dropped.y)
+
+    def test_stamped_index_on_a_panel_keeps_the_entity_levels(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Sur un panel, le niveau s'insère AVANT la date, après les entités."""
+        builder = _builder()
+        dates = pd.MultiIndex.from_product(
+            [['FR'], pd.to_datetime(['2021-12-31'])], names=['country', 'date']
+        )
+        builder.materializer.record_production(
+            'v',
+            pd.Series([31.0], index=dates),
+            pd.Series(['model'], index=dates),
+            pd.Series(['Q'], index=dates),
+        )
+        training = builder.build(
+            column='v',
+            feature_cols=FEATURES,
+            stage_freq='M',
+            detected_frequencies=PANEL_F_FREQUENCIES,
+            source_data=mixed_freq_panel_multifrequency,
+            eligible_origins={'observed', 'model'},
+            keep_coincident_cells=True,
+        )
+        assert training.has_frequency_level
+        assert list(training.X.index.names) == ['country', 'frequency', 'date']
+        assert ('FR', 'Y', pd.Timestamp('2021-12-31')) in training.X.index
+        assert ('FR', 'Q', pd.Timestamp('2021-12-31')) in training.X.index
+        # Les 51 lignes du §5.8, plus la cellule coïncidente conservée
+        assert len(training) == 52

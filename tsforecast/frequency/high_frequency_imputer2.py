@@ -41,6 +41,7 @@ from ..panel.utils import (
 from .aggregation_constraint import (
     AggregationConstraint,
     ConstraintSetting,
+    resolve_aggregation_constraint,
     validate_aggregation_constraint,
 )
 from .covariate_materializer import CovariateMaterializer
@@ -68,7 +69,11 @@ from .provenance import (
 )
 from .stage_scaler import ScaleMode, StageScaler
 from .target_frequency_validator import TargetFrequencyValidator
-from .training_set_builder import TrainingSet, TrainingSetBuilder
+from .training_set_builder import (
+    TrainingSet,
+    TrainingSetBuilder,
+    split_training_index,
+)
 from .variable_orderer import VariableOrderer, VariableSpec
 
 # Type aliases
@@ -292,7 +297,17 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             ``'covariates_only'`` apply the very same filter and differ only
             by the plan. ``'covariates_only'`` is inert on the final values
             outside ``covariate_strategy='model'``, ``True`` never is (see
-            the inert combinations above).
+            the inert combinations above). **Not orthogonal to**
+            ``aggregation_constraint`` under ``True``: an earlier stage's
+            imputation falling on the date of an anchor — the 31st of
+            December is both a quarter end and a year end — is dropped from
+            ``y_train`` under ``'sum'``, the rescaling making it an exact
+            linear combination of the other rows, and kept under ``None``,
+            where the training index then gains a ``'frequency'`` level. The
+            link is algebraic, not conventional, and is assumed as such.
+            Under ``False`` and ``'covariates_only'`` no coincidence is
+            possible and ``aggregation_constraint`` has no effect whatsoever
+            on the composition of ``y_train``.
         fit_predict_order: Order in which variables are imputed,
             ``'frequency'`` (default) or ``'cv'``. Inert outside
             ``covariate_strategy='model'``. Under ``'cv'`` each variable is
@@ -323,7 +338,19 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             or a dict of these values keyed by column.
         aggregation_constraint: ``'sum'`` (default), ``None``, or a dict of
             these two values keyed by column with an optional
-            ``'__default__'`` key.
+            ``'__default__'`` key. Beyond the rescaling of the predictions, it
+            also governs the composition of ``y_train`` under
+            ``impute_intermediate_frequencies=True``, and therefore **ceases
+            to be orthogonal** to it: under ``'sum'`` an earlier stage's
+            imputation coinciding with an anchor is dropped — the rescaling
+            imposes that the sub-periods sum to the observed total, so the
+            coarser row is the sum of the finer ones and keeping both counts
+            the period total twice; under ``None`` nothing is rescaled, the
+            collinearity is broken, every cell is kept and the training index
+            gains a ``'frequency'`` level on the entity side. The read is
+            per column, the dict form included. Under ``False`` and
+            ``'covariates_only'`` the effect is nil: ``y_train`` holds
+            anchors only and no coincidence can occur.
         keep_lower_frequencies: Pure display parameter, see above.
         on_frequency_mismatch: ``'error'`` (default) or ``'warn'`` when
             ``target_frequency`` is higher than the data allows.
@@ -1946,6 +1973,8 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         blocks: Dict[EntityKey, str],
         stage_freq: Union[str, Dict[EntityKey, str]],
         row_frequency: pd.Series,
+        real_index: pd.Index,
+        row_entities: Sequence[EntityKey],
     ) -> Union[pd.Series, pd.DataFrame]:
         """Divide the covariates by the period their own row spans.
 
@@ -1969,26 +1998,35 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             binding: Block frequency binding of the training grid.
             blocks: Block frequency of each contributing entity.
             stage_freq: Frequency of the stage.
-            row_frequency: Frequency each training row was produced at.
+            row_frequency: Frequency each training row was produced at,
+                indexed on the training grid — stamped with a frequency level
+                or not.
+            real_index: The ``(entity..., date)`` grid of the same rows, the
+                only shape :class:`StageScaler` ever reads. The very object
+                ``row_frequency.index`` is when no frequency level was stamped.
+            row_entities: Entity key of each row, decomposed once by
+                :func:`split_training_index`.
 
         Returns:
             Whatever :meth:`StageScaler.feature_divisors` returns for a
-            homogeneous grid; a ``DataFrame`` indexed like ``row_frequency``
-            and columned like ``feature_cols`` otherwise.
+            homogeneous, unstamped grid; a ``DataFrame`` indexed like
+            ``row_frequency`` and columned like ``feature_cols`` otherwise.
         """
         # Extraction de l'index
         index = row_frequency.index
         # Extraction des fréquences
         frequencies = row_frequency.to_numpy(dtype=object)
+        # Grille estampillée : elle n'est jamais remise au scaler
+        stamped = real_index is not index
 
-        # Entité de chaque ligne, puis fréquence de bloc attendue pour elle
-        row_entities = self._row_entities(index)
+        # Fréquence de bloc attendue pour chaque ligne
         expected = np.array(
             [blocks.get(entity) for entity in row_entities], dtype=object
         )
 
-        # Grille homogène : le chemin d'origine, à la liaison de bloc
-        if bool((frequencies == expected).all()):
+        # Grille homogène et non estampillée : le chemin d'origine, à la
+        # liaison de bloc
+        if not stamped and bool((frequencies == expected).all()):
             return self._stage_scaler.feature_divisors(
                 columns=feature_cols,
                 column_frequencies=freqs_by_column,
@@ -1998,6 +2036,59 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
                 index=index,
             )
 
+        # Grille hétérogène : un appel par couche, puis remontée au format par
+        # ligne, seul capable de porter deux échelles sur une même colonne
+        divisors = pd.DataFrame(
+            np.nan, index=index, columns=list(feature_cols), dtype=float
+        )
+        for layer, in_layer in self._row_layers(row_entities, frequencies, blocks):
+            # Écriture positionnelle : sous une grille estampillée, deux lignes
+            # partagent une date et l'alignement par étiquette les confondrait
+            positions = np.flatnonzero(in_layer)
+            sub_real = real_index[in_layer]
+            sub_divisors = self._stage_scaler.feature_divisors(
+                columns=feature_cols,
+                column_frequencies=freqs_by_column,
+                ways=ways,
+                grid_freq=self._block_binding(layer, sub_real),
+                stage_freq=stage_freq,
+                index=sub_real,
+            )
+            # Forme scalaire par colonne : diffusion sur les lignes concernées
+            if isinstance(sub_divisors, pd.Series):
+                for name in feature_cols:
+                    divisors.iloc[
+                        positions, divisors.columns.get_loc(name)
+                    ] = float(sub_divisors[name])
+            else:
+                divisors.iloc[positions, :] = (
+                    sub_divisors[list(feature_cols)].to_numpy(dtype=float)
+                )
+        return divisors
+
+    # Méthode auxiliaire d'énumération des couches d'une grille d'entraînement
+    @staticmethod
+    def _row_layers(
+        row_entities: Sequence[EntityKey],
+        frequencies: np.ndarray,
+        blocks: Dict[EntityKey, str],
+    ) -> List[Tuple[Dict[EntityKey, str], np.ndarray]]:
+        """Enumerate the layers of a training grid, one frequency per entity.
+
+        Same rule as :meth:`TrainingSetBuilder._frequency_layers`, read here
+        on the assembled grid rather than on the per-entity frames: the block
+        frequency opens each entity's list, so a grid where axis 2 injected
+        nothing yields exactly one layer.
+
+        Args:
+            row_entities: Entity key of each row, in grid order.
+            frequencies: Production frequency of each row, in grid order.
+            blocks: Block frequency of each contributing entity.
+
+        Returns:
+            Ordered list of ``(layer, selector)`` pairs, the selector being a
+            boolean array over the grid. Empty layers are dropped.
+        """
         # Fréquences de chaque entité, celle de son bloc en tête
         per_entity: Dict[EntityKey, List[str]] = {}
         for entity, frequency in zip(row_entities, frequencies):
@@ -2008,11 +2099,8 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             if frequency not in ordered:
                 ordered.append(frequency)
 
-        # Grille hétérogène : un appel par couche, puis remontée au format par
-        # ligne, seul capable de porter deux échelles sur une même colonne
-        divisors = pd.DataFrame(
-            np.nan, index=index, columns=list(feature_cols), dtype=float
-        )
+        # Couches : la i-ème fréquence de chaque entité qui en porte une
+        layers: List[Tuple[Dict[EntityKey, str], np.ndarray]] = []
         depth = max((len(f) for f in per_entity.values()), default=0)
         for rank in range(depth):
             layer = {
@@ -2027,42 +2115,106 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
                 ],
                 dtype=bool,
             )
-            if not in_layer.any():
-                continue
-            sub_index = index[in_layer]
-            sub_divisors = self._stage_scaler.feature_divisors(
-                columns=feature_cols,
-                column_frequencies=freqs_by_column,
-                ways=ways,
-                grid_freq=self._block_binding(layer, sub_index),
-                stage_freq=stage_freq,
-                index=sub_index,
+            if in_layer.any():
+                layers.append((layer, in_layer))
+        return layers
+
+    # Méthode auxiliaire de calcul des diviseurs de cible par fréquence de ligne
+    def _target_divisors_per_row(
+        self,
+        *,
+        column: str,
+        binding: Union[str, Dict[EntityKey, str]],
+        blocks: Dict[EntityKey, str],
+        stage_freq: Union[str, Dict[EntityKey, str]],
+        row_frequency: pd.Series,
+        real_index: pd.Index,
+        row_entities: Sequence[EntityKey],
+    ) -> Union[float, pd.Series]:
+        """Divide the target by the period its own row spans.
+
+        Strictly the historical single call
+        (:meth:`StageScaler.target_divisor` with ``produced_freq``) as long as
+        the grid carries no frequency level. Once it does, two rows share a
+        date and the scaler — which groups by ``(stage frequency, production
+        frequency)`` and writes its results back by label — would set both.
+        The call is then split layer by layer, each layer being handed the
+        real, duplicate-free ``(entity..., date)`` sub-grid, and the results
+        written back positionally.
+
+        Args:
+            column: Column being imputed, for scale-mode resolution.
+            binding: Block frequency binding of the training grid. Unread by
+                the scaler as soon as ``produced_freq`` is given, and kept
+                only to leave the historical call untouched.
+            blocks: Block frequency of each contributing entity.
+            stage_freq: Frequency of the stage.
+            row_frequency: Frequency each training row was produced at.
+            real_index: The ``(entity..., date)`` grid of the same rows.
+            row_entities: Entity key of each row.
+
+        Returns:
+            A ``Series`` of per-row divisors indexed like ``row_frequency``,
+            or the float ``1.0`` when the target is exempt from scaling.
+        """
+        # Extraction de l'index et des fréquences de ligne
+        index = row_frequency.index
+        frequencies = row_frequency.to_numpy(dtype=object)
+
+        # Grille non estampillée : l'appel unique d'origine, inchangé
+        if real_index is index:
+            return self._stage_scaler.target_divisor(
+                column,
+                source_freq=binding,
+                pred_freq=stage_freq,
+                index=index,
+                produced_freq=row_frequency,
             )
-            # Forme scalaire par colonne : diffusion sur les lignes concernées
-            if isinstance(sub_divisors, pd.Series):
-                for name in feature_cols:
-                    divisors.loc[sub_index, name] = float(sub_divisors[name])
-            else:
-                divisors.loc[sub_index, list(feature_cols)] = sub_divisors
+
+        # Grille estampillée : un appel par couche, sur la grille réelle
+        divisors = pd.Series(np.nan, index=index, dtype=float)
+        for layer, in_layer in self._row_layers(row_entities, frequencies, blocks):
+            positions = np.flatnonzero(in_layer)
+            sub_real = real_index[in_layer]
+            produced = pd.Series(frequencies[in_layer], index=sub_real)
+            sub_divisors = self._stage_scaler.target_divisor(
+                column,
+                source_freq=self._block_binding(layer, sub_real),
+                pred_freq=stage_freq,
+                index=sub_real,
+                produced_freq=produced,
+            )
+            divisors.iloc[positions] = np.asarray(sub_divisors, dtype=float)
         return divisors
 
     # Méthode auxiliaire d'extraction de l'entité de chaque ligne d'une grille
     @staticmethod
-    def _row_entities(index: pd.Index) -> List[EntityKey]:
+    def _row_entities(
+        index: pd.Index,
+        has_frequency_level: bool = False,
+    ) -> List[EntityKey]:
         """Return the entity key of every row of a grid.
 
+        Thin pass-through over :func:`split_training_index`, the single
+        decomposition of a training grid: under
+        ``keep_coincident_cells`` the grid carries a frequency level on the
+        entity side and the entity is ``key[:-2]``, not ``key[:-1]``.
+
         Args:
-            index: Grid, ``MultiIndex`` ``(entity..., date)`` on a panel.
+            index: Grid, ``MultiIndex`` ``(entity..., date)`` on a panel,
+                ``(entity..., freq, date)`` when stamped.
+            has_frequency_level: Whether the grid carries that extra level,
+                read from :attr:`TrainingSet.has_frequency_level`.
 
         Returns:
             One entity key per row, in grid order. A time series yields the
             degenerate key ``()`` everywhere.
         """
-        # Grille sans niveau d'entité : entité dégénérée unique
-        if not isinstance(index, pd.MultiIndex):
-            return [()] * len(index)
-        depth = index.nlevels - 1
-        return [tuple(key[:depth]) for key in index]
+        # Décomposition unique, partagée avec le constructeur du jeu
+        _real, entities = split_training_index(
+            index, has_frequency_level=has_frequency_level
+        )
+        return entities
 
     # Méthode auxiliaire d'ordonnancement des colonnes d'une étape
     def _order_columns(
@@ -2288,6 +2440,14 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         # Origines acceptées pour la target et les covariables
         eligible = ELIGIBLE_ORIGINS[self.impute_intermediate_frequencies]
 
+        # Départage des cellules coïncidentes, lu par colonne : le
+        # paramètre admet une forme dictionnaire, la valeur n'est donc jamais
+        # globale. Le constructeur du jeu ne reçoit que ce booléen : il ignore
+        # tout de "aggregation_constraint", comme il ignore tout de l'axe 2
+        keep_coincident = resolve_aggregation_constraint(
+            self.aggregation_constraint, column
+        ) is None
+
         # Jeu mutualisé, sonde sans covariable : elle ne matérialise rien et
         # rend déjà les blocs, la cible brute et la grille d'entraînement
         probe = builder.build(
@@ -2297,8 +2457,17 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             detected_frequencies=freqs_by_column,
             source_data=X_work,
             eligible_origins=eligible,
+            keep_coincident_cells=keep_coincident,
         )
         blocks = dict(probe.blocks)
+
+        # Grille réelle de la sonde : le matérialiseur et le scaler ne lisent
+        # jamais le niveau de fréquence. Dédoublonnée, deux cellules
+        # coïncidentes partageant par définition une date
+        probe_real, _probe_entities = split_training_index(
+            probe.X.index, has_frequency_level=probe.has_frequency_level
+        )
+        probe_real = probe_real[~probe_real.duplicated()]
 
         # Grille de prédiction des entités concernées
         pred_grid = self._prediction_grid(X_work, stage_freq, entities)
@@ -2307,8 +2476,8 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         # d'entraînement est au pas des blocs, la grille de prédiction au pas
         # de l'étape
         train_view = materializer.stage_frame(
-            grid_index=probe.X.index,
-            stage_freq=self._block_binding(blocks, probe.X.index) if blocks else stage_freq,
+            grid_index=probe_real,
+            stage_freq=self._block_binding(blocks, probe_real) if blocks else stage_freq,
             detected_frequencies=freqs_by_column,
             source_data=X_work,
         )
@@ -2340,21 +2509,31 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             source_data=X_work,
             eligible_origins=eligible,
             materialization=ways,
+            keep_coincident_cells=keep_coincident,
         )
 
         # Mise à l'échelle : diviseur de la cible par ligne, diviseurs des
         # features par bloc
         X_train, y_train = training.X, training.y
         if len(training) > 0:
-            binding = self._block_binding(blocks, training.X.index)
+            # Décomposition unique de la grille d'entraînement : la grille
+            # réelle que lisent le matérialiseur et le scaler, et l'entité de
+            # chaque ligne — "key[:-2]" sous une grille estampillée
+            real_index, row_entities = split_training_index(
+                training.X.index,
+                has_frequency_level=training.has_frequency_level,
+            )
+            binding = self._block_binding(blocks, real_index)
             y_train = self._stage_scaler.apply(
                 y_train,
-                self._stage_scaler.target_divisor(
-                    column,
-                    source_freq=binding,
-                    pred_freq=stage_freq,
-                    index=training.X.index,
-                    produced_freq=training.row_frequency,
+                self._target_divisors_per_row(
+                    column=column,
+                    binding=binding,
+                    blocks=dict(training.blocks),
+                    stage_freq=stage_freq,
+                    row_frequency=training.row_frequency,
+                    real_index=real_index,
+                    row_entities=row_entities,
                 ),
             )
             if feature_cols:
@@ -2368,6 +2547,8 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
                         blocks=dict(training.blocks),
                         stage_freq=stage_freq,
                         row_frequency=training.row_frequency,
+                        real_index=real_index,
+                        row_entities=row_entities,
                     ),
                 )
 

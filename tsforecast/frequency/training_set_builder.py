@@ -54,6 +54,59 @@ LogCallback = Callable[[str], None]
 # Colonnes du tableau intermédiaire d'une ligne candidate
 _ROW_COLUMNS: Tuple[str, ...] = ('value', 'freq', 'origin')
 
+# Nom du niveau de fréquence ajouté à l'index du jeu d'entraînement
+FREQUENCY_LEVEL_NAME: str = 'frequency'
+
+
+# Fonction de décomposition d'un index de jeu d'entraînement
+def split_training_index(
+    index: pd.Index,
+    *,
+    has_frequency_level: bool,
+) -> Tuple[pd.Index, List[EntityKey]]:
+    """Split a training grid into its real index and its entity keys.
+
+    Under ``keep_coincident_cells`` the training grid carries an extra
+    frequency level placed on the entity side — ``(entity..., freq, date)`` —
+    so the entity of a row is ``key[:-2]`` and no longer ``key[:-1]``. This is
+    the single decomposition every consumer goes through, so the two shapes
+    are read in exactly one place.
+
+    Args:
+        index: Training grid, stamped or not.
+        has_frequency_level: Whether the grid carries the frequency level,
+            read from :attr:`TrainingSet.has_frequency_level` — never sniffed
+            from the level names.
+
+    Returns:
+        Tuple ``(real_index, entities)``: the ``(entity..., date)`` grid the
+        materializer and the scaler read — the input itself when no level was
+        added — and the entity key of each row, in grid order. A time series
+        yields the degenerate key ``()`` everywhere.
+
+    Examples:
+        >>> dates = pd.to_datetime(['2021-12-31', '2021-12-31'])
+        >>> stamped = pd.MultiIndex.from_arrays(
+        ...     [['Y', 'Q'], dates], names=['frequency', 'date']
+        ... )
+        >>> real, entities = split_training_index(
+        ...     stamped, has_frequency_level=True
+        ... )
+        >>> list(real), entities
+        ([Timestamp('2021-12-31 00:00:00'), Timestamp('2021-12-31 00:00:00')], [(), ()])
+    """
+    # Grille non estampillée : aucun niveau de fréquence
+    if not has_frequency_level:
+        if not isinstance(index, pd.MultiIndex):
+            return index, [()] * len(index)
+        depth = index.nlevels - 1
+        return index, [tuple(key[:depth]) for key in index]
+
+    # Grille estampillée : le niveau de fréquence est l'avant-dernier
+    real = index.droplevel(-2)
+    depth = index.nlevels - 2
+    return real, [tuple(key[:depth]) for key in index]
+
 
 # Jeu d'entraînement mutualisé d'une variable à une étape
 @dataclass(frozen=True)
@@ -82,6 +135,12 @@ class TrainingSet:
             as-is on the prediction grid.
         column_origins: Aggregated origin of each covariate, input of the
             ``covariate_taint`` computation.
+        has_frequency_level: Whether the index of :attr:`X`, :attr:`y`,
+            :attr:`row_frequency` and :attr:`row_origin` carries the extra
+            frequency level of ``keep_coincident_cells`` — ``(entity...,
+            freq, date)`` instead of ``(entity..., date)``. The single source
+            of truth on the grid shape: consumers pass it to
+            :func:`split_training_index` rather than sniffing the index.
 
     Examples:
         >>> empty = TrainingSet(
@@ -101,6 +160,7 @@ class TrainingSet:
     blocks: Mapping[EntityKey, str]
     ways: Mapping[str, MaterializationWay]
     column_origins: Mapping[str, CellOrigin]
+    has_frequency_level: bool = False
 
     # Nombre de lignes du jeu, mesure directe du gain de la mutualisation
     def __len__(self) -> int:
@@ -308,6 +368,7 @@ class TrainingSetBuilder:
         block: pd.DataFrame,
         f_block: str,
         mirror_block: Optional[pd.DataFrame],
+        keep_coincident_cells: bool = False,
     ) -> pd.DataFrame:
         """Compose the candidate rows of one block, before any filtering.
 
@@ -317,6 +378,12 @@ class TrainingSetBuilder:
         an earlier stage are added from the mirror, carrying their own
         production frequency and origin.
 
+        Two cells of one entity may share a date without describing the same
+        period — the 31st of December is both a year end and a quarter end.
+        ``keep_coincident_cells`` decides between them: False (the historical
+        behaviour) keeps the observed one alone, True keeps both, which the
+        caller then distinguishes by the frequency level of the grid.
+
         Args:
             column: Column being composed.
             block: This entity's source data, date-indexed.
@@ -324,10 +391,15 @@ class TrainingSetBuilder:
             mirror_block: This entity's mirror block — a frame with columns
                 ``value`` / ``freq`` / ``origin`` — or None when the column
                 produced nothing for that entity yet.
+            keep_coincident_cells: Whether a produced cell falling on a date
+                already carrying an observation is kept. The component never
+                learns WHY it is asked to: the decision belongs to the caller,
+                exactly like ``eligible_origins``.
 
         Returns:
             Date-indexed frame with columns ``value``, ``freq`` and
-            ``origin``, sorted by date.
+            ``origin``, sorted by date. The sort is stable, so an observed
+            cell always precedes the finer produced cell it coincides with.
         """
         # Cellules observées : leur fréquence est celle du bloc, leur origine
         # est 'observed' par construction
@@ -345,14 +417,21 @@ class TrainingSetBuilder:
         # Cellules produites par une étape antérieure : fréquence et origine
         # lues dans les registres
         if mirror_block is not None and not mirror_block.empty:
+            # Départage des cellules coïncidentes: une période que
+            # non recalée n'est pas colinéaire non
+            # plus, mais une règle dépendant des valeurs serait irreproductible
+            # entre le fit et le transform.
+            coincident = mirror_block.index.isin(rows.index)
             extra = mirror_block.loc[
-                ~mirror_block.index.isin(rows.index), list(_ROW_COLUMNS)
+                slice(None) if keep_coincident_cells else ~coincident,
+                list(_ROW_COLUMNS),
             ]
             extra = extra[extra['value'].notna()]
             if not extra.empty:
                 rows = pd.concat([rows, extra])
 
-        return rows.sort_index()
+        # Tri stable : à date égale, l'observation précède la cellule produite
+        return rows.sort_index(kind='stable')
 
     # Méthode auxiliaire de découpage des lignes en couches homogènes
     @staticmethod
@@ -510,22 +589,51 @@ class TrainingSetBuilder:
     def _mutualized_index(
         rows_per_entity: Mapping[EntityKey, pd.DataFrame],
         source_data: pd.DataFrame,
+        keep_coincident_cells: bool = False,
     ) -> pd.Index:
         """Assemble the union of the block grids into one index.
 
+        Under ``keep_coincident_cells`` the grid gains a frequency level
+        placed on the entity side — the block becomes the ``(entity,
+        frequency)`` pair, which is exactly the key of a layer —
+        so two cells of one entity sharing a date but describing different
+        periods each get their own key.
+
         Args:
-            rows_per_entity: Retained rows of each entity, date-indexed.
+            rows_per_entity: Retained rows of each entity, date-indexed and
+                carrying a ``freq`` column.
             source_data: Input data, whose index shape and names are
                 reproduced.
+            keep_coincident_cells: Whether the frequency level is stamped in.
 
         Returns:
-            A ``DatetimeIndex`` for a time series, a ``MultiIndex``
-            ``(entity..., date)`` for a panel. Empty and of the source shape
-            when no entity contributes.
+            Without the level: a ``DatetimeIndex`` for a time series, a
+            ``MultiIndex`` ``(entity..., date)`` for a panel. With it: a
+            ``MultiIndex`` ``(freq, date)`` or ``(entity..., freq, date)``,
+            the level named ``'frequency'`` and inserted before the date
+            level. Empty and of the source shape when no entity contributes.
         """
         # Aucun contributeur : grille vide, de la forme de la source
         if not rows_per_entity:
             return source_data.index[:0]
+
+        # Noms de niveaux de la source, la date en dernier
+        source_names = (
+            list(source_data.index.names)
+            if isinstance(source_data.index, pd.MultiIndex)
+            else [source_data.index.name]
+        )
+
+        # Grille estampillée : la fréquence de chaque ligne devient un niveau,
+        # inséré avant la date
+        if keep_coincident_cells:
+            stamped: List[Tuple[Any, ...]] = [
+                (*entity, frequency, date)
+                for entity, rows in rows_per_entity.items()
+                for date, frequency in zip(rows.index, rows['freq'])
+            ]
+            names = source_names[:-1] + [FREQUENCY_LEVEL_NAME, source_names[-1]]
+            return pd.MultiIndex.from_tuples(stamped, names=names)
 
         # Série temporelle : entité dégénérée unique, index de dates
         if list(rows_per_entity) == [()]:
@@ -538,7 +646,7 @@ class TrainingSetBuilder:
             for entity, rows in rows_per_entity.items()
             for date in rows.index
         ]
-        return pd.MultiIndex.from_tuples(tuples, names=list(source_data.index.names))
+        return pd.MultiIndex.from_tuples(tuples, names=source_names)
 
     # -------------------------------------------------------------------------
     # Méthode publique de composition du jeu
@@ -554,6 +662,7 @@ class TrainingSetBuilder:
         source_data: pd.DataFrame,
         eligible_origins: Iterable[CellOrigin],
         materialization: Optional[Mapping[str, MaterializationWay]] = None,
+        keep_coincident_cells: bool = False,
     ) -> TrainingSet:
         """Compose the mutualized training set of one variable at one stage.
 
@@ -588,6 +697,17 @@ class TrainingSetBuilder:
                 block frequency allows — an ``'interpolate'`` way on a block
                 grid no finer than the covariate becomes the rank-1 identity
                 or aggregation.
+            keep_coincident_cells: Whether two cells of one entity sharing a
+                date but describing different periods — a yearly anchor and
+                the fourth quarterly imputation of that year — are BOTH kept.
+                False (default) keeps the observed one alone and the index
+                stays ``(entity..., date)``; True keeps both and the index
+                gains a ``'frequency'`` level on the entity side — but only
+                where a coincidence actually survives the origin filter, so
+                a set holding anchors alone keeps the historical shape and
+                the parameter is inert on it. Like
+                ``eligible_origins``, the reason belongs to the caller: this
+                class never reads ``aggregation_constraint``.
 
         Returns:
             The :class:`TrainingSet`. Empty — with empty ``blocks`` and
@@ -628,7 +748,11 @@ class TrainingSetBuilder:
         # Lignes candidates de chaque bloc, une seule règle
         candidates = {
             entity: self._candidate_rows(
-                column, source_blocks[entity], f_block, mirror_blocks.get(entity)
+                column,
+                source_blocks[entity],
+                f_block,
+                mirror_blocks.get(entity),
+                keep_coincident_cells=keep_coincident_cells,
             )
             for entity, f_block in blocks.items()
         }
@@ -646,8 +770,21 @@ class TrainingSetBuilder:
             entity: rows for entity, rows in rows_per_entity.items() if not rows.empty
         }
 
-        # Grille mutualisée : union des grilles de bloc
-        grid = self._mutualized_index(rows_per_entity, source_data)
+        # Estampille du niveau de fréquence : elle n'a lieu que lorsqu'elle
+        # sert, c'est-à-dire lorsque deux cellules retenues d'une même entité
+        # partagent une date. Sans coïncidence — le cas de tout jeu sans axe 2,
+        # où y_train ne tient que des ancres — l'index reste inchangé
+        stamp = keep_coincident_cells and any(
+            bool(rows.index.duplicated().any()) for rows in rows_per_entity.values()
+        )
+
+        # Grille mutualisée : union des grilles de bloc. Sous l'estampille, deux
+        # grilles coexistent — la réelle, seule remise au matérialiseur, et
+        # l'estampillée, portée par le jeu rendu
+        grid = self._mutualized_index(rows_per_entity, source_data, stamp)
+        real_grid = (
+            self._mutualized_index(rows_per_entity, source_data) if stamp else grid
+        )
 
         # Cible brutes et métadonnées de ligne, dans l'ordre de la grille
         stacked = (
@@ -679,6 +816,7 @@ class TrainingSetBuilder:
                 blocks=blocks,
                 ways={},
                 column_origins={},
+                has_frequency_level=stamp,
             )
 
         # Un appel au matérialiseur par couche, sur la sous-grille de la
@@ -705,13 +843,18 @@ class TrainingSetBuilder:
             # Matérialisation
             frame, sub_ways, sub_origins = self.materializer.materialize(
                 columns=columns,
-                grid_index=grid[in_layer],
+                grid_index=real_grid[in_layer],
                 stage_freq=dict(layer),
                 detected_frequencies=detected_frequencies,
                 source_data=source_data,
                 materialization=materialization,
                 record=False,
             )
+            # Estampille de la fréquence APRÈS la matérialisation, à
+            # l'empilement : une couche ne porte qu'une fréquence par entité,
+            # c'est donc un ajout de niveau constant, jamais une jointure
+            if stamp:
+                frame = frame.set_axis(grid[in_layer], axis=0)
             frames.append(frame)
             # Réduction sur les couches : la voie la plus dégradée et
             # l'origine la plus souillée, mêmes règles que la réduction par
@@ -744,6 +887,7 @@ class TrainingSetBuilder:
             blocks=blocks,
             ways=ways,
             column_origins=column_origins,
+            has_frequency_level=stamp,
         )
 
     # Représentation lisible du composant
