@@ -187,10 +187,14 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
     hyperparameter search unbearable:
 
     - ``impute_intermediate_frequencies='covariates_only'`` **without**
-      ``covariate_strategy='model'`` changes **no** final value: the
-      covariates are materialized from their own observations, the
-      intermediate stages cost compute and show up in the multi-frequency
-      output, nothing else.
+      ``covariate_strategy='model'`` changes **no** final value: materialization
+      ranks 2 and 3 are then structurally out of reach — a covariate is served
+      from its own observations before any register is read — so the stage
+      carry that gives ``'covariates_only'`` its whole point never happens. The
+      intermediate stages still cost compute and still show up in the
+      multi-frequency output when ``keep_lower_frequencies=True``, and that is
+      all they do. ``True``, by contrast, has an effect under **every**
+      strategy: it changes ``y_train`` itself.
     - ``covariate_fallback`` is inert outside ``covariate_strategy='model'``.
     - ``fit_predict_order`` — and with it ``cv``, ``cv_scoring`` and
       ``min_cv_train_size`` as ordering devices — is inert outside
@@ -198,6 +202,18 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
     - ``training_coverage_threshold`` without ``training_scope`` is inert:
       the training window then follows ``imputation_scope`` and
       ``coverage_threshold``.
+
+    **What the parameter space no longer expresses**: the ``hfi`` mode "one
+    single fit, reused at the following stages with that stage's scale
+    factor" — the ``False`` branch of its cascade refitting switch — is
+    **abandoned**, switch included. It bought compute
+    at the price of a fit/predict asymmetry that was never mastered. Should
+    the need come back it returns as an **internal optimization** —
+    memoizing a model whose training set and materialization ways have not
+    changed between two stages — never as public semantics. It is not to be
+    confused with the single fit per (stage, variable) already in place,
+    which shares a model between the plan steps of **one** stage only and
+    never across stages.
 
     ``keep_lower_frequencies`` is a **pure display parameter**: it governs how
     the frequency levels of the output are stacked, never the logic. Under
@@ -271,6 +287,12 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             ``True`` also trains on the target's own earlier imputations and on
             the interpolated cells that replaced them on failure. **Never
             tested for truth**: ``'covariates_only'`` is truthy.
+            ``'covariates_only'`` and ``True`` build the very same stage plan
+            and differ only by that origin filter; ``False`` and
+            ``'covariates_only'`` apply the very same filter and differ only
+            by the plan. ``'covariates_only'`` is inert on the final values
+            outside ``covariate_strategy='model'``, ``True`` never is (see
+            the inert combinations above).
         fit_predict_order: Order in which variables are imputed,
             ``'frequency'`` (default) or ``'cv'``. Inert outside
             ``covariate_strategy='model'``. Under ``'cv'`` each variable is
@@ -1264,35 +1286,133 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Progression de fréquences
     # -------------------------------------------------------------------------
+    # Méthode auxiliaire de construction de la progression d'un groupe d'entités
+    def _group_frequency_progression(
+        self,
+        entities: Optional[Sequence[EntityKey]],
+        target_frequency: str,
+    ) -> List[str]:
+        """Build the stage frequencies of one target-frequency group.
+
+        Args:
+            entities: Entity keys of the group, ``None`` for a time series —
+                the degenerate one-entity case, where nothing is filtered.
+            target_frequency: Target frequency shared by the group.
+
+        Returns:
+            Stage frequencies in base form, from the lowest to the highest,
+            the target frequency last. The lowest frequency of ``F`` is never
+            a stage: nothing is imputable at it.
+
+        Examples:
+            >>> imputer._group_frequency_progression(None, 'M')  # doctest: +SKIP
+            ['Q', 'M']
+        """
+        # Fréquence cible du groupe, forme canonique de comparaison
+        f_target = normalize_frequency(target_frequency, return_format='base')
+
+        # Ensemble des fréquences des couples (entité, colonne) imputables du
+        # périmètre du groupe, plus la fréquence cible
+        admissible = None if entities is None else set(entities)
+        categories = self._classify_variables_at_frequency(
+            self.effective_target_frequency_
+        )
+        frequencies = {f_target}
+        for key in categories['impute']:
+            entity, _ = split_variable_key(key)
+            if admissible is not None and entity not in admissible:
+                continue
+            frequencies.add(
+                normalize_frequency(
+                    self.detected_frequencies_[key], return_format='base'
+                )
+            )
+
+        # Fréquence la plus basse de l'ensemble précédemment défini : jamais une étape, rien n'y étant à
+        # imputer. "get_frequency_order" croît quand la fréquence baisse
+        lowest = max(frequencies, key=get_frequency_order)
+
+        # Tri de la plus basse à la plus haute, borné des deux côtés :
+        # strictement au-dessus de la plus basse source, au plus à la cible
+        stages = [
+            frequency
+            for frequency in sorted(
+                frequencies, key=get_frequency_order, reverse=True
+            )
+            if is_higher_frequency(frequency, lowest)
+            and (frequency == f_target or is_higher_frequency(f_target, frequency))
+        ]
+
+        # Garantie que la cible est le dernier élément de la progression
+        if f_target in stages:
+            stages.remove(f_target)
+        stages.append(f_target)
+        return stages
+
     # Méthode auxiliaire de construction de la progression de fréquences
     def _build_frequency_progression(self) -> List[Union[str, Dict[EntityKey, str]]]:
         """Build the ordered list of stage frequencies.
 
         Under ``impute_intermediate_frequencies is False`` the progression is
         the target frequency alone: the imputed variable jumps straight from
-        its own frequency to the target, with no intermediate stage.
+        its own frequency to the target, with no intermediate stage. Under the
+        two other modalities the progression is complete and **identical**:
+        ``'covariates_only'`` and ``True`` share the very same stage plan and
+        differ only by the origin filter of ``y_train``, held by
+        ``ELIGIBLE_ORIGINS``.
+
+        On a panel the progression is computed **per group of entities sharing
+        the same target frequency**, then merged into global stages: an entity
+        whose group does not travel through a stage is simply absent from that
+        stage's binding, which leaves it unclassified — hence never imputed,
+        and never written — at that stage.
 
         Returns:
-            Ordered list of stage frequencies, the target frequency last.
+            Ordered list of stage frequencies, the target frequency last. A
+            time series yields a list of strings; a panel yields a list of
+            ``{entity: frequency}`` bindings.
 
-        Raises:
-            NotImplementedError: Under ``'covariates_only'`` and ``True``.
+        Examples:
+            >>> imputer.frequency_progression_          # doctest: +SKIP
+            [{('FR',): 'Q', ('DE',): 'Q'}, {('FR',): 'M'}]
         """
         # Modalité sans étape intermédiaire : une seule étape, la cible.
         if self.impute_intermediate_frequencies is False:
             return [self.effective_target_frequency_]
 
-        # TODO (lot L11) : progression complète (§5.2, points 1 et 3) —
-        # ensemble F des fréquences des couples (entité, colonne) imputables
-        # plus la cible, privé de la plus basse, trié du plus bas au plus
-        # haut, la cible en dernier. Point d'extension unique : le reste du
-        # fit parcourt déjà "frequency_progression_" sans hypothèse sur sa
-        # longueur
-        raise NotImplementedError(
-            f"impute_intermediate_frequencies="
-            f"{self.impute_intermediate_frequencies!r} is delivered by lot "
-            f"L11; only False is supported so far."
+        target = self.effective_target_frequency_
+
+        # Cas dégénéré de la série temporelle : un seul groupe, cible scalaire
+        if not isinstance(target, dict):
+            return list(self._group_frequency_progression(None, target))
+
+        # Panel : un groupe d'entités par fréquence cible partagée
+        groups: Dict[str, List[EntityKey]] = {}
+        for entity, frequency in target.items():
+            groups.setdefault(
+                normalize_frequency(frequency, return_format='base'), []
+            ).append(entity)
+        per_group = {
+            f_target: self._group_frequency_progression(entities, f_target)
+            for f_target, entities in groups.items()
+        }
+
+        # Fusion en étapes globales : union ordonnée des fréquences d'étape,
+        # chaque étape ne liant que les entités dont le groupe la traverse
+        stage_order = sorted(
+            {stage for stages in per_group.values() for stage in stages},
+            key=get_frequency_order,
+            reverse=True,
         )
+        return [
+            {
+                entity: stage
+                for f_target, entities in groups.items()
+                if stage in per_group[f_target]
+                for entity in entities
+            }
+            for stage in stage_order
+        ]
 
     # -------------------------------------------------------------------------
     # Fit
@@ -1405,8 +1525,9 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
 
         # Écartement des couples sans fréquence détectable : une entité
         # n'observant jamais une colonne n'a pas de fréquence pour elle.
-        # "covariate_eligibility" côté covariables et "impute_intermediate_frequency" /!\ a remplacer par le bon nom de méthode une fois implémentée
-        # côté cible en tirent chacun les conséquences
+        # "CovariateMaterializer.eligible_columns" côté covariables et
+        # "_group_frequency_progression" côté cible en tirent chacun les
+        # conséquences
         self._undetected_frequencies_ = tuple(
             key for key, freq in raw_frequencies.items() if freq is None
         )
@@ -1814,6 +1935,135 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             return next(iter(blocks.values()))
         return dict(blocks)
 
+    # Méthode auxiliaire de calcul des diviseurs de features par fréquence de ligne
+    def _feature_divisors_per_row(
+        self,
+        *,
+        feature_cols: Sequence[str],
+        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
+        ways: Dict[str, MaterializationWay],
+        binding: Union[str, Dict[EntityKey, str]],
+        blocks: Dict[EntityKey, str],
+        stage_freq: Union[str, Dict[EntityKey, str]],
+        row_frequency: pd.Series,
+    ) -> Union[pd.Series, pd.DataFrame]:
+        """Divide the covariates by the period their own row spans.
+
+        The grid of a mutualized training set is homogeneous only as long as
+        axis 2 injects nothing into it: a cell produced at an earlier, finer
+        stage sits on a row of that stage's frequency, not of its block's. The
+        covariates of such a row are materialized at the row frequency
+        (:class:`TrainingSetBuilder`), so their divisor must be read there
+        too — the very same unifying rule the target divisor follows.
+
+        One call to :meth:`StageScaler.feature_divisors` per layer of rows
+        sharing one frequency per entity, never one per row. A grid where
+        every row already sits at its block frequency — the case as soon as
+        axis 2 injects nothing — short-circuits back to the single historical
+        call, block binding included.
+
+        Args:
+            feature_cols: Covariate columns to scale.
+            freqs_by_column: Detected frequencies, keyed by column.
+            ways: Materialization way retained for each covariate.
+            binding: Block frequency binding of the training grid.
+            blocks: Block frequency of each contributing entity.
+            stage_freq: Frequency of the stage.
+            row_frequency: Frequency each training row was produced at.
+
+        Returns:
+            Whatever :meth:`StageScaler.feature_divisors` returns for a
+            homogeneous grid; a ``DataFrame`` indexed like ``row_frequency``
+            and columned like ``feature_cols`` otherwise.
+        """
+        # Extraction de l'index
+        index = row_frequency.index
+        # Extraction des fréquences
+        frequencies = row_frequency.to_numpy(dtype=object)
+
+        # Entité de chaque ligne, puis fréquence de bloc attendue pour elle
+        row_entities = self._row_entities(index)
+        expected = np.array(
+            [blocks.get(entity) for entity in row_entities], dtype=object
+        )
+
+        # Grille homogène : le chemin d'origine, à la liaison de bloc
+        if bool((frequencies == expected).all()):
+            return self._stage_scaler.feature_divisors(
+                columns=feature_cols,
+                column_frequencies=freqs_by_column,
+                ways=ways,
+                grid_freq=binding,
+                stage_freq=stage_freq,
+                index=index,
+            )
+
+        # Fréquences de chaque entité, celle de son bloc en tête
+        per_entity: Dict[EntityKey, List[str]] = {}
+        for entity, frequency in zip(row_entities, frequencies):
+            ordered = per_entity.setdefault(
+                entity,
+                [blocks[entity]] if entity in blocks else [],
+            )
+            if frequency not in ordered:
+                ordered.append(frequency)
+
+        # Grille hétérogène : un appel par couche, puis remontée au format par
+        # ligne, seul capable de porter deux échelles sur une même colonne
+        divisors = pd.DataFrame(
+            np.nan, index=index, columns=list(feature_cols), dtype=float
+        )
+        depth = max((len(f) for f in per_entity.values()), default=0)
+        for rank in range(depth):
+            layer = {
+                entity: ordered[rank]
+                for entity, ordered in per_entity.items()
+                if rank < len(ordered)
+            }
+            in_layer = np.array(
+                [
+                    layer.get(entity) == frequency
+                    for entity, frequency in zip(row_entities, frequencies)
+                ],
+                dtype=bool,
+            )
+            if not in_layer.any():
+                continue
+            sub_index = index[in_layer]
+            sub_divisors = self._stage_scaler.feature_divisors(
+                columns=feature_cols,
+                column_frequencies=freqs_by_column,
+                ways=ways,
+                grid_freq=self._block_binding(layer, sub_index),
+                stage_freq=stage_freq,
+                index=sub_index,
+            )
+            # Forme scalaire par colonne : diffusion sur les lignes concernées
+            if isinstance(sub_divisors, pd.Series):
+                for name in feature_cols:
+                    divisors.loc[sub_index, name] = float(sub_divisors[name])
+            else:
+                divisors.loc[sub_index, list(feature_cols)] = sub_divisors
+        return divisors
+
+    # Méthode auxiliaire d'extraction de l'entité de chaque ligne d'une grille
+    @staticmethod
+    def _row_entities(index: pd.Index) -> List[EntityKey]:
+        """Return the entity key of every row of a grid.
+
+        Args:
+            index: Grid, ``MultiIndex`` ``(entity..., date)`` on a panel.
+
+        Returns:
+            One entity key per row, in grid order. A time series yields the
+            degenerate key ``()`` everywhere.
+        """
+        # Grille sans niveau d'entité : entité dégénérée unique
+        if not isinstance(index, pd.MultiIndex):
+            return [()] * len(index)
+        depth = index.nlevels - 1
+        return [tuple(key[:depth]) for key in index]
+
     # Méthode auxiliaire d'ordonnancement des colonnes d'une étape
     def _order_columns(
         self,
@@ -2110,13 +2360,14 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             if feature_cols:
                 X_train = self._stage_scaler.apply(
                     X_train,
-                    self._stage_scaler.feature_divisors(
-                        columns=feature_cols,
-                        column_frequencies=freqs_by_column,
+                    self._feature_divisors_per_row(
+                        feature_cols=feature_cols,
+                        freqs_by_column=freqs_by_column,
                         ways=ways,
-                        grid_freq=binding,
+                        binding=binding,
+                        blocks=dict(training.blocks),
                         stage_freq=stage_freq,
-                        index=training.X.index,
+                        row_frequency=training.row_frequency,
                     ),
                 )
 
@@ -2886,8 +3137,8 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         """
         raise NotImplementedError(
             f"HighFrequencyImputer2.transform is delivered by lot "
-            f"{_TRANSFORM_LOT} ([SPEC] §12.4). This lot (L9) delivers "
-            f"__init__ and fit phases 0 to 4 only."
+            f"{_TRANSFORM_LOT} ([SPEC] §12.4). The lots delivered so far "
+            f"cover __init__ and fit phases 0 to 6 only."
         )
 
     # Méthode de transformation inverse, livrée par le lot L12
@@ -2906,6 +3157,6 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         """
         raise NotImplementedError(
             f"HighFrequencyImputer2.inverse_transform is delivered by lot "
-            f"{_TRANSFORM_LOT} ([SPEC] §12.4). This lot (L9) delivers "
-            f"__init__ and fit phases 0 to 4 only."
+            f"{_TRANSFORM_LOT} ([SPEC] §12.4). The lots delivered so far "
+            f"cover __init__ and fit phases 0 to 6 only."
         )

@@ -25,14 +25,15 @@ from typing import (
 )
 
 # Manipulation de données
+import numpy as np
 import pandas as pd
 
 # Producteur unique des features, et lecture des formes par entité
-from .covariate_materializer import CovariateMaterializer
+from .covariate_materializer import CovariateMaterializer, _WAY_RANK
 # Voies de matérialisation, définies avec l'étape du plan
 from .imputation_plan2 import MaterializationWay
 # Primitives d'origine de cellule
-from .provenance import CellOrigin
+from .provenance import CellOrigin, max_origin
 # Normalisation des fréquences détectées
 from ..utils.frequency.utils import normalize_frequency
 # Utilitaires de panel : découpage et normalisation des clés d'entité
@@ -353,6 +354,84 @@ class TrainingSetBuilder:
 
         return rows.sort_index()
 
+    # Méthode auxiliaire de découpage des lignes en couches homogènes
+    @staticmethod
+    def _frequency_layers(
+        rows_per_entity: Mapping[EntityKey, pd.DataFrame],
+        blocks: Mapping[EntityKey, str],
+    ) -> List[Dict[EntityKey, str]]:
+        """Split the rows into layers of one frequency per entity.
+
+        A block is homogeneous only as long as axis 2 injects nothing into
+        it: a cell produced at an earlier, finer stage sits on a row of that
+        stage's frequency, not of its block's. A layer is one frequency per
+        contributing entity — the shape :meth:`CovariateMaterializer.materialize`
+        and the training mask both read — and the block frequency always
+        opens the list, so a homogeneous set yields exactly **one** layer,
+        equal to ``blocks``: the axis-2-off path keeps its single call.
+
+        Args:
+            rows_per_entity: Candidate rows of each entity, carrying a
+                ``freq`` column.
+            blocks: Block frequency of each entity.
+
+        Returns:
+            Ordered list of ``{entity: frequency}`` bindings covering every
+            row exactly once.
+
+        Examples:
+            >>> builder._frequency_layers(rows, blocks)     # doctest: +SKIP
+            [{('FR',): 'Y', ('DE',): 'Q'}, {('FR',): 'Q'}]
+        """
+        # Fréquences de chaque entité, celle de son bloc en tête
+        # Initialisation du dictionnaire résultat
+        per_entity: Dict[EntityKey, List[str]] = {}
+        # Parcours des entités
+        for entity, rows in rows_per_entity.items():
+            # Extraction des fréqunces comprimes dans le bloc
+            f_block = blocks.get(entity)
+            frequencies = [f_block] if f_block is not None else []
+            # Ajout des fréquences manquantes
+            for frequency in pd.unique(rows['freq'].dropna().to_numpy(dtype=object)):
+                if frequency not in frequencies:
+                    frequencies.append(frequency)
+            per_entity[entity] = frequencies
+
+        # Couches : la i-ème fréquence de chaque entité qui en porte une
+        depth = max((len(f) for f in per_entity.values()), default=0)
+        return [
+            {
+                entity: frequencies[rank]
+                for entity, frequencies in per_entity.items()
+                if rank < len(frequencies)
+            }
+            for rank in range(depth)
+        ]
+
+    # Méthode auxiliaire de sélection des lignes d'une couche
+    @staticmethod
+    def _rows_of_layer(
+        rows: pd.DataFrame,
+        entity: EntityKey,
+        layer: Mapping[EntityKey, str],
+    ) -> np.ndarray:
+        """Return the boolean selector of one entity's rows in one layer.
+
+        Args:
+            rows: Candidate rows of the entity, carrying a ``freq`` column.
+            entity: Entity key of the block.
+            layer: Binding of the layer.
+
+        Returns:
+            Boolean array, all False when the entity does not reach the
+            layer.
+        """
+        # Entité absente de la couche : aucune ligne
+        frequency = layer.get(entity)
+        if frequency is None:
+            return np.zeros(len(rows), dtype=bool)
+        return (rows['freq'] == frequency).to_numpy(dtype=bool)
+
     # Méthode auxiliaire de restriction par la fenêtre d'entraînement
     def _restrict_to_window(
         self,
@@ -361,9 +440,17 @@ class TrainingSetBuilder:
     ) -> Dict[EntityKey, pd.DataFrame]:
         """Restrict the candidate rows to the ``'training'`` window.
 
-        The mask is asked once, at the frequency of each block: the mutualized
-        set gathers blocks running at different frequencies, and a mask read at
-        a single frequency could not describe them.
+        The mask is read at the frequency of **each row**, which is the same
+        unifying rule as the scale divisors: an observed cell carries its
+        block frequency ``f_block(e)``, a cell produced by an earlier stage
+        carries its production frequency. Reading the window at the block
+        frequency alone would leave every finer produced cell outside the
+        mask's own grid — hence silently dropped — and no target could ever
+        train on its own earlier imputations.
+
+        One call per layer (:meth:`_frequency_layers`), never one per row: a
+        homogeneous set yields a single layer equal to the blocks, and the
+        call is then the historical one.
 
         Args:
             candidates: Candidate rows of each entity.
@@ -378,34 +465,40 @@ class TrainingSetBuilder:
         if self.training_mask is None:
             return dict(candidates)
 
-        # Appel unique, à la fréquence de bloc de chaque entité. Un retour
-        # None dit qu'aucune fenêtre n'est calculable — calculateur non ajusté,
-        # fréquence de bloc inconvertible : aucune restriction plutôt que le
-        # rejet silencieux de toutes les lignes
-        mask = self.training_mask(dict(blocks))
-        if mask is None:
-            return dict(candidates)
-        # Découpage du masque par entité, index de date seul
-        mask_blocks = {
-            normalize_entity_key(entity): entity_block
-            for entity, _mask, entity_block in iter_entity_blocks(mask)
-        }
+        # Un appel par couche. Un retour None dit qu'aucune fenêtre n'est
+        # calculable — calculateur non ajusté, fréquence de bloc
+        # inconvertible : aucune restriction plutôt que le rejet silencieux
+        # de toutes les lignes
+        layers = self._frequency_layers(candidates, blocks)
+        masks: List[Tuple[Dict[EntityKey, str], Optional[Dict[EntityKey, pd.Series]]]] = []
+        for layer in layers:
+            mask = self.training_mask(dict(layer))
+            masks.append((
+                layer,
+                None if mask is None else {
+                    normalize_entity_key(entity): entity_block
+                    for entity, _mask, entity_block in iter_entity_blocks(mask)
+                },
+            ))
 
-        # Restriction bloc par bloc
+        # Restriction bloc par bloc, couche par couche
         restricted: Dict[EntityKey, pd.DataFrame] = {}
         for entity, rows in candidates.items():
-            # Masque correspondant aux observations de l'entité
-            entity_mask = mask_blocks.get(entity)
-            # Entité absente du masque : le calculateur omet les entités sans
-            # masque ajusté, aucune restriction n'est alors définissable
-            if entity_mask is None:
-                restricted[entity] = rows
-                continue
-            # Date absente du masque : hors fenêtre, la ligne est écartée.
-            # Comparaison à True plutôt que "fillna(False)" : la réindexation
-            # d'un masque booléen produit un dtype objet, que "fillna" convertit
-            # avec avertissement
-            keep = entity_mask.reindex(rows.index).eq(True).to_numpy(dtype=bool)
+            keep = np.zeros(len(rows), dtype=bool)
+            for layer, mask_blocks in masks:
+                in_layer = self._rows_of_layer(rows, entity, layer)
+                if not in_layer.any():
+                    continue
+                # Masque correspondant aux observations de l'entité. Entité
+                # absente du masque : le calculateur omet les entités sans
+                # masque ajusté, aucune restriction n'est alors définissable
+                entity_mask = None if mask_blocks is None else mask_blocks.get(entity)
+                if entity_mask is None:
+                    keep |= in_layer
+                    continue
+                # Date absente du masque : hors fenêtre, la ligne est écartée.
+                in_window = entity_mask.reindex(rows.index).eq(True).to_numpy(dtype=bool)
+                keep |= in_layer & in_window
             restricted[entity] = rows[keep]
         return restricted
 
@@ -588,18 +681,53 @@ class TrainingSetBuilder:
                 column_origins={},
             )
 
-        # Appel unique au matérialiseur, sur la grille mutualisée, à la
-        # fréquence de bloc de chaque entité. "record=False" : les cellules
-        # produites le sont à la fréquence des blocs et non à celle d'une
-        # étape, les inscrire polluerait le miroir
-        X, ways, column_origins = self.materializer.materialize(
-            columns=columns,
-            grid_index=grid,
-            stage_freq=dict(blocks),
-            detected_frequencies=detected_frequencies,
-            source_data=source_data,
-            materialization=materialization,
-            record=False,
+        # Un appel au matérialiseur par couche, sur la sous-grille de la
+        # couche, à la fréquence de chaque entité qui l'atteint. Une seule
+        # couche — le cas dès que l'axe 2 n'injecte rien — rend l'appel unique
+        # sur la grille mutualisée et aux fréquences de bloc.
+        # Extraction des couches
+        layers = self._frequency_layers(rows_per_entity, blocks)
+        # Initialisation des étapes
+        frames: List[pd.DataFrame] = []
+        # Initialisation des matérialisations
+        ways: Dict[str, MaterializationWay] = {}
+        # Initialisation des origines
+        column_origins: Dict[str, CellOrigin] = {}
+        # Parcours des couches
+        for layer in layers:
+            # Masque des lignes dans la couche
+            in_layer = np.concatenate([
+                self._rows_of_layer(rows, entity, layer)
+                for entity, rows in rows_per_entity.items()
+            ])
+            if not in_layer.any():
+                continue
+            # Matérialisation
+            frame, sub_ways, sub_origins = self.materializer.materialize(
+                columns=columns,
+                grid_index=grid[in_layer],
+                stage_freq=dict(layer),
+                detected_frequencies=detected_frequencies,
+                source_data=source_data,
+                materialization=materialization,
+                record=False,
+            )
+            frames.append(frame)
+            # Réduction sur les couches : la voie la plus dégradée et
+            # l'origine la plus souillée, mêmes règles que la réduction par
+            # entité de "decide_ways"
+            for name, way in sub_ways.items():
+                previous = ways.get(name)
+                if previous is None or _WAY_RANK[way] > _WAY_RANK[previous]:
+                    ways[name] = way
+            for name, origin in sub_origins.items():
+                column_origins[name] = max_origin(
+                    [column_origins.get(name, 'observed'), origin]
+                )
+        X = (
+            pd.concat(frames).reindex(grid)
+            if frames
+            else pd.DataFrame(index=grid, columns=list(columns), dtype=float)
         )
 
         # Voies rendues : celles imposées quand il y en a, pour que l'appelant

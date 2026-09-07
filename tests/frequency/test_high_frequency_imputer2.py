@@ -27,8 +27,13 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import KFold
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer2 import HighFrequencyImputer2
+from tsforecast.frequency.high_frequency_imputer2 import (
+    ELIGIBLE_ORIGINS,
+    HighFrequencyImputer2,
+)
 from tsforecast.frequency.imputation_plan import INTERPOLATE_FALLBACK
+from tsforecast.frequency.provenance import ProvenanceType
+from tsforecast.frequency.stage_scaler import StageScaler
 
 # Clés d'entité du jeu PANEL-F, sous forme de tuples (§2.5)
 FR, DE, IT = ('FR',), ('DE',), ('IT',)
@@ -517,13 +522,12 @@ class TestFitPhases:
                 getattr(imputer, method)(reference_timeseries)
             assert 'L12' in str(excinfo.value)
 
-    def test_intermediate_frequencies_not_implemented_yet(self, reference_timeseries):
-        """Les deux modalités de l'axe 2 non livrées annoncent le lot L11."""
-        for modality in ('covariates_only', True):
+    def test_intermediate_frequencies_modalities_all_fit(self, reference_timeseries):
+        """Les trois modalités de l'axe 2 ajustent, aucune ne lève (§5.1)."""
+        for modality in (False, 'covariates_only', True):
             imputer = _make_imputer(impute_intermediate_frequencies=modality)
-            with pytest.raises(NotImplementedError) as excinfo:
-                _fit_quietly(imputer, reference_timeseries)
-            assert 'L11' in str(excinfo.value)
+            _fit_quietly(imputer, reference_timeseries)
+            assert imputer.frequency_progression_[-1] == 'M'
 
     def test_panel_declared_by_panel_cols_on_flat_frame(self, mixed_freq_panel_multifrequency):
         """Un panel déclaré par panel_cols sur frame plat est pleinement fonctionnel (B15)."""
@@ -1703,3 +1707,377 @@ class TestPhaseFiveEdgeCases:
         imputer = _fit_with_spy(data)
         assert len(imputer.imputation_plan_) == 0
         assert imputer.imputation_models_ == {}
+
+
+# =============================================================================
+# Axe 2 — traversée des fréquences intermédiaires (lot L11, §5)
+# =============================================================================
+# Fonction auxiliaire de capture des contextes d'ajustement de chaque variable
+def _capture_variable_fits(data: pd.DataFrame, **overrides) -> tuple:
+    """Ajuste un imputeur en retenant le contexte de chaque (étape, variable).
+
+    Le contexte est celui que la PHASE 5c ajuste réellement : la sonde
+    d'ordonnancement passe par la même implémentation, seul le dernier appel
+    d'une (étape, variable) est donc conservé.
+
+    Returns:
+        Couple ``(imputer, fits)``, ``fits`` étant un dict
+        ``(label d'étape, colonne) -> _VariableFit``.
+    """
+    fits = {}
+    original = HighFrequencyImputer2._prepare_variable
+
+    def _spy(self, **kwargs):
+        fit = original(self, **kwargs)
+        label = self._stage_frequency_label(kwargs['stage_freq'])
+        fits[(label, kwargs['column'])] = fit
+        return fit
+
+    with patch.object(HighFrequencyImputer2, '_prepare_variable', _spy):
+        imputer = _fit_with_spy(data, **overrides)
+    return imputer, fits
+
+
+# Fonction auxiliaire de lecture des couples (étape, variable) du plan
+def _plan_pairs(imputer: HighFrequencyImputer2) -> list:
+    """Rend la liste ordonnée des couples (label d'étape, variable) du plan."""
+    return [(step.pred_freq_label, step.var_name) for step in imputer.imputation_plan_.steps]
+
+
+class TestFrequencyProgression:
+    """§5.2 — construction de la progression, identique au fit et au transform."""
+
+    def test_frequency_progression_on_reference_ts(self, reference_timeseries):
+        """Les trois modalités sur le jeu TS, valeurs exactes (§5.2)."""
+        # F = {Q, Y, M} : sous False, la cible seule
+        imputer = _fit_with_spy(reference_timeseries, impute_intermediate_frequencies=False)
+        assert imputer.frequency_progression_ == ['M']
+
+        # Sous les deux autres modalités, LE MÊME plan : Y, la plus basse
+        # fréquence, n'est pas une étape — rien n'est à y imputer
+        for modality in ('covariates_only', True):
+            imputer = _fit_with_spy(
+                reference_timeseries, impute_intermediate_frequencies=modality
+            )
+            assert imputer.frequency_progression_ == ['Q', 'M']
+
+    def test_imputable_variables_of_each_stage_on_reference_ts(self, reference_timeseries):
+        """Étape Q : {a1, a2} ; étape M : {q1, a1, a2} (§5.2, point d)."""
+        imputer = _fit_with_spy(
+            reference_timeseries, impute_intermediate_frequencies='covariates_only'
+        )
+        assert {column for column, _ in imputer._imputable_groups('Q')} == {'a1', 'a2'}
+        assert {column for column, _ in imputer._imputable_groups('M')} == {'q1', 'a1', 'a2'}
+
+    def test_progression_on_panel_f_uses_per_entity_frequencies(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Sur PANEL-F, F est lu par couple (entité, colonne) (§2.5, §5.2)."""
+        imputer = _fit_with_spy(
+            mixed_freq_panel_multifrequency,
+            impute_intermediate_frequencies='covariates_only',
+        )
+        # v est annuelle pour FR, trimestrielle pour DE, mensuelle pour IT :
+        # une lecture par colonne n'aurait vu qu'une fréquence et manqué Q
+        assert [
+            imputer._stage_frequency_label(stage)
+            for stage in imputer.frequency_progression_
+        ] == ['Q', 'M']
+
+        # Étape Q : v n'est imputable que pour FR
+        assert imputer._imputable_groups({FR: 'Q', DE: 'Q', IT: 'Q'})[('v', 'Y')] == (FR,)
+        assert ('v', 'Q') not in imputer._imputable_groups({FR: 'Q', DE: 'Q', IT: 'Q'})
+        # Étape M : v est imputable pour FR et DE, jamais pour IT
+        at_month = imputer._imputable_groups({FR: 'M', DE: 'M', IT: 'M'})
+        assert at_month[('v', 'Y')] == (FR,)
+        assert at_month[('v', 'Q')] == (DE,)
+        # IT observe déjà v mensuellement : elle n'est imputable à aucune étape
+        for (column, _source), entities in at_month.items():
+            if column == 'v':
+                assert IT not in entities
+
+    def test_progression_per_target_frequency_group_on_panel(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Un dict de cibles produit une progression par groupe, fusionnée (§5.2)."""
+        imputer = _fit_with_spy(
+            mixed_freq_panel_multifrequency,
+            target_frequency={FR: 'M', DE: 'Q', IT: 'M'},
+            impute_intermediate_frequencies=True,
+        )
+        # DE a Q pour cible : son groupe s'arrête à l'étape Q, dont il est absent
+        assert imputer.frequency_progression_ == [
+            {FR: 'Q', DE: 'Q', IT: 'Q'},
+            {FR: 'M', IT: 'M'},
+        ]
+        # Aucune étape mensuelle n'écrit pour DE
+        for step in imputer.imputation_plan_.steps:
+            if step.pred_freq_label == 'M':
+                assert DE not in (step.entities or ())
+
+
+class TestStagePlanAxis2:
+    """§5.5 — le plan d'étapes complet sur le jeu TS."""
+
+    def test_stage_plan_of_spec_5_5(self, reference_timeseries):
+        """2 étapes, 5 modèles, y_train filtré par l'origine (§5.5)."""
+        expected_pairs = [
+            ('Q', 'a1'), ('Q', 'a2'), ('M', 'a1'), ('M', 'a2'), ('M', 'q1'),
+        ]
+        # Sous 'covariates_only', y_train tient les 3 ancres partout : le
+        # filtre est celui de False, seul le plan diffère
+        imputer, fits = _capture_variable_fits(
+            reference_timeseries,
+            covariate_strategy='model',
+            fit_predict_order='frequency',
+            impute_intermediate_frequencies='covariates_only',
+        )
+        assert imputer.frequency_progression_ == ['Q', 'M']
+        assert _plan_pairs(imputer) == expected_pairs
+        assert _SpyEstimator.n_fits == 5
+        for stage in ('Q', 'M'):
+            for column in ('a1', 'a2'):
+                assert len(fits[(stage, column)].y_train) == 3
+        assert len(fits[('M', 'q1')].y_train) == 12
+
+        # Sous True, les étapes M de a1 et a2 gagnent leurs imputations Q.
+        # Douze lignes et non quinze : la quatrième imputation trimestrielle
+        # de chaque année tombe sur l'ancre annuelle, où l'observation gagne
+        imputer, fits = _capture_variable_fits(
+            reference_timeseries,
+            covariate_strategy='model',
+            fit_predict_order='frequency',
+            impute_intermediate_frequencies=True,
+        )
+        assert _plan_pairs(imputer) == expected_pairs
+        assert _SpyEstimator.n_fits == 5
+        for column in ('a1', 'a2'):
+            assert len(fits[('Q', column)].y_train) == 3
+            training = fits[('M', column)].training
+            assert len(fits[('M', column)].y_train) == 12
+            assert sorted(training.row_origin.value_counts().to_dict().items()) == [
+                ('model', 9), ('observed', 3)
+            ]
+
+    def test_carried_model_rank_reached_under_covariates_only(self, reference_timeseries):
+        """Le rang 3 — report d'étape — devient atteignable (§4.4, §5.6)."""
+        imputer = _fit_with_spy(
+            reference_timeseries,
+            covariate_strategy='model',
+            impute_intermediate_frequencies='covariates_only',
+        )
+        ways = [
+            way
+            for step in imputer.imputation_plan_.steps
+            for way in step.materialization.values()
+        ]
+        assert 'carried_model' in ways
+        # Sous False, aucune étape antérieure : le rang 3 reste hors d'atteinte
+        without = _fit_with_spy(
+            reference_timeseries,
+            covariate_strategy='model',
+            impute_intermediate_frequencies=False,
+        )
+        assert 'carried_model' not in [
+            way
+            for step in without.imputation_plan_.steps
+            for way in step.materialization.values()
+        ]
+
+
+class TestOriginFilter:
+    """§5.3 — le filtre d'origine de y_train, et le piège D12."""
+
+    def test_covariates_only_differs_from_true(self, reference_timeseries):
+        """I12 — même plan, filtre différent, valeurs différentes (§5.1)."""
+        # Sous 'model', aucune ligne d'origine 'model' n'entre dans y_train
+        _, covariates_only = _capture_variable_fits(
+            reference_timeseries,
+            covariate_strategy='model',
+            impute_intermediate_frequencies='covariates_only',
+        )
+        for fit in covariates_only.values():
+            assert set(fit.training.row_origin.unique()) <= {'observed'}
+
+        # ... et les valeurs finales diffèrent de celles de True
+        _, cascaded = _capture_variable_fits(
+            reference_timeseries,
+            covariate_strategy='model',
+            impute_intermediate_frequencies=True,
+        )
+        assert 'model' in set(cascaded[('M', 'a1')].training.row_origin.unique())
+        assert not np.allclose(
+            covariates_only[('M', 'a1')].y_train.to_numpy()[:3],
+            cascaded[('M', 'a1')].y_train.to_numpy()[:3],
+        ) or len(cascaded[('M', 'a1')].y_train) != len(
+            covariates_only[('M', 'a1')].y_train
+        )
+
+        # Sous 'interpolate', les rangs 2 et 3 sont hors d'atteinte :
+        # 'covariates_only' rend exactement les valeurs de False
+        store_false = _fit_with_spy(
+            reference_timeseries,
+            covariate_strategy='interpolate',
+            impute_intermediate_frequencies=False,
+        )._covariate_materializer.imputed_store
+        store_only = _fit_with_spy(
+            reference_timeseries,
+            covariate_strategy='interpolate',
+            impute_intermediate_frequencies='covariates_only',
+        )._covariate_materializer.imputed_store
+        for column in ('a1', 'a2', 'q1'):
+            # "check_freq=False" : l'attribut de fréquence de l'index diffère
+            # après deux étapes, les valeurs sont ce qui est comparé
+            pd.testing.assert_series_equal(
+                store_false[column],
+                store_only[column],
+                check_names=False,
+                check_freq=False,
+            )
+
+    def test_y_train_filter_reads_origin_store_not_provenance(self, reference_timeseries):
+        """D12 — le filtre lit origin_store, jamais la provenance publique."""
+        imputer = _fit_with_spy(reference_timeseries)
+        materializer = imputer._covariate_materializer
+        materializer.reset()
+        builder = imputer._training_set_builder
+        frequencies = imputer._detected_frequencies_by_column()
+
+        # Deux cellules de MÊME provenance publique — toutes deux produites
+        # par une même étape trimestrielle — mais d'origines différentes
+        dates = pd.to_datetime(['2021-03-31', '2021-06-30', '2021-09-30'])
+        materializer.record_production(
+            'a1',
+            pd.Series([30.0, 31.0, 32.0], index=dates),
+            pd.Series(['observed', 'model', 'interpolated'], index=dates),
+            pd.Series(['Q', 'Q', 'Q'], index=dates),
+        )
+
+        def _origins(modality):
+            training = builder.build(
+                column='a1',
+                feature_cols=(),
+                stage_freq='M',
+                detected_frequencies=frequencies,
+                source_data=reference_timeseries,
+                eligible_origins=ELIGIBLE_ORIGINS[modality],
+            )
+            return training.row_origin.reindex(dates).dropna().to_list()
+
+        # Sous 'covariates_only', seule la cellule observée entre ; la cellule
+        # de repli 'interpolated' est exclue au même titre que celle de modèle
+        assert _origins('covariates_only') == ['observed']
+        # Sous True, les trois entrent
+        assert sorted(_origins(True)) == ['interpolated', 'model', 'observed']
+
+    def test_target_taint_families(self, reference_timeseries):
+        """I6 — les deux familles de souillure de cible n'existent que sous True."""
+        tainted = {
+            ProvenanceType.MODEL_ON_IMPUTED_TARGET,
+            ProvenanceType.MODEL_ON_IMPUTED_BOTH,
+        }
+        for modality in (False, 'covariates_only'):
+            imputer = _fit_with_spy(
+                reference_timeseries,
+                covariate_strategy='model',
+                impute_intermediate_frequencies=modality,
+            )
+            for step in imputer.imputation_plan_.steps:
+                assert step.target_taint == 'none'
+                assert step.emitted_provenance not in tainted
+
+        imputer = _fit_with_spy(
+            reference_timeseries,
+            covariate_strategy='model',
+            impute_intermediate_frequencies=True,
+        )
+        emitted = {step.emitted_provenance for step in imputer.imputation_plan_.steps}
+        assert emitted & tainted
+
+
+class TestPerRowScale:
+    """§5.4 — le diviseur d'échelle est par ligne, jamais par étape."""
+
+    def test_per_row_scale_factor_on_mixed_frequency_y_train(self):
+        """Le tableau chiffré du §5.4 : 120/Y, 28/Q, 30/Q à l'étape M."""
+        scaler = StageScaler(scale_features='constant')
+        index = pd.to_datetime(['2021-12-31', '2021-03-31', '2021-06-30'])
+        produced = pd.Series(['Y', 'Q', 'Q'], index=index)
+        divisors = scaler.target_divisor(
+            'a1', source_freq='Y', pred_freq='M', index=index, produced_freq=produced
+        )
+        # Le diviseur est PAR LIGNE : le scalaire de l'étape ne s'applique pas
+        assert isinstance(divisors, pd.Series)
+        assert divisors.to_list() == pytest.approx([12.0, 3.0, 3.0])
+        scaled = scaler.apply(pd.Series([120.0, 28.0, 30.0], index=index), divisors)
+        assert scaled.to_list() == pytest.approx([10.0, 9.3333333, 10.0])
+
+    def test_unit_divisors_are_not_short_circuited(self):
+        """B12 — une Series valant 1.0 partout reste une Series."""
+        scaler = StageScaler(scale_features='constant')
+        index = pd.to_datetime(['2021-01-31', '2021-02-28'])
+        divisors = scaler.target_divisor(
+            'a1',
+            source_freq='M',
+            pred_freq='M',
+            index=index,
+            produced_freq=pd.Series(['M', 'M'], index=index),
+        )
+        assert isinstance(divisors, pd.Series)
+        assert divisors.to_list() == pytest.approx([1.0, 1.0])
+
+    def test_row_frequency_mixes_block_and_store_sources(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Les deux sources de la fréquence de ligne coexistent (§5.4, §5.8)."""
+        _, fits = _capture_variable_fits(
+            mixed_freq_panel_multifrequency,
+            covariate_strategy='interpolate',
+            impute_intermediate_frequencies=True,
+        )
+        training = fits[('M', 'v')].training
+        # Fréquences de BLOC : Y pour FR, Q pour DE, M pour IT
+        assert dict(training.blocks) == {FR: 'Y', DE: 'Q', IT: 'M'}
+        by_entity = {}
+        for entity, frequency, origin in zip(
+            [tuple(key[:-1]) for key in training.row_frequency.index],
+            training.row_frequency,
+            training.row_origin,
+        ):
+            by_entity.setdefault(entity, set()).add((frequency, origin))
+        # FR porte ses 3 ancres annuelles ET ses imputations trimestrielles
+        assert ('Y', 'observed') in by_entity[FR]
+        assert ('Q', 'model') in by_entity[FR]
+        # DE et IT n'apportent que des observations, à leur fréquence propre
+        assert by_entity[DE] == {('Q', 'observed')}
+        assert by_entity[IT] == {('M', 'observed')}
+
+        # La cible mise à l'échelle reste homogène : le diviseur fractionnaire
+        # du bloc IT (1/1 à l'étape M) n'est pas planchéré, celui de FR vaut 12
+        scaled = fits[('M', 'v')].y_train
+        for year, level in ((2021, 10.0), (2022, 11.0), (2023, 12.5)):
+            values = scaled[
+                scaled.index.get_level_values(-1).year == year
+            ].to_numpy()
+            assert values.mean() == pytest.approx(level, rel=0.2)
+
+    def test_target_taint_of_a_contributing_entity_propagates(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """§5.8 — une cellule 'model' d'une entité dégrade toute l'étape."""
+        imputer = _fit_with_spy(
+            mixed_freq_panel_multifrequency,
+            covariate_strategy='interpolate',
+            impute_intermediate_frequencies=True,
+        )
+        monthly = [
+            step
+            for step in imputer.imputation_plan_.steps
+            if step.pred_freq_label == 'M' and step.var_name == 'v'
+        ]
+        assert monthly
+        # Les imputations trimestrielles de FR souillent la cible de l'étape,
+        # donc la provenance des cellules produites pour DE aussi
+        for step in monthly:
+            assert step.target_taint == 'imputed'
+        assert any(DE in (step.entities or ()) for step in monthly)
