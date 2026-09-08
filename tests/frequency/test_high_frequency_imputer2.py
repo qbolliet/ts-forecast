@@ -1,9 +1,9 @@
 """Tests for tsforecast.frequency.high_frequency_imputer2.
 
-Lot L9 de [SPEC] high_frequency_imputer2_architecture.md : la classe
+Lots L9 à L12 de [SPEC] high_frequency_imputer2_architecture.md : la classe
 orchestratrice, ses validations d'`__init__` (§13.1), ses attributs ajustés
-(§13.2) et les phases 0 à 4 du fit (§12.3). La PHASE 5 est le lot L10 et le
-`transform` le lot L12 : les deux lèvent ici `NotImplementedError`.
+(§13.2), les six phases du fit (§12.3) puis le rejeu du plan figé par
+`transform`, l'inversion et la sortie multi-fréquences (§12.4).
 
 Couvre en particulier la conformité sklearn (§12.5 : B3, B14, B15, B16, B20),
 les fréquences détectées PAR (entité, colonne) (§2.1, §2.5, jeu `PANEL-F`), la
@@ -23,8 +23,10 @@ import pandas as pd
 import pytest
 from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.exceptions import NotFittedError
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import KFold
+from sklearn.model_selection import GridSearchCV, KFold
+from sklearn.pipeline import Pipeline
 
 # Objets testés
 from tsforecast.frequency.high_frequency_imputer2 import (
@@ -38,6 +40,7 @@ from tsforecast.frequency.provenance import (
     resolve_model_provenance,
 )
 from tsforecast.frequency.stage_scaler import StageScaler
+from tsforecast.xy import XYPipeline
 
 # Clés d'entité du jeu PANEL-F, sous forme de tuples (§2.5)
 FR, DE, IT = ('FR',), ('DE',), ('IT',)
@@ -517,14 +520,6 @@ class TestFitPhases:
             w for w in caught if 'estimator=None' in str(w.message)
         ]
         assert len(estimator_warnings) == 1
-
-    def test_transform_not_implemented_yet(self, reference_timeseries):
-        """transform et inverse_transform annoncent le lot qui les livre."""
-        imputer = _fit_quietly(_make_imputer(), reference_timeseries)
-        for method in ('transform', 'inverse_transform'):
-            with pytest.raises(NotImplementedError) as excinfo:
-                getattr(imputer, method)(reference_timeseries)
-            assert 'L12' in str(excinfo.value)
 
     def test_intermediate_frequencies_modalities_all_fit(self, reference_timeseries):
         """Les trois modalités de l'axe 2 ajustent, aucune ne lève (§5.1)."""
@@ -2597,3 +2592,592 @@ class TestUnobservedEntities:
         assert {str(value) for value in self._provenance(imputer, 'IT')} == {
             'model_unanchored'
         }
+
+
+# =============================================================================
+# Lot L12 — transform, inverse_transform et sortie multi-fréquences (§12.4)
+# =============================================================================
+# Fabrique privée d'un transform silencieux
+def _transform_quietly(imputer: HighFrequencyImputer2, data: pd.DataFrame):
+    """Rejoue le plan sur des données, en avalant les avertissements légitimes."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return imputer.transform(data)
+
+
+# Fabrique privée d'un fit_transform silencieux
+def _fit_transform_quietly(imputer: HighFrequencyImputer2, data: pd.DataFrame):
+    """Ajuste puis rejoue, en avalant les avertissements légitimes."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return imputer.fit_transform(data)
+
+
+# Les six combinaisons significatives des deux axes : 'tolerate_nan' est
+# exclue, son prérequis dur (un estimateur tolérant les NaN) relevant d'un
+# autre test
+_AXIS_COMBINATIONS = [
+    ('interpolate', False),
+    ('interpolate', 'covariates_only'),
+    ('interpolate', True),
+    ('model', False),
+    ('model', 'covariates_only'),
+    ('model', True),
+]
+
+
+class TestTransformSymmetry:
+    """I1 — `fit_transform(X)` est strictement `fit(X).transform(X)`."""
+
+    @pytest.mark.parametrize('strategy, intermediate', _AXIS_COMBINATIONS)
+    @pytest.mark.parametrize(
+        'fixture_name', ['reference_timeseries', 'mixed_freq_panel_multifrequency']
+    )
+    def test_fit_transform_equals_fit_then_transform(
+        self, strategy, intermediate, fixture_name, request
+    ):
+        """I1 — valeurs, provenances et attributs de sortie strictement égaux."""
+        data = request.getfixturevalue(fixture_name)
+        params = dict(
+            covariate_strategy=strategy,
+            impute_intermediate_frequencies=intermediate,
+        )
+
+        # Les deux chemins, sur les mêmes données
+        combined = _fit_transform_quietly(_make_imputer(**params), data)
+        separate = _make_imputer(**params)
+        _fit_quietly(separate, data)
+        replayed = _transform_quietly(separate, data)
+
+        # Égalité STRICTE des valeurs
+        pd.testing.assert_frame_equal(combined, replayed)
+
+    @pytest.mark.parametrize('strategy, intermediate', _AXIS_COMBINATIONS)
+    def test_output_attributes_are_identical_too(
+        self, strategy, intermediate, reference_timeseries
+    ):
+        """I1 — la provenance et les attributs ajustés coïncident aussi."""
+        params = dict(
+            covariate_strategy=strategy,
+            impute_intermediate_frequencies=intermediate,
+        )
+        first = _make_imputer(**params)
+        _fit_transform_quietly(first, reference_timeseries)
+
+        second = _make_imputer(**params)
+        _fit_quietly(second, reference_timeseries)
+        _transform_quietly(second, reference_timeseries)
+
+        # Provenance du dernier transform
+        pd.testing.assert_frame_equal(
+            first.imputation_provenance_, second.imputation_provenance_
+        )
+        # Attributs de sortie du fit
+        assert first.frequency_progression_ == second.frequency_progression_
+        assert first.detected_frequencies_ == second.detected_frequencies_
+        assert first.unanchored_pairs_ == second.unanchored_pairs_
+        pd.testing.assert_frame_equal(
+            first.imputation_plan_.to_diagnostic_frame(),
+            second.imputation_plan_.to_diagnostic_frame(),
+        )
+
+    def test_transform_never_rebuilds_the_training_set(self, reference_timeseries):
+        """Le TrainingSetBuilder n'est pas sur le chemin du transform (§12.1)."""
+        imputer = _fit_quietly(_make_imputer(), reference_timeseries)
+        with patch.object(
+            imputer._training_set_builder, 'build',
+            side_effect=AssertionError('the training set must never be rebuilt'),
+        ):
+            _transform_quietly(imputer, reference_timeseries)
+
+
+class TestTransformOutsideWindow:
+    """I7 — le transform hors fenêtre impute au lieu de vider."""
+
+    # Fixture privée d'un jeu dont la fin sort de la fenêtre stricte
+    @staticmethod
+    def _truncated(data: pd.DataFrame) -> pd.DataFrame:
+        """Jeu TS dont les trois colonnes basses fréquences s'arrêtent en 2022."""
+        frame = data.copy()
+        tail = frame.index >= pd.Timestamp('2023-01-31')
+        frame.loc[tail, ['q1', 'a1', 'a2']] = np.nan
+        return frame
+
+    def test_transform_outside_fit_window(self, reference_timeseries):
+        """I7 — impute, ne détruit aucune observation, avertit UNE fois."""
+        data = self._truncated(reference_timeseries)
+        imputer = _fit_quietly(_make_imputer(), data)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            result = imputer.transform(data)
+
+        # Un seul avertissement de fenêtre, nommant le nombre de lignes
+        window_warnings = [
+            str(w.message) for w in caught if 'outside' in str(w.message)
+        ]
+        assert len(window_warnings) == 1
+        assert 'row(s)' in window_warnings[0]
+
+        # Aucune ligne d'entrée perdue, aucune observation détruite
+        flat = result.droplevel('frequency')
+        assert len(flat) == len(data)
+        observed = data['m1'].notna()
+        assert np.allclose(flat['m1'].to_numpy(), data['m1'].to_numpy())
+        assert observed.all()
+
+        # Les lignes hors fenêtre gardent leurs valeurs d'entrée : la colonne
+        # n'est jamais vidée sans être réécrite
+        tail = flat.index >= pd.Timestamp('2023-01-31')
+        assert flat.loc[tail, 'm1'].notna().all()
+
+    def test_input_observations_survive_every_column(self, reference_timeseries):
+        """Aucune cellule observée de m1 n'est jamais perdue au transform."""
+        data = self._truncated(reference_timeseries)
+        imputer = _fit_quietly(_make_imputer(), data)
+        flat = _transform_quietly(imputer, data).droplevel('frequency')
+        assert flat['m1'].notna().sum() == data['m1'].notna().sum()
+
+
+class TestInverseTransform:
+    """I8 — aller-retour transform / inverse_transform."""
+
+    def test_inverse_transform_roundtrip(self, reference_timeseries):
+        """I8 — l'index et les noms sont restitués, les valeurs sous demande."""
+        imputer = _make_imputer(restore_original_values=True)
+        transformed = _fit_transform_quietly(imputer, reference_timeseries)
+        restored = imputer.inverse_transform(transformed)
+
+        # Index et noms de niveaux d'origine
+        assert restored.index.equals(reference_timeseries.index)
+        assert restored.index.names == reference_timeseries.index.names
+
+        # Valeurs d'origine, cellule par cellule
+        for column in reference_timeseries.columns:
+            observed = reference_timeseries[column].notna()
+            assert np.allclose(
+                restored.loc[observed, column].to_numpy(),
+                reference_timeseries.loc[observed, column].to_numpy(),
+            )
+
+    def test_inverse_transform_preserves_multilevel_entity_names(
+        self, panel_two_level_dataset
+    ):
+        """I8, B4 — un panel à deux niveaux d'entité garde ses trois noms."""
+        imputer = HighFrequencyImputer2(
+            target_frequency='M',
+            estimator=LinearRegression(),
+            restore_original_values=True,
+        )
+        transformed = _fit_transform_quietly(imputer, panel_two_level_dataset)
+
+        # Le niveau de fréquence s'insère du côté de l'entité (§5.9)
+        assert list(transformed.index.names) == [
+            'country', 'sector', 'frequency', 'date'
+        ]
+
+        restored = imputer.inverse_transform(transformed)
+        assert list(restored.index.names) == ['country', 'sector', 'date']
+        # Toute ligne d'entrée est restituée, avec ses valeurs d'origine. La
+        # grille cible peut en porter d'autres — l'ancrage de la conversion de
+        # fenêtre ajoute ici une fin de période au-delà des données, ce que
+        # produit déjà le fit et qui ne relève pas de l'inversion
+        assert panel_two_level_dataset.index.isin(restored.index).all()
+        source = panel_two_level_dataset['indicateur_mensuel']
+        assert np.allclose(
+            restored['indicateur_mensuel'].reindex(source.index).to_numpy(),
+            source.to_numpy(),
+        )
+
+    def test_inverse_transform_without_a_provenance_matrix_raises(
+        self, reference_timeseries
+    ):
+        """Sans matrice de provenance, l'inversion refuse : c'est elle qui guide.
+
+        Le fit en écrit déjà une — inverser juste après lui est donc licite,
+        et lit alors la provenance du fit. La garde couvre l'état purgé.
+        """
+        imputer = _fit_quietly(_make_imputer(), reference_timeseries)
+        del imputer.__dict__['imputation_provenance_']
+        with pytest.raises(ValueError, match='previous call to transform'):
+            imputer.inverse_transform(reference_timeseries)
+
+    def test_inverse_right_after_a_fit_reads_the_fit_provenance(
+        self, reference_timeseries
+    ):
+        """Le fit écrit sa propre matrice : l'inversion la lit sans transform."""
+        imputer = _fit_quietly(_make_imputer(), reference_timeseries)
+        restored = imputer.inverse_transform(reference_timeseries)
+        assert restored.index.equals(reference_timeseries.index)
+
+    def test_imputed_cells_are_set_back_to_nan(self, reference_timeseries):
+        """Sans restore_original_values, toute cellule non ORIGINAL redevient NaN."""
+        imputer = _make_imputer()
+        transformed = _fit_transform_quietly(imputer, reference_timeseries)
+        restored = imputer.inverse_transform(transformed)
+        # m1 est observée partout : elle traverse intacte
+        assert restored['m1'].notna().all()
+        # a1 était imputée : elle ne peut pas être plus renseignée qu'à l'entrée
+        assert restored['a1'].notna().sum() <= reference_timeseries['a1'].notna().sum()
+
+
+class TestMaterializationReplay:
+    """I11 — la voie de matérialisation et ses valeurs sont celles du fit."""
+
+    def test_materialization_identical_fit_and_transform(self, reference_timeseries):
+        """I11 — mêmes voies et mêmes valeurs produites au fit et au transform."""
+        imputer = _fit_with_spy(reference_timeseries, covariate_strategy='model')
+
+        # Voies figées, relevées avant le rejeu
+        plan_before = imputer.imputation_plan_.to_diagnostic_frame()
+        ways_before = {
+            (step.pred_freq_label, step.var_key): dict(step.materialization)
+            for step in imputer.imputation_plan_
+        }
+        # Trames de prédiction du fit, par modèle
+        models = imputer.imputation_models_
+        fit_frames = {
+            key: [frame.copy() for frame in getattr(model, 'predict_X_', [])]
+            for key, model in models.items()
+        }
+
+        _transform_quietly(imputer, reference_timeseries)
+
+        # Le plan n'a pas bougé : les voies sont rejouées, jamais redécidées
+        pd.testing.assert_frame_equal(
+            plan_before, imputer.imputation_plan_.to_diagnostic_frame()
+        )
+        ways_after = {
+            (step.pred_freq_label, step.var_key): dict(step.materialization)
+            for step in imputer.imputation_plan_
+        }
+        assert ways_after == ways_before
+
+        # La NATURE des valeurs produites est la même : les trames de
+        # prédiction du rejeu sont, une à une, celles du fit
+        for key, model in models.items():
+            produced = getattr(model, 'predict_X_', [])
+            fitted = fit_frames[key]
+            assert len(produced) == 2 * len(fitted)
+            for before, after in zip(fitted, produced[len(fitted):]):
+                pd.testing.assert_frame_equal(before, after)
+
+
+class TestTransformFrequencyControl:
+    """D11 — contrôle des fréquences détectées au transform (§12.1)."""
+
+    def test_transform_diverging_frequency_warns_once_and_uses_fit_frequencies(
+        self, reference_timeseries
+    ):
+        """Divergence : UN avertissement, puis les fréquences du fit."""
+        imputer = _fit_quietly(_make_imputer(), reference_timeseries)
+        fit_frequencies = dict(imputer.detected_frequencies_)
+
+        # q1 passe de trimestrielle à annuelle sur les données du transform
+        diverging = reference_timeseries.copy()
+        annual = diverging.index.month == 12
+        diverging['q1'] = np.nan
+        diverging.loc[annual, 'q1'] = [30.0, 90.0, 150.0]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.transform(diverging)
+
+        divergence_warnings = [
+            str(w.message) for w in caught
+            if 'different frequency at transform time' in str(w.message)
+        ]
+        assert len(divergence_warnings) == 1
+        assert 'q1' in divergence_warnings[0]
+        assert 'fit=' in divergence_warnings[0] and 'transform=' in divergence_warnings[0]
+
+        # Poursuite avec les fréquences du fit : elles ne sont jamais réécrites
+        assert imputer.detected_frequencies_ == fit_frequencies
+
+    def test_transform_missing_column_raises_naming_columns(
+        self, reference_timeseries
+    ):
+        """Colonne du fit absente : ValueError nommant les colonnes."""
+        imputer = _fit_quietly(_make_imputer(), reference_timeseries)
+        with pytest.raises(ValueError) as excinfo:
+            imputer.transform(reference_timeseries.drop(columns=['q1', 'a2']))
+        message = str(excinfo.value)
+        assert "'q1'" in message and "'a2'" in message
+
+    def test_transform_extra_column_ignored_silently(self, reference_timeseries):
+        """Colonne supplémentaire : ignorée, sans avertissement ni erreur."""
+        imputer = _fit_quietly(_make_imputer(), reference_timeseries)
+        extended = reference_timeseries.copy()
+        extended['extra'] = np.arange(len(extended), dtype=float)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            result = imputer.transform(extended)
+
+        assert not [w for w in caught if 'extra' in str(w.message)]
+        # La colonne traverse le transform sans entrer dans aucun plan
+        assert 'extra' in result.columns
+        reference = _transform_quietly(imputer, reference_timeseries)
+        pd.testing.assert_frame_equal(
+            result[reference.columns], reference
+        )
+
+    def test_per_entity_frequency_divergence_is_not_a_false_positive(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """La comparaison est par COUPLE : PANEL-F n'émet aucune divergence."""
+        imputer = _fit_quietly(_make_imputer(), mixed_freq_panel_multifrequency)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.transform(mixed_freq_panel_multifrequency)
+        assert not [
+            w for w in caught
+            if 'different frequency at transform time' in str(w.message)
+        ]
+
+
+class TestKeepLowerFrequencies:
+    """`keep_lower_frequencies` est un paramètre d'AFFICHAGE pur (§12.4)."""
+
+    def test_keep_lower_frequencies_is_display_only(self, reference_timeseries):
+        """Les valeurs du niveau cible sont identiques sous True et sous False."""
+        stacked = _fit_transform_quietly(
+            _make_imputer(keep_lower_frequencies=True), reference_timeseries
+        )
+        flat = _fit_transform_quietly(
+            _make_imputer(keep_lower_frequencies=False), reference_timeseries
+        )
+
+        # Sous False, aucun niveau de fréquence dans l'index
+        assert not isinstance(flat.index, pd.MultiIndex)
+        # Sous True, le niveau cible porte exactement les mêmes valeurs
+        target_level = stacked.xs('M', level='frequency')
+        pd.testing.assert_frame_equal(target_level, flat)
+
+    def test_no_intermediate_level_without_axis_2(self, reference_timeseries):
+        """Sous impute_intermediate_frequencies=False, un seul niveau empilé."""
+        stacked = _fit_transform_quietly(
+            _make_imputer(impute_intermediate_frequencies=False),
+            reference_timeseries,
+        )
+        assert set(stacked.index.get_level_values('frequency')) == {'M'}
+
+    def test_intermediate_levels_appear_under_axis_2(self, reference_timeseries):
+        """Sous True, les étapes intermédiaires deviennent autant de niveaux."""
+        stacked = _fit_transform_quietly(
+            _make_imputer(impute_intermediate_frequencies=True),
+            reference_timeseries,
+        )
+        levels = set(stacked.index.get_level_values('frequency'))
+        assert 'M' in levels and len(levels) > 1
+
+
+# Fonction auxiliaire de présence du niveau de fréquence
+def _has_frequency_level_in_output(frame: pd.DataFrame) -> bool:
+    """Dit si un frame porte le niveau 'frequency' de la sortie empilée."""
+    return (
+        isinstance(frame.index, pd.MultiIndex)
+        and 'frequency' in (frame.index.names or [])
+    )
+
+class TestTransformState:
+    """B19 et §13.2 — l'état de transform est écrasé puis purgé."""
+
+    def test_transform_state_purged_at_fit(self, reference_timeseries):
+        """B19 — un fit efface l'état laissé par le transform précédent."""
+        imputer = _make_imputer()
+        _fit_transform_quietly(imputer, reference_timeseries)
+        assert '_original_X_' in imputer.__dict__
+
+        _fit_quietly(imputer, reference_timeseries)
+        assert '_original_X_' not in imputer.__dict__
+        assert '_original_y_' not in imputer.__dict__
+        # Le fit réécrit sa propre matrice, jamais celle d'un transform passé
+        assert 'imputation_provenance_' in imputer.__dict__
+
+    def test_provenance_is_overwritten_by_each_transform(self, reference_timeseries):
+        """§13.2 — l'attribut porte la provenance du DERNIER transform."""
+        imputer = _fit_quietly(_make_imputer(), reference_timeseries)
+        after_fit = imputer.imputation_provenance_.copy()
+        _transform_quietly(imputer, reference_timeseries)
+        after_transform = imputer.imputation_provenance_
+        # La matrice du transform porte le niveau de fréquence, celle du fit non
+        assert _has_frequency_level_in_output(after_transform)
+        assert not _has_frequency_level_in_output(after_fit)
+
+    def test_fit_state_is_restored_after_a_transform(self, reference_timeseries):
+        """Le rejeu rend au fit son calculateur et son traceur de provenance."""
+        imputer = _fit_quietly(_make_imputer(), reference_timeseries)
+        calculator = imputer._imputation_window_calc
+        tracker = imputer._provenance_tracker
+        _transform_quietly(imputer, reference_timeseries)
+        assert imputer._imputation_window_calc is calculator
+        assert imputer._provenance_tracker is tracker
+
+
+class TestSharedModelReplay:
+    """§5.8 R6 — un modèle partagé est rejoué par chacune de ses étapes."""
+
+    def test_shared_model_replayed_by_each_step(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Les deux étapes de 'v' rejouent le MÊME objet modèle, sur leurs entités."""
+        imputer = _fit_with_spy(mixed_freq_panel_multifrequency)
+        monthly = [
+            step for step in imputer.imputation_plan_
+            if step.var_name == 'v' and step.pred_freq_label == 'M'
+        ]
+        assert len(monthly) == 2
+
+        # Un seul objet modèle, partagé (§5.8 R6)
+        assert monthly[0].model is monthly[1].model
+        # Des entités et des recalages distincts
+        assert set(monthly[0].entities) != set(monthly[1].entities)
+        assert monthly[0].source_frequency != monthly[1].source_frequency
+
+        # Chaque étape rejoue le modèle : autant d'appels de prédiction que
+        # d'étapes, au fit comme au transform
+        model = monthly[0].model
+        fit_calls = len(model.predict_X_)
+        _transform_quietly(imputer, mixed_freq_panel_multifrequency)
+        assert len(model.predict_X_) == 2 * fit_calls
+
+        # Et la symétrie tient malgré le partage
+        combined = _fit_transform_quietly(
+            _make_imputer(estimator=_SpyEstimator()), mixed_freq_panel_multifrequency
+        )
+        separate = _make_imputer(estimator=_SpyEstimator())
+        _fit_quietly(separate, mixed_freq_panel_multifrequency)
+        pd.testing.assert_frame_equal(
+            combined, _transform_quietly(separate, mixed_freq_panel_multifrequency)
+        )
+
+
+class TestNewEntityAtTransform:
+    """D34 — une entité absente du fit, rencontrée au transform."""
+
+    # Fixture privée d'une entité ajoutée après le fit
+    @staticmethod
+    def _with_new_entity(data: pd.DataFrame) -> pd.DataFrame:
+        """PANEL-F augmenté d'une entité ES, dont 'v' n'est jamais observée."""
+        added = data.xs('IT', level=0, drop_level=False).copy()
+        added.index = pd.MultiIndex.from_arrays(
+            [
+                ['ES'] * len(added),
+                added.index.get_level_values(-1),
+            ],
+            names=data.index.names,
+        )
+        added['v'] = np.nan
+        return pd.concat([data, added]).sort_index()
+
+    def test_new_entity_is_left_untouched_by_default(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Sous False, rien ne lui est écrit et un avertissement la nomme."""
+        imputer = _fit_quietly(_make_imputer(), mixed_freq_panel_multifrequency)
+        extended = self._with_new_entity(mixed_freq_panel_multifrequency)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            result = imputer.transform(extended)
+
+        messages = [str(w.message) for w in caught if 'absent from the fit' in str(w.message)]
+        assert len(messages) == 1
+        assert 'ES' in messages[0]
+
+        # Les 36 cellules de 'v' restent vides
+        target = result.xs('M', level='frequency')
+        assert target.xs('ES', level=0)['v'].isna().all()
+        # Les autres entités sont intactes
+        reference = _transform_quietly(imputer, mixed_freq_panel_multifrequency)
+        for entity in ('FR', 'DE', 'IT'):
+            pd.testing.assert_series_equal(
+                result.xs('M', level='frequency').xs(entity, level=0)['v'],
+                reference.xs('M', level='frequency').xs(entity, level=0)['v'],
+            )
+
+    def test_new_entity_is_imputed_on_demand(self, mixed_freq_panel_multifrequency):
+        """Sous True, elle est imputée sans ancre, par le modèle du plan."""
+        imputer = _fit_quietly(
+            _make_imputer(impute_unobserved_entities=True),
+            mixed_freq_panel_multifrequency,
+        )
+        extended = self._with_new_entity(mixed_freq_panel_multifrequency)
+        result = _transform_quietly(imputer, extended)
+
+        target = result.xs('M', level='frequency').xs('ES', level=0)
+        # Les 36 cellules sont renseignées
+        assert target['v'].notna().sum() == 36
+        # Elles portent la provenance des cellules sans ancre
+        provenance = (
+            imputer.imputation_provenance_
+            .xs('M', level='frequency').xs('ES', level=0)['v']
+        )
+        assert set(provenance.dropna().unique()) == {ProvenanceType.MODEL_UNANCHORED}
+
+
+class TestSklearnConformance:
+    """I9 — conformité sklearn de bout en bout (§12.5)."""
+
+    # Cible de panel par entité, forme dict du §13.1
+    _TARGET = {('FR',): 'M', ('DE',): 'M', ('IT',): 'M'}
+
+    def test_pipeline_fit_transform(self, mixed_freq_panel_multifrequency):
+        """L'imputeur s'insère dans un `Pipeline` sklearn et le traverse."""
+        pipeline = Pipeline([
+            ('imputer', HighFrequencyImputer2(
+                target_frequency=self._TARGET,
+                estimator=LinearRegression(),
+                keep_lower_frequencies=False,
+            )),
+        ])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = pipeline.fit_transform(mixed_freq_panel_multifrequency)
+
+        assert isinstance(result, pd.DataFrame)
+        assert list(result.columns) == list(mixed_freq_panel_multifrequency.columns)
+        # Le clone du pipeline reste conforme : les paramètres traversent
+        assert clone(pipeline).get_params()['imputer__target_frequency'] == self._TARGET
+
+    def test_grid_search_on_panel_with_target_frequency_dict(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """`GridSearchCV` explore l'imputeur sur un panel à cible par entité."""
+        panel = mixed_freq_panel_multifrequency
+        X = panel[['m1', 'q1']]
+        y = panel['v']
+
+        # Découpage par DATE, pour que les deux plis restent des panels
+        # complets : un pli privé d'entité relèverait de D34, pas d'ici
+        dates = panel.index.get_level_values(-1)
+        cutoff = pd.Timestamp('2022-12-31')
+        split = [(
+            np.flatnonzero(dates <= cutoff),
+            np.flatnonzero(dates > cutoff),
+        )]
+
+        pipeline = XYPipeline([
+            ('imputer', HighFrequencyImputer2(
+                target_frequency=self._TARGET,
+                estimator=LinearRegression(),
+                keep_lower_frequencies=False,
+            )),
+            ('fill', SimpleImputer()),
+            ('regressor', LinearRegression()),
+        ])
+        search = GridSearchCV(
+            pipeline,
+            {'imputer__covariate_strategy': ['interpolate', 'model']},
+            cv=split,
+            error_score='raise',
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            search.fit(X, y)
+
+        assert search.best_params_['imputer__covariate_strategy'] in (
+            'interpolate', 'model'
+        )
+        assert np.isfinite(search.best_score_)

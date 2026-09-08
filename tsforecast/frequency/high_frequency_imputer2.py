@@ -2,6 +2,8 @@
 # Importation des modules
 # Modules de base
 import warnings
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import (
     Any,
@@ -53,6 +55,7 @@ from .imputation_plan2 import (
     append_step,
     to_entity_tuple,
 )
+from .imputation_plan2 import _scale_equal as _scale_factors_equal
 from .imputation_window import (
     ImputationScope,
     ImputationWindowCalculator,
@@ -108,9 +111,6 @@ ELIGIBLE_ORIGINS: Dict[Any, Tuple[CellOrigin, ...]] = {
     'covariates_only': ('observed',),
     True: ('observed', 'interpolated', 'model'),
 }
-
-# Lot livrant "transform" / "inverse_transform" ([SPEC] §17) /!\
-_TRANSFORM_LOT = 'L12'
 
 
 # Contexte d'ajustement d'une variable à une étape
@@ -221,10 +221,14 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
     never across stages.
 
     ``keep_lower_frequencies`` is a **pure display parameter**: it governs how
-    the frequency levels of the output are stacked, never the logic. Under
-    ``impute_intermediate_frequencies=False`` there is **no intermediate
-    level to stack** — the output carries the source level and the target
-    level, and nothing in between.
+    the frequency levels of the output are stacked, never the logic — the
+    values of the target level are the same either way. The levels stacked are
+    the stages of the progression, so under
+    ``impute_intermediate_frequencies=False`` there is **no intermediate level
+    to stack**: the output carries the target level and nothing else.
+    The frequency level sits on the entity side of the index, the shape:
+    ``(frequency, date)`` on a time series, ``(entity..., 'frequency',
+    'date')`` on a panel.
 
     **The price of** ``impute_intermediate_frequencies=False``: on a time
     series, ``y_train`` of an annual variable observed at three anchors holds
@@ -433,8 +437,12 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             ``imputation_window_`` carried the strict bounds: here each
             attribute carries the bounds of its own mask, and
             ``strict_window_mask_`` is the sole holder of the strict window.
-        imputation_provenance_: Provenance matrix after ``fit``, then after
-            ``transform``.
+        imputation_provenance_: Provenance matrix. Written by ``fit``, then
+            overwritten by every ``transform``: it always describes the
+            last pass, which is what ``inverse_transform`` undoes. It follows
+            the shape of the output — stacked on the frequency level under
+            ``keep_lower_frequencies=True``, flat otherwise — and ``fit``
+            purges the transform's copy in its first phase.
         feature_columns_: Columns of ``X`` as received.
         target_column_: Name under which ``y`` was merged, or None.
         entities_: Entity keys of the panel, or None on a time series.
@@ -1099,14 +1107,22 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             >>> imputer._detected_frequencies_by_column()   # doctest: +SKIP
             {'m1': 'M', 'q1': 'Q', 'v': {('FR',): 'Y', ('DE',): 'Q'}}
         """
+        # Couples apparus au transform : aucune fréquence de fit ne les porte,
+        # la détection faite sur les données du transform est leur seule
+        # source. Les couples du fit, eux, ne sont jamais recouverts
+        pairs: Dict[Union[str, tuple], str] = {
+            **getattr(self, '_transform_frequencies', {}),
+            **self.detected_frequencies_,
+        }
+
         # Cas des séries temporelles : les clés sont déjà des noms de colonnes
         if not self.is_panel_:
-            return dict(self.detected_frequencies_)
+            return dict(pairs)
 
         # Cas du panel : regroupement par colonne, puis repli sur la forme
         # scalaire quand toutes les entités s'accordent
         by_column: Dict[str, Dict[EntityKey, str]] = {}
-        for key, freq in self.detected_frequencies_.items():
+        for key, freq in pairs.items():
             entity, column = split_variable_key(key)
             by_column.setdefault(column, {})[entity] = freq
 
@@ -3318,6 +3334,13 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         values = pd.Series(
             np.asarray(predictions, dtype=float).ravel(), index=grid, name=step.var_name
         )
+        # Report court-circuité : les deux facteurs sont le même
+        # objet tant que le modèle est ajusté pour l'étape courante. Diviser
+        # puis multiplier n'ajouterait que du bruit d'arrondi et, sous
+        # 'calendar', désalignerait une Series figée sur la grille du fit
+        # contre celle du transform — donc rendrait tout NaN
+        if _scale_factors_equal(step.scale_factor, step.fit_scale_factor):
+            return values
         return self._stage_scaler.invert(
             self._stage_scaler.apply(values, step.scale_factor), step.fit_scale_factor
         )
@@ -3582,10 +3605,10 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
 
         Raises:
             NotFittedError: If ``fit`` has not run (B20).
-            NotImplementedError: Always, until lot L12.
+            ValueError: If a column of the fit is missing from ``X`` (D11).
         """
-        # Vérification d'ajustement avant toute autre chose : sans elle, le
-        # NotImplementedError de "_transform" masquerait le NotFittedError
+        # Vérification d'ajustement avant toute autre chose : sans elle,
+        # l'erreur de "_transform" masquerait le NotFittedError
         self._check_fitted()
         return super().transform(X, y)
 
@@ -3602,57 +3625,994 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
 
         Raises:
             NotFittedError: If ``fit`` has not run (B20).
-            NotImplementedError: Always, until lot L12.
+            ValueError: If no ``transform`` preceded the call.
         """
         # Même ordre que "transform" : ajustement d'abord
         self._check_fitted()
         return super().inverse_transform(X, y)
 
-    # Méthode de transformation, livrée par le lot L12
+    # -------------------------------------------------------------------------
+    # Transform — rejeu du plan figé
+    # -------------------------------------------------------------------------
+    # Gestionnaire de contexte installant l'état de rejeu
+    @contextmanager
+    def _replay_state(
+        self,
+        window_calc: ImputationWindowCalculator,
+        tracker: ImputationProvenanceTracker,
+        frequencies: Dict[Union[str, tuple], str],
+    ):
+        """Install the transform state around a replay, then restore the fit's.
+
+        The step execution of ``fit`` reads its window calculator, its
+        provenance tracker, its warning accumulators and its three registers
+        from the instance. Swapping them here is what lets ``transform`` reuse
+        :meth:`_execute_step` **as is** rather than carry a second execution
+        loop.
+
+        Args:
+            window_calc: Window calculator recomputed on the transformed data..
+            tracker: Provenance tracker of this transform, already initialized
+                on the frame produced by the additive transformer.
+            frequencies: Frequencies detected for the (entity, column) pairs
+                the fit never saw, the only ones no fit value can be replayed
+                for.
+
+        Yields:
+            None. The fit state is restored on the way out, exception
+            included.
+        """
+        # Mémorisation de l'état du fit, restauré en sortie
+        saved = (
+            self._imputation_window_calc,
+            self._provenance_tracker,
+            self._warnings,
+            self._unanchored_written,
+            self._unanchored_failures,
+            getattr(self, '_transform_frequencies', {}),
+            getattr(self, '_replay_notes', []),
+        )
+        self._imputation_window_calc = window_calc
+        self._provenance_tracker = tracker
+        self._warnings = []
+        self._unanchored_written = set()
+        self._unanchored_failures = []
+        self._transform_frequencies = dict(frequencies)
+        self._replay_notes = []
+        # Registres du transform : recalculés, jamais hérités du fit
+        self._covariate_materializer.reset()
+        try:
+            yield
+        finally:
+            (
+                self._imputation_window_calc,
+                self._provenance_tracker,
+                self._warnings,
+                self._unanchored_written,
+                self._unanchored_failures,
+                self._transform_frequencies,
+                self._replay_notes,
+            ) = saved
+
+    # Méthode auxiliaire de contrôle des fréquences au transform
+    def _check_transform_frequencies(
+        self,
+        X_work: pd.DataFrame,
+    ) -> Dict[Union[str, tuple], str]:
+        """Compare the frequencies of the transform with those of the fit.
+
+        The comparison is made **pair by pair** — ``(entity..., column)`` — and
+        never column by column: on a panel the same column may legitimately
+        carry a different frequency for each entity, and a
+        per-column comparison would report a false divergence at every
+        transform.
+
+        Args:
+            X_work: Working frame of the transform, before the additive
+                transformer.
+
+        Returns:
+            Frequencies detected for the pairs the fit never saw — a new entity
+            of a known column. Their frequency cannot be replayed, so this is
+            the only one available.
+
+        Raises:
+            ValueError: If a column known at fit time is absent from the data
+                being transformed. The message names the missing columns.
+        """
+        # Colonnes du fit, couples indétectables compris : une colonne
+        # entièrement NaN au fit reste une colonne attendue au transform
+        fit_columns = {
+            split_variable_key(key)[1]
+            for key in (*self.detected_frequencies_, *self._undetected_frequencies_)
+        }
+        # Colonnes disparues : erreur nommant les colonnes, jamais un silence
+        missing = sorted(
+            column for column in fit_columns if column not in X_work.columns
+        )
+        if missing:
+            raise ValueError(
+                f"transform is missing {len(missing)} column(s) seen at fit "
+                f"time: {missing}. Every column of the fit must be present, "
+                f"even entirely empty: it is part of the frozen plan. Extra "
+                f"columns, on the other hand, are ignored."
+            )
+
+        # Redétection sur les données du transform
+        detected = self._detect_frequencies_robustly(X_work)
+
+        # Divergences, couple par couple, sur les seules clés communes
+        diverging: List[Tuple[Any, str, str]] = []
+        for key, freq in detected.items():
+            fit_freq = self.detected_frequencies_.get(key)
+            if freq is None or fit_freq is None:
+                continue
+            if (
+                normalize_frequency(freq, return_format='base')
+                != normalize_frequency(fit_freq, return_format='base')
+            ):
+                diverging.append((key, fit_freq, freq))
+
+        # Avertissement uniquement, puis poursuite avec les fréquences du fit :
+        # "_detected_frequencies_by_column" ne lit que "detected_frequencies_"
+        if diverging:
+            listing = ', '.join(
+                f"{key!r}: fit={fit_freq}, transform={freq}"
+                for key, fit_freq, freq in sorted(
+                    diverging, key=lambda item: repr(item[0])
+                )
+            )
+            warnings.warn(
+                f"{len(diverging)} (entity, column) pair(s) carry a different "
+                f"frequency at transform time; the fit frequencies are kept: "
+                f"{listing}",
+                UserWarning,
+            )
+
+        # Couples inconnus du fit, sur des colonnes du fit : leur fréquence est
+        # celle qu'on vient de détecter, aucune autre n'existe
+        return {
+            key: freq
+            for key, freq in detected.items()
+            if freq is not None
+            and key not in self.detected_frequencies_
+            and split_variable_key(key)[1] in fit_columns
+        }
+
+    # Méthode auxiliaire de l'avertissement unique des lignes hors fenêtre
+    def _warn_rows_outside_window(
+        self,
+        window_calc: ImputationWindowCalculator,
+        X_work: pd.DataFrame,
+    ) -> None:
+        """Warn once about the rows the recomputed window leaves out.
+
+        The window is a constraint on data availability, not a learned
+        parameter: it is recomputed on the transformed data. Rows falling
+        outside it are simply not predicted — nothing is ever blanked — and a
+        single aggregated message names how many they are and which entities
+        they belong to.
+
+        Args:
+            window_calc: Window calculator fitted on the transformed data.
+            X_work: Working frame of the transform.
+        """
+        # Masque de prédiction, "kind" nommé explicitement
+        try:
+            mask = window_calc.get_imputation_window_mask(X_work, kind='imputation')
+        except (ValueError, KeyError, TypeError):
+            return
+
+        # Lignes du périmètre laissées hors fenêtre
+        outside = mask.index[~mask.to_numpy(dtype=bool)]
+        if len(outside) == 0:
+            return
+
+        # Entités concernées, nommées dans le message agrégé
+        entities = tuple(self._index_entities(outside)) if self.is_panel_ else ()
+        warnings.warn(
+            f"{len(outside)} row(s) of the data being transformed fall outside "
+            f"the imputation window recomputed on them"
+            + (f", for entities {entities}" if entities else "")
+            + ". These rows keep their input values: nothing is ever blanked.",
+            UserWarning,
+        )
+
+    # Méthode auxiliaire des entités apparues au transform
+    def _new_entities(self, X_work: pd.DataFrame) -> Tuple[EntityKey, ...]:
+        """List the entities of the transform the fit never saw.
+
+        Args:
+            X_work: Working frame of the transform.
+
+        Returns:
+            Normalized entity keys, in order of appearance. Empty on a time
+            series.
+        """
+        # Série temporelle : aucune entité, donc aucune nouveauté possible
+        if not self.is_panel_ or not self.entities_:
+            return ()
+
+        # Entités du fit, sous forme normalisée
+        known = {normalize_entity_key(entity) for entity in self.entities_}
+        return tuple(
+            entity
+            for entity in self._index_entities(X_work.index)
+            if entity not in known
+        )
+
+    # Méthode auxiliaire d'extension de la liaison d'étape aux entités nouvelles
+    def _extend_stage_binding(
+        self,
+        stage_freq: Union[str, Dict[EntityKey, str]],
+        new_entities: Sequence[EntityKey],
+        stage_label: str,
+    ) -> Union[str, Dict[EntityKey, str]]:
+        """Bind the entities born at transform time to a stage frequency.
+
+        A new entity carries no ``target_frequency`` entry — a dict one is
+        checked against the entities of the fit — so it can only join a stage
+        whose entities agree on one single frequency. When they disagree no
+        rule departs them, and the entity is left out of that stage and named
+        by the aggregated warning.
+
+        Args:
+            stage_freq: Frequency of the stage, scalar or per entity.
+            new_entities: Entities the fit never saw.
+            stage_label: Readable label of the stage, for the message.
+
+        Returns:
+            The binding extended to the new entities, or the original one.
+        """
+        # Rien à étendre, ou étape scalaire (série temporelle)
+        if not new_entities or not isinstance(stage_freq, dict):
+            return stage_freq
+
+        # Unanimité des entités de l'étape
+        unique = {
+            normalize_frequency(freq, return_format='base')
+            for freq in stage_freq.values()
+        }
+        if len(unique) != 1:
+            self._replay_notes.append(
+                f"stage {stage_label}: its entities disagree on the stage "
+                f"frequency, so the entities born at transform time "
+                f"{tuple(new_entities)} cannot be bound to it and are skipped"
+            )
+            return stage_freq
+
+        shared = unique.pop()
+        return {**stage_freq, **{entity: shared for entity in new_entities}}
+
+    # Méthode auxiliaire des étapes sans ancre des entités nouvelles
+    def _new_entity_steps(
+        self,
+        steps: Sequence[ImputationStep],
+        new_entities: Sequence[EntityKey],
+        binding: Union[str, Dict[EntityKey, str]],
+    ) -> List[ImputationStep]:
+        """Derive the unanchored steps of the entities born at transform time.
+
+        An entity absent from the fit is, by construction, an entity without
+        any anchor: it falls under ``impute_unobserved_entities``, and under it
+        only. The step is derived from a step of the same
+        (stage, variable) — same model object (``is``), same ``feature_cols``,
+        same materialization ways — so nothing is decided here: only the
+        entities, the absence of source frequency and the neutral scale change.
+
+        Such a step never enters ``imputation_plan_``: the plan is the state of
+        the fit.
+
+        Args:
+            steps: Plan steps of the stage, in plan order.
+            new_entities: Entities the fit never saw.
+            binding: Stage binding, already extended (or not) to them.
+
+        Returns:
+            One step per column imputed at that stage, empty when the parameter
+            is off or when no new entity could be bound.
+        """
+        # Paramètre éteint, ou aucune entité nouvelle : rien à dériver
+        if not new_entities or not self.impute_unobserved_entities:
+            return []
+
+        # Entités effectivement liées à l'étape
+        bound = [
+            entity
+            for entity in new_entities
+            if not isinstance(binding, dict) or entity in binding
+        ]
+        if not bound:
+            return []
+
+        # Un représentant par colonne, dans l'ordre du plan
+        derived: List[ImputationStep] = []
+        seen: set = set()
+        for step in steps:
+            if step.var_name in seen:
+                continue
+            seen.add(step.var_name)
+            derived.append(
+                replace(
+                    step,
+                    source_frequency=None,
+                    entities=to_entity_tuple(bound),
+                    scale_factor=1.0,
+                    fit_scale_factor=1.0,
+                    unanchored=True,
+                )
+            )
+        return derived
+
+    # Méthode de rejeu du plan, étape de fréquence par étape de fréquence
+    def _replay_plan(
+        self,
+        X_stage: pd.DataFrame,
+    ) -> Tuple["OrderedDict[str, pd.DataFrame]", "OrderedDict[str, pd.DataFrame]"]:
+        """Replay every frozen step of the plan, in the order of the fit.
+
+        Nothing is decided here: the classification, the progression, the
+        variable order, the models, the ``feature_cols``, the materialization
+        ways and the taints all come from the plan. Only the windows, the stage
+        frames, the interpolated values, the predictions, the rescaling and the
+        provenance are recomputed.
+
+        Args:
+            X_stage: Working frame after the additive transformer. Never
+                modified: the imputations travel through the registers of
+                :class:`CovariateMaterializer`, exactly as at fit time.
+
+        Returns:
+            Tuple ``(frames, provenances)``, both keyed by stage label in
+            progression order — the stacking order of the multi-frequency
+            output.
+        """
+        # Initialisation des jeux de données et des provenances
+        frames: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
+        provenances: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
+
+        # Étapes du plan, indexées par label d'étape
+        by_stage = self.imputation_plan_.by_stage()
+        # Entités nées au transform
+        new_entities = self._new_entities(X_stage)
+        # Entités nouvelles laissées de côté faute de paramètre : une note
+        if new_entities and not self.impute_unobserved_entities:
+            self._replay_notes.append(
+                f"{len(new_entities)} entity/entities absent from the fit "
+                f"{new_entities} are left untouched "
+                f"(impute_unobserved_entities=False)"
+            )
+
+        # Report de fréquence : dernière étape traversée par chaque entité
+        carried: Dict[EntityKey, str] = {}
+        last_position = len(self.frequency_progression_) - 1
+        # Parcours des étapes de la progression, rejouée telle quelle
+        for position, stage_freq in enumerate(self.frequency_progression_):
+            stage_label = self._stage_frequency_label(stage_freq)
+            # Liaison de fréquence, étendue aux entités nouvelles (D34)
+            binding = self._extend_stage_binding(stage_freq, new_entities, stage_label)
+
+            # Étapes de plan de l'étape, puis celles des entités nouvelles
+            steps = list(by_stage.get(stage_label, ()))
+            steps = steps + self._new_entity_steps(steps, new_entities, binding)
+            # Logging
+            self._log(
+                f"[transform] stage {stage_label}: replaying {len(steps)} step(s)"
+            )
+            # Exécution par LA MÊME méthode qu'au fit
+            for step in steps:
+                self._execute_step(step, X_work=X_stage, stage_freq=binding)
+
+            # Liaison complète, pour la sortie : une entité que l'étape ne
+            # concerne pas garde les lignes de son dernier passage, et une
+            # liaison partielle ferait échouer la lecture du masque, qui
+            # retomberait alors sans bruit sur tout l'index
+            output_binding = self._output_binding(binding, carried, X_stage)
+
+            # Grille de la frame : l'INDEX du masque, jamais ses seules lignes
+            # vraies — les lignes hors fenêtre restent dans la sortie avec
+            # leurs valeurs d'entrée, aucune observation n'est détruite
+            grid = self._stage_mask(X_stage, output_binding, kind='imputation').index
+            # Étape finale : aucune ligne d'entrée ne peut manquer à la sortie
+            if position == last_position:
+                absent = X_stage.index.difference(grid)
+                if len(absent) > 0:
+                    grid = grid.append(absent)
+
+            # Frame d'étape reconstruite après les écritures, puis recouverte
+            # par les imputations : "stage_frame" ne lit le miroir que sous
+            # "covariate_strategy='model'", et la sortie doit le porter sous
+            # toutes les stratégies
+            frame = self._covariate_materializer.stage_frame(
+                grid_index=grid,
+                stage_freq=output_binding,
+                detected_frequencies=self._detected_frequencies_by_column(),
+                source_data=X_stage,
+            )
+            # Noms de l'index d'entrée : la grille vient d'un masque converti,
+            # qui ne les porte pas, et la sortie doit rester lisible comme
+            # l'entrée — empilée ou non
+            if grid.nlevels == X_stage.index.nlevels:
+                frame = frame.rename_axis(X_stage.index.names)
+            frames[stage_label] = self._overlay_imputations(frame, output_binding)
+
+            # Instantané de provenance, pris au même instant et réindexé sur la
+            # grille de l'étape : la matrice partage ainsi l'index de la sortie,
+            # que "_inverse_transform" lit ensuite masque contre masque
+            snapshot = self._provenance_tracker.get_provenance_matrix()
+            provenances[stage_label] = (
+                snapshot.reindex(index=grid, columns=frame.columns)
+                .fillna(ProvenanceType.ORIGINAL)
+                .rename_axis(frame.index.names)
+            )
+
+            # Report : chaque entité de l'étape y inscrit sa fréquence, lue par
+            # les étapes suivantes qui ne la concernent plus
+            if isinstance(binding, dict):
+                carried.update(binding)
+
+        return frames, provenances
+
+    # Méthode auxiliaire de la liaison de fréquence de la sortie d'une étape
+    def _output_binding(
+        self,
+        binding: Union[str, Dict[EntityKey, str]],
+        carried: Dict[EntityKey, str],
+        X_stage: pd.DataFrame,
+    ) -> Union[str, Dict[EntityKey, str]]:
+        """Complete a stage binding with the entities the stage leaves out.
+
+        A stage of a panel binds only the entities it concerns: the
+        others have either already reached their target frequency or not yet
+        entered the progression. The output, however, has to carry every
+        entity, so each of them is bound to the frequency of its last stage —
+        its target frequency when it has not travelled any stage yet.
+
+        Args:
+            binding: Execution binding of the stage, extended to the entities
+                born at transform time.
+            carried: Frequency of the last stage each entity took part in.
+            X_stage: Working frame, source of the entity list.
+
+        Returns:
+            The binding itself on a time series; a mapping naming every entity
+            of the data otherwise.
+        """
+        # Série temporelle : la forme scalaire est la seule qui ait un sens
+        if not isinstance(binding, dict):
+            return binding
+
+        completed = dict(binding)
+        for entity in self._index_entities(X_stage.index):
+            if entity in completed:
+                continue
+            # Report du dernier passage, à défaut la cible de l'entité, à
+            # défaut encore la fréquence de l'étape : une entité sans
+            # fréquence sortirait de la grille de sortie, donc du résultat
+            frequency = (
+                carried.get(entity)
+                or self._entity_target_frequency(entity)
+                or next(iter(binding.values()), None)
+            )
+            if frequency is not None:
+                completed[entity] = frequency
+        return completed
+
+    # Méthode auxiliaire de recouvrement d'une frame par les imputations
+    def _overlay_imputations(
+        self,
+        frame: pd.DataFrame,
+        output_binding: Union[str, Dict[EntityKey, str]],
+    ) -> pd.DataFrame:
+        """Lay the imputations of the mirror over a stage frame.
+
+        ``stage_frame`` fabricates nothing: it carries the input values and
+        the exact aggregations, and reads the mirror only under
+        ``covariate_strategy='model'``. The output must show the imputations
+        under every strategy, and they must win over the raw anchor of a
+        lower-frequency column — an anchor row re-expressed no longer carries
+        the total of its period.
+
+        Only the cells produced at the frequency of the row are laid over: a
+        value produced at an earlier, coarser stage would otherwise land on a
+        finer grid at the magnitude of another period.
+
+        Args:
+            frame: Stage frame, as built by the materializer.
+            output_binding: Complete frequency binding of the frame's grid.
+
+        Returns:
+            The frame, imputations included.
+        """
+        # Extraction du matérialiseur
+        materializer = self._covariate_materializer
+        # Aucune production : la frame est déjà la sortie de l'étape
+        if not materializer.imputed_store:
+            return frame
+
+        # Fréquence d'étape de chaque ligne de la grille
+        row_frequency = pd.Series(
+            self._stage_frequency_of(output_binding, frame.index), index=frame.index
+        )
+
+        # Initialisation du jeu de données résultat
+        result = frame.copy()
+        # Parcours des colonnes
+        for column in result.columns:
+            # Cellules imputées
+            produced = materializer.imputed_store.get(column)
+            if produced is None:
+                continue
+            values = produced.reindex(frame.index)
+            # Fréquence de production, cellule par cellule
+            produced_frequency = materializer.imputed_freq_store[column].reindex(
+                frame.index
+            )
+            # Cellules de l'étape courante, les seules à la bonne échelle
+            kept = values.where(
+                values.notna() & produced_frequency.eq(row_frequency)
+            )
+            result[column] = kept.combine_first(result[column])
+        return result
+
+    # Méthode de transformation : rejeu du plan figé
     def _transform(self, X, y=None):
         """Replay the fitted plan on new data.
 
-        Deliberately NOT implemented in this lot. A provisional version would
-        survive and drift away from the fit — defects B7/B27, the very motive
-        of this architecture: ``fit`` and ``transform`` must share ONE
-        implementation of step execution, which lot L10 delivers first.
+        Phases 0'-4' recompute what depends on the data — ``y`` alignment and
+        naming by the same functions as the fit, the additive transformer
+        applied with the fitted object, the provenance tracker initialized
+        after it, the windows recomputed and the frequency check
+        — then every frozen step is replayed by :meth:`_execute_step`,
+        the very method the fit calls. No second execution loop, and no
+        training set is ever rebuilt: the ``TrainingSetBuilder`` is not on this
+        path.
 
-        Note for that lot, on the unanchored pairs of section 5.10: the
-        behavior is to be carried over as-is — an entity without any anchor
-        at ``fit`` stays without any anchor at ``transform``, its cells being
-        replayed by the very same plan step, unrescaled and marked
-        ``MODEL_UNANCHORED`` — and an entity NEW at ``transform`` falls under
-        that very mechanism, gated by the same parameter.
+        Note:
+            This method is stateful: it snapshots its input in ``_original_X_``
+            / ``_original_y_`` and overwrites ``imputation_provenance_`` at
+            each call. :meth:`_inverse_transform` reads them back and therefore
+            always inverts the last transform. ``fit`` purges the three.
 
         Args:
             X: Features to transform.
             y: Target to transform (optional).
 
+        Returns:
+            The transformed features, or the pair ``(X, y)`` when ``y`` is
+            given. Under ``keep_lower_frequencies=True`` the index carries a
+            ``'frequency'`` level.
+
         Raises:
-            NotImplementedError: Always, until lot L12.
+            ValueError: If ``X`` is not a DataFrame, if it carries no usable
+                temporal index, or if a column of the fit is missing.
+
+        Examples:
+            >>> imputed = imputer.fit(df).transform(df)      # doctest: +SKIP
         """
-        raise NotImplementedError(
-            f"HighFrequencyImputer2.transform is delivered by lot "
-            f"{_TRANSFORM_LOT} ([SPEC] §12.4). The lots delivered so far "
-            f"cover __init__ and fit phases 0 to 6 only."
+        # =================================================================
+        # PHASE 0' — Setup, contrat d'entrée et instantané
+        # =================================================================
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError(f"X must be a pandas DataFrame, got {type(X).__name__}")
+
+        # Alignement de l'index de y sur celui de X, par la même fonction qu'au
+        # fit : deux règles de nommage divergentes ont déjà fait perdre la cible
+        # parmi les colonnes d'étapes
+        if y is not None:
+            y = self._align_target_index(X, y)
+
+        # Instantané de l'entrée du dernier transform, lu par l'inversion
+        self._original_X_ = X.copy()
+        self._original_y_ = y.copy() if y is not None else None
+
+        # Concaténation en un unique jeu de travail
+        y_col_name: Optional[str] = None
+        if y is not None:
+            y_col_name = self._resolve_target_column_name(y)
+            X_work = pd.concat([X, y.to_frame(name=y_col_name)], axis=1)
+        else:
+            X_work = X.copy()
+
+        # Index temporel exploitable
+        if not isinstance(X_work.index, (pd.DatetimeIndex, pd.MultiIndex)):
+            if self.time_col and self.time_col in X_work.columns:
+                X_work = X_work.set_index(self.time_col)
+            else:
+                raise ValueError("Data must have a DatetimeIndex or MultiIndex")
+
+        # Contrôle des fréquences (D11) : erreur sur colonne manquante,
+        # avertissement unique sur divergence, silence sur colonne en trop
+        new_frequencies = self._check_transform_frequencies(X_work)
+
+        # =================================================================
+        # PHASE 1' — Fenêtres recalculées
+        # =================================================================
+        # Calcul au même stade qu'au fit — avant le transformateur additif —
+        # pour que le recalcul sur les données du fit redonne exactement la
+        # fenêtre du fit, et donc "fit_transform(X) == fit(X).transform(X)"
+        window_calc, window_error = self._fit_imputation_window(X_work)
+        if window_calc is None:
+            warnings.warn(
+                f"Could not calculate the imputation window of the data being "
+                f"transformed: {window_error}. Using all available data.",
+                UserWarning,
+            )
+            # Calculateur non ajusté : les gardes des consommateurs le neutralisent
+            window_calc = self._make_window_calculator()
+        else:
+            self._warn_rows_outside_window(window_calc, X_work)
+
+        # =================================================================
+        # PHASE 2' — Transformateur additif, avec l'objet ajusté
+        # =================================================================
+        if self.additive_transformer_ is not None:
+            X_stage = self.additive_transformer_.transform(X_work)
+            # Déballage du couple (X, y) que renvoie un transformateur XY
+            if isinstance(X_stage, tuple):
+                X_stage = X_stage[0]
+        else:
+            X_stage = X_work.copy()
+
+        # =================================================================
+        # PHASE 3'-4' — Provenance, initialisée après lui
+        # =================================================================
+        tracker = ImputationProvenanceTracker()
+        tracker.initialize(X_stage, panel_cols=self.panel_cols)
+
+        # =================================================================
+        # PHASE 5' — Rejeu du plan
+        # =================================================================
+        with self._replay_state(window_calc, tracker, new_frequencies):
+            frames, provenances = self._replay_plan(X_stage)
+            # Avertissements accumulés pendant le rejeu, relevés avant que le
+            # contexte ne restaure les accumulateurs du fit
+            degraded = list(self._warnings)
+            unanchored_failures = sorted(set(self._unanchored_failures), key=repr)
+            notes = list(self._replay_notes)
+
+        # Avertissements agrégés, un message par famille
+        if degraded:
+            warnings.warn(
+                f"{len(degraded)} imputation step(s) degraded during the "
+                f"transform:\n  - " + "\n  - ".join(degraded),
+                UserWarning,
+            )
+        if unanchored_failures:
+            warnings.warn(
+                f"{len(unanchored_failures)} unobserved (entity, column) "
+                f"pair(s) could not be imputed for lack of usable covariates "
+                f"on the target grid; their cells stay NaN and ORIGINAL: "
+                f"{unanchored_failures}",
+                UserWarning,
+            )
+        if notes:
+            warnings.warn(
+                f"{len(notes)} case(s) of entities outside the frozen plan at "
+                f"transform time:\n  - " + "\n  - ".join(notes),
+                UserWarning,
+            )
+
+        # =================================================================
+        # PHASE 6' — Sortie multi-fréquences et provenance
+        # =================================================================
+        if not frames:
+            # Progression sans étape : rien n'a été produit
+            data_result = X_stage
+            self.imputation_provenance_ = tracker.get_provenance_matrix()
+        elif self.keep_lower_frequencies:
+            data_result = self._build_multifreq_output(frames)
+            self.imputation_provenance_ = self._build_multifreq_output(provenances)
+        else:
+            final_label = list(frames)[-1]
+            data_result = frames[final_label]
+            self.imputation_provenance_ = provenances[final_label]
+
+        # Scission X / y
+        if y is not None and y_col_name in data_result.columns:
+            return data_result.drop(columns=[y_col_name]), data_result[y_col_name]
+        return data_result
+
+    # -------------------------------------------------------------------------
+    # Sortie multi-fréquences
+    # -------------------------------------------------------------------------
+    # Méthode auxiliaire d'empilage des niveaux de fréquence
+    def _build_multifreq_output(
+        self,
+        stage_frames: "OrderedDict[str, pd.DataFrame]",
+    ) -> pd.DataFrame:
+        """Stack the stage frames into one multi-frequency frame.
+
+        Backs ``keep_lower_frequencies=True``, a **pure display parameter**: it
+        governs how the levels of the output are stacked, never the logic. The
+        index adds the frequency level taht sits on the
+        entity side and every entity level of a panel is preserved with its
+        own name.
+
+        Under ``impute_intermediate_frequencies=False`` the progression holds
+        the target stage alone: the output then carries that single level,
+        there being no intermediate one to stack.
+
+        Args:
+            stage_frames: Stage frames keyed by frequency label, in progression
+                order. Each must already carry the imputations of its stage —
+                :meth:`_replay_plan` builds them after the writes.
+
+        Returns:
+            Frame with a MultiIndex ``(frequency, date)`` on a time series and
+            ``(entity..., 'frequency', 'date')`` on a panel.
+        """
+        # Empilage dans l'ordre d'insertion, l'étiquette de chaque bloc étant
+        # construite à part pour ne jamais entrer en collision avec une colonne
+        all_frames: List[pd.DataFrame] = []
+        freq_labels: List[np.ndarray] = []
+        for freq_label, frame in stage_frames.items():
+            all_frames.append(frame)
+            freq_labels.append(np.full(len(frame), freq_label, dtype=object))
+
+        combined = pd.concat(all_frames, ignore_index=False)
+        freq_values = np.concatenate(freq_labels)
+
+        # Construction du MultiIndex de sortie
+        if self.is_panel_ and isinstance(combined.index, pd.MultiIndex):
+            # Conservation de tous les niveaux d'entité, noms compris
+            n_entity = combined.index.nlevels - 1
+            entity_arrays = [
+                combined.index.get_level_values(level) for level in range(n_entity)
+            ]
+            entity_names = [
+                combined.index.names[level]
+                if combined.index.names[level] is not None
+                else ('entity' if n_entity == 1 else f'entity_{level}')
+                for level in range(n_entity)
+            ]
+            new_index = pd.MultiIndex.from_arrays(
+                [*entity_arrays, freq_values, combined.index.get_level_values(-1)],
+                names=[
+                    *entity_names,
+                    'frequency',
+                    combined.index.names[-1] or 'date',
+                ],
+            )
+        else:
+            new_index = pd.MultiIndex.from_arrays(
+                [freq_values, combined.index],
+                names=['frequency', combined.index.name or 'date'],
+            )
+
+        return combined.set_axis(new_index)
+
+    # -------------------------------------------------------------------------
+    # Transformation inverse
+    # -------------------------------------------------------------------------
+    # Méthode auxiliaire de présence du niveau de fréquence
+    @staticmethod
+    def _has_frequency_level(frame: pd.DataFrame) -> bool:
+        """Tell whether a frame carries the multi-frequency ``frequency`` level.
+
+        Args:
+            frame: Frame to inspect.
+
+        Returns:
+            True if its index is a MultiIndex holding a ``'frequency'`` level.
+        """
+        return (
+            isinstance(frame.index, pd.MultiIndex)
+            and 'frequency' in (frame.index.names or [])
         )
 
-    # Méthode de transformation inverse, livrée par le lot L12
+    # Méthode auxiliaire de sélection du niveau de fréquence à inverser
+    def _select_inverse_frequency_level(
+        self,
+        data: pd.DataFrame,
+        provenance: pd.DataFrame,
+    ) -> Optional[str]:
+        """Pick the frequency level to keep when inverting a stacked output.
+
+        The level of the source index is the one to keep: it is where the
+        values sit at the granularity of the data given to ``fit``. It may be
+        missing — an undetectable index frequency, or a frequency that never
+        was a stage — and the target level is then the best proxy, being the
+        only one always produced.
+
+        Args:
+            data: Frame to invert, stacked or not.
+            provenance: Provenance matrix of the last transform, stacked or not
+                — both follow ``keep_lower_frequencies``.
+
+        Returns:
+            The frequency label to keep, or None when neither frame carries a
+            frequency level.
+        """
+        # Recensement des labels disponibles, données et provenance confondues
+        available: List[str] = []
+        for frame in (data, provenance):
+            if self._has_frequency_level(frame):
+                available.extend(
+                    frame.index.get_level_values('frequency').unique().tolist()
+                )
+        if not available:
+            return None
+
+        # Priorité au niveau de l'index source
+        source_label = getattr(self, '_source_index_frequency_label', None)
+        if source_label is not None and source_label in available:
+            return source_label
+
+        # Repli sur le niveau cible, toujours produit
+        target_label = self._stage_frequency_label(self.effective_target_frequency_)
+        if target_label in available:
+            return target_label
+
+        # Dernier repli : le dernier niveau empilé, avec avertissement
+        warnings.warn(
+            f"Neither the source frequency level ({source_label}) nor the "
+            f"target one ({target_label}) is present in the data to invert. "
+            f"Falling back on the last stacked level {available[-1]!r}.",
+            UserWarning,
+        )
+        return available[-1]
+
+    # Méthode auxiliaire de suppression du niveau de fréquence
+    def _drop_frequency_level(
+        self,
+        frame: pd.DataFrame,
+        label: Optional[str],
+    ) -> pd.DataFrame:
+        """Reduce a stacked frame to one frequency level and restore its index.
+
+        Panel and time series are handled alike: the level is addressed by
+        name, never by position, and the names of the remaining levels are
+        restored from the last transform input.
+
+        Args:
+            frame: Frame to reduce, stacked or not.
+            label: Frequency label to keep. None leaves the frame untouched.
+
+        Returns:
+            The frame restricted to ``label``, without the frequency level.
+        """
+        # Frame déjà à un seul niveau de fréquence
+        if label is None or not self._has_frequency_level(frame):
+            return frame
+
+        # Niveau absent du frame : rien à extraire
+        if label not in frame.index.get_level_values('frequency'):
+            return frame
+        reduced = frame.xs(label, level='frequency')
+
+        # Restauration des noms de niveaux de l'index source
+        source = getattr(self, '_original_X_', None)
+        if source is not None:
+            source_names = list(source.index.names)
+            if len(source_names) == reduced.index.nlevels:
+                reduced = reduced.rename_axis(source_names)
+
+        return reduced
+
+    # Méthode auxiliaire de restauration des valeurs d'origine exactes
+    def _restore_original_values(
+        self,
+        data_result: pd.DataFrame,
+        y_col_name: Optional[str],
+    ) -> pd.DataFrame:
+        """Refill the cells observed in the last transform input.
+
+        Backs ``restore_original_values=True``: the ``ORIGINAL`` mask alone
+        drops the anchor dates of a lower-frequency variable, which the target
+        level holds as an imputation even though the input carried a true
+        observation there.
+
+        Args:
+            data_result: Frame restored from the provenance mask, at the source
+                index.
+            y_col_name: Column name given to ``y`` in the working frame.
+
+        Returns:
+            The frame with every cell observed in the snapshot set back to its
+            original value.
+        """
+        # Reconstruction de l'instantané de l'entrée du dernier transform
+        snapshot = self._original_X_
+        if self._original_y_ is not None and y_col_name is not None:
+            snapshot = pd.concat(
+                [snapshot, self._original_y_.to_frame(name=y_col_name)], axis=1
+            )
+
+        # Restriction aux colonnes et à l'index communs
+        common_cols = [c for c in data_result.columns if c in snapshot.columns]
+        if not common_cols:
+            return data_result
+        aligned = snapshot[common_cols].reindex(index=data_result.index)
+
+        # Les valeurs observées priment sur celles restaurées par la provenance
+        data_result = data_result.copy()
+        data_result[common_cols] = aligned.combine_first(data_result[common_cols])
+        return data_result
+
+    # Méthode de transformation inverse
     def _inverse_transform(self, X, y=None):
         """Undo the imputation and the additive transformer.
 
-        Deliberately NOT implemented in this lot, for the same reason as
-        :meth:`_transform`.
+        Mirror of :meth:`_transform`, driven by the provenance matrix of the
+        last transform rather than by the fit: inverting a transform run on new
+        data must undo what that very call produced. Four moves: keep the
+        frequency level of the source index and restore the index names,
+        set back to NaN every cell whose provenance is not ``ORIGINAL``, invert
+        the additive transformer last, then optionally restore the exact
+        original values.
 
         Args:
-            X: Transformed features.
+            X: Transformed features, as returned by ``transform``.
             y: Transformed target (optional).
 
+        Returns:
+            The original features, or the pair ``(X, y)`` when ``y`` is given.
+
         Raises:
-            NotImplementedError: Always, until lot L12.
+            ValueError: If ``transform`` was never called: the provenance
+                matrix it writes is what identifies the imputed cells.
+
+        Examples:
+            >>> restored = imputer.inverse_transform(transformed)  # doctest: +SKIP
         """
-        raise NotImplementedError(
-            f"HighFrequencyImputer2.inverse_transform is delivered by lot "
-            f"{_TRANSFORM_LOT} ([SPEC] §12.4). The lots delivered so far "
-            f"cover __init__ and fit phases 0 to 6 only."
+        # 0. Garde : la provenance du dernier transform est indispensable
+        if 'imputation_provenance_' not in self.__dict__:
+            raise ValueError(
+                "inverse_transform requires a previous call to transform: the "
+                "provenance matrix of the last transform "
+                "(imputation_provenance_) identifies the cells to set back to "
+                "NaN. Call transform(X) or fit_transform(X) first."
+            )
+
+        # Concaténation X / y, symétrique de "_transform"
+        y_col_name: Optional[str] = None
+        if y is not None:
+            y_col_name = self._resolve_target_column_name(y)
+            data_work = pd.concat([X, y.to_frame(name=y_col_name)], axis=1)
+        else:
+            data_work = X.copy()
+
+        provenance = self.imputation_provenance_
+
+        # 1. Retrait du niveau de fréquence, sur les données ET la provenance :
+        # chacune le porte ou non, selon "keep_lower_frequencies"
+        level_label = self._select_inverse_frequency_level(data_work, provenance)
+        data_work = self._drop_frequency_level(data_work, level_label)
+        provenance = self._drop_frequency_level(provenance, level_label)
+
+        # 2. Remise à NaN de toute cellule non originale
+        original_mask = (provenance == ProvenanceType.ORIGINAL).reindex(
+            index=data_work.index, columns=data_work.columns
         )
+        # Colonnes hors périmètre de la provenance : jamais masquées
+        untracked = [c for c in data_work.columns if c not in provenance.columns]
+        if untracked:
+            original_mask[untracked] = True
+        original_mask = original_mask.fillna(False).astype(bool)
+        data_work = data_work.where(original_mask)
+
+        # 3. Inversion de la transformation additive, en DERNIER (miroir du
+        # transform, qui l'applique en premier)
+        data_result = data_work
+        if self.additive_transformer_ is not None and hasattr(
+            self.additive_transformer_, 'inverse_transform'
+        ):
+            try:
+                inverted = self.additive_transformer_.inverse_transform(data_work)
+                data_result = inverted[0] if isinstance(inverted, tuple) else inverted
+            except Exception as error:
+                warnings.warn(
+                    f"Failed to inverse transform with the additive "
+                    f"transformer: {error}",
+                    UserWarning,
+                )
+
+        # 4. Restauration optionnelle des valeurs d'origine exactes
+        if self.restore_original_values:
+            data_result = self._restore_original_values(data_result, y_col_name)
+
+        # 5. Scission X / y, symétrique de "_transform"
+        if y is not None and y_col_name in data_result.columns:
+            return data_result.drop(columns=[y_col_name]), data_result[y_col_name]
+        return data_result

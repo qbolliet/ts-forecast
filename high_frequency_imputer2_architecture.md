@@ -2222,9 +2222,12 @@ réellement été fait.
   `restore_original_values`), avec les invariants B4 (panels à n > 2 niveaux d'entité, noms
   d'index préservés) et B19.
 - **`keep_lower_frequencies`** : conservé (nom compris), documenté comme **paramètre d'affichage
-  pur** — il gouverne l'empilage multi-fréquences de la sortie, jamais la logique. Sous
-  `impute_intermediate_frequencies=False`, il n'y a pas de niveau intermédiaire à empiler : la
-  sortie ne contient que le niveau source et le niveau cible. À documenter tel quel.
+  pur** — il gouverne l'empilage multi-fréquences de la sortie, jamais la logique ; les valeurs du
+  niveau cible sont les mêmes sous `True` et sous `False`. Les niveaux empilés sont les **étapes de
+  la progression** : sous `impute_intermediate_frequencies=False` il n'y a donc pas de niveau
+  intermédiaire à empiler, et la sortie ne porte que le niveau cible (**D35**, arbitrage du lot
+  L12 ; la version précédente de cette phrase annonçait « le niveau source et le niveau cible »).
+  L'index prend la forme du §5.9, le niveau de fréquence du côté de l'entité.
 
 ### 12.5 — Conformité sklearn et contrat d'entrée (repris de [ARCH] §3.16, non négociables)
 
@@ -2424,6 +2427,16 @@ l'auteur à la revue du lot (D32, D33). Chacune est mesurée par un invariant du
 | **D32** | sous `aggregation_constraint=None`, les cellules coïncidentes de **tous** les niveaux de fréquence sont conservées dans `y_train`, l'index du jeu d'entraînement gagnant un niveau de fréquence du côté de l'entité ; sous `'sum'`, la plus fine est écartée (§5.9) | sous `'sum'` le recalage impose Σ(sous-périodes) = total observé : la ligne de basse fréquence **est** la somme des autres, mesuré exact au flottant près sur `TS` (écarts `−0.0000 / +0.0000 / −0.0000`). Les garder toutes compte le total de la période deux fois et sur-pondère la basse fréquence. Sous `None` aucun recalage n'a lieu, la colinéarité est **rompue** (écarts `−0.65 / +2.37 / −0.60`) et chaque ligne porte une contrainte propre. Prix assumé et à documenter : `aggregation_constraint` cesse d'être orthogonale à l'axe 2. Bénéfice annexe : la forme d'index ainsi définie est celle que `keep_lower_frequencies=True` doit rendre (§12.4), au lieu d'en inventer une seconde au lot L12. **Précisé au lot L11a** : le niveau n'est estampillé que si une coïncidence survit au filtre d'origine — sinon `None` modifierait la forme de `y_train` sous `False` et `'covariates_only'`, où le §11.1 exige un effet **nul** |
 | **D33** | `impute_unobserved_entities: bool = False` : une entité n'observant **jamais** la colonne peut recevoir une imputation complète apprise sur les autres entités, marquée `MODEL_UNANCHORED` et jamais recalée (§5.10) | le modèle mutualisé du §5.8 rend l'extrapolation naturelle — les covariables de l'entité existent, seule la cible manque — et c'est le cas d'usage « prédire un pays absent à partir des autres ». Le blocage actuel n'était **pas** R1, qui gouverne le seul côté entraînement et dont l'exclusion reste saine (une entité sans observation n'aurait que ses propres sorties à réinjecter), mais la **classification**, faute de `f_var(e, c)`. Défaut à `False` : l'ouvrir sans le demander changerait silencieusement le résultat de tout panel partiellement renseigné, et ces cellules n'ont ni ancre, ni recalage, ni diviseur — trois différences sémantiques que la provenance doit porter. Indépendant de l'axe 2 : la capacité joue à l'identique sous `False` |
 
+### 14.7 — Décisions arrêtées à l'implémentation du `transform` (lot L12, 2026-09-08)
+
+| Code | Décision | Motif |
+|---|---|---|
+| **D34** | une entité **absente du fit** rencontrée au `transform` est imputée sous `impute_unobserved_entities=True`, et laissée intacte sous `False`. Elle est liée à une étape dont les entités s'accordent sur **une seule** fréquence — sans quoi rien ne la départage, et un avertissement agrégé la nomme — puis servie par une étape de plan **dérivée** d'une étape de la même (étape, variable) : même objet modèle, mêmes `feature_cols`, mêmes voies, `source_frequency=None`, `unanchored=True`, facteurs à 1.0. Ces étapes dérivées n'entrent **jamais** dans `imputation_plan_` | une entité sans historique est, par construction, une entité sans ancre : c'est le mécanisme du §5.10, sous le même paramètre, et non un second. Rien n'est redécidé — ni voie, ni feature, ni modèle — seul le périmètre d'entités change, comme il change déjà d'un groupe de fréquence source à l'autre (§5.8 R6). Sa fréquence détectée, elle, ne peut venir que des données du transform : aucun fit ne la porte |
+| **D35** | sous `impute_intermediate_frequencies=False`, la sortie porte le **seul niveau cible** ; aucun niveau « source » n'est amorcé | les niveaux empilés sont les étapes de la progression, et sous `False` elle n'en a qu'une. Amorcer un niveau « source » aurait fabriqué un niveau qui n'est l'image d'aucune étape, et qui coïncide de toute façon avec le niveau cible dans le cas courant (index mensuel, cible `M`) |
+| **D36** | le report d'échelle de `_predict_step` est **court-circuité** quand `scale_factor` et `fit_scale_factor` coïncident, au lieu de diviser puis multiplier | `_build_step` leur donne le même objet : le report vaut 1.0 par construction. Sous `scale_features='calendar'` ce facteur est une `Series` **figée sur la grille du fit** ; la grille du transform étant différente, la division la désalignait et rendait toute la prédiction NaN. Au fit, la seule différence est la disparition du bruit d'arrondi de `x/d*d` |
+| **D37** | la sortie d'une étape est la frame du matérialiseur **recouverte par le miroir**, cellule à cellule et seulement pour les cellules produites **à la fréquence de la ligne** | `stage_frame` ne lit le miroir que sous `covariate_strategy='model'` (précédence du §4.4) : sous les deux autres stratégies la sortie aurait été vide de toute imputation. Le filtre par fréquence de production interdit à une valeur produite à une étape plus grossière de se poser, à l'échelle d'une autre période, sur une grille plus fine. Les imputations priment sur l'ancre brute, conformément au §11.2 |
+| **D38** | la grille d'une frame d'étape est l'**index** du masque d'imputation — jamais ses seules lignes vraies — complétée, à l'étape finale, des lignes d'entrée qu'elle ne couvrirait pas ; et une entité que l'étape ne concerne pas y garde les lignes de son **dernier passage** | I7 : le `transform` ne détruit jamais une observation d'entrée. Et une liaison de fréquence partielle ferait échouer la lecture du masque, qui retomberait sans bruit sur tout l'index — donc sur des lignes à la mauvaise fréquence pour tout le panel |
+
 ---
 
 ## 15 — Prérequis et travaux annexes
@@ -2512,6 +2525,13 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 | **I20** | cellules coïncidentes (§5.9, D32) | sur `TS` sous `True`, à l'étape `M` : `len(y_train)` de `a1` vaut **12** sous `aggregation_constraint='sum'` et **15** sous `None` ; sous `'sum'` la somme des 4 imputations trimestrielles de chaque année **égale** l'ancre (à `1e-9`), sous `None` elle en **diffère** ; sous `None` l'index du jeu d'entraînement porte un niveau de fréquence et les deux cellules du `2021-12-31` (`('Y', …)` et `('Q', …)`) coexistent, avec des diviseurs `12` et `3` ; sous `'sum'` l'index est **inchangé** par rapport à aujourd'hui. Sous `False` et `'covariates_only'`, `aggregation_constraint` n'a **aucun** effet sur `y_train` |
 | **I21** | entités sans ancre (§5.10, D33) | sur `PANEL-F` dont `v` est effacée pour `IT` : sous `impute_unobserved_entities=False`, les 36 cellules d'`IT` restent NaN, `ORIGINAL`, et aucune étape de plan ne porte `IT` ; sous `True`, les 36 sont renseignées, portent **toutes** `MODEL_UNANCHORED`, l'étape de plan correspondante a `source_frequency is None` et `scale_factor == 1.0`, elle **partage l'objet modèle** (`is`) des étapes `(v, Y)` et `(v, Q)` de la même étape de fréquence, `IT` ne contribue **aucune** ligne à `y_train` (R1 inchangée), et **aucun** total annuel n'est imposé à `IT`. La progression est **identique** dans les deux cas : un couple sans fréquence détectée n'entre pas dans `F` |
 
+**État au lot L12** : les vingt et un invariants sont couverts par
+`tests/frequency/test_high_frequency_imputer2.py`. I1 (`TestTransformSymmetry`), I7
+(`TestTransformOutsideWindow`), I8 (`TestInverseTransform`), I9
+(`TestParameterValidation` pour `clone`/`get_params`/`set_params`/`NotFittedError` et
+`TestSklearnConformance` pour `Pipeline`/`GridSearchCV`) et I11 (`TestMaterializationReplay`,
+qui compare les trames de prédiction du fit et du rejeu une à une) sont livrés par ce lot.
+
 **État au lot L11** : I2 à I6, I10 à I18 sont couverts par
 `tests/frequency/test_high_frequency_imputer2.py`, sur `TS`, sur `PANEL` et sur `PANEL-F` — I12,
 I13 et la partie (a) de I18 depuis le lot L11. I19 est couvert par
@@ -2563,7 +2583,7 @@ mise à jour du notebook concerné quand il touche l'exécution d'étape (§15.2
 | **L11** ✅ | axe 2 : progression de fréquences, `ELIGIBLE_ORIGINS`, échelle par ligne, report d'étape ; composition avec la mutualisation (fréquence de ligne : bloc **ou** store) ; **couches** (§5.4bis) et fusion des progressions de panel (§5.2). Livré le 2026-09-07 ; décisions D30 et D31 (§14.6) | L10 | I12, I13, I18, I19, exemples chiffrés du §5.5 et du §5.8 |
 | **L11a** | cellules coïncidentes sous `aggregation_constraint=None` (§5.9, D32) : conservation de tous les niveaux de fréquence dans `y_train`, niveau de fréquence ajouté à l'index du jeu d'entraînement, docstrings des deux paramètres liés | L11 | I20, non-régression de I14 et I16 |
 | **L11b** | `impute_unobserved_entities` (§5.10, D33) : classification d'un couple sans ancre, étape de plan à `source_frequency=None`, court-circuit du recalage et du diviseur, `MODEL_UNANCHORED`, `unanchored_pairs_`, avertissement agrégé | L11 | I21, non-régression de I6 et I15 |
-| **L12** | `transform`, `inverse_transform`, `keep_lower_frequencies`, contrôle des fréquences (D11), avertissements uniques ; la sortie multi-fréquences reprend la **forme d'index du §5.9** | L11a, L11b | I1, I7, I8 |
+| **L12** ✅ | `transform`, `inverse_transform`, `keep_lower_frequencies`, contrôle des fréquences (D11), avertissements uniques ; la sortie multi-fréquences reprend la **forme d'index du §5.9**. Livré le 2026-09-08 ; décisions D34 à D38 (§14.7) | L11a, L11b | I1, I7, I8, I9, I11 |
 | **L13** | notebook 5 pas à pas (§15.2) et documentation (`mkdocs`, docstrings de référence) | L12 | exécution complète du notebook |
 
 **Points de vigilance à rappeler dans chaque prompt d'implémentation** :
