@@ -2238,8 +2238,11 @@ réellement été fait.
 - **B15** : panel déclaré par `panel_cols` sur frame plat, pleinement fonctionnel.
 - **B16** : dict `target_frequency` incomplet → `ValueError` nommant les entités manquantes.
 - **B19** : purge de l'état de `transform` en tête de `fit`.
-- **B20** : `NotFittedError` propre avant `fit`, via `check_is_fitted` avec une **liste explicite**
-  d'attributs.
+- **B20** : `NotFittedError` propre avant `fit`. La classe expose `__sklearn_is_fitted__`, qui
+  teste la présence de la **liste explicite** d'attributs ajustés ; `check_is_fitted` le consulte
+  avant son balayage de suffixe, donc les appels déjà présents dans `transform` /
+  `inverse_transform` du parent `XYPanelTimeSeriesTransformer` suffisent — aucune surcharge de ces
+  deux méthodes dans `hfi2`.
 - **Index trié, sans tri implicite** : la classe fige `auto_sort=False` et
   `strict_validation=True`. Un index non trié lève un `ValueError` explicite plutôt que d'être
   trié en silence — le tri déplacerait les fenêtres et les agrégats sans que l'appelant le sache.

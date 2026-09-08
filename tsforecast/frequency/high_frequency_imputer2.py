@@ -23,7 +23,6 @@ import numpy as np
 import pandas as pd
 # Sklearn
 from sklearn.base import BaseEstimator, TransformerMixin, clone
-from sklearn.utils.validation import check_is_fitted
 # Utilitaires du package
 from ..xy.transformers import XYPanelTimeSeriesTransformer
 from ..utils.frequency.utils import (
@@ -942,9 +941,14 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Conformité sklearn
     # -------------------------------------------------------------------------
-    # Méthode auxiliaire de vérification de l'ajustement
-    def _check_fitted(self) -> None:
-        """Raise a clean ``NotFittedError`` when the imputer is not fitted.
+    # Prédicat d'ajustement consulté par "check_is_fitted"
+    def __sklearn_is_fitted__(self) -> bool:
+        """Report whether ``fit`` has completed.
+
+        ``check_is_fitted`` consults this predicate before its suffix scan, so
+        every ``check_is_fitted(self)`` call — those the parent already makes
+        in ``transform`` and ``inverse_transform`` included — becomes strict
+        without an override here.
 
         The attribute list is explicit. The default sklearn convention
         — any attribute ending in ``_`` — would be satisfied by the parent
@@ -952,11 +956,11 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         ``feature_names_`` before ``_fit`` runs: an interrupted fit would then
         look fitted.
 
-        Raises:
-            NotFittedError: If ``fit`` has not completed.
+        Returns:
+            True once all fitted attributes are present.
         """
         # Liste explicite plutôt que la convention du suffixe
-        check_is_fitted(self, attributes=list(_FITTED_ATTRIBUTES))
+        return all(hasattr(self, attr) for attr in _FITTED_ATTRIBUTES)
 
     # Vue en lecture seule des modèles ajustés du plan
     @property
@@ -2061,19 +2065,21 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         self,
         X_work: pd.DataFrame,
         stage_freq: Union[str, Dict[EntityKey, str]],
-        kind: Literal['strict', 'imputation', 'training'],
+        kind: Literal['imputation', 'training'],
     ) -> pd.Series:
         """Read one window mask at the frequency of a stage.
 
-        The ``kind`` is named by the caller, never defaulted.
+        The ``kind`` is named by the caller, never defaulted. Only the two
+        windows the fit actually restricts on are read here: the strict
+        window is diagnostic (``strict_window_mask_``) and governs nothing
+        in the stage execution.
         An entity the calculator omits — one without a valid fitted mask — is
         left unrestricted rather than silently losing every one of its rows.
 
         Args:
             X_work: Working frame, the fallback grid.
             stage_freq: Frequency of the stage, scalar or per entity.
-            kind: Window read: ``'strict'``, ``'imputation'`` or
-                ``'training'``.
+            kind: Window read: ``'imputation'`` or ``'training'``.
 
         Returns:
             Boolean Series at the stage frequency, on a ``DatetimeIndex`` for
@@ -2137,8 +2143,8 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         """Build the stage grid of a group, window restriction lifted.
 
         Reserved to the unanchored steps, whose entities have
-        no window to speak of: the strict window is where every column of the
-        entity is covered, and the imputed column covers nothing there. Every
+        no window to speak of: the prediction window of such an entity is
+        empty, since the imputed column carries no anchor to bound it. Every
         row of the stage grid is kept; the covariates then decide, a row they
         cannot feed producing a NaN that is simply never written.
 
@@ -3587,49 +3593,6 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         if getattr(self, '_target_freq_validator_cache', None) is None:
             self._target_freq_validator_cache = TargetFrequencyValidator()
         return self._target_freq_validator_cache
-
-    # -------------------------------------------------------------------------
-    # Transform et inversion
-    # -------------------------------------------------------------------------
-    # Surcharge de transform pour la vérification d'ajustement explicite
-    def transform(self, X, y=None):
-        """Transform X, and optionally y.
-
-        Args:
-            X: Features to transform.
-            y: Target to transform (optional).
-
-        Returns:
-            The transformed features, or the pair ``(X, y)`` when ``y`` is
-            given.
-
-        Raises:
-            NotFittedError: If ``fit`` has not run (B20).
-            ValueError: If a column of the fit is missing from ``X`` (D11).
-        """
-        # Vérification d'ajustement avant toute autre chose : sans elle,
-        # l'erreur de "_transform" masquerait le NotFittedError
-        self._check_fitted()
-        return super().transform(X, y)
-
-    # Surcharge d'inverse_transform pour la vérification d'ajustement explicite
-    def inverse_transform(self, X, y=None):
-        """Invert the transformation of X, and optionally y.
-
-        Args:
-            X: Transformed features.
-            y: Transformed target (optional).
-
-        Returns:
-            The original features, or the pair ``(X, y)`` when ``y`` is given.
-
-        Raises:
-            NotFittedError: If ``fit`` has not run (B20).
-            ValueError: If no ``transform`` preceded the call.
-        """
-        # Même ordre que "transform" : ajustement d'abord
-        self._check_fitted()
-        return super().inverse_transform(X, y)
 
     # -------------------------------------------------------------------------
     # Transform — rejeu du plan figé
