@@ -1,7 +1,7 @@
 """Tests unitaires pour `interpolate_to_higher_frequency(anchor_fraction=...)`.
 
 Ce module couvre la position d'ancrage de la valeur dans sa période (prérequis
-P2 de `HighFrequencyImputer2`, §10.2 de la spécification d'architecture) : le
+P2 de `HighFrequencyImputer`, §10.2 de la spécification d'architecture) : le
 décalage des ancres à une fraction de leur période source, l'interpolation sur
 l'union (ancres décalées ∪ grille cible), la restriction finale à la grille
 cible, et la non-régression stricte du chemin `anchor_fraction=None`.

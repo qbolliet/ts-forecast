@@ -1,6 +1,6 @@
 """Frequency scaling of one imputation stage, as a reversible sklearn transformer.
 
-``HighFrequencyImputer2`` fits a model whose target is a low-frequency variable
+``HighFrequencyImputer`` fits a model whose target is a low-frequency variable
 (a yearly total) on a grid running at a higher frequency (months). Both sides of
 that model must be expressed at the same scale, and the scale is a pure function
 of the frequency pair — never of the data. This module holds that arithmetic.
@@ -638,7 +638,7 @@ class StageScaler(BaseEstimator, TransformerMixin):
 
         The divisor of a covariate is read off the period one of its cells
         covers on the grid it sits on, and not off the frequency of the
-        imputed variable. As the training grid of the ``HighFrequencyImputer2``
+        imputed variable. As the training grid of the ``HighFrequencyImputer``
         is the mutualized block
         grid, one frequency per entity, and the covariates are
         materialized onto it by the imputation ways. Two cells of the same column

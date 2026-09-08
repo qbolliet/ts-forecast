@@ -8,9 +8,7 @@ fréquence la plus fine, il faut donner une valeur mensuelle aux variables qui n
 sont observées qu'une fois par trimestre ou par an — sans inventer d'information
 que l'on ne pourrait pas justifier.
 
-`HighFrequencyImputer2` (classe courante ;
-`HighFrequencyImputer` est l'implémentation historique, conservée pour
-compatibilité) impute les colonnes de basse fréquence sur une **grille cible plus
+`HighFrequencyImputer` impute les colonnes de basse fréquence sur une **grille cible plus
 fine**, en **cascade** (année → trimestre → mois si besoin), et **trace l'origine
 de chaque cellule produite**.
 
@@ -104,7 +102,7 @@ purement d'affichage, sans effet sur les valeurs).
 ## Pour aller plus loin
 
 - Tutoriel : [Imputation multi-fréquences](../tutorials/mixed_frequency_imputation.md)
-- API : [HighFrequencyImputer2](../api/frequency/HighFrequencyImputer2.md),
+- API : [HighFrequencyImputer](../api/frequency/HighFrequencyImputer.md),
   [provenance](../api/frequency/provenance.md),
   [aggregation_constraint](../api/frequency/aggregation_constraint.md)
 - Métriques de tracking : [`imputation_metrics`](../guides/mlflow_tracking.md)

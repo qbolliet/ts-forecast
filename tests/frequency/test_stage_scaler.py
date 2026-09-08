@@ -663,18 +663,6 @@ class TestStatelessness:
         )['m1'] == 12.0
 
 
-class TestHfiUntouched:
-    """Lot purement additif : la logique d'échelle de hfi reste en place."""
-
-    def test_hfi_still_carries_its_own_divisors(self):
-        """`_covariate_scaling_divisors` et `_covariate_divisor` existent toujours."""
-        from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
-
-        assert hasattr(HighFrequencyImputer, '_covariate_scaling_divisors')
-        assert hasattr(HighFrequencyImputer, '_covariate_divisor')
-        assert hasattr(HighFrequencyImputer, '_apply_frequency_scaling')
-        assert hasattr(HighFrequencyImputer, '_stage_scale_factor')
-
 
 class TestMutualizedTrainingSet:
     """[SPEC] §5.8 : `source_freq` par entité, une fréquence de bloc par entité."""

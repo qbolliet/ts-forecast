@@ -14,7 +14,7 @@ Aucun composant du paquet ne dépend de MLflow.
 |-----------|-----------|-----------|-----------|
 | Splitters `crossvals` | `get_params()` | `split_summary()` | — |
 | `PublicationDelayTransformer` | `get_params()` | `delay_metrics()` | délais inférés (`compare_and_detect_delays` → CSV) |
-| `HighFrequencyImputer2` | `get_params()` | `imputation_metrics()` | `imputation_provenance_` (CSV), `imputation_plan_` (repr), `frequency_progression_` |
+| `HighFrequencyImputer` | `get_params()` | `imputation_metrics()` | `imputation_provenance_` (CSV), `imputation_plan_` (repr), `frequency_progression_` |
 | `PanelwiseTransformer` | `get_params()` | — | `failed_entities_` |
 | `XYPipeline` | `get_params()` | score du modèle final | — |
 
@@ -66,7 +66,7 @@ mlflow.log_metrics(delay_metrics(pdt))
 
 ### `imputation_metrics(imputer, *, per_column=False)`
 
-Résumé d'un `HighFrequencyImputer2` (ou `HighFrequencyImputer`) ajusté :
+Résumé d'un `HighFrequencyImputer` ajusté :
 
 - `provenance.<type>` et `provenance.<type>_pct` pour chaque `ProvenanceType`
   (ex. `provenance.original_pct`, `provenance.model_on_true_pct`,
@@ -142,12 +142,12 @@ with mlflow.start_run():
 import mlflow
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import cross_validate
-from tsforecast import HighFrequencyImputer2, TSOutOfSampleSplit
+from tsforecast import HighFrequencyImputer, TSOutOfSampleSplit
 from tsforecast import imputation_metrics, split_summary
 
 with mlflow.start_run():
     # --- imputation multi-fréquences ---
-    imputer = HighFrequencyImputer2(target_frequency="M", estimator=Ridge())
+    imputer = HighFrequencyImputer(target_frequency="M", estimator=Ridge())
     imputed = imputer.fit_transform(raw_data)
 
     mlflow.log_params({f"imputer__{k}": repr(v) for k, v in imputer.get_params().items()})

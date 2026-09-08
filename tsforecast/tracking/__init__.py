@@ -8,7 +8,7 @@ the inputs are already-fitted estimators.
 
 Functions:
     imputation_metrics: Provenance breakdown and cascade summary of a fitted
-        ``HighFrequencyImputer2`` / ``HighFrequencyImputer``.
+        ``HighFrequencyImputer``.
     delay_metrics: Applied-delay summary of a fitted
         ``PublicationDelayTransformer``.
     split_summary: Fold-count and train/test size summary of any tsforecast

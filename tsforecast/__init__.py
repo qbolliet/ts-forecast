@@ -36,7 +36,7 @@ from .crossvals import (
     PanelInSampleSplitPerEntity,
 )
 from .delays import PublicationDelayTransformer
-from .frequency import HighFrequencyImputer, HighFrequencyImputer2
+from .frequency import HighFrequencyImputer
 from .panel import PanelwiseTransformer
 from .xy import XYPipeline, XYTransformerMixin
 from .tracking import imputation_metrics, delay_metrics, split_summary
@@ -55,7 +55,6 @@ __all__ = [
     "PublicationDelayTransformer",
     # Imputation multi-fréquences
     "HighFrequencyImputer",
-    "HighFrequencyImputer2",
     # Transformateurs
     "PanelwiseTransformer",
     "XYPipeline",

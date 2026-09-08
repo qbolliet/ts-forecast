@@ -1,4 +1,4 @@
-"""Variable ordering for the ``model`` covariate strategy of ``HighFrequencyImputer2``."""
+"""Variable ordering for the ``model`` covariate strategy of ``HighFrequencyImputer``."""
 # Importation des modules
 # Modules de base
 import warnings
@@ -20,7 +20,7 @@ from sklearn.utils.validation import check_is_fitted
 from ..utils.frequency.utils import get_frequency_order
 
 # Identifiant retourné par order() : le nom de variable pour une série
-# temporelle, ou la clé de groupe (nom, fréquence) de hfi2 pour un panel dont
+# temporelle, ou la clé de groupe (nom, fréquence) de HighFrequencyImputer pour un panel dont
 # les entités divergent de fréquence
 VariableKey = Any
 
@@ -35,7 +35,7 @@ class VariableSpec:
     the caller (one variable name, one detected frequency, and the entities
     sharing that frequency for a panel group) — grouping heterogeneous
     entities into several same-frequency groups is the caller's
-    responsibility (``hfi2``'s ``GroupKey``, see ``imputation_plan2.py``).
+    responsibility (``HighFrequencyImputer``'s ``GroupKey``, see ``imputation_plan.py``).
 
     Attributes:
         name: Column name of the variable in the data passed to
@@ -56,7 +56,7 @@ class VariableSpec:
 
 # Composant d'ordonnancement des variables
 class VariableOrderer(BaseEstimator):
-    """Order variables for the cascading imputation of ``HighFrequencyImputer2``.
+    """Order variables for the cascading imputation of ``HighFrequencyImputer``.
 
     Two orders are available, selected by ``fit_predict_order``:
 

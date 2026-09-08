@@ -31,7 +31,7 @@ import pandas as pd
 # Producteur unique des features, et lecture des formes par entité
 from .covariate_materializer import CovariateMaterializer, _WAY_RANK
 # Voies de matérialisation, définies avec l'étape du plan
-from .imputation_plan2 import MaterializationWay
+from .imputation_plan import MaterializationWay
 # Primitives d'origine de cellule
 from .provenance import CellOrigin, max_origin
 # Normalisation des fréquences détectées

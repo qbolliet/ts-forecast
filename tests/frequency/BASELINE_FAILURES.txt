@@ -3,6 +3,26 @@
 # Commit: 0cbfa60 (branche qb-mixed-frequencies) + lot L2 (provenance §6)
 # Result: 5 failed, 520 passed (525 tests collectés)
 #
+# Relevé du 2026-09-08 (lot L13-0 : suppression de HighFrequencyImputer v1,
+# promotion de la v2 au nom canonique, suffixe « 2 » effacé) : quatre entrées
+# de référence disparaissent MÉCANIQUEMENT avec les fichiers de test v1
+# supprimés (aucun code de tsforecast/ corrigé, aucun test ré-écrit) :
+#   - test_hfi_edge_cases.py::TestIrregularFrequency::test_undetectable_frequency_raises
+#   - test_hfi_edge_cases.py::TestIrregularFrequency::test_single_gap_in_otherwise_regular_monthly_series_raises
+#     -> fichier test_hfi_edge_cases.py supprimé (sujet exclusif : la v1 ;
+#        « vrai bug » du triage 2026-08-24, hors périmètre de la revue v1).
+#   - test_high_frequency_imputer.py::TestHighFrequencyImputerEdgeCases::test_all_nan_column
+#   - test_high_frequency_imputer.py::TestHighFrequencyImputerValidation::test_missing_datetime_index
+#     -> le fichier test_high_frequency_imputer.py porte désormais les tests de
+#        la v2 (ex-test_high_frequency_imputer2.py) ; ces deux node ids, qui
+#        épinglaient des bugs documentés du code v1 aujourd'hui supprimé
+#        (« vrai bug » du triage), n'existent plus.
+# La 5e entrée (test_converter_positions.py) est CONSERVÉE : FrequencyConverter
+# est intouché par ce lot. `check_regressions.py` doit rapporter « NOUVEAUX
+# ÉCHECS : Aucun » ; les 4 ids retirés apparaîtront une fois en « ÉCHECS
+# RÉSOLUS » au premier passage post-merge (attendu, cosmétique). Résultat du
+# lot : 1 failed, 618 passed sur tests/frequency + tests/tracking.
+#
 # Relevé du 2026-09-01 (lot L3 hfi2, [SPEC] §7.2 : type de retour unifié des
 # masques de fenêtre sur panel — imputation_strict_window_mask_ /
 # imputation_window_mask_ / training_window_mask_ et coverage_by_date_ portent
@@ -71,10 +91,6 @@
 # manquante" / "vrai bug") sont listés ci-dessous comme nouvelle référence.
 
 tests/frequency/test_converter_positions.py::TestExtendIndexForUpsampling::test_unsupported_frequency_pair_returns_original
-tests/frequency/test_hfi_edge_cases.py::TestIrregularFrequency::test_single_gap_in_otherwise_regular_monthly_series_raises
-tests/frequency/test_hfi_edge_cases.py::TestIrregularFrequency::test_undetectable_frequency_raises
-tests/frequency/test_high_frequency_imputer.py::TestHighFrequencyImputerEdgeCases::test_all_nan_column
-tests/frequency/test_high_frequency_imputer.py::TestHighFrequencyImputerValidation::test_missing_datetime_index
 
 ## Triage des 32 échecs de la référence initiale (2026-08-24, commit 187c2d2)
 

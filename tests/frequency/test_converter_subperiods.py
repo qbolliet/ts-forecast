@@ -10,8 +10,9 @@ Ce module épingle le contrat des deux méthodes de comptage :
   période, qui respecte les irrégularités calendaires (février compte 28 jours).
 
 Les deux sont la seule source de vérité du package en matière de comptage de
-sous-périodes : `ImputationWindowCalculator._convert_mask_to_frequency` et
-`HighFrequencyImputer._prepare_training_data` les consomment toutes deux.
+sous-périodes : `ImputationWindowCalculator._convert_mask_to_frequency` et le
+constructeur du jeu d'entraînement de l'imputeur multi-fréquences les consomment
+toutes deux.
 
 `TestFullPeriodsOnlyUsesCalendarCounts` épingle le consommateur interne du
 comptage exact : le garde-fou `full_periods_only` d'`aggregate_to_lower_frequency`,
@@ -19,16 +20,12 @@ aligné sur celui de `method='all'`. Avant cet alignement, un facteur constant
 (`get_duration_conversion_factor('M', 'D') == 30.0`) exigeait 30 jours par mois
 et écartait février toutes les années, ce qui cassait la régularité de la série
 mensuelle intermédiaire et faisait disparaître toute covariable journalière du
-jeu d'entraînement de `HighFrequencyImputer`.
+jeu d'entraînement de l'imputeur multi-fréquences.
 """
-import warnings
-
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.linear_model import LinearRegression
 
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
 from tsforecast.utils.frequency.converter import FrequencyConverter
 
 
@@ -275,46 +272,3 @@ class TestFullPeriodsOnlyUsesCalendarCounts:
         assert converter.aggregate_to_lower_frequency(
             mask, 'YE', method='all', source_freq='D'
         ).tolist() == [False]
-
-    def test_daily_covariate_reaches_training_set(self):
-        """Une covariable journalière atteint le jeu d'entraînement de l'imputeur.
-
-        Test d'intégration du bout de chaîne : covariable journalière dense,
-        variable annuelle à imputer, étape mensuelle. Avec un décompte
-        constant, la perte des févriers cassait la régularité de la série
-        mensuelle, l'agrégation M->Y suivante jetait chaque année entière et
-        l'étape basculait en repli par interpolation, avec pour seul indice
-        « 0 usable covariate(s) ».
-        """
-        dates = pd.date_range(_DAILY_START, _DAILY_END, freq='D')
-        rng = np.random.default_rng(0)
-
-        df = pd.DataFrame(index=dates)
-        df.index.name = 'date'
-        # Covariable journalière dense
-        df['daily_cov'] = 10.0 + rng.normal(0, 1.0, len(dates))
-        # Variable annuelle : observée au seul dernier jour de chaque année
-        year_ends = dates[(dates.month == 12) & (dates.day == 31)]
-        df['annual_var'] = np.nan
-        df.loc[year_ends, 'annual_var'] = 1000.0 + 10.0 * np.arange(len(year_ends))
-
-        imputer = HighFrequencyImputer(
-            target_frequency='M',
-            estimator=LinearRegression(),
-        )
-
-        # Neutralisation des avertissements préexistants et étrangers à ce test
-        # (provenance des cellules vides, dates sans covariable observée sur une
-        # grille journalière) : seul le contenu du plan d'imputation est en jeu
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            imputer.fit(df)
-
-        # Une seule étape, celle de la variable annuelle au stade mensuel
-        assert len(imputer.imputation_plan_) == 1
-        step = imputer.imputation_plan_[0]
-
-        # L'étape porte un modèle entraîné, pas le repli par interpolation
-        assert not step.is_fallback
-        # La covariable journalière a bien atteint le jeu d'entraînement
-        assert step.feature_cols == ('daily_cov',)

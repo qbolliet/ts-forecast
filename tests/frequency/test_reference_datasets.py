@@ -1,13 +1,13 @@
 """Tests des jeux de référence de ``high_frequency_imputer2_architecture.md``.
 
 Le jeu ``PANEL`` (§2.3) et le jeu ``TS`` (§2.2) servent de support à tous les
-tests et notebooks de ``HighFrequencyImputer2``. Leur structure et leurs valeurs
+tests et notebooks de ``HighFrequencyImputer``. Leur structure et leurs valeurs
 d'or sont verrouillées ici : elles ne doivent plus bouger une fois ce lot livré.
 """
 # Manipulation de données
 import pandas as pd
 
-# Détecteur de fréquence utilisé par HighFrequencyImputer2
+# Détecteur de fréquence utilisé par HighFrequencyImputer
 from tsforecast.utils.frequency.utils import detect_frequency
 
 

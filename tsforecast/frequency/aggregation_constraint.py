@@ -1,6 +1,6 @@
 """Aggregation constraint of one imputation stage, as an sklearn transformer.
 
-``HighFrequencyImputer2`` predicts the sub-periods of a low-frequency variable
+``HighFrequencyImputer`` predicts the sub-periods of a low-frequency variable
 on a finer grid. Left free, those predictions have no reason to agree with the
 observation they are supposed to describe: a year observed at 120 may end up
 with twelve months summing to 112.5. The aggregation constraint closes that
@@ -24,7 +24,7 @@ Two returns matter to the caller, and they are different objects:
 Provenance invariance: applying the constraint never changes the provenance of
 a cell. A rescaled cell keeps the ``MODEL_*`` or ``INTERPOLATED`` mark it
 carried before the rescaling, exactly as rescaling by ``StageScaler`` leaves
-provenance untouched. There is no ``DISAGGREGATED`` provenance in ``hfi2``: it
+provenance untouched. There is no ``DISAGGREGATED`` provenance in ``HighFrequencyImputer``: it
 would state nothing the cell's own provenance does not already state, and would
 hide whether the value came from a model or from an interpolation. Both masks
 above are therefore diagnostic — they say which cells moved and which rows held
@@ -331,7 +331,7 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         keeps the ``MODEL_*`` or ``INTERPOLATED`` mark it carried before the
         rescaling, exactly as it does under ``StageScaler``: the constraint
         moves a value, it does not produce it. There is no ``DISAGGREGATED``
-        provenance in ``hfi2`` — it would state nothing the cell's own
+        provenance in ``HighFrequencyImputer`` — it would state nothing the cell's own
         provenance does not already state, and would hide whether the value
         came from a model or from an interpolation.
 

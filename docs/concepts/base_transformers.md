@@ -40,7 +40,7 @@ PanelTimeSeriesTransformer
 └── PublicationDelayTransformer .. délais de publication (module delays)
 ```
 
-`HighFrequencyImputer2` hérite de `XYPanelTimeSeriesTransformer`
+`HighFrequencyImputer` hérite de `XYPanelTimeSeriesTransformer`
 (`PanelTimeSeriesTransformer` + `XYTransformerMixin`).
 
 ## Pour aller plus loin

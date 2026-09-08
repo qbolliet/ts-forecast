@@ -21,7 +21,7 @@ from sklearn.linear_model import LinearRegression
 
 # Objets testés
 from tsforecast.tracking import imputation_metrics, delay_metrics, split_summary
-from tsforecast.frequency import HighFrequencyImputer2
+from tsforecast.frequency import HighFrequencyImputer
 from tsforecast.delays import PublicationDelayTransformer
 from tsforecast.crossvals import TSOutOfSampleSplit, PanelOutOfSampleSplit
 
@@ -61,7 +61,7 @@ def _is_flat_scalar_mapping(metrics) -> bool:
 def test_imputation_metrics_flat_and_finite(mixed_frequency_ts):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        imputer = HighFrequencyImputer2(
+        imputer = HighFrequencyImputer(
             target_frequency="M", estimator=LinearRegression()
         ).fit(mixed_frequency_ts)
 
@@ -83,7 +83,7 @@ def test_imputation_metrics_flat_and_finite(mixed_frequency_ts):
 def test_imputation_metrics_per_column(mixed_frequency_ts):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        imputer = HighFrequencyImputer2(
+        imputer = HighFrequencyImputer(
             target_frequency="M", estimator=LinearRegression()
         ).fit(mixed_frequency_ts)
 
@@ -103,7 +103,7 @@ def test_imputation_metrics_cv_scores(mixed_frequency_ts):
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        imputer = HighFrequencyImputer2(
+        imputer = HighFrequencyImputer(
             target_frequency="M",
             estimator=LinearRegression(),
             covariate_strategy="model",
@@ -121,7 +121,7 @@ def test_imputation_metrics_cv_scores(mixed_frequency_ts):
 
 def test_imputation_metrics_unfitted_raises():
     with pytest.raises(AttributeError):
-        imputation_metrics(HighFrequencyImputer2(target_frequency="M"))
+        imputation_metrics(HighFrequencyImputer(target_frequency="M"))
 
 
 # --------------------------------------------------------------------------- #

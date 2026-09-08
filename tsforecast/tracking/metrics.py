@@ -61,8 +61,8 @@ def imputation_metrics(
 ) -> Dict[str, float]:
     """Summarize a fitted mixed-frequency imputer as flat tracking metrics.
 
-    Works with :class:`~tsforecast.frequency.HighFrequencyImputer2` and the
-    legacy :class:`~tsforecast.frequency.HighFrequencyImputer`. The provenance
+    Works with a fitted :class:`~tsforecast.frequency.HighFrequencyImputer`.
+    The provenance
     statistics are read from ``provenance_statistics_`` when present (the last
     ``transform``), otherwise from ``provenance_statistics_fit_`` (the ``fit``).
 
@@ -78,8 +78,7 @@ def imputation_metrics(
         percentages per ``ProvenanceType`` over the whole matrix, e.g.
         ``provenance.original_pct``, ``provenance.model_on_true``);
         ``n_stages`` (frequencies in the cascade); ``n_unanchored_pairs``
-        (``(entity, column)`` pairs imputed with no anchor, ``HighFrequencyImputer2``
-        only); ``cv_score.{min,max,mean,n}`` (cross-validated ordering scores,
+        (``(entity, column)`` pairs imputed with no anchor); ``cv_score.{min,max,mean,n}`` (cross-validated ordering scores,
         only when the ``'cv'`` ordering ran with a non-empty result); and
         ``<column>.provenance.<key>`` per column when ``per_column=True``.
 
@@ -100,8 +99,7 @@ def imputation_metrics(
     if statistics is None:
         raise AttributeError(
             "imputer exposes neither 'provenance_statistics_' nor "
-            "'provenance_statistics_fit_'; pass a fitted HighFrequencyImputer2 "
-            "or HighFrequencyImputer."
+            "'provenance_statistics_fit_'; pass a fitted HighFrequencyImputer."
         )
 
     metrics: Dict[str, float] = {}
@@ -125,7 +123,7 @@ def imputation_metrics(
         len(getattr(imputer, "unanchored_pairs_", ()) or ())
     )
 
-    # Scores de validation croisée d'ordonnancement (HighFrequencyImputer2)
+    # Scores de validation croisée d'ordonnancement
     cv_scores = getattr(imputer, "imputation_cv_scores_", None)
     if cv_scores:
         flat_scores: List[Any] = [

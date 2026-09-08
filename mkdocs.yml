@@ -122,10 +122,9 @@ nav:
     - compare_and_detect_delays: api/delays/compare_and_detect_delays.md
     - calculate_applicable_delay: api/delays/calculate_applicable_delay.md
   - frequency:
-    - HighFrequencyImputer2: api/frequency/HighFrequencyImputer2.md
-    - HighFrequencyImputer (legacy): api/frequency/HighFrequencyImputer.md
+    - HighFrequencyImputer: api/frequency/HighFrequencyImputer.md
     - provenance: api/frequency/provenance.md
-    - imputation_plan2: api/frequency/imputation_plan2.md
+    - imputation_plan: api/frequency/imputation_plan.md
     - covariate_materializer: api/frequency/covariate_materializer.md
     - aggregation_constraint: api/frequency/aggregation_constraint.md
     - stage_scaler: api/frequency/stage_scaler.md

@@ -1,10 +1,9 @@
-"""Tests for tsforecast.frequency.imputation_plan2.
+"""Tests for tsforecast.frequency.imputation_plan.
 
 Focus §12.1 / §4.6 / §6.2 de [SPEC] high_frequency_imputer2_architecture.md :
-étape immuable v2, couverture exacte de feature_cols par la voie de
+étape immuable, couverture exacte de feature_cols par la voie de
 matérialisation, invariant de repli, facteur d'échelle par ligne (pd.Series),
-plan immuable et sérialisation de diagnostic. Lot purement additif : la v1
-(imputation_plan.ImputationStep) reste intacte.
+plan immuable et sérialisation de diagnostic.
 """
 # Modules de base
 import dataclasses
@@ -14,7 +13,7 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Objets testés
-from tsforecast.frequency.imputation_plan2 import (
+from tsforecast.frequency.imputation_plan import (
     ImputationStep,
     ImputationPlan,
     append_step,
@@ -49,7 +48,7 @@ def _make_step(**overrides):
 
 
 class TestImputationStep:
-    """Étape v2 : immuabilité et invariants de __post_init__."""
+    """Étape : immuabilité et invariants de __post_init__."""
 
     def test_step_is_frozen(self):
         """Toute affectation sur une étape lève FrozenInstanceError."""
@@ -137,13 +136,13 @@ class TestImputationStep:
             step.materialization['m1'] = 'aggregate'
 
     def test_stage_key_property(self):
-        """stage_key reste le couple (pred_freq_label, var_key) de la v1."""
+        """stage_key est le couple (pred_freq_label, var_key)."""
         step = _make_step(pred_freq_label='M', var_key='gdp')
         assert step.stage_key == ('M', 'gdp')
 
 
 class TestImputationPlan:
-    """Plan v2 : conteneur immuable, groupement, vues, diagnostic."""
+    """Plan : conteneur immuable, groupement, vues, diagnostic."""
 
     def test_plan_is_immutable_and_append_returns_new(self):
         """append_step renvoie un nouveau plan sans muter l'ancien."""
@@ -237,25 +236,3 @@ class TestImputationPlan:
         frame = ImputationPlan().to_diagnostic_frame()
         assert len(frame) == 0
         assert 'emitted_provenance' in frame.columns
-
-
-class TestV1Untouched:
-    """La structure de plan de la v1 reste intacte (§12.2, §15.3)."""
-
-    def test_v1_step_untouched(self):
-        """imputation_plan.ImputationStep s'importe encore et porte trained_on_imputed."""
-        from tsforecast.frequency.imputation_plan import ImputationStep as ImputationStepV1
-
-        field_names = {f.name for f in dataclasses.fields(ImputationStepV1)}
-        assert 'trained_on_imputed' in field_names
-        # Les champs v2 ne se sont pas glissés dans la v1
-        assert 'covariate_taint' not in field_names
-        assert 'materialization' not in field_names
-
-    def test_v1_and_v2_are_distinct_classes(self):
-        """Les deux ImputationStep sont des classes distinctes, sans base commune."""
-        from tsforecast.frequency.imputation_plan import ImputationStep as ImputationStepV1
-
-        assert ImputationStep is not ImputationStepV1
-        assert not issubclass(ImputationStep, ImputationStepV1)
-        assert not issubclass(ImputationStepV1, ImputationStep)

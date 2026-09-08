@@ -1,7 +1,7 @@
 """Materialization of covariates on one imputation-stage grid.
 
 This module holds the component that carries the central invariant of
-``HighFrequencyImputer2``:
+``HighFrequencyImputer``:
 
     A model never sees, at prediction time, a feature-availability pattern more
     degraded than at training time, nor features of a different nature.
@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 # Voies de matérialisation, définies avec l'étape du plan
-from .imputation_plan2 import MaterializationWay
+from .imputation_plan import MaterializationWay
 # Primitives d'origine de cellule
 from .provenance import CellOrigin, max_origin
 # Arithmétique et conversion de fréquences
@@ -207,7 +207,7 @@ def _same_frequency(left: Optional[str], right: Optional[str]) -> bool:
 
 # Composant de matérialisation des covariables
 class CovariateMaterializer:
-    """Single producer of the feature frames of ``HighFrequencyImputer2``.
+    """Single producer of the feature frames of ``HighFrequencyImputer``.
 
     Three registries are held by this component and by it alone:
 
@@ -1464,7 +1464,7 @@ class CovariateMaterializer:
                 ``columns``. None to let the component choose.
             record: Whether the production feeds the three stores. False
                 produces the features and writes nothing, which is what the
-                stages of ``HighFrequencyImputer2`` use for their COVARIATES:
+                stages of ``HighFrequencyImputer`` use for their COVARIATES:
                 the registries hold what has been IMPUTED, never what was
                 merely prepared as a feature. Recording a covariate would
                 overwrite in the mirror the imputation its own model just
@@ -1563,7 +1563,7 @@ class CovariateMaterializer:
     ) -> pd.DataFrame:
         """Build the working frame of one stage: originals, exact aggregations, mirror.
 
-        The stage frame is the view PHASE 5 of ``HighFrequencyImputer2`` opens
+        The stage frame is the view PHASE 5 of ``HighFrequencyImputer`` opens
         each stage on: the input values, the EXACT aggregations of the finer
         columns onto the stage grid, and the mirror of what earlier stages
         imputed. It deliberately fabricates no interpolated value — a column
@@ -1643,7 +1643,7 @@ class CovariateMaterializer:
     ) -> None:
         """Record a production made outside this component in the three stores.
 
-        The stage executor of ``HighFrequencyImputer2`` writes the values a
+        The stage executor of ``HighFrequencyImputer`` writes the values a
         model produced — and the aggregation constraint possibly rescaled —
         through this method, so that the three registries keep being fed by a
         single implementation, the one :meth:`materialize` and

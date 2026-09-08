@@ -40,7 +40,7 @@ class ProvenanceType(str, Enum):
             whether the value came from a model or from an interpolation — and
             must NEVER be used as a filter to compose ``y_train`` nor to
             compute a taint level; those read the origin store, never the
-            provenance matrix. ``HighFrequencyImputer2`` NEVER emits it:
+            provenance matrix. ``HighFrequencyImputer`` NEVER emits it:
             rescaling to the period totals leaves provenance untouched, so a
             rescaled cell and an overwritten anchor row keep the ``MODEL_*``
             or INTERPOLATED mark of the value written there.
@@ -371,9 +371,9 @@ class ImputationProvenanceTracker:
         date re-expressed at the stage frequency merely sits where a real
         observation was. It must therefore NEVER be used as a filter to
         compose ``y_train`` nor to compute a taint level — those read the
-        origin store, never the provenance matrix. LEGACY of
-        ``HighFrequencyImputer``: ``HighFrequencyImputer2`` never calls it, the
-        aggregation constraint leaving provenance untouched.
+        origin store, never the provenance matrix. LEGACY mark: the current
+        imputer never calls it, the aggregation constraint leaving provenance
+        untouched.
 
         Args:
             column: Name of the column containing the disaggregated values.

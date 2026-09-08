@@ -1,7 +1,7 @@
 # Tutoriel : imputation multi-fréquences
 
 Ce tutoriel montre pas à pas comment donner une valeur mensuelle à une variable
-annuelle avec `HighFrequencyImputer2`, puis comment lire la provenance des
+annuelle avec `HighFrequencyImputer`, puis comment lire la provenance des
 valeurs produites.
 
 Voir le [concept](../concepts/mixed_frequency_imputation.md) pour le modèle
@@ -16,7 +16,7 @@ observée seulement au 31 décembre.
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
-from tsforecast import HighFrequencyImputer2
+from tsforecast import HighFrequencyImputer
 
 dates = pd.date_range("2019-01-31", periods=60, freq="ME")
 rng = np.random.default_rng(0)
@@ -41,7 +41,7 @@ Cas par défaut : `a1` est imputée directement à la fréquence mensuelle, le m
 n'apprend que sur les ancres observées.
 
 ```python
-imputer = HighFrequencyImputer2(
+imputer = HighFrequencyImputer(
     target_frequency="M",
     estimator=LinearRegression(),
     covariate_strategy="interpolate",   # axe 1 (défaut)
@@ -97,7 +97,7 @@ data["a2"] = np.nan
 for year_end in ["2019-12-31", "2020-12-31", "2021-12-31", "2022-12-31", "2023-12-31"]:
     data.loc[year_end, "a2"] = data.loc[:year_end, "m2"].tail(12).sum() + rng.normal(0, 5)
 
-imputer = HighFrequencyImputer2(
+imputer = HighFrequencyImputer(
     target_frequency="M",
     estimator=LinearRegression(),
     covariate_strategy="model",
@@ -122,7 +122,7 @@ La sortie insère le niveau `frequency` juste avant la date :
 `(entité..., 'frequency', 'date')`.
 
 ```python
-imputer = HighFrequencyImputer2(
+imputer = HighFrequencyImputer(
     target_frequency="M",
     estimator=LinearRegression(),
     panel_cols=["country"],
@@ -136,5 +136,5 @@ imputer = HighFrequencyImputer2(
 ## Voir aussi
 
 - [Concept : imputation multi-fréquences](../concepts/mixed_frequency_imputation.md)
-- [API : HighFrequencyImputer2](../api/frequency/HighFrequencyImputer2.md)
+- [API : HighFrequencyImputer](../api/frequency/HighFrequencyImputer.md)
 - [Guide MLflow](../guides/mlflow_tracking.md)
