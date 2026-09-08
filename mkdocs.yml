@@ -50,7 +50,7 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
-          paths: [src, docs/snippets]
+          paths: [".", docs/snippets]
           import:
           - https://docs.python.org/3/objects.inv
           - https://mkdocstrings.github.io/objects.inv
@@ -87,14 +87,67 @@ extra_javascript:
   - https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.4/MathJax.js?config=TeX-AMS-MML_HTMLorMML
 
 nav:
-- Package description: index.md
-- API Documentation:
+- Home: index.md
+- Concepts:
+  - Cross-validation temporelle: concepts/cross_validation.md
+  - Délais de publication: concepts/publication_delays.md
+  - Imputation multi-fréquences: concepts/mixed_frequency_imputation.md
+  - Pipeline XY: concepts/xy_pipeline.md
+  - Transformations par entité: concepts/panelwise_transforms.md
+  - Classes de base des transformateurs: concepts/base_transformers.md
+  - Utilitaires temporels: concepts/temporal_utils.md
+- Tutoriels:
+  - Ensembles train/test rigoureux: tutorials/pseudo_real_time_forecast.md
+  - Délais de publication: tutorials/publication_delays.md
+  - Imputation multi-fréquences: tutorials/mixed_frequency_imputation.md
+  - Pipeline XY: tutorials/xy_pipeline.md
+  - Transformations par entité: tutorials/panelwise_transforms.md
+  - Utilitaires temporels: tutorials/temporal_utils.md
+- Guides:
+  - Tracking d'expériences (MLflow): guides/mlflow_tracking.md
+- API Reference:
   - crossvals:
-    - PanelOutOfSampleSplit: api/crossvals/PanelOutOfSampleSplit.md
-    - PanelInSampleSplit: api/crossvals/PanelInSampleSplit.md
-    - PanelOutOfSampleSplitPerEntity: api/crossvals/PanelOutOfSampleSplitPerEntity.md
-    - PanelInSampleSplitPerEntity: api/crossvals/PanelInSampleSplitPerEntity.md
     - OutOfSampleSplit: api/crossvals/OutOfSampleSplit.md
     - InSampleSplit: api/crossvals/InSampleSplit.md
     - TSOutOfSampleSplit: api/crossvals/TSOutOfSampleSplit.md
     - TSInSampleSplit: api/crossvals/TSInSampleSplit.md
+    - PanelOutOfSampleSplit: api/crossvals/PanelOutOfSampleSplit.md
+    - PanelInSampleSplit: api/crossvals/PanelInSampleSplit.md
+    - PanelOutOfSampleSplitPerEntity: api/crossvals/PanelOutOfSampleSplitPerEntity.md
+    - PanelInSampleSplitPerEntity: api/crossvals/PanelInSampleSplitPerEntity.md
+  - delays:
+    - PublicationDelayTransformer: api/delays/PublicationDelayTransformer.md
+    - ShiftTransformer: api/delays/ShiftTransformer.md
+    - MaskTransformer: api/delays/MaskTransformer.md
+    - compare_and_detect_delays: api/delays/compare_and_detect_delays.md
+    - calculate_applicable_delay: api/delays/calculate_applicable_delay.md
+  - frequency:
+    - HighFrequencyImputer2: api/frequency/HighFrequencyImputer2.md
+    - HighFrequencyImputer (legacy): api/frequency/HighFrequencyImputer.md
+    - provenance: api/frequency/provenance.md
+    - imputation_plan2: api/frequency/imputation_plan2.md
+    - covariate_materializer: api/frequency/covariate_materializer.md
+    - aggregation_constraint: api/frequency/aggregation_constraint.md
+    - stage_scaler: api/frequency/stage_scaler.md
+    - variable_orderer: api/frequency/variable_orderer.md
+    - imputation_window: api/frequency/imputation_window.md
+    - frequency_aligner: api/frequency/frequency_aligner.md
+    - target_frequency_validator: api/frequency/target_frequency_validator.md
+    - regularizer: api/frequency/regularizer.md
+  - xy:
+    - XYPipeline: api/xy/XYPipeline.md
+    - XYTransformerMixin: api/xy/XYTransformerMixin.md
+  - panel:
+    - PanelwiseTransformer: api/panel/PanelwiseTransformer.md
+    - Utilitaires panel: api/panel/utils.md
+  - base:
+    - Transformateurs de base: api/base/transformers.md
+  - utils:
+    - frequency: api/utils/frequency.md
+    - duration: api/utils/duration.md
+    - position: api/utils/position.md
+    - time: api/utils/time.md
+    - validation: api/utils/validation.md
+    - parse: api/utils/parse.md
+  - tracking:
+    - Métriques: api/tracking/metrics.md

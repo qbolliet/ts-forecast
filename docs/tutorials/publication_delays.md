@@ -488,7 +488,7 @@ transformer = PublicationDelayTransformer(
 
 Le cœur de la stratégie `'shift'` est le calcul du nombre de périodes à décaler pour chaque série.
 
-![Calcul des périodes à décaler](../assets/06_compute_shift_periods.png)
+![Calcul des périodes à décaler](../assets/compute_shift_periods.png)
 
 **Formule :**
 
@@ -543,7 +543,7 @@ n_periods = -ceil((45 - (-16)) / 30) = -ceil(61 / 30) = -ceil(2.03) = -3
 
 La stratégie `'mask'` utilise la **fréquence de l'index** (pas celle de la série) pour calculer le nombre d'observations à masquer.
 
-![Calcul des périodes à masquer](../assets/07_compute_mask_periods.png)
+![Calcul des périodes à masquer](../assets/compute_mask_periods.png)
 
 **Formule :**
 
