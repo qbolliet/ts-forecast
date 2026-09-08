@@ -419,6 +419,16 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             for.
         imputation_order_: Variable order per stage. **Empty outside**
             ``covariate_strategy='model'``.
+        imputation_cv_scores_: ``{stage_label: {variable: cv_score}}`` — the
+            cross-validated scores that decided ``imputation_order_``. Empty
+            outside ``covariate_strategy='model'`` **and**
+            ``fit_predict_order='cv'``; a stage whose order fell back entirely
+            to frequency carries no entry. Exposed for tracking.
+        provenance_statistics_: Counts and percentages per ``ProvenanceType``,
+            ``{'overall': {...}, column: {...}}`` — the output of
+            :meth:`ImputationProvenanceTracker.compute_statistics` computed on
+            the last pass, kept so it need not be rebuilt. Exposed for
+            tracking (see :func:`tsforecast.tracking.imputation_metrics`).
         imputation_plan_: :class:`ImputationPlan` — the complete fitted state.
         imputation_models_: Read-only view ``{(stage, variable): estimator}``
             over the plan.
@@ -1782,6 +1792,11 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         # 'model', l'ordre par étape est produit en phase 5
         self.imputation_order_ = {}
 
+        # Scores de validation croisée qui ont décidé de cet ordre, par étape
+        # puis par variable. Vide hors covariate_strategy='model' +
+        # fit_predict_order='cv'. Exposé pour le tracking.
+        self.imputation_cv_scores_: Dict[str, Dict[Any, float]] = {}
+
         # Accumulateur des avertissements de la phase 5 : ils sont émis en un
         # seul message en fin de phase, jamais un par variable et par étape
         self._warnings: List[str] = []
@@ -1975,6 +1990,12 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         # sortie multi-fréquences relève du "transform", seul producteur de
         # frame
         self.imputation_provenance_ = self._provenance_tracker.get_provenance_matrix()
+
+        # Statistiques de provenance (comptes et pourcentages par
+        # "ProvenanceType", au global et par colonne) : exposées telles quelles
+        # pour le tracking, elles évitent à l'utilisateur de reconstruire un
+        # tracker pour les recalculer
+        self.provenance_statistics_ = self._provenance_tracker.compute_statistics()
 
         # Couples imputés sans ancre : toujours écrit, vide compris, ce qui
         # autorise sa lecture par "check_is_fitted"
@@ -2562,6 +2583,11 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             training_sets=training_sets,
         ))
         self.imputation_order_[stage_label] = list(ordered)
+        # Report des scores CV qui ont décidé du rang, pour le tracking. Sous
+        # l'ordre 'frequency' l'ordonnanceur laisse "scores_" vide
+        stage_scores = dict(getattr(self._variable_orderer, 'scores_', {}) or {})
+        if stage_scores:
+            self.imputation_cv_scores_[stage_label] = stage_scores
         return ordered
 
     # Méthode d'exécution d'une étape de fréquence

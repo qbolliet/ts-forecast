@@ -91,6 +91,14 @@ class VariableOrderer(BaseEstimator):
             ``int`` build a ``KFold(shuffle=True, random_state=42)`` instead
             of ``check_cv``'s unshuffled default; a splitter or an iterable
             of splits is resolved through ``check_cv`` unchanged.
+        scores_: Cross-validated score of each key actually scored by the
+            **last** :meth:`order` call, ``{VariableKey: float}``. Empty
+            under the ``'frequency'`` order and whenever ``order`` returns
+            early (one variable or fewer). Meant for tracking — it is the
+            per-variable predictability that drove the ranking.
+        fallback_keys_: Keys relegated to the fallback group by the last
+            :meth:`order` call (no covariate, too few observations, or no
+            scoring set), ordered as returned. Empty under ``'frequency'``.
 
     Examples:
         >>> import pandas as pd
@@ -348,6 +356,12 @@ class VariableOrderer(BaseEstimator):
         # Vérification que l'estimateur est entraîné
         check_is_fitted(self, attributes=['cv_'])
 
+        # Réinitialisation des diagnostics de l'appel : les scores de
+        # validation croisée qui ont décidé du rang, et les clés reléguées au
+        # groupe de repli. Renseignés uniquement sous l'ordre 'cv'.
+        self.scores_: Dict[VariableKey, float] = {}
+        self.fallback_keys_: List[VariableKey] = []
+
         # Extraction des variables à ordonner
         var_keys = list(variables)
         if len(var_keys) <= 1:
@@ -522,5 +536,10 @@ class VariableOrderer(BaseEstimator):
         # variable
         cv_scored.sort(key=lambda item: (-item[1], variables[item[0]].name))
         fallback_scored.sort(key=lambda item: (-item[1], variables[item[0]].name))
+
+        # Diagnostics de l'appel : le score CV par clé effectivement scorée, et
+        # les clés du groupe de repli (non comparables, cf. docstring)
+        self.scores_ = {key: score for key, score in cv_scored}
+        self.fallback_keys_ = [key for key, _ in fallback_scored]
 
         return [v for v, _ in cv_scored] + [v for v, _ in fallback_scored]

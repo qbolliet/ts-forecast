@@ -31,10 +31,11 @@ def parse_frequency(frequency_str : str) -> Tuple[FrequencyType, str, str]:
 
     Args:
         frequency_str: Pandas frequency string to parse (e.g., 'MS', 'QE-DEC', 'D')
-            Must follow the format: [FREQ][S|E?]-[SUFFIX?]
-            - FREQ: Base frequency code (uppercase letters like 'M', 'Q', 'W')
-            - S|E: Optional position indicator ('S' for start, 'E' for end)
-            - SUFFIX: Optional suffix after '-' (e.g., month names for quarters)
+            Must follow the format ``[FREQ][S|E?]-[SUFFIX?]`` where ``FREQ`` is
+            the base frequency code (uppercase letters like 'M', 'Q', 'W'),
+            ``S``/``E`` is an optional position indicator ('S' for start, 'E'
+            for end), and ``SUFFIX`` is an optional suffix after ``-`` (e.g.
+            month names for quarters).
 
     Returns:
         Tuple containing:

@@ -293,6 +293,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             these stages, rebuilding each stage frame from the input data via
             :meth:`_build_stage_frame`, so that fit and transform work on
             identical stage frames for identical data.
+        provenance_statistics_fit_: Counts and percentages per
+            ``ProvenanceType`` at the end of ``fit``
+            (``{'overall': {...}, column: {...}}``), the output of
+            :meth:`ImputationProvenanceTracker.compute_statistics`. Kept so it
+            need not be rebuilt; exposed for tracking (see
+            :func:`tsforecast.tracking.imputation_metrics`).
+        provenance_statistics_: Same, for the LAST ``transform`` call.
         imputation_provenance_fit_: DataFrame tracking origin of each value
             ('original', 'model_on_true', 'model_on_imputed', 'aggregated',
             'disaggregated') as seen at the end of ``fit``. Single-level
@@ -3747,6 +3754,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # celle du transform qui suit immédiatement
         self.imputation_provenance_fit_ = self._provenance_tracker.get_provenance_matrix()
 
+        # Statistiques de provenance du fit (comptes et pourcentages par
+        # "ProvenanceType"), exposées pour le tracking sans reconstruction d'un
+        # tracker. Distinctes de "provenance_statistics_", écrites au transform
+        self.provenance_statistics_fit_ = self._provenance_tracker.compute_statistics()
+
     # -------------------------------------------------------------------------
     # Transform
     # -------------------------------------------------------------------------
@@ -4084,8 +4096,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Contrôle de cohérence provenance / données
         self._check_provenance_consistency(data_result, self.imputation_provenance_)
 
-        # Résumé de provenance
-        overall_stats = transform_tracker.compute_statistics()['overall']
+        # Résumé de provenance : statistiques complètes exposées pour le
+        # tracking (elles décrivent le dernier "transform", comme
+        # "imputation_provenance_")
+        self.provenance_statistics_ = transform_tracker.compute_statistics()
+        overall_stats = self.provenance_statistics_['overall']
         # Logging
         self._log(
             "Transform summary: " + ", ".join(
