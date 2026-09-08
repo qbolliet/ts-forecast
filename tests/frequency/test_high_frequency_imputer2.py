@@ -32,7 +32,10 @@ from tsforecast.frequency.high_frequency_imputer2 import (
     HighFrequencyImputer2,
 )
 from tsforecast.frequency.imputation_plan import INTERPOLATE_FALLBACK
-from tsforecast.frequency.provenance import ProvenanceType
+from tsforecast.frequency.provenance import (
+    ProvenanceType,
+    resolve_model_provenance,
+)
 from tsforecast.frequency.stage_scaler import StageScaler
 
 # Clés d'entité du jeu PANEL-F, sous forme de tuples (§2.5)
@@ -2232,3 +2235,267 @@ class TestPerRowScale:
         for step in monthly:
             assert step.target_taint == 'imputed'
         assert any(DE in (step.entities or ()) for step in monthly)
+
+
+# =============================================================================
+# Entités n'observant jamais la variable imputée (§5.10, D33)
+# =============================================================================
+# Fixture privée du jeu PANEL-F dont 'v' est entièrement effacée pour IT
+@pytest.fixture
+def panel_f_without_it_v(mixed_freq_panel_multifrequency) -> pd.DataFrame:
+    """``PANEL-F`` dont ``v`` n'est JAMAIS observée pour ``IT`` (§5.10).
+
+    Les 36 cellules mensuelles de ``v`` d'``IT`` sont effacées : le couple
+    ``('IT', 'v')`` n'a plus de fréquence détectable et rejoint les couples
+    non détectés. ``FR`` reste annuelle et ``DE`` trimestrielle, de sorte que
+    le jeu mutualisé du §5.8 garde ses 15 lignes.
+    """
+    frame = mixed_freq_panel_multifrequency.copy()
+    frame.loc[('IT',), 'v'] = np.nan
+    return frame
+
+
+# Fixture privée de l'entité totalement muette : ni cible, ni covariable
+@pytest.fixture
+def panel_f_with_a_mute_entity(panel_f_without_it_v) -> pd.DataFrame:
+    """``PANEL-F`` dont ``IT`` n'a plus de covariable exploitable pour ``v``.
+
+    ``q1`` est effacée à son tour : ``IT`` ne garde que ``m1``, ce qui la
+    laisse dans le jeu à la fréquence cible — une entité dont plus aucune
+    colonne mensuelle n'est observée est écartée bien plus haut, par la
+    validation de la fréquence cible — mais prive la grille de prédiction de
+    ``v`` d'une de ses deux covariables. C'est le seul chemin d'échec du
+    §5.10 : la ligne est vide, et l'interpolation ne peut pas servir de repli
+    — il n'y a rien à interpoler.
+    """
+    frame = panel_f_without_it_v.copy()
+    frame.loc[('IT',), 'q1'] = np.nan
+    return frame
+
+
+class TestUnobservedEntities:
+    """I21 — imputation complète d'une entité qui n'observe jamais la colonne."""
+
+    @staticmethod
+    def _v_steps(imputer: HighFrequencyImputer2) -> list:
+        """Étapes de plan de la variable 'v'."""
+        return [step for step in imputer.imputation_plan_ if step.var_name == 'v']
+
+    @staticmethod
+    def _imputed(imputer: HighFrequencyImputer2, entity: str) -> pd.Series:
+        """Cellules de 'v' écrites dans le miroir pour une entité."""
+        store = imputer._covariate_materializer.imputed_store['v']
+        if entity not in set(store.index.get_level_values(0)):
+            return pd.Series(dtype=float)
+        return _entity_block(store, entity)
+
+    @staticmethod
+    def _provenance(imputer: HighFrequencyImputer2, entity: str) -> pd.Series:
+        """Provenance de 'v' pour une entité."""
+        return _entity_block(imputer.imputation_provenance_['v'], entity)
+
+    def test_unobserved_entity_is_left_alone_by_default(self, panel_f_without_it_v):
+        """I21 — sous le défaut False, IT n'est ni imputée ni nommée par le plan."""
+        imputer = _fit_quietly(_make_imputer(), panel_f_without_it_v)
+
+        # Aucune cellule produite, et le miroir ne porte que FR et DE
+        assert self._imputed(imputer, 'IT').empty
+
+        # Les 36 cellules restent vides et non imputées : la matrice de
+        # provenance laisse une cellule NaN sans marque, aucune ne portant
+        # donc la moindre provenance de modèle
+        provenance = self._provenance(imputer, 'IT')
+        assert len(provenance) == 36
+        assert provenance.isna().all()
+
+        # Aucune étape de plan ne nomme IT parmi ses entités
+        for step in self._v_steps(imputer):
+            assert IT not in (step.entities or ())
+            assert step.source_frequency is not None
+            assert step.unanchored is False
+
+        # L'attribut est écrit, et vide
+        assert imputer.unanchored_pairs_ == ()
+
+    def test_unobserved_entity_is_imputed_on_demand(self, panel_f_without_it_v):
+        """I21 — sous True, les 36 cellules sont produites et marquées sans ancre."""
+        imputer = _fit_quietly(
+            _make_imputer(impute_unobserved_entities=True), panel_f_without_it_v
+        )
+
+        # Les 36 cellules mensuelles sont renseignées
+        imputed = self._imputed(imputer, 'IT')
+        assert len(imputed) == 36
+        assert imputed.notna().all()
+
+        # Toutes portent MODEL_UNANCHORED, et elles seules
+        assert {str(value) for value in self._provenance(imputer, 'IT')} == {
+            'model_unanchored'
+        }
+
+        # Le couple est rendu par l'attribut ajusté, sous-ensemble des couples
+        # sans fréquence détectée
+        assert imputer.unanchored_pairs_ == (('IT', 'v'),)
+        assert set(imputer.unanchored_pairs_) <= set(imputer._undetected_frequencies_)
+
+    def test_unanchored_step_shares_the_model_and_carries_no_scale(
+        self, panel_f_without_it_v
+    ):
+        """L'étape (v, None) partage le modèle des groupes ancrés, sans diviseur."""
+        imputer = _fit_quietly(
+            _make_imputer(impute_unobserved_entities=True), panel_f_without_it_v
+        )
+        steps = {step.source_frequency: step for step in self._v_steps(imputer)}
+        assert set(steps) == {'Y', 'Q', None}
+
+        unanchored = steps[None]
+        assert unanchored.source_frequency is None
+        assert unanchored.unanchored is True
+        assert unanchored.entities == (IT,)
+        assert unanchored.scale_factor == 1.0
+        assert unanchored.fit_scale_factor == 1.0
+
+        # MÊME objet modèle que les deux étapes ancrées de la même étape de
+        # fréquence (§5.8 R6, D19)
+        assert unanchored.model is steps['Y'].model
+        assert unanchored.model is steps['Q'].model
+
+    def test_unanchored_entity_contributes_nothing_to_training(
+        self, panel_f_without_it_v
+    ):
+        """R1 inchangée — IT n'apporte aucune ligne au jeu mutualisé."""
+        imputer = _fit_with_spy(
+            panel_f_without_it_v, impute_unobserved_entities=True
+        )
+        steps = self._v_steps(imputer)
+        assert len(steps) == 3
+
+        # Les blocs ne nomment que les entités qui OBSERVENT la colonne
+        for step in steps:
+            assert dict(step.training_blocks) == {FR: 'Y', DE: 'Q'}
+
+        # 15 lignes mutualisées : 3 annuelles de FR, 12 trimestrielles de DE
+        y_train = steps[0].model.fit_y_
+        assert len(y_train) == 15
+        assert pd.Series(
+            [key[0] for key in y_train.index]
+        ).value_counts().to_dict() == {'DE': 12, 'FR': 3}
+
+        # Le même compte sans le paramètre : R1 ne bouge pas
+        without = _fit_with_spy(panel_f_without_it_v)
+        assert len(self._v_steps(without)[0].model.fit_y_) == 15
+
+    @pytest.mark.parametrize('constraint', ['sum', None])
+    def test_no_aggregation_constraint_on_unanchored_cells(
+        self, panel_f_without_it_v, constraint
+    ):
+        """Aucun total de période n'est imposé aux cellules sans ancre."""
+        imputer = _fit_quietly(
+            _make_imputer(
+                impute_unobserved_entities=True, aggregation_constraint=constraint
+            ),
+            panel_f_without_it_v,
+        )
+
+        # La somme 2021 d'IT n'a aucune raison de valoir 120 : ses cellules
+        # sont des prédictions libres, jamais la désagrégation d'un total
+        italy = self._imputed(imputer, 'IT')
+        assert italy.loc['2021'].sum() != pytest.approx(120.0)
+
+        # Le recalage des groupes ANCRÉS, lui, reste celui du §11.1
+        if constraint == 'sum':
+            france = self._imputed(imputer, 'FR')
+            assert france.loc['2021'].sum() == pytest.approx(120.0)
+
+    @pytest.mark.parametrize('modality', [False, 'covariates_only', True])
+    def test_progression_is_unchanged_by_the_parameter(
+        self, panel_f_without_it_v, modality
+    ):
+        """Le couple sans ancre n'entre dans aucun ensemble F : la progression est identique."""
+        without = _fit_with_spy(
+            panel_f_without_it_v, impute_intermediate_frequencies=modality
+        )
+        with_parameter = _fit_with_spy(
+            panel_f_without_it_v,
+            impute_intermediate_frequencies=modality,
+            impute_unobserved_entities=True,
+        )
+        assert (
+            with_parameter.frequency_progression_ == without.frequency_progression_
+        )
+        assert (
+            with_parameter.variable_categories_ == without.variable_categories_
+        )
+
+        # La capacité joue sous les TROIS modalités, l'axe 2 n'y étant pour rien
+        assert with_parameter.unanchored_pairs_ == (('IT', 'v'),)
+
+    def test_unanchored_pair_without_covariates_warns_once_and_stays_nan(
+        self, panel_f_with_a_mute_entity
+    ):
+        """Sans covariable exploitable, la ligne est vide : NaN, et un seul avertissement."""
+        imputer = _make_imputer(impute_unobserved_entities=True)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.fit(panel_f_with_a_mute_entity)
+
+        # Aucune cellule produite pour IT, et aucune provenance de modèle
+        assert self._imputed(imputer, 'IT').empty
+        assert self._provenance(imputer, 'IT').isna().all()
+        assert imputer.unanchored_pairs_ == ()
+
+        # UN SEUL avertissement nomme le couple, agrégé en fin de fit
+        naming = [
+            str(warning.message) for warning in caught
+            if "('IT', 'v')" in str(warning.message)
+        ]
+        assert len(naming) == 1
+
+    def test_model_unanchored_is_never_emitted_by_default(
+        self, panel_f_without_it_v, mixed_freq_panel_multifrequency
+    ):
+        """I6 non-régression — l'ajout est additif, aucune cellule ne change de marque."""
+        for data in (panel_f_without_it_v, mixed_freq_panel_multifrequency):
+            imputer = _fit_with_spy(data)
+            emitted = {
+                str(value)
+                for value in imputer.imputation_provenance_.to_numpy().ravel()
+            }
+            assert 'model_unanchored' not in emitted
+
+            # Les cinq familles restent résolues par les deux seules souillures
+            for step in imputer.imputation_plan_:
+                if step.is_fallback:
+                    continue
+                assert step.emitted_provenance == resolve_model_provenance(
+                    step.covariate_taint, step.target_taint
+                )
+
+    def test_adding_the_unanchored_group_leaves_the_others_intact(
+        self, panel_f_without_it_v
+    ):
+        """I15 non-régression — X_train, y_train et les voies des groupes ancrés."""
+        without = _fit_with_spy(panel_f_without_it_v)
+        with_parameter = _fit_with_spy(
+            panel_f_without_it_v, impute_unobserved_entities=True
+        )
+
+        anchored = {
+            step.source_frequency: step
+            for step in self._v_steps(with_parameter)
+            if step.source_frequency is not None
+        }
+        reference = {
+            step.source_frequency: step for step in self._v_steps(without)
+        }
+        assert set(anchored) == set(reference) == {'Y', 'Q'}
+
+        for source_frequency, step in anchored.items():
+            other = reference[source_frequency]
+            # Même jeu mutualisé, aux valeurs près
+            pd.testing.assert_frame_equal(step.model.fit_X_, other.model.fit_X_)
+            pd.testing.assert_series_equal(step.model.fit_y_, other.model.fit_y_)
+            # Mêmes voies de matérialisation, mêmes entités, même échelle
+            assert dict(step.materialization) == dict(other.materialization)
+            assert step.entities == other.entities
+            assert step.scale_factor == other.scale_factor

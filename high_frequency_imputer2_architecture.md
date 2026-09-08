@@ -1219,14 +1219,14 @@ impute_unobserved_entities: bool = False
 ```
 
 `False` (défaut) : comportement actuel, inchangé — l'entité reste hors de toute grille de
-prédiction et ses cellules restent `ORIGINAL`/NaN. `True` : le couple `(e, c)` devient
+prédiction et ses cellules restent NaN, sans marque de provenance (conséquence 5). `True` : le couple `(e, c)` devient
 **imputable à la fréquence cible de `e`**, à une étape unique, celle de `f_target(e)`.
 
 C'est le pendant, côté **cible**, de `covariate_eligibility` côté **covariables** (§4.5) : la même
 question — « que faire d'un couple `(entité, colonne)` jamais observé ? » — posée aux deux bouts
 du modèle.
 
-#### Les cinq conséquences, à traiter explicitement
+#### Les six conséquences, à traiter explicitement
 
 1. **Classification et progression.** Le couple a une fréquence source **absente**, jamais
    inférée. Il n'entre donc dans l'ensemble `F` du §5.2 pour **aucune** fréquence : il n'ajoute
@@ -1238,8 +1238,19 @@ du modèle.
    C'est une différence sémantique de fond avec toutes les autres cellules produites, qui sont
    des **désagrégations** d'une observation ; celles-ci sont des **prédictions libres**.
 3. **Aucun diviseur.** Pas de fréquence source, donc pas de conversion : la prédiction est
-   produite directement à l'échelle de l'étape, diviseur `1.0`. Le `scale_factor` de l'étape de
-   plan vaut `1.0` et son `fit_scale_factor` reste celui du modèle partagé (§5.8 R6).
+   produite directement à l'échelle de l'étape, diviseur `1.0`. `scale_factor` **et**
+   `fit_scale_factor` valent `1.0`.
+
+   > **Arrêté à l'implémentation (lot L14b, 2026-09-08).** La première rédaction demandait un
+   > `fit_scale_factor` « resté celui du modèle partagé » (§5.8 R6). C'est numériquement faux :
+   > `_predict_step` n'utilise jamais ces deux champs séparément, mais leur **rapport** — il
+   > applique `scale_factor` puis inverse `fit_scale_factor`. Les groupes ancrés portent déjà
+   > **deux facteurs égaux**, la cible ayant été mise à l'échelle **ligne à ligne** (§5.4) : le
+   > modèle partagé rend donc déjà des valeurs au pas de l'étape, et le report vaut `1.0`.
+   > Reprendre le `12.0` du groupe `Y` comme `fit_scale_factor` d'une étape sans ancre en
+   > multiplierait les prédictions par douze. Les deux facteurs valent donc `1.0`, ce qui est
+   > **le même report neutre** que celui des groupes ancrés — la règle R6 est respectée, le
+   > modèle n'étant pas réajusté, seul son report l'exprimant correctement.
 4. **Provenance.** « Aucune ancre » est épistémiquement bien plus faible que « trois ancres
    désagrégées », et la matrice de provenance mentirait à les confondre. Un membre est ajouté à
    l'énumération du §6.1 :
@@ -1256,8 +1267,33 @@ du modèle.
    cellule qui portait une autre valeur n'en change.
 5. **Éligibilité des covariables.** L'entité doit disposer de covariables sur la grille cible,
    sans quoi la ligne est vide et le repli s'applique. Le repli d'une entité sans ancre **ne peut
-   pas être l'interpolation** — il n'y a rien à interpoler : ses cellules restent NaN et
-   `ORIGINAL`, et un avertissement **agrégé** nomme les couples concernés en fin de `fit`.
+   pas être l'interpolation** — il n'y a rien à interpoler : ses cellules restent NaN et **non
+   marquées**, et un avertissement **agrégé** nomme les couples concernés en fin de `fit`.
+
+   *Précision de vocabulaire, mesurée* : « non marquées » et non « `ORIGINAL` ». Le tracker ne
+   pose `ORIGINAL` que sur les cellules **non nulles en entrée** (§6.4) ; une cellule NaN jamais
+   imputée porte `None` dans `imputation_provenance_`. La lecture d'un test est donc
+   `provenance.isna()`, jamais `== ORIGINAL`. Cela vaut aussi pour toutes les autres mentions du
+   §5.10 : sous `impute_unobserved_entities=False`, les cellules de l'entité muette sont NaN et
+   sans marque.
+6. **Fenêtre d'imputation.** La fenêtre stricte d'une entité est l'intervalle où **toutes** ses
+   colonnes sont couvertes (§7). Une entité sans ancre n'en a donc **aucune, par construction** :
+   la colonne qu'on lui impute ne couvre rien chez elle. La subordonner à la couverture de la
+   colonne même que l'étape produit serait circulaire, et rendrait le paramètre **inopérant sous
+   les réglages par défaut**. La grille de prédiction d'une étape sans ancre est donc prise
+   **sans restriction de fenêtre** pour ses entités — exactement le traitement que le §7.2
+   réserve déjà à une entité que le calculateur omet, « laissée sans restriction plutôt que de
+   perdre silencieusement toutes ses lignes ». Ce sont ensuite les **covariables** qui décident :
+   une ligne qu'elles ne peuvent pas nourrir rend un NaN, qui n'est jamais écrit, et la
+   conséquence 5 s'applique.
+
+   > **Arrêté à l'implémentation (lot L14b, 2026-09-08).** Mesuré sur `PANEL-F` dont `v` est
+   > effacée pour `IT`, sous `imputation_scope='strict'` : `column_coverage_[('IT',)]['v']` vaut
+   > `(None, None)`, la couverture d'`IT` n'atteint donc jamais `1.0`, son masque d'imputation est
+   > **entièrement faux** et sa grille compte **zéro ligne** — là où `FR` et `DE` en comptent 36.
+   > La restriction levée, les 36 cellules attendues par l'exemple normatif ci-dessous sont
+   > produites. Cette levée ne concerne **que** les étapes sans ancre : aucune grille de
+   > prédiction ancrée n'en est élargie.
 
 #### Exemple normatif sur `PANEL-F`
 

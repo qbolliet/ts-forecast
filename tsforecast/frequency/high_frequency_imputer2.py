@@ -65,7 +65,6 @@ from .provenance import (
     Taint,
     max_origin,
     origin_to_taint,
-    resolve_model_provenance,
 )
 from .stage_scaler import ScaleMode, StageScaler
 from .target_frequency_validator import TargetFrequencyValidator
@@ -97,6 +96,7 @@ _FITTED_ATTRIBUTES: Tuple[str, ...] = (
     'detected_frequencies_',
     'variable_categories_',
     'frequency_progression_',
+    'unanchored_pairs_',
     'imputation_plan_',
 )
 
@@ -308,6 +308,27 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             Under ``False`` and ``'covariates_only'`` no coincidence is
             possible and ``aggregation_constraint`` has no effect whatsoever
             on the composition of ``y_train``.
+        impute_unobserved_entities: Whether an entity that never observes an
+            imputable column may receive a complete imputation of it, learned
+            on the other entities of the panel. ``False`` (default) leaves
+            such a pair out of every prediction grid: its cells stay NaN and
+            ``ORIGINAL``. ``True`` makes the pair imputable **at the target
+            frequency of its entity, and there only** — the last stage of its
+            group — through a dedicated plan step whose ``source_frequency``
+            is ``None``. It is the target-side counterpart of
+            ``covariate_eligibility``, and it is **independent of axis 2**:
+            it behaves identically under the three modalities and leaves
+            ``frequency_progression_`` untouched. Three semantic differences
+            these cells carry, and which ``MODEL_UNANCHORED`` reports: no
+            anchor, hence **no rescaling** whatever
+            ``aggregation_constraint`` says, and **no divisor** — they are
+            free predictions, not disaggregations of an observed total. The
+            entity contributes nothing to the training set either : it has no true value to bring. Its only
+            failure path is the absence of usable covariates on the target
+            grid: interpolation cannot be the fallback of an entity with
+            nothing to interpolate, so the cells stay NaN and ``ORIGINAL``
+            and a single aggregated warning names the pairs at the end of
+            ``fit``.
         fit_predict_order: Order in which variables are imputed,
             ``'frequency'`` (default) or ``'cv'``. Inert outside
             ``covariate_strategy='model'``. Under ``'cv'`` each variable is
@@ -371,7 +392,15 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         variable_categories_: Variable keys per category ``'aggregate'`` /
             ``'impute'`` / ``'target_freq'``, classified **per (entity,
             column) pair** on a panel.
-        frequency_progression_: Ordered list of stage frequencies.
+        frequency_progression_: Ordered list of stage frequencies. **Not
+            changed** by ``impute_unobserved_entities``: an unanchored pair
+            has no source frequency, so it joins no frequency set and adds no
+            stage.
+        unanchored_pairs_: Tuple of the ``(entity..., column)`` pairs actually
+            imputed without any anchor under
+            ``impute_unobserved_entities=True``. Always written, empty under
+            the default; a subset of the pairs no frequency could be detected
+            for.
         imputation_order_: Variable order per stage. **Empty outside**
             ``covariate_strategy='model'``.
         imputation_plan_: :class:`ImputationPlan` — the complete fitted state.
@@ -430,6 +459,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         interpolation_anchor: Union[None, float, Dict[str, Optional[float]]] = None,
         # --- Axe 2 : fréquences intermédiaires ---
         impute_intermediate_frequencies: IntermediateFrequencies = False,
+        impute_unobserved_entities: bool = False,
         # --- Ordre d'imputation ---
         fit_predict_order: Literal['frequency', 'cv'] = 'frequency',
         cv: Union[int, Any, Iterable, None] = None,
@@ -542,6 +572,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             'keep_lower_frequencies': keep_lower_frequencies,
             'restore_original_values': restore_original_values,
             'verbose': verbose,
+            'impute_unobserved_entities': impute_unobserved_entities,
         }
         for param_name, param_value in boolean_params.items():
             if not isinstance(param_value, bool):
@@ -559,6 +590,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         self.interpolation_method = interpolation_method
         self.interpolation_anchor = interpolation_anchor
         self.impute_intermediate_frequencies = impute_intermediate_frequencies
+        self.impute_unobserved_entities = impute_unobserved_entities
         self.fit_predict_order = fit_predict_order
         self.cv = cv
         self.cv_scoring = cv_scoring
@@ -1159,11 +1191,19 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
     def _imputable_groups(
         self,
         prediction_frequency: Union[str, Dict[EntityKey, str]],
-    ) -> Dict[Tuple[str, str], Tuple[EntityKey, ...]]:
+    ) -> Dict[Tuple[str, Optional[str]], Tuple[EntityKey, ...]]:
         """Group the imputable ``(entity, column)`` pairs by source frequency.
 
         Each ``(column, f_var)`` group yields one plan step at the stage,
         all of them sharing the model fitted on the mutualized training set.
+
+        Under ``impute_unobserved_entities=True`` a further group
+        ``(column, None)`` gathers the entities that never observe the column.
+        This is the **single** entry point of that capability:
+        the classification is left untouched, which is exactly what keeps
+        ``variable_categories_`` and ``frequency_progression_`` identical with
+        and without the parameter -- such a pair has no source frequency, so
+        it joins no frequency set and adds no stage.
 
         Args:
             prediction_frequency: Frequency of the stage.
@@ -1171,14 +1211,15 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         Returns:
             Mapping from ``(column, source frequency)`` to the tuple of
             entity keys of the group, each tuple sorted for determinism. On a
-            time series the entity key is ``()``.
+            time series the entity key is ``()``. The source frequency is
+            ``None`` for an unanchored group.
 
         Examples:
             >>> imputer._imputable_groups('M')          # doctest: +SKIP
-            {('v', 'Y'): (('FR',),), ('v', 'Q'): (('DE',),)}
+            {('v', 'Y'): (('FR',),), ('v', None): (('IT',),)}
         """
         # Regroupement des couples imputables par (colonne, fréquence source)
-        groups: Dict[Tuple[str, str], List[EntityKey]] = {}
+        groups: Dict[Tuple[str, Optional[str]], List[EntityKey]] = {}
         categories = self._classify_variables_at_frequency(prediction_frequency)
         for key in categories['impute']:
             entity, column = split_variable_key(key)
@@ -1187,12 +1228,107 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             )
             groups.setdefault((column, source_freq), []).append(entity)
 
+        # Groupes sans ancre, ajoutés après les groupes ancrés : l'ordre du
+        # plan reste celui des fréquences sources, la nouveauté en queue
+        for entity, column in self._unanchored_pairs_at(prediction_frequency):
+            groups.setdefault((column, None), []).append(entity)
+
         # Tri des entités de chaque groupe : l'ordre du plan ne doit dépendre
         # ni de l'ordre des colonnes ni de celui des lignes en entrée
         return {
             group_key: tuple(sorted(entities, key=repr))
             for group_key, entities in groups.items()
         }
+
+    # Méthode auxiliaire de lecture de la fréquence cible d'une entité
+    def _entity_target_frequency(self, entity: Optional[EntityKey]) -> Optional[str]:
+        """Read the target frequency bound to one entity.
+
+        Args:
+            entity: Entity key, None on a time series.
+
+        Returns:
+            The normalized target frequency of that entity, or None when the
+            binding does not name it.
+
+        Examples:
+            >>> imputer._entity_target_frequency(('FR',))   # doctest: +SKIP
+            'M'
+        """
+        # Les deux formes de la cible, scalaire et par entité, lues ici seulement
+        target = self.effective_target_frequency_
+        frequency = target.get(entity) if isinstance(target, dict) else target
+        if frequency is None:
+            return None
+        return normalize_frequency(frequency, return_format='base')
+
+    # Méthode auxiliaire de sélection des couples imputables sans aucune ancre
+    def _unanchored_pairs_at(
+        self,
+        prediction_frequency: Union[str, Dict[EntityKey, str]],
+    ) -> List[Tuple[EntityKey, str]]:
+        """Select the never-observed pairs imputable at one stage.
+
+        A pair the fit could detect no frequency for is imputable at the
+        target frequency of its entity, and there only: it is the last stage
+        of its group, wherever the other entities stand. Two conditions gate
+        it, beyond ``impute_unobserved_entities``:
+
+        1. the stage binds the entity to its own target frequency -- anything
+           finer or coarser is an intermediate stage the pair never joins;
+        2. at least one other entity observes the column, without which the
+           mutualized training set would be empty and the step would have no
+           model to share.
+
+        Args:
+            prediction_frequency: Frequency of the stage, scalar or per
+                entity.
+
+        Returns:
+            List of ``(entity key, column)`` pairs, in the order of
+            ``_undetected_frequencies_``. Empty under the default parameter,
+            and empty on a time series, which has no other entity to learn
+            from.
+
+        Examples:
+            >>> imputer._unanchored_pairs_at('M')       # doctest: +SKIP
+            [(('IT',), 'v')]
+        """
+        # Capacité fermée par défaut, et sans objet sur une série temporelle :
+        # l'imputation sans ancre est apprise sur les AUTRES entités
+        if not self.impute_unobserved_entities or not self.is_panel_:
+            return []
+
+        # Parcours des couples jamais observés
+        pairs: List[Tuple[EntityKey, str]] = []
+        for key in self._undetected_frequencies_:
+            entity, column = split_variable_key(key)
+
+            # Fréquence de prédiction liée à l'entité par l'étape
+            if isinstance(prediction_frequency, dict):
+                pred_freq = prediction_frequency.get(entity)
+            else:
+                pred_freq = prediction_frequency
+            if pred_freq is None:
+                continue
+
+            # Fréquence cible propre à l'entité
+            f_target = self._entity_target_frequency(entity)
+            if f_target is None:
+                continue
+
+            # Étape f_target(e) uniquement, la dernière de la progression du
+            # groupe de l'entité
+            if normalize_frequency(pred_freq, return_format='base') != f_target:
+                continue
+
+            # Colonne observée par au moins une autre entité : sans elle, le
+            # jeu mutualisé est vide et il n'y a aucun modèle à partager
+            if not self._column_frequencies_by_entity(column):
+                continue
+
+            pairs.append((entity, column))
+        return pairs
 
     # -------------------------------------------------------------------------
     # Fenêtres
@@ -1464,8 +1600,9 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         - PHASE 5: stage execution — one model per (stage, variable),
           shared by its source-frequency groups, then one plan step per
           group.
-        - PHASE 6: finalization — frozen plan and output attributes. The
-          multi-frequency output belongs to ``transform``.
+        - PHASE 6: finalization — frozen plan, provenance matrix and
+          ``unanchored_pairs_``. The multi-frequency output belongs to
+          ``transform``.
 
         Args:
             X: Features of shape (n_samples, n_features).
@@ -1613,6 +1750,12 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         # Accumulateur des avertissements de la phase 5 : ils sont émis en un
         # seul message en fin de phase, jamais un par variable et par étape
         self._warnings: List[str] = []
+
+        # Couples imputés sans ancre, et couples que l'absence de covariable
+        # exploitable a laissés NaN : les premiers alimentent
+        # "unanchored_pairs_", les seconds l'avertissement agrégé
+        self._unanchored_written: set = set()
+        self._unanchored_failures: List[tuple] = []
 
         # Contrainte d'agrégation, portée par un composant unique : il recale
         # les prédictions des étapes ET, injecté dans le matérialiseur, les
@@ -1778,6 +1921,18 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
                 UserWarning,
             )
 
+        # Couples sans ancre restés vides : un seul avertissement les nommant
+        # tous. L'interpolation ne peut pas leur servir de repli — il n'y a
+        # rien à interpoler
+        if self._unanchored_failures:
+            named = sorted({pair for pair in self._unanchored_failures}, key=repr)
+            warnings.warn(
+                f"{len(named)} unobserved (entity, column) pair(s) could not be "
+                f"imputed for lack of usable covariates on the target grid; "
+                f"their cells stay NaN and ORIGINAL: {named}",
+                UserWarning,
+            )
+
         # =================================================================
         # PHASE 6 — Finalisation
         # =================================================================
@@ -1785,6 +1940,10 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         # sortie multi-fréquences relève du "transform", seul producteur de
         # frame
         self.imputation_provenance_ = self._provenance_tracker.get_provenance_matrix()
+
+        # Couples imputés sans ancre : toujours écrit, vide compris, ce qui
+        # autorise sa lecture par "check_is_fitted"
+        self.unanchored_pairs_ = tuple(sorted(self._unanchored_written, key=repr))
 
     # -------------------------------------------------------------------------
     # PHASE 5 — Exécution des étapes
@@ -1936,6 +2095,33 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         mask = self._stage_mask(X_work, stage_freq, kind='imputation')
         grid = mask.index[mask.to_numpy(dtype=bool)]
         return self._restrict_to_entities(grid, entities)
+
+    # Méthode auxiliaire de la grille non restreinte d'un groupe
+    def _unrestricted_grid(
+        self,
+        X_work: pd.DataFrame,
+        stage_freq: Union[str, Dict[EntityKey, str]],
+        entities: Optional[Sequence[EntityKey]],
+    ) -> pd.Index:
+        """Build the stage grid of a group, window restriction lifted.
+
+        Reserved to the unanchored steps, whose entities have
+        no window to speak of: the strict window is where every column of the
+        entity is covered, and the imputed column covers nothing there. Every
+        row of the stage grid is kept; the covariates then decide, a row they
+        cannot feed producing a NaN that is simply never written.
+
+        Args:
+            X_work: Working frame.
+            stage_freq: Frequency of the stage.
+            entities: Entities of the group, None for a time series.
+
+        Returns:
+            Index of the rows of those entities at the stage frequency.
+        """
+        # Index du masque, pris sans sa valeur booléenne : la grille de l'étape
+        mask = self._stage_mask(X_work, stage_freq, kind='imputation')
+        return self._restrict_to_entities(mask.index, entities)
 
     # Méthode auxiliaire de liaison de fréquence des blocs
     @staticmethod
@@ -2272,12 +2458,20 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         # Parcours des colonnes
         for column in columns:
             groups = by_column[column]
-            lowest = max(
-                (source_freq for _column, source_freq in groups),
-                key=get_frequency_order,
-            )
+            # Les groupes sans ancre n'ont pas de fréquence source à comparer :
+            # ils sont écartés du rang, et une colonne qui n'aurait qu'eux se
+            # range à la fréquence cible de ses entités
+            anchored = [
+                source_freq
+                for _column, source_freq in groups
+                if source_freq is not None
+            ]
             entities = tuple(
                 sorted({e for group in groups.values() for e in group}, key=repr)
+            )
+            lowest = (
+                max(anchored, key=get_frequency_order) if anchored
+                else self._entity_target_frequency(entities[0] if entities else None)
             )
             specs[column] = VariableSpec(
                 name=column,
@@ -2690,6 +2884,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
                 is_fallback=is_fallback,
                 training_blocks=blocks,
                 multi_frequency=multi_frequency,
+                unanchored=group_key[1] is None,
             )
             # Exécution, puis gel : un échec de prédiction dégrade l'étape en
             # repli, de sorte que le plan dise ce qui a réellement été fait
@@ -2771,7 +2966,7 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         self,
         *,
         column: str,
-        source_frequency: str,
+        source_frequency: Optional[str],
         entities: Optional[Sequence[EntityKey]],
         grid: pd.Index,
         stage_freq: Union[str, Dict[EntityKey, str]],
@@ -2784,12 +2979,14 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         is_fallback: bool,
         training_blocks: Dict[EntityKey, str],
         multi_frequency: bool,
+        unanchored: bool = False,
     ) -> ImputationStep:
         """Freeze one plan step of a (stage, variable, source frequency) group.
 
         Args:
             column: Column imputed by the step.
-            source_frequency: Detected frequency of the column for the group.
+            source_frequency: Detected frequency of the column for the group,
+                None for an unanchored group.
             entities: Entities of the group, None for a time series.
             grid: Prediction grid of the group, read by the ``'calendar'``
                 scale mode.
@@ -2806,22 +3003,20 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             multi_frequency: Whether the column carries several source
                 frequencies at this stage, which is what makes the frequency
                 part of the registry key.
+            unanchored: Whether the entities of the group never observe the
+                column, so the step predicts without any anchor.
 
         Returns:
             The frozen :class:`ImputationStep`.
         """
-        # Facteur d'échelle du groupe. La cible ayant été mise à l'échelle
-        # ligne à ligne, les prédictions sortent déjà au pas de l'étape :
-        # "scale_factor" et "fit_scale_factor" coïncident et le report vaut 1.0
-        try:
-            scale = self._stage_scaler.fit_scale_factor(
-                column,
-                source_freq=source_frequency,
-                pred_freq=stage_freq,
-                index=grid,
-            )
-        except (ValueError, KeyError, TypeError):
+        # Groupe sans ancre : aucune fréquence source, donc aucune conversion.
+        # La prédiction est produite directement à l'échelle de l'étape et les
+        # deux facteurs valent 1.0 — le report reste neutre, exactement comme
+        # pour les groupes ancrés dont les deux facteurs coïncident déjà
+        if unanchored:
             scale = 1.0
+        else:
+            scale = self._group_scale_factor(column, source_frequency, stage_freq, grid)
 
         # Clé de registre : la fréquence n'entre dans la clé que lorsque les
         # entités divergent sur la fréquence de cette colonne
@@ -2845,7 +3040,42 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             interpolation_method=self._covariate_materializer.resolve_method(column),
             interpolation_anchor=self._covariate_materializer.resolve_anchor(column),
             training_blocks=training_blocks,
+            unanchored=unanchored,
         )
+
+    # Méthode auxiliaire du facteur d'échelle d'un groupe ancré
+    def _group_scale_factor(
+        self,
+        column: str,
+        source_frequency: str,
+        stage_freq: Union[str, Dict[EntityKey, str]],
+        grid: pd.Index,
+    ) -> Union[float, pd.Series]:
+        """Compute the scale factor of one anchored group.
+
+        The target having been scaled row by row, the predictions already come
+        out at the pace of the stage: ``scale_factor`` and ``fit_scale_factor``
+        coincide and the carry is 1.0.
+
+        Args:
+            column: Column imputed by the step.
+            source_frequency: Detected frequency of the column for the group.
+            stage_freq: Frequency of the stage.
+            grid: Prediction grid of the group, read by the ``'calendar'``
+                scale mode.
+
+        Returns:
+            The factor, or 1.0 when the scaler refuses the conversion.
+        """
+        try:
+            return self._stage_scaler.fit_scale_factor(
+                column,
+                source_freq=source_frequency,
+                pred_freq=stage_freq,
+                index=grid,
+            )
+        except (ValueError, KeyError, TypeError):
+            return 1.0
 
     # Méthode unique d'exécution d'une étape du plan
     def _execute_step(
@@ -2863,6 +3093,14 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         through this very method, which is what makes the two paths identical
         by construction.
 
+        An unanchored step departs from the common path on
+        three points, and on three only: it is never rescaled to a period
+        total, its cells carry ``MODEL_UNANCHORED``, and it has no
+        interpolation fallback — there is nothing to interpolate for an
+        entity that never observes the column, so a failure leaves its cells
+        NaN and ``ORIGINAL`` and is reported by the aggregated warning of the
+        end of the fit.
+
         Args:
             step: Frozen step to execute.
             X_work: Working frame the values are read from.
@@ -2871,7 +3109,9 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         Returns:
             True when the step had to fall back on interpolation at execution
             time — a prediction failure — so the caller can degrade the plan
-            step accordingly. False otherwise.
+            step accordingly. False otherwise, an unanchored failure
+            included: such a step is never degraded into a fallback, it is
+            simply not executed.
         """
         # Extraction du matérisaliseur des étapes précédentes
         materializer = self._covariate_materializer
@@ -2882,6 +3122,16 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
 
         # Grille du groupe : la fenêtre d'imputation de ses entités, ancres comprises
         grid = self._prediction_grid(X_work, stage_freq, step.entities)
+
+        # Sans ancre, la fenêtre stricte d'une entité est vide par
+        # construction : elle est l'intervalle où toutes ses colonnes sont
+        # couvertes, et la colonne imputée n'y en couvre aucune. La subordonner
+        # à la couverture de la colonne même que l'étape produit serait
+        # circulaire ; l'entité est donc laissée sans restriction, exactement
+        # comme "_stage_mask" traite déjà une entité que le calculateur omet
+        if step.unanchored and len(grid) == 0:
+            grid = self._unrestricted_grid(X_work, stage_freq, step.entities)
+
         if len(grid) == 0:
             return False
 
@@ -2890,6 +3140,13 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         if not step.is_fallback:
             values = self._predict_step(step, grid, X_work, freqs_by_column, stage_freq)
         degraded = values is None and not step.is_fallback
+
+        # Absence d'ancre : l'interpolation ne peut pas être le repli, faute
+        # d'observation à interpoler. Les couples restent NaN et ORIGINAL, et
+        # l'avertissement agrégé de la fin du fit les nomme
+        if step.unanchored and values is None:
+            self._unanchored_failures.extend(self._step_pairs(step))
+            return False
 
         if values is None:
             # « Le repli matérialise » : "interpolate_column" alimente déjà les
@@ -2905,24 +3162,35 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             provenance = ProvenanceType.INTERPOLATED
         else:
             origin = 'model'
-            provenance = resolve_model_provenance(
-                step.covariate_taint, step.target_taint
-            )
+            # Provenance tranchée par l'étape elle-même : c'est là, et là
+            # seulement, que l'absence d'ancre prime sur les cinq familles
+            provenance = step.emitted_provenance
 
         # Recalage aux totaux de la fréquence source du groupe : annuels pour
-        # une entité annuelle, trimestriels pour une entité trimestrielle
-        observations = X_work[column].reindex(
-            self._restrict_to_entities(X_work.index, step.entities)
-        )
-        values, _rescaled_mask = self._aggregation_constraint.rescale(
-            values, observations, step.source_frequency, column=column,
-            grid_freq=stage_freq,
-        )
+        # une entité annuelle, trimestriels pour une entité trimestrielle.
+        # Court-circuité sans ancre, quelle que soit la valeur du paramètre :
+        # il n'existe aucun total de période à imposer, et ces cellules sont
+        # des prédictions libres là où les autres sont des désagrégations
+        if not step.unanchored:
+            observations = X_work[column].reindex(
+                self._restrict_to_entities(X_work.index, step.entities)
+            )
+            values, _rescaled_mask = self._aggregation_constraint.rescale(
+                values, observations, step.source_frequency, column=column,
+                grid_freq=stage_freq,
+            )
 
         # Ecriture : cellules effectivement produites
         written = values[values.notna()]
         if written.empty:
+            # Sans ancre, une grille entièrement NaN : le couple est nommé par l'avertissement agrégé
+            if step.unanchored:
+                self._unanchored_failures.extend(self._step_pairs(step))
             return degraded
+
+        # Couples effectivement imputés sans ancre, source de unanchored_pairs_
+        if step.unanchored:
+            self._unanchored_written.update(self._step_pairs(step))
 
         # Marquage de provenance : identique pour les cellules recalées et non
         # recalées, lignes d'ancres comprises — le recalage ne change aucune
@@ -2942,6 +3210,31 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             ),
         )
         return degraded
+
+    # Méthode auxiliaire des clés de couple d'une étape
+    @staticmethod
+    def _step_pairs(step: ImputationStep) -> List[tuple]:
+        """Render the ``(entity..., column)`` keys covered by one step.
+
+        The shape is that of the keys of ``detected_frequencies_`` and of the
+        never-observed pairs, so ``unanchored_pairs_`` is directly comparable
+        with them.
+
+        Args:
+            step: Executed step.
+
+        Returns:
+            One key per entity of the step, empty on a time series, which
+            carries no entity level.
+
+        Examples:
+            >>> HighFrequencyImputer2._step_pairs(step)     # doctest: +SKIP
+            [('IT', 'v')]
+        """
+        # Série temporelle : aucune entité, donc aucun couple à nommer
+        return [
+            (*entity, step.var_name) for entity in (step.entities or ())
+        ]
 
     # Méthode auxiliaire de prédiction d'une étape à modèle
     def _predict_step(
@@ -3308,6 +3601,13 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         survive and drift away from the fit — defects B7/B27, the very motive
         of this architecture: ``fit`` and ``transform`` must share ONE
         implementation of step execution, which lot L10 delivers first.
+
+        Note for that lot, on the unanchored pairs of section 5.10: the
+        behavior is to be carried over as-is — an entity without any anchor
+        at ``fit`` stays without any anchor at ``transform``, its cells being
+        replayed by the very same plan step, unrescaled and marked
+        ``MODEL_UNANCHORED`` — and an entity NEW at ``transform`` falls under
+        that very mechanism, gated by the same parameter.
 
         Args:
             X: Features to transform.

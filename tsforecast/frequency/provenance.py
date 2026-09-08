@@ -61,6 +61,17 @@ class ProvenanceType(str, Enum):
             value (``impute_intermediate_frequencies=True``); the covariates
             do not.
         MODEL_ON_IMPUTED_BOTH: Both sides carry a model-imputed value.
+
+    Cell produced without any anchor of its own column, for its own entity:
+        MODEL_UNANCHORED: The entity never observes the column, and received a
+            complete imputation learned on the other entities of the panel
+            (``impute_unobserved_entities=True``). It answers another question
+            than the five MODEL_* levels above — not "what is the worst
+            ingredient the model saw?" but "is this cell tied to an
+            observation of its own column, for its own entity?" — which is why
+            it does not fit on their scale and primes over them: whatever the
+            two taints, which stay computed and frozen in the plan step for
+            diagnosis.
     """
     ORIGINAL = 'original'
     AGGREGATED = 'aggregated'
@@ -72,6 +83,8 @@ class ProvenanceType(str, Enum):
     MODEL_ON_IMPUTED = 'model_on_imputed'
     MODEL_ON_IMPUTED_TARGET = 'model_on_imputed_target'
     MODEL_ON_IMPUTED_BOTH = 'model_on_imputed_both'
+
+    MODEL_UNANCHORED = 'model_unanchored'
 
     # Représentation lisible (utilisée par l'affichage tabulaire de pandas,
     # p.ex. provenance_matrix_) : 'original' plutôt que 'ProvenanceType.ORIGINAL'.

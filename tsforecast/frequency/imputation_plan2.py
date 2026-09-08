@@ -145,7 +145,10 @@ class ImputationStep:
             Same per-row form allowed. Never changes once fitted.
         source_frequency: Normalized detected frequency of the variable for
             this group. Defines the periods the predictions are
-            disaggregated over when ``aggregation_constraint`` is on.
+            disaggregated over when ``aggregation_constraint`` is on. None
+            for an unanchore group (see :attr:`unanchored`): the variable has
+            no source frequency there, hence no period to rescale over and no
+            divisor.
         entities: Entity tuples covered by the group, None for a time
             series.
         covariate_taint: Worst taint among the covariate cells the model
@@ -172,6 +175,13 @@ class ImputationStep:
             the stage, only the divisors do. A pure diagnostic field, replayed
             as-is, empty for a step built without a mutualized set. Stored as
             a read-only mapping.
+        unanchored: Whether the entities of the step never observe the column
+            (``impute_unobserved_entities=True``). Such a step
+            carries ``source_frequency is None`` and a unit
+            :attr:`scale_factor`, is never rescaled to any period total, and
+            emits :attr:`ProvenanceType.MODEL_UNANCHORED`, which primes over
+            the five MODEL_* families — the two taints stay computed and
+            frozen here for diagnosis.
 
     Examples:
         >>> from sklearn.linear_model import LinearRegression
@@ -207,7 +217,7 @@ class ImputationStep:
     feature_cols: Tuple[str, ...]
     scale_factor: Union[float, pd.Series]
     fit_scale_factor: Union[float, pd.Series]
-    source_frequency: str
+    source_frequency: Optional[str]
     entities: Optional[Tuple[EntityKey, ...]]
     covariate_taint: Taint
     target_taint: Taint
@@ -217,6 +227,8 @@ class ImputationStep:
     interpolation_anchor: Optional[float]
     # Champ de diagnostic, en dernière position et avec défaut
     training_blocks: Mapping[EntityKey, str] = field(default_factory=dict)
+    # Étape sans aucune ancre de la colonne pour ses entités
+    unanchored: bool = False
 
     # Contrôles d'invariants et gel des conteneurs mutables
     def __post_init__(self) -> None:
@@ -299,13 +311,24 @@ class ImputationStep:
         """Provenance every cell produced by this step's model carries.
 
         Returns:
-            :attr:`ProvenanceType.INTERPOLATED` for a fallback step, 
-             otherwise the MODEL_* provenance resolved from
-            :attr:`covariate_taint` and :attr:`target_taint` by
+            :attr:`ProvenanceType.INTERPOLATED` for a fallback step,
+            :attr:`ProvenanceType.MODEL_UNANCHORED` for an
+            :attr:`unanchored` one, otherwise the MODEL_* provenance resolved
+            from :attr:`covariate_taint` and :attr:`target_taint` by
             :func:`~tsforecast.frequency.provenance.resolve_model_provenance`.
+
+        Examples:
+            >>> _example_step().emitted_provenance      # doctest: +SKIP
+            <ProvenanceType.MODEL_ON_TRUE: 'model_on_true'>
         """
         if self.is_fallback:
             return ProvenanceType.INTERPOLATED
+        # Primauté de l'absence d'ancre sur les cinq familles MODEL_* : les
+        # deux souillures restent lues par le diagnostic, jamais par la
+        # provenance émise. "resolve_model_provenance" demeure une fonction
+        # pure des deux souillures, l'arbitrage se tenant ici et ici seulement
+        if self.unanchored:
+            return ProvenanceType.MODEL_UNANCHORED
         return resolve_model_provenance(self.covariate_taint, self.target_taint)
 
     # Égalité explicite : l'égalité générée lèverait sur un scale_factor Series
@@ -341,6 +364,7 @@ class ImputationStep:
             and self.interpolation_method == other.interpolation_method
             and self.interpolation_anchor == other.interpolation_anchor
             and dict(self.training_blocks) == dict(other.training_blocks)
+            and self.unanchored == other.unanchored
         )
 
     # Hachage sur un sous-ensemble sûrement hachable et stable
