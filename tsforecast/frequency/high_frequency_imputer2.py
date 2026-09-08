@@ -312,17 +312,30 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             imputable column may receive a complete imputation of it, learned
             on the other entities of the panel. ``False`` (default) leaves
             such a pair out of every prediction grid: its cells stay NaN and
-            ``ORIGINAL``. ``True`` makes the pair imputable **at the target
-            frequency of its entity, and there only** — the last stage of its
-            group — through a dedicated plan step whose ``source_frequency``
-            is ``None``. It is the target-side counterpart of
-            ``covariate_eligibility``, and it is **independent of axis 2**:
-            it behaves identically under the three modalities and leaves
-            ``frequency_progression_`` untouched. Three semantic differences
+            ``ORIGINAL``. ``True`` makes the pair imputable at **every
+            stage of its entity's progression**, through one dedicated plan
+            step per stage whose ``source_frequency`` is ``None``. It is the
+            target-side counterpart of ``covariate_eligibility``, and it is
+            **independent of axis 2**: one single rule, whose consequences
+            follow the progression — under ``False`` that progression holds
+            the target frequency alone, which is the degenerate case, and
+            under the two other modalities the intermediate stages fill the
+            mirror and the intermediate levels of the output that the entity
+            would otherwise leave with a hole. The value reached at the target
+            frequency is the same either way. And
+            ``frequency_progression_`` stays untouched throughout — the pair
+            travels the stages, it never adds one. Three semantic differences
             these cells carry, and which ``MODEL_UNANCHORED`` reports: no
             anchor, hence **no rescaling** whatever
             ``aggregation_constraint`` says, and **no divisor** — they are
-            free predictions, not disaggregations of an observed total. The
+            free predictions, not disaggregations of an observed total. This
+            holds at every stage, the intermediate ones included: a cell
+            anchored on an earlier prediction of its own column, for its own
+            entity, is anchored on nothing. Rescaling the finer level onto the
+            coarser one would moreover give these cells a cross-level
+            coherence the anchored ones do not have — two levels of an
+            anchored entity are each rescaled onto the shared observed total,
+            never onto one another. The
             entity contributes nothing to the training set either : it has no true value to bring. Its only
             failure path is the absence of usable covariates on the target
             grid: interpolation cannot be the fallback of an entity with
@@ -1198,12 +1211,13 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         all of them sharing the model fitted on the mutualized training set.
 
         Under ``impute_unobserved_entities=True`` a further group
-        ``(column, None)`` gathers the entities that never observe the column.
-        This is the **single** entry point of that capability:
-        the classification is left untouched, which is exactly what keeps
-        ``variable_categories_`` and ``frequency_progression_`` identical with
-        and without the parameter -- such a pair has no source frequency, so
-        it joins no frequency set and adds no stage.
+        ``(column, None)`` gathers the entities that never observe the column,
+        at every stage binding them. This is the **single** entry point of
+        that capability: the classification is left untouched, which is
+        exactly what keeps ``variable_categories_`` and
+        ``frequency_progression_`` identical with and without the parameter --
+        such a pair has no source frequency, so it joins no frequency set and,
+        travelling the stages, adds none.
 
         Args:
             prediction_frequency: Frequency of the stage.
@@ -1269,16 +1283,27 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
     ) -> List[Tuple[EntityKey, str]]:
         """Select the never-observed pairs imputable at one stage.
 
-        A pair the fit could detect no frequency for is imputable at the
-        target frequency of its entity, and there only: it is the last stage
-        of its group, wherever the other entities stand. Two conditions gate
-        it, beyond ``impute_unobserved_entities``:
+        A pair the fit could detect no frequency for joins every stage of its
+        entity's progression, not only the last: the rule is the general one,
+        of which the single stage of
+        ``impute_intermediate_frequencies=False`` is the degenerate case.
+        Reading the binding rather than the target frequency is what keeps the
+        parameter independent of axis 2 -- one rule, whose consequences follow
+        the progression, instead of a behavior that changes with the modality.
 
-        1. the stage binds the entity to its own target frequency -- anything
-           finer or coarser is an intermediate stage the pair never joins;
+        Two conditions gate a pair, beyond ``impute_unobserved_entities``:
+
+        1. the stage binds the entity, which a stage its target-frequency
+           group does not travel through never does;
         2. at least one other entity observes the column, without which the
            mutualized training set would be empty and the step would have no
            model to share.
+
+        No condition is put on the level the entity reaches: the cells
+        produced at an intermediate stage are anchored on nothing, exactly
+        like those of the last one -- being anchored on an earlier prediction
+        of itself is not being anchored -- so every stage rescales nothing and
+        emits ``MODEL_UNANCHORED``.
 
         Args:
             prediction_frequency: Frequency of the stage, scalar or per
@@ -1310,16 +1335,6 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
             else:
                 pred_freq = prediction_frequency
             if pred_freq is None:
-                continue
-
-            # Fréquence cible propre à l'entité
-            f_target = self._entity_target_frequency(entity)
-            if f_target is None:
-                continue
-
-            # Étape f_target(e) uniquement, la dernière de la progression du
-            # groupe de l'entité
-            if normalize_frequency(pred_freq, return_format='base') != f_target:
                 continue
 
             # Colonne observée par au moins une autre entité : sans elle, le

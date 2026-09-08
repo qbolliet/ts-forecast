@@ -1219,8 +1219,10 @@ impute_unobserved_entities: bool = False
 ```
 
 `False` (défaut) : comportement actuel, inchangé — l'entité reste hors de toute grille de
-prédiction et ses cellules restent NaN, sans marque de provenance (conséquence 5). `True` : le couple `(e, c)` devient
-**imputable à la fréquence cible de `e`**, à une étape unique, celle de `f_target(e)`.
+prédiction et ses cellules restent NaN, sans marque de provenance (conséquence 5). `True` : le
+couple `(e, c)` devient **imputable à chaque étape de la progression de `e`** — une seule sous
+`impute_intermediate_frequencies=False`, ce qui est le cas dégénéré de la règle et non une
+exception (conséquence 1).
 
 C'est le pendant, côté **cible**, de `covariate_eligibility` côté **covariables** (§4.5) : la même
 question — « que faire d'un couple `(entité, colonne)` jamais observé ? » — posée aux deux bouts
@@ -1230,13 +1232,60 @@ du modèle.
 
 1. **Classification et progression.** Le couple a une fréquence source **absente**, jamais
    inférée. Il n'entre donc dans l'ensemble `F` du §5.2 pour **aucune** fréquence : il n'ajoute
-   pas d'étape et ne change pas la progression. Il rejoint un groupe de plan dédié dont
-   `source_frequency` vaut `None`, à l'étape `f_target(e)` — **la dernière** de la progression de
-   son groupe, où qu'en soient les autres entités.
-2. **Aucun recalage.** Il n'existe aucun total de période à imposer : `AggregationConstraint` est
-   **court-circuitée** pour ces cellules, quelle que soit la valeur de `aggregation_constraint`.
-   C'est une différence sémantique de fond avec toutes les autres cellules produites, qui sont
-   des **désagrégations** d'une observation ; celles-ci sont des **prédictions libres**.
+   pas d'étape et ne change pas la progression. Il **la parcourt** : à chaque étape qui **lie**
+   son entité, il rejoint un groupe de plan dédié dont `source_frequency` vaut `None`. La
+   condition est la **liaison**, jamais le niveau : une étape que le groupe de fréquence cible de
+   `e` ne traverse pas ne lie pas `e` (D31), et il n'y a rien d'autre à tester.
+
+   > **Révisé au lot L14c (2026-09-08).** La première rédaction réservait le couple à la seule
+   > étape `f_target(e)`. C'était le cas dégénéré pris pour la règle : sous
+   > `impute_intermediate_frequencies=False` la progression n'a **qu'une** étape, la cible, et les
+   > deux formulations coïncident. Sous les deux autres modalités elles divergent, et réserver le
+   > couple à la dernière étape laissait l'entité **ajourée à tous les niveaux intermédiaires** :
+   > absente du miroir pendant toute la cascade — donc inutilisable comme covariable par les
+   > autres variables, et suffisante à faire tomber une colonne entière sous
+   > `covariate_eligibility='all_entities'` — et absente des niveaux intermédiaires que
+   > `keep_lower_frequencies=True` rendra (§12.4). Lire la **liaison** plutôt que la fréquence
+   > cible est en outre ce qui **préserve** l'indépendance à l'axe 2 : une règle unique dont les
+   > conséquences suivent la progression, au lieu d'un paramètre dont le sens change avec la
+   > modalité.
+   >
+   > **La valeur atteinte à la fréquence cible ne change pas** pour autant, et c'est ce qui rend
+   > la révision sûre : le modèle de l'étape cible est le même, R1 (§5.8) tenant l'entité hors du
+   > jeu mutualisé qu'elle porte ou non, désormais, les cellules d'une passe antérieure — les
+   > blocs se lisent dans `detected_frequencies_`, jamais dans le miroir. Mesuré sur `PANEL-F`
+   > dont `v` est effacée pour `IT`, `impute_intermediate_frequencies=True` : `IT` reçoit 12
+   > cellules trimestrielles de plus, et ses 36 cellules mensuelles valent **exactement** ce
+   > qu'elles valaient sans la passe intermédiaire. La seule exception est
+   > `covariate_strategy='model'`, où remplir le miroir plus tôt change — par construction, et
+   > c'est le but de cette stratégie — ce que les autres modèles lisent.
+2. **Aucun recalage, à aucune étape.** Il n'existe aucun total de période à imposer :
+   `AggregationConstraint` est **court-circuitée** pour ces cellules, quelle que soit la valeur de
+   `aggregation_constraint`. C'est une différence sémantique de fond avec toutes les autres
+   cellules produites, qui sont des **désagrégations** d'une observation ; celles-ci sont des
+   **prédictions libres**.
+
+   Depuis que le couple parcourt la progression (conséquence 1), la question se pose une seconde
+   fois : les cellules d'une étape fine pourraient être recalées sur celles de l'étape grossière
+   qui les précède, l'entité disposant enfin de « totaux » à son propre nom. **Elle est tranchée
+   par la négative**, pour deux raisons.
+
+   > **Arrêté au lot L14c (2026-09-08).** D'abord, ces « totaux » ne sont pas des observations :
+   > le §11.1 recale sur des totaux **observés**, et subordonner le niveau du modèle fin à celui
+   > du modèle grossier reviendrait à propager l'erreur du second dans le premier, sans qu'aucun
+   > des deux ne soit plus fiable a priori. Ensuite et surtout, **la cohérence inter-niveaux n'est
+   > pas un invariant de `hfi2`**, y compris pour les entités **ancrées** : mesuré sur `PANEL-F`
+   > sous `True`, `FR` reçoit `Q1-2021 = 28.5728` à l'étape `Q` et des mois qui somment à
+   > `28.5758` sur ce même trimestre à l'étape `M` — les deux niveaux sont recalés sur la **même
+   > observation annuelle** (`120.0` exactement de part et d'autre), **jamais l'un sur l'autre**.
+   > Recaler les cellules sans ancre entre elles leur donnerait donc une propriété que les
+   > cellules **ancrées n'ont pas**, ce qui inverserait la hiérarchie épistémique que tout le
+   > §5.10 construit.
+   >
+   > Le corollaire vaut pour la provenance (conséquence 4) : **toutes** les passes portent
+   > `MODEL_UNANCHORED`, la première comme les suivantes. Une cellule ancrée sur une prédiction
+   > antérieure de **sa propre colonne, pour sa propre entité**, n'est pas ancrée : la question du
+   > §6.1 reçoit la même réponse à tous les niveaux.
 3. **Aucun diviseur.** Pas de fréquence source, donc pas de conversion : la prédiction est
    produite directement à l'échelle de l'étape, diviseur `1.0`. `scale_factor` **et**
    `fit_scale_factor` valent `1.0`.
@@ -1314,6 +1363,13 @@ sont produites par ce modèle et laissées telles quelles.
 `MODEL_UNANCHORED`, et **aucune** somme annuelle n'est imposée — le total 2021 de `IT` n'a aucune
 raison de valoir 120. Sous `impute_unobserved_entities=False`, les 36 cellules restent NaN et la
 troisième étape de plan n'existe pas.
+
+**Sous `impute_intermediate_frequencies=True`**, la progression compte deux étapes (`Q` puis `M`)
+et le tableau ci-dessus se lit à chacune : `IT` reçoit une quatrième étape de plan à l'étape `Q`,
+`source_frequency` à `None`, 12 cellules trimestrielles marquées `MODEL_UNANCHORED` et non
+recalées. Ses 36 cellules mensuelles sont **inchangées** — mesuré : moᵇyenne 2021 identique au
+flottant près avec et sans la passe intermédiaire — et rien n'impose que les trois mois d'un
+trimestre somment à la cellule trimestrielle de ce trimestre, pas plus que pour `FR`.
 
 ---
 

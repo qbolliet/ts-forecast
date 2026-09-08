@@ -31,6 +31,7 @@ from tsforecast.frequency.high_frequency_imputer2 import (
     ELIGIBLE_ORIGINS,
     HighFrequencyImputer2,
 )
+from tsforecast.frequency.covariate_materializer import CovariateMaterializer
 from tsforecast.frequency.imputation_plan import INTERPOLATE_FALLBACK
 from tsforecast.frequency.provenance import (
     ProvenanceType,
@@ -2471,23 +2472,37 @@ class TestUnobservedEntities:
                     step.covariate_taint, step.target_taint
                 )
 
+    @pytest.mark.parametrize('modality', [False, True])
     def test_adding_the_unanchored_group_leaves_the_others_intact(
-        self, panel_f_without_it_v
+        self, panel_f_without_it_v, modality
     ):
-        """I15 non-régression — X_train, y_train et les voies des groupes ancrés."""
-        without = _fit_with_spy(panel_f_without_it_v)
+        """I15 non-régression — X_train, y_train et les voies des groupes ancrés.
+
+        Sous ``True``, la mesure porte aussi ce que la règle promet : les
+        passes intermédiaires de l'entité sans ancre ne changent PAS le
+        modèle de l'étape cible, R1 la tenant hors du jeu mutualisé qu'elle
+        porte ou non des cellules imputées. Même jeu, même modèle, donc mêmes
+        valeurs finales.
+        """
+        without = _fit_with_spy(
+            panel_f_without_it_v, impute_intermediate_frequencies=modality
+        )
         with_parameter = _fit_with_spy(
-            panel_f_without_it_v, impute_unobserved_entities=True
+            panel_f_without_it_v,
+            impute_intermediate_frequencies=modality,
+            impute_unobserved_entities=True,
         )
 
-        anchored = {
-            step.source_frequency: step
-            for step in self._v_steps(with_parameter)
-            if step.source_frequency is not None
-        }
-        reference = {
-            step.source_frequency: step for step in self._v_steps(without)
-        }
+        def _anchored(imputer, stage):
+            return {
+                step.source_frequency: step
+                for step in self._v_steps(imputer)
+                if step.source_frequency is not None
+                and step.pred_freq_label == stage
+            }
+
+        anchored = _anchored(with_parameter, 'M')
+        reference = _anchored(without, 'M')
         assert set(anchored) == set(reference) == {'Y', 'Q'}
 
         for source_frequency, step in anchored.items():
@@ -2499,3 +2514,86 @@ class TestUnobservedEntities:
             assert dict(step.materialization) == dict(other.materialization)
             assert step.entities == other.entities
             assert step.scale_factor == other.scale_factor
+
+    def test_unanchored_pair_travels_every_stage_of_its_progression(
+        self, panel_f_without_it_v
+    ):
+        """Le couple rejoint TOUTES les étapes que sa progression traverse.
+
+        L'étape unique de ``False`` est le cas dégénéré de cette règle, non
+        une exception : sous ``True`` la progression de ``IT`` compte deux
+        étapes, et le couple les rejoint toutes les deux.
+        """
+        imputer = _fit_with_spy(
+            panel_f_without_it_v,
+            impute_intermediate_frequencies=True,
+            impute_unobserved_entities=True,
+        )
+
+        # Deux étapes dans la progression, l'intermédiaire et la cible
+        assert [
+            imputer._stage_frequency_label(stage)
+            for stage in imputer.frequency_progression_
+        ] == ['Q', 'M']
+
+        # Une étape de plan sans ancre à CHACUNE, jamais à la seule dernière
+        unanchored = [step for step in self._v_steps(imputer) if step.unanchored]
+        assert {step.pred_freq_label for step in unanchored} == {'Q', 'M'}
+        for step in unanchored:
+            assert step.source_frequency is None
+            assert step.entities == (IT,)
+            assert step.scale_factor == 1.0
+            # R1 inchangée à toutes les étapes : IT n'entre dans aucun bloc,
+            # qu'elle porte ou non les cellules d'une passe antérieure
+            assert IT not in dict(step.training_blocks)
+
+        # Le couple n'est nommé qu'une fois, quel que soit le nombre de passes
+        assert imputer.unanchored_pairs_ == (('IT', 'v'),)
+
+    def test_every_pass_stays_unanchored_and_unrescaled(self, panel_f_without_it_v):
+        """Une passe ancrée sur une prédiction d'elle-même n'est pas ancrée.
+
+        Aucune contrainte d'agrégation ne relie les niveaux d'une entité sans
+        ancre — pas plus qu'elle n'en relie ceux d'une entité ANCRÉE, dont les
+        deux niveaux sont recalés sur le total observé commun et jamais l'un
+        sur l'autre.
+        """
+        productions: list = []
+        real = CovariateMaterializer.record_production
+
+        def _spy(materializer, column, values, origins, freqs):
+            """Retient chaque production, le miroir n'en gardant que la dernière."""
+            productions.append((column, freqs.iloc[0], values.copy()))
+            return real(materializer, column, values, origins, freqs)
+
+        # Estimateur réel, et non l'espion : celui-ci prédit une constante,
+        # de sorte que les deux niveaux coïncideraient par construction et
+        # que la mesure ne dirait plus rien
+        with patch.object(CovariateMaterializer, 'record_production', _spy):
+            imputer = _fit_quietly(
+                _make_imputer(
+                    impute_intermediate_frequencies=True,
+                    impute_unobserved_entities=True,
+                ),
+                panel_f_without_it_v,
+            )
+
+        # Productions de 'v' pour IT, une par étape
+        by_stage = {
+            stage: values
+            for column, stage, values in productions
+            if column == 'v' and set(_by_entity(values.index)) == {IT}
+        }
+        assert set(by_stage) == {'Q', 'M'}
+
+        # Le trimestre imputé à l'étape Q et la somme des trois mois de la
+        # même période à l'étape M ne coïncident pas : rien ne les lie
+        quarterly = _entity_block(by_stage['Q'], 'IT').loc['2021-01':'2021-03']
+        monthly = _entity_block(by_stage['M'], 'IT').loc['2021-01':'2021-03']
+        assert len(quarterly) == 1 and len(monthly) == 3
+        assert float(monthly.sum()) != pytest.approx(float(quarterly.sum()))
+
+        # Toutes les cellules, des deux niveaux, portent MODEL_UNANCHORED
+        assert {str(value) for value in self._provenance(imputer, 'IT')} == {
+            'model_unanchored'
+        }
