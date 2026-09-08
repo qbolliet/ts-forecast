@@ -13,6 +13,18 @@
 > Les codes `Bxx`/`Cxx` renvoient à `high_frequency_imputer_annotations_architecture.md`
 > (noté **[ARCH]**), les codes `Dxx` au §14 de [SPEC].
 >
+> **Révision du 2026-09-08** — les prompts **1 à 15** sont exécutés (lots `L0` à `L12`) : la
+> classe et ses six composants sont implémentés et testés. Cette révision réorganise la fin du
+> chantier. Elle **insère** le prompt **16** (suppression de `HighFrequencyImputer` v1 et
+> renommage de `hfi2`, exécuté AVANT le notebook pour que notebook et documentation s'écrivent
+> une seule fois sur les noms définitifs) et le prompt **16a** (unification des jeux de référence
+> `TS` / `PANEL` / `PANEL-F` en un jeu unique `PANEL-X`, dont ils deviennent des projections) ;
+> elle **renumérote** l'ancien 16 en **17** et l'ancien 17 en **18**, et **ajoute** les prompts
+> **19** (documentation utilisateur : concept, tutoriel, schémas draw.io) et **20** (onglet
+> « Notes d'implémentation » et `README.md`). Les prompts 17 et 18 sont amendés en conséquence :
+> le notebook se déroule sur `PANEL-X` seul et ne peut plus exécuter `hfi` v1, la documentation
+> ne mentionne plus de coexistence.
+>
 > **Révision du 2026-09-04** — les prompts **1 à 11 sont exécutés** (lots `L0` à `L8`) et ne
 > doivent plus être modifiés. Cette révision intègre la **mutualisation inter-entités du jeu
 > d'entraînement** ([SPEC] §5.8, décisions D17 à D19, défaut mesuré B29) : elle **insère** les
@@ -98,12 +110,16 @@ la raison de chaque modification.
 | 14a | **L11a** | cellules coïncidentes sous `aggregation_constraint=None`, niveau de fréquence dans l'index | §5.9, D32 | **Opus** | **Oui** | 14 |
 | 14b | **L11b** | `impute_unobserved_entities` : imputer une entité sans aucune ancre | §5.10, D33 | **Opus** | **Oui** | 14 |
 | 15 | **L12** | `transform`, `inverse_transform`, `keep_lower_frequencies`, D11 | §12.1, §12.4 | **Opus** | **Oui** | 14a, 14b |
-| 16 | **L13a** | Notebook 5 « pas à pas » | §15.2 | **Sonnet** | Non | 1, 15 |
-| 17 | **L13b** | Documentation : docstrings de référence, `mkdocs`, `__init__.py` | §15.3 | **Sonnet** | Non | 16 |
+| 16 | **L13-0** | **suppression** de `hfi` v1 et **renommage** de `hfi2` en `HighFrequencyImputer` | §15.3, §1.1, §1.5 | **Sonnet** | **Oui** | 15 |
+| 16a | **L13-0b** | jeu de référence unifié `PANEL-X` : `TS`, `PANEL` et `PANEL-F` deviennent des projections | §2.2, §2.3, §2.5 | **Sonnet** | Non | 1, 11a, 16 |
+| 17 | **L13a** | Notebook 5 « pas à pas », sur le seul jeu `PANEL-X` | §15.2 | **Sonnet** | Non | 15, 16, 16a |
+| 18 | **L13b** | Documentation de référence : docstrings, `mkdocs`, `__init__.py`, `CLAUDE.md` | §13, §12.2 | **Sonnet** | Non | 17 |
+| 19 | **L13c** | Documentation utilisateur : concept, tutoriel des configurations, schémas draw.io | §4, §5, §5.6 | **Opus** | **Oui** | 18 |
+| 20 | **L13d** | Onglet « Notes d'implémentation » et `README.md` | §12, §16 | **Sonnet** | Non | 19 |
 
 **Dépendances dures** : 2 → 3 ; 4 → 6 ; 3 → 7 ; 3, 4, 5 → 8 ; 8 → 9 ; 4 → 10 ; 5 → 11 ;
 7 → 11b ; 6, 8, 9, 11a, 11b → 11c ; 8, 9, 10 → 11d ; 6, 7, 9, 10, 11, 11c, 11d → 12 ;
-12 → 13 → 14 → {14a, 14b} → 15 → 16 → 17. Les prompts **14a** et **14b** sont **indépendants
+12 → 13 → 14 → {14a, 14b} → 15 → 16 → 16a → 17 → 18 → 19 → 20. Les prompts **14a** et **14b** sont **indépendants
 entre eux** — l'un touche la composition de `y_train`, l'autre le périmètre de prédiction — et
 parallélisables ; tous deux doivent précéder le prompt 15, qui reprend la forme d'index du §5.9 et
 doit reconduire le comportement du §5.10 au `transform`. Le prompt **11d** est indépendant de
@@ -118,7 +134,10 @@ tout.
 **symétrie fit/transform** et la **provenance** : une erreur y produit des résultats faux sans
 crash (lots 2, 3, 7, 8, 9, 10, 12, 13, 14, 15).
 **Sonnet** pour les lots à surface fermée et à critère binaire : créations de dataclass,
-renommages mécaniques, tri de variables, notebooks, docstrings (lots 1, 4, 5, 6, 11, 16, 17).
+renommages mécaniques, tri de variables, notebooks, docstrings (lots 1, 4, 5, 6, 11, 16, 16a,
+17, 18, 20). **Opus** aussi pour le lot 19, dont le livrable est une pédagogie — isoler les
+configurations, choisir l'exemple minimal qui distingue chacune, concevoir les schémas — et non
+une transcription.
 
 ### Critère de choix du plan mode
 
@@ -2659,25 +2678,189 @@ localiser le code par nom de symbole, jamais par numéro de ligne.
 
 ---
 
-## Prompt 16 — Notebook 5 « pas à pas » (L13a)
+## Prompt 16 — Suppression de `hfi` v1 et renommage de `hfi2` (L13-0)
 
-**Modèle : Sonnet · Plan mode : Non · Dépendances : prompts 1 et 15**
+**Modèle : Sonnet · Plan mode : Oui · Dépendances : prompt 15**
 
-> Plan mode inutile : le contenu attendu est énuméré section par section ; le notebook 4 fournit
-> le modèle de structure.
+> Plan mode utile : le lot supprime deux modules publics et renomme quatre symboles exportés ;
+> le plan sert à établir la liste EXHAUSTIVE des consommateurs avant la première suppression.
+> Aucune ligne de logique métier n'est écrite dans ce lot : toute divergence de comportement
+> observée après renommage est un bug d'import, pas une régression fonctionnelle.
 
 ````text
-Contexte : HighFrequencyImputer2 est implémenté et testé (tsforecast/frequency/
-high_frequency_imputer2.py et ses six composants). Il manque le notebook d'audit pas-à-pas, qui
-est le livrable de vérification humaine de la classe.
-Référence : [SPEC] = high_frequency_imputer2_architecture.md §15.2, et le notebook existant
-notebooks/4 - QB - HighFrequencyImputer pas a pas.ipynb, dont il faut reprendre la STRUCTURE et
-les contrôles croisés.
+Contexte : HighFrequencyImputer2 est implémenté, testé et validé (prompt 15). La version 1
+(tsforecast/frequency/high_frequency_imputer.py) n'a plus de raison d'être : elle porte le défaut
+structurel B28 (asymétrie fit/predict) et le défaut B29 (mutualisation implicite et fausse), tous
+deux mesurés au [SPEC] §1.1 et §1.5 et corrigés par construction dans la v2. La coexistence
+prévue au [SPEC] §15.3 prend fin ici.
+Référence : [SPEC] = high_frequency_imputer2_architecture.md.
 
-CIBLE — nouveau notebook `notebooks/5 - QB - HighFrequencyImputer2 pas a pas.ipynb`, exécuté sur
-LES DEUX JEUX du notebook 3 (série temporelle et panel hétérogène avec `climat_affaires` absente
-pour IT), PLUS le jeu `PANEL-F` ([SPEC] §2.5, fixture `mixed_freq_panel_multifrequency`), à
-reconstruire dans le notebook par la même fonction que la fixture.
+CIBLE — un dépôt où « HighFrequencyImputer » désigne la v2, et où le suffixe « 2 » a disparu.
+
+1) SUPPRESSIONS (le contenu v1 est définitivement abandonné, pas archivé — git conserve
+   l'historique) :
+   - `tsforecast/frequency/high_frequency_imputer.py` (classe v1) ;
+   - `tsforecast/frequency/imputation_plan.py` (`ImputationPlan` v1, `ImputationStep` v1,
+     sentinelle `INTERPOLATE_FALLBACK` si elle n'est plus référencée ailleurs) ;
+   - `notebooks/4 - QB - HighFrequencyImputer pas a pas.ipynb` (pas-à-pas de la v1) ;
+   - les tests dont la v1 est le SEUL sujet. Vérifier fichier par fichier avant de supprimer :
+     `tests/frequency/test_high_frequency_imputer.py`, `test_hfi_edge_cases.py`,
+     `test_hfi_integration.py` peuvent contenir des tests de composants PARTAGÉS (iwc,
+     frequency_aligner, converter) qu'il faut alors déplacer, pas détruire. Rapporter la
+     décision prise pour chacun.
+
+2) RENOMMAGES, par `git mv` pour préserver l'historique :
+   - `high_frequency_imputer2.py` -> `high_frequency_imputer.py` ;
+   - `imputation_plan2.py` -> `imputation_plan.py` ;
+   - `tests/frequency/test_high_frequency_imputer2.py` -> `test_high_frequency_imputer.py` ;
+   - `tests/frequency/test_imputation_plan2.py` -> `test_imputation_plan.py` ;
+   puis les symboles : `HighFrequencyImputer2` -> `HighFrequencyImputer`,
+   `ImputationPlan2` -> `ImputationPlan`, `ImputationStep2` -> `ImputationStep`, et tout alias
+   d'export suffixé « 2 ».
+
+3) CONSOMMATEURS À METTRE À JOUR — la liste ci-dessous est établie par lecture du dépôt ; la
+   compléter par un grep final, ne pas s'y fier aveuglément :
+   - code : `tsforecast/__init__.py`, `tsforecast/frequency/__init__.py`,
+     `tsforecast/tracking/__init__.py`, `tsforecast/tracking/metrics.py`, et les docstrings des
+     huit modules de `tsforecast/frequency/` qui nomment l'une ou l'autre version ;
+   - tests : toute la suite `tests/frequency/`, plus `tests/tracking/test_metrics.py` ;
+   - docs : `docs/api/frequency/HighFrequencyImputer2.md` (renommé en `HighFrequencyImputer.md`,
+     l'ancienne page v1 du même nom étant supprimée), `docs/api/frequency/imputation_plan2.md`
+     -> `imputation_plan.md`, `docs/concepts/mixed_frequency_imputation.md`,
+     `docs/concepts/base_transformers.md`, `docs/tutorials/mixed_frequency_imputation.md`,
+     `docs/guides/mlflow_tracking.md`, et la nav de `mkdocs.yml` (retirer l'entrée
+     « HighFrequencyImputer (legacy) ») ;
+   - notebooks : `2 - QB - Mixed frequencies.ipynb` (23 instanciations de la v1) et
+     `explore_imputation_order.ipynb` (3). Ces notebooks appellent l'espace de paramètres v1 ;
+     les MIGRER vers l'espace v2. Pour les paramètres que la v2 n'exprime plus
+     ([SPEC] §5.7 — `cascade_refitting`, `cv_n_splits`, `enforce_period_totals`,
+     `disaggregate_anchors`, `train_on_partial_coverage`), remplacer la cellule par son
+     équivalent v2 quand il existe, sinon la retirer en laissant une cellule markdown qui dit ce
+     qui a disparu et pourquoi (renvoi au §5.7). NE PAS supprimer ces notebooks.
+   - `CLAUDE.md` : section `tsforecast/frequency/`, retirer la mention « `HighFrequencyImputer`
+     (v1) est legacy, conservé pour compatibilité » et la numérotation « 2 » partout.
+
+4) VÉRIFICATIONS DE FIN DE LOT, toutes obligatoires, résultats rapportés :
+   - `grep -rn "HighFrequencyImputer2\|ImputationPlan2\|ImputationStep2\|imputation_plan2\|high_frequency_imputer2" --include="*.py" --include="*.md" --include="*.yml" --include="*.ipynb" .`
+     (hors `site/`, `.venv/` et les quatre documents de travail `high_frequency_imputer*.md`,
+     qui sont des archives de conception et ne se réécrivent pas) : ZÉRO occurrence ;
+   - `uv run tests/frequency/check_regressions.py`, puis RÉGÉNÉRATION de
+     `tests/frequency/BASELINE_FAILURES.txt` — les échecs de référence portés par les tests v1
+     supprimés disparaissent mécaniquement. Lister les entrées retirées et la raison de chacune ;
+   - `uv run mkdocs build --strict` : construction verte ;
+   - exécution des deux notebooks migrés, sans cellule en erreur.
+
+Contraintes :
+   - AUCUNE modification de comportement dans ce lot. Si un test v2 change de résultat après le
+     renommage, c'est un import cassé : le corriger, ne jamais ajuster l'attendu du test.
+   - Un seul commit, message `refactor(L13-0): suppression de hfi v1 et renommage de hfi2`.
+
+Rappels de convention (CLAUDE.md) : commentaires internes en français à formulation nominale ;
+docstrings en anglais Google Style ; localiser le code par nom de symbole, jamais par numéro de
+ligne ; ne jamais masquer un échec de test.
+````
+
+---
+
+## Prompt 16a — Jeu de référence unifié `PANEL-X` (L13-0b)
+
+**Modèle : Sonnet · Plan mode : Non · Dépendances : prompts 1, 11a, 16**
+
+> Plan mode inutile : la cible est une factorisation à résultat vérifiable mécaniquement
+> (égalité stricte des fixtures avant / après).
+
+````text
+Contexte : les trois jeux de référence du [SPEC] — `TS` (§2.2), `PANEL` (§2.3) et `PANEL-F`
+(§2.5) — sont construits par trois fonctions distinctes de `tests/frequency/conftest.py`, alors
+qu'ils partagent le même index et les mêmes colonnes `m1` / `q1`. Constat vérifié sur le dépôt :
+
+  - l'index de `PANEL` et celui de `PANEL-F` sont IDENTIQUES (3 entités FR/DE/IT x 36 dates ME) ;
+  - `m1` et `q1` y sont identiques valeur par valeur ;
+  - `reference_timeseries()` est EXACTEMENT `PANEL.loc['FR', ['m1','q1','a1','a2']]`.
+
+Les trois jeux sont donc des projections d'un même jeu, qu'on nommera `PANEL-X`. Les unifier
+supprime trois sources de vérité au profit d'une seule et permet au notebook de pas-à-pas
+(prompt 17) de tout illustrer sur une seule itération.
+Référence : [SPEC] §2.2, §2.3, §2.5.
+
+CIBLE :
+
+1) Un constructeur unique `_build_panel_reference()` dans `tests/frequency/conftest.py`,
+   produisant `PANEL-X` : MultiIndex (`country`, `date`), entités `FR` / `DE` / `IT`, 36 dates
+   `ME` de 2021-01-31 à 2023-12-31, colonnes `m1`, `q1`, `a1`, `a2`, `climat_affaires`, `v` —
+   l'union stricte des colonnes des trois jeux, chacune conservant sa définition actuelle.
+
+2) Les trois fixtures existantes deviennent des PROJECTIONS, et rien d'autre :
+   - `reference_timeseries` -> `PANEL-X.loc['FR', ['m1','q1','a1','a2']]` ;
+   - `mixed_freq_panel_heterogeneous` -> `PANEL-X[['m1','q1','a1','a2','climat_affaires']]` ;
+   - `mixed_freq_panel_multifrequency` -> `PANEL-X[['m1','q1','v']]`.
+   Une quatrième fixture `panel_reference_full` expose `PANEL-X` entier.
+   Les trois anciens constructeurs `_build_reference_timeseries`, `_build_panel_heterogeneous`,
+   `_build_panel_multifrequency` disparaissent.
+
+3) PREUVE D'IDENTITÉ, à produire AVANT de supprimer quoi que ce soit : sérialiser la sortie des
+   trois constructeurs actuels, puis comparer les projections par
+   `pandas.testing.assert_frame_equal` en strict. Les valeurs d'or gelées des §2.2 et §2.5
+   (120/132/150, 60/66/72, les 12 ancres de `DE`, les 36 valeurs de `IT`) doivent survivre au bit
+   près, et les invariants I14 à I16 rester verts sans retouche.
+
+4) CORRECTIF, à faire dans le même lot : `climat_affaires` est aujourd'hui tirée après
+   `np.random.seed(seed + hash(entity) % 1000)`. `hash()` d'une `str` est SALÉ PAR PROCESSUS
+   (vérifié : deux exécutions donnent 901 puis 822 pour `'FR'`) — ses valeurs ne sont donc PAS
+   reproductibles d'une exécution à l'autre, et aucune valeur d'or ne peut en dépendre.
+   Remplacer par une graine déterministe (`zlib.crc32(entity.encode())` ou le rang de l'entité),
+   vérifier par grep qu'aucun test n'attend une valeur numérique de `climat_affaires`, et
+   appliquer le même correctif aux autres constructeurs de `conftest.py` qui utilisent
+   `hash(entity)` (`_build_panel`, `_build_panel_two_level`). Rapporter les tests dont le
+   résultat bouge.
+
+5) [SPEC] : ajouter une section §2.6 « Jeu de référence `PANEL-X` » énonçant que `TS`, `PANEL` et
+   `PANEL-F` sont désormais des PROJECTIONS d'un jeu unique, et que ce statut ne change aucune de
+   leurs valeurs — les §2.2, §2.3 et §2.5 restent normatifs et gelés. Ne rien réécrire d'autre
+   dans [SPEC].
+
+6) `tests/frequency/test_reference_datasets.py` : ajouter les trois identités de projection comme
+   tests explicites (elles sont la garantie que la factorisation ne dérive pas).
+
+Contraintes :
+   - aucune modification de `tsforecast/` dans ce lot ;
+   - `uv run tests/frequency/check_regressions.py` : aucun échec nouveau.
+
+Rappels de convention (CLAUDE.md) : commentaires internes en français à formulation nominale ;
+docstrings en anglais Google Style avec Args/Returns/Examples (doctest quand possible, comme les
+constructeurs actuels) ; type hints systématiques.
+````
+
+---
+
+## Prompt 17 — Notebook 5 « pas à pas » (L13a)
+
+**Modèle : Sonnet · Plan mode : Non · Dépendances : prompts 15, 16, 16a**
+
+> Plan mode inutile : le contenu attendu est énuméré section par section.
+
+````text
+Contexte : HighFrequencyImputer (la v2, renommée au prompt 16) est implémenté et testé
+(tsforecast/frequency/high_frequency_imputer.py et ses six composants). Il manque le notebook
+d'audit pas-à-pas, qui est le livrable de vérification humaine de la classe.
+Référence : [SPEC] = high_frequency_imputer2_architecture.md §15.2. Le notebook v1
+`4 - QB - HighFrequencyImputer pas a pas.ipynb` a été supprimé au prompt 16 : en reprendre la
+STRUCTURE et les CONTRÔLES CROISÉS depuis l'historique git, pas la logique.
+
+CIBLE — nouveau notebook `notebooks/5 - QB - HighFrequencyImputer pas a pas.ipynb` (le numéro 5
+est conservé pour ne pas se confondre avec le notebook 4 supprimé), exécuté sur UN SEUL JEU :
+`PANEL-X` ([SPEC] §2.6, fixture `panel_reference_full`), à reconstruire dans le notebook par la
+MÊME fonction que la fixture.
+
+Règle de lecture du jeu unique : le pas-à-pas se déroule sur le frame COMPLET (six colonnes), qui
+porte simultanément la feature absente pour une entité (`climat_affaires` / IT) et la colonne à
+fréquence hétérogène par entité (`v`). MAIS les valeurs d'or chiffrées du [SPEC] (§4.7, §5.5,
+§5.8) sont énoncées sur les jeux ISOLÉS : partout où le notebook vérifie l'un de ces chiffres, il
+repasse par la projection correspondante (`PANEL-X.loc['FR', ['m1','q1','a1','a2']]` pour `TS`,
+`PANEL-X[['m1','q1','v']]` pour `PANEL-F`) et le dit explicitement en markdown. Sur le frame
+complet, `v` devient covariable de `a1`/`a2` et réciproquement : le plan gagne des étapes et les
+`X_train` ne sont plus ceux du §5.5 — c'est attendu, et c'est précisément ce qu'illustre le jeu
+unifié.
 
 Sections attendues :
 
@@ -2700,9 +2883,13 @@ Sections attendues :
    déséquilibre train/test est le symptôme IMMÉDIAT d'un diviseur faux. Inclure le cas mixte
    « feature 'calendar', y 'constant' ».
 
-4) LES SIX COMBINAISONS des deux axes (3 stratégies × 3 modalités, réduites aux six qui diffèrent
-   effectivement — voir [SPEC] §5.6 pour les combinaisons inertes), avec la matrice de provenance
-   résultante et la répartition des cinq familles MODEL_*.
+4) LES COMBINAISONS des deux axes (3 stratégies x 3 modalités), avec la matrice de provenance
+   résultante et la répartition des cinq familles MODEL_*. ATTENTION : [SPEC] §15.2 annonce SIX
+   combinaisons effectivement distinctes, mais la lecture littérale du §5.6 en donne SEPT —
+   `'covariates_only'` n'étant inerte que hors `covariate_strategy='model'`, il replie deux cases
+   sur neuf, soit 2 + 2 + 3 = 7. MESURER le nombre de classes d'équivalence sur ce jeu (comparer
+   les sorties deux à deux), RAPPORTER le résultat, et ne pas trancher à la place du [SPEC] :
+   si le décompte mesuré est 7, le signaler comme coquille probable du §15.2 à corriger.
 
 5) CONTRÔLES CROISÉS repris du notebook 4 :
    - pas-à-pas vs `fit_transform` : égalité stricte ;
@@ -2711,16 +2898,18 @@ Sections attendues :
 6) Une section sur le PANEL HÉTÉROGÈNE : mesure de l'invariant NaN PAR ENTITÉ, et illustration
    des deux valeurs de `covariate_eligibility` sur `climat_affaires` / IT.
 
-7) Une section finale sur la MUTUALISATION INTER-ENTITÉS ([SPEC] §5.8), sur le jeu `PANEL-F` :
+7) Une section finale sur la MUTUALISATION INTER-ENTITÉS ([SPEC] §5.8), sur la projection
+   `PANEL-F` :
    - pour chaque étape, la composition du jeu d'entraînement bloc par bloc, en tableau : entité,
      `f_block`, nombre de lignes, diviseur, cible avant et après mise à l'échelle (lire
      `step.training_blocks` et l'estimateur espion, ne rien recalculer à la main) ;
    - un graphique superposant les trois blocs une fois mis à l'échelle : FR annuel, DE
      trimestriel et IT mensuel décrivent la même trajectoire — c'est le contrôle de bon sens ;
-   - le comptage comparé : 51 lignes d'entraînement à CHAQUE étape (les blocs ne dépendant pas
-     de l'étape, D18) contre 3 sans mutualisation, et
-     contre les 9 lignes de trois échelles différentes que produit `hfi` sur le même jeu
-     ([SPEC] §1.5) — exécuter les deux classes côte à côte pour le montrer ;
+   - le comptage comparé : 51 lignes d'entraînement à CHAQUE étape (les blocs ne dépendant pas de
+     l'étape, D18) contre 3 sans mutualisation — cette seconde valeur se mesure en restreignant
+     le jeu à la seule entité FR, PAS en instanciant l'ancienne classe, supprimée au prompt 16.
+     Pour la mesure historique de `hfi` (9 lignes à trois échelles différentes), CITER
+     [SPEC] §1.5 en markdown comme mesure archivée, sans tenter de la reproduire ;
    - la vérification qu'IT entraîne le modèle sans jamais être réécrite (ses cellules restent
      ORIGINAL), et que les deux étapes de plan de l'étape M partagent le même modèle tout en
      recalant sur des totaux différents (annuels pour FR, trimestriels pour DE).
@@ -2739,19 +2928,21 @@ docstrings en anglais Google Style ; cellules markdown en français.
 
 ---
 
-## Prompt 17 — Documentation de référence (L13b)
+## Prompt 18 — Documentation de référence (docstrings, API, exports) (L13b)
 
-**Modèle : Sonnet · Plan mode : Non · Dépendances : prompt 16**
+**Modèle : Sonnet · Plan mode : Non · Dépendances : prompt 17**
 
 > Plan mode inutile : lot de rédaction, à surface fermée.
 
 ````text
-Contexte : HighFrequencyImputer2 est implémenté, testé et audité par le notebook 5. Ce dernier lot
-aligne la documentation du package.
+Contexte : HighFrequencyImputer (v2) est implémenté, testé et audité par le notebook 5, et la v1
+a été supprimée au prompt 16. Ce lot aligne la documentation de RÉFÉRENCE du package — les
+docstrings et les pages d'API générées. La documentation UTILISATEUR (concept + tutoriel) fait
+l'objet du prompt 19, les notes d'implémentation du prompt 20 : ne pas empiéter.
 Référence : [SPEC] = high_frequency_imputer2_architecture.md, qui est LA RÉFÉRENCE UNIQUE de
 l'implémentation et de sa documentation — la documentation ne doit rien affirmer qui n'y figure.
 
-1) DOCSTRING DE CLASSE de `HighFrequencyImputer2` : la relire intégralement contre [SPEC] §13 et
+1) DOCSTRING DE CLASSE de `HighFrequencyImputer` : la relire intégralement contre [SPEC] §13 et
    la compléter. Elle doit contenir, en anglais Google Style :
    - le tableau des DEUX AXES du §0 et la question à laquelle chacun répond ;
    - `Args:` couvrant les 24 paramètres, chacun avec sa sémantique, son défaut, et le renvoi à la
@@ -2771,38 +2962,174 @@ l'implémentation et de sa documentation — la documentation ne doit rien affir
    l'échappatoire nommée (un imputeur ajusté par entité) pour qui ne le veut pas.
 
 2) Docstrings des SIX composants (`CovariateMaterializer`, `StageScaler`, `VariableOrderer`,
-   `AggregationConstraint`, `TrainingSetBuilder`, `ImputationStep` v2 / `ImputationPlan`) :
+   `AggregationConstraint`, `TrainingSetBuilder`, `ImputationStep` / `ImputationPlan`) :
    vérifier que chacune énonce sa RESPONSABILITÉ UNIQUE telle que définie au §12.2, et renvoie à
    la section de [SPEC] qui la spécifie. Corriger toute docstring qui décrit un comportement que
    le code n'a pas.
 
-3) `tsforecast/frequency/__init__.py` : exports complets et cohérents des symboles nouveaux
-   (`HighFrequencyImputer2`, les six composants, `ImputationStep2`/`ImputationPlan2`,
-   `MaterializationWay`, `CellOrigin`, `Taint`, `resolve_model_provenance`), `__all__` à jour, et
-   docstring de module mentionnant la COEXISTENCE de `HighFrequencyImputer` et
-   `HighFrequencyImputer2` pendant la transition ([SPEC] §15.3). Ne rien déprécier : la
-   dépréciation de hfi est un chantier ultérieur, hors périmètre.
+3) `tsforecast/frequency/__init__.py` : exports complets et cohérents (`HighFrequencyImputer`,
+   les six composants, `ImputationStep` / `ImputationPlan`, `MaterializationWay`, `CellOrigin`,
+   `Taint`, `resolve_model_provenance`), `__all__` à jour, et docstring de module décrivant le
+   rôle du paquet. La v1 ayant disparu au prompt 16, il n'y a plus de coexistence à documenter :
+   si une mention de transition subsiste, la retirer.
 
-4) `mkdocs` : ajouter les pages de référence des nouveaux modules dans docs/ et les entrées
-   correspondantes dans mkdocs.yml, sur le modèle des pages existantes. Vérifier que la
-   construction passe.
+4) `mkdocs` : vérifier que les pages de référence des modules existent dans `docs/api/frequency/`
+   et que la nav de `mkdocs.yml` les liste toutes, sur le modèle des pages existantes.
+   `uv run mkdocs build --strict` doit passer.
 
-5) `CLAUDE.md`, section « Structure du Projet » puis « Objectifs Fonctionnels » : ajouter
-   `high_frequency_imputer2.py` et les six composants sous `tsforecast/frequency/`, et déplacer
-   « Gestion complète de données multi-fréquences (imputation, agrégation) » de « À implémenter »
-   vers « Implémenté » en précisant que `HighFrequencyImputer` reste en place pendant la
-   transition. Ne pas toucher au reste du fichier.
-
-6) `README.md` : une entrée courte, cohérente avec le reste du fichier. Ne pas le réécrire.
+5) `CLAUDE.md`, sections « Structure du Projet » et « Objectifs Fonctionnels » : décrire l'état
+   final (une seule classe, ses six composants), sans mention de v1 ni de suffixe « 2 ». Ne pas
+   toucher au reste du fichier. Le README est traité au prompt 20 : ne pas y toucher ici.
 
 Enfin : `uv run tests/frequency/check_regressions.py` une dernière fois, et me donner le bilan
-final — compte d'échecs vs référence, tableau invariant I1-I16 -> test(s), et liste des points de
+final — compte d'échecs vs référence, tableau invariant I1-I17 -> test(s), et liste des points de
 [SPEC] que l'implémentation ne couvre PAS, s'il en reste. Ne rien déclarer acquis sans l'avoir
 vérifié.
 
 Rappels de convention (CLAUDE.md) : commentaires internes en français à formulation nominale ;
 docstrings en anglais Google Style avec Args/Returns/Raises/Examples ; type hints systématiques ;
 localiser le code par nom de symbole, jamais par numéro de ligne.
+````
+
+---
+
+## Prompt 19 — Documentation utilisateur : concept, tutoriel et schémas (L13c)
+
+**Modèle : Opus · Plan mode : Oui · Dépendances : prompt 18**
+
+> Opus et plan mode : le livrable n'est pas de la transcription mais une PÉDAGOGIE — isoler six
+> ou sept configurations, choisir pour chacune l'exemple minimal qui la distingue de sa voisine,
+> et concevoir les schémas correspondants. Le plan valide le découpage en sections et la liste
+> des figures AVANT la première ligne de XML draw.io, qui coûte cher à réécrire.
+
+````text
+Contexte : la documentation de référence est à jour (prompt 18). Il manque la documentation
+UTILISATEUR de l'imputation multi-fréquences : celle qui explique la logique d'imputation à
+quelqu'un qui n'a pas lu le [SPEC], sur le modèle de ce qui existe pour les délais de
+publication.
+Références :
+  - [SPEC] = high_frequency_imputer2_architecture.md (source de vérité : ne rien affirmer qui
+    n'y figure) ;
+  - modèles de rédaction : `docs/tutorials/publication_delays.md` (942 lignes, 11 figures),
+    `docs/tutorials/pseudo_real_time_forecast.md` (356 lignes, 4 figures) ;
+  - modèles graphiques : `drawio_examples/*.drawio` (6 sources) et leurs exports dans
+    `docs/assets/`.
+
+ATTENTION AUX NOMS DE FICHIERS : la page à réécrire s'appelle
+`docs/tutorials/mixed_frequency_imputation.md` (140 lignes, déjà rédigée mais sur une logique
+antérieure), et elle est doublée d'un `docs/concepts/mixed_frequency_imputation.md` (110 lignes).
+Il n'existe PAS de `mixed_frequencies_tutorial.md`. Les deux pages sont à reprendre :
+le CONCEPT porte le modèle mental (les deux axes, la provenance, le plan, la mutualisation), le
+TUTORIEL déroule les cas.
+
+CIBLE — coeur du lot : les DIFFÉRENCES DE LOGIQUE D'IMPUTATION induites par les paramètres des
+deux axes, traitées EN ISOLATION, une section par configuration, pour faire ressortir le rôle
+propre de chaque paramètre.
+
+  - Axe 1 : `covariate_strategy` in {'tolerate_nan', 'interpolate', 'model'} ([SPEC] §4) ;
+  - Axe 2 : `impute_intermediate_frequencies` in {False, 'covariates_only', True} ([SPEC] §5).
+
+Sur les neuf couples, `'covariates_only'` est inerte hors `covariate_strategy='model'` (§5.6),
+ce qui replie deux cases : la lecture littérale donne donc SEPT configurations distinctes
+(2 + 2 + 3), là où [SPEC] §15.2 en annonce six. Le notebook 5 (prompt 17) a mesuré le nombre réel
+de classes d'équivalence : REPRENDRE SON RÉSULTAT, le documenter tel qu'il est, et signaler
+l'écart s'il subsiste. Chaque configuration reçoit :
+  - ce que voit le modèle (`X_train` / `y_train` / `X_pred`) sur un exemple minimal ;
+  - la provenance produite (quelle famille MODEL_*, et pourquoi — §6.3) ;
+  - ce qui la distingue de la configuration voisine, en une phrase ;
+  - quand la choisir, et à quel prix.
+
+Données des exemples : réutiliser les projections de `PANEL-X` ([SPEC] §2.6) déjà utilisées par
+le notebook 5, pour que documentation et notebook racontent la même histoire avec les mêmes
+chiffres. Le code des blocs doit être exécutable tel quel.
+
+Sections supplémentaires attendues dans le tutoriel, après les configurations :
+  - la contrainte d'agrégation (`aggregation_constraint`) et la désagrégation des ancres (§11) ;
+  - la mise à l'échelle (`scale_features`, 'constant' vs 'calendar', §9) ;
+  - la mutualisation inter-entités sur un panel (§5.8) et l'hypothèse de niveaux comparables ;
+  - la lecture de la provenance et son usage en aval (filtrage, tracking).
+
+SCHÉMAS — un par configuration au minimum, plus un schéma d'ensemble des deux axes et un schéma
+de la mutualisation. Sources `.drawio` versionnées dans `drawio_examples/` (numérotation à la
+suite des existantes), exports PNG dans `docs/assets/`, référencés depuis les pages markdown
+comme les figures existantes (`![Légende](../assets/nom.png)`).
+
+Charte graphique, relevée sur les six sources existantes — s'y conformer :
+  - page 1100-1500 de large, fond blanc, `mxGraphModel` standard ;
+  - titre `fontSize=18` gras, sous-titre `fontSize=14` italique, titres de section `fontSize=16`
+    gras, corps `fontSize=11` à `12`. NE PAS descendre sous 11 pour le corps : les figures
+    existantes utilisent 9-10 par endroits, c'est trop petit une fois exportées, ne pas
+    reproduire ce défaut ;
+  - palette draw.io par défaut, telle qu'employée : bleu `#dae8fc`/`#6c8ebf`, vert
+    `#d5e8d4`/`#82b366`, rouge `#f8cecc`/`#b85450`, jaune `#fff2cc`/`#d6b656`, gris
+    `#e0e0e0`/`#f5f5f5`, accent foncé `#1e4a7a` ; `fontFamily=Courier New` pour les valeurs de
+    données et les noms de colonnes ;
+  - une LÉGENDE encadrée dans chaque figure, comme dans `01_detect_delays_two_datasets.drawio` :
+    chaque couleur y est nommée, et la figure doit se lire SANS le texte qui l'entoure ;
+  - MODE MATHÉMATIQUE : activer `math="1"` sur le `mxGraphModel` et écrire les notations indicées
+    en LaTeX dans les libellés ($$f_{var}(e,v)$$, $$f_{block}(e)$$, $$X_{train}$$, $$y_{train}$$,
+    $$X_{pred}$$). Le rendu MathJax n'apparaît qu'à l'export depuis l'application draw.io :
+    produire les `.drawio` et me signaler explicitement quels PNG restent à exporter à la main,
+    plutôt que de produire un PNG faux.
+
+Contraintes :
+  - le tutoriel doit rester lisible d'un bout à l'autre : une configuration par section, dans un
+    ordre qui va du plus simple au plus engageant, chaque section autonome ;
+  - ne rien affirmer qui ne soit dans [SPEC] ou mesuré par le notebook 5 ; en cas de doute, le
+    dire plutôt que d'inventer ;
+  - `uv run mkdocs build --strict` doit passer, et toutes les images référencées doivent exister.
+
+Rappels de convention (CLAUDE.md) : pages de documentation en français ; blocs de code avec des
+docstrings anglaises Google Style si des fonctions y sont définies.
+````
+
+---
+
+## Prompt 20 — Onglet « Notes d'implémentation » et `README.md` (L13d)
+
+**Modèle : Sonnet · Plan mode : Non · Dépendances : prompt 19**
+
+> Plan mode inutile : la matière existe déjà ([SPEC] et docstrings du prompt 18) ; le lot
+> l'organise en pages et met à jour la nav.
+
+````text
+Contexte : la documentation utilisateur (concept + tutoriel) est en place (prompt 19). Il manque
+un onglet destiné à qui veut comprendre COMMENT la classe fonctionne à l'intérieur — le lecteur
+qui va modifier le code, pas celui qui l'utilise.
+Référence : [SPEC] = high_frequency_imputer2_architecture.md ; le bilan produit en fin de
+prompt 18 ; le notebook 5 (prompt 17) pour les chiffres.
+
+1) NOUVELLE SECTION DE NAV `mkdocs.yml`, intitulée « Notes d'implémentation », placée après
+   « Guides ». Pages, dans `docs/implementation/` :
+   - `mixed_frequency_architecture.md` : la vue d'ensemble — les deux axes, les phases 0 à 6 du
+     `fit` et 0' à 4' du `transform` ([SPEC] §12.3), et le rôle de chacun des six composants avec
+     sa responsabilité unique (§12.2). Un schéma de flux réutilisant la charte du prompt 19.
+   - `imputation_plan.md` : le plan comme état ajusté complet — ce que porte une `ImputationStep`,
+     pourquoi le plan est immuable et rejoué au `transform`, et la règle d'unicité de la voie de
+     matérialisation (§4.6, invariant I11).
+   - `provenance.md` : l'échelle de souillure, la table de correspondance 3x3 -> 5 (§6.3), et ce
+     que chaque famille MODEL_* garantit au lecteur d'une sortie.
+   - `pooled_training.md` : la mutualisation inter-entités (§5.8) — les six règles, le diviseur
+     par ligne, et le contre-exemple B29 (§1.5) qui la motive.
+   - `invariants.md` : le tableau I1 à I17 (§16), chacun avec le ou les tests qui le mesurent,
+     repris du bilan du prompt 18. C'est la page qui dit ce que le package GARANTIT.
+   Chaque page renvoie vers l'API générée et vers le tutoriel correspondant ; aucune ne duplique
+   le tutoriel, qui reste la porte d'entrée utilisateur.
+
+2) `README.md` : mise à jour. Le fichier actuel mélange un énoncé d'objectifs rédigé au futur et
+   une section de tests. Le réécrire pour qu'il donne, dans l'ordre : ce que fait le package en
+   trois lignes ; l'installation ; un exemple minimal exécutable (imputation multi-fréquences ou
+   crossval, au choix, mais qui tourne) ; le tableau des modules (`crossvals`, `delays`,
+   `frequency`, `panel`, `xy`, `tracking`, `utils`) avec une ligne chacun ; le lien vers le site
+   de documentation ; les commandes de test. Distinguer clairement ce qui est IMPLÉMENTÉ de ce
+   qui est PROJETÉ — la liste actuelle présente les deux au même niveau, ce qui est trompeur.
+   Aligner cette distinction sur la section « Objectifs Fonctionnels » de `CLAUDE.md`.
+
+3) Vérifications : `uv run mkdocs build --strict` vert ; tous les liens internes résolus ;
+   l'exemple du README exécuté et son résultat vérifié.
+
+Rappels de convention (CLAUDE.md) : documentation en français ; ne rien affirmer qui ne soit dans
+[SPEC] ou vérifié dans le dépôt.
 ````
 
 ---
@@ -2833,4 +3160,4 @@ localiser le code par nom de symbole, jamais par numéro de ligne.
 | Le repli matérialise (stores alimentés) | 8, 13 |
 | Avertissements agrégés et uniques | 11, 12, 13, 15 |
 | `__init__` valide sans transformer | 7, 10, 11, 12 |
-| `hfi` et `hfi2` coexistent, sauf `MODEL_ON_MIXED` | 4, 12, 17 |
+| `hfi` et `hfi2` coexistent, sauf `MODEL_ON_MIXED` — **jusqu'au lot 16**, qui supprime la v1 | 4, 12, 16 |
