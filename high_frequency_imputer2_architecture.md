@@ -327,6 +327,23 @@ et **ne l'est pas** pour `IT`, qui l'observe déjà à la fréquence cible.
 Ce jeu est le support des invariants I14, I15 et I16 (§16) ; ses valeurs sont **gelées** au même
 titre que celles du jeu `TS`.
 
+### 2.6 — Jeu de référence `PANEL-X` (jeu unifié)
+
+`TS` (§2.2), `PANEL` (§2.3) et `PANEL-F` (§2.5) sont **des projections d'un jeu unique**,
+`PANEL-X` : trois entités `FR` / `DE` / `IT`, index mensuel fin de mois 2021-01-31 → 2023-12-31
+(36 dates par entité, 108 lignes), colonnes `m1`, `q1`, `a1`, `a2`, `climat_affaires`, `v` —
+l'union stricte des colonnes des trois jeux, chacune gardant sa définition des §2.2 à §2.5.
+
+- `TS` = `PANEL-X.loc['FR', ['m1', 'q1', 'a1', 'a2']]` ;
+- `PANEL` = `PANEL-X[['m1', 'q1', 'a1', 'a2', 'climat_affaires']]` ;
+- `PANEL-F` = `PANEL-X[['m1', 'q1', 'v']]`.
+
+Ce statut de projection **ne change aucune valeur** : les §2.2, §2.3 et §2.5 restent normatifs et
+gelés, `PANEL-X` n'est que leur source unique. Les valeurs de `climat_affaires` (bruit
+gaussien) restent purement informatives — aucune valeur d'or n'en dépend. Support :
+`tests/frequency/conftest.py::_build_panel_reference` (fixture `panel_reference_full`) ; les
+identités de projection sont testées dans `tests/frequency/test_reference_datasets.py`.
+
 ---
 
 ## 3 — L'invariant central

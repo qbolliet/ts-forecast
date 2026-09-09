@@ -6,6 +6,8 @@ structure des données de `notebooks/2 - QB - Mixed frequencies.ipynb`
 `high_frequency_imputer_review.md`.
 """
 # Modules de base
+import zlib
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -108,7 +110,9 @@ def _build_panel(seed: int = 42) -> pd.DataFrame:
 
     all_data = []
     for country, params in countries.items():
-        np.random.seed(seed + hash(country) % 1000)
+        # Graine déterministe par entité : ``hash`` d'une ``str`` est salé par
+        # processus (non reproductible d'une exécution à l'autre), ``crc32`` non.
+        np.random.seed(seed + zlib.crc32(country.encode()) % 1000)
 
         df_country = pd.DataFrame(index=dates)
         df_country['country'] = country
@@ -177,92 +181,79 @@ def _build_panel(seed: int = 42) -> pd.DataFrame:
     return df_panel
 
 
-def _build_reference_timeseries(seed: int = 42) -> pd.DataFrame:
-    """Build the ``TS`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.2.
+def _build_panel_reference(seed: int = 42) -> pd.DataFrame:
+    """Build the unified ``PANEL-X`` reference dataset (``high_frequency_imputer2_architecture.md`` §2.6).
 
-    Month-end index (``ME``) from 2021-01-31 to 2023-12-31 (36 rows). Every
-    column is additive (an annual value is the sum of its sub-periods). The
-    annual columns carry the document's gold values, reused verbatim as gold
-    cases by later implementation lots and therefore frozen.
+    Single source of truth behind the three frozen reference datasets of the
+    spec: ``TS`` (§2.2), ``PANEL`` (§2.3) and ``PANEL-F`` (§2.5) are now strict
+    projections of this frame (fixtures ``reference_timeseries``,
+    ``mixed_freq_panel_heterogeneous``, ``mixed_freq_panel_multifrequency``).
+    Three entities ``FR`` / ``DE`` / ``IT`` share a month-end (``ME``) index
+    from 2021-01-31 to 2023-12-31 (36 dates per entity, 108 rows). Every column
+    is additive (an annual value is the sum of its sub-periods). Columns, in
+    the union order of the three datasets:
 
-    Args:
-        seed: Unused; kept for signature parity with the other builders of
-            this module (the construction is fully deterministic).
-
-    Returns:
-        Time series ``DataFrame`` with a ``DatetimeIndex`` named ``date`` and
-        columns ``m1`` (monthly, never NaN), ``q1`` (quarterly, non-NaN only
-        at quarter-end months), ``a1`` and ``a2`` (annual, non-NaN only at
-        the three year-end anchors, values 120/132/150 and 60/66/72).
-
-    Examples:
-        >>> df = _build_reference_timeseries()
-        >>> df.loc['2022-12-31', ['a1', 'a2']].tolist()
-        [132.0, 66.0]
-    """
-    # Graine conservée pour l'homogénéité de signature : aucun tirage aléatoire.
-    del seed
-
-    dates = pd.date_range(start='2021-01-31', end='2023-12-31', freq='ME')
-    df = pd.DataFrame(index=dates)
-    df.index.name = 'date'
-
-    # ----- m1 : mensuelle, dense, jamais NaN -----
-    df['m1'] = 100.0 + np.arange(len(dates), dtype=float)
-
-    # ----- q1 : trimestrielle, valeur uniquement aux fins de trimestre -----
-    quarter_end_mask = dates.month.isin([3, 6, 9, 12])
-    df['q1'] = np.nan
-    df.loc[quarter_end_mask, 'q1'] = 10.0 * np.arange(1, quarter_end_mask.sum() + 1)
-
-    # ----- a1 / a2 : annuelles, valeurs d'or du document (§2.2) -----
-    annual_anchors = pd.to_datetime(['2021-12-31', '2022-12-31', '2023-12-31'])
-    df['a1'] = np.nan
-    df['a2'] = np.nan
-    df.loc[annual_anchors, 'a1'] = [120.0, 132.0, 150.0]
-    df.loc[annual_anchors, 'a2'] = [60.0, 66.0, 72.0]
-
-    return df
-
-
-def _build_panel_heterogeneous(seed: int = 42) -> pd.DataFrame:
-    """Build the ``PANEL`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.3.
-
-    Three entities ``FR`` / ``DE`` / ``IT`` sharing a month-end index
-    (``ME``) from 2021-01-31 to 2023-12-31 (36 rows per entity, 108 total).
-    Same mixed-frequency columns as :func:`_build_reference_timeseries`, plus
-    ``climat_affaires``: a monthly business-survey indicator observed for
-    ``FR`` and ``DE`` but structurally absent for ``IT`` (the column exists
-    in the frame for every entity, the Italian entity simply never observes
-    it). This is the support of the ``covariate_eligibility`` parameter
-    (§4.5) and of the per-entity measurement of the central NaN invariant
-    (§3). Every column is additive.
+    - ``m1`` (monthly, dense, never NaN): ``100 + rank``, identical across
+      entities.
+    - ``q1`` (quarterly: non-NaN only at quarter-end months 3/6/9/12):
+      ``10 * k``, identical across entities.
+    - ``a1`` (annual: non-NaN only at the three year-end anchors) — §2.2 gold
+      values 120 / 132 / 150, identical across entities.
+    - ``a2`` (annual, same anchors) — §2.2 gold values 60 / 66 / 72.
+    - ``climat_affaires`` (monthly business survey): observed for ``FR`` and
+      ``DE`` (level ~100 with reproducible noise), entirely NaN for ``IT``
+      (the column exists for every entity, only ``IT`` never observes it) —
+      the support of ``covariate_eligibility`` (§4.5).
+    - ``v`` (heterogeneous frequency per entity): annual for ``FR`` (3
+      anchors), quarterly for ``DE`` (12 anchors), monthly for ``IT`` (36
+      values), chosen so the three entities carry the same annual total
+      (120 / 132 / 150) — the support of inter-entity mutualisation (§5.8)
+      and of invariants I14 to I16 (§16).
 
     Args:
-        seed: Base random seed; each entity draws its ``climat_affaires``
-            noise after ``np.random.seed(seed + hash(entity) % 1000)`` — the
-            same seeding mechanism as :func:`_build_panel`.
+        seed: Base random seed for the ``climat_affaires`` noise; each entity
+            draws after ``np.random.seed(seed + zlib.crc32(entity) % 1000)``.
+            ``crc32`` (not ``hash``) keeps the seed reproducible from one
+            process to the next — no gold value depends on ``climat_affaires``,
+            whose values are informative only.
 
     Returns:
-        Panel ``DataFrame`` with a ``MultiIndex`` (``country``, ``date``) and
-        entities ``FR`` / ``DE`` / ``IT``.
+        Panel ``DataFrame`` with a sorted ``MultiIndex`` (``country``,
+        ``date``), entities ``FR`` / ``DE`` / ``IT``, columns ``m1``, ``q1``,
+        ``a1``, ``a2``, ``climat_affaires``, ``v``.
 
     Examples:
-        >>> df = _build_panel_heterogeneous()
+        >>> df = _build_panel_reference()
+        >>> list(df.columns)
+        ['m1', 'q1', 'a1', 'a2', 'climat_affaires', 'v']
+        >>> df.loc['FR', ['a1', 'a2']].dropna().values.tolist()
+        [[120.0, 60.0], [132.0, 66.0], [150.0, 72.0]]
+        >>> df.loc['DE', 'v'].dropna().tolist()
+        [28.0, 30.0, 31.0, 31.0, 31.0, 33.0, 34.0, 34.0, 36.0, 37.0, 38.0, 39.0]
         >>> int(df.loc['IT', 'climat_affaires'].notna().sum())
         0
-        >>> int(df.loc['FR', 'climat_affaires'].notna().sum())
-        36
     """
     entities = ('FR', 'DE', 'IT')
     dates = pd.date_range(start='2021-01-31', end='2023-12-31', freq='ME')
     quarter_end_mask = dates.month.isin([3, 6, 9, 12])
+    quarter_end_dates = dates[quarter_end_mask]
     annual_anchors = pd.to_datetime(['2021-12-31', '2022-12-31', '2023-12-31'])
+
+    # ----- Valeurs d'or de v, par entité (§2.5) : même total annuel pour les trois -----
+    v_by_entity = {
+        'FR': pd.Series([120.0, 132.0, 150.0], index=annual_anchors),
+        'DE': pd.Series(
+            [28.0, 30.0, 31.0, 31.0, 31.0, 33.0, 34.0, 34.0, 36.0, 37.0, 38.0, 39.0],
+            index=quarter_end_dates,
+        ),
+        'IT': pd.Series([10.0] * 12 + [11.0] * 12 + [12.5] * 12, index=dates),
+    }
 
     all_data = []
     for entity in entities:
-        # Même mécanisme de graine par entité que _build_panel.
-        np.random.seed(seed + hash(entity) % 1000)
+        # Graine déterministe par entité (cf. _build_panel) : seule climat_affaires
+        # consomme le générateur, et seulement pour FR et DE.
+        np.random.seed(seed + zlib.crc32(entity.encode()) % 1000)
 
         df_entity = pd.DataFrame(index=dates)
         df_entity.index.name = 'date'
@@ -288,78 +279,6 @@ def _build_panel_heterogeneous(seed: int = 42) -> pd.DataFrame:
         if entity != 'IT':
             climat_noise = np.random.normal(0, 2.0, len(dates))
             df_entity['climat_affaires'] = 100.0 + climat_noise
-
-        all_data.append(df_entity)
-
-    df_panel = pd.concat(all_data, ignore_index=False)
-    df_panel = df_panel.reset_index().rename(columns={'index': 'date'})
-    df_panel = df_panel.set_index(['country', 'date'])
-    df_panel = df_panel.sort_index()
-
-    return df_panel
-
-
-def _build_panel_multifrequency(seed: int = 42) -> pd.DataFrame:
-    """Build the ``PANEL-F`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.5.
-
-    Three entities ``FR`` / ``DE`` / ``IT`` sharing the same month-end
-    (``ME``) index as :func:`_build_panel_heterogeneous` (2021-01-31 to
-    2023-12-31, 36 rows per entity, 108 total). Same ``m1`` / ``q1``
-    columns as :func:`_build_reference_timeseries`, identical across the
-    three entities, plus ``v``: a single column observed at a different
-    frequency per entity (annual for ``FR``, quarterly for ``DE``, monthly
-    for ``IT``), chosen so the three entities carry the same annual total
-    at every year (120.0 / 132.0 / 150.0) — the support of inter-entity
-    mutualisation of the training set (§5.8) and of the ``B29`` defect it
-    measures (§1.5). No ``climat_affaires`` column: this dataset is not
-    ``PANEL`` and does not replace it.
-
-    Args:
-        seed: Unused; kept for signature parity with the other builders of
-            this module (the construction is fully deterministic).
-
-    Returns:
-        Panel ``DataFrame`` with a ``MultiIndex`` (``country``, ``date``)
-        and entities ``FR`` / ``DE`` / ``IT``.
-
-    Examples:
-        >>> df = _build_panel_multifrequency()
-        >>> int(df.loc['IT', 'v'].notna().sum())
-        36
-        >>> df.loc['FR', 'v'].dropna().tolist()
-        [120.0, 132.0, 150.0]
-    """
-    # Graine conservée pour l'homogénéité de signature : aucun tirage aléatoire.
-    del seed
-
-    entities = ('FR', 'DE', 'IT')
-    dates = pd.date_range(start='2021-01-31', end='2023-12-31', freq='ME')
-    quarter_end_mask = dates.month.isin([3, 6, 9, 12])
-    quarter_end_dates = dates[quarter_end_mask]
-    annual_anchors = pd.to_datetime(['2021-12-31', '2022-12-31', '2023-12-31'])
-
-    # ----- Valeurs d'or de v, par entité (§2.5) : même total annuel pour les trois -----
-    v_by_entity = {
-        'FR': pd.Series([120.0, 132.0, 150.0], index=annual_anchors),
-        'DE': pd.Series(
-            [28.0, 30.0, 31.0, 31.0, 31.0, 33.0, 34.0, 34.0, 36.0, 37.0, 38.0, 39.0],
-            index=quarter_end_dates,
-        ),
-        'IT': pd.Series([10.0] * 12 + [11.0] * 12 + [12.5] * 12, index=dates),
-    }
-
-    all_data = []
-    for entity in entities:
-        df_entity = pd.DataFrame(index=dates)
-        df_entity.index.name = 'date'
-        df_entity['country'] = entity
-
-        # ----- m1 : mensuelle, dense, jamais NaN — identique au jeu TS -----
-        df_entity['m1'] = 100.0 + np.arange(len(dates), dtype=float)
-
-        # ----- q1 : trimestrielle, valeur uniquement aux fins de trimestre -----
-        df_entity['q1'] = np.nan
-        df_entity.loc[quarter_end_mask, 'q1'] = 10.0 * np.arange(1, quarter_end_mask.sum() + 1)
 
         # ----- v : fréquence hétérogène par entité (annuelle / trimestrielle / mensuelle) -----
         df_entity['v'] = np.nan
@@ -409,7 +328,11 @@ def _build_panel_two_level(seed: int = 7) -> pd.DataFrame:
     all_data = []
     for country in countries:
         for sector in sectors:
-            np.random.seed(seed + hash((country, sector)) % 1000)
+            # Graine déterministe par entité (cf. _build_panel) : ``crc32`` sur
+            # la clé ``country|sector``, ``hash`` d'un tuple étant salé par processus.
+            np.random.seed(
+                seed + zlib.crc32(f"{country}|{sector}".encode()) % 1000
+            )
 
             df = pd.DataFrame(index=dates)
             df['country'] = country
@@ -485,11 +408,34 @@ def mixed_freq_panel() -> pd.DataFrame:
 
 
 @pytest.fixture
+def panel_reference_full() -> pd.DataFrame:
+    """Unified ``PANEL-X`` reference dataset (``high_frequency_imputer2_architecture.md`` §2.6).
+
+    The single frame all three frozen reference datasets project from:
+    ``TS`` (:func:`reference_timeseries`, §2.2), ``PANEL``
+    (:func:`mixed_freq_panel_heterogeneous`, §2.3) and ``PANEL-F``
+    (:func:`mixed_freq_panel_multifrequency`, §2.5) are strict column (and,
+    for ``TS``, entity) projections of this dataset — the projection status
+    changes none of their values, §2.2 / §2.3 / §2.5 stay normative and
+    frozen.
+
+    ``MultiIndex`` (``country``, ``date``) with 3 entities (``FR``, ``DE``,
+    ``IT``), each sharing the same 36 month-end (``ME``) dates from
+    2021-01-31 to 2023-12-31 (108 rows total). Columns ``m1``, ``q1``,
+    ``a1``, ``a2``, ``climat_affaires``, ``v`` — see
+    :func:`_build_panel_reference` for their definitions.
+    """
+    return _build_panel_reference()
+
+
+@pytest.fixture
 def reference_timeseries() -> pd.DataFrame:
     """``TS`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.2.
 
-    ``DatetimeIndex`` named ``date``, month-end anchored (``ME``), 36 rows
-    from 2021-01-31 to 2023-12-31. Columns:
+    Strict projection of ``PANEL-X`` (§2.6, :func:`panel_reference_full`):
+    ``panel_x.loc['FR', ['m1', 'q1', 'a1', 'a2']]``. ``DatetimeIndex`` named
+    ``date``, month-end anchored (``ME``), 36 rows from 2021-01-31 to
+    2023-12-31. Columns:
 
     - ``m1`` (monthly, dense, never NaN).
     - ``q1`` (quarterly: non-NaN only at quarter-end months 3/6/9/12).
@@ -500,17 +446,24 @@ def reference_timeseries() -> pd.DataFrame:
     The annual gold values match §2.2 verbatim and are reused as gold cases
     by later implementation lots; they must not change.
     """
-    return _build_reference_timeseries()
+    panel_x = _build_panel_reference()
+    df = panel_x.loc['FR', ['m1', 'q1', 'a1', 'a2']].copy()
+    # Restauration de la fréquence d'index, perdue au découpage du MultiIndex :
+    # la projection reste identique bit à bit à l'ancien constructeur dédié.
+    df.index.freq = df.index.inferred_freq
+    return df
 
 
 @pytest.fixture
 def mixed_freq_panel_heterogeneous() -> pd.DataFrame:
     """``PANEL`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.3.
 
-    ``MultiIndex`` (``country``, ``date``) with 3 entities (``FR``, ``DE``,
-    ``IT``), each sharing the same 36 month-end (``ME``) dates from
-    2021-01-31 to 2023-12-31 (108 rows total). Columns ``m1`` / ``q1`` /
-    ``a1`` / ``a2`` as in :func:`reference_timeseries`, plus:
+    Strict projection of ``PANEL-X`` (§2.6, :func:`panel_reference_full`):
+    ``panel_x[['m1', 'q1', 'a1', 'a2', 'climat_affaires']]``. ``MultiIndex``
+    (``country``, ``date``) with 3 entities (``FR``, ``DE``, ``IT``), each
+    sharing the same 36 month-end (``ME``) dates from 2021-01-31 to
+    2023-12-31 (108 rows total). Columns ``m1`` / ``q1`` / ``a1`` / ``a2``
+    as in :func:`reference_timeseries`, plus:
 
     - ``climat_affaires`` (monthly business survey): observed for ``FR`` and
       ``DE`` (level ~100 with reproducible noise), entirely NaN for ``IT``.
@@ -518,18 +471,19 @@ def mixed_freq_panel_heterogeneous() -> pd.DataFrame:
       observes it — the support of ``covariate_eligibility`` (§4.5) and of
       the per-entity NaN invariant (§3).
     """
-    return _build_panel_heterogeneous()
+    return _build_panel_reference()[['m1', 'q1', 'a1', 'a2', 'climat_affaires']]
 
 
 @pytest.fixture
 def mixed_freq_panel_multifrequency() -> pd.DataFrame:
     """``PANEL-F`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.5.
 
-    ``MultiIndex`` (``country``, ``date``) with 3 entities (``FR``, ``DE``,
-    ``IT``), each sharing the same 36 month-end (``ME``) dates as
-    :func:`mixed_freq_panel_heterogeneous` (108 rows total). Columns ``m1``
-    / ``q1`` as in :func:`reference_timeseries`, identical across the three
-    entities, plus:
+    Strict projection of ``PANEL-X`` (§2.6, :func:`panel_reference_full`):
+    ``panel_x[['m1', 'q1', 'v']]``. ``MultiIndex`` (``country``, ``date``)
+    with 3 entities (``FR``, ``DE``, ``IT``), each sharing the same 36
+    month-end (``ME``) dates as :func:`mixed_freq_panel_heterogeneous` (108
+    rows total). Columns ``m1`` / ``q1`` as in :func:`reference_timeseries`,
+    identical across the three entities, plus:
 
     - ``v`` (the heterogeneous-frequency column): observed annually for
       ``FR`` (3 year-end anchors), quarterly for ``DE`` (12 quarter-end
@@ -541,4 +495,4 @@ def mixed_freq_panel_multifrequency() -> pd.DataFrame:
     No ``climat_affaires`` column: this dataset is not ``PANEL`` and does
     not replace it.
     """
-    return _build_panel_multifrequency()
+    return _build_panel_reference()[['m1', 'q1', 'v']]

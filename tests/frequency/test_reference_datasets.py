@@ -3,6 +3,11 @@
 Le jeu ``PANEL`` (§2.3) et le jeu ``TS`` (§2.2) servent de support à tous les
 tests et notebooks de ``HighFrequencyImputer``. Leur structure et leurs valeurs
 d'or sont verrouillées ici : elles ne doivent plus bouger une fois ce lot livré.
+
+Depuis le lot L13-0b (§2.6), les trois jeux sont des PROJECTIONS d'un jeu unique
+``PANEL-X`` (fixture ``panel_reference_full``). Les identités de projection sont
+testées par ``TestPanelXProjections`` : elles garantissent que la factorisation
+ne dérive pas.
 """
 # Manipulation de données
 import pandas as pd
@@ -137,3 +142,58 @@ class TestMultiFrequencyPanel:
         for entity in ('FR', 'DE', 'IT'):
             assert detected[(entity, 'm1')] == 'M'
             assert detected[(entity, 'q1')] == 'Q'
+
+
+class TestPanelXProjections:
+    """§2.6 — ``TS``, ``PANEL`` et ``PANEL-F`` sont des projections de ``PANEL-X``."""
+
+    def test_reference_timeseries_is_the_fr_projection(
+        self,
+        reference_timeseries: pd.DataFrame,
+        panel_reference_full: pd.DataFrame,
+    ) -> None:
+        """``TS`` == ``PANEL-X.loc['FR', ['m1', 'q1', 'a1', 'a2']]``, au bit près."""
+        projection = panel_reference_full.loc['FR', ['m1', 'q1', 'a1', 'a2']]
+
+        # ``check_freq=False`` : le découpage d'un MultiIndex perd l'attribut
+        # ``freq`` de l'index ; la fixture ``reference_timeseries`` le restaure
+        # pour rester un remplacement exact de l'ancien constructeur dédié.
+        pd.testing.assert_frame_equal(
+            reference_timeseries, projection, check_freq=False
+        )
+
+    def test_heterogeneous_panel_is_the_column_projection(
+        self,
+        mixed_freq_panel_heterogeneous: pd.DataFrame,
+        panel_reference_full: pd.DataFrame,
+    ) -> None:
+        """``PANEL`` == ``PANEL-X[['m1', 'q1', 'a1', 'a2', 'climat_affaires']]``."""
+        projection = panel_reference_full[
+            ['m1', 'q1', 'a1', 'a2', 'climat_affaires']
+        ]
+
+        pd.testing.assert_frame_equal(mixed_freq_panel_heterogeneous, projection)
+
+    def test_multifrequency_panel_is_the_column_projection(
+        self,
+        mixed_freq_panel_multifrequency: pd.DataFrame,
+        panel_reference_full: pd.DataFrame,
+    ) -> None:
+        """``PANEL-F`` == ``PANEL-X[['m1', 'q1', 'v']]``."""
+        projection = panel_reference_full[['m1', 'q1', 'v']]
+
+        pd.testing.assert_frame_equal(mixed_freq_panel_multifrequency, projection)
+
+    def test_projections_share_one_index(
+        self,
+        panel_reference_full: pd.DataFrame,
+        mixed_freq_panel_heterogeneous: pd.DataFrame,
+        mixed_freq_panel_multifrequency: pd.DataFrame,
+    ) -> None:
+        """Les deux projections panel portent l'index de ``PANEL-X``, à l'identique."""
+        assert mixed_freq_panel_heterogeneous.index.equals(
+            panel_reference_full.index
+        )
+        assert mixed_freq_panel_multifrequency.index.equals(
+            panel_reference_full.index
+        )
