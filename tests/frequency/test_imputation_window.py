@@ -4,6 +4,8 @@ Chaque test épingle un comportement précis identifié dans la revue. Les tests
 marqués ``xfail(strict=True)`` documentent le comportement souhaité (pas le
 comportement actuel bogué) et référencent la section de la revue concernée.
 """
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -436,19 +438,95 @@ class TestImputationWindowCalculatorValidation:
     def test_fit_panel_rejects_when_no_entity_has_valid_window(self):
         """§3.6 : aucune entité n'a de fenêtre stricte -> ValueError explicite.
 
-        `b` est entièrement NaN pour les deux entités : la couverture
-        conjointe des deux colonnes n'atteint jamais 1.0, donc aucune des
-        deux entités n'obtient de fenêtre stricte.
+        Les deux colonnes sont observées sur des plages DISJOINTES : chacune
+        existe, donc aucune n'est écartée du dénominateur, mais leur
+        couverture conjointe n'atteint jamais 1.0.
         """
         dates = pd.date_range('2020-01-01', periods=12, freq='MS')
         idx = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+        # Première moitié pour 'a', seconde pour 'b', pour chaque entité
+        first_half = [1.0] * 6 + [np.nan] * 6
+        second_half = [np.nan] * 6 + [1.0] * 6
         df = pd.DataFrame(
-            {'a': np.arange(24, dtype=float), 'b': [np.nan] * 24}, index=idx
+            {'a': first_half * 2, 'b': second_half * 2}, index=idx
         )
         calc = ImputationWindowCalculator(coverage_threshold=0.5)
 
         with pytest.raises(ValueError, match='No imputation window'):
             calc.fit(df)
+
+
+class TestStructurallyAbsentColumns:
+    """Une colonne sans aucune observation ne doit pas opposer de veto.
+
+    Elle ne dit rien de l'étendue temporelle de son entité : la garder au
+    dénominateur plafonnerait la couverture sous 1.0 sur toutes les dates,
+    donc viderait la fenêtre stricte de l'entité entière.
+    """
+
+    @staticmethod
+    def _panel_with_absent_column():
+        """Panel où 'b' n'est jamais observée pour la seule entité 'B'."""
+        dates = pd.date_range('2020-01-01', periods=12, freq='MS')
+        idx = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+        values = np.arange(24, dtype=float)
+        column_b = np.concatenate([np.arange(12, dtype=float), [np.nan] * 12])
+        return pd.DataFrame({'a': values, 'b': column_b}, index=idx)
+
+    def test_absent_column_does_not_veto_entity_window(self):
+        """L'entité dont une colonne est absente garde une fenêtre pleine."""
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        with pytest.warns(UserWarning, match='coverage denominator'):
+            calc.fit(self._panel_with_absent_column())
+
+        mask = calc.get_imputation_window_mask()
+        counts = mask.groupby(level=0).sum().to_dict()
+        assert counts['A'] == 12
+        assert counts['B'] == 12
+        assert calc.entities_without_window_ == ()
+
+    def test_absent_columns_are_reported(self):
+        """L'exclusion est nommée par l'attribut, jamais silencieuse."""
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        with pytest.warns(UserWarning, match='coverage denominator'):
+            calc.fit(self._panel_with_absent_column())
+
+        assert calc.structurally_absent_columns_[('A',)] == ()
+        assert calc.structurally_absent_columns_[('B',)] == ('b',)
+        # L'exclusion porte sur le dénominateur, pas sur la couverture rendue
+        assert calc.column_coverage_[('B',)]['b'] == (None, None)
+
+    def test_notion_is_panel_only_on_a_time_series(self):
+        """Sur série temporelle, une colonne vide est rejetée en amont.
+
+        La détection de fréquence lève avant que le calculateur ne voie la
+        colonne : la notion de colonne structurellement absente n'a de sens
+        que par entité, une colonne présente ailleurs dans le panel.
+        """
+        dates = pd.date_range('2020-01-01', periods=12, freq='MS')
+        df = pd.DataFrame(
+            {'a': np.arange(12, dtype=float),
+             'b': np.arange(12, dtype=float),
+             'c': [np.nan] * 12},
+            index=dates,
+        )
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        with pytest.raises(ValueError):
+            calc.fit(df)
+
+    def test_no_absent_column_is_silent(self):
+        """Sans colonne absente, ni avertissement ni entrée non vide."""
+        dates = pd.date_range('2020-01-01', periods=12, freq='MS')
+        df = pd.DataFrame(
+            {'a': np.arange(12, dtype=float), 'b': np.arange(12, dtype=float)},
+            index=dates,
+        )
+        calc = ImputationWindowCalculator(coverage_threshold=0.5)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            calc.fit(df)
+
+        assert calc.structurally_absent_columns_ == ()
 
 
 class TestNotFittedGuards:

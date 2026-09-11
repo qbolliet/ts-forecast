@@ -2947,11 +2947,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 is_fallback=is_fallback,
                 training_blocks=blocks,
                 multi_frequency=multi_frequency,
+                n_training_rows=len(y_train),
                 unanchored=group_key[1] is None,
             )
             # Exécution, puis gel : un échec de prédiction dégrade l'étape en
-            # repli, de sorte que le plan dise ce qui a réellement été fait
-            degraded = self._execute_step(step, X_work=X_work, stage_freq=stage_freq)
+            # repli, de sorte que le plan dise ce qui a réellement été fait.
+            # La volumétrie écrite n'est connue qu'après coup : elle est gelée
+            # sur l'étape au même titre que la dégradation
+            degraded, n_written = self._execute_step(
+                step, X_work=X_work, stage_freq=stage_freq
+            )
+            step = replace(step, n_written=n_written)
             if degraded:
                 step = replace(
                     step,
@@ -3042,6 +3048,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         is_fallback: bool,
         training_blocks: Dict[EntityKey, str],
         multi_frequency: bool,
+        n_training_rows: int,
         unanchored: bool = False,
     ) -> ImputationStep:
         """Freeze one plan step of a (stage, variable, source frequency) group.
@@ -3066,6 +3073,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             multi_frequency: Whether the column carries several source
                 frequencies at this stage, which is what makes the frequency
                 part of the registry key.
+            n_training_rows: Size of the mutualized ``y_train`` the model was
+                fitted on, shared by every group of the variable.
             unanchored: Whether the entities of the group never observe the
                 column, so the step predicts without any anchor.
 
@@ -3104,6 +3113,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             interpolation_anchor=self._covariate_materializer.resolve_anchor(column),
             training_blocks=training_blocks,
             unanchored=unanchored,
+            n_training_rows=n_training_rows,
         )
 
     # Méthode auxiliaire du facteur d'échelle d'un groupe ancré
@@ -3147,7 +3157,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         *,
         X_work: pd.DataFrame,
         stage_freq: Union[str, Dict[EntityKey, str]],
-    ) -> bool:
+    ) -> Tuple[bool, int]:
         """Execute one frozen plan step.
 
         The step is already frozen: this method decides nothing and only
@@ -3170,11 +3180,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             stage_freq: Frequency of the stage.
 
         Returns:
-            True when the step had to fall back on interpolation at execution
-            time — a prediction failure — so the caller can degrade the plan
-            step accordingly. False otherwise, an unanchored failure
-            included: such a step is never degraded into a fallback, it is
-            simply not executed.
+            Tuple ``(degraded, n_written)``. ``degraded`` is True when the
+            step had to fall back on interpolation at execution time — a
+            prediction failure — so the caller can degrade the plan step
+            accordingly; False otherwise, an unanchored failure included:
+            such a step is never degraded into a fallback, it is simply not
+            executed. ``n_written`` counts the cells actually written, after
+            rescaling, and is 0 whenever nothing was produced. The replay at
+            ``transform`` discards both.
         """
         # Extraction du matérisaliseur des étapes précédentes
         materializer = self._covariate_materializer
@@ -3196,7 +3209,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             grid = self._unrestricted_grid(X_work, stage_freq, step.entities)
 
         if len(grid) == 0:
-            return False
+            return False, 0
 
         # Production des valeurs : modèle, ou repli d'interpolation
         values: Optional[pd.Series] = None
@@ -3209,7 +3222,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # l'avertissement agrégé de la fin du fit les nomme
         if step.unanchored and values is None:
             self._unanchored_failures.extend(self._step_pairs(step))
-            return False
+            return False, 0
 
         if values is None:
             # « Le repli matérialise » : "interpolate_column" alimente déjà les
@@ -3249,7 +3262,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Sans ancre, une grille entièrement NaN : le couple est nommé par l'avertissement agrégé
             if step.unanchored:
                 self._unanchored_failures.extend(self._step_pairs(step))
-            return degraded
+            return degraded, 0
 
         # Couples effectivement imputés sans ancre, source de unanchored_pairs_
         if step.unanchored:
@@ -3272,7 +3285,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 index=written.index,
             ),
         )
-        return degraded
+        return degraded, len(written)
 
     # Méthode auxiliaire des clés de couple d'une étape
     @staticmethod

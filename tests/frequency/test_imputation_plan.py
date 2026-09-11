@@ -205,7 +205,10 @@ class TestImputationPlan:
 
         frame = plan.to_diagnostic_frame()
         assert list(frame.columns) == [
-            'stage', 'variable', 'n_features', 'covariate_taint', 'target_taint',
+            'stage', 'variable', 'source_frequency', 'entities', 'n_entities',
+            'scale_factor', 'fit_scale_factor', 'unanchored', 'n_features',
+            'n_training_rows', 'n_written',
+            'covariate_taint', 'target_taint',
             'emitted_provenance', 'is_fallback', 'interpolation_method',
             'interpolation_anchor', 'materialization', 'training_blocks',
         ]

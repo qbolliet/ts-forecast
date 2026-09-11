@@ -56,7 +56,15 @@ class ImputationWindowCalculator:
     window grows backward or forward from it as long as coverage meets the
     specified threshold.
 
-    THREE masks are derived from the same coverage computation, so that the
+    Columns with no observation at all — for a panel, per entity — are
+    excluded from that fraction. Such a column carries no information about
+    the temporal extent of its entity, while keeping it in the denominator
+    would cap coverage at ``(n-1)/n`` on every date, hence below 1.0, hence
+    an empty strict window and an entity where nothing can ever be imputed.
+    The exclusion is reported through ``structurally_absent_columns_`` and a
+    ``UserWarning``.
+
+    Three masks are derived from the same coverage computation, so that the
     range a model is fitted on can be set independently of the range it
     imputes:
 
@@ -154,6 +162,17 @@ class ImputationWindowCalculator:
             ``pd.Series`` on a DatetimeIndex for time series; ``pd.Series``
             on a MultiIndex ``(entity..., date)`` for panel, restricted to
             entities that have a coverage grid.
+        structurally_absent_columns_: Columns with no observation at all,
+            excluded from the coverage denominator so that they cannot cap
+            coverage below 1.0 and veto the whole window of their entity.
+            Dict entity tuple -> tuple of column names for a panel, where an
+            entity without any such column carries an empty tuple; always the
+            empty tuple for a time series, where a fully empty column is
+            rejected by frequency detection before the window is ever
+            computed — the notion is a per-entity one, a column observed
+            elsewhere in the panel but never for that entity. Their entry in
+            ``column_coverage_`` stays ``(None, None)``: the exclusion bears
+            on the denominator, not on the reported coverage.
         entities_without_window_: Tuple of entity key tuples whose imputation
             window could not be determined (index frequency not identified,
             or empty coverage grid). Their rows appear in the three masks as
@@ -276,6 +295,12 @@ class ImputationWindowCalculator:
         # identifiée ou grille de couverture vide) : leurs lignes figurent à
         # False dans les trois masques, cet attribut les recense explicitement
         self.entities_without_window_: Tuple[tuple, ...] = ()
+        # Colonnes sans aucune observation, écartées du dénominateur de
+        # couverture : tuple de noms pour une série temporelle, dict par entité
+        # pour un panel (une entité sans colonne absente porte un tuple vide)
+        self.structurally_absent_columns_: Union[
+            Tuple[str, ...], Dict[tuple, Tuple[str, ...]]
+        ] = ()
 
         # Attributs auxiliaires
         self.coverage_by_date_: Optional[pd.Series] = None
@@ -421,6 +446,10 @@ class ImputationWindowCalculator:
         # Notion sans objet hors panel (réinitialisation en cas de ré-estimation)
         self.entities_without_window_ = ()
 
+        # Colonnes écartées du dénominateur : jamais silencieux
+        self.structurally_absent_columns_ = result['absent_columns']
+        self._warn_structurally_absent({(): result['absent_columns']})
+
     # Méthode auxiliaire d'estimation de la fenêtre sur des données de panel
     def _fit_panel(self, data: pd.DataFrame) -> None:
         """Compute per-entity windows and masks for panel data (MultiIndex).
@@ -457,6 +486,7 @@ class ImputationWindowCalculator:
         training_mask_parts: List[pd.Series] = []
         coverage_parts: List[pd.Series] = []
         entities_without_window: List[tuple] = []
+        absent_by_entity: Dict[tuple, Tuple[str, ...]] = {}
 
         # Parcours des entités
         for entity in entities:
@@ -484,6 +514,7 @@ class ImputationWindowCalculator:
                 # Ajout au registre des entités sans fenêtre
                 self._store_entity_without_window(entity_key)
                 entities_without_window.append(entity_key)
+                absent_by_entity[entity_key] = ()
                 # Série de booléens False
                 self._append_false_mask_parts(
                     entity_key, entity_frame_dates,
@@ -502,6 +533,7 @@ class ImputationWindowCalculator:
             self.imputation_strict_window_start_[entity_key] = result['imputation_strict_start']
             self.imputation_strict_window_end_[entity_key] = result['imputation_strict_end']
             self.column_coverage_[entity_key] = result['column_coverage']
+            absent_by_entity[entity_key] = result['absent_columns']
 
             # Cas où la grille de couverture est vide : même traitement que la
             # fréquence non identifiée, l'entité n'a pas de masque exploitable
@@ -531,6 +563,10 @@ class ImputationWindowCalculator:
         self.coverage_by_date_ = self._assemble_panel_series(coverage_parts)
         self.entities_without_window_ = tuple(entities_without_window)
 
+        # Colonnes écartées du dénominateur, par entité : jamais silencieux
+        self.structurally_absent_columns_ = absent_by_entity
+        self._warn_structurally_absent(absent_by_entity)
+
         # Vérification qu'au moins une entité a une fenêtre valide. Une fenêtre
         # stricte absente partout reste rédhibitoire : l'extension ne peut jamais
         # créer de fenêtre là où aucune fenêtre stricte n'existe (cf.
@@ -547,6 +583,41 @@ class ImputationWindowCalculator:
                 "unrestricted training window, but no value can be imputed.",
                 UserWarning
             )
+
+    # Méthode auxiliaire d'avertissement sur les colonnes écartées du dénominateur
+    @staticmethod
+    def _warn_structurally_absent(
+        absent_by_entity: Dict[tuple, Tuple[str, ...]],
+    ) -> None:
+        """Warn about the columns dropped from the coverage denominator.
+
+        A column with no observation at all says nothing about the temporal
+        extent of its entity, so it is excluded rather than allowed to cap
+        coverage below 1.0 forever. That exclusion widens the window, hence
+        the imputations, so it is never silent.
+
+        Args:
+            absent_by_entity: Structurally absent columns, keyed by entity
+                tuple; ``()`` is the degenerate key of a time series.
+        """
+        # Rendu par entité, restreint à celles qui ont effectivement perdu une colonne
+        reported = {
+            entity: columns for entity, columns in absent_by_entity.items() if columns
+        }
+        if not reported:
+            return
+
+        # Message : la clé dégénérée d'une série temporelle n'est pas nommée
+        details = "; ".join(
+            (f"{sorted(columns)}" if not entity else f"{entity}: {sorted(columns)}")
+            for entity, columns in reported.items()
+        )
+        warnings.warn(
+            "Columns without any observation are excluded from the coverage "
+            f"denominator, which widens the imputation window ({details}). "
+            "They are listed in structurally_absent_columns_.",
+            UserWarning
+        )
 
     # Méthode auxiliaire d'enregistrement des bornes None d'une entité sans fenêtre
     def _store_entity_without_window(self, entity_key: tuple) -> None:
@@ -710,6 +781,7 @@ class ImputationWindowCalculator:
             'training_window_mask': None,
             'coverage': None,
             'column_coverage': None,
+            'absent_columns': (),
         }
 
         # Construction de la grille haute fréquence de référence
@@ -722,8 +794,28 @@ class ImputationWindowCalculator:
         # Construction de la matrice de couverture booléenne
         coverage_matrix = self._build_coverage_matrix(df, col_freqs, grid, index_freq)
 
-        # Calcul de l'coverage (proportion de colonnes couvertes par date)
-        coverage = coverage_matrix.mean(axis=1)
+        # Colonnes structurellement absentes : aucune observation sur toute la
+        # grille. Elles ne disent rien de l'étendue temporelle de l'entité, et
+        # les garder au dénominateur reviendrait à leur laisser opposer un veto
+        # permanent à toute la fenêtre — une colonne absente plafonnerait la
+        # couverture à (n-1)/n, donc sous 1.0, donc fenêtre stricte vide. Le
+        # reste du pipeline les traite déjà comme telles
+        # ("_undetected_frequencies_" côté imputeur) ; le dénominateur suit
+        absent_columns = tuple(
+            col for col in coverage_matrix.columns
+            if not bool(coverage_matrix[col].any())
+        )
+        present_columns = [
+            col for col in coverage_matrix.columns if col not in absent_columns
+        ]
+
+        # Calcul de la couverture (proportion de colonnes couvertes par date),
+        # sur les seules colonnes présentes. Toutes absentes : couverture nulle,
+        # comme auparavant — il n'y a alors rien à imputer ni sur quoi s'appuyer
+        if present_columns:
+            coverage = coverage_matrix[present_columns].mean(axis=1)
+        else:
+            coverage = pd.Series(0.0, index=grid)
 
         # Extraction de la couverture par colonne (premier/dernier True dans la grille)
         column_coverage = {}
@@ -760,6 +852,7 @@ class ImputationWindowCalculator:
                 **_none_result,
                 'coverage': coverage,
                 'column_coverage': column_coverage,
+                'absent_columns': absent_columns,
                 'imputation_strict_window_mask': imputation_strict_window_mask,
                 'imputation_window_mask': self._build_scope_mask(
                     coverage,
@@ -845,6 +938,7 @@ class ImputationWindowCalculator:
             'training_window_mask': training_window_mask,
             'coverage': coverage,
             'column_coverage': column_coverage,
+            'absent_columns': absent_columns,
         }
 
     # Construction de la grille à l'indice de la fréquence pour le calcul de la couverture

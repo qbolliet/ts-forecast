@@ -182,6 +182,14 @@ class ImputationStep:
             emits :attr:`ProvenanceType.MODEL_UNANCHORED`, which primes over
             the five MODEL_* families — the two taints stay computed and
             frozen here for diagnosis.
+        n_training_rows: Number of rows of the mutualized ``y_train`` the
+            model was fitted on. Every step of the same (stage, variable)
+            shares it, since they share the fit; 0 for a step built without
+            a training set. A pure fit-time diagnostic.
+        n_written: Number of cells the step actually wrote at fit time —
+            non-NaN predictions after rescaling, hence after the anchor rows
+            were re-expressed. A pure fit-time diagnostic: the replay at
+            ``transform`` writes onto another index and never refreshes it.
 
     Examples:
         >>> from sklearn.linear_model import LinearRegression
@@ -229,6 +237,10 @@ class ImputationStep:
     training_blocks: Mapping[EntityKey, str] = field(default_factory=dict)
     # Étape sans aucune ancre de la colonne pour ses entités
     unanchored: bool = False
+    # Volumétrie de l'étape, renseignée au fit
+    n_training_rows: int = 0
+    # Nombre de lignes imputées
+    n_written: int = 0
 
     # Contrôles d'invariants et gel des conteneurs mutables
     def __post_init__(self) -> None:
@@ -365,6 +377,8 @@ class ImputationStep:
             and self.interpolation_anchor == other.interpolation_anchor
             and dict(self.training_blocks) == dict(other.training_blocks)
             and self.unanchored == other.unanchored
+            and self.n_training_rows == other.n_training_rows
+            and self.n_written == other.n_written
         )
 
     # Hachage sur un sous-ensemble sûrement hachable et stable
@@ -458,8 +472,15 @@ class ImputationPlan:
         """Serialize the plan as a one-row-per-step diagnostic frame.
 
         Returns:
-            DataFrame with columns ``stage``, ``variable``, ``n_features``,
-            ``covariate_taint``, ``target_taint``, ``emitted_provenance``
+            DataFrame with columns ``stage``, ``variable``,
+            ``source_frequency``, ``entities`` (rendered as a
+            comma-separated string, ``''`` for a time series),
+            ``n_entities``, ``scale_factor`` (``'per-row'`` when it is a
+            :class:`pandas.Series`), ``fit_scale_factor`` (same rendering;
+            it only differs from ``scale_factor`` when a step was degraded
+            after its fit), ``unanchored``, ``n_features``,
+            ``n_training_rows``, ``n_written``, ``covariate_taint``,
+            ``target_taint``, ``emitted_provenance``
             (via
             :func:`~tsforecast.frequency.provenance.resolve_model_provenance`,
             or :attr:`ProvenanceType.INTERPOLATED` for a fallback step),
@@ -470,14 +491,20 @@ class ImputationPlan:
 
         Examples:
             >>> ImputationPlan().to_diagnostic_frame().columns.tolist()
-            ['stage', 'variable', 'n_features', 'covariate_taint', 'target_taint', 'emitted_provenance', 'is_fallback', 'interpolation_method', 'interpolation_anchor', 'materialization', 'training_blocks']
+            ['stage', 'variable', 'source_frequency', 'entities', 'n_entities', 'scale_factor', 'fit_scale_factor', 'unanchored', 'n_features', 'n_training_rows', 'n_written', 'covariate_taint', 'target_taint', 'emitted_provenance', 'is_fallback', 'interpolation_method', 'interpolation_anchor', 'materialization', 'training_blocks']
         """
+        # Colonnes retournées dans le jeu de données de diagnostic
         columns = [
-            'stage', 'variable', 'n_features', 'covariate_taint', 'target_taint',
+            'stage', 'variable', 'source_frequency', 'entities', 'n_entities',
+            'scale_factor', 'fit_scale_factor', 'unanchored', 'n_features',
+            'n_training_rows', 'n_written',
+            'covariate_taint', 'target_taint',
             'emitted_provenance', 'is_fallback', 'interpolation_method',
             'interpolation_anchor', 'materialization', 'training_blocks',
         ]
+        # Initialisation de la liste des lignes (1 ligne correspond à une étape du plan)
         rows = []
+        # Parcours des étapes
         for step in self.steps:
             # Rendu lisible de la voie de matérialisation
             materialization_repr = ", ".join(
@@ -488,10 +515,34 @@ class ImputationPlan:
                 f"{_entity_label(entity)}={freq}"
                 for entity, freq in step.training_blocks.items()
             )
+            # Rendu lisible des entités du groupe ; None signale une série
+            # temporelle, dont l'entité dégénérée n'a rien à afficher
+            entities_repr = "" if step.entities is None else ", ".join(
+                _entity_label(entity) for entity in step.entities
+            )
+            n_entities = 0 if step.entities is None else len(step.entities)
+            # Un facteur d'échelle par ligne n'a pas de rendu scalaire : la
+            # cellule dit sa nature, le détail se lit sur "step.scale_factor"
+            scale_repr = (
+                'per-row' if isinstance(step.scale_factor, pd.Series)
+                else step.scale_factor
+            )
+            fit_scale_repr = (
+                'per-row' if isinstance(step.fit_scale_factor, pd.Series)
+                else step.fit_scale_factor
+            )
             rows.append({
                 'stage': step.pred_freq_label,
                 'variable': step.var_name,
+                'source_frequency': step.source_frequency,
+                'entities': entities_repr,
+                'n_entities': n_entities,
+                'scale_factor': scale_repr,
+                'fit_scale_factor': fit_scale_repr,
+                'unanchored': step.unanchored,
                 'n_features': len(step.feature_cols),
+                'n_training_rows': step.n_training_rows,
+                'n_written': step.n_written,
                 'covariate_taint': step.covariate_taint,
                 'target_taint': step.target_taint,
                 'emitted_provenance': step.emitted_provenance,
