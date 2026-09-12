@@ -280,9 +280,11 @@ class FrequencyAligner:
         if observed.dropna().empty:
             return None
         
+        # Ancrage de l'offset cible sur la position (début/fin) de l'index
+        # source
         return self._freq_converter.interpolate_to_higher_frequency(
             observed,
-            target_frequency,
+            target_offset_for_index(series.index, target_frequency),
             method=method,
             limit=limit,
             limit_direction=limit_direction,

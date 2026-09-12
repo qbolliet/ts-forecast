@@ -33,7 +33,11 @@ from .imputation_plan import MaterializationWay
 from .provenance import CellOrigin, max_origin
 # Arithmétique et conversion de fréquences
 from ..utils.frequency.converter import FrequencyConverter
-from ..utils.frequency.utils import is_higher_frequency, normalize_frequency
+from ..utils.frequency.utils import (
+    is_higher_frequency,
+    normalize_frequency,
+    target_offset_for_index,
+)
 # Primitives du paramètre de contrainte d'agrégation, partagées avec
 # "AggregationConstraint" : une seule validation, une seule résolution
 from .aggregation_constraint import (
@@ -1088,10 +1092,11 @@ class CovariateMaterializer:
         if observations.empty:
             return pd.Series(np.nan, index=dates, name=column)
 
-        # Interpolation à la fréquence de l'étape
+        # Interpolation à la fréquence de l'étape, dont l'offset est ancré sur
+        # la position (début/fin) de la grille.
         interpolated = self._conv.interpolate_to_higher_frequency(
             observations,
-            f_target,
+            target_offset_for_index(dates, f_target),
             method=self.resolve_method(column),
             source_freq=f_source,
             anchor_fraction=self.resolve_anchor(column),
@@ -1314,8 +1319,11 @@ class CovariateMaterializer:
             # rang suppose l'additivité par construction,
             # ce paramètre ne gouvernant que le recalage des interpolées
             elif way == 'aggregate':
+                # Ancrage de l'offset cible sur la position (début/fin) de la
+                # grille de l'étape
+                stage_offset = target_offset_for_index(dates, f_stage)
                 aggregated = self._conv.aggregate_to_lower_frequency(
-                    source, f_stage, method='sum',
+                    source, stage_offset, method='sum',
                     full_periods_only=True, source_freq=f_col,
                 )
                 values = aggregated.reindex(dates)

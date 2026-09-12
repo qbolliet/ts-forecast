@@ -1055,3 +1055,38 @@ class TestPanelMaskReturnType:
         # coverage_by_date_ reste une Series sur DatetimeIndex
         assert isinstance(calc.coverage_by_date_.index, pd.DatetimeIndex)
 
+
+class TestGridUpperBoundIsExclusive:
+    """La grille ne dépasse jamais la dernière période observée.
+
+    La borne haute de la grille est la FIN EXCLUSIVE de la dernière période
+    observée ; ``pd.date_range`` traite sa borne ``end`` comme incluse. Sur un
+    index ancré en fin de période l'écart ne se voit pas (2023-12-31 précède la
+    borne 2024-01-01), sur un index ancré en début de période la borne est
+    elle-même une date de la grille et une période entière serait ajoutée après
+    la dernière observation.
+    """
+
+    @pytest.mark.parametrize(
+        'freq, last_date',
+        [('MS', '2023-12-01'), ('ME', '2023-12-31')],
+    )
+    def test_grid_stops_at_the_last_observed_period(self, freq, last_date):
+        """Grille ancrée en début comme en fin : une ligne par période observée."""
+        dates = pd.date_range('2019-01-01' if freq == 'MS' else '2019-01-31',
+                              periods=60, freq=freq)
+        data = pd.DataFrame(
+            {'a': np.arange(60, dtype=float), 'b': np.arange(60, dtype=float)},
+            index=dates,
+        )
+        data.index.name = 'date'
+
+        calc = ImputationWindowCalculator()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            calc.fit(data)
+        mask = calc.get_imputation_window_mask()
+
+        # Une ligne de masque par ligne de données, sans période surnuméraire
+        assert len(mask) == len(data)
+        assert mask.index[-1] == pd.Timestamp(last_date)

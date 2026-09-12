@@ -347,6 +347,25 @@ class TestDensifiedSpanFollowsPosition:
         assert result.index[0] == pd.Timestamp('2023-01-31')
         assert result.index[-1] == pd.Timestamp('2023-09-30')
 
+    def test_positionless_target_follows_the_source_position(self, aligner):
+        """Cible sans position ('M') : les labels suivent l'ancrage de la source.
+
+        La position de la cible n'est pas toujours fournie par l'appelant —
+        ``HighFrequencyImputer`` raisonne en fréquences de base. Les labels
+        produits doivent alors retomber sur la grille source, sans quoi la
+        réindexation finale ne rend que des NaN.
+        """
+        dates = pd.date_range('2023-01-01', periods=3, freq='QS')
+        df = pd.DataFrame({'gdp': [100.0, 110.0, 120.0]}, index=dates)
+
+        result = aligner._interpolate_to_target(df, ['gdp'], 'M')
+
+        # Grille ancrée en début de mois, comme la source
+        assert result.index[0] == pd.Timestamp('2023-01-01')
+        assert result.index[-1] == pd.Timestamp('2023-09-01')
+        # La colonne est bien produite, et non perdue par une réindexation
+        assert result['gdp'].notna().all()
+
     def test_dense_index_is_not_extended_beyond_its_own_periods(self, aligner):
         """Une frame déjà à la fréquence cible n'est pas étendue : les trous sont comblés."""
         dates = pd.date_range('2023-01-01', periods=9, freq='MS')

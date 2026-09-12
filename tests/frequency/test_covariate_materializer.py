@@ -992,3 +992,73 @@ class TestInitValidation:
         materializer = CovariateMaterializer(interpolation_method=setting)
         assert materializer.interpolation_method is setting
         assert materializer.aggregation_constraint_applier is None
+
+
+class TestStartAnchoredGrids:
+    """Grilles ancrées en DÉBUT de période (freq 'MS' / 'QS' / 'YS').
+
+    Les jeux de référence du [SPEC] sont ancrés en fin de période ; des données
+    réelles ancrées en début de période (`pd.date_range(..., freq='MS')`, cas des
+    notebooks 2 et 3) traversent les mêmes voies. Les labels produits par une
+    agrégation ou une interpolation doivent alors retomber sur la grille de
+    l'étape, sans quoi la réindexation finale rend une colonne entièrement NaN —
+    et, en cascade, un jeu d'entraînement vide puis un repli d'interpolation.
+    """
+
+    # Jeu ancré en début de période : mensuelle dense, trimestrielle, annuelle
+    @staticmethod
+    def _start_anchored_data() -> pd.DataFrame:
+        """Build a month-START anchored dataset, quarterly and annual anchors."""
+        dates = pd.date_range('2021-01-01', periods=36, freq='MS')
+        data = pd.DataFrame({'m1': 100.0 + np.arange(36)}, index=dates)
+        data.index.name = 'date'
+        # Ancres trimestrielles en DÉBUT de trimestre (janvier, avril, ...)
+        data['q1'] = np.nan
+        quarter_starts = dates[dates.month.isin([1, 4, 7, 10])]
+        data.loc[quarter_starts, 'q1'] = 10.0 * np.arange(1, len(quarter_starts) + 1)
+        # Ancres annuelles en DÉBUT d'année (janvier)
+        data['a1'] = np.nan
+        year_starts = dates[dates.month == 1]
+        data.loc[year_starts, 'a1'] = 1000.0 * np.arange(1, len(year_starts) + 1)
+        return data
+
+    def test_aggregation_lands_on_a_quarter_start_grid(self):
+        """Une colonne mensuelle s'agrège sur une grille de DÉBUT de trimestre."""
+        data = self._start_anchored_data()
+        materializer = CovariateMaterializer()
+        grid = pd.date_range('2021-01-01', periods=12, freq='QS')
+
+        features, ways, _origins = materializer.materialize(
+            columns=['m1', 'q1'],
+            grid_index=grid,
+            stage_freq='Q',
+            detected_frequencies={'m1': 'M', 'q1': 'Q', 'a1': 'Y'},
+            source_data=data,
+        )
+
+        # La voie reste celle du rang 1 : c'est l'ancrage des labels qui est en jeu
+        assert ways['m1'] == 'aggregate'
+        # Aucune période incomplète sur cette grille : la colonne est pleine
+        assert features['m1'].notna().all()
+        # Somme exacte des trois mois du trimestre, non un label perdu en NaN
+        assert features['m1'].iloc[0] == pytest.approx(100 + 101 + 102)
+        assert features['m1'].iloc[1] == pytest.approx(103 + 104 + 105)
+
+    def test_interpolation_lands_on_a_month_start_grid(self):
+        """Une colonne annuelle s'interpole sur une grille de DÉBUT de mois."""
+        data = self._start_anchored_data()
+        materializer = CovariateMaterializer(covariate_strategy='interpolate')
+        grid = pd.date_range('2021-01-01', periods=36, freq='MS')
+
+        features, ways, origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=grid,
+            stage_freq='M',
+            detected_frequencies={'m1': 'M', 'q1': 'Q', 'a1': 'Y'},
+            source_data=data,
+        )
+
+        assert ways['a1'] == 'interpolate'
+        assert origins['a1'] == 'interpolated'
+        # La colonne est produite sur toute la grille, et non laissée vide
+        assert features['a1'].notna().all()

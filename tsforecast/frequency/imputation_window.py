@@ -1030,7 +1030,13 @@ class ImputationWindowCalculator:
             except Exception:
                 return None
 
-        return grid
+        # Application de l'exclusivité de la borne supérieure : "date_range" la
+        # traite comme incluse. Sur une grille ancrée en fin de période la date
+        # produite précède la borne et rien n'est retiré ; sur une grille ancrée
+        # en début de période la borne est elle-même une date de la grille, et
+        # la conserver ajouterait une période entière après la dernière
+        # observation
+        return grid[grid < grid_end_exclusive]
 
     # Méthode auxiliaire de construction de la matrice de couverture
     def _build_coverage_matrix(
