@@ -3270,9 +3270,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Marquage de provenance : identique pour les cellules recalées et non
         # recalées, lignes d'ancres comprises — le recalage ne change aucune
-        # provenance. Une ligne d'ancre
-        # ré-exprimée ne reste jamais original : elle ne porte plus
-        # l'observation
+        # provenance. Une ligne d'ancre ré-exprimée ne reste jamais original : elle ne porte plus
+        # l'observation. La grille densifiée peut porter des dates absentes de
+        # l'entrée (index irrégulier, fenêtre étendue vers des périodes où
+        # seules des observations basse fréquence isolées existent) : la
+        # matrice, initialisée sur l'index d'entrée, est donc étendue d'abord
+        self._provenance_tracker.extend_index(written.index)
         self._provenance_tracker.mark_imputed(column, written.index, provenance)
 
         # Mise à jour des trois registres, y compris en repli

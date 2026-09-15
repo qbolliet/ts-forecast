@@ -296,6 +296,55 @@ class ImputationProvenanceTracker:
 
         return self
 
+    # Méthode d'extension de la matrice à des lignes absentes de l'entrée
+    def extend_index(self, index: pd.Index) -> None:
+        """Add the rows of ``index`` the provenance matrix does not carry yet.
+
+        The matrix is initialized on the input index, but an imputation stage
+        writes on a densified grid: on an irregular index (a few isolated
+        annual observations before the start of the monthly grid, say), the
+        grid carries dates the input never had. The added rows are "not
+        filled" (``None``), the value :meth:`initialize` gives to a NaN cell,
+        so that only the subsequent ``mark_*`` call decides their provenance.
+
+        The existing rows keep their order; the matrix is re-sorted only when
+        it was already sorted, so that an added date lands in its period
+        instead of at the end.
+
+        Args:
+            index: Row labels about to be written. Labels already present are
+                ignored.
+
+        Raises:
+            ValueError: If provenance matrix not initialized.
+
+        Examples:
+            >>> tracker = ImputationProvenanceTracker()
+            >>> data = pd.DataFrame({'a': [1.0, 2.0]},
+            ...                     index=pd.to_datetime(['2015-01-01', '2015-03-01']))
+            >>> _ = tracker.initialize(data)
+            >>> tracker.extend_index(pd.to_datetime(['2015-02-01']))
+            >>> tracker.provenance_matrix_['a'].tolist()
+            [<ProvenanceType.ORIGINAL: 'original'>, None, <ProvenanceType.ORIGINAL: 'original'>]
+        """
+        # Validation de l'initialisation
+        if self.provenance_matrix_ is None:
+            raise ValueError("Provenance matrix not initialized. Call initialize() first.")
+
+        # Lignes réellement nouvelles
+        missing = index.difference(self.provenance_matrix_.index)
+        if len(missing) == 0:
+            return
+
+        # Ajout des lignes "non renseignées", tri conservé s'il existait
+        was_sorted = self.provenance_matrix_.index.is_monotonic_increasing
+        extended = self.provenance_matrix_.reindex(
+            self.provenance_matrix_.index.append(missing)
+        )
+        # "reindex" remplit de NaN : retour explicite à la convention None
+        extended.loc[missing] = None
+        self.provenance_matrix_ = extended.sort_index() if was_sorted else extended
+
     # Méthode de marquage d'observartions comme "imputées"
     def mark_imputed(
         self,

@@ -106,6 +106,71 @@ class TestMarkInterpolated:
         assert tracker.get_provenance('a', dates[2]) is ProvenanceType.INTERPOLATED
 
 
+class TestExtendIndex:
+    """Extension de la matrice à une grille densifiée plus large que l'entrée."""
+
+    @staticmethod
+    def _tracker(index):
+        data = pd.DataFrame({'a': [1.0] * len(index)}, index=index)
+        tracker = ImputationProvenanceTracker()
+        tracker.initialize(data)
+        return tracker
+
+    def test_new_rows_are_unfilled_and_sorted_in(self):
+        """Les dates ajoutées sont None et prennent leur place chronologique."""
+        tracker = self._tracker(pd.to_datetime(['2015-01-01', '2015-04-01']))
+        tracker.extend_index(pd.date_range('2015-01-01', '2015-04-01', freq='MS'))
+
+        matrix = tracker.provenance_matrix_
+        assert list(matrix.index) == list(pd.date_range('2015-01-01', '2015-04-01', freq='MS'))
+        assert matrix['a'].tolist() == [
+            ProvenanceType.ORIGINAL, None, None, ProvenanceType.ORIGINAL
+        ]
+
+    def test_extension_makes_mark_imputed_possible(self):
+        """Sans extension, l'écriture sur une date absente lève une KeyError."""
+        tracker = self._tracker(pd.to_datetime(['2015-01-01', '2015-04-01']))
+        grid = pd.date_range('2015-01-01', '2015-04-01', freq='MS')
+        with pytest.raises(KeyError):
+            tracker.mark_interpolated('a', grid)
+
+        tracker.extend_index(grid)
+        tracker.mark_interpolated('a', grid)
+        assert (tracker.provenance_matrix_['a'] == ProvenanceType.INTERPOLATED).all()
+
+    def test_known_labels_are_a_no_op(self):
+        """Une grille déjà couverte laisse la matrice strictement intacte."""
+        index = pd.date_range('2015-01-01', periods=3, freq='MS')
+        tracker = self._tracker(index)
+        before = tracker.provenance_matrix_.copy()
+        tracker.extend_index(index[:2])
+        pd.testing.assert_frame_equal(tracker.provenance_matrix_, before)
+
+    def test_unsorted_matrix_keeps_its_order(self):
+        """Une matrice non triée n'est pas réordonnée : ajout en fin."""
+        tracker = self._tracker(pd.to_datetime(['2015-03-01', '2015-01-01']))
+        tracker.extend_index(pd.to_datetime(['2015-02-01']))
+        assert list(tracker.provenance_matrix_.index) == list(
+            pd.to_datetime(['2015-03-01', '2015-01-01', '2015-02-01'])
+        )
+
+    def test_panel_rows_land_inside_their_entity(self):
+        """Sur MultiIndex trié, la ligne ajoutée reste dans le bloc de son entité."""
+        index = pd.MultiIndex.from_tuples(
+            [('FR', pd.Timestamp('2015-01-01')), ('FR', pd.Timestamp('2015-03-01')),
+             ('IT', pd.Timestamp('2015-01-01'))],
+            names=['country', 'date'],
+        )
+        tracker = self._tracker(index)
+        tracker.extend_index(pd.MultiIndex.from_tuples(
+            [('FR', pd.Timestamp('2015-02-01'))], names=['country', 'date']
+        ))
+        assert tracker.provenance_matrix_.index.get_level_values('country').tolist() == [
+            'FR', 'FR', 'FR', 'IT'
+        ]
+        assert tracker.provenance_matrix_['a'].isna().sum() == 1
+
+
 class TestTaintPrimitives:
     """origin_to_taint et max_origin (§6.2)."""
 

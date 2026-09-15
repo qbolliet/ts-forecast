@@ -2740,6 +2740,77 @@ class TestTransformOutsideWindow:
         assert flat['m1'].notna().sum() == data['m1'].notna().sum()
 
 
+class TestIrregularIndexExtendedWindow:
+    """Fenêtre étendue vers des périodes où la grille cible n'existe pas dans l'index.
+
+    Observations annuelles isolées AVANT le début de la grille mensuelle : sous
+    un seuil nul, la fenêtre y remonte et la grille densifiée porte des mois
+    absents de l'entrée. La matrice de provenance, initialisée sur l'index
+    d'entrée, levait une KeyError à l'écriture.
+    """
+
+    @staticmethod
+    def _irregular_timeseries() -> pd.DataFrame:
+        """Mensuelles dès 2018, trimestrielle, annuelle dès 2015 (index irrégulier)."""
+        rng = np.random.default_rng(0)
+        monthly = pd.date_range('2018-01-01', '2021-12-01', freq='MS')
+        frame = pd.DataFrame(index=monthly)
+        frame['m1'] = 100 + rng.normal(0, 1, len(monthly)).cumsum()
+        frame['m2'] = 50 + rng.normal(0, 1, len(monthly))
+        frame['q1'] = np.where(monthly.month.isin([1, 4, 7, 10]),
+                               300 + rng.normal(0, 5, len(monthly)), np.nan)
+        annual = pd.date_range('2015-01-01', '2021-01-01', freq='YS')
+        frame = frame.reindex(frame.index.union(annual))
+        frame['a1'] = np.nan
+        frame.loc[annual, 'a1'] = 1200 + rng.normal(0, 20, len(annual))
+        frame.index.name = 'date'
+        return frame
+
+    @pytest.mark.parametrize('scope', ['extended_backward', 'extended_both'])
+    @pytest.mark.parametrize('strategy', ['interpolate', 'model'])
+    def test_fit_transform_on_densified_grid(self, scope, strategy):
+        """Le fit aboutit ; la provenance couvre les mois absents de l'entrée."""
+        data = self._irregular_timeseries()
+        imputer = _make_imputer(
+            imputation_scope=scope, coverage_threshold=0.0,
+            covariate_strategy=strategy, keep_lower_frequencies=False,
+        )
+        imputer = _fit_quietly(imputer, data)
+
+        # La fenêtre remonte bien jusqu'à la première observation annuelle
+        assert imputer.imputation_window_[0] == pd.Timestamp('2015-01-01')
+
+        # Les mois de 2015 absents de l'entrée portent une provenance imputée
+        matrix = imputer.imputation_provenance_
+        added = pd.date_range('2015-02-01', '2015-12-01', freq='MS')
+        assert added.isin(matrix.index).all()
+        assert matrix.loc[added, 'a1'].notna().all()
+        # Aucune ligne créée ne se déclare ORIGINAL
+        assert not (matrix.loc[added] == ProvenanceType.ORIGINAL).any().any()
+        assert matrix.index.is_monotonic_increasing
+
+        # Le transform rejoue sans erreur et produit ces mois
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = imputer.transform(data)
+        assert result.loc[added, 'a1'].notna().all()
+
+    def test_additivity_holds_on_the_isolated_years(self):
+        """Sous 'sum', les douze mois d'une année isolée redonnent son total."""
+        data = self._irregular_timeseries()
+        imputer = _fit_quietly(_make_imputer(
+            imputation_scope='extended_backward', coverage_threshold=0.0,
+            keep_lower_frequencies=False,
+        ), data)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = imputer.transform(data)
+        for year in (2015, 2016, 2017):
+            months = result.loc[f'{year}-01-01':f'{year}-12-01', 'a1']
+            assert len(months) == 12
+            assert months.sum() == pytest.approx(data.loc[f'{year}-01-01', 'a1'])
+
+
 class TestInverseTransform:
     """I8 — aller-retour transform / inverse_transform."""
 
