@@ -19,11 +19,17 @@ Ce package poursuit les objectifs suivants :
 
 python tests/run_tests.py --mode all
 
-### Run fast tests only (excluding performance tests)
+### Run unit tests only (tests/unit/ and tests/support/)
+python tests/run_tests.py --mode unit
+
+### Run integration tests only (tests/integration/)
+python tests/run_tests.py --mode integration
+
+### Run fast tests only (excluding tests marked slow)
 python tests/run_tests.py --mode fast
 
 ### Run with coverage report
 python tests/run_tests.py --mode coverage
 
-### Run specific test module
-python tests/run_tests.py --module test_base_classes
+### Run a specific target (file, directory or node id)
+python tests/run_tests.py --path tests/unit/crossvals/test_base_classes.py

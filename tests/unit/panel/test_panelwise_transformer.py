@@ -15,10 +15,7 @@ from sklearn.base import clone
 import warnings
 
 # Import du module à tester
-import sys
-sys.path.insert(0, '/home/claude')
-
-from panelwise_transformer import PanelwiseTransformer
+from tsforecast.panel.transformers import PanelwiseTransformer
 
 
 # =============================================================================

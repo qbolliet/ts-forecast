@@ -21,7 +21,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.base import BaseEstimator, RegressorMixin, clone
+from sklearn.base import clone
 from sklearn.exceptions import NotFittedError
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression
@@ -41,6 +41,9 @@ from tsforecast.frequency.provenance import (
 )
 from tsforecast.frequency.stage_scaler import StageScaler
 from tsforecast.xy import XYPipeline
+
+# Estimateurs factices partagés (anciennement définis en privé dans ce module)
+from tests.support.estimators import FailingEstimator, SpyEstimator
 
 # Clés d'entité du jeu PANEL-F, sous forme de tuples (§2.5)
 FR, DE, IT = ('FR',), ('DE',), ('IT',)
@@ -368,6 +371,7 @@ class TestFitPhases:
     """Les phases 0 à 4 renseignent les attributs ajustés du §13.2."""
 
     @pytest.mark.parametrize('fixture_name', ['reference_timeseries', 'mixed_freq_panel_heterogeneous'])
+    @pytest.mark.slow
     def test_phases_zero_to_four_populate_attributes(self, fixture_name, request):
         """Les attributs des phases 0 à 4 sont renseignés, sur TS comme sur panel."""
         data = request.getfixturevalue(fixture_name)
@@ -411,6 +415,7 @@ class TestFitPhases:
         assert set(imputer.imputation_models_)
         assert all(step.pred_freq_label == 'M' for step in imputer.imputation_plan_)
 
+    @pytest.mark.slow
     def test_entities_are_set_on_panel_only(self, reference_timeseries,
                                             mixed_freq_panel_multifrequency):
         """entities_ vaut None sur une série temporelle et liste les entités sur un panel."""
@@ -465,6 +470,7 @@ class TestFitPhases:
         assert 'different indices' in message
         assert 'same length' in message
 
+    @pytest.mark.slow
     def test_three_window_masks_are_set(self, mixed_freq_panel_heterogeneous):
         """Les trois masques sont des Series booléennes à MultiIndex sur panel (§7.2)."""
         imputer = _fit_quietly(_make_imputer(), mixed_freq_panel_heterogeneous)
@@ -521,6 +527,7 @@ class TestFitPhases:
         ]
         assert len(estimator_warnings) == 1
 
+    @pytest.mark.slow
     def test_intermediate_frequencies_modalities_all_fit(self, reference_timeseries):
         """Les trois modalités de l'axe 2 ajustent, aucune ne lève (§5.1)."""
         for modality in (False, 'covariates_only', True):
@@ -544,6 +551,7 @@ class TestFitPhases:
         _fit_quietly(imputer, reference_timeseries)
         assert '_original_X_' not in imputer.__dict__
 
+    @pytest.mark.slow
     def test_entity_never_observing_a_column_is_left_out(
         self, mixed_freq_panel_heterogeneous
     ):
@@ -709,7 +717,7 @@ class TestStaticInvariants:
     def test_no_boolean_test_on_impute_intermediate_frequencies(self):
         """Aucun test de vérité booléenne sur l'axe 2 : invariant I13."""
         module_path = (
-            Path(__file__).resolve().parents[2]
+            Path(__file__).resolve().parents[3]
             / 'tsforecast' / 'frequency' / 'high_frequency_imputer.py'
         )
         source = module_path.read_text(encoding='utf-8')
@@ -728,7 +736,7 @@ class TestStaticInvariants:
     def test_removed_parameters_absent_from_source(self):
         """Les paramètres supprimés ne réapparaissent nulle part dans le module."""
         module_path = (
-            Path(__file__).resolve().parents[2]
+            Path(__file__).resolve().parents[3]
             / 'tsforecast' / 'frequency' / 'high_frequency_imputer.py'
         )
         source = module_path.read_text(encoding='utf-8')
@@ -750,56 +758,10 @@ class TestStaticInvariants:
 # =============================================================================
 # PHASE 5 — Exécution des étapes (lot L10)
 # =============================================================================
-# Estimateur espion : il retient ce que chaque appel lui a montré
-class _SpyEstimator(BaseEstimator, RegressorMixin):
-    """Estimateur espion, tolérant les NaN et prédisant une constante.
-
-    Il retient ``fit_X_``, ``fit_y_`` et la liste ``predict_X_`` des trames de
-    prédiction, ce qui rend l'invariant central (I2) et l'échelle (I5)
-    mesurables. Le compteur de classe ``n_fits`` mesure la règle « un seul
-    ajustement par (étape, variable) » (I15).
-    """
-
-    n_fits = 0
-
-    def __init__(self, constant: float = 1.0):
-        self.constant = constant
-
-    def fit(self, X, y):
-        """Retient le jeu d'entraînement et la moyenne de la cible."""
-        type(self)._record_fit()
-        self.fit_X_ = X.copy()
-        self.fit_y_ = y.copy()
-        self.predict_X_ = []
-        values = np.asarray(y, dtype=float)
-        finite = values[~np.isnan(values)]
-        self.mean_ = float(finite.mean()) if finite.size else 0.0
-        return self
-
-    def predict(self, X):
-        """Retient la trame de prédiction et rend la moyenne apprise."""
-        if not hasattr(self, 'predict_X_'):
-            self.predict_X_ = []
-        self.predict_X_.append(X.copy())
-        return np.full(len(X), self.mean_)
-
-    @classmethod
-    def _record_fit(cls):
-        """Incrémente le compteur d'ajustements de la classe."""
-        _SpyEstimator.n_fits += 1
-
-
-# Estimateur d'échec, pour le chemin de repli
-class _FailingEstimator(BaseEstimator, RegressorMixin):
-    """Estimateur dont l'ajustement échoue toujours."""
-
-    def fit(self, X, y):
-        """Lève systématiquement, pour éprouver le repli d'interpolation."""
-        raise RuntimeError('deliberate fit failure')
-
-    def predict(self, X):
-        """Jamais atteint : l'ajustement a déjà échoué."""
-        raise RuntimeError('deliberate predict failure')
+# Alias locaux vers tests/support/estimators.py, tolérés jusqu'au prompt F10
+# (nettoyage des usages internes du préfixe `_`).
+_SpyEstimator = SpyEstimator
+_FailingEstimator = FailingEstimator
 
 
 # Fonction auxiliaire d'ajustement silencieux avec l'espion
@@ -840,6 +802,7 @@ class TestNaNInvariant:
     @pytest.mark.parametrize(
         'fixture_name', ['reference_timeseries', 'mixed_freq_panel_heterogeneous']
     )
+    @pytest.mark.slow
     def test_nan_invariant_by_stage_and_column(self, strategy, fixture_name, request):
         """Formulation D14 : inclusion des dates, par étape, colonne ET entité."""
         data = request.getfixturevalue(fixture_name)
@@ -897,6 +860,7 @@ class TestOrderInvariance:
             pd.testing.assert_series_equal(provenance, other_provenance)
 
     @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate'])
+    @pytest.mark.slow
     def test_processing_order_indifferent_outside_model(
         self, reference_timeseries, strategy
     ):
@@ -917,6 +881,7 @@ class TestOrderInvariance:
                 self._outputs(backward, columns)[column][0],
             )
 
+    @pytest.mark.slow
     def test_imputation_order_empty_outside_model(self, reference_timeseries):
         """imputation_order_ reste vide hors covariate_strategy='model'."""
         assert not _fit_with_spy(reference_timeseries).imputation_order_
@@ -1007,6 +972,7 @@ class TestOrderingSeesTheFittedSets:
         assert scored == pytest.approx(annual.to_numpy(dtype=float))
         assert scored != pytest.approx(december.to_numpy(dtype=float))
 
+    @pytest.mark.slow
     def test_panel_scored_target_is_brought_back_to_the_stage_scale(
         self, mixed_freq_panel_multifrequency
     ):
@@ -1029,6 +995,7 @@ class TestOrderingSeesTheFittedSets:
         assert counts == {'IT': 36, 'DE': 12, 'FR': 3}
         assert y_scored.min() > 9.0 and y_scored.max() < 14.0
 
+    @pytest.mark.slow
     def test_scoring_rows_follow_the_training_window_not_the_strict_one(
         self, reference_timeseries
     ):
@@ -1747,6 +1714,7 @@ def _plan_pairs(imputer: HighFrequencyImputer) -> list:
 class TestFrequencyProgression:
     """§5.2 — construction de la progression, identique au fit et au transform."""
 
+    @pytest.mark.slow
     def test_frequency_progression_on_reference_ts(self, reference_timeseries):
         """Les trois modalités sur le jeu TS, valeurs exactes (§5.2)."""
         # F = {Q, Y, M} : sous False, la cible seule
@@ -1769,6 +1737,7 @@ class TestFrequencyProgression:
         assert {column for column, _ in imputer._imputable_groups('Q')} == {'a1', 'a2'}
         assert {column for column, _ in imputer._imputable_groups('M')} == {'q1', 'a1', 'a2'}
 
+    @pytest.mark.slow
     def test_progression_on_panel_f_uses_per_entity_frequencies(
         self, mixed_freq_panel_multifrequency
     ):
@@ -1819,6 +1788,7 @@ class TestFrequencyProgression:
 class TestStagePlanAxis2:
     """§5.5 — le plan d'étapes complet sur le jeu TS."""
 
+    @pytest.mark.slow
     def test_stage_plan_of_spec_5_5(self, reference_timeseries):
         """2 étapes, 5 modèles, y_train filtré par l'origine (§5.5)."""
         expected_pairs = [
@@ -1888,6 +1858,7 @@ class TestStagePlanAxis2:
 class TestOriginFilter:
     """§5.3 — le filtre d'origine de y_train, et le piège D12."""
 
+    @pytest.mark.slow
     def test_covariates_only_differs_from_true(self, reference_timeseries):
         """I12 — même plan, filtre différent, valeurs différentes (§5.1)."""
         # Sous 'model', aucune ligne d'origine 'model' n'entre dans y_train
@@ -1970,6 +1941,7 @@ class TestOriginFilter:
         # Sous True, les trois entrent
         assert sorted(_origins(True)) == ['interpolated', 'model', 'observed']
 
+    @pytest.mark.slow
     def test_target_taint_families(self, reference_timeseries):
         """I6 — les deux familles de souillure de cible n'existent que sous True."""
         tainted = {
@@ -2033,6 +2005,7 @@ class TestCoincidentCells:
             _fit_quietly(_make_imputer(**overrides), data)
         return fits
 
+    @pytest.mark.slow
     def test_coincident_cells_kept_only_without_constraint(self, reference_timeseries):
         """I20 — 12 lignes sous 'sum', 15 sous None, à l'étape M (§5.9)."""
         _, under_sum = self._cascade(reference_timeseries, 'sum')
@@ -2071,6 +2044,7 @@ class TestCoincidentCells:
         free = _totals(None)
         assert any(abs(free[year] - anchor) > 0.1 for year, anchor in gold.items())
 
+    @pytest.mark.slow
     def test_training_index_gains_a_frequency_level(self, reference_timeseries):
         """Sous None, l'index porte la fréquence ; sous 'sum', il est inchangé."""
         _, under_sum = self._cascade(reference_timeseries, 'sum')
@@ -2125,6 +2099,7 @@ class TestCoincidentCells:
         assert scaled[('Q', anchor)] == pytest.approx(10.0, rel=0.1)
 
     @pytest.mark.parametrize('modality', [False, 'covariates_only'])
+    @pytest.mark.slow
     def test_constraint_is_inert_on_y_train_without_axis_2(
         self, reference_timeseries, modality
     ):
@@ -2177,6 +2152,7 @@ class TestPerRowScale:
         assert isinstance(divisors, pd.Series)
         assert divisors.to_list() == pytest.approx([1.0, 1.0])
 
+    @pytest.mark.slow
     def test_row_frequency_mixes_block_and_store_sources(
         self, mixed_freq_panel_multifrequency
     ):
@@ -2212,6 +2188,7 @@ class TestPerRowScale:
             ].to_numpy()
             assert values.mean() == pytest.approx(level, rel=0.2)
 
+    @pytest.mark.slow
     def test_target_taint_of_a_contributing_entity_propagates(
         self, mixed_freq_panel_multifrequency
     ):
@@ -2357,6 +2334,7 @@ class TestUnobservedEntities:
         assert unanchored.model is steps['Y'].model
         assert unanchored.model is steps['Q'].model
 
+    @pytest.mark.slow
     def test_unanchored_entity_contributes_nothing_to_training(
         self, panel_f_without_it_v
     ):
@@ -2405,6 +2383,7 @@ class TestUnobservedEntities:
             assert france.loc['2021'].sum() == pytest.approx(120.0)
 
     @pytest.mark.parametrize('modality', [False, 'covariates_only', True])
+    @pytest.mark.slow
     def test_progression_is_unchanged_by_the_parameter(
         self, panel_f_without_it_v, modality
     ):
@@ -2448,6 +2427,7 @@ class TestUnobservedEntities:
         ]
         assert len(naming) == 1
 
+    @pytest.mark.slow
     def test_model_unanchored_is_never_emitted_by_default(
         self, panel_f_without_it_v, mixed_freq_panel_multifrequency
     ):
@@ -2469,6 +2449,7 @@ class TestUnobservedEntities:
                 )
 
     @pytest.mark.parametrize('modality', [False, True])
+    @pytest.mark.slow
     def test_adding_the_unanchored_group_leaves_the_others_intact(
         self, panel_f_without_it_v, modality
     ):
@@ -2634,6 +2615,7 @@ class TestTransformSymmetry:
     @pytest.mark.parametrize(
         'fixture_name', ['reference_timeseries', 'mixed_freq_panel_multifrequency']
     )
+    @pytest.mark.slow
     def test_fit_transform_equals_fit_then_transform(
         self, strategy, intermediate, fixture_name, request
     ):
@@ -3090,6 +3072,7 @@ class TestTransformState:
 class TestSharedModelReplay:
     """§5.8 R6 — un modèle partagé est rejoué par chacune de ses étapes."""
 
+    @pytest.mark.slow
     def test_shared_model_replayed_by_each_step(
         self, mixed_freq_panel_multifrequency
     ):
@@ -3143,6 +3126,7 @@ class TestNewEntityAtTransform:
         added['v'] = np.nan
         return pd.concat([data, added]).sort_index()
 
+    @pytest.mark.slow
     def test_new_entity_is_left_untouched_by_default(
         self, mixed_freq_panel_multifrequency
     ):
@@ -3213,6 +3197,7 @@ class TestSklearnConformance:
         # Le clone du pipeline reste conforme : les paramètres traversent
         assert clone(pipeline).get_params()['imputer__target_frequency'] == self._TARGET
 
+    @pytest.mark.slow
     def test_grid_search_on_panel_with_target_frequency_dict(
         self, mixed_freq_panel_multifrequency
     ):

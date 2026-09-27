@@ -41,3 +41,25 @@ packages = ["tsforecast"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--strict-markers"
+markers = [
+    "unit: test unitaire d'un composant isolé de tsforecast",
+    "integration: test enchaînant plusieurs composants publics ou des jeux réalistes",
+    "slow: test dont l'exécution dépasse 2 secondes",
+    "internal: test d'un symbole privé, sans chemin public raisonnable",
+]
+
+[tool.coverage.run]
+source = ["tsforecast"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

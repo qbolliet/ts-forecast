@@ -1,0 +1,126 @@
+# Échecs hérités — mécanisme TRANSITOIRE (tests_and_refactoring_prompts.md §4.4).
+#
+# Chaque node id ci-dessous reçoit un xfail(strict=False) automatique via le hook
+# pytest_collection_modifyitems de tests/conftest.py, le temps que le prompt
+# responsable (indiqué par le commentaire "# prompt <id>" qui précède chaque
+# groupe) trie la cause de l'échec (catégorie a/b/c/d de tests/ANOMALIES.md) et
+# retire les entrées correspondantes de ce fichier. Ce n'est PAS un masquage
+# permanent : le prompt C2 exige qu'il ne reste plus, en fin de campagne, que le
+# groupe "# hors campagne".
+
+# prompt D2
+tests/unit/delays/test_calculator.py::TestAggregateDelays::test_aggregate_by_indicator_only
+tests/unit/delays/test_calculator.py::TestAggregateDelays::test_aggregation_metadata
+tests/unit/delays/test_calculator.py::TestAggregateDelays::test_aggregation_method_max
+tests/unit/delays/test_calculator.py::TestAggregateDelays::test_aggregation_method_mean
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_aggregate_by_panel_false
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_aggregate_by_panel_true
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_basic_usage
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_custom_aggregation_function
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_different_aggregation_methods
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_frequency_conversion_monthly_to_quarterly
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_frequency_conversion_quarterly_to_monthly
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_invalid_target_frequency_type
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_output_unit_conversion
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_reference_point_start
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_reference_point_validation
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_simple_time_series_no_panel
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_target_frequency_as_dict
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_with_invalid_indicators
+tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_with_specific_indicators
+tests/unit/delays/test_calculator.py::TestCalculateConvertedDelay::test_higher_frequency_conversion
+tests/unit/delays/test_calculator.py::TestCalculateConvertedDelay::test_lower_frequency_conversion
+tests/unit/delays/test_calculator.py::TestCalculateConvertedDelay::test_same_frequency_different_reference
+tests/unit/delays/test_calculator.py::TestCalculateConvertedDelay::test_same_frequency_same_reference
+tests/unit/delays/test_calculator.py::TestCalculateConvertedDelay::test_unit_conversion_in_delay
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_empty_dataframe_after_filtering
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_mixed_units
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_negative_delay
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_preserve_index_names
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_result_column_order
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_single_observation
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_special_frequency_aliases
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_very_large_delay
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_weekly_frequency
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_yearly_frequency
+tests/unit/delays/test_calculator.py::TestEdgeCases::test_zero_delay
+tests/unit/delays/test_calculator.py::TestIntegrationWithDataManager::test_full_pipeline_frequency_conversion
+tests/unit/delays/test_calculator.py::TestIntegrationWithDataManager::test_full_pipeline_panel_data
+tests/unit/delays/test_calculator.py::TestIntegrationWithDataManager::test_full_pipeline_simple_time_series
+tests/unit/delays/test_calculator.py::TestValidateColumns::test_empty_dataframe
+tests/unit/delays/test_calculator.py::TestValidateColumns::test_valid_columns
+
+# prompt D3
+tests/unit/delays/test_transformers.py::TestMaskTransformerBoundaries::test_series_end_with_how_first
+tests/unit/delays/test_transformers.py::TestMaskTransformerBoundaries::test_series_end_with_how_last
+tests/unit/delays/test_transformers.py::TestMaskTransformerBoundaries::test_series_start_with_how_first
+tests/unit/delays/test_transformers.py::TestMaskTransformerDataFrame::test_mask_dataframe_inverse_transform
+tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransform::test_fit_basic
+tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransform::test_fit_creates_shift_params
+tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransform::test_fit_transform
+tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransform::test_transform_basic
+tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerParams::test_params_with_dict_reference_point
+tests/unit/delays/test_transformers.py::TestShiftTransformerEdgeCases::test_non_datetime_index
+
+# prompt D5
+tests/integration/delays/test_integration.py::TestCombinedTransformations::test_shift_then_mask
+tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_last_observation_aligned_with_prediction_date
+tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_workflow_multi_frequency
+tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_workflow_panel_mono_frequency
+tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_workflow_time_series_mono_frequency
+tests/integration/delays/test_integration.py::TestDelayDetectionWorkflowPanel::test_panel_each_entity_has_delays
+tests/integration/delays/test_integration.py::TestDelayDetectionWorkflowPanel::test_panel_last_observation_per_entity
+tests/integration/delays/test_integration.py::TestMaskTransformerWithPanelwise::test_mask_applied_independently_per_entity
+tests/integration/delays/test_integration.py::TestMaskTransformerWithPanelwise::test_mask_correct_per_entity
+tests/integration/delays/test_integration.py::TestMaskTransformerWithPanelwise::test_mask_transform_inverse_transform_per_entity
+tests/integration/delays/test_integration.py::TestPerformance::test_large_panel_performance
+tests/integration/delays/test_integration.py::TestShiftTransformerWithPanelwise::test_shift_different_params_per_entity
+tests/integration/delays/test_integration.py::TestShiftTransformerWithPanelwise::test_shift_no_nan_introduced_per_entity
+tests/integration/delays/test_integration.py::TestShiftTransformerWithPanelwise::test_shift_transform_inverse_transform_per_entity
+
+# prompt U6
+tests/unit/utils/frequency/test_normalizer.py::TestConverterIntegration::test_converter_handle_a_alias
+tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_a_in_dictionaries
+tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_a_literal_conversion
+tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_a_same_order_as_y
+tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_a_validate
+tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_normalize_a_with_anchor
+tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_normalize_a_with_position
+tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_normalize_deprecated_alias_a
+tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerComplexStrings::test_normalize_anchor_strings_year
+tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerComplexStrings::test_normalize_position_strings_end
+tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerComplexStrings::test_normalize_position_strings_start
+tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerIntegration::test_normalize_complex_then_is_higher_frequency
+tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerIntegration::test_real_world_frequency_detector_output
+tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerIntegration::test_validate_complex_strings
+tests/unit/utils/frequency/test_normalizer.py::TestNormalizeFrequencyReturnFormats::test_return_format_base_default
+tests/unit/utils/frequency/test_normalizer.py::TestNormalizeFrequencyReturnFormats::test_return_format_base_explicit
+tests/unit/utils/frequency/test_normalizer.py::TestNormalizeFrequencyReturnFormats::test_return_format_components
+tests/unit/utils/frequency/test_normalizer.py::TestNormalizeFrequencyReturnFormats::test_return_format_full
+tests/unit/utils/frequency/test_normalizer.py::TestNormalizeFrequencyReturnFormats::test_return_format_with_position
+
+# prompt U7
+tests/unit/utils/frequency/test_detector.py::TestDetectDatasetFrequency::test_dataframe_with_3level_multiindex
+tests/unit/utils/frequency/test_detector.py::TestDetectFrequencyWrapper::test_series_multiindex_without_consistency
+tests/unit/utils/frequency/test_detector.py::TestFrequencyDetectorMultiIndex::test_series_multiindex_insufficient_observations
+tests/unit/utils/frequency/test_detector.py::TestFrequencyDetectorMultiIndex::test_series_multiindex_unsorted
+tests/unit/utils/frequency/test_detector.py::TestFrequencyDetectorMultiIndex::test_series_with_2level_multiindex
+
+# prompt U8
+tests/unit/utils/frequency/converter/test_positions.py::TestExtendIndexForUpsampling::test_unsupported_frequency_pair_returns_original
+
+# hors campagne
+tests/unit/panel/test_panelwise_transformer.py::TestErrorHandling::test_error_handling_raise
+tests/unit/panel/test_panelwise_transformer.py::TestErrorHandling::test_missing_panel_cols_error
+tests/unit/panel/test_panelwise_transformer.py::TestMultiLevelPanel::test_get_entity_transformer
+tests/unit/panel/test_panelwise_transformer.py::TestMultiLevelPanel::test_multi_level_fit_transform
+tests/unit/panel/test_panelwise_transformer.py::TestPanelwiseTransformerBasic::test_fit_and_transform_separately
+tests/unit/panel/test_panelwise_transformer.py::TestPanelwiseTransformerBasic::test_fit_transform_no_validation
+tests/unit/panel/test_panelwise_transformer.py::TestPanelwiseTransformerBasic::test_inverse_transform
+tests/unit/panel/test_panelwise_transformer.py::TestPanelwiseTransformerBasic::test_per_entity_scaling
+tests/unit/panel/test_panelwise_transformer.py::TestSklearnCompatibility::test_gridsearchcv_compatible
+tests/unit/panel/test_panelwise_transformer.py::TestSklearnCompatibility::test_in_pipeline
+tests/unit/panel/test_panelwise_transformer.py::TestSklearnCompatibility::test_nested_pipeline
+tests/unit/panel/test_panelwise_transformer.py::TestStructurePreservation::test_column_order_preservation
+tests/unit/panel/test_panelwise_transformer.py::TestStructurePreservation::test_index_preservation
+tests/unit/panel/test_panelwise_transformer.py::TestStructurePreservation::test_row_order_preservation
