@@ -257,7 +257,7 @@ def to_period_start(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, p
         where :func:`convert_position` cannot infer any frequency at all
         (documented as a no-op rather than raised). A merely irregular index
         (some entity-specific anchors outside the common grid, as in
-        :func:`~tests.support.fixtures.nb3_timeseries`) is usually still
+        :func:`~tests.support.fixtures.irregular_index_timeseries`) is usually still
         converted: :func:`convert_position` only needs a locally detectable
         step between dates, not a fully regular grid.
 

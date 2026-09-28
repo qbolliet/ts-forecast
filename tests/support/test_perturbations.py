@@ -3,7 +3,7 @@
 Une fonction pure par cas limite de ``CLAUDE.md`` — chaque test vérifie que la
 perturbation produit exactement la forme annoncée par sa docstring, sur de
 petits jeux construits à la main et sur les jeux réalistes du notebook 3
-(``nb3_panel``) pour les perturbations spécifiques aux panels.
+(``heterogeneous_coverage_panel``) pour les perturbations spécifiques aux panels.
 """
 # Manipulation de données
 import pandas as pd
@@ -89,13 +89,17 @@ class TestReverseEntities:
         with pytest.raises(TypeError):
             reverse_entities(small_timeseries)
 
-    def test_nb3_panel_entity_order_is_reversed(self, nb3_panel: pd.DataFrame) -> None:
+    def test_heterogeneous_coverage_panel_entity_order_is_reversed(
+        self, heterogeneous_coverage_panel: pd.DataFrame
+    ) -> None:
         """Propriété (pas de valeur d'or) sur le jeu réaliste : mêmes entités, ordre inversé."""
-        reversed_panel = reverse_entities(nb3_panel)
-        original_entities = list(dict.fromkeys(nb3_panel.index.get_level_values('country')))
+        reversed_panel = reverse_entities(heterogeneous_coverage_panel)
+        original_entities = list(
+            dict.fromkeys(heterogeneous_coverage_panel.index.get_level_values('country'))
+        )
         reversed_entities = list(dict.fromkeys(reversed_panel.index.get_level_values('country')))
         assert reversed_entities == list(reversed(original_entities))
-        assert len(reversed_panel) == len(nb3_panel)
+        assert len(reversed_panel) == len(heterogeneous_coverage_panel)
 
 
 class TestWithSpecialColumnNames:
@@ -204,7 +208,7 @@ class TestPeriodPosition:
         assert not any(date.day == 1 for date in dates)
 
     def test_irregular_index_still_converts_the_common_grid(
-        self, nb3_timeseries: pd.DataFrame
+        self, irregular_index_timeseries: pd.DataFrame
     ) -> None:
         """Un index irrégulier (ancres annuelles hors grille) est tout de même converti.
 
@@ -213,7 +217,7 @@ class TestPeriodPosition:
         (``pd.infer_freq``, strict), l'irrégularité ne bloque pas ici la
         conversion.
         """
-        result = to_period_end(nb3_timeseries)
+        result = to_period_end(irregular_index_timeseries)
         assert not any(date.day == 1 and date.hour == 0 for date in result.index)
 
     def test_empty_index_is_a_no_op(self, small_timeseries: pd.DataFrame) -> None:
@@ -245,9 +249,9 @@ class TestPeriodPosition:
             panel.index.get_level_values('entity')
         )
 
-    def test_to_period_index_irregular_is_a_no_op(self, nb3_timeseries: pd.DataFrame) -> None:
+    def test_to_period_index_irregular_is_a_no_op(self, irregular_index_timeseries: pd.DataFrame) -> None:
         """``pd.infer_freq`` échoue sur un index irrégulier : la conversion est sautée."""
-        result = to_period_index(nb3_timeseries)
+        result = to_period_index(irregular_index_timeseries)
         assert isinstance(result.index, pd.DatetimeIndex)
 
 

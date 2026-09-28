@@ -18,8 +18,8 @@ from tsforecast.utils.frequency.utils import detect_frequency
 from tsforecast.frequency import is_regular
 from tests.support.datasets import (
     HETEROGENEOUS_PANEL_COUNTRIES,
-    build_panel_nb2,
-    build_timeseries_nb2,
+    build_mixed_frequency_panel,
+    build_mixed_frequency_timeseries,
 )
 
 
@@ -206,12 +206,12 @@ class TestPanelXProjections:
         )
 
 
-class TestNotebook3Datasets:
+class TestRealisticMixedFrequencyDatasets:
     """Jeu réaliste du notebook 3 (§2.4 de ``tests_and_refactoring_prompts.md``).
 
-    ``nb3_timeseries`` / ``nb3_panel`` ne sont pas des constructeurs dédiés :
-    ce sont des appels particuliers de :func:`build_timeseries_nb2` et
-    :func:`build_panel_nb2`, généralisés pour reproduire
+    ``irregular_index_timeseries`` / ``heterogeneous_coverage_panel`` ne sont pas des constructeurs dédiés :
+    ce sont des appels particuliers de :func:`build_mixed_frequency_timeseries` et
+    :func:`build_mixed_frequency_panel`, généralisés pour reproduire
     ``create_timeseries_dataset`` / ``create_panel_dataset`` du notebook
     ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb`` (cellules
     5 et 7). Chaque test ci-dessous vérifie une caractéristique annoncée par ce
@@ -221,10 +221,10 @@ class TestNotebook3Datasets:
     # ----- Couverture propre à chaque entité (cellule 6, notebook 3) -----
 
     def test_panel_entities_have_their_own_monthly_grid_coverage(
-        self, nb3_panel: pd.DataFrame
+        self, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
         """Chaque entité couvre sa propre grille mensuelle (§2.2 du notebook)."""
-        df = nb3_panel
+        df = heterogeneous_coverage_panel
 
         # Valeurs d'or : dates de couverture mensuelle du dictionnaire
         # ``countries`` de ``create_panel_dataset`` (cellule 7 du notebook),
@@ -248,7 +248,7 @@ class TestNotebook3Datasets:
             assert entity_index.max() == monthly_grid.max()
 
     def test_timeseries_and_each_entity_index_is_irregular(
-        self, nb3_timeseries: pd.DataFrame, nb3_panel: pd.DataFrame
+        self, irregular_index_timeseries: pd.DataFrame, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
         """L'historique annuel antérieur à la grille mensuelle rend l'index irrégulier.
 
@@ -258,18 +258,18 @@ class TestNotebook3Datasets:
         réellement hors grille — ``is_regular`` doit le détecter, pour la
         série seule comme pour chaque entité du panel.
         """
-        assert is_regular(nb3_timeseries) is False
+        assert is_regular(irregular_index_timeseries) is False
 
         for entity in ('France', 'Allemagne', 'Italie'):
-            assert is_regular(nb3_panel.loc[entity]) is False
+            assert is_regular(heterogeneous_coverage_panel.loc[entity]) is False
 
     # ----- depenses_publiques_pib : fréquence de publication par entité (cellule 9) -----
 
     def test_depenses_publiques_pib_publication_frequency_per_entity(
-        self, nb3_panel: pd.DataFrame
+        self, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
         """Publication annuelle pour France/Italie, trimestrielle pour Allemagne, dernière valeur NaN."""
-        df = nb3_panel
+        df = heterogeneous_coverage_panel
 
         annual_entities = {'France': 6, 'Italie': 5}
         for entity, n_observations in annual_entities.items():
@@ -300,10 +300,10 @@ class TestNotebook3Datasets:
     # ----- climat_affaires : structurellement absente pour l'Italie (cellules 10-11) -----
 
     def test_climat_affaires_structurally_absent_for_italy(
-        self, nb3_panel: pd.DataFrame
+        self, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
         """Colonne présente pour les trois entités, zéro observation pour l'Italie."""
-        df = nb3_panel
+        df = heterogeneous_coverage_panel
 
         assert 'climat_affaires' in df.columns
 
@@ -315,41 +315,41 @@ class TestNotebook3Datasets:
     # ----- Délais : dernière valeur NaN pour inflation_ipc et taux_chomage -----
 
     def test_last_row_of_inflation_and_chomage_is_nan(
-        self, nb3_timeseries: pd.DataFrame, nb3_panel: pd.DataFrame
+        self, irregular_index_timeseries: pd.DataFrame, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
         """Délai de publication d'un mois simulé : dernière observation retirée."""
-        assert pd.isna(nb3_timeseries['inflation_ipc'].iloc[-1])
-        assert pd.isna(nb3_timeseries['taux_chomage'].iloc[-1])
+        assert pd.isna(irregular_index_timeseries['inflation_ipc'].iloc[-1])
+        assert pd.isna(irregular_index_timeseries['taux_chomage'].iloc[-1])
 
         for entity in ('France', 'Allemagne', 'Italie'):
-            df_entity = nb3_panel.loc[entity]
+            df_entity = heterogeneous_coverage_panel.loc[entity]
             assert pd.isna(df_entity['inflation_ipc'].iloc[-1])
             assert pd.isna(df_entity['taux_chomage'].iloc[-1])
 
     # ----- Reproductibilité -----
 
-    def test_nb3_timeseries_is_reproducible(self, nb3_timeseries: pd.DataFrame) -> None:
+    def test_irregular_index_timeseries_is_reproducible(self, irregular_index_timeseries: pd.DataFrame) -> None:
         """Deux appels avec les mêmes arguments rendent un jeu bit-identique."""
-        rebuilt = build_timeseries_nb2(annual_start_date='2015-01-01')
-        pd.testing.assert_frame_equal(nb3_timeseries, rebuilt)
+        rebuilt = build_mixed_frequency_timeseries(annual_start_date='2015-01-01')
+        pd.testing.assert_frame_equal(irregular_index_timeseries, rebuilt)
 
-    def test_nb3_panel_is_reproducible(self, nb3_panel: pd.DataFrame) -> None:
+    def test_heterogeneous_coverage_panel_is_reproducible(self, heterogeneous_coverage_panel: pd.DataFrame) -> None:
         """Deux appels avec les mêmes arguments rendent un jeu bit-identique."""
-        rebuilt = build_panel_nb2(countries=HETEROGENEOUS_PANEL_COUNTRIES)
-        pd.testing.assert_frame_equal(nb3_panel, rebuilt)
+        rebuilt = build_mixed_frequency_panel(countries=HETEROGENEOUS_PANEL_COUNTRIES)
+        pd.testing.assert_frame_equal(heterogeneous_coverage_panel, rebuilt)
 
-    def test_nb3_timeseries_gold_values(self, nb3_timeseries: pd.DataFrame) -> None:
+    def test_irregular_index_timeseries_gold_values(self, irregular_index_timeseries: pd.DataFrame) -> None:
         """Quatre valeurs d'or relevées une fois sur le jeu construit, puis écrites en dur."""
-        df = nb3_timeseries
+        df = irregular_index_timeseries
 
         assert df.loc['2019-01-01', 'production_industrielle'] == pytest.approx(102.67063571504136)
         assert pd.isna(df.loc['2018-12-01', 'production_industrielle'])
         assert df.loc['2018-01-01', 'inflation_ipc'] == pytest.approx(0.6037293256197321)
         assert df.loc['2015-01-01', 'balance_commerciale_annuelle'] == pytest.approx(-35.2628407569658)
 
-    def test_nb3_panel_gold_values(self, nb3_panel: pd.DataFrame) -> None:
+    def test_heterogeneous_coverage_panel_gold_values(self, heterogeneous_coverage_panel: pd.DataFrame) -> None:
         """Trois valeurs d'or relevées une fois sur le jeu construit, puis écrites en dur."""
-        df = nb3_panel
+        df = heterogeneous_coverage_panel
 
         assert df.loc[('France', '2018-01-01'), 'inflation_ipc'] == pytest.approx(1.8353430756890152)
         assert df.loc[('Allemagne', '2018-07-01'), 'climat_affaires'] == pytest.approx(99.96786883370062)
@@ -357,14 +357,14 @@ class TestNotebook3Datasets:
 
     # ----- Régression : les valeurs par défaut restent le jeu historique régulier -----
 
-    def test_default_build_timeseries_nb2_stays_regular(self) -> None:
+    def test_default_build_mixed_frequency_timeseries_stays_regular(self) -> None:
         """Sans ``annual_start_date``, l'index reste régulier (généralisation non contaminante)."""
-        df = build_timeseries_nb2()
+        df = build_mixed_frequency_timeseries()
         assert is_regular(df) is True
 
-    def test_default_build_panel_nb2_stays_regular_and_without_nb3_columns(self) -> None:
+    def test_default_build_mixed_frequency_panel_stays_regular_and_without_heterogeneous_columns(self) -> None:
         """Sans ``countries``, le panel reste régulier et sans les colonnes propres au notebook 3."""
-        df = build_panel_nb2()
+        df = build_mixed_frequency_panel()
 
         assert 'depenses_publiques_pib' not in df.columns
         assert 'climat_affaires' not in df.columns

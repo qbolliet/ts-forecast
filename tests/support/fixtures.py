@@ -13,10 +13,10 @@ import pytest
 
 from tests.support.datasets import (
     HETEROGENEOUS_PANEL_COUNTRIES,
-    build_panel_nb2,
+    build_mixed_frequency_panel,
+    build_mixed_frequency_timeseries,
     build_panel_reference,
     build_panel_two_level,
-    build_timeseries_nb2,
 )
 
 
@@ -263,7 +263,7 @@ def test_helpers():
 @pytest.fixture(scope='session')
 def _mixed_freq_timeseries_session() -> pd.DataFrame:
     """Session-scoped build of :func:`mixed_freq_timeseries` — see its docstring."""
-    return build_timeseries_nb2()
+    return build_mixed_frequency_timeseries()
 
 
 @pytest.fixture
@@ -314,7 +314,7 @@ def panel_two_level_dataset(_panel_two_level_dataset_session: pd.DataFrame) -> p
 @pytest.fixture(scope='session')
 def _mixed_freq_panel_session() -> pd.DataFrame:
     """Session-scoped build of :func:`mixed_freq_panel` — see its docstring."""
-    return build_panel_nb2()
+    return build_mixed_frequency_panel()
 
 
 @pytest.fixture
@@ -442,16 +442,16 @@ def mixed_freq_panel_multifrequency(_panel_reference_full_session: pd.DataFrame)
 
 
 @pytest.fixture(scope='session')
-def _nb3_timeseries_session() -> pd.DataFrame:
-    """Session-scoped build of :func:`nb3_timeseries` — see its docstring."""
-    return build_timeseries_nb2(annual_start_date='2015-01-01')
+def _irregular_index_timeseries_session() -> pd.DataFrame:
+    """Session-scoped build of :func:`irregular_index_timeseries` — see its docstring."""
+    return build_mixed_frequency_timeseries(annual_start_date='2015-01-01')
 
 
 @pytest.fixture
-def nb3_timeseries(_nb3_timeseries_session: pd.DataFrame) -> pd.DataFrame:
+def irregular_index_timeseries(_irregular_index_timeseries_session: pd.DataFrame) -> pd.DataFrame:
     """Realistic mixed-frequency time series of notebook 3.
 
-    ``build_timeseries_nb2(annual_start_date='2015-01-01')`` — same schema as
+    ``build_mixed_frequency_timeseries(annual_start_date='2015-01-01')`` — same schema as
     :func:`mixed_freq_timeseries`, with ``balance_commerciale_annuelle``'s
     history starting in 2015, three years before the monthly grid
     (2018-01-01). The union with the monthly grid introduces isolated annual
@@ -460,20 +460,20 @@ def nb3_timeseries(_nb3_timeseries_session: pd.DataFrame) -> pd.DataFrame:
     only a regular grid dotted with NaN, unlike every other fixture in this
     module.
     """
-    return _nb3_timeseries_session.copy()
+    return _irregular_index_timeseries_session.copy()
 
 
 @pytest.fixture(scope='session')
-def _nb3_panel_session() -> pd.DataFrame:
-    """Session-scoped build of :func:`nb3_panel` — see its docstring."""
-    return build_panel_nb2(countries=HETEROGENEOUS_PANEL_COUNTRIES)
+def _heterogeneous_coverage_panel_session() -> pd.DataFrame:
+    """Session-scoped build of :func:`heterogeneous_coverage_panel` — see its docstring."""
+    return build_mixed_frequency_panel(countries=HETEROGENEOUS_PANEL_COUNTRIES)
 
 
 @pytest.fixture
-def nb3_panel(_nb3_panel_session: pd.DataFrame) -> pd.DataFrame:
+def heterogeneous_coverage_panel(_heterogeneous_coverage_panel_session: pd.DataFrame) -> pd.DataFrame:
     """Realistic heterogeneous mixed-frequency panel of notebook 3.
 
-    ``build_panel_nb2(countries=HETEROGENEOUS_PANEL_COUNTRIES)`` — 3 entities
+    ``build_mixed_frequency_panel(countries=HETEROGENEOUS_PANEL_COUNTRIES)`` — 3 entities
     (``France``, ``Allemagne``, ``Italie``), each with its own monthly-grid
     coverage (France 2018-01 to 2024-07, Allemagne 2018-07 to 2024-04, Italie
     2019-01 to 2024-07) rather than one common period truncated per entity.
@@ -487,6 +487,6 @@ def nb3_panel(_nb3_panel_session: pd.DataFrame) -> pd.DataFrame:
 
     Each entity's ``balance_commerciale_annuelle`` history also starts
     earlier than its monthly grid, so every entity's index is individually
-    irregular (see :func:`nb3_timeseries`).
+    irregular (see :func:`irregular_index_timeseries`).
     """
-    return _nb3_panel_session.copy()
+    return _heterogeneous_coverage_panel_session.copy()

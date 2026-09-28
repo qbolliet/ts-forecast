@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 
-def build_timeseries_nb2(
+def build_mixed_frequency_timeseries(
     start_date: str = '2018-01-01',
     end_date: str = '2024-07-01',
     annual_start_date: Optional[str] = None,
@@ -56,7 +56,7 @@ def build_timeseries_nb2(
         ``annual_start_date``, dernière année disponible NaN).
 
     Examples:
-        >>> df = build_timeseries_nb2()
+        >>> df = build_mixed_frequency_timeseries()
         >>> list(df.columns)
         ['production_industrielle', 'inflation_ipc', 'taux_chomage', 'pib_trimestriel', 'balance_commerciale_annuelle']
         >>> len(df)
@@ -67,7 +67,7 @@ def build_timeseries_nb2(
         irrégulier :
 
         >>> from tsforecast.frequency import is_regular
-        >>> df_irregular = build_timeseries_nb2(annual_start_date='2015-01-01')
+        >>> df_irregular = build_mixed_frequency_timeseries(annual_start_date='2015-01-01')
         >>> is_regular(df_irregular)
         False
     """
@@ -145,7 +145,7 @@ def build_timeseries_nb2(
     return df
 
 
-# Dictionnaire par défaut de build_panel_nb2 : 3 entités, grille mensuelle commune,
+# Dictionnaire par défaut de build_mixed_frequency_panel : 3 entités, grille mensuelle commune,
 # sans depenses_publiques_pib ni climat_affaires (jeu régulier historique).
 _DEFAULT_PANEL_COUNTRIES = {
     'France': {
@@ -169,7 +169,7 @@ _DEFAULT_PANEL_COUNTRIES = {
 }
 
 
-def build_panel_nb2(
+def build_mixed_frequency_panel(
     seed: int = 42,
     countries: Optional[dict] = None,
 ) -> pd.DataFrame:
@@ -201,7 +201,7 @@ def build_panel_nb2(
             propres à chaque entité si fournies — couverture hétérogène) ;
             ``annual_start_date`` (défaut ``start_date`` ; une date
             antérieure rend l'index de l'entité irrégulier, comme
-            :func:`build_timeseries_nb2`) ; ``depenses_base`` /
+            :func:`build_mixed_frequency_timeseries`) ; ``depenses_base`` /
             ``depenses_frequency`` (``'annuelle'`` ou ``'trimestrielle'`` —
             absente : colonne ``depenses_publiques_pib`` omise) ;
             ``climat_affaires_observe`` (``bool`` — absente : colonne
@@ -212,12 +212,12 @@ def build_panel_nb2(
         Avec le dictionnaire par défaut : 3 entités (``France``,
         ``Allemagne``, ``Italie``), chacune sur les 79 mêmes dates
         mensuelles (``MS``) de 2018-01-01 à 2024-07-01 (237 lignes). Mêmes
-        colonnes et ordres de grandeur que :func:`build_timeseries_nb2`,
+        colonnes et ordres de grandeur que :func:`build_mixed_frequency_timeseries`,
         avec dates de démarrage et niveaux de base spécifiques à chaque
         entité.
 
     Examples:
-        >>> df = build_panel_nb2()
+        >>> df = build_mixed_frequency_panel()
         >>> df.index.names
         FrozenList(['country', 'date'])
         >>> sorted(df.index.get_level_values('country').unique())
@@ -226,7 +226,7 @@ def build_panel_nb2(
         Couverture hétérogène, fréquence de publication par entité et index
         irrégulier (paramètres du notebook 3) :
 
-        >>> df_heterogeneous = build_panel_nb2(countries=HETEROGENEOUS_PANEL_COUNTRIES)
+        >>> df_heterogeneous = build_mixed_frequency_panel(countries=HETEROGENEOUS_PANEL_COUNTRIES)
         >>> int(df_heterogeneous.loc['Italie', 'climat_affaires'].notna().sum())
         0
     """
@@ -306,7 +306,7 @@ def build_panel_nb2(
         # Historique disponible dès `annual_start_date` (défaut : `start_date`,
         # index régulier). Une date antérieure à `start_date` introduit des
         # ancres annuelles isolées avant le début de la grille mensuelle de
-        # l'entité, et rend son index irrégulier (cf. build_timeseries_nb2).
+        # l'entité, et rend son index irrégulier (cf. build_mixed_frequency_timeseries).
         annual_start_date = params.get('annual_start_date', start_date)
         annual_dates = pd.date_range(start=annual_start_date, end=end_date, freq='YS')
         df_country = df_country.reindex(df_country.index.union(annual_dates))
@@ -363,7 +363,7 @@ def build_panel_nb2(
 # jamais observée pour l'Italie, historique de balance commerciale antérieur
 # au début de la grille mensuelle (index irrégulier). Le notebook amorce ses
 # graines par ``seed + hash(country) % 1000`` — salé par processus, donc non
-# reproductible d'une exécution à l'autre ; build_panel_nb2 utilise toujours
+# reproductible d'une exécution à l'autre ; build_mixed_frequency_panel utilise toujours
 # ``zlib.crc32``, seule la structure du notebook est reproduite ici.
 HETEROGENEOUS_PANEL_COUNTRIES = {
     'France': {
@@ -437,7 +437,7 @@ def build_panel_two_level(seed: int = 7) -> pd.DataFrame:
     all_data = []
     for country in countries:
         for sector in sectors:
-            # Graine déterministe par entité (cf. build_panel_nb2) : ``crc32`` sur
+            # Graine déterministe par entité (cf. build_mixed_frequency_panel) : ``crc32`` sur
             # la clé ``country|sector``, ``hash`` d'un tuple étant salé par processus.
             np.random.seed(
                 seed + zlib.crc32(f"{country}|{sector}".encode()) % 1000
@@ -546,7 +546,7 @@ def build_panel_reference(seed: int = 42) -> pd.DataFrame:
 
     all_data = []
     for entity in entities:
-        # Graine déterministe par entité (cf. build_panel_nb2) : seule climat_affaires
+        # Graine déterministe par entité (cf. build_mixed_frequency_panel) : seule climat_affaires
         # consomme le générateur, et seulement pour FR et DE.
         np.random.seed(seed + zlib.crc32(entity.encode()) % 1000)
 

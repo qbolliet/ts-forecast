@@ -150,32 +150,37 @@ raison d'aligner un test sur la docstring contre le code, ni sur le code contre 
 
 ### 2.4 Jeux de données
 
-- `tests/support/datasets.py` porte `build_timeseries_nb2` / `build_panel_nb2` (répliques du
+- `tests/support/datasets.py` porte `build_mixed_frequency_timeseries` / `build_mixed_frequency_panel` (répliques du
   **notebook 2**, généralisées — voir ci-dessous), `build_panel_two_level` et
   `build_panel_reference` (jeu `PANEL-X` : colonnes `m1, q1, a1, a2, climat_affaires, v`,
   entités `FR/DE/IT`, valeurs d'or du §2 de la spec) et ses projections
   (`reference_timeseries`, `mixed_freq_panel_heterogeneous`, `mixed_freq_panel_multifrequency`).
 - Le jeu du **notebook 3** (`notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb`,
   `create_timeseries_dataset` / `create_panel_dataset`) n'a **pas** de constructeur dédié : il
-  fait doublon avec `build_timeseries_nb2` / `build_panel_nb2` sur deux de ses trois
+  fait doublon avec `build_mixed_frequency_timeseries` / `build_mixed_frequency_panel` sur deux de ses trois
   caractéristiques (`climat_affaires` absente pour une entité et fréquence hétérogène par
   entité pour une même colonne existent déjà dans `PANEL-X`, via `v`). Seule sa troisième
   caractéristique — couverture temporelle propre à chaque entité et index **réellement**
   irrégulier (dates annuelles antérieures à la grille mensuelle, pas seulement des NaN dans une
   grille régulière) — est un apport réel, absent des jeux existants avant ce prompt. Plutôt que
   d'ajouter des constructeurs `build_timeseries_nb3` / `build_panel_nb3` quasi dupliqués,
-  `build_timeseries_nb2` et `build_panel_nb2` ont été **étendus** avec les paramètres qui
+  `build_mixed_frequency_timeseries` et `build_mixed_frequency_panel` ont été **étendus** avec les paramètres qui
   manquaient (`annual_start_date`, et pour le panel : couverture par entité, fréquence de
   publication par entité, covariable structurellement absente) ; les valeurs par défaut de ces
   deux fonctions restent inchangées (jeu régulier historique), et le dictionnaire
   `HETEROGENEOUS_PANEL_COUNTRIES` reproduit fidèlement `create_panel_dataset` en passant
-  `countries=HETEROGENEOUS_PANEL_COUNTRIES` à `build_panel_nb2`. Les fixtures `nb3_timeseries`
-  / `nb3_panel` (§4.2.4 et tous les prompts qui les utilisent) restent nommées ainsi mais sont
-  désormais construites par ces fonctions généralisées, pas par des constructeurs séparés — ce
-  qui ne change rien pour les prompts qui les consomment par leur nom de fixture.
+  `countries=HETEROGENEOUS_PANEL_COUNTRIES` à `build_mixed_frequency_panel`. Les fixtures
+  `irregular_index_timeseries` / `heterogeneous_coverage_panel` (§4.2.4 et tous les prompts qui
+  les utilisent) sont construites par ces fonctions généralisées, pas par des constructeurs
+  séparés. Ces quatre noms (les deux constructeurs et les deux fixtures) ont été renommés après
+  A1 pour ne plus mentionner le notebook d'origine (`build_timeseries_nb2` →
+  `build_mixed_frequency_timeseries`, `build_panel_nb2` → `build_mixed_frequency_panel`,
+  `nb3_timeseries` → `irregular_index_timeseries`, `nb3_panel` → `heterogeneous_coverage_panel`) ;
+  ce document reflète déjà les noms actuels partout sauf dans le texte des prompts A0/A1
+  eux-mêmes (§6), laissé inchangé car déjà exécuté.
 - ⚠️ Le notebook 3 amorce ses graines par `np.random.seed(seed + hash(country) % 1000)` :
   `hash` d'une `str` est salé par processus, **son panel change à chaque exécution**. Comme
-  `build_panel_nb2`, `HETEROGENEOUS_PANEL_COUNTRIES` passe par `zlib.crc32` : seule la
+  `build_mixed_frequency_panel`, `HETEROGENEOUS_PANEL_COUNTRIES` passe par `zlib.crc32` : seule la
   **structure** du notebook est reproduite, pas ses valeurs exactes.
 - Références aux anciens chemins de tests : `notebooks/5 - QB - HighFrequencyImputer pas a
   pas.ipynb` (importe `_build_panel_reference` par `importlib` depuis
@@ -269,7 +274,7 @@ Chaque prompt demande de relire cette section : elle fait partie du prompt.
    `datetime64`, `Period`, `Timestamp` là où l'API les accepte. Utiliser
    `tests/support/perturbations.py`.
 4. Chaque composant qui accepte des jeux de données est testé au moins une fois sur les jeux
-   **réalistes** du notebook 3 (`nb3_timeseries`, `nb3_panel`) — à défaut de valeur d'or, sur
+   **réalistes** du notebook 3 (`irregular_index_timeseries`, `heterogeneous_coverage_panel`) — à défaut de valeur d'or, sur
    des **propriétés** (pas de NaN introduit hors fenêtre, totaux conservés, index restitué…).
 5. Spécifique `frequency` : une fréquence détectée est une propriété du couple
    **(entité, colonne)** ; `impute_intermediate_frequencies` ne se teste jamais par vérité
@@ -691,7 +696,7 @@ Créer tests/unit/utils/position/test_{converter,normalizer,utils}.py :
   cible, multiplicateurs ('2MS' → '2ME'), fréquences sans notion de position (D, h) ;
 - conversion d'index / de jeux de données (MS ↔ ME, QS ↔ QE, YS ↔ YE) : valeurs d'or de dates
   calculées à la main (fin de février bissextile 2024, trimestres), séries et panels
-  (nb3_panel : positions début), index irrégulier (nb3_timeseries), index désordonné,
+  (heterogeneous_coverage_panel : positions début), index irrégulier (irregular_index_timeseries), index désordonné,
   MultiIndex 3 niveaux ; les imports différés de tsforecast.utils.frequency dans converter.py
   doivent être exercés.
 Une conversion qui déplace une observation hors de sa période d'origine est une anomalie
@@ -747,7 +752,7 @@ Compléter, en exerçant les deux chemins (index / colonne time_col) et le param
 - aller-retour validate_temporal_data → restore_original_structure == identité, pour chaque
   perturbation de tests/support/perturbations.py ;
 - validate_entities_grouped / validate_sorted_within_groups : entités entrelacées, triées par
-  entité mais pas par date, strict True / False (erreur vs correction), nb3_panel mélangé.
+  entité mais pas par date, strict True / False (erreur vs correction), heterogeneous_coverage_panel mélangé.
 Attention : le message « Cannot determine time index » de base/transformers.py qui fait échouer
 des tests delays vient peut-être d'ici — si validate_temporal_data refuse un cas raisonnable,
 c'est une anomalie à consigner (et à signaler pour D3-D5).
@@ -805,8 +810,8 @@ tests/unit/utils/frequency/test_detector.py (53 tests, 5 échecs : Series à Mul
    CENTRAL du package (HighFrequencyImputer en dépend) : une Series à MultiIndex qui n'est plus
    détectée est a priori (b) sauf preuve d'un changement délibéré.
 2. Compléter : chaque fréquence (D, W, M, Q, Y, positions S / E), séries à trous, à une seule
-   observation, à deux observations, index irrégulier (nb3_timeseries : fréquence de chaque
-   colonne, et de l'index global), panel à fréquence hétérogène par entité (nb3_panel,
+   observation, à deux observations, index irrégulier (irregular_index_timeseries : fréquence de chaque
+   colonne, et de l'index global), panel à fréquence hétérogène par entité (heterogeneous_coverage_panel,
    depenses_publiques_pib : Y pour FR / IT, Q pour DE), colonne jamais observée pour une
    entité (climat_affaires / IT), données désordonnées, return_format ; target_offset_for_index.
 
@@ -838,8 +843,8 @@ En plan mode :
    test_aggregation.py, test_interpolation.py, test_panel.py). Faire valider.
 
 Puis : trier l'échec existant (§4.4) ; écrire les tests manquants avec valeurs d'or à la main ;
-propriété d'additivité (agrégation par somme d'une désagrégation = identité) ; nb3_panel et
-nb3_timeseries au moins une fois par méthode publique.
+propriété d'additivité (agrégation par somme d'une désagrégation = identité) ; heterogeneous_coverage_panel et
+irregular_index_timeseries au moins une fois par méthode publique.
 
 Critères §4.6 (objectif 90 % minimum sur ce fichier) ; rapport §4.7.
 ```
@@ -877,7 +882,7 @@ panel_cols). Test : tests/unit/delays/test_data_manager.py (48 tests), dans coll
    premier téléchargement (existing_data=None), révisions de valeurs déjà publiées (sont-elles
    des « nouvelles observations » ?), panel (panel_cols) et série, time_col vs index,
    download_date str / datetime, données désordonnées, colonnes au nom spécial ; scénario
-   réaliste : nb3_panel « téléchargé » à deux dates (le second avec les valeurs retirées par
+   réaliste : heterogeneous_coverage_panel « téléchargé » à deux dates (le second avec les valeurs retirées par
    les délais simulés du notebook) → délais détectés par (entité, colonne) cohérents avec
    ceux simulés.
 
@@ -967,7 +972,7 @@ une variable, variable sans délai, entité absente du tableau). Faire valider.
 
 Puis : tri des échecs (§4.4 ; le KeyError est-il un renommage de colonne non répercuté dans le
 code — ce serait (b), un bogue introduit par le renommage — ou dans le test ?) ; tests de la
-matrice ; aller-retour transform / inverse_transform ; sur nb3_panel avec des délais tirés de
+matrice ; aller-retour transform / inverse_transform ; sur heterogeneous_coverage_panel avec des délais tirés de
 compare_and_detect_delays (D1) → après transform, la dernière valeur disponible de chaque
 (entité, colonne) est cohérente avec son délai.
 
@@ -993,10 +998,10 @@ voir aussi ce qu'a conclu U5.
 1. Tri §4.4 de chaque échec, retrait du groupe D5 de legacy_failures.txt.
 2. Scinder par thème si utile (test_panelwise.py, test_workflow.py) ; marquer slow le test de
    performance.
-3. Ajouter le workflow de bout en bout sur nb3_panel : deux « téléchargements » →
+3. Ajouter le workflow de bout en bout sur heterogeneous_coverage_panel : deux « téléchargements » →
    compare_and_detect_delays → calculate_applicable_delay → PublicationDelayTransformer →
    vérification par (entité, colonne) ; puis PublicationDelayTransformer dans une XYPipeline
-   évaluée par cross_validate avec TSOutOfSampleSplit sur nb3_timeseries (pas de fuite :
+   évaluée par cross_validate avec TSOutOfSampleSplit sur irregular_index_timeseries (pas de fuite :
    aucune donnée du pli de test visible au fit).
 
 Critères §4.6 (couverture globale de tsforecast/delays ≥ 90 % en fin de partie D) ;
@@ -1034,7 +1039,7 @@ provenance.py :
   get_mask, compute_statistics (tous les types présents, pourcentages cohérents, jeu vide),
   get_provenance_matrix, to_string_matrix, merge (chevauchements, colonnes disjointes,
   conflits) ;
-- nb3_panel : marquage de la seule entité IT, aucune cellule FR / DE touchée.
+- heterogeneous_coverage_panel : marquage de la seule entité IT, aucune cellule FR / DE touchée.
 
 imputation_plan.py : ImputationStep (frozen, __eq__ Series-safe sur scale_factor, stage_key,
 emitted_provenance pour chaque combinaison de souillures et unanchored), ImputationPlan
@@ -1059,7 +1064,7 @@ HighFrequencyImputer mais exporté (IndexRegularizer, is_regular, regularize). L
 notebooks/utils/regularizer.ipynb + notebooks/test_regularizer.ipynb (possiblement périmés),
 puis créer tests/unit/frequency/test_regularizer.py :
 - is_regular : série régulière / à trou / à doublon ; panel régulier, panel dont UNE entité est
-  irrégulière ; D, M (début et fin), Q, Y ; nb3_timeseries et nb3_panel (irréguliers) ;
+  irrégulière ; D, M (début et fin), Q, Y ; irregular_index_timeseries et heterogeneous_coverage_panel (irréguliers) ;
 - regularize : réindexation sur la grille régulière, valeurs préservées aux dates d'origine,
   NaN aux dates ajoutées, idempotence, non trié, panel à couvertures hétérogènes (chaque entité
   garde-t-elle SES bornes ?), positions incohérentes entre entités (quelle erreur ?) ;
@@ -1067,7 +1072,7 @@ puis créer tests/unit/frequency/test_regularizer.py :
 Une observation détruite ou une fréquence d'entité modifiée par regularize → anomalie.
 
 Partie B — tests/unit/frequency/test_target_frequency_validator.py (93 %, 23 tests) :
-branches manquantes (term-missing d'abord), nb3_panel (y à couverture hétérogène), cible
+branches manquantes (term-missing d'abord), heterogeneous_coverage_panel (y à couverture hétérogène), cible
 absente pour une entité, target_frequency en dict avec entité inconnue / manquante, fréquence
 cible plus basse que celle de y.
 
@@ -1093,7 +1098,7 @@ utilisé par le notebook 3).
 2. Compléter, valeurs d'or à la main : agrégation M→Q, M→Y, Q→Y (méthodes exposées), périodes
    incomplètes en bord, NaN au milieu d'une période ; interpolation Y→M, Q→M, positions début ET
    fin des deux côtés (le commit 967e2ad « position coherence with source index » est récent :
-   zone à risque) ; panel à fréquence par (entité, colonne) — nb3_panel, depenses_publiques_pib ;
+   zone à risque) ; panel à fréquence par (entité, colonne) — heterogeneous_coverage_panel, depenses_publiques_pib ;
    shuffle_rows → résultat identique ; noms de colonnes spéciaux ; index 3 niveaux ;
    build_densified_index : bornes exactes par position.
 
@@ -1118,12 +1123,12 @@ ImputationWindowCalculator, ImputationScope.
 2. Un test par contrat : inclusion strict ⊆ imputation, relation avec training selon
    training_scope ; type de retour panel = pd.Series unique à MultiIndex (entity…, date), jamais
    un dict ; bornes = dict par entité ; entities_without_window_ ; coverage_threshold 0 et 1 ;
-   extensions avant / arrière ; D39 sur nb3_panel (climat_affaires / IT hors dénominateur,
+   extensions avant / arrière ; D39 sur heterogeneous_coverage_panel (climat_affaires / IT hors dénominateur,
    avertissement UNIQUE, structurally_absent_columns_ exact) ; get_mask_at_frequency pour chaque
    kind, M→Q, M→Y, positions début / fin, entité sans fenêtre, clés scalaires vs tuples ;
    get_columns_with_coverage ; NotFitted sur chaque méthode publique.
-3. nb3_panel : fenêtres par entité cohérentes avec les couvertures propres (DE finit en
-   2024-04, IT commence en 2019-01), bornes calculées à la main ; nb3_timeseries : les dates
+3. heterogeneous_coverage_panel : fenêtres par entité cohérentes avec les couvertures propres (DE finit en
+   2024-04, IT commence en 2019-01), bornes calculées à la main ; irregular_index_timeseries : les dates
    annuelles de 2015 ne doivent pas étendre la fenêtre stricte avant 2018 (sinon : anomalie ?).
 4. Robustesse : shuffle_rows, reverse_entities, to_three_level_index → mêmes masques.
 
@@ -1149,7 +1154,7 @@ validate_constraint_columns, ConstraintKind, DEFAULT_CONSTRAINT_KEY.
    avec DEFAULT_CONSTRAINT_KEY, colonne inconnue, types invalides).
 2. rescale — invariant « somme des sous-périodes recalées = total observé » par PROPRIÉTÉ sur
    Y→M, Y→Q, Q→M ; positions début / fin ; période incomplète en bord ; sous-période NaN ; total
-   nul ; total NÉGATIF (balance commerciale de nb3 !) ; toutes sous-périodes nulles (division
+   nul ; total NÉGATIF (balance commerciale d'`irregular_index_timeseries` !) ; toutes sous-périodes nulles (division
    par zéro ?) ; panel à fréquence source différente par entité.
 3. anchor_cells_mask : exactement les cellules des ancres.
 4. sklearn : clone, get_params / set_params, fit_transform == fit().transform(), NotFitted.
@@ -1181,7 +1186,7 @@ Cible : tests/unit/frequency/test_stage_scaler.py (47 tests, 91 %, 20 appels pri
 3. Règle de forme : Series vs DataFrame selon la configuration, y compris diviseurs tous à 1.0.
 4. Symétrie inverse_transform ∘ transform == identité (1e-12) sur features et cible ; transform
    distingue features / cible par le type.
-5. source_freq par entité : PANEL-F et nb3_panel (depenses_publiques_pib Y pour FR / IT, Q pour
+5. source_freq par entité : PANEL-F et heterogeneous_coverage_panel (depenses_publiques_pib Y pour FR / IT, Q pour
    DE).
 6. sklearn : clone, NotFitted, get_params ; méthodes de diviseur utilisables sans fit.
 
@@ -1211,7 +1216,7 @@ case = couvert / à ajouter / sans objet. Faire valider.
 
 Puis : un test par rang de précédence, avec deux rangs candidats dont seul le plus prioritaire
 s'applique ; unicité de la voie par (colonne, entité, étape) ; invariant fit → predict sur
-nb3_panel par entité ; covariate_eligibility (climat_affaires / IT) ; snapshot / reset isolent
+heterogeneous_coverage_panel par entité ; covariate_eligibility (climat_affaires / IT) ; snapshot / reset isolent
 deux usages successifs ; AggregationConstraintApplier (Protocol) : une doublure minimale suffit.
 
 Critères §4.6 ; rapport §4.7.
@@ -1238,7 +1243,7 @@ robustesse et les propriétés.
 - build : lignes d'or sur PANEL-F (51 à toutes les étapes), 12 vs 15 lignes a1 / a2 à l'étape M
   sous 'sum' vs None ; entité plus fine que l'étape jamais sur la grille de prédiction ; filtre
   d'origine ; fenêtre 'training' lue par couche ;
-- nb3_panel, depenses_publiques_pib : blocs {FR: Y, DE: Q, IT: Y}, diviseurs cohérents avec
+- heterogeneous_coverage_panel, depenses_publiques_pib : blocs {FR: Y, DE: Q, IT: Y}, diviseurs cohérents avec
   StageScaler ;
 - shuffle_rows / reverse_entities → mêmes lignes (au tri près).
 
@@ -1335,7 +1340,7 @@ tests/unit/frequency/high_frequency_imputer/ créé en F10. Aucun changement dan
 4. Positions : PANEL-X passé en to_period_start → mêmes imputations au décalage de date près.
    Constat connu non corrigé (campagne HFI2) : sur un index MS, la grille cible porte une ligne de
    plus par entité — l'épingler ici, anomalie si confirmé.
-5. fit sur nb3_timeseries et nb3_panel pour chaque covariate_strategy : pas d'exception, aucune
+5. fit sur irregular_index_timeseries et heterogeneous_coverage_panel pour chaque covariate_strategy : pas d'exception, aucune
    cellule observée marquée imputée, avertissements agrégés (un par famille au plus).
 
 Critères §4.6 ; rapport §4.7.
@@ -1366,7 +1371,7 @@ changement dans tsforecast/.
    - inverse_transform(transform(X)) restitue les valeurs OBSERVÉES de X et son index
      (niveaux multiples, noms non standards) ;
    - keep_lower_frequencies et sortie multi-fréquences selon D35.
-3. nb3_panel : fit jusqu'à 2023-12, transform sur l'ensemble ; DE (fin 2024-04) n'est pas
+3. heterogeneous_coverage_panel : fit jusqu'à 2023-12, transform sur l'ensemble ; DE (fin 2024-04) n'est pas
    prolongée au-delà de sa couverture sans provenance adéquate.
 
 Critères §4.6 ; objectif final high_frequency_imputer.py ≥ 95 %. Rapport §4.7.
@@ -1384,7 +1389,7 @@ tests_and_refactoring_prompts.md (le §3 définit la frontière unit / integrati
 Objectif : tests/integration/frequency/, comportement de bout en bout sur les jeux du notebook 3
 et insertion de HighFrequencyImputer dans l'écosystème du package. Plan mode : proposer la
 matrice de scénarios et la faire valider. Pistes :
-1. test_hfi_on_notebook3.py : HFI sur nb3_timeseries et nb3_panel, chaque covariate_strategy ×
+1. test_hfi_on_realistic_dataset.py : HFI sur irregular_index_timeseries et heterogeneous_coverage_panel, chaque covariate_strategy ×
    impute_intermediate_frequencies — aucune valeur observée modifiée ; totaux de période
    conservés sous 'sum' ; chaque cellule non NaN de la sortie a une provenance ; NaN restants
    seulement là où la spec les annonce (par entité : climat_affaires / IT) ; entités à
@@ -1593,7 +1598,7 @@ FIGE le comportement actuel avant le refactoring.
    impute_intermediate_frequencies × aggregation_constraint ('sum', None) × fit_predict_order
    ('frequency', 'cv') × impute_unobserved_entities, élaguée aux combinaisons distinctes
    (voir §15.2 de la spec : classes d'équivalence) — et pour les jeux PANEL-X, ses projections,
-   nb3_timeseries, nb3_panel, enregistre : sortie de fit_transform, de transform sur un X
+   irregular_index_timeseries, heterogeneous_coverage_panel, enregistre : sortie de fit_transform, de transform sur un X
    postérieur, de inverse_transform, la matrice de provenance, to_diagnostic_frame() du plan,
    les attributs publics ajustés (sérialisables), et la liste (catégorie, message) des
    avertissements. Format : pickle pandas (pd.to_pickle) + un manifest JSON (configuration,
@@ -1730,7 +1735,7 @@ _check_target_frequency_covers_entities.
    jamais de l'imputeur entier.
 2. La classe calcule le layout une fois en phase 0-3 et publie les MÊMES attributs ajustés
    (detected_frequencies_, variable_categories_, frequency_progression_, …) qu'avant.
-3. tests/unit/imputation/_engine/test_frequency_layout.py : PANEL-X, PANEL-F, nb3_panel
+3. tests/unit/imputation/_engine/test_frequency_layout.py : PANEL-X, PANEL-F, heterogeneous_coverage_panel
    (depenses_publiques_pib Y / Q / Y, climat_affaires / IT non détectée), progression fusionnée
    sur cibles hétérogènes ; tests internal déplacés.
 
