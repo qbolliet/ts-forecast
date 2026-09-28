@@ -74,6 +74,99 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/utils/parse/test_utils.py::TestParseBuildRoundTrip::test_roundtrip_is_identity[W-MON]`
 - **Statut** : corrigée
 
+### ANO-UTILS-002 — Docstring de `DurationNormalizer` : exemple appelant une méthode inexistante
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/utils/duration/normalizer.py::DurationNormalizer`
+- **Sévérité** : cosmétique
+- **Observé** : le docstring de classe (`Examples:`) appelle
+  `normalizer.normalize_duration('monthly')` ; `DurationNormalizer` n'expose
+  pas de méthode `normalize_duration` (ce nom est celui de la fonction de
+  commodité au niveau module, `tsforecast/utils/duration/utils.py::normalize_duration`,
+  qui appelle en interne `DurationNormalizer.normalize`). `uv run pytest
+  --doctest-modules tsforecast/utils/duration` lève
+  `AttributeError: 'DurationNormalizer' object has no attribute 'normalize_duration'`.
+- **Attendu** : l'exemple devrait appeler `normalizer.normalize('monthly')`
+  (ou `normalize_duration('monthly')` après import de la fonction module).
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.duration.normalizer import DurationNormalizer
+  DurationNormalizer().normalize_duration('monthly')  # AttributeError
+  ```
+- **Test** : découvert hors campagne de tests dédiés, via
+  `uv run pytest --doctest-modules tsforecast/utils/duration` (non ajouté à
+  `tests/`, aucun test de doctest n'existe encore pour ce module).
+- **Correctif** : l'exemple appelle désormais `normalizer.normalize('month')`
+  (littéral valide de `UserDurationType`, `'monthly'` n'en fait pas partie).
+  `uv run pytest --doctest-modules tsforecast/utils/duration` passe.
+- **Statut** : corrigée
+
+### ANO-UTILS-003 — Docstring de `get_duration_order` : type de retour annoncé (`float`) ≠ type observé (`int`)
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/utils/duration/utils.py::get_duration_order`
+- **Sévérité** : cosmétique
+- **Observé** : le docstring annonce `Returns: Duration order as float` et
+  l'exemple `>>> get_duration_order('day') / 7.0`, mais `_duration_order`
+  (`DurationNormalizer.__init__`) stocke des `int` pour la plupart des codes
+  (seuls `'B'` et `'SM'` sont des `float`, `7.5`/`8.5`, pour s'insérer entre
+  deux durées standards) : `get_duration_order('day')` renvoie l'`int` `7`,
+  pas le `float` `7.0`. `uv run pytest --doctest-modules
+  tsforecast/utils/duration` échoue sur cet exemple.
+- **Attendu** : soit le docstring documente le type réel (`int` ou `float`
+  selon le code), soit le code caste systématiquement en `float`.
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.duration.utils import get_duration_order
+  type(get_duration_order('day'))  # <class 'int'>, pas <class 'float'>
+  ```
+- **Test** : couvert côté test par
+  `tests/unit/utils/duration/test_utils.py::TestGetDurationOrder::test_golden_orders`
+  (assertions d'égalité numérique, insensibles au type exact).
+- **Correctif** : docstring corrigé pour documenter le type réel (`int` ou
+  `float` selon le code) et l'exemple mis à jour (`get_duration_order('day')
+  == 7`, pas `7.0`). Code inchangé (pas de cast systématique en `float`).
+- **Statut** : corrigée
+
+### ANO-UTILS-004 — `DurationConverter.convert(rounding=...)` ignorait silencieusement une valeur de `rounding` inconnue
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/duration/converter.py::DurationConverter._round_result`
+- **Sévérité** : mineure
+- **Observé** : une valeur de `rounding` autre que `'floor'`, `'ceil'` ou
+  `None` (ex. `'round'`) ne levait aucune erreur ; `_round_result` retournait
+  silencieusement la valeur non arrondie, comme si `rounding=None` avait été
+  passé. Point de vigilance déjà relevé dans
+  `notebooks/utils/duration_converter.ipynb` §3.4.
+- **Attendu** : une valeur de `rounding` non reconnue doit être rejetée
+  explicitement (échec rapide plutôt que silencieux).
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.duration.converter import DurationConverter
+  DurationConverter().convert(37, 'h', 'D', rounding='round')  # ValueError désormais
+  ```
+- **Correctif** : `_round_result` lève `ValueError("Unsupported rounding
+  mode: ...")` pour toute valeur autre que `'floor'`/`'ceil'`.
+- **Test** : `tests/unit/utils/duration/test_converter.py::TestConvert::test_unrecognized_rounding_value_raises`
+- **Statut** : corrigée
+
+### ANO-UTILS-005 — `DurationConverter.get_conversion_factor` : branche défensive inatteignable
+- **Type** : [CODE] comportement (nettoyage, pas un bogue)
+- **Composant** : `tsforecast/utils/duration/converter.py::DurationConverter.get_conversion_factor`
+- **Sévérité** : cosmétique
+- **Observé** : après recherche dans la table calendaire (`_CALENDAR_SUBPERIODS`),
+  le code vérifiait `if from_code not in _CONVERSION_FACTORS_TO_SECONDS`
+  (et l'équivalent pour `to_code`) avant le calcul via les secondes. Ces
+  branches étaient du code mort : `from_code`/`to_code` proviennent de
+  `normalize_duration`, qui ne renvoie que des codes déjà présents dans
+  `_CONVERSION_FACTORS_TO_SECONDS` (mêmes clés que `_code_to_literal`) — donc
+  inatteignables avec les mappings actuels, décelé lors de la campagne de tests
+  U2 (couverture bloquée à 92 % sur ces deux lignes).
+- **Attendu** : suppression du code mort, sans changement de comportement.
+- **Correctif** : les deux `if` et leurs `raise ValueError` retirés ; le
+  commentaire précédant le calcul explique désormais la garantie qui les
+  rendait inutiles.
+- **Test** : couverture 100 % de `converter.py` après suppression
+  (`tests/unit/utils/duration/test_converter.py`).
+- **Statut** : corrigée
+
 ## DELAYS
 
 _Aucune entrée._

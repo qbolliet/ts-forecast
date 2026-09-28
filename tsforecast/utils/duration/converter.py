@@ -132,13 +132,9 @@ class DurationConverter(TemporalConverter):
         if inverted is not None:
             return 1.0 / float(inverted)
 
-        # Vérification que les facteurs existent
-        if from_code not in _CONVERSION_FACTORS_TO_SECONDS:
-            raise ValueError(f"No conversion factor for duration: {from_code}")
-        if to_code not in _CONVERSION_FACTORS_TO_SECONDS:
-            raise ValueError(f"No conversion factor for duration: {to_code}")
-
-        # Calcul du facteur via l'unité de référence (secondes)
+        # Calcul du facteur via l'unité de référence (secondes) : from_code et
+        # to_code sont garantis présents dans _CONVERSION_FACTORS_TO_SECONDS à
+        # ce stade (normalize_duration ne renvoie que des codes qui y figurent)
         from_to_seconds = _CONVERSION_FACTORS_TO_SECONDS[from_code]
         to_to_seconds = _CONVERSION_FACTORS_TO_SECONDS[to_code]
 
@@ -155,6 +151,9 @@ class DurationConverter(TemporalConverter):
         Returns:
             Rounded value
 
+        Raises:
+            ValueError: If rounding is not 'floor' or 'ceil'
+
         Examples:
             >>> converter = DurationConverter()
             >>> converter._round_result(1.5, 'floor')
@@ -167,4 +166,7 @@ class DurationConverter(TemporalConverter):
         elif rounding == 'ceil':
             return math.ceil(value)
         else:
-            return value
+            raise ValueError(
+                f"Unsupported rounding mode: {rounding!r}. "
+                "Supported modes: 'floor', 'ceil', or None for no rounding."
+            )

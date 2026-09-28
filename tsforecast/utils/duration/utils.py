@@ -194,16 +194,21 @@ def get_duration_order(duration: Union[DurationType, UserDurationType]) -> float
         duration: Duration to get order for. Can be code or literal name.
 
     Returns:
-        Duration order as float. Higher number means longer duration.
-        Returns 0 if duration is not found in the order mapping.
+        Duration order as int or float. Higher number means longer duration.
+        Most codes have an int order ; 'B' (business_day) and 'SM'
+        (semi_month) have a non-integer float order (7.5, 8.5) to fit
+        strictly between two standard durations. 0 if the duration is not
+        found in the order mapping (unreachable in practice: normalize_duration
+        already raises ValueError for an unsupported duration before this
+        lookup is reached).
 
     Examples:
         >>> get_duration_order('day')
-        7.0
+        7
         >>> get_duration_order('month')
-        9.0
+        9
         >>> get_duration_order('hour')
-        6.0
+        6
         >>> get_duration_order('quarter') > get_duration_order('month')
         True
     """

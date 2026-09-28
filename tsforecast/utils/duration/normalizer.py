@@ -28,7 +28,7 @@ class DurationNormalizer(TemporalNormalizer):
         'h'
         >>> normalizer.to_literal('D')
         'day'
-        >>> normalizer.normalize_duration('monthly')
+        >>> normalizer.normalize('month')
         'M'
     """
 
