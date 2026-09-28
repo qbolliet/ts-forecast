@@ -58,3 +58,25 @@ class FailingEstimator(BaseEstimator, RegressorMixin):
     def predict(self, X):
         """Jamais atteint : l'ajustement a déjà échoué."""
         raise RuntimeError('deliberate predict failure')
+
+
+class ConstantEstimator(BaseEstimator, RegressorMixin):
+    """Estimateur qui prédit toujours la même constante, quel que soit ``X``.
+
+    Ignore entièrement ``X`` et ``y`` au ``fit`` : contrairement à
+    :class:`SpyEstimator` (moyenne de ``y``), la constante est fixée à
+    l'``__init__``, ce qui rend la sortie une valeur d'or triviale et connue
+    d'avance — utile pour isoler le comportement d'un composant amont
+    (fenêtrage, mise à l'échelle) de celui de l'estimateur lui-même.
+    """
+
+    def __init__(self, constant: float = 0.0):
+        self.constant = constant
+
+    def fit(self, X, y):
+        """N'apprend rien : seule la présence de ``fit`` satisfait le contrat sklearn."""
+        return self
+
+    def predict(self, X):
+        """Rend ``constant``, répété pour chaque ligne de ``X``."""
+        return np.full(len(X), self.constant)

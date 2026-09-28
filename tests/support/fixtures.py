@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from tests.support.datasets import (
+    HETEROGENEOUS_PANEL_COUNTRIES,
     build_panel_nb2,
     build_panel_reference,
     build_panel_two_level,
@@ -251,8 +252,22 @@ def test_helpers():
 # =============================================================================
 
 
+# -----------------------------------------------------------------------------
+# Jeux coûteux : construits UNE fois par session (``_..._session``), chaque
+# fixture publique en renvoie une ``.copy()`` — un test qui mute son jeu (tri
+# en place, renommage de colonnes...) ne contamine jamais les tests suivants,
+# y compris ceux d'un autre fichier partageant la même session pytest.
+# -----------------------------------------------------------------------------
+
+
+@pytest.fixture(scope='session')
+def _mixed_freq_timeseries_session() -> pd.DataFrame:
+    """Session-scoped build of :func:`mixed_freq_timeseries` — see its docstring."""
+    return build_timeseries_nb2()
+
+
 @pytest.fixture
-def mixed_freq_timeseries() -> pd.DataFrame:
+def mixed_freq_timeseries(_mixed_freq_timeseries_session: pd.DataFrame) -> pd.DataFrame:
     """Mixed-frequency macroeconomic time series (mirrors df_timeseries).
 
     DatetimeIndex named ``date``, month-start anchored (``MS``), 79 rows
@@ -271,11 +286,17 @@ def mixed_freq_timeseries() -> pd.DataFrame:
       NaN elsewhere): ~-26 to -9, last available year NaN (simulated
       3-month publication delay).
     """
-    return build_timeseries_nb2()
+    return _mixed_freq_timeseries_session.copy()
+
+
+@pytest.fixture(scope='session')
+def _panel_two_level_dataset_session() -> pd.DataFrame:
+    """Session-scoped build of :func:`panel_two_level_dataset` — see its docstring."""
+    return build_panel_two_level()
 
 
 @pytest.fixture
-def panel_two_level_dataset() -> pd.DataFrame:
+def panel_two_level_dataset(_panel_two_level_dataset_session: pd.DataFrame) -> pd.DataFrame:
     """Two-level entity panel (country x sector), 2x2 = 4 entities.
 
     MultiIndex (``country``, ``sector``, ``date``) with 2 countries
@@ -287,11 +308,17 @@ def panel_two_level_dataset() -> pd.DataFrame:
     - ``indicateur_trimestriel`` (quarterly: non-NaN only at quarter-start
       months 1/4/7/10, NaN elsewhere) — the variable to impute: ~500-575.
     """
-    return build_panel_two_level()
+    return _panel_two_level_dataset_session.copy()
+
+
+@pytest.fixture(scope='session')
+def _mixed_freq_panel_session() -> pd.DataFrame:
+    """Session-scoped build of :func:`mixed_freq_panel` — see its docstring."""
+    return build_panel_nb2()
 
 
 @pytest.fixture
-def mixed_freq_panel() -> pd.DataFrame:
+def mixed_freq_panel(_mixed_freq_panel_session: pd.DataFrame) -> pd.DataFrame:
     """Mixed-frequency macroeconomic panel (mirrors df_panel).
 
     MultiIndex (``country``, ``date``) with 3 entities (``France``,
@@ -314,11 +341,17 @@ def mixed_freq_panel() -> pd.DataFrame:
     - ``balance_commerciale_annuelle`` (annual, non-NaN only in January):
       ~-30 to +5, last available year per entity NaN.
     """
-    return build_panel_nb2()
+    return _mixed_freq_panel_session.copy()
+
+
+@pytest.fixture(scope='session')
+def _panel_reference_full_session() -> pd.DataFrame:
+    """Session-scoped build of :func:`panel_reference_full` — see its docstring."""
+    return build_panel_reference()
 
 
 @pytest.fixture
-def panel_reference_full() -> pd.DataFrame:
+def panel_reference_full(_panel_reference_full_session: pd.DataFrame) -> pd.DataFrame:
     """Unified ``PANEL-X`` reference dataset (``high_frequency_imputer2_architecture.md`` §2.6).
 
     The single frame all three frozen reference datasets project from:
@@ -336,11 +369,11 @@ def panel_reference_full() -> pd.DataFrame:
     :func:`~tests.support.datasets.build_panel_reference` for their
     definitions.
     """
-    return build_panel_reference()
+    return _panel_reference_full_session.copy()
 
 
 @pytest.fixture
-def reference_timeseries() -> pd.DataFrame:
+def reference_timeseries(_panel_reference_full_session: pd.DataFrame) -> pd.DataFrame:
     """``TS`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.2.
 
     Strict projection of ``PANEL-X`` (§2.6, :func:`panel_reference_full`):
@@ -357,8 +390,7 @@ def reference_timeseries() -> pd.DataFrame:
     The annual gold values match §2.2 verbatim and are reused as gold cases
     by later implementation lots; they must not change.
     """
-    panel_x = build_panel_reference()
-    df = panel_x.loc['FR', ['m1', 'q1', 'a1', 'a2']].copy()
+    df = _panel_reference_full_session.loc['FR', ['m1', 'q1', 'a1', 'a2']].copy()
     # Restauration de la fréquence d'index, perdue au découpage du MultiIndex :
     # la projection reste identique bit à bit à l'ancien constructeur dédié.
     df.index.freq = df.index.inferred_freq
@@ -366,7 +398,7 @@ def reference_timeseries() -> pd.DataFrame:
 
 
 @pytest.fixture
-def mixed_freq_panel_heterogeneous() -> pd.DataFrame:
+def mixed_freq_panel_heterogeneous(_panel_reference_full_session: pd.DataFrame) -> pd.DataFrame:
     """``PANEL`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.3.
 
     Strict projection of ``PANEL-X`` (§2.6, :func:`panel_reference_full`):
@@ -382,11 +414,11 @@ def mixed_freq_panel_heterogeneous() -> pd.DataFrame:
       observes it — the support of ``covariate_eligibility`` (§4.5) and of
       the per-entity NaN invariant (§3).
     """
-    return build_panel_reference()[['m1', 'q1', 'a1', 'a2', 'climat_affaires']]
+    return _panel_reference_full_session[['m1', 'q1', 'a1', 'a2', 'climat_affaires']].copy()
 
 
 @pytest.fixture
-def mixed_freq_panel_multifrequency() -> pd.DataFrame:
+def mixed_freq_panel_multifrequency(_panel_reference_full_session: pd.DataFrame) -> pd.DataFrame:
     """``PANEL-F`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.5.
 
     Strict projection of ``PANEL-X`` (§2.6, :func:`panel_reference_full`):
@@ -406,4 +438,55 @@ def mixed_freq_panel_multifrequency() -> pd.DataFrame:
     No ``climat_affaires`` column: this dataset is not ``PANEL`` and does
     not replace it.
     """
-    return build_panel_reference()[['m1', 'q1', 'v']]
+    return _panel_reference_full_session[['m1', 'q1', 'v']].copy()
+
+
+@pytest.fixture(scope='session')
+def _nb3_timeseries_session() -> pd.DataFrame:
+    """Session-scoped build of :func:`nb3_timeseries` — see its docstring."""
+    return build_timeseries_nb2(annual_start_date='2015-01-01')
+
+
+@pytest.fixture
+def nb3_timeseries(_nb3_timeseries_session: pd.DataFrame) -> pd.DataFrame:
+    """Realistic mixed-frequency time series of notebook 3.
+
+    ``build_timeseries_nb2(annual_start_date='2015-01-01')`` — same schema as
+    :func:`mixed_freq_timeseries`, with ``balance_commerciale_annuelle``'s
+    history starting in 2015, three years before the monthly grid
+    (2018-01-01). The union with the monthly grid introduces isolated annual
+    anchors before its start, and the resulting index is genuinely
+    irregular (:func:`tsforecast.frequency.is_regular` is ``False``) — not
+    only a regular grid dotted with NaN, unlike every other fixture in this
+    module.
+    """
+    return _nb3_timeseries_session.copy()
+
+
+@pytest.fixture(scope='session')
+def _nb3_panel_session() -> pd.DataFrame:
+    """Session-scoped build of :func:`nb3_panel` — see its docstring."""
+    return build_panel_nb2(countries=HETEROGENEOUS_PANEL_COUNTRIES)
+
+
+@pytest.fixture
+def nb3_panel(_nb3_panel_session: pd.DataFrame) -> pd.DataFrame:
+    """Realistic heterogeneous mixed-frequency panel of notebook 3.
+
+    ``build_panel_nb2(countries=HETEROGENEOUS_PANEL_COUNTRIES)`` — 3 entities
+    (``France``, ``Allemagne``, ``Italie``), each with its own monthly-grid
+    coverage (France 2018-01 to 2024-07, Allemagne 2018-07 to 2024-04, Italie
+    2019-01 to 2024-07) rather than one common period truncated per entity.
+    Adds two columns absent from :func:`mixed_freq_panel`:
+
+    - ``depenses_publiques_pib``: publication frequency differs by entity
+      (annual for France and Italie, quarterly for Allemagne), last
+      publication per entity NaN.
+    - ``climat_affaires``: observed for France and Allemagne, structurally
+      absent (column present, zero observation) for Italie.
+
+    Each entity's ``balance_commerciale_annuelle`` history also starts
+    earlier than its monthly grid, so every entity's index is individually
+    irregular (see :func:`nb3_timeseries`).
+    """
+    return _nb3_panel_session.copy()

@@ -150,21 +150,33 @@ raison d'aligner un test sur la docstring contre le code, ni sur le code contre 
 
 ### 2.4 Jeux de données
 
-- `tests/frequency/conftest.py` porte `_build_timeseries` / `_build_panel` (répliques du
-  **notebook 2**), `_build_panel_two_level` et `_build_panel_reference` (jeu `PANEL-X` :
-  colonnes `m1, q1, a1, a2, climat_affaires, v`, entités `FR/DE/IT`, valeurs d'or du §2 de la
-  spec) et ses projections (`reference_timeseries`, `mixed_freq_panel_heterogeneous`,
-  `mixed_freq_panel_multifrequency`).
-- **Aucune** réplique des jeux du **notebook 3** (`notebooks/3 - QB - Panel a frequences mixtes
-  heterogene.ipynb`, `create_timeseries_dataset` / `create_panel_dataset`) n'existe dans
-  `tests/`. Ce sont les plus réalistes : couverture propre à chaque entité (FR 2018-01→2024-07,
-  DE 2018-07→2024-04, IT 2019-01→2024-07), index **irrégulier** (balance commerciale annuelle
-  démarrant en 2015/2016, avant la grille mensuelle), `depenses_publiques_pib` annuelle pour
-  FR/IT et trimestrielle pour DE, `climat_affaires` jamais observée pour IT, délais de
-  publication simulés, dates en **début** de période (`MS`, `YS`).
+- `tests/support/datasets.py` porte `build_timeseries_nb2` / `build_panel_nb2` (répliques du
+  **notebook 2**, généralisées — voir ci-dessous), `build_panel_two_level` et
+  `build_panel_reference` (jeu `PANEL-X` : colonnes `m1, q1, a1, a2, climat_affaires, v`,
+  entités `FR/DE/IT`, valeurs d'or du §2 de la spec) et ses projections
+  (`reference_timeseries`, `mixed_freq_panel_heterogeneous`, `mixed_freq_panel_multifrequency`).
+- Le jeu du **notebook 3** (`notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb`,
+  `create_timeseries_dataset` / `create_panel_dataset`) n'a **pas** de constructeur dédié : il
+  fait doublon avec `build_timeseries_nb2` / `build_panel_nb2` sur deux de ses trois
+  caractéristiques (`climat_affaires` absente pour une entité et fréquence hétérogène par
+  entité pour une même colonne existent déjà dans `PANEL-X`, via `v`). Seule sa troisième
+  caractéristique — couverture temporelle propre à chaque entité et index **réellement**
+  irrégulier (dates annuelles antérieures à la grille mensuelle, pas seulement des NaN dans une
+  grille régulière) — est un apport réel, absent des jeux existants avant ce prompt. Plutôt que
+  d'ajouter des constructeurs `build_timeseries_nb3` / `build_panel_nb3` quasi dupliqués,
+  `build_timeseries_nb2` et `build_panel_nb2` ont été **étendus** avec les paramètres qui
+  manquaient (`annual_start_date`, et pour le panel : couverture par entité, fréquence de
+  publication par entité, covariable structurellement absente) ; les valeurs par défaut de ces
+  deux fonctions restent inchangées (jeu régulier historique), et le dictionnaire
+  `HETEROGENEOUS_PANEL_COUNTRIES` reproduit fidèlement `create_panel_dataset` en passant
+  `countries=HETEROGENEOUS_PANEL_COUNTRIES` à `build_panel_nb2`. Les fixtures `nb3_timeseries`
+  / `nb3_panel` (§4.2.4 et tous les prompts qui les utilisent) restent nommées ainsi mais sont
+  désormais construites par ces fonctions généralisées, pas par des constructeurs séparés — ce
+  qui ne change rien pour les prompts qui les consomment par leur nom de fixture.
 - ⚠️ Le notebook 3 amorce ses graines par `np.random.seed(seed + hash(country) % 1000)` :
-  `hash` d'une `str` est salé par processus, **son panel change à chaque exécution**. La
-  réplique de test utilise `zlib.crc32` : seule la **structure** du notebook est reproduite.
+  `hash` d'une `str` est salé par processus, **son panel change à chaque exécution**. Comme
+  `build_panel_nb2`, `HETEROGENEOUS_PANEL_COUNTRIES` passe par `zlib.crc32` : seule la
+  **structure** du notebook est reproduite, pas ses valeurs exactes.
 - Références aux anciens chemins de tests : `notebooks/5 - QB - HighFrequencyImputer pas a
   pas.ipynb` (importe `_build_panel_reference` par `importlib` depuis
   `tests/frequency/conftest.py`), `notebooks/utils/{frequency_aligner,frequency_converter,
@@ -195,7 +207,7 @@ tests/
 ├── ANOMALIES.md             # registre des anomalies (protocole §4.5)
 ├── run_tests.py             # --mode all | unit | integration | fast | coverage
 ├── support/                 # paquet partagé : `from tests.support import ...`
-│   ├── datasets.py          # constructeurs PURS : PANEL-X, notebook 2, notebook 3
+│   ├── datasets.py          # constructeurs PURS : PANEL-X, notebook 2 (généralisé notebook 3)
 │   ├── fixtures.py          # fixtures pytest, enregistrées par `pytest_plugins`
 │   ├── perturbations.py     # désordre, noms spéciaux, positions S/E, index 3 niveaux…
 │   ├── estimators.py        # SpyEstimator, FailingEstimator, ConstantEstimator
@@ -346,7 +358,7 @@ Rapport en français :
 | # | Objet | Modèle | Plan | Effort | Dépend de |
 |---|---|---|---|---|---|
 | **A0** | Arborescence, migration de **tous** les tests, config pytest/coverage, liste transitoire | Sonnet | **Oui** | medium | — |
-| **A1** | `tests/support` : jeux du notebook 3, perturbations, doublures | Sonnet | Non | medium | A0 |
+| **A1** | `tests/support` : fixtures notebook 3, perturbations, doublures | Sonnet | Non | medium | A0 |
 | **U1** | `utils/parse` + `utils/abc` (réparation de `test_parser.py`) | Sonnet | Non | medium | A0 |
 | **U2** | `utils/duration` | Sonnet | Non | medium | A0 |
 | **U3** | `utils/position` (12 %) | Opus | Non | high | A0 |
@@ -520,7 +532,7 @@ Rapport final : §4.7, plus le tableau ancien chemin → nouveau chemin et la du
 `-m "not slow"`.
 ```
 
-### Prompt A1 — `tests/support` : jeux du notebook 3, perturbations, doublures
+### Prompt A1 — `tests/support` : fixtures notebook 3, perturbations, doublures
 
 **Modèle : Sonnet · Plan mode : Non · Effort : medium · Dépendances : A0**
 
@@ -529,35 +541,40 @@ Contexte : dépôt ts-forecast. Lis CLAUDE.md puis les sections 2, 3 et 4 de
 tests_and_refactoring_prompts.md. A0 a créé tests/support/ (datasets.py, fixtures.py,
 estimators.py, test_datasets.py). Aucun changement dans tsforecast/.
 
-Objectif : doter les tests des jeux REALISTES du notebook
-`notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb` (aucune réplique dans tests/
-aujourd'hui) et d'une boîte à outils de perturbations d'index.
+tests/support/datasets.py a déjà été étendu (avant ce prompt, hors campagne) pour couvrir les
+jeux REALISTES du notebook `notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb` :
+pas de nouveaux constructeurs `build_timeseries_nb3` / `build_panel_nb3` (doublons évités, §2.4),
+mais `build_timeseries_nb2` (paramètre `annual_start_date`) et `build_panel_nb2` (paramètre
+`countries`, dictionnaire `HETEROGENEOUS_PANEL_COUNTRIES` fourni par le module) généralisés
+pour produire ce jeu à l'identique quand on le leur demande. Les valeurs par défaut de ces deux
+fonctions sont inchangées (vérifié : sorties bit-identiques à avant l'extension). Objectif de
+ce prompt : les fixtures, leurs tests, et une boîte à outils de perturbations d'index.
 
-1. tests/support/datasets.py :
-   - build_timeseries_nb3(start_date='2018-01-01', end_date='2024-07-01',
-     annual_start_date='2015-01-01', seed=42) : réplique fidèle de create_timeseries_dataset
-     (cellule 5 ; lire le JSON du notebook pour copier la logique exacte) ;
-   - build_panel_nb3(seed=42) : réplique fidèle de create_panel_dataset (cellule 7), MAIS graine
-     par entité `seed + zlib.crc32(country.encode()) % 1000` au lieu de `hash(country)` (salé
-     par processus : le notebook n'est pas reproductible) — le commenter.
-   Docstrings Google complètes ; Examples: en doctest vérifiant la structure.
+1. tests/support/fixtures.py :
+   - `nb3_timeseries` : `build_timeseries_nb2(annual_start_date='2015-01-01')`.
+   - `nb3_panel` : `build_panel_nb2(countries=HETEROGENEOUS_PANEL_COUNTRIES)`.
+   - Fixture de session privée + fixture de fonction publique renvoyant `.copy()` (contre les
+     mutations croisées) pour ces deux jeux ; même traitement pour les jeux existants coûteux
+     (`mixed_freq_timeseries`, `mixed_freq_panel`, `panel_two_level_dataset`,
+     `panel_reference_full` et ses projections).
 
-2. tests/support/fixtures.py : `nb3_timeseries`, `nb3_panel` (fixture de session privée +
-   fixture de fonction publique renvoyant .copy(), contre les mutations croisées) ; même
-   traitement pour les jeux existants coûteux.
-
-3. tests/support/test_datasets.py, classe TestNotebook3Datasets : chacune des caractéristiques
-   annoncées par le notebook (cellules 0, 6, 8, 10, 11) :
+2. tests/support/test_datasets.py, classe TestNotebook3Datasets : chacune des caractéristiques
+   annoncées par le notebook (cellules 0, 6, 8, 10, 11), exercées via les fixtures
+   `nb3_timeseries` / `nb3_panel` (pas d'appel direct à un constructeur `nb3` : il n'y en a pas) :
    - couverture propre à chaque entité (FR 2018-01→2024-07, DE 2018-07→2024-04,
      IT 2019-01→2024-07 pour la grille mensuelle) ;
-   - index irrégulier (dates annuelles antérieures à la grille mensuelle) : `is_regular` de
+   - index irrégulier (dates annuelles antérieures à la grille mensuelle, pour
+     `nb3_timeseries` comme pour chaque entité de `nb3_panel`) : `is_regular` de
      tsforecast.frequency doit le dire irrégulier ;
    - depenses_publiques_pib : annuelle FR/IT, trimestrielle DE, dernière valeur retirée ;
    - climat_affaires : observée FR/DE, zéro observation IT, colonne présente pour IT ;
    - délais : dernière ligne NaN pour inflation_ipc et taux_chomage ;
    - reproductibilité : deux appels égaux ; 3-4 valeurs d'or relevées une fois et écrites en dur.
+   - Vérifier aussi (régression) que `build_timeseries_nb2()` et `build_panel_nb2()` sans
+     argument restent des jeux réguliers (`is_regular` vrai), sans `depenses_publiques_pib` ni
+     `climat_affaires` : la généralisation ne doit pas avoir contaminé le jeu par défaut.
 
-4. tests/support/perturbations.py — fonctions pures, documentées, testées (TestPerturbations) :
+3. tests/support/perturbations.py — fonctions pures, documentées, testées (TestPerturbations) :
    shuffle_rows(df, seed) ; reverse_entities(df) ; with_special_column_names(df) →
    (df, mapping) (espaces, accents, '/', '%', '(') ; with_index_names(df, names) ;
    to_three_level_index(df) (niveau région ajouté) ; to_period_start(df) / to_period_end(df)
@@ -567,7 +584,7 @@ aujourd'hui) et d'une boîte à outils de perturbations d'index.
    single_observation(df) ; empty_like(df). Chaque fonction : docstring Google + Examples,
    commentaire français sur le cas limite fabriqué (renvoi à CLAUDE.md « Priorités de test »).
 
-5. tests/support/estimators.py : SpyEstimator (enregistre X / y de chaque fit et predict),
+4. tests/support/estimators.py : SpyEstimator (enregistre X / y de chaque fit et predict),
    FailingEstimator (lève à la demande), ConstantEstimator (prédit une constante, valeurs d'or
    triviales). Docstrings complètes.
 

@@ -11,9 +11,16 @@ ne dérive pas.
 """
 # Manipulation de données
 import pandas as pd
+import pytest
 
 # Détecteur de fréquence utilisé par HighFrequencyImputer
 from tsforecast.utils.frequency.utils import detect_frequency
+from tsforecast.frequency import is_regular
+from tests.support.datasets import (
+    HETEROGENEOUS_PANEL_COUNTRIES,
+    build_panel_nb2,
+    build_timeseries_nb2,
+)
 
 
 class TestHeterogeneousPanel:
@@ -197,3 +204,170 @@ class TestPanelXProjections:
         assert mixed_freq_panel_multifrequency.index.equals(
             panel_reference_full.index
         )
+
+
+class TestNotebook3Datasets:
+    """Jeu réaliste du notebook 3 (§2.4 de ``tests_and_refactoring_prompts.md``).
+
+    ``nb3_timeseries`` / ``nb3_panel`` ne sont pas des constructeurs dédiés :
+    ce sont des appels particuliers de :func:`build_timeseries_nb2` et
+    :func:`build_panel_nb2`, généralisés pour reproduire
+    ``create_timeseries_dataset`` / ``create_panel_dataset`` du notebook
+    ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb`` (cellules
+    5 et 7). Chaque test ci-dessous vérifie une caractéristique annoncée par ce
+    notebook (cellules 0, 6, 8, 10, 11), exercée via les fixtures.
+    """
+
+    # ----- Couverture propre à chaque entité (cellule 6, notebook 3) -----
+
+    def test_panel_entities_have_their_own_monthly_grid_coverage(
+        self, nb3_panel: pd.DataFrame
+    ) -> None:
+        """Chaque entité couvre sa propre grille mensuelle (§2.2 du notebook)."""
+        df = nb3_panel
+
+        # Valeurs d'or : dates de couverture mensuelle du dictionnaire
+        # ``countries`` de ``create_panel_dataset`` (cellule 7 du notebook),
+        # recopiées telles quelles (et non relues depuis
+        # ``HETEROGENEOUS_PANEL_COUNTRIES``, pour ne pas rendre le test
+        # tautologique avec sa propre source).
+        expected_grids = {
+            'France': pd.date_range('2018-01-01', '2024-07-01', freq='MS'),
+            'Allemagne': pd.date_range('2018-07-01', '2024-04-01', freq='MS'),
+            'Italie': pd.date_range('2019-01-01', '2024-07-01', freq='MS'),
+        }
+
+        for entity, monthly_grid in expected_grids.items():
+            entity_index = df.loc[entity].index
+            # La grille mensuelle propre à l'entité est incluse dans son index
+            # (qui porte en plus les ancres annuelles hors grille, testées à
+            # part) : c'est elle qui porte la couverture temporelle annoncée.
+            assert monthly_grid.isin(entity_index).all()
+            monthly_positions = entity_index[entity_index.isin(monthly_grid)]
+            assert monthly_positions.min() == monthly_grid.min()
+            assert entity_index.max() == monthly_grid.max()
+
+    def test_timeseries_and_each_entity_index_is_irregular(
+        self, nb3_timeseries: pd.DataFrame, nb3_panel: pd.DataFrame
+    ) -> None:
+        """L'historique annuel antérieur à la grille mensuelle rend l'index irrégulier.
+
+        Cas limite CLAUDE.md « fréquences irrégulières » : contrairement aux
+        autres jeux de la suite (grille régulière ponctuée de NaN),
+        ``balance_commerciale_annuelle`` introduit ici des ancres annuelles
+        réellement hors grille — ``is_regular`` doit le détecter, pour la
+        série seule comme pour chaque entité du panel.
+        """
+        assert is_regular(nb3_timeseries) is False
+
+        for entity in ('France', 'Allemagne', 'Italie'):
+            assert is_regular(nb3_panel.loc[entity]) is False
+
+    # ----- depenses_publiques_pib : fréquence de publication par entité (cellule 9) -----
+
+    def test_depenses_publiques_pib_publication_frequency_per_entity(
+        self, nb3_panel: pd.DataFrame
+    ) -> None:
+        """Publication annuelle pour France/Italie, trimestrielle pour Allemagne, dernière valeur NaN."""
+        df = nb3_panel
+
+        annual_entities = {'France': 6, 'Italie': 5}
+        for entity, n_observations in annual_entities.items():
+            serie = df.loc[entity, 'depenses_publiques_pib'].dropna()
+            assert len(serie) == n_observations
+            # Valeur d'or : écart d'environ un an entre publications.
+            gaps_days = (serie.index[1:] - serie.index[:-1]).days
+            assert (gaps_days >= 360).all()
+
+        serie_de = df.loc['Allemagne', 'depenses_publiques_pib'].dropna()
+        assert len(serie_de) == 23
+        gaps_days_de = (serie_de.index[1:] - serie_de.index[:-1]).days
+        assert (gaps_days_de < 100).all()
+
+        # Dernière valeur retirée (délai de publication simulé) : la dernière
+        # date de publication candidate (mois de janvier pour une fréquence
+        # annuelle, mois 1/4/7/10 pour une fréquence trimestrielle) au sein de
+        # la grille mensuelle de l'entité reste NaN, alors qu'une publication
+        # aurait dû y figurer.
+        expected_last_candidate = {
+            'France': pd.Timestamp('2024-01-01'),
+            'Allemagne': pd.Timestamp('2024-04-01'),
+            'Italie': pd.Timestamp('2024-01-01'),
+        }
+        for entity, last_candidate in expected_last_candidate.items():
+            assert pd.isna(df.loc[(entity, last_candidate), 'depenses_publiques_pib'])
+
+    # ----- climat_affaires : structurellement absente pour l'Italie (cellules 10-11) -----
+
+    def test_climat_affaires_structurally_absent_for_italy(
+        self, nb3_panel: pd.DataFrame
+    ) -> None:
+        """Colonne présente pour les trois entités, zéro observation pour l'Italie."""
+        df = nb3_panel
+
+        assert 'climat_affaires' in df.columns
+
+        n_obs = df.groupby(level=0)['climat_affaires'].count()
+        assert n_obs['Italie'] == 0
+        assert n_obs['France'] == 79  # taille de la grille mensuelle de la France
+        assert n_obs['Allemagne'] == 70  # taille de la grille mensuelle de l'Allemagne
+
+    # ----- Délais : dernière valeur NaN pour inflation_ipc et taux_chomage -----
+
+    def test_last_row_of_inflation_and_chomage_is_nan(
+        self, nb3_timeseries: pd.DataFrame, nb3_panel: pd.DataFrame
+    ) -> None:
+        """Délai de publication d'un mois simulé : dernière observation retirée."""
+        assert pd.isna(nb3_timeseries['inflation_ipc'].iloc[-1])
+        assert pd.isna(nb3_timeseries['taux_chomage'].iloc[-1])
+
+        for entity in ('France', 'Allemagne', 'Italie'):
+            df_entity = nb3_panel.loc[entity]
+            assert pd.isna(df_entity['inflation_ipc'].iloc[-1])
+            assert pd.isna(df_entity['taux_chomage'].iloc[-1])
+
+    # ----- Reproductibilité -----
+
+    def test_nb3_timeseries_is_reproducible(self, nb3_timeseries: pd.DataFrame) -> None:
+        """Deux appels avec les mêmes arguments rendent un jeu bit-identique."""
+        rebuilt = build_timeseries_nb2(annual_start_date='2015-01-01')
+        pd.testing.assert_frame_equal(nb3_timeseries, rebuilt)
+
+    def test_nb3_panel_is_reproducible(self, nb3_panel: pd.DataFrame) -> None:
+        """Deux appels avec les mêmes arguments rendent un jeu bit-identique."""
+        rebuilt = build_panel_nb2(countries=HETEROGENEOUS_PANEL_COUNTRIES)
+        pd.testing.assert_frame_equal(nb3_panel, rebuilt)
+
+    def test_nb3_timeseries_gold_values(self, nb3_timeseries: pd.DataFrame) -> None:
+        """Quatre valeurs d'or relevées une fois sur le jeu construit, puis écrites en dur."""
+        df = nb3_timeseries
+
+        assert df.loc['2019-01-01', 'production_industrielle'] == pytest.approx(102.67063571504136)
+        assert pd.isna(df.loc['2018-12-01', 'production_industrielle'])
+        assert df.loc['2018-01-01', 'inflation_ipc'] == pytest.approx(0.6037293256197321)
+        assert df.loc['2015-01-01', 'balance_commerciale_annuelle'] == pytest.approx(-35.2628407569658)
+
+    def test_nb3_panel_gold_values(self, nb3_panel: pd.DataFrame) -> None:
+        """Trois valeurs d'or relevées une fois sur le jeu construit, puis écrites en dur."""
+        df = nb3_panel
+
+        assert df.loc[('France', '2018-01-01'), 'inflation_ipc'] == pytest.approx(1.8353430756890152)
+        assert df.loc[('Allemagne', '2018-07-01'), 'climat_affaires'] == pytest.approx(99.96786883370062)
+        assert df.loc[('Italie', '2019-01-01'), 'depenses_publiques_pib'] == pytest.approx(49.53371034228826)
+
+    # ----- Régression : les valeurs par défaut restent le jeu historique régulier -----
+
+    def test_default_build_timeseries_nb2_stays_regular(self) -> None:
+        """Sans ``annual_start_date``, l'index reste régulier (généralisation non contaminante)."""
+        df = build_timeseries_nb2()
+        assert is_regular(df) is True
+
+    def test_default_build_panel_nb2_stays_regular_and_without_nb3_columns(self) -> None:
+        """Sans ``countries``, le panel reste régulier et sans les colonnes propres au notebook 3."""
+        df = build_panel_nb2()
+
+        assert 'depenses_publiques_pib' not in df.columns
+        assert 'climat_affaires' not in df.columns
+
+        for entity in df.index.get_level_values('country').unique():
+            assert is_regular(df.loc[entity]) is True

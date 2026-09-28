@@ -9,30 +9,51 @@ notebooks (``from tests.support.datasets import build_panel_reference``).
 """
 # Modules de base
 import zlib
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 
-def build_timeseries_nb2(seed: int = 42) -> pd.DataFrame:
+def build_timeseries_nb2(
+    start_date: str = '2018-01-01',
+    end_date: str = '2024-07-01',
+    annual_start_date: Optional[str] = None,
+    seed: int = 42,
+) -> pd.DataFrame:
     """Build the mixed-frequency time series dataset of notebook 2.
 
     Réplique par code (sans lecture du notebook) de ``df_timeseries`` dans
     ``notebooks/2 - QB - Mixed frequencies.ipynb``, utilisée comme référence
-    empirique dans ``high_frequency_imputer_review.md``.
+    empirique dans ``high_frequency_imputer_review.md``. Généralisée pour
+    couvrir également le jeu, plus réaliste, de ``create_timeseries_dataset``
+    dans ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb`` :
+    ``annual_start_date`` antérieur à ``start_date`` (paramètres par défaut de
+    ce notebook) rend l'index global irrégulier — quelques ancres annuelles
+    isolées avant le début de la grille mensuelle. Ce paramètre vaut
+    ``start_date`` par défaut, ce qui préserve le jeu régulier historique.
 
     Args:
+        start_date: Début de la grille mensuelle (variables mensuelle et
+            trimestrielle).
+        end_date: Fin du jeu (grille mensuelle et série annuelle).
+        annual_start_date: Début de la série annuelle de balance
+            commerciale. ``None`` (défaut) la borne à ``start_date`` : la
+            série reste incluse dans la grille mensuelle et l'index résultant
+            est régulier. Une date antérieure à ``start_date`` ajoute des
+            ancres annuelles hors grille et rend l'index irrégulier.
         seed: Graine du générateur pseudo-aléatoire NumPy.
 
     Returns:
         ``DataFrame`` à ``DatetimeIndex`` nommé ``date``, ancré en début de
-        mois (``MS``), 79 lignes de 2018-01-01 à 2024-07-01. Colonnes :
+        mois (``MS``) sur la grille mensuelle, avec colonnes :
         ``production_industrielle`` (mensuelle, dense à partir de 2019-01,
         NaN avant), ``inflation_ipc`` (mensuelle, dense, dernière valeur
         NaN), ``taux_chomage`` (mensuelle, dense, dernière valeur NaN),
         ``pib_trimestriel`` (trimestrielle, NaN hors fin de trimestre,
         dernier trimestre disponible NaN), ``balance_commerciale_annuelle``
-        (annuelle, NaN hors janvier, dernière année disponible NaN).
+        (annuelle, ancrée en début d'année (``YS``) à partir de
+        ``annual_start_date``, dernière année disponible NaN).
 
     Examples:
         >>> df = build_timeseries_nb2()
@@ -40,10 +61,20 @@ def build_timeseries_nb2(seed: int = 42) -> pd.DataFrame:
         ['production_industrielle', 'inflation_ipc', 'taux_chomage', 'pib_trimestriel', 'balance_commerciale_annuelle']
         >>> len(df)
         79
+
+        Avec un historique de balance commerciale antérieur à la grille
+        mensuelle (paramètres du notebook 3), l'index global devient
+        irrégulier :
+
+        >>> from tsforecast.frequency import is_regular
+        >>> df_irregular = build_timeseries_nb2(annual_start_date='2015-01-01')
+        >>> is_regular(df_irregular)
+        False
     """
     np.random.seed(seed)
+    annual_start_date = annual_start_date or start_date
 
-    dates = pd.date_range(start='2018-01-01', end='2024-07-01', freq='MS')
+    dates = pd.date_range(start=start_date, end=end_date, freq='MS')
     n_periods = len(dates)
 
     df = pd.DataFrame(index=dates)
@@ -81,13 +112,19 @@ def build_timeseries_nb2(seed: int = 42) -> pd.DataFrame:
             df.loc[date, 'pib_trimestriel'] = pib_base * (1 + growth / 100) ** quarter_idx
             quarter_idx += 1
 
-    # ----- Variable annuelle : balance commerciale (~-26 à -9), NaN sauf en janvier -----
+    # ----- Variable annuelle : balance commerciale (~-26 à -9), ancrée en YS -----
+    # Historique disponible dès `annual_start_date` : quand celui-ci précède
+    # `start_date`, l'union avec la grille mensuelle introduit des ancres
+    # annuelles isolées avant son début, et l'index global devient irrégulier.
+    annual_dates = pd.date_range(start=annual_start_date, end=end_date, freq='YS')
+    df = df.reindex(df.index.union(annual_dates))
+    df.index.name = 'date'
+
     df['balance_commerciale_annuelle'] = np.nan
-    for date in dates:
-        if date.month == 1:
-            year_factor = date.year - 2018
-            base_balance = -25 + year_factor * 3 + np.random.normal(0, 5)
-            df.loc[date, 'balance_commerciale_annuelle'] = base_balance
+    for date in annual_dates:
+        year_factor = date.year - 2018
+        base_balance = -25 + year_factor * 3 + np.random.normal(0, 5)
+        df.loc[date, 'balance_commerciale_annuelle'] = base_balance
 
     # ----- Simulation de délais de publication (dernières valeurs retirées) -----
     df.loc[df.index[-1], 'inflation_ipc'] = np.nan
@@ -108,25 +145,76 @@ def build_timeseries_nb2(seed: int = 42) -> pd.DataFrame:
     return df
 
 
-def build_panel_nb2(seed: int = 42) -> pd.DataFrame:
+# Dictionnaire par défaut de build_panel_nb2 : 3 entités, grille mensuelle commune,
+# sans depenses_publiques_pib ni climat_affaires (jeu régulier historique).
+_DEFAULT_PANEL_COUNTRIES = {
+    'France': {
+        'pib_base': 2800,
+        'inflation_base': 1.5,
+        'chomage_base': 8.0,
+        'prod_ind_start': '2018-06-01',
+    },
+    'Allemagne': {
+        'pib_base': 3500,
+        'inflation_base': 1.2,
+        'chomage_base': 5.5,
+        'prod_ind_start': '2019-01-01',
+    },
+    'Italie': {
+        'pib_base': 2200,
+        'inflation_base': 1.8,
+        'chomage_base': 10.5,
+        'prod_ind_start': '2019-06-01',
+    },
+}
+
+
+def build_panel_nb2(
+    seed: int = 42,
+    countries: Optional[dict] = None,
+) -> pd.DataFrame:
     """Build the mixed-frequency panel dataset of notebook 2.
 
     Réplique par code de ``df_panel`` dans
-    ``notebooks/2 - QB - Mixed frequencies.ipynb``.
+    ``notebooks/2 - QB - Mixed frequencies.ipynb``. Généralisée pour couvrir
+    également le jeu, plus réaliste et hétérogène, de
+    ``create_panel_dataset`` dans ``notebooks/3 - QB - Panel a frequences
+    mixtes heterogene.ipynb`` : passer ``countries=HETEROGENEOUS_PANEL_COUNTRIES``
+    (défini plus bas dans ce module) reproduit ce jeu à l'identique — couverture
+    propre à chaque entité, ``depenses_publiques_pib`` à fréquence de
+    publication hétérogène, ``climat_affaires`` structurellement absente pour
+    une entité. Le dictionnaire par défaut ne fixe aucune de ces clés : le jeu
+    régulier historique (3 entités sur la même grille mensuelle, sans
+    ``depenses_publiques_pib`` ni ``climat_affaires``) reste inchangé.
 
     Args:
         seed: Graine de base du générateur pseudo-aléatoire NumPy ; chaque
             entité tire après ``np.random.seed(seed + zlib.crc32(pays) %
             1000)`` — ``crc32`` (et non ``hash``) garde la graine
             reproductible d'une exécution à l'autre.
+        countries: Dictionnaire ``{nom_entité: paramètres}``. ``None``
+            (défaut) utilise 3 entités (``France``, ``Allemagne``,
+            ``Italie``) sur une grille mensuelle commune. Clés reconnues par
+            entité : ``pib_base``, ``inflation_base``, ``chomage_base``,
+            ``prod_ind_start`` (toujours requises) ; ``start_date`` /
+            ``end_date`` (défaut ``'2018-01-01'`` / ``'2024-07-01'``,
+            propres à chaque entité si fournies — couverture hétérogène) ;
+            ``annual_start_date`` (défaut ``start_date`` ; une date
+            antérieure rend l'index de l'entité irrégulier, comme
+            :func:`build_timeseries_nb2`) ; ``depenses_base`` /
+            ``depenses_frequency`` (``'annuelle'`` ou ``'trimestrielle'`` —
+            absente : colonne ``depenses_publiques_pib`` omise) ;
+            ``climat_affaires_observe`` (``bool`` — absente : colonne
+            ``climat_affaires`` omise).
 
     Returns:
-        ``DataFrame`` panel à ``MultiIndex`` (``country``, ``date``) avec 3
-        entités (``France``, ``Allemagne``, ``Italie``), chacune sur les 79
-        mêmes dates mensuelles (``MS``) de 2018-01-01 à 2024-07-01 (237
-        lignes). Mêmes colonnes et ordres de grandeur que
-        :func:`build_timeseries_nb2`, avec dates de démarrage et niveaux de
-        base spécifiques à chaque entité.
+        ``DataFrame`` panel à ``MultiIndex`` (``country``, ``date``) trié.
+        Avec le dictionnaire par défaut : 3 entités (``France``,
+        ``Allemagne``, ``Italie``), chacune sur les 79 mêmes dates
+        mensuelles (``MS``) de 2018-01-01 à 2024-07-01 (237 lignes). Mêmes
+        colonnes et ordres de grandeur que :func:`build_timeseries_nb2`,
+        avec dates de démarrage et niveaux de base spécifiques à chaque
+        entité.
 
     Examples:
         >>> df = build_panel_nb2()
@@ -134,36 +222,27 @@ def build_panel_nb2(seed: int = 42) -> pd.DataFrame:
         FrozenList(['country', 'date'])
         >>> sorted(df.index.get_level_values('country').unique())
         ['Allemagne', 'France', 'Italie']
-    """
-    countries = {
-        'France': {
-            'pib_base': 2800,
-            'inflation_base': 1.5,
-            'chomage_base': 8.0,
-            'prod_ind_start': '2018-06-01',
-        },
-        'Allemagne': {
-            'pib_base': 3500,
-            'inflation_base': 1.2,
-            'chomage_base': 5.5,
-            'prod_ind_start': '2019-01-01',
-        },
-        'Italie': {
-            'pib_base': 2200,
-            'inflation_base': 1.8,
-            'chomage_base': 10.5,
-            'prod_ind_start': '2019-06-01',
-        },
-    }
 
-    dates = pd.date_range(start='2018-01-01', end='2024-07-01', freq='MS')
-    n_periods = len(dates)
+        Couverture hétérogène, fréquence de publication par entité et index
+        irrégulier (paramètres du notebook 3) :
+
+        >>> df_heterogeneous = build_panel_nb2(countries=HETEROGENEOUS_PANEL_COUNTRIES)
+        >>> int(df_heterogeneous.loc['Italie', 'climat_affaires'].notna().sum())
+        0
+    """
+    if countries is None:
+        countries = _DEFAULT_PANEL_COUNTRIES
 
     all_data = []
     for country, params in countries.items():
         # Graine déterministe par entité : ``hash`` d'une ``str`` est salé par
         # processus (non reproductible d'une exécution à l'autre), ``crc32`` non.
         np.random.seed(seed + zlib.crc32(country.encode()) % 1000)
+
+        start_date = params.get('start_date', '2018-01-01')
+        end_date = params.get('end_date', '2024-07-01')
+        dates = pd.date_range(start=start_date, end=end_date, freq='MS')
+        n_periods = len(dates)
 
         df_country = pd.DataFrame(index=dates)
         df_country['country'] = country
@@ -204,12 +283,52 @@ def build_panel_nb2(seed: int = 42) -> pd.DataFrame:
                 )
                 quarter_idx += 1
 
+        # ----- depenses_publiques_pib : fréquence de publication propre à l'entité -----
+        # Absente du dictionnaire par défaut (colonne omise) ; annuelle ou
+        # trimestrielle selon l'entité dans ``HETEROGENEOUS_PANEL_COUNTRIES``.
+        if 'depenses_frequency' in params:
+            df_country['depenses_publiques_pib'] = np.nan
+            publication_months = (
+                [1] if params['depenses_frequency'] == 'annuelle' else [1, 4, 7, 10]
+            )
+            depenses_idx = 0
+            for date in dates:
+                if date.month in publication_months:
+                    value = (
+                        params['depenses_base']
+                        + 0.1 * depenses_idx
+                        + np.random.normal(0, 1.0)
+                    )
+                    df_country.loc[date, 'depenses_publiques_pib'] = value
+                    depenses_idx += 1
+
+        # ----- balance_commerciale_annuelle : ancrée en YS, historique propre à l'entité -----
+        # Historique disponible dès `annual_start_date` (défaut : `start_date`,
+        # index régulier). Une date antérieure à `start_date` introduit des
+        # ancres annuelles isolées avant le début de la grille mensuelle de
+        # l'entité, et rend son index irrégulier (cf. build_timeseries_nb2).
+        annual_start_date = params.get('annual_start_date', start_date)
+        annual_dates = pd.date_range(start=annual_start_date, end=end_date, freq='YS')
+        df_country = df_country.reindex(df_country.index.union(annual_dates))
+        df_country['country'] = country
+
         df_country['balance_commerciale_annuelle'] = np.nan
-        for date in dates:
-            if date.month == 1:
-                year_factor = date.year - 2018
-                base = -20 + np.random.uniform(-10, 10) + year_factor * 2
-                df_country.loc[date, 'balance_commerciale_annuelle'] = base
+        for date in annual_dates:
+            year_factor = date.year - 2018
+            base = -20 + np.random.uniform(-10, 10) + year_factor * 2
+            df_country.loc[date, 'balance_commerciale_annuelle'] = base
+
+        # ----- climat_affaires : structurellement absente pour certaines entités -----
+        # Absente du dictionnaire par défaut (colonne omise) ; la colonne
+        # existe pour toutes les entités de ``HETEROGENEOUS_PANEL_COUNTRIES``
+        # mais reste entièrement NaN pour celles dont
+        # ``climat_affaires_observe`` vaut ``False`` (support de
+        # ``covariate_eligibility``, §4.5 de la spec HFI2).
+        if 'climat_affaires_observe' in params:
+            df_country['climat_affaires'] = np.nan
+            if params['climat_affaires_observe']:
+                climat_noise = np.random.normal(0, 2.0, n_periods)
+                df_country.loc[dates, 'climat_affaires'] = 100.0 + climat_noise
 
         df_country.loc[df_country.index[-1], 'inflation_ipc'] = np.nan
         df_country.loc[df_country.index[-1], 'taux_chomage'] = np.nan
@@ -222,6 +341,11 @@ def build_panel_nb2(seed: int = 42) -> pd.DataFrame:
         if len(bc_available) > 0:
             df_country.loc[bc_available[-1], 'balance_commerciale_annuelle'] = np.nan
 
+        if 'depenses_publiques_pib' in df_country.columns:
+            depenses_available = df_country[df_country['depenses_publiques_pib'].notna()].index
+            if len(depenses_available) > 0:
+                df_country.loc[depenses_available[-1], 'depenses_publiques_pib'] = np.nan
+
         all_data.append(df_country)
 
     df_panel = pd.concat(all_data, ignore_index=False)
@@ -230,6 +354,55 @@ def build_panel_nb2(seed: int = 42) -> pd.DataFrame:
     df_panel = df_panel.sort_index()
 
     return df_panel
+
+
+# Réplique fidèle du dictionnaire ``countries`` de ``create_panel_dataset``
+# (cellule 7, ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb``) :
+# couverture propre à chaque entité, dépenses publiques à fréquence de
+# publication hétérogène (annuelle FR/IT, trimestrielle DE), climat_affaires
+# jamais observée pour l'Italie, historique de balance commerciale antérieur
+# au début de la grille mensuelle (index irrégulier). Le notebook amorce ses
+# graines par ``seed + hash(country) % 1000`` — salé par processus, donc non
+# reproductible d'une exécution à l'autre ; build_panel_nb2 utilise toujours
+# ``zlib.crc32``, seule la structure du notebook est reproduite ici.
+HETEROGENEOUS_PANEL_COUNTRIES = {
+    'France': {
+        'climat_affaires_observe': True,
+        'pib_base': 2800,
+        'inflation_base': 1.5,
+        'chomage_base': 8.0,
+        'depenses_base': 55.0,
+        'start_date': '2018-01-01',
+        'end_date': '2024-07-01',
+        'prod_ind_start': '2018-06-01',
+        'depenses_frequency': 'annuelle',
+        'annual_start_date': '2015-01-01',
+    },
+    'Allemagne': {
+        'climat_affaires_observe': True,
+        'pib_base': 3500,
+        'inflation_base': 1.2,
+        'chomage_base': 5.5,
+        'depenses_base': 45.0,
+        'start_date': '2018-07-01',
+        'end_date': '2024-04-01',
+        'prod_ind_start': '2019-01-01',
+        'depenses_frequency': 'trimestrielle',
+        'annual_start_date': '2016-01-01',
+    },
+    'Italie': {
+        'climat_affaires_observe': False,
+        'pib_base': 2200,
+        'inflation_base': 1.8,
+        'chomage_base': 10.5,
+        'depenses_base': 50.0,
+        'start_date': '2019-01-01',
+        'end_date': '2024-07-01',
+        'prod_ind_start': '2019-06-01',
+        'depenses_frequency': 'annuelle',
+        'annual_start_date': '2016-01-01',
+    },
+}
 
 
 def build_panel_two_level(seed: int = 7) -> pd.DataFrame:
