@@ -134,6 +134,10 @@ def build_frequency_string(
         >>> # Weekly frequency
         >>> build_frequency_string('W')
         'W'
+        >>>
+        >>> # Weekly anchored on Monday (no S/E position for weekly anchors)
+        >>> build_frequency_string('W', suffix='MON')
+        'W-MON'
     """
     from ..frequency.utils import normalize_frequency
 
@@ -144,14 +148,16 @@ def build_frequency_string(
     if position is not None and position not in ['S', 'E']:
         raise ValueError(f"position must be 'S' (start), 'E' (end), or None, got '{position}'")
 
-    # Si pas de position, retourne la fréquence de base (le suffixe est ignoré :
-    # il n'a de sens qu'accolé à une position, ex: 'QE-DEC')
-    if position is None:
-        return base_freq
-
-    # Ajout de la position uniquement si la fréquence la supporte (ex: 'D' n'a
-    # pas de déclinaison S/E) ; sinon la position est silencieusement ignorée
-    freq_with_position = f"{base_freq}{position}" if base_freq in _POSITION_AWARE_FREQUENCIES else base_freq
+    # Ajout de la position uniquement si elle est fournie et si la fréquence la
+    # supporte (ex: 'D' n'a pas de déclinaison S/E) ; sinon la position est
+    # silencieusement ignorée. Le suffixe, lui, reste ajouté indépendamment de
+    # la position : certaines fréquences portent une ancre significative sans
+    # notion de position (ex: 'W-MON', jour de la semaine, pas de S/E en pandas).
+    freq_with_position = (
+        f"{base_freq}{position}"
+        if position is not None and base_freq in _POSITION_AWARE_FREQUENCIES
+        else base_freq
+    )
 
     # Ajout du suffixe si présent
     if suffix is not None:

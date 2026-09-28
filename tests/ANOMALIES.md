@@ -44,7 +44,35 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ## UTILS
 
-_Aucune entrée._
+### ANO-UTILS-001 — `build_frequency_string` perd l'ancre d'un jour de semaine
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/parse/utils.py::build_frequency_string`
+- **Sévérité** : mineure
+- **Observé** : `build_frequency_string(*parse_frequency('W-MON'))` renvoyait `'W'`
+  (l'ancre `MON` perdue). Le code ignorait délibérément le suffixe quand
+  `position is None` (« le suffixe n'a de sens qu'accolé à une position »),
+  hypothèse vraie pour les trimestres (`'QE-DEC'`) mais fausse pour les
+  ancres hebdomadaires, qui n'ont pas de position S/E et portent pourtant un
+  suffixe significatif (le jour de la semaine). Le même chemin de code est
+  emprunté par `PublicationDelayTransformer` / `ShiftTransformer` /
+  `MaskTransformer` (`tsforecast/delays/transformers.py`, via
+  `self.index_position_` / `self.index_suffix_`) : un index à fréquence
+  hebdomadaire ancrée y perdait silencieusement son ancre.
+- **Attendu** : le round trip `parse_frequency` → `build_frequency_string`
+  doit être l'identité pour toute chaîne de fréquence supportée, y compris
+  les ancres hebdomadaires (`'W-MON'` → `'W-MON'`), comme c'est déjà le cas
+  pour les ancres trimestrielles.
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.parse.utils import parse_frequency, build_frequency_string
+  freq, position, suffix = parse_frequency('W-MON')  # ('W', None, 'MON')
+  build_frequency_string(freq, position, suffix)  # était 'W' au lieu de 'W-MON'
+  ```
+- **Correctif** : `build_frequency_string` accole désormais le suffixe
+  indépendamment de la présence d'une position (seule la position reste
+  conditionnée à `_POSITION_AWARE_FREQUENCIES`).
+- **Test** : `tests/unit/utils/parse/test_utils.py::TestParseBuildRoundTrip::test_roundtrip_is_identity[W-MON]`
+- **Statut** : corrigée
 
 ## DELAYS
 

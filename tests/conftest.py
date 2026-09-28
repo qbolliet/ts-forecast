@@ -21,10 +21,6 @@ collect_ignore = [
     # Renommage délibéré `_calculate_release_delays` → `_calculate_publication_delays`
     # (tsforecast/delays/data_manager.py) — à traiter au prompt D1.
     "unit/delays/test_data_manager.py",
-    # `detect_and_parse_frequency` n'est plus exporté par `tsforecast.frequency`,
-    # remplacé par `tsforecast.utils.parse.parse_frequency` /
-    # `build_frequency_string` — à traiter au prompt U1.
-    "unit/utils/frequency/test_parser.py",
 ]
 
 
