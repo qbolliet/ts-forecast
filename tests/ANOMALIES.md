@@ -552,6 +552,137 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `::TestCanonicalizeFrequency`
 - **Statut** : corrigée
 
+### ANO-UTILS-018 — `get_period_end(…, 'ns')` renvoie la date d'entrée : période vide
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/time/utils.py::get_period_end`
+- **Sévérité** : mineure
+- **Observé** : `date + timedelta(microseconds=0.001)` est arrondi à 0 par `timedelta` :
+  `get_period_end(d, 'ns') == d` et `get_period_start(d, 'ns') == d`. La période
+  `[début, fin)` est vide, `début <= date < fin` est faux.
+- **Attendu** : `fin > date`. `datetime` ne sait pas représenter 1 ns : soit renvoyer
+  un `Timestamp` (`pd.Timestamp(date) + pd.Timedelta(1, 'ns')`), soit rejeter `'ns'`
+  explicitement plutôt que renvoyer une borne fausse.
+- **Reproduction** :
+  ```python
+  from datetime import datetime
+  from tsforecast.utils.time.utils import get_period_boundaries
+  d = datetime(2023, 6, 15, 1, 2, 3, 456789)
+  get_period_boundaries(d, 'ns')   # (d, d)
+  ```
+- **Correctif** : la période d'un instant `'ns'` dure une nanoseconde ; les fonctions retournent des `pd.Timestamp` (sous-classe de `datetime`), ce qui représente la borne.
+- **Test** : `tests/unit/utils/time/test_utils.py::TestNanosecond`
+- **Statut** : corrigée
+
+### ANO-UTILS-019 — `get_period_end(…, 'ms')` n'est pas tronqué à la milliseconde
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/time/utils.py::get_period_end`
+- **Sévérité** : majeure
+- **Observé** : la branche `'ms'` fait `date + timedelta(milliseconds=1)` sans tronquer,
+  alors que `s`, `min` et `h` tronquent avant d'ajouter. Pour
+  `2023-06-15 14:35:47.123456` : début `.123000` (correct), fin `.124456` au lieu de
+  `.124000`. La période `[.123000 ; .124456)` dure 1,456 ms, et la période suivante ne
+  commence pas à `fin` (`get_period_start(fin, 'ms') = .124000`).
+- **Attendu** : `fin = début + 1 ms`, comme pour les autres unités ; périodes contiguës.
+- **Reproduction** :
+  ```python
+  from datetime import datetime
+  from tsforecast.utils.time.utils import get_period_end
+  get_period_end(datetime(2023, 6, 15, 14, 35, 47, 123456), 'ms')   # …47.124456
+  ```
+- **Correctif** : toutes les fréquences infra-journalières se ramènent à `début = date − (temps écoulé depuis l'origine mod n·unité)` et `fin = début + n·unité` ; plus de branche spécifique à `ms`.
+- **Test** : `tests/unit/utils/time/test_utils.py::TestMillisecond`, `::TestPeriodProperties` (`ms` et `ns` inclus)
+- **Statut** : corrigée
+
+### ANO-UTILS-020 — `get_period_*` : entrée `pandas.Period` acceptée pour certaines fréquences seulement
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/time/utils.py::get_period_start`, `get_period_end`
+- **Sévérité** : mineure (arbitrée)
+- **Observé** : la signature n'annonce que `Timestamp` / `datetime`, et seul `Timestamp` est
+  converti. Un `Period` passe par duck-typing : `D`, `B`, `SM`, `M`, `Q`, `Y` fonctionnent
+  (`.year` / `.month` / `.day`), mais `W` (`TypeError: 'int' object is not callable`,
+  `Period.weekday` est une propriété), `h`, `min`, `s`, `ms` (`AttributeError: 'Period' object has no
+  attribute 'replace'`) et `us` (`IncompatibleFrequency`) échouent avec des erreurs opaques.
+  `'ns'` renvoie le `Period` tel quel.
+- **Attendu** : à trancher : soit `Period` est un type d'entrée (conversion par
+  `.to_timestamp()` en tête de fonction), soit il est refusé avec un message explicite.
+  Le comportement actuel est épinglé en attendant.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.time.utils import get_period_start
+  p = pd.Period('2023-06-15', freq='D')
+  get_period_start(p, 'M')   # datetime(2023, 6, 1)
+  get_period_start(p, 'W')   # TypeError
+  ```
+- **Correctif** : arbitrage : `Period` est un type d'entrée, représenté par son premier instant (`to_timestamp(how='start')`), pour toutes les fréquences ; `datetime64` accepté ; `NaT` lève `ValueError`, les autres types `TypeError` avec message clair.
+- **Test** : `tests/unit/utils/time/test_utils.py::TestPeriodInput`
+- **Statut** : corrigée
+
+### ANO-UTILS-021 — `get_period_*` : ancres et multiplicateurs de fréquence ignorés
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/time/utils.py::get_period_start`, `get_period_end`
+- **Sévérité** : mineure (arbitrée)
+- **Observé** : `normalize_frequency` réduit la fréquence à sa base : `'Q-JAN'`, `'QS-FEB'`
+  donnent des trimestres civils, `'YS-JUL'` des années civiles, `'2MS'` / `'3D'` /
+  `'2h'` une période d'**une** unité. Pour `W-*` le code documente ce choix
+  (« toujours lundi ») ; pour `Q` / `Y` et les multiplicateurs, rien n'est documenté.
+  Cohérence : ANO-UTILS-007 (corrigée) traitait comme un défaut majeur l'ancre ignorée
+  par `PeriodPositionConverter`.
+- **Attendu** : à trancher. Les bornes d'une période `Q-JAN` (mai-juil.) diffèrent de
+  celles de `Q-DEC` ; soit les ancres sont gérées, soit un rejet explicite ou la
+  docstring précise la limite. Comportement actuel épinglé.
+- **Reproduction** :
+  ```python
+  from datetime import datetime
+  from tsforecast.utils.time.utils import get_period_start
+  get_period_start(datetime(2023, 6, 15), 'Q-JAN')   # 2023-04-01 ; pandas : 2023-05-01
+  get_period_start(datetime(2023, 6, 15), '2MS')     # 2023-06-01 (période de 1 mois)
+  ```
+- **Correctif** : arbitrage : ancres et multiplicateurs sont pris en compte (`W-X` finit le jour X, `Q-X` / `QE-X` finissent en X, `QS-X` commencent en X, idem `Y`) ; `nX` donne des périodes de n unités alignées sur l'époque Unix (et l'ancre) ou sur le paramètre optionnel `origin`. Ancre invalide ou sur une base sans ancre : `ValueError`.
+- **Test** : `tests/unit/utils/time/test_utils.py::TestPeriodAnchorsAndMultipliers`, `::TestPeriodOrigin`, `::TestInvalidFrequency`
+- **Statut** : corrigée
+
+### ANO-UTILS-022 — `resolve_date('')` renvoie `NaT` au lieu de lever `ValueError`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/time/utils.py::resolve_date`
+- **Sévérité** : mineure
+- **Observé** : `pd.to_datetime('')` renvoie `NaT`, retourné tel quel (un `NaT` est aussi
+  un `datetime` : `resolve_date(pd.NaT)` le renvoie inchangé). Une date vide se
+  propage ensuite silencieusement.
+- **Attendu** : la docstring promet un `ValueError` pour toute valeur non résoluble ;
+  une chaîne vide n'est pas une date.
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.time.utils import resolve_date
+  resolve_date('')   # NaT
+  ```
+- **Correctif** : `resolve_date` lève `ValueError` quand le résultat est `NaT` (chaîne vide, `NaT` en entrée).
+- **Test** : `tests/unit/utils/time/test_utils.py::TestResolveDate::test_unresolvable_value_raises_instead_of_returning_nat`
+- **Statut** : corrigée
+
+### ANO-UTILS-023 — `get_period_start` / `get_period_end` perdent le fuseau horaire
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/time/utils.py::get_period_start`, `get_period_end`
+- **Sévérité** : majeure
+- **Observé** : `Timestamp.to_pydatetime()` conserve le fuseau, mais les branches qui
+  reconstruisent la date avec `datetime(...)` le perdent (début : toutes les fréquences
+  sauf `'ns'` ; fin : `D`, `B`, `W`, `SM`, `M`, `Q`, `Y`). Les branches `s`, `min`, `h`,
+  `us`, `ms` de `get_period_end` le conservent : pour `'h'`,
+  `get_period_boundaries` renvoie un **début naïf** et une **fin aware**, et
+  `début <= date` lève `TypeError: can't compare offset-naive and offset-aware datetimes`.
+- **Attendu** : bornes du même fuseau que la date d'entrée (`tzinfo=date.tzinfo`).
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.time.utils import get_period_boundaries
+  d = pd.Timestamp('2023-06-15 14:35', tz='Europe/Paris')
+  get_period_boundaries(d, 'h')   # (naïf 14:00, aware 15:00)
+  get_period_boundaries(d, 'M')   # (naïf, naïf)
+  ```
+- **Correctif** : calcul sur `pd.Timestamp` : fuseau conservé ; fréquences calendaires sur l'horloge murale (jour de 23 h / 25 h), infra-journalières sur l'horloge murale locale avec conservation du décalage UTC (heure ambiguë, fuseaux à +5:30).
+- **Test** : `tests/unit/utils/time/test_utils.py::TestTimezone`
+- **Statut** : corrigée
+
 ## DELAYS
 
 _Aucune entrée._

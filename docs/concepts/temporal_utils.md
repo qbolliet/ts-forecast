@@ -56,7 +56,15 @@ Conventions de conversion :
 
 - `resolve_date()` — conversion souple chaîne / datetime → date
 - `timeseries_to_string()` / `string_to_timeseries()` — index datetime ↔ chaîne
-- `get_period_start()` / `get_period_end()` / `get_period_boundaries()`
+- `get_period_start()` / `get_period_end()` / `get_period_boundaries()` — bornes
+  `[début, fin)` de la période contenant une date, en `pd.Timestamp` :
+  - ancres respectées : `W-WED` (semaine jeudi → mercredi), `QE-JAN` / `QS-FEB`
+    (trimestres févr.-avr., mai-juil., …), `YS-JUL` (exercice juillet-juin) ;
+  - multiplicateurs (`2MS`, `3D`, `2h`) : périodes de *n* unités alignées sur
+    l'époque Unix, ou sur le paramètre optionnel `origin` ;
+  - fuseau horaire conservé (jours de 23 h / 25 h aux changements d'heure) ;
+    entrées `datetime`, `Timestamp`, `datetime64` ou `Period` (représentée par
+    son premier instant).
 
 ## `utils/validation/` — validation de structure
 
