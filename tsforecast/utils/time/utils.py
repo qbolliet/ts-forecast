@@ -182,6 +182,12 @@ def _resolve_spec(frequency: Union[FrequencyType, UserFrequencyType]) -> _Period
     Raises:
         ValueError: If the frequency is unsupported, or if its anchor is invalid
             for its base frequency.
+
+    Examples:
+        >>> _resolve_spec('2MS')
+        _PeriodSpec(base='M', multiplier=2, position='S', suffix=None)
+        >>> _resolve_spec('W-WED')
+        _PeriodSpec(base='W', multiplier=1, position=None, suffix='WED')
     """
     # Validation et base normalisée (lève 'Unsupported frequency' le cas échéant)
     base = normalize_frequency(frequency)
@@ -218,9 +224,21 @@ def _to_timestamp(date: Union[pd.Timestamp, datetime, pd.Period]) -> pd.Timestam
 
     A ``Period`` is represented by its start.
 
+    Args:
+        date: Date-like input (datetime, Timestamp, datetime64 or Period).
+
+    Returns:
+        The corresponding timestamp (time zone preserved).
+
     Raises:
         TypeError: If ``date`` is not a datetime, Timestamp, datetime64 or Period.
         ValueError: If ``date`` is ``NaT``.
+
+    Examples:
+        >>> _to_timestamp(pd.Period('2023-06', freq='M'))
+        Timestamp('2023-06-01 00:00:00')
+        >>> _to_timestamp(datetime(2023, 6, 15, 14, 30))
+        Timestamp('2023-06-15 14:30:00')
     """
     if isinstance(date, pd.Period):
         timestamp = date.to_timestamp(how='start')
@@ -243,6 +261,24 @@ def _align_origin(
 
     A naive origin is read as wall-clock time in ``tz``; an aware origin is
     converted to ``tz`` (or made naive when ``tz`` is None).
+
+    Args:
+        origin: Grid origin, or None when no origin is given.
+        tz: Time zone of the reference date (None for a naive date).
+
+    Returns:
+        The origin expressed in ``tz``, or None if ``origin`` is None.
+
+    Raises:
+        ValueError: If ``origin`` is ``NaT``.
+
+    Examples:
+        >>> _align_origin(None, None) is None
+        True
+        >>> _align_origin(datetime(2023, 1, 1), 'Europe/Paris')
+        Timestamp('2023-01-01 00:00:00+0100', tz='Europe/Paris')
+        >>> _align_origin(pd.Timestamp('2023-01-01', tz='UTC'), None)
+        Timestamp('2023-01-01 00:00:00')
     """
     if origin is None:
         return None
@@ -258,7 +294,24 @@ def _align_origin(
 
 # Retour au fuseau d'origine d'une date « murale » (sans fuseau)
 def _localize(wall: pd.Timestamp, tz) -> pd.Timestamp:
-    """Attach ``tz`` to a wall-clock timestamp (no-op when ``tz`` is None)."""
+    """Attach ``tz`` to a wall-clock timestamp (no-op when ``tz`` is None).
+
+    Ambiguous times (DST fall-back) resolve to the first occurrence and
+    non-existent times (DST spring-forward) shift forward.
+
+    Args:
+        wall: Naive wall-clock timestamp.
+        tz: Target time zone, or None to keep the timestamp naive.
+
+    Returns:
+        The timestamp localized in ``tz`` (unchanged when ``tz`` is None).
+
+    Examples:
+        >>> _localize(pd.Timestamp('2023-06-15 12:00'), None)
+        Timestamp('2023-06-15 12:00:00')
+        >>> _localize(pd.Timestamp('2023-06-15 12:00'), 'Europe/Paris')
+        Timestamp('2023-06-15 12:00:00+0200', tz='Europe/Paris')
+    """
     if tz is None:
         return wall
     return wall.tz_localize(tz, ambiguous=True, nonexistent='shift_forward')
@@ -268,7 +321,22 @@ def _localize(wall: pd.Timestamp, tz) -> pd.Timestamp:
 def _subdaily_bounds(
     date: pd.Timestamp, spec: _PeriodSpec, origin: Optional[pd.Timestamp]
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Boundaries for ns / us / ms / s / min / h periods."""
+    """Compute the boundaries for ns / us / ms / s / min / h periods.
+
+    Args:
+        date: Reference date (may be time zone aware).
+        spec: Frequency components (base in ``_SUBDAILY_NS``).
+        origin: Grid origin already aligned on the time zone of ``date``, or None
+            (grid anchored on the Unix epoch).
+
+    Returns:
+        Tuple ``(start, end)`` in the time zone of ``date``; ``end`` is exclusive.
+
+    Examples:
+        >>> spec = _PeriodSpec('h', 2, None, None)
+        >>> _subdaily_bounds(pd.Timestamp('2023-06-15 14:35'), spec, None)
+        (Timestamp('2023-06-15 14:00:00'), Timestamp('2023-06-15 16:00:00'))
+    """
     length = spec.multiplier * _SUBDAILY_NS[spec.base]
     wall = date.tz_localize(None) if date.tzinfo is not None else date
     origin_wall = 0
@@ -287,7 +355,22 @@ def _subdaily_bounds(
 def _day_bounds(
     date: pd.Timestamp, spec: _PeriodSpec, origin: Optional[pd.Timestamp]
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Wall-clock boundaries (naive) for D / B / W periods."""
+    """Compute the wall-clock boundaries (naive) for D / B / W periods.
+
+    Args:
+        date: Naive reference date.
+        spec: Frequency components (base 'D', 'B' or 'W').
+        origin: Naive grid origin (only its date is used), or None (grid anchored
+            on the Unix epoch, or on the week anchor for 'W').
+
+    Returns:
+        Tuple ``(start, end)`` of naive midnights; ``end`` is exclusive.
+
+    Examples:
+        >>> spec = _PeriodSpec('W', 1, None, None)
+        >>> _day_bounds(pd.Timestamp('2023-06-15'), spec, None)
+        (Timestamp('2023-06-12 00:00:00'), Timestamp('2023-06-19 00:00:00'))
+    """
     days_per_unit = 7 if spec.base == 'W' else 1
     length = spec.multiplier * days_per_unit
 
@@ -309,7 +392,22 @@ def _day_bounds(
 def _month_bounds(
     date: pd.Timestamp, spec: _PeriodSpec, origin: Optional[pd.Timestamp]
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Wall-clock boundaries (naive) for SM / M / Q / Y periods."""
+    """Compute the wall-clock boundaries (naive) for SM / M / Q / Y periods.
+
+    Args:
+        date: Naive reference date.
+        spec: Frequency components (base 'SM', 'M', 'Q' or 'Y').
+        origin: Naive grid origin (only its month, or fortnight for 'SM', is used),
+            or None (grid anchored on the Unix epoch or on the frequency anchor).
+
+    Returns:
+        Tuple ``(start, end)`` of naive first days; ``end`` is exclusive.
+
+    Examples:
+        >>> spec = _PeriodSpec('Q', 1, None, None)
+        >>> _month_bounds(pd.Timestamp('2023-06-15'), spec, None)
+        (Timestamp('2023-04-01 00:00:00'), Timestamp('2023-07-01 00:00:00'))
+    """
     month_index = date.year * 12 + date.month - 1
 
     # Semi-mensuel : indice de quinzaine (1-15 puis 16-fin), grille en quinzaines
@@ -321,6 +419,14 @@ def _month_bounds(
         start_index = origin_index + ((index - origin_index) // spec.multiplier) * spec.multiplier
 
         def to_date(fortnight_index: int) -> pd.Timestamp:
+            """Convert a fortnight index into its first day (1st or 16th).
+
+            Args:
+                fortnight_index: Number of fortnights since year 0.
+
+            Returns:
+                Naive timestamp of the first day of the fortnight.
+            """
             month, half = divmod(fortnight_index, 2)
             return pd.Timestamp(year=month // 12, month=month % 12 + 1, day=16 if half else 1)
 
@@ -342,6 +448,14 @@ def _month_bounds(
     start_index = origin_index + ((month_index - origin_index) // length) * length
 
     def to_first_day(index: int) -> pd.Timestamp:
+        """Convert a month index into the first day of that month.
+
+        Args:
+            index: Number of months since year 0 (``year * 12 + month - 1``).
+
+        Returns:
+            Naive timestamp of the first day of the month.
+        """
         return pd.Timestamp(year=index // 12, month=index % 12 + 1, day=1)
 
     return to_first_day(start_index), to_first_day(start_index + length)
@@ -353,7 +467,25 @@ def _period_bounds(
     frequency: Union[FrequencyType, UserFrequencyType],
     origin: Union[pd.Timestamp, datetime, None],
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Compute ``(start, end)`` of the period containing ``date``."""
+    """Compute ``(start, end)`` of the period containing ``date``.
+
+    Args:
+        date: Reference date.
+        frequency: Period frequency (pandas codes or user-friendly names).
+        origin: Optional grid origin for multiplied frequencies.
+
+    Returns:
+        Tuple ``(start, end)`` in the time zone of ``date``; ``end`` is exclusive.
+
+    Raises:
+        ValueError: If the frequency or its anchor is unsupported, or if ``date``
+            or ``origin`` is ``NaT``.
+        TypeError: If ``date`` is not a datetime, Timestamp, datetime64 or Period.
+
+    Examples:
+        >>> _period_bounds(pd.Timestamp('2023-06-15'), 'monthly', None)
+        (Timestamp('2023-06-01 00:00:00'), Timestamp('2023-07-01 00:00:00'))
+    """
     # Résolution et décomposition de la fréquence
     spec = _resolve_spec(frequency)
     # Conversion en timestamp
