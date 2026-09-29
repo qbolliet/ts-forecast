@@ -8,7 +8,7 @@ import pytest
 import numpy as np
 from datetime import datetime
 import warnings
-from tsforecast.base.transformers import PanelTimeSeriesTransformer
+from tsforecast.base.transformers import PanelTimeSeriesTransformer, TimeSeriesTransformerMixin
 
 # Classe de test concrète (PanelTimeSeriesTransformer est abstraite)
 class ConcreteTransformer(PanelTimeSeriesTransformer):
@@ -641,3 +641,116 @@ class TestValidationCanBeDisabled:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestValidateTimeIndex:
+    """``TimeSeriesTransformerMixin._validate_time_index`` follows the rules of ``validate_temporal_data``.
+
+    The method is private but has no public entry point of its own: it is called by
+    ``PanelTimeSeriesTransformer`` before ``validate_temporal_data`` and must accept and
+    reject the same time labels (datetimes, date strings and periods accepted; numeric
+    labels rejected).
+    """
+
+    @staticmethod
+    def _months(periods: int = 3) -> pd.DatetimeIndex:
+        """Build a month-start ``DatetimeIndex`` (``MS``)."""
+        return pd.date_range('2023-01-01', periods=periods, freq='MS')
+
+    def _validate(self, df: pd.DataFrame, time_col=None) -> pd.DatetimeIndex:
+        """Call the method on a bare mixin."""
+        return TimeSeriesTransformerMixin()._validate_time_index(df, time_col)
+
+    def test_datetime_index_is_returned(self):
+        """A ``DatetimeIndex`` comes back equal."""
+        df = pd.DataFrame({'v': range(3)}, index=self._months())
+        pd.testing.assert_index_equal(self._validate(df), self._months(), check_names=False)
+
+    def test_string_index_is_converted(self):
+        """ISO strings on the index become datetimes."""
+        df = pd.DataFrame({'v': [1, 2]}, index=['2023-01-01', '2023-02-01'])
+        assert list(self._validate(df)) == list(self._months(2))
+
+    def test_multiindex_uses_its_last_level(self):
+        """A panel ``MultiIndex`` gives the dates of its last level, one per row.
+
+        This case used to fail with "Cannot determine time index".
+        """
+        index = pd.MultiIndex.from_product([['A', 'B'], self._months(2)])
+        result = self._validate(pd.DataFrame({'v': range(4)}, index=index))
+        assert list(result) == list(self._months(2)) * 2
+
+    def test_multiindex_with_string_dates(self):
+        """String dates on the last level of a ``MultiIndex`` are converted."""
+        index = pd.MultiIndex.from_product([['A'], ['2023-01-01', '2023-02-01']])
+        result = self._validate(pd.DataFrame({'v': [1, 2]}, index=index))
+        assert list(result) == list(self._months(2))
+
+    def test_period_index_is_read_at_first_instants(self):
+        """A ``PeriodIndex`` gives the first instant of each period.
+
+        This case used to fail with "Cannot determine time index".
+        """
+        df = pd.DataFrame({'v': range(3)}, index=pd.period_range('2023-01', periods=3, freq='M'))
+        assert list(self._validate(df)) == list(self._months())
+
+    def test_period_last_level_of_a_multiindex(self):
+        """Periods on the last level of a ``MultiIndex`` are read at their first instant."""
+        index = pd.MultiIndex.from_product([['A'], pd.period_range('2023-01', periods=2, freq='M')])
+        result = self._validate(pd.DataFrame({'v': [1, 2]}, index=index))
+        assert list(result) == list(self._months(2))
+
+    def test_time_col_gives_a_datetime_index(self):
+        """A time column is returned as a ``DatetimeIndex`` (it used to be a ``Series``)."""
+        df = pd.DataFrame({'date': ['2023-01-01', '2023-02-01'], 'v': [1, 2]})
+        result = self._validate(df, time_col='date')
+        assert isinstance(result, pd.DatetimeIndex)
+        assert list(result) == list(self._months(2))
+
+    def test_period_time_col_is_read_at_first_instants(self):
+        """A ``Period`` time column is accepted."""
+        df = pd.DataFrame({'date': pd.period_range('2023-01', periods=2, freq='M'), 'v': [1, 2]})
+        assert list(self._validate(df, time_col='date')) == list(self._months(2))
+
+    def test_missing_time_col_falls_back_on_the_index(self):
+        """A ``time_col`` that is not a column leaves the index in charge."""
+        df = pd.DataFrame({'v': range(3)}, index=self._months())
+        assert list(self._validate(df, time_col='date')) == list(self._months())
+
+    @pytest.mark.parametrize(
+        'labels', [[2020, 2021], [0, 1], [2020.0, 2021.0]], ids=['integer-years', 'range-like', 'floats']
+    )
+    def test_numeric_index_is_rejected(self, labels):
+        """Numeric labels are not dates: they used to be read as nanoseconds since 1970."""
+        df = pd.DataFrame({'v': [1, 2]}, index=labels)
+        with pytest.raises(ValueError, match='Cannot determine time index'):
+            self._validate(df)
+
+    def test_numeric_last_level_is_rejected(self):
+        """Numeric labels on the last level of a ``MultiIndex`` are rejected too."""
+        index = pd.MultiIndex.from_arrays([['A', 'A'], [2020, 2021]])
+        with pytest.raises(ValueError, match='Cannot determine time index'):
+            self._validate(pd.DataFrame({'v': [1, 2]}, index=index))
+
+    def test_non_date_strings_are_rejected(self):
+        """Strings that are not dates raise a ``ValueError``."""
+        df = pd.DataFrame({'v': [1, 2]}, index=['a', 'b'])
+        with pytest.raises(ValueError, match='Cannot determine time index'):
+            self._validate(df)
+
+    @pytest.mark.parametrize(
+        'labels', [[2020, 2021], ['a', 'b']], ids=['integers', 'non-date-strings']
+    )
+    def test_invalid_time_col_is_rejected_with_its_name(self, labels):
+        """A time column that is not made of dates raises a ``ValueError`` naming it.
+
+        Non-date strings used to escape as a raw pandas error, integers were read
+        as nanoseconds since 1970.
+        """
+        df = pd.DataFrame({'date': labels, 'v': [1, 2]})
+        with pytest.raises(ValueError, match="Column 'date' cannot be converted"):
+            self._validate(df, time_col='date')
+
+    def test_empty_frame_is_accepted(self):
+        """An empty frame with the default index has no label to refuse."""
+        assert len(self._validate(pd.DataFrame({'v': []}))) == 0

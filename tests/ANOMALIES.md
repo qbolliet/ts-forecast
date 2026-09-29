@@ -683,6 +683,303 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/utils/time/test_utils.py::TestTimezone`
 - **Statut** : corrigée
 
+### ANO-UTILS-024 — `restore_original_structure` réaffecte l'index d'origine par position à des lignes triées
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/validation/utils.py::restore_original_structure`
+  (cause : `validate_temporal_data(sort_data=True)` réordonne les lignes, alors que les
+  métadonnées ne gardent que `original_index` ; `was_sorted` est enregistré mais jamais lu)
+- **Sévérité** : majeure
+- **Observé** : dès que l'entrée n'est pas triée, `data_work.index = metadata['original_index']`
+  colle l'index d'origine (dans l'ordre d'entrée) sur des lignes déjà triées. **Chemin index** :
+  la série `[30, 10, 20]` sur `[2023-03-01, 2023-01-01, 2023-02-01]` revient avec
+  `2023-03-01 → 10`, `2023-01-01 → 20`, `2023-02-01 → 30` : chaque valeur est rattachée à
+  la **mauvaise date**, sans erreur ni avertissement. **Chemin colonnes** : les lignes
+  reviennent triées, avec les étiquettes `0..n-1` de l'entrée (l'ordre d'origine n'est pas
+  restitué). Même effet sur un panel dont les blocs d'entités ne sont pas dans l'ordre
+  lexicographique (`reverse_entities`). Appelé par
+  `PanelTimeSeriesTransformer._restore_structure_if_converted`
+  (`tsforecast/base/transformers.py`, `convert_cols_to_index=True`). Le test existant `test_restoration_with_unsorted_data`
+  comparait les dates triées des deux côtés : il ne pouvait pas le voir.
+- **Attendu** : `restore_original_structure(validate_temporal_data(x, return_metadata=True))`
+  restitue `x` à l'identique (valeurs, index et ordre des lignes), triée ou non à l'entrée ;
+  à défaut d'ordre restituable, ne jamais rattacher une valeur à une autre étiquette.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.validation import validate_temporal_data, restore_original_structure
+  s = pd.Series([30, 10, 20], name='v',
+                index=pd.to_datetime(['2023-03-01', '2023-01-01', '2023-02-01']))
+  v, meta = validate_temporal_data(s, return_metadata=True)
+  restore_original_structure(v, meta)   # 2023-03-01 -> 10 (au lieu de 30)
+  ```
+- **Correctif** : décision de l'auteur (2026-09-29) : **renoncer** à restituer l'ordre
+  d'origine (aucun cas d'usage à des lignes non triées). `validate_temporal_data` note dans
+  les métadonnées `rows_reordered` (le tri a réellement déplacé des lignes) ;
+  `restore_original_structure` n'affecte plus `original_index` quand `rows_reordered` est
+  vrai (ni quand le nombre de lignes a changé) : les lignes restent triées, avec l'index
+  qu'elles ont (chemin colonnes : étiquettes `0..n-1` neuves). Chaque valeur garde sa date.
+- **Test** : `tests/unit/utils/validation/test_utils.py::TestRestoreOriginalStructure::test_index_path_restoration_after_sort_keeps_each_value_on_its_date`,
+  `::test_column_path_restoration_after_sort_gives_the_sorted_rows`,
+  `::TestReturnedMetadata::test_rows_reordered_flag`,
+  `::TestRoundTripOnPerturbedDatasets::test_round_trip_of_unsorted_data_gives_the_sorted_frame`
+  (`shuffle_rows` et `reverse_entities`, chemins index et colonnes) ; l'identité sans tri
+  reste testée par `::test_round_trip_of_unsorted_data_without_sort_is_the_identity`
+- **Statut** : corrigée
+
+### ANO-UTILS-025 — `restore_original_structure` ne restitue pas la position des colonnes d'origine
+- **Type** : [CODE] comportement (le docstring promet « column positions »)
+- **Composant** : `tsforecast/utils/validation/utils.py::restore_original_structure`
+- **Sévérité** : mineure
+- **Observé** : `reset_index()` place les colonnes d'index (panel puis temps) **en tête** ;
+  `metadata['original_columns']` n'est jamais lu. Une entrée `['date', 'v', 'entity']`
+  revient en `['entity', 'date', 'v']`. Sans effet quand les colonnes d'index étaient déjà
+  en tête, dans cet ordre (cas des jeux `reset_index()` de la campagne).
+- **Attendu** : colonnes restituées dans l'ordre d'origine (les colonnes ajoutées après la
+  validation restant en fin), comme l'annonce le docstring.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.validation import validate_temporal_data, restore_original_structure
+  df = pd.DataFrame({'date': pd.date_range('2023-01-01', periods=3).tolist() * 2,
+                     'v': range(6), 'entity': ['A'] * 3 + ['B'] * 3})
+  v, meta = validate_temporal_data(df, time_col='date', panel_cols=['entity'], return_metadata=True)
+  list(restore_original_structure(v, meta).columns)   # ['entity', 'date', 'v']
+  ```
+- **Correctif** : après `reset_index()`, les colonnes sont réordonnées selon
+  `metadata['original_columns']` ; les colonnes ajoutées depuis restent en fin.
+- **Test** : `tests/unit/utils/validation/test_utils.py::TestRestoreOriginalStructure::test_columns_are_restored_at_their_original_positions`,
+  `::test_columns_added_after_validation_stay_last`, `::test_missing_column_record_leaves_the_reset_order`
+- **Statut** : corrigée
+
+### ANO-UTILS-026 — `restore_original_structure` sur une `Series` (chemin colonnes) renvoie la colonne temporelle
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/validation/utils.py::restore_original_structure`
+- **Sévérité** : mineure (le type de `X` passé par `_restore_structure_if_converted` n'a pas été vérifié)
+- **Observé** : la `Series` est convertie en frame, l'index (temps) est remis en colonne
+  par `reset_index()`, puis `data_work.iloc[:, 0]` renvoie la **première colonne, c'est-à-dire
+  les dates**, à la place des valeurs. Le test existant `test_restoration_with_series` ne
+  vérifiait que le type et l'absence de NaN : il passait à vide.
+- **Attendu** : les valeurs de la `Series` ne sont jamais remplacées par les dates. La forme
+  exacte (valeurs sur le `RangeIndex` d'origine, ou frame avec la colonne temporelle) est à
+  décider ; le test n'exige que les valeurs.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.validation import validate_temporal_data, restore_original_structure
+  df = pd.DataFrame({'date': pd.date_range('2023-01-01', periods=3), 'v': [10, 20, 30]})
+  v, meta = validate_temporal_data(df, time_col='date', return_metadata=True)
+  restore_original_structure(v['v'], meta)   # les dates, pas [10, 20, 30]
+  ```
+- **Correctif** : une `Series` n'est plus convertie en frame : elle garde ses valeurs et
+  récupère son index d'origine (sous les mêmes conditions qu'en ANO-024) ; les dates, portées
+  par l'index validé seul, sont abandonnées quand l'index est remplacé. Après un tri, la
+  `Series` garde son index temporel.
+- **Test** : `tests/unit/utils/validation/test_utils.py::TestRestoreOriginalStructure::test_a_series_of_the_column_path_gets_its_original_index_back`,
+  `::test_a_reordered_series_keeps_its_time_index`
+- **Statut** : corrigée
+
+### ANO-UTILS-027 — Une `Series` non nommée ressort nommée `0`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/validation/utils.py::validate_temporal_data` et `::restore_original_structure`
+- **Sévérité** : mineure
+- **Observé** : `Series.to_frame()` sur une série sans nom crée la colonne `0` ;
+  `data.iloc[:, 0]` renvoie ensuite une `Series` **nommée `0`** au lieu de `None`. Vrai
+  aussi pour `restore_original_structure`. Le nom d'une série nommée est, lui, conservé.
+- **Attendu** : le nom de la `Series` en entrée (y compris `None`) est celui de la sortie.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.validation import validate_temporal_data
+  s = pd.Series([1, 2, 3], index=pd.date_range('2023-01-01', periods=3))
+  validate_temporal_data(s).name   # 0
+  ```
+- **Correctif** : `validate_temporal_data` réaffecte `data.name` à la `Series` renvoyée ;
+  `restore_original_structure` ne convertit plus la `Series` en frame.
+- **Test** : `tests/unit/utils/validation/test_utils.py::TestValidateTemporalDataInputContract::test_unnamed_series_stays_unnamed`,
+  `::TestRestoreOriginalStructure::test_unnamed_series_round_trips_unnamed`
+- **Statut** : corrigée
+
+### ANO-UTILS-028 — Index entier (`RangeIndex`, années) converti en nanosecondes depuis 1970
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/validation/utils.py::validate_temporal_data`
+  (`_check_datetime_convertible`, `_validate_index_based`)
+- **Sévérité** : à arbitrer
+- **Observé** : « convertible en date » signifie « `pd.to_datetime` ne lève pas ». Un
+  `RangeIndex` (`0, 1, …`) ou des années entières (`2020, 2021`) passent **en mode strict**
+  et deviennent `1970-01-01 00:00:00.000002020`, `…2021` : des dates sans rapport avec les
+  données, sans erreur ni avertissement. Même chose pour le dernier niveau d'un `MultiIndex`.
+  La même conversion nue est faite par `TimeSeriesTransformerMixin._validate_time_index`
+  (`tsforecast/base/transformers.py`). La documentation (`docs/concepts/temporal_utils.md`)
+  ne dit rien du cas.
+- **Attendu** : à trancher. Refuser un index entier en mode strict (il ne représente pas un
+  instant), ou documenter l'acceptation. Comportement actuel épinglé.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.validation import validate_temporal_data
+  validate_temporal_data(pd.DataFrame({'v': [1, 2]}, index=[2020, 2021])).index[0]
+  # Timestamp('1970-01-01 00:00:00.000002020')
+  ```
+- **Correctif** : décision de l'auteur (2026-09-29) : **rejeter** un index entier. Le
+  helper `_convert_to_datetime` (qui remplace `_check_datetime_convertible`) refuse tout
+  index / colonne à dtype numérique (entiers, flottants), sauf s'il est vide. Effet : erreur
+  en strict, avertissement puis données inchangées sinon (index simple et dernier niveau de
+  `MultiIndex`) ; erreur dans les deux modes pour `time_col`. Aligné sur les mêmes règles :
+  `TimeSeriesTransformerMixin._validate_time_index` (`tsforecast/base/transformers.py`), qui
+  réutilise `_convert_to_datetime` (auparavant `pd.to_datetime` nu). Effet de bord : le test
+  `delays` `TestShiftTransformerEdgeCases::test_non_datetime_index` (« rejet des index
+  non-datetime ») passe, retiré de `tests/legacy_failures.txt`.
+- **Test** : `tests/unit/base/test_transformers.py::TestValidateTimeIndex` (numérique rejeté, `Period`, `MultiIndex`, `time_col`),
+  `tests/unit/utils/validation/test_utils.py::TestIndexBasedValidation::test_numeric_index_is_rejected_when_strict`,
+  `::test_default_range_index_is_rejected_when_strict`, `::test_numeric_index_warns_and_returns_data_when_not_strict`,
+  `::TestMultiIndexValidation::test_integer_last_level_is_rejected_when_strict`,
+  `::TestColumnBasedValidation::test_numeric_time_col_is_rejected`
+- **Statut** : corrigée
+
+### ANO-UTILS-029 — `PeriodIndex` refusé par la validation temporelle
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/validation/utils.py::validate_temporal_data`,
+  `::validate_sorted_within_groups` ; même cause dans
+  `tsforecast/base/transformers.py::TimeSeriesTransformerMixin._validate_time_index`
+- **Sévérité** : à arbitrer
+- **Observé** : `pd.to_datetime` rejette un `PeriodIndex` (`TypeError: Passing PeriodDtype
+  data is invalid`). `validate_temporal_data` lève donc `ValueError: Index cannot be
+  converted to datetime` en mode strict (index simple, dernier niveau de `MultiIndex` ou
+  colonne `time_col` : `Column 'date' cannot be converted to datetime`), et en mode non
+  strict avertit puis renvoie l'index **inchangé** (toujours `PeriodIndex`).
+  `validate_sorted_within_groups` lève `Time series data must have DatetimeIndex`.
+  `_validate_time_index` lève « Cannot determine time index » : c'est le message qui fait
+  échouer des tests `delays` (voir le rapport U5, à signaler pour D3-D5).
+- **Attendu** : à trancher. `CLAUDE.md` cite `Period` parmi les types de dates à tester « là
+  où l'API les accepte » ; soit conversion par `to_timestamp()`, soit refus documenté.
+  Comportement actuel épinglé.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.validation import validate_temporal_data
+  s = pd.Series([1, 2, 3], index=pd.period_range('2023-01', periods=3, freq='M'))
+  validate_temporal_data(s)   # ValueError: Index cannot be converted to datetime
+  ```
+- **Correctif** : décision de l'auteur (2026-09-29) : **accepter** `PeriodIndex`. Il est
+  converti à son premier instant (`to_timestamp()`, convention d'ANO-UTILS-020) pour un index
+  simple, le dernier niveau d'un `MultiIndex` et une colonne `time_col` ;
+  `restore_original_structure` rend le `PeriodIndex` d'origine sur le chemin index.
+  `validate_sorted_within_groups` accepte un `PeriodIndex` (série simple ou dernier niveau).
+  `_validate_time_index` (`base`) est aligné : il accepte un `PeriodIndex` et lit le dernier
+  niveau d'un `MultiIndex` (il échouait sur les deux avec « Cannot determine time index »),
+  et renvoie un `DatetimeIndex` pour une `time_col` (c'était une `Series`). Effet de bord :
+  sept tests d'intégration `delays` (`TestShiftTransformerWithPanelwise`,
+  `TestMaskTransformerWithPanelwise`, `TestPerformance::test_large_panel_performance`), qui
+  échouaient sur ce message avec un panel `MultiIndex`, passent ; retirés de
+  `tests/legacy_failures.txt` (groupe D5).
+- **Test** : `tests/unit/utils/validation/test_utils.py::TestIndexBasedValidation::test_period_index_is_converted_to_first_instants`,
+  `::test_unsorted_period_index_is_sorted`, `::TestMultiIndexValidation::test_period_last_level_is_converted_to_first_instants`,
+  `::TestColumnBasedValidation::test_period_time_col_is_converted_to_first_instants`,
+  `::TestRestoreOriginalStructure::test_period_index_is_restored_after_conversion`,
+  `::TestRoundTripOnPerturbedDatasets::test_period_index_dataset_round_trips`, `::test_period_column_dataset_is_validated`,
+  `::test_period_index_panel_round_trips`, `::TestValidateSortedWithinGroups::test_plain_series_with_period_index`,
+  `::test_panel_with_period_dates`
+- **Statut** : corrigée
+
+### ANO-UTILS-030 — Dernier niveau de `MultiIndex` converti sur les niveaux triés, pas sur les valeurs
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/validation/utils.py::validate_temporal_data`
+  (`_validate_index_based`, branche `MultiIndex`)
+- **Sévérité** : mineure
+- **Observé** : le contrôle `_check_datetime_convertible` porte sur les **valeurs** du
+  dernier niveau, la conversion sur ses **niveaux** (`index.levels[-1]`, uniques et triés
+  lexicographiquement). Pour des chaînes non ISO, pandas déduit le format de la première
+  valeur rencontrée : `['15/01/2023', '02/02/2023']` sur un index simple donne
+  `2023-01-15`, `2023-02-02` (jour d'abord, déduit de `15/01`), mais sur un `MultiIndex` les
+  niveaux triés commencent par `02/02/2023` (lu mois d'abord), d'où
+  `ValueError: Failed to convert MultiIndex last level: time data "15/01/2023" doesn't
+  match format "%m/%d/%Y"` en strict, et avertissement + niveau non converti sinon. Le
+  résultat dépend de l'ordre lexicographique des chaînes, et le message d'erreur est
+  contradictoire avec le contrôle qui vient de passer.
+- **Attendu** : mêmes dates que l'index simple pour les mêmes valeurs (conversion des
+  valeurs du niveau, pas de ses niveaux triés).
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.validation import validate_temporal_data
+  idx = pd.MultiIndex.from_arrays([['A', 'A'], ['15/01/2023', '02/02/2023']])
+  validate_temporal_data(pd.DataFrame({'v': [1, 2]}, index=idx))
+  # ValueError: Failed to convert MultiIndex last level: ...
+  ```
+- **Correctif** : la conversion porte sur les **valeurs** du dernier niveau ; l'index est
+  reconstruit par `MultiIndex.from_arrays`. Le `try / except` de conversion, devenu
+  inatteignable, est supprimé (voir ANO-UTILS-032).
+- **Test** : `tests/unit/utils/validation/test_utils.py::TestMultiIndexValidation::test_day_first_string_dates_convert_like_a_flat_index`
+- **Statut** : corrigée
+
+### ANO-UTILS-031 — Docstring de `validate_temporal_data` : `strict=False` ne « corrige » pas une colonne temporelle illisible
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/utils/validation/utils.py::validate_temporal_data`
+- **Sévérité** : cosmétique
+- **Observé** : le docstring décrit `strict` : « If True, raises errors on validation
+  failures; if False, attempts corrections ». Sur le chemin index, `strict=False` avertit et
+  renvoie les données. Sur le chemin colonnes, une `time_col` non convertible lève
+  `ValueError: Column 'date' cannot be converted to datetime` **dans les deux modes**
+  (aucun repli possible : pas de colonne temporelle, pas d'index). Le mode non strict ne
+  couvre en fait que les doublons et la conversion d'index.
+- **Attendu** : le docstring précise que `strict=False` ne concerne pas la conversion de
+  `time_col` (le code est juste).
+- **Correctif** : docstring de `validate_temporal_data` (`strict`, types de dates acceptés)
+  précisé ; code inchangé.
+- **Test** : `tests/unit/utils/validation/test_utils.py::TestColumnBasedValidation::test_non_convertible_time_col_raises_in_both_modes`
+  (suit le code, pas de `xfail`)
+- **Statut** : corrigée
+
+### ANO-UTILS-032 — `validate_temporal_data` : branches inatteignables (code mort)
+- **Type** : [CODE] comportement (nettoyage, pas un bogue)
+- **Composant** : `tsforecast/utils/validation/utils.py::_validate_index_based`,
+  `::_validate_column_based`
+- **Sévérité** : cosmétique
+- **Observé** : (1) dans `_validate_index_based`, le `try / except` autour de
+  `pd.to_datetime(data.index)` (index simple) ne peut jamais lever : le même appel vient de
+  réussir dans `_check_datetime_convertible` ; (2) dans `_validate_column_based`, même
+  situation pour `pd.to_datetime(data[time_col])`, et les branches `if time_col:` fausses
+  (lignes `498->508`, `511->515`) sont inatteignables : `panel_cols` sans `time_col` est
+  rejeté dès le début de `validate_temporal_data`, et sans `time_col` ni `panel_cols` c'est
+  le chemin index qui est pris. Décelé par la couverture : ces lignes sont les seules non couvertes
+  de `utils.py` (96 %, lignes et branches).
+- **Attendu** : suppression du code mort, sans changement de comportement.
+- **Correctif** : les trois `try / except` de conversion et les branches `if time_col:`
+  sont supprimés ; `_validate_column_based` exige `time_col` (`str`). `utils.py` : 100 %
+  de couverture (lignes et branches).
+- **Test** : couverture 100 % de `utils.py` par les tests de `tests/unit/utils/validation/test_utils.py`
+- **Statut** : corrigée
+
+### ANO-UTILS-033 — Avertissement « Index replaced » émis à chaque appel du chemin colonnes
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/validation/utils.py::validate_temporal_data`
+- **Sévérité** : cosmétique
+- **Observé** : le chemin `time_col` émettait `UserWarning: Index replaced with [...]. Use
+  return_metadata=True and restore_original_structure() to revert.` même quand
+  `return_metadata=True` était déjà passé.
+- **Attendu** : pas d'avertissement quand l'appelant a demandé les métadonnées de restauration.
+- **Correctif** : l'avertissement n'est émis que sans `return_metadata`.
+- **Test** : `tests/unit/utils/validation/test_utils.py::TestColumnBasedValidation::test_replacement_of_the_index_is_announced_without_metadata`,
+  `::test_replacement_of_the_index_is_silent_with_metadata`
+- **Statut** : corrigée
+
+### ANO-UTILS-034 — `validate_sorted_within_groups` : `except Exception` masque une erreur de structure en « non trié »
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/validation/utils.py::validate_sorted_within_groups`
+  (et `validate_entities_grouped` pour les colonnes ambiguës)
+- **Sévérité** : mineure
+- **Observé** : une `time_col` (ou un `panel_col`) dont le nom désigne deux colonnes fait de
+  `data[time_col]` un frame ; le contrôle vectorisé échouait, et le `except Exception` du repli
+  répondait `False` (« non trié »), sans signaler le mauvais usage.
+- **Attendu** : erreur explicite pour un nom de colonne ambigu ; pas de repli silencieux.
+- **Correctif** : contrôle explicite `_check_columns_unique` (`ValueError: Column 'date' is not
+  unique in data`) dans les deux fonctions ; le `try / except` est supprimé.
+  Des dates incomparables (chaîne et entier) donnent toujours `False`
+  (`is_monotonic_increasing`), sans exception.
+- **Test** : `tests/unit/utils/validation/test_utils.py::TestValidateSortedWithinGroups::test_ambiguous_time_col_is_rejected`,
+  `::TestValidateEntitiesGrouped::test_ambiguous_panel_col_is_rejected`
+- **Statut** : corrigée
+
 ## DELAYS
 
 _Aucune entrée._

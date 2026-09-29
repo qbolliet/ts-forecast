@@ -60,7 +60,6 @@ tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransf
 tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransform::test_fit_transform
 tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransform::test_transform_basic
 tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerParams::test_params_with_dict_reference_point
-tests/unit/delays/test_transformers.py::TestShiftTransformerEdgeCases::test_non_datetime_index
 
 # prompt D5
 tests/integration/delays/test_integration.py::TestCombinedTransformations::test_shift_then_mask
@@ -70,13 +69,6 @@ tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_w
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_workflow_time_series_mono_frequency
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflowPanel::test_panel_each_entity_has_delays
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflowPanel::test_panel_last_observation_per_entity
-tests/integration/delays/test_integration.py::TestMaskTransformerWithPanelwise::test_mask_applied_independently_per_entity
-tests/integration/delays/test_integration.py::TestMaskTransformerWithPanelwise::test_mask_correct_per_entity
-tests/integration/delays/test_integration.py::TestMaskTransformerWithPanelwise::test_mask_transform_inverse_transform_per_entity
-tests/integration/delays/test_integration.py::TestPerformance::test_large_panel_performance
-tests/integration/delays/test_integration.py::TestShiftTransformerWithPanelwise::test_shift_different_params_per_entity
-tests/integration/delays/test_integration.py::TestShiftTransformerWithPanelwise::test_shift_no_nan_introduced_per_entity
-tests/integration/delays/test_integration.py::TestShiftTransformerWithPanelwise::test_shift_transform_inverse_transform_per_entity
 
 # prompt U6
 tests/unit/utils/frequency/test_normalizer.py::TestConverterIntegration::test_converter_handle_a_alias

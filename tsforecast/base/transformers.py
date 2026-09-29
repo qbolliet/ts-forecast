@@ -20,6 +20,8 @@ from ..utils.validation import (
     validate_entities_grouped,
     validate_sorted_within_groups
 )
+# Règles de conversion en dates communes à toute la validation temporelle
+from ..utils.validation.utils import _convert_to_datetime
 
 
 # Mixin pour les séries temporelles
@@ -51,7 +53,13 @@ class TimeSeriesTransformerMixin:
         Extracts or converts time index from various formats:
         - From a specified time column
         - From an existing DatetimeIndex
+        - From the last level of a MultiIndex (panel data)
         - By converting a non-datetime index
+
+        The conversion follows the rules of ``validate_temporal_data``: datetimes,
+        strings parsable as dates and ``Period`` values (read at the first instant of
+        the period) are accepted; numeric labels (``RangeIndex``, integer years) are not
+        dates and are rejected, except on an empty index.
 
         Args:
             X: Input data with time information
@@ -84,21 +92,24 @@ class TimeSeriesTransformerMixin:
         """
         if time_col and time_col in X.columns:
             # Utilisation de la colonne temporelle spécifiée
-            time_index = pd.to_datetime(X[time_col])
-        elif isinstance(X.index, pd.DatetimeIndex):
-            # L'index est déjà un DatetimeIndex
-            time_index = X.index
+            converted = _convert_to_datetime(X[time_col])
+            if converted is None:
+                raise ValueError(
+                    f"Cannot determine time index. Column '{time_col}' cannot be "
+                    "converted to datetime."
+                )
         else:
-            # Tentative de conversion de l'index
-            try:
-                time_index = pd.to_datetime(X.index)
-            except:
+            # Index temporel : dernier niveau pour un MultiIndex (entités, puis dates)
+            index = X.index.get_level_values(-1) if isinstance(X.index, pd.MultiIndex) else X.index
+            converted = _convert_to_datetime(index)
+            if converted is None:
                 raise ValueError(
                     "Cannot determine time index. Please provide a datetime index "
                     "or specify time_col parameter."
                 )
 
-        return time_index
+        # Une colonne convertie est une Series : le contrat annonce un DatetimeIndex
+        return pd.DatetimeIndex(converted)
 
 
 # Transformer pour les données de panel
