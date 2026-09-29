@@ -13,7 +13,6 @@ densified (as required by the HighFrequencyImputer), see
 delegates the actual conversions to this class.
 """
 # Importation des modules
-import re
 import numpy as np
 import pandas as pd
 from typing import Any, Union, Optional, Literal, Dict, Tuple, List
@@ -32,7 +31,7 @@ from .utils import (
     detect_index_frequency,
 )
 from ..validation import validate_temporal_data
-from ..parse import parse_frequency, build_frequency_string
+from ..parse import ParsedFrequency, parse_frequency, build_frequency_string
 
 # Import des utilitaires de gestion des positions
 from ..position.utils import (
@@ -78,29 +77,18 @@ def _modernize_resample_freq(freq: str) -> str:
         >>> _modernize_resample_freq('D')
         'D'
     """
-    match = re.fullmatch(r'(\d*)([A-Za-z]+)((?:-[A-Za-z]+)?)', freq)
-    if not match:
+    # Parsing de la fréquence
+    try:
+        parsed = parse_frequency(freq)
+    except ValueError:
         return freq
-    multiplier, base, anchor = match.groups()
-    modern_base = _DEPRECATED_PERIOD_END_ALIASES.get(base, base)
-    return f"{multiplier}{modern_base}{anchor}"
 
-
-# Fonction auxiliaire de suppression du multiplicateur d'un offset pandas
-def _strip_multiplier(freq_str: str) -> str:
-    """Strip a leading pandas offset multiplier (e.g. '2MS' -> 'MS').
-
-    ``parse_frequency`` does not handle multipliers ; les appelants qui n'ont
-    besoin que de la base et de la position (pas du multiplicateur lui-même)
-    le retirent d'abord.
-
-    Examples:
-        >>> _strip_multiplier('2MS')
-        'MS'
-        >>> _strip_multiplier('D')
-        'D'
-    """
-    return re.sub(r'^\d+', '', freq_str)
+    # Seule une base nue (sans position S/E) est concernée
+    if parsed.position is not None or parsed.freq not in _DEPRECATED_PERIOD_END_ALIASES:
+        return freq
+    multiplier = str(parsed.multiplier) if parsed.multiplier != 1 else ''
+    anchor = f"-{parsed.suffix}" if parsed.suffix is not None else ''
+    return f"{multiplier}{_DEPRECATED_PERIOD_END_ALIASES[parsed.freq]}{anchor}"
 
 
 # Classe de conversion d'une fréquence dans une autre
@@ -257,44 +245,31 @@ class FrequencyConverter(TemporalConverter):
 
         # Cas 1: Traitement des Series
         if isinstance(data, pd.Series):
-            # Détection de la fréquence actuelle (avec position et anchor)
-            detected_freq = detect_frequency(data=data, return_format='components')
+            # Détection de la fréquence actuelle (avec position, anchor et multiplicateur)
+            source = detect_frequency(data=data, return_format='components')
 
             # Cas où aucune fréquence n'a pu être détectée
-            if not detected_freq:
+            if not source:
                 raise ValueError("Cannot detect current frequency of the data")
-            # Parsing des composants
-            else :
-                source_freq_base, source_position, _ = detected_freq
 
-            # Normalisation de la fréquence cible (doit être str pour Series)
+            # Décomposition de la fréquence cible (doit être str pour Series)
             if isinstance(target_freq, dict):
                 raise ValueError("target_freq must be a string for Series input")
-            else :
-                if target_position is None :
-                    target_freq_base, target_position, _ = normalize_frequency(target_freq, return_format='components')
-                    # Si la target_position n'est pas spécifiée dans la fréquence, on lui associe celle de la source
-                    if target_position is None :
-                        target_position = source_position
-                else :
-                    target_freq_base = normalize_frequency(target_freq, return_format='base')
+            target = normalize_frequency(target_freq, return_format='components')
 
-            # Construction de la fréquence cible complète avec position
-            target_freq_with_position = build_frequency_string(
-                target_freq_base,
-                target_position
-            )
+            # Position cible : explicite, sinon celle de la fréquence cible, sinon celle de la source
+            target_position = target_position or target.position or source.position
 
-            # Si les fréquences sont identiques (base + position), retourner les données telles quelles
-            source_freq_with_position = build_frequency_string(
-                source_freq_base,
-                source_position
-            )
+            # Construction des fréquences complètes (base + position + multiplicateur)
+            target_freq_with_position = self._with_position(target, target_position)
+            source_freq_with_position = self._with_position(source, source.position)
+
+            # Si les fréquences sont identiques, retourner les données telles quelles
             if source_freq_with_position == target_freq_with_position:
                 return data
 
             # Détermination de la direction de conversion
-            if is_higher_frequency(target_freq_base, source_freq_base):
+            if is_higher_frequency(target_freq_with_position, source_freq_with_position):
                 # Upsampling
                 return self._upsample(
                     data=data,
@@ -370,17 +345,87 @@ class FrequencyConverter(TemporalConverter):
             0.3333333333333333
         """
         # Normalisation des fréquences (codes/littéraux) vers leur base durée
-        # (ex: 'daily'/'D' -> 'D', 'monthly'/'M' -> 'M'), seul format reconnu
-        # par DurationConverter
-        from_base = normalize_frequency(from_unit, return_format='base')
-        to_base = normalize_frequency(to_unit, return_format='base')
+        # (ex: 'daily'/'D' -> 'D', 'monthly'/'M' -> 'M'), multiplicateur conservé
+        # ('2MS' -> '2M') : c'est la durée de la période qui compte
+        from_duration = self._duration_of(from_unit)
+        to_duration = self._duration_of(to_unit)
 
         # Délégation au DurationConverter avec arguments inversés :
         # DurationConverter.get_conversion_factor(a, b) = durée(a) / durée(b)
         # = "combien de b dans un a"
         # On veut : "combien de from_freq dans un to_freq" = durée(to) / durée(from)
         # → on passe (to_freq, from_freq)
-        return get_duration_conversion_factor(to_base, from_base)
+        return get_duration_conversion_factor(to_duration, from_duration)
+
+    # Méthode auxiliaire de conversion d'une fréquence en durée (base + multiplicateur)
+    @staticmethod
+    def _duration_of(frequency: str) -> str:
+        """Express a frequency as a duration string, multiplier kept.
+
+        Args:
+            frequency: Frequency in any supported format ('2MS', 'QE-DEC', 'daily').
+
+        Returns:
+            Duration string made of the base code and the multiplier ('2M', 'Q', 'D').
+
+        Examples:
+            >>> FrequencyConverter._duration_of('2MS')
+            '2M'
+            >>> FrequencyConverter._duration_of('QE-DEC')
+            'Q'
+        """
+        parsed = normalize_frequency(frequency, return_format='components')
+        return build_frequency_string(parsed.freq, multiplier=parsed.multiplier)
+
+    # Méthode auxiliaire de construction d'une fréquence avec position
+    @staticmethod
+    def _with_position(parsed: ParsedFrequency, position: Optional[str]) -> str:
+        """Build the frequency string of a decomposed frequency at a given position.
+
+        The anchor is left out: the converters work on the base, the position
+        and the multiplier.
+
+        Args:
+            parsed: Decomposed frequency.
+            position: Position ('S', 'E') or None.
+
+        Returns:
+            Frequency string ('MS', '2QE', 'D').
+
+        Examples:
+            >>> FrequencyConverter._with_position(ParsedFrequency('M', None, None, 2), 'S')
+            '2MS'
+        """
+        return build_frequency_string(parsed.freq, position, multiplier=parsed.multiplier)
+
+    # Méthode auxiliaire de rejet des fréquences multipliées
+    @staticmethod
+    def _reject_multiplied(operation: str, *frequencies: Optional[str]) -> None:
+        """Reject multiplied frequencies for an operation that counts base periods.
+
+        Args:
+            operation: Name of the operation, for the error message.
+            *frequencies: Frequencies to check (None values are skipped).
+
+        Raises:
+            NotImplementedError: If a frequency carries a multiplier. Not a
+                ValueError: callers tolerate those and would silently skip
+                the operation.
+
+        Examples:
+            >>> FrequencyConverter._reject_multiplied('counting', 'MS', 'D')
+            >>> FrequencyConverter._reject_multiplied('counting', '2MS')
+            Traceback (most recent call last):
+                ...
+            NotImplementedError: counting does not support the multiplied frequency '2MS'
+        """
+        # Parcours des fréquences
+        for frequency in frequencies:
+            # Erreur quand un multiplier est différent de 1
+            if frequency and normalize_frequency(frequency, return_format='components').multiplier != 1:
+                raise NotImplementedError(
+                    f"{operation} does not support the multiplied frequency '{frequency}'"
+                )
 
     # Méthode de comptage des sous-périodes, période cible par période cible
     def count_subperiods_per_period(
@@ -419,6 +464,9 @@ class FrequencyConverter(TemporalConverter):
             >>> converter.count_subperiods_per_period(index, 'Y', 'M')
             array([12.])
         """
+        # Le comptage porte sur des périodes de base : un bloc de n périodes n'a pas de décompte
+        self._reject_multiplied('Sub-period counting', low_freq, high_freq)
+
         # Normalisation des fréquences de base (sans positions S/E ni ancrage)
         low = normalize_frequency(low_freq, return_format='base')
         high = normalize_frequency(high_freq, return_format='base')
@@ -631,6 +679,10 @@ class FrequencyConverter(TemporalConverter):
         if not source_freq:
             return None
 
+        # Le décompte porte sur des périodes de base : les fréquences multipliées sont
+        # rejetées avant d'être ramenées à leur base
+        self._reject_multiplied('The coverage check (full_periods_only, method=\'all\')', source_freq, target_freq)
+
         # Extraction des fréquences de base (sans position ni ancrage)
         source_base = normalize_frequency(source_freq, return_format='base')
         target_base = normalize_frequency(target_freq, return_format='base')
@@ -839,7 +891,7 @@ class FrequencyConverter(TemporalConverter):
         final_index: Optional[pd.DatetimeIndex] = None
 
         # Extraction de la position
-        _, target_position, _ = parse_frequency(frequency_str=target_freq)
+        target_position = parse_frequency(frequency_str=target_freq).position
         # Validation que target_freq est un offset pandas valide
         # On ne normalise plus la fréquence pour préserver la position (S/E)
         try:
@@ -973,13 +1025,11 @@ class FrequencyConverter(TemporalConverter):
             DatetimeIndex(['2024-01-31', '2024-04-30'], dtype='datetime64[ns]', freq=None)
         """
         # Décomposition de la fréquence cible
-        target_base, target_pos, _ = normalize_frequency(
-            target_freq,
-            return_format='components'
-        )
+        target = normalize_frequency(target_freq, return_format='components')
+        target_base = target.freq
 
         # Convention du package en l'absence de position explicite
-        target_pos = target_pos if target_pos is not None else 'E'
+        target_pos = target.position if target.position is not None else 'E'
         how = 'start' if normalize_position(target_pos) == 'S' else 'end'
 
         # Ré-ancrage période par période, avec repli sur l'index d'origine si la
@@ -1056,8 +1106,9 @@ class FrequencyConverter(TemporalConverter):
 
         Args:
             index: Source datetime index, one entry per observed period.
-            source_freq: Source frequency, with optional position. Only its
-                base is used, so a multiplier (``'2M'``) is handled as its base.
+            source_freq: Source frequency, with optional position. A multiplied
+                frequency (``'2M'``) is rejected: each timestamp would stand
+                for a block of several periods.
             target_freq: Target frequency, used to decide whether sub-daily
                 precision matters.
             anchor_fraction: Validated fraction in ``[0, 1]``.
@@ -1077,7 +1128,10 @@ class FrequencyConverter(TemporalConverter):
             >>> converter._shift_index_to_anchor_fraction(yearly, 'YE', 'QE', 1.0)
             DatetimeIndex(['2021-12-31', '2022-12-31'], dtype='datetime64[ns]', freq=None)
         """
-        # Normalisation de la base source (sans position S/E ni multiplicateur)
+        # Un timestamp d'index multiplié représente un bloc de n périodes, non une période
+        self._reject_multiplied('anchor_fraction', source_freq)
+
+        # Normalisation de la base source (sans position S/E)
         source_base = normalize_frequency(source_freq, return_format='base')
 
         # Périodes source réelles, avec repli quand la base n'est pas convertible
@@ -1134,14 +1188,10 @@ class FrequencyConverter(TemporalConverter):
 
         # Cas 'default' : calcul du facteur de conversion
         if limit == 'default' and source_freq:
-            # Normalisation des fréquences
-            source_base = normalize_frequency(source_freq, return_format='base')
-            target_base = normalize_frequency(target_freq, return_format='base')
-            # Calcul du facteur de conversion
+            # Calcul du facteur de conversion (multiplicateurs compris) :
+            # « combien de périodes cibles dans une période source »
             try:
-                factor = get_duration_conversion_factor(
-                    source_base, target_base
-                )
+                factor = self.get_conversion_factor(target_freq, source_freq)
                 return int(round(factor))
             except (ValueError, KeyError):
                 return None
@@ -1171,9 +1221,9 @@ class FrequencyConverter(TemporalConverter):
         # Résolution de la position cible
         position = target_position
         if position is None:
-            # Extraction de la position depuis la fréquence cible (hors multiplicateur) ;
+            # Extraction de la position depuis la fréquence cible ;
             # convention du package en l'absence de position explicite : fin de période
-            _, extracted_pos, _ = parse_frequency(_strip_multiplier(target_freq))
+            extracted_pos = parse_frequency(target_freq).position
             position = extracted_pos if extracted_pos is not None else 'E'
 
         # Normalisation et conversion en direction
@@ -1217,8 +1267,8 @@ class FrequencyConverter(TemporalConverter):
         if isinstance(target_freq, str):
             # Validation de la fréquence en décomposant d'abord pour gérer les positions S/E
             try:
-                # Décomposition de la fréquence (hors multiplicateur) pour extraire la base et la position
-                freq_base, freq_pos, _ = parse_frequency(_strip_multiplier(target_freq))
+                # Décomposition de la fréquence pour extraire la base et la position
+                freq_base, freq_pos, _, _ = parse_frequency(target_freq)
                 # Normalisation de la fréquence de base uniquement
                 normalize_frequency(freq_base)
                 # Validation de la position si elle est spécifiée et non-default
@@ -1260,8 +1310,8 @@ class FrequencyConverter(TemporalConverter):
             # Validation de chaque fréquence cible (clé = colonne, entité ou (entité, colonne))
             for key, freq in target_freq.items():
                 try:
-                    # Décomposition de la fréquence (hors multiplicateur) pour extraire la base et la position
-                    freq_base, freq_pos, _ = parse_frequency(_strip_multiplier(freq))
+                    # Décomposition de la fréquence pour extraire la base et la position
+                    freq_base, freq_pos, _, _ = parse_frequency(freq)
                     # Normalisation de la fréquence de base uniquement
                     normalize_frequency(freq_base)
                     # Validation de la position si elle est spécifiée et non-default
@@ -1430,25 +1480,22 @@ class FrequencyConverter(TemporalConverter):
             Dictionary mapping column names to (source_freq, target_freq) tuples
         """
         # Détection des fréquences source de chaque colonne (index simple → {col: freq})
-        # detect_dataset_frequency gère la détection par colonne et la normalisation
-        current_frequencies = detect_dataset_frequency(data, return_format='with_position')
+        # detect_dataset_frequency gère la détection par colonne et la normalisation ;
+        # les composants sont recomposés en chaîne avec position et multiplicateur
+        current_frequencies = {
+            col: self._with_position(parsed, parsed.position)
+            for col, parsed in detect_dataset_frequency(data, return_format='components').items()
+            if parsed
+        }
 
         # Construction du frequency_map
         frequency_map = {}
 
         if isinstance(target_freq, str):
-            # Même fréquence cible pour toutes les colonnes
-            if target_position is None :
-                target_freq_base, resolved_position, _ = normalize_frequency(target_freq, return_format='components')
-            else :
-                target_freq_base = normalize_frequency(target_freq, return_format='base')
-                resolved_position = target_position
-
-            # Construction de la fréquence cible complète avec position
-            target_freq_with_position = build_frequency_string(
-                target_freq_base,
-                resolved_position
-            )
+            # Même fréquence cible pour toutes les colonnes : décomposition, puis
+            # construction de la fréquence complète (position explicite prioritaire)
+            target = normalize_frequency(target_freq, return_format='components')
+            target_freq_with_position = self._with_position(target, target_position or target.position)
 
             for col in list(data.columns):
                 # Extraction de la fréquence de la colonne
@@ -1465,19 +1512,11 @@ class FrequencyConverter(TemporalConverter):
                 if not current_freq:
                     continue
 
-                # Résolution de la position cible propre à la colonne (variable locale
+                # Décomposition de la fréquence cible de la colonne, puis construction de
+                # la fréquence complète (position explicite prioritaire ; variables locales
                 # pour ne pas propager la position d'une colonne à la suivante)
-                if target_position is None :
-                    col_freq_base, col_position, _ = normalize_frequency(target, return_format='components')
-                else :
-                    col_freq_base = normalize_frequency(target, return_format='base')
-                    col_position = target_position
-
-                # Construction de la fréquence cible complète avec position
-                col_target_with_position = build_frequency_string(
-                    col_freq_base,
-                    col_position
-                )
+                col_target = normalize_frequency(target, return_format='components')
+                col_target_with_position = self._with_position(col_target, target_position or col_target.position)
                 frequency_map[col] = (current_freq, col_target_with_position)
 
         return frequency_map
@@ -1552,12 +1591,9 @@ class FrequencyConverter(TemporalConverter):
             # Extraction des colonnes à convertir
             subset = data[columns]
 
-            # Décomposition des fréquences pour extraire les bases (sans positions ni anchors)
-            source_base = normalize_frequency(source_freq, return_format='base')
-            target_base = normalize_frequency(target_freq, return_format='base')
-
-            # Détermination de la direction de conversion (basée sur les fréquences de base)
-            if is_higher_frequency(target_base, source_base):
+            # Détermination de la direction de conversion (bases et multiplicateurs ;
+            # positions et anchors sont sans effet sur l'ordre des fréquences)
+            if is_higher_frequency(target_freq, source_freq):
                 # Upsampling (la fréquence source du groupe est déjà détectée)
                 converted = self._upsample(
                     data=subset, target_freq=target_freq,
@@ -1788,22 +1824,20 @@ class FrequencyConverter(TemporalConverter):
             >>> len(extended)
             12
         """
-        # Extraction des informations de fréquence et position
-        source_base, source_pos, _ = normalize_frequency(
-            source_freq,
-            return_format='components'
-        )
-        target_base, target_pos, _ = normalize_frequency(target_freq, return_format='components')
+        # Extraction des informations de fréquence, position et multiplicateur
+        source = normalize_frequency(source_freq, return_format='components')
+        target = normalize_frequency(target_freq, return_format='components')
+        source_base, source_multiplier = source.freq, source.multiplier
+        target_base, target_multiplier = target.freq, target.multiplier
 
-        # Définir des valeurs par défaut pour les positions si None (convention: 'E')
-        source_pos = source_pos if source_pos is not None else 'E'
-        target_pos = target_pos if target_pos is not None else 'E'
+        # Définir la position source par défaut si None (convention: 'E')
+        source_pos = source.position if source.position is not None else 'E'
 
         # Vérification si extension nécessaire
-        # On étend seulement si les bases de fréquence sont différentes et compatibles
+        # On étend seulement si les fréquences sont différentes et compatibles
         # Ex: Q->M nécessite extension, mais M->M ne nécessite pas extension
-        if source_base == target_base:
-            # Même fréquence de base, pas d'extension nécessaire
+        if source_base == target_base and source_multiplier == target_multiplier:
+            # Même fréquence (base et multiplicateur), pas d'extension nécessaire
             return original_index
 
         # Calcul dynamique du ratio de conversion en utilisant DurationConverter
@@ -1811,11 +1845,18 @@ class FrequencyConverter(TemporalConverter):
         # Ex: 1 trimestre (Q) = 3 mois (M) → ratio = 3.0
         try:
             # Récupération du facteur de conversion depuis DurationConverter
-            ratio = get_duration_conversion_factor(source_base, target_base)
+            # (multiplicateurs compris : 1 bloc source '2M' = 2 mois)
+            ratio = get_duration_conversion_factor(
+                build_frequency_string(source_base, multiplier=source_multiplier),
+                build_frequency_string(target_base, multiplier=target_multiplier),
+            )
 
             # Vérification que le ratio est un entier positif (ou proche d'un entier)
-            # Pour l'extension d'index, on a besoin d'un ratio entier
-            if ratio < 1 or abs(ratio - round(ratio)) > 1e-6:
+            # Pour l'extension d'index, on a besoin d'un ratio entier ; avec un
+            # multiplicateur, le ratio peut être fractionnaire ('QS' -> '2MS' : 1,5)
+            # et seule la contrainte ratio >= 1 est conservée
+            has_multiplier = source_multiplier != 1 or target_multiplier != 1
+            if ratio < 1 or (not has_multiplier and abs(ratio - round(ratio)) > 1e-6):
                 # Le ratio n'est pas un entier ou est < 1, pas d'extension possible
                 return original_index
 
@@ -1833,9 +1874,18 @@ class FrequencyConverter(TemporalConverter):
         # Construction du nouvel index
         try:
             # Conversion en périodes pandas en utilisant la fréquence de BASE (sans S/E)
-            # Pour déterminer les bornes de la plage étendue
-            extended_start = pd.Period(start_date, freq=source_base).to_timestamp(how='start')
-            extended_end = pd.Period(end_date, freq=source_base).to_timestamp(how='end')
+            # Pour déterminer les bornes de la plage étendue. Un timestamp multiplié
+            # couvre un bloc de n périodes de base : à partir de lui en position début,
+            # jusqu'à lui en position fin
+            block_extra = source_multiplier - 1
+            first_period = pd.Period(start_date, freq=source_base)
+            last_period = pd.Period(end_date, freq=source_base)
+            if source_pos == 'S':
+                extended_start = first_period.to_timestamp(how='start')
+                extended_end = (last_period + block_extra).to_timestamp(how='end')
+            else:
+                extended_start = (first_period - block_extra).to_timestamp(how='start')
+                extended_end = last_period.to_timestamp(how='end')
 
             # Création de l'index complet avec la fréquence cible (incluant position S/E)
             extended_index = pd.date_range(start=extended_start, end=extended_end, freq=target_freq)

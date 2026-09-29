@@ -138,9 +138,7 @@ class TestFrequencyDetectorTimeSeriesFrequency:
         freq = detector.detect_time_series_frequency(series, return_format='components')
 
         assert isinstance(freq, tuple)
-        assert len(freq) == 3
-        assert freq[0] == 'M'
-        assert freq[1] == 'S'
+        assert freq == ('M', 'S', None, 1)
 
 
 class TestFrequencyDetectorMultiIndex:
@@ -585,9 +583,7 @@ class TestDetectIndexFrequencyReturnFormat:
         freq = detect_index_frequency(dates, return_format='components')
 
         assert isinstance(freq, tuple)
-        assert len(freq) == 3
-        assert freq[0] == 'M'
-        assert freq[1] == 'S'
+        assert freq == ('M', 'S', None, 1)
 
     def test_components_format_quarterly(self):
         """Test format components pour fréquence trimestrielle."""
@@ -595,10 +591,7 @@ class TestDetectIndexFrequencyReturnFormat:
         freq = detect_index_frequency(dates, return_format='components')
 
         assert isinstance(freq, tuple)
-        assert len(freq) == 3
-        assert freq[0] == 'Q'
-        assert freq[1] == 'E'
-        assert freq[2] == 'DEC'
+        assert freq == ('Q', 'E', 'DEC', 1)
 
     def test_components_format_daily(self):
         """Test format components pour fréquence journalière."""
@@ -681,3 +674,48 @@ class TestTargetOffsetForIndex:
         """
         daily_index = pd.date_range('2024-01-01', periods=59, freq='D')
         assert target_offset_for_index(daily_index, 'ME') == 'ME'
+
+
+class TestFrequencyDetectorDuplicatedDates:
+    """Duplicated dates never yield a zero spacing (ANO-UTILS-014)."""
+
+    def test_short_index_with_duplicate_is_monthly(self):
+        """A duplicated date among few monthly dates does not turn the frequency into 'ns'.
+
+        Écarts triés avec doublon : 0, 31, 29 jours, tous modaux ; avant
+        correction, l'écart nul l'emportait et la fréquence valait ``'ns'``.
+        Après dédoublonnage, trois dates mensuelles uniques -> ``'MS'``.
+        """
+        dates = pd.DatetimeIndex(['2024-01-01', '2024-01-01', '2024-02-01', '2024-03-01'])
+        series = pd.Series(range(4), index=dates)
+        assert FrequencyDetector().detect_time_series_frequency(series, return_format='full') == 'MS'
+
+    def test_only_duplicates_is_undetectable(self):
+        """Two identical dates carry no spacing at all: no frequency."""
+        dates = pd.DatetimeIndex(['2024-01-01', '2024-01-01'])
+        series = pd.Series(range(2), index=dates)
+        assert FrequencyDetector().detect_time_series_frequency(series) is None
+
+
+class TestFrequencyDetectorSemiMonthly:
+    """Semi-monthly grids are detected with their position ('SMS' / 'SME')."""
+
+    @pytest.mark.parametrize(
+        "freq, expected",
+        [
+            pytest.param('SMS', 'SMS', id="start-grid-1st-and-15th"),
+            pytest.param('SME', 'SME', id="end-grid-15th-and-month-end"),
+        ],
+    )
+    def test_native_grids(self, freq, expected):
+        """Native pandas semi-monthly grids keep their position in the 'full' format."""
+        dates = pd.date_range('2024-01-01', periods=8, freq=freq)
+        assert detect_index_frequency(dates, return_format='full') == expected
+
+    def test_loose_pattern_has_no_position(self):
+        """Dates around the start and middle of months (not exactly 1st / 15th) stay 'SM'."""
+        # Autant de dates en début (2) qu'en milieu (16) de mois : > 40 % chacune
+        dates = pd.DatetimeIndex(
+            ['2024-01-02', '2024-01-16', '2024-02-02', '2024-02-16', '2024-03-02', '2024-03-16']
+        )
+        assert detect_index_frequency(dates, return_format='full') == 'SM'

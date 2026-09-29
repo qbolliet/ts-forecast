@@ -1,13 +1,13 @@
-"""Boîte à outils de perturbations d'index et de colonnes pour les tests.
+"""Toolbox of index and column perturbations for the tests.
 
-Fonctions pures : chacune prend un ``DataFrame`` (ou ``Series``) déjà construit
-par :mod:`tests.support.datasets` ou une fixture de
-:mod:`tests.support.fixtures`, et renvoie une copie perturbée, sans jamais
-modifier l'entrée en place. Elles matérialisent les cas limites listés dans
-``CLAUDE.md`` (« Priorités de test » : désordonnancement, index dupliqués,
-entités manquantes, fréquences irrégulières, noms de colonnes spéciaux,
-robustesse d'index) pour que chaque test de composant les compose librement
-sans les récrire.
+Pure functions: each one takes a ``DataFrame`` (or ``Series``) already
+built by :mod:`tests.support.datasets` or a fixture of
+:mod:`tests.support.fixtures`, and returns a perturbed copy, never
+modifying its input in place. They materialize the edge cases listed in
+``CLAUDE.md`` ("test priorities": unsorted data, duplicated index,
+missing entities, irregular frequencies, special column names, index
+robustness) so that each component test composes them freely without
+rewriting them.
 """
 # Modules de base
 from typing import Optional, Sequence, Union
@@ -23,8 +23,8 @@ def shuffle_rows(
 ) -> Union[pd.DataFrame, pd.Series]:
     """Shuffle all rows of a time series or panel frame.
 
-    # Cas limite (CLAUDE.md « Robustesse aux index ») : données intentionnellement
-    # mal triées, sans toucher aux valeurs ni à l'appariement (index, ligne).
+    Edge case: intentionally unsorted data, without touching values nor
+    the (index, row) pairing.
 
     Args:
         df: Time series or panel data, any index type.
@@ -40,16 +40,16 @@ def shuffle_rows(
         >>> sorted(shuffled.index) == sorted(s.index)
         True
     """
+    # Cas limite (CLAUDE.md « Robustesse aux index ») : données intentionnellement
+    # mal triées, sans toucher aux valeurs ni à l'appariement (index, ligne).
     return df.sample(frac=1.0, random_state=seed)
 
 
 def reverse_entities(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.Series]:
     """Reverse the order of entities of a panel, keeping each entity's rows contiguous.
 
-    # Cas limite (CLAUDE.md « Robustesse aux index ») : panel dont les entités
-    # n'apparaissent pas dans l'ordre alphabétique ni dans l'ordre de première
-    # observation attendu par un composant naïf — l'ordre au sein de chaque
-    # entité reste inchangé, seul l'ordre des blocs d'entités est inversé.
+    Edge case: entities appearing neither in alphabetical order nor in the
+    first-observation order a naive component expects.
 
     Args:
         df: Panel data with a ``MultiIndex`` whose first level is the entity.
@@ -69,6 +69,10 @@ def reverse_entities(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, 
         >>> list(reverse_entities(df).index.get_level_values('entity'))
         ['B', 'A', 'A']
     """
+    # Cas limite (CLAUDE.md « Robustesse aux index ») : panel dont les entités
+    # n'apparaissent pas dans l'ordre alphabétique ni dans l'ordre de première
+    # observation attendu par un composant naïf — l'ordre au sein de chaque
+    # entité reste inchangé, seul l'ordre des blocs d'entités est inversé.
     if not isinstance(df.index, pd.MultiIndex):
         raise TypeError("reverse_entities requires a MultiIndex (panel data)")
 
@@ -94,10 +98,8 @@ def with_special_column_names(
 ) -> tuple:
     """Rename every column with special characters (spaces, accents, ``/ % (``).
 
-    # Cas limite (CLAUDE.md « noms de colonnes avec caractères spéciaux ») :
-    # les composants qui construisent des noms de colonnes dérivés (jointures
-    # de chaînes, expressions régulières) sont réputés fragiles à ces
-    # caractères ; le mappage renvoyé permet de retrouver le nom d'origine.
+    Edge case: components building derived column names (string joins,
+    regular expressions) are deemed fragile to these characters.
 
     Args:
         df: Time series or panel DataFrame (or Series, renamed via ``.name``).
@@ -116,6 +118,10 @@ def with_special_column_names(
         >>> list(renamed.columns) == list(mapping.values())
         True
     """
+    # Cas limite (CLAUDE.md « noms de colonnes avec caractères spéciaux ») :
+    # les composants qui construisent des noms de colonnes dérivés (jointures
+    # de chaînes, expressions régulières) sont réputés fragiles à ces
+    # caractères ; le mappage renvoyé permet de retrouver le nom d'origine.
     if isinstance(df, pd.Series):
         suffix = _SPECIAL_COLUMN_SUFFIXES[0]
         new_name = f"{df.name}{suffix}"
@@ -141,9 +147,8 @@ def with_index_names(
 ) -> Union[pd.DataFrame, pd.Series]:
     """Rename the index (or every level of a ``MultiIndex``) of a frame.
 
-    # Cas limite (CLAUDE.md « noms de colonnes/index non standards ») : les
-    # composants qui repèrent le niveau temporel par un nom fixe (``'date'``)
-    # plutôt que par position doivent être mis en défaut par ce renommage.
+    Edge case: components locating the time level by a fixed name
+    (``'date'``) rather than by position must fail on this renaming.
 
     Args:
         df: Time series or panel data.
@@ -159,6 +164,9 @@ def with_index_names(
         >>> with_index_names(df, 'periode').index.name
         'periode'
     """
+    # Cas limite (CLAUDE.md « noms de colonnes/index non standards ») : les
+    # composants qui repèrent le niveau temporel par un nom fixe (``'date'``)
+    # plutôt que par position doivent être mis en défaut par ce renommage.
     out = df.copy()
     out.index = out.index.set_names(names)
     return out
@@ -172,10 +180,8 @@ def to_three_level_index(
 ) -> Union[pd.DataFrame, pd.Series]:
     """Add an outer entity level (``region``) to a two-level panel index.
 
-    # Cas limite (CLAUDE.md « index mixtes ») : composants qui supposent un
-    # ``MultiIndex`` à exactement deux niveaux (entité, date) et se comportent
-    # mal (mauvais niveau pris pour la date, groupby erroné) dès qu'un niveau
-    # supplémentaire est ajouté avant l'entité.
+    Edge case: components assuming a ``MultiIndex`` of exactly two levels
+    (entity, date) misbehave once an extra level precedes the entity.
 
     Args:
         df: Panel data with a two-level ``MultiIndex`` (entity, date).
@@ -201,6 +207,10 @@ def to_three_level_index(
         >>> to_three_level_index(df).index.names
         FrozenList(['region', 'country', 'date'])
     """
+    # Cas limite (CLAUDE.md « index mixtes ») : composants qui supposent un
+    # ``MultiIndex`` à exactement deux niveaux (entité, date) et se comportent
+    # mal (mauvais niveau pris pour la date, groupby erroné) dès qu'un niveau
+    # supplémentaire est ajouté avant l'entité.
     if not isinstance(df.index, pd.MultiIndex) or df.index.nlevels != 2:
         raise TypeError("to_three_level_index requires a two-level MultiIndex (entity, date)")
 
@@ -222,9 +232,10 @@ def to_three_level_index(
 def _infer_current_position(index: pd.Index) -> Optional[str]:
     """Infer whether a ``DatetimeIndex`` looks start- or end-anchored.
 
-    Un index est réputé « début de période » si sa première date tombe le 1er
-    du mois (convention ``MS`` / ``QS`` / ``YS`` de tout le paquet), « fin de
-    période » sinon. ``None`` pour un index vide (rien à inférer).
+    An index is deemed "period start" if its first date falls on the 1st
+    of the month (``MS`` / ``QS`` / ``YS`` convention of the whole
+    package), "period end" otherwise. ``None`` for an empty index
+    (nothing to infer).
     """
     if len(index) == 0:
         return None
@@ -235,17 +246,11 @@ def _infer_current_position(index: pd.Index) -> Optional[str]:
 def to_period_start(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.Series]:
     """Flip a start/end-anchored index to start-of-period anchoring.
 
-    # Cas limite (CLAUDE.md « positions début (MS, QS, YS) et fin (ME, QE, YE) »)
-    # : composants qui ne testent que la convention native des jeux de
-    # référence (``MS`` pour les notebooks 2/3, ``ME`` pour ``PANEL-X``)
-    # doivent rester corrects sous l'autre convention.
-    #
-    # Règle : la position (début/fin) est une propriété de l'INDEX PARTAGÉ, pas
-    # d'une colonne individuelle — toutes les colonnes d'une même ligne portent
-    # la même date physique. La fréquence propre à chaque couple (entité,
-    # colonne) n'intervient qu'indirectement, via :func:`convert_position`, qui
-    # (pour un panel) détecte et applique la fréquence de CHAQUE ENTITÉ
-    # séparément (``_convert_panel``) plutôt qu'une fréquence globale unique.
+    Edge case: components only tested under the native convention of the
+    reference datasets (``MS`` for notebooks 2/3, ``ME`` for ``PANEL-X``)
+    must stay correct under the other convention. The position is a
+    property of the shared index, not of a single column; the frequency is
+    applied per entity by :func:`convert_position`.
 
     Args:
         df: Time series or panel data with a ``DatetimeIndex`` (last level for
@@ -268,6 +273,17 @@ def to_period_start(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, p
         >>> to_period_start(df).index[0]
         Timestamp('2020-01-01 00:00:00')
     """
+    # Cas limite (CLAUDE.md « positions début (MS, QS, YS) et fin (ME, QE, YE) »)
+    # : composants qui ne testent que la convention native des jeux de
+    # référence (``MS`` pour les notebooks 2/3, ``ME`` pour ``PANEL-X``)
+    # doivent rester corrects sous l'autre convention.
+    #
+    # Règle : la position (début/fin) est une propriété de l'INDEX PARTAGÉ, pas
+    # d'une colonne individuelle — toutes les colonnes d'une même ligne portent
+    # la même date physique. La fréquence propre à chaque couple (entité,
+    # colonne) n'intervient qu'indirectement, via :func:`convert_position`, qui
+    # (pour un panel) détecte et applique la fréquence de CHAQUE ENTITÉ
+    # séparément (``_convert_panel``) plutôt qu'une fréquence globale unique.
     dates = df.index.get_level_values(-1) if isinstance(df.index, pd.MultiIndex) else df.index
     current_position = _infer_current_position(dates)
     if current_position in (None, 'S'):
@@ -313,18 +329,17 @@ def to_period_end(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.
 def to_period_index(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.Series]:
     """Convert the ``DatetimeIndex`` (last level for a panel) to a ``PeriodIndex``.
 
-    # Cas limite (CLAUDE.md « types de dates : datetime64, Period, Timestamp »)
-    # : composants qui appellent des méthodes propres à ``DatetimeIndex``
-    # (``.freq``, arithmétique par ``DateOffset``) sans passer par les
-    # convertisseurs du paquet doivent être mis en défaut par un ``PeriodIndex``.
+    Edge case: components calling ``DatetimeIndex``-specific methods
+    (``.freq``, ``DateOffset`` arithmetic) without going through the
+    package converters must fail on a ``PeriodIndex``.
 
     Args:
         df: Time series or panel data with a ``DatetimeIndex``.
 
     Returns:
         A copy of ``df`` with the date level converted to ``PeriodIndex``,
-        left unchanged (« là où c'est pertinent ») when the frequency cannot
-        be inferred from an irregular index.
+        left unchanged (where relevant) when the frequency cannot be
+        inferred from an irregular index.
 
     Examples:
         >>> import pandas as pd
@@ -332,6 +347,10 @@ def to_period_index(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, p
         >>> isinstance(to_period_index(df).index, pd.PeriodIndex)
         True
     """
+    # Cas limite (CLAUDE.md « types de dates : datetime64, Period, Timestamp »)
+    # : composants qui appellent des méthodes propres à ``DatetimeIndex``
+    # (``.freq``, arithmétique par ``DateOffset``) sans passer par les
+    # convertisseurs du paquet doivent être mis en défaut par un ``PeriodIndex``.
     def _as_period(index: pd.DatetimeIndex) -> Optional[pd.PeriodIndex]:
         freq = index.freq
         if freq is None:
@@ -381,9 +400,9 @@ def drop_entity(
 ) -> Union[pd.DataFrame, pd.Series]:
     """Remove every row belonging to one entity of a panel.
 
-    # Cas limite (CLAUDE.md « entités manquantes dans les panels ») : simule
-    # une entité absente du jeu (ni observée ni présente en NaN), à distinguer
-    # d'une entité présente mais entièrement NaN.
+    Edge case: an entity absent from the dataset (neither observed nor
+    present as NaN), to be distinguished from an entity present but
+    entirely NaN.
 
     Args:
         df: Panel data with a ``MultiIndex`` whose first level is the entity.
@@ -402,6 +421,9 @@ def drop_entity(
         >>> list(drop_entity(df, 'A').index.get_level_values('entity'))
         ['B']
     """
+    # Cas limite (CLAUDE.md « entités manquantes dans les panels ») : simule
+    # une entité absente du jeu (ni observée ni présente en NaN), à distinguer
+    # d'une entité présente mais entièrement NaN.
     if not isinstance(df.index, pd.MultiIndex):
         raise TypeError("drop_entity requires a MultiIndex (panel data)")
     return df.drop(index=entity, level=0)
@@ -412,9 +434,8 @@ def with_duplicated_rows(
 ) -> Union[pd.DataFrame, pd.Series]:
     """Duplicate the first ``n`` rows by appending them a second time.
 
-    # Cas limite (CLAUDE.md « index dupliqués ») : les doublons sont ajoutés en
-    # queue de frame (pas triés), pour aussi éprouver la robustesse au
-    # désordonnancement en même temps que la duplication.
+    Edge case: duplicates are appended at the end of the frame (unsorted),
+    to exercise robustness to disorder along with duplication.
 
     Args:
         df: Time series or panel data.
@@ -429,6 +450,9 @@ def with_duplicated_rows(
         >>> len(with_duplicated_rows(df, n=1))
         4
     """
+    # Cas limite (CLAUDE.md « index dupliqués ») : les doublons sont ajoutés en
+    # queue de frame (pas triés), pour aussi éprouver la robustesse au
+    # désordonnancement en même temps que la duplication.
     duplicated = df.iloc[:n]
     return pd.concat([df, duplicated])
 
@@ -436,9 +460,8 @@ def with_duplicated_rows(
 def single_observation(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.Series]:
     """Reduce a frame to its single first row, keeping the original index type.
 
-    # Cas limite (CLAUDE.md « datasets ... avec une seule observation ») :
-    # aucune fréquence n'est inférable depuis un seul point, les composants
-    # qui appellent aveuglément ``infer_freq`` doivent le tolérer.
+    Edge case: no frequency can be inferred from a single point;
+    components blindly calling ``infer_freq`` must tolerate it.
 
     Args:
         df: Time series or panel data with at least one row.
@@ -452,15 +475,18 @@ def single_observation(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame
         >>> len(single_observation(df))
         1
     """
+    # Cas limite (CLAUDE.md « datasets ... avec une seule observation ») :
+    # aucune fréquence n'est inférable depuis un seul point, les composants
+    # qui appellent aveuglément ``infer_freq`` doivent le tolérer.
     return df.iloc[[0]].copy()
 
 
 def empty_like(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.Series]:
     """Reduce a frame to zero rows, keeping its columns, dtypes and index type.
 
-    # Cas limite (CLAUDE.md « datasets vides ») : distingue un jeu vide d'un
-    # jeu absent (``None``) — la forme (colonnes, dtypes, noms d'index) reste
-    # entièrement renseignée, seules les lignes disparaissent.
+    Edge case: distinguishes an empty dataset from a missing one (``None``):
+    the shape (columns, dtypes, index names) stays fully defined, only the
+    rows disappear.
 
     Args:
         df: Time series or panel data.
@@ -476,4 +502,7 @@ def empty_like(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.Ser
         >>> list(empty_like(df).columns)
         ['v']
     """
+    # Cas limite (CLAUDE.md « datasets vides ») : distingue un jeu vide d'un
+    # jeu absent (``None``) — la forme (colonnes, dtypes, noms d'index) reste
+    # entièrement renseignée, seules les lignes disparaissent.
     return df.iloc[0:0].copy()

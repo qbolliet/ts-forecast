@@ -36,7 +36,7 @@ class TestNormalize:
 
     @pytest.mark.parametrize("code", _CODES)
     def test_code_is_returned_unchanged(self, normalizer, code):
-        """Un code déjà normalisé est renvoyé tel quel."""
+        """An already normalized code is returned as is."""
         assert normalizer.normalize(code) == code
 
     @pytest.mark.parametrize(
@@ -45,7 +45,7 @@ class TestNormalize:
         ids=_LITERALS,
     )
     def test_literal_resolves_to_code(self, normalizer, literal, expected_code):
-        """Chaque nom littéral se résout vers son code correspondant."""
+        """Each literal name resolves to its code."""
         assert normalizer.normalize(literal) == expected_code
 
     @pytest.mark.parametrize(
@@ -62,19 +62,20 @@ class TestNormalize:
     def test_falls_back_to_parse_frequency_for_pandas_strings(
         self, normalizer, frequency_str, expected_code
     ):
-        """Repli sur ``parse_frequency`` : la position et le suffixe d'ancrage
-        d'une chaîne de fréquence pandas complète sont ignorés, seule la
-        fréquence de base est retenue.
+        """Fallback on ``parse_frequency`` for full pandas frequency strings.
+
+        Position and anchor suffix are ignored, only the base frequency is
+        kept.
         """
         assert normalizer.normalize(frequency_str) == expected_code
 
     def test_uppercase_s_is_not_recognized_as_seconds(self, normalizer):
-        """Piège epinglé (notebook duration_normalizer) : le code des secondes
-        est ``'s'`` minuscule. ``'S'`` majuscule n'est ni un code ni un
-        littéral connu, et le repli via ``parse_frequency('S')`` extrait une
-        base identique à la valeur d'entrée : le garde-fou anti-boucle infinie
-        empêche la récursion, la normalisation échoue donc au lieu de
-        retomber sur la seconde.
+        """Pinned pitfall (notebook duration_normalizer): the seconds code is lowercase ``'s'``.
+
+        Uppercase ``'S'`` is neither a known code nor a literal, and the
+        ``parse_frequency('S')`` fallback extracts a base identical to the
+        input: the infinite-recursion guard stops there, so normalization
+        fails instead of falling back on seconds.
         """
         assert normalizer.normalize("s") == "s"
         with pytest.raises(ValueError, match="Unsupported duration"):
@@ -90,8 +91,10 @@ class TestNormalize:
         ],
     )
     def test_case_sensitive_rejection(self, normalizer, invalid_code):
-        """Aucune normalisation de casse n'est appliquée : une variante mal
-        capitalisée d'un code ou d'un littéral pourtant valide est rejetée.
+        """No case normalization is applied.
+
+        A wrongly capitalized variant of an otherwise valid code or literal is
+        rejected.
         """
         with pytest.raises(ValueError, match="Unsupported duration"):
             normalizer.normalize(invalid_code)
@@ -106,8 +109,10 @@ class TestNormalize:
         ],
     )
     def test_non_string_input_raises(self, normalizer, invalid_value):
-        """Un type non ``str`` est explicitement rejeté (pas de ``TypeError``
-        laissé remonter naturellement, contrairement à ``DurationConverter``).
+        """A non-``str`` input is explicitly rejected.
+
+        No ``TypeError`` is left to propagate naturally, unlike
+        ``DurationConverter``.
         """
         with pytest.raises(ValueError, match="must be a string"):
             normalizer.normalize(invalid_value)
@@ -117,11 +122,43 @@ class TestNormalize:
         [pytest.param("xyz", id="unknown-code"), pytest.param("", id="empty-string")],
     )
     def test_unsupported_string_raises(self, normalizer, invalid_value):
-        """Une chaîne non reconnue, même après repli sur ``parse_frequency``,
-        lève une erreur explicite.
-        """
+        """An unrecognized string, even after the ``parse_frequency`` fallback, raises an explicit error."""
         with pytest.raises(ValueError, match="Unsupported duration"):
             normalizer.normalize(invalid_value)
+
+    @pytest.mark.parametrize("value, expected", [("2D", "D"), ("3MS", "M"), ("12ME", "M"), ("15min", "min")])
+    def test_multiplied_duration_is_normalized_to_its_code(self, normalizer, value, expected):
+        """A leading multiplier is accepted and left out of the code."""
+        assert normalizer.normalize(value) == expected
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [("2D", ("D", 2)), ("3MS", ("M", 3)), ("day", ("D", 1)), ("business_day", ("B", 1)), ("min", ("min", 1))],
+    )
+    def test_normalize_with_multiplier(self, normalizer, value, expected):
+        """The code and the multiplier are returned together."""
+        assert normalizer.normalize_with_multiplier(value) == expected
+
+    @pytest.mark.parametrize("value", ["2xyz", ""])
+    def test_multiplied_unsupported_duration_raises(self, normalizer, value):
+        """The multiplier does not make an unknown unit valid."""
+        with pytest.raises(ValueError, match="Unsupported duration"):
+            normalizer.normalize(value)
+
+    @pytest.mark.parametrize(
+        "dur1, dur2, expected",
+        [
+            pytest.param("2D", "D", True, id="same-code-higher-multiplier"),
+            pytest.param("D", "2D", False, id="same-code-lower-multiplier"),
+            pytest.param("2D", "W", False, id="two-days-vs-week"),
+            pytest.param("8D", "W", True, id="eight-days-vs-week"),
+            pytest.param("120min", "h", True, id="two-hours-in-minutes-vs-hour"),
+            pytest.param("month", "day", True, id="no-multiplier"),
+        ],
+    )
+    def test_is_longer_duration_with_multiplier(self, normalizer, dur1, dur2, expected):
+        """A multiplier lengthens the duration."""
+        assert normalizer.is_longer_duration(dur1, dur2) is expected
 
 
 class TestToCode:
@@ -129,11 +166,11 @@ class TestToCode:
 
     @pytest.mark.parametrize("value", _CODES + _LITERALS)
     def test_matches_normalize_on_valid_values(self, normalizer, value):
-        """Résultat identique à ``normalize`` pour toute entrée valide."""
+        """Same result as ``normalize`` for every valid input."""
         assert normalizer.to_code(value) == normalizer.normalize(value)
 
     def test_matches_normalize_error_on_invalid_value(self, normalizer):
-        """Même erreur que ``normalize`` pour une entrée invalide."""
+        """Same error as ``normalize`` for an invalid input."""
         with pytest.raises(ValueError, match="Unsupported duration"):
             normalizer.to_code("xyz")
 
@@ -145,21 +182,21 @@ class TestToLiteral:
         "code, expected_literal", list(zip(_CODES, _LITERALS)), ids=_CODES
     )
     def test_code_resolves_to_literal(self, normalizer, code, expected_literal):
-        """Un code se résout vers son nom littéral."""
+        """A code resolves to its literal name."""
         assert normalizer.to_literal(code) == expected_literal
 
     @pytest.mark.parametrize("literal", _LITERALS)
     def test_literal_is_idempotent(self, normalizer, literal):
-        """Un littéral déjà normalisé se résout vers lui-même."""
+        """An already literal value resolves to itself."""
         assert normalizer.to_literal(literal) == literal
 
     @pytest.mark.parametrize("code", _CODES)
     def test_roundtrip_to_code_to_literal_is_identity(self, normalizer, code):
-        """``to_code(to_literal(code)) == code`` : bijection code <-> littéral."""
+        """``to_code(to_literal(code)) == code``: code <-> literal bijection."""
         assert normalizer.to_code(normalizer.to_literal(code)) == code
 
     def test_invalid_value_raises(self, normalizer):
-        """L'erreur de ``normalize`` est propagée telle quelle."""
+        """The ``normalize`` error is propagated unchanged."""
         with pytest.raises(ValueError, match="Unsupported duration"):
             normalizer.to_literal("xyz")
 
@@ -169,7 +206,7 @@ class TestValidate:
 
     @pytest.mark.parametrize("value", _CODES + _LITERALS + ["MS", "QE-DEC", "W-MON"])
     def test_true_for_supported_values(self, normalizer, value):
-        """Toute valeur acceptée par ``normalize`` est validée."""
+        """Every value accepted by ``normalize`` is valid."""
         assert normalizer.validate(value) is True
 
     @pytest.mark.parametrize(
@@ -185,8 +222,9 @@ class TestValidate:
         ],
     )
     def test_false_without_raising_for_unsupported_values(self, normalizer, invalid_value):
-        """Aucune exception ne remonte, y compris pour des types manifestement
-        invalides : ``validate`` renvoie toujours un booléen.
+        """No exception propagates, even for obviously invalid types.
+
+        ``validate`` always returns a boolean.
         """
         assert normalizer.validate(invalid_value) is False
 
@@ -200,14 +238,15 @@ class TestIsLongerDuration:
         ids=[f"{a}-lt-{b}" for a, b in zip(_CODES[:-1], _CODES[1:])],
     )
     def test_consecutive_codes_are_strictly_ordered(self, normalizer, shorter, longer):
-        """L'ordre déclaré (ns < us < ... < B < W < SM < M < Q < Y) est
-        respecté entre deux codes consécutifs, dans les deux sens.
+        """The declared order (ns < us < ... < B < W < SM < M < Q < Y) holds between consecutive codes.
+
+        Checked in both directions.
         """
         assert normalizer.is_longer_duration(longer, shorter) is True
         assert normalizer.is_longer_duration(shorter, longer) is False
 
     def test_mixed_code_and_literal_formats(self, normalizer):
-        """Les deux arguments peuvent mélanger code et littéral."""
+        """Both arguments may mix code and literal."""
         assert normalizer.is_longer_duration("month", "day") is True
         assert normalizer.is_longer_duration("M", "D") is True
         assert normalizer.is_longer_duration("month", "D") is True
@@ -215,15 +254,17 @@ class TestIsLongerDuration:
 
     @pytest.mark.parametrize("code", _CODES)
     def test_equality_is_always_false(self, normalizer, code):
-        """Comparaison stricte (``>``) : ``is_longer_duration(x, x)`` est
-        toujours ``False``, jamais ``>=``.
+        """Strict comparison (``>``): ``is_longer_duration(x, x)`` is always ``False``.
+
+        Never ``>=``.
         """
         assert normalizer.is_longer_duration(code, code) is False
 
     def test_total_order_is_transitive(self, normalizer):
-        """Propriété : la relation définit un ordre total sur l'ensemble des
-        codes (antisymétrie et transitivité), cohérent avec l'ordre déclaré
-        dans ``_CODES``.
+        """Property: the relation is a total order on the codes.
+
+        Antisymmetric and transitive, consistent with the order declared in
+        ``_CODES``.
         """
         for a, b in itertools.combinations(_CODES, 2):
             index_a, index_b = _CODES.index(a), _CODES.index(b)
@@ -236,10 +277,12 @@ class TestIsLongerDuration:
             )
 
     def test_invalid_duration_raises_before_fallback_to_zero(self, normalizer):
-        """``is_longer_duration`` appelle ``to_code`` sur ses deux arguments,
-        qui lève une ``ValueError`` avant d'atteindre le repli interne
-        ``_duration_order.get(code, 0)`` : une durée invalide n'est donc
-        jamais traitée silencieusement comme "la plus courte".
+        """An invalid duration raises before the internal fallback to zero.
+
+        ``is_longer_duration`` calls ``to_code`` on both arguments, which
+        raises a ``ValueError`` before the internal fallback
+        ``_duration_order.get(code, 0)`` is reached: an invalid duration is
+        never silently treated as "the shortest".
         """
         with pytest.raises(ValueError, match="Unsupported duration"):
             normalizer.is_longer_duration("day", "xyz")
@@ -267,9 +310,10 @@ class TestAreCompatibleDurations:
         ],
     )
     def test_matches_validate_conjunction(self, normalizer, dur1, dur2):
-        """Équivalence stricte avec ``validate(dur1) and validate(dur2)`` :
-        aucune notion de rapport de conversion raisonnable entre les deux
-        durées n'est vérifiée (ex : ``'ns'``/``'Y'`` sont jugées "compatibles").
+        """Strict equivalence with ``validate(dur1) and validate(dur2)``.
+
+        No notion of a reasonable conversion ratio between both durations is
+        checked (e.g. ``'ns'`` / ``'Y'`` are deemed "compatible").
         """
         expected = normalizer.validate(dur1) and normalizer.validate(dur2)
         assert normalizer.are_compatible_durations(dur1, dur2) == expected

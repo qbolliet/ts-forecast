@@ -10,7 +10,7 @@ from __future__ import annotations
 # Importation des modules
 import re
 import pandas as pd
-from typing import Tuple, Optional, TYPE_CHECKING
+from typing import NamedTuple, Optional, TYPE_CHECKING
 
 # Import réservé au typage statique : ..frequency et ..position importent ce
 # module au niveau package (via frequency/normalizer.py et position/utils.py),
@@ -18,51 +18,82 @@ from typing import Tuple, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from ..frequency.types import FrequencyType
 
-# Fréquences pandas supportant un suffixe de position S/E (ex: 'MS', 'QE')
-_POSITION_AWARE_FREQUENCIES = ('M', 'Q', 'Y', 'W', 'B')
+# Abréviations pandas des mois, dans l'ordre (ancres trimestrielles et annuelles)
+MONTH_ABBREVIATIONS = ('JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC')
+
+# Fréquences pandas supportant un suffixe de position S/E (ex: 'MS', 'QE', 'SMS').
+# 'W' et 'B' n'en font pas partie : pandas ne connaît ni 'WS'/'WE' ni 'BS'/'BE'
+# (l'ancre hebdomadaire est un jour de la semaine, pas une position)
+_POSITION_AWARE_FREQUENCIES = ('M', 'Q', 'Y', 'SM')
+
+# Composants d'une chaîne de fréquence pandas
+class ParsedFrequency(NamedTuple):
+    """Components of a pandas frequency string ``[N]FREQ[S|E][-SUFFIX]``.
+
+    Attributes:
+        freq: Base frequency code ('M', 'Q', 'W', 'h', ...).
+        position: Position indicator ('S', 'E') or None.
+        suffix: Anchor after the dash ('DEC', 'MON', ...) or None.
+        multiplier: Leading integer multiplier (1 when absent), the ``n`` of
+            ``to_offset('2MS').n``.
+
+    Examples:
+        >>> ParsedFrequency('M', 'S', None, 2)
+        ParsedFrequency(freq='M', position='S', suffix=None, multiplier=2)
+    """
+
+    freq: FrequencyType
+    position: Optional[str]
+    suffix: Optional[str]
+    multiplier: int = 1
+
 
 # Fonction de parsing d'une chaîne de caractères contenant une fréquence
-def parse_frequency(frequency_str : str) -> Tuple[FrequencyType, str, str]:
+def parse_frequency(frequency_str : str) -> ParsedFrequency:
     """Parse a frequency string into its component parts.
 
-    Extracts the base frequency code, position indicator, and suffix from
-    a pandas-style frequency string. This is useful for decomposing frequency
-    specifications before normalization or conversion operations.
+    Extracts the multiplier, base frequency code, position indicator, and
+    suffix from a pandas-style frequency string. This is useful for
+    decomposing frequency specifications before normalization or conversion
+    operations.
 
     Args:
-        frequency_str: Pandas frequency string to parse (e.g., 'MS', 'QE-DEC', 'D')
-            Must follow the format ``[FREQ][S|E?]-[SUFFIX?]`` where ``FREQ`` is
-            the base frequency code (uppercase letters like 'M', 'Q', 'W'),
-            ``S``/``E`` is an optional position indicator ('S' for start, 'E'
-            for end), and ``SUFFIX`` is an optional suffix after ``-`` (e.g.
-            month names for quarters).
+        frequency_str: Pandas frequency string to parse (e.g., 'MS', '2MS',
+            'QE-DEC', 'D'). Must follow the format
+            ``[N][FREQ][S|E?]-[SUFFIX?]`` where ``N`` is an optional positive
+            integer multiplier, ``FREQ`` is the base frequency code (letters
+            like 'M', 'Q', 'W'), ``S``/``E`` is an optional position
+            indicator ('S' for start, 'E' for end), and ``SUFFIX`` is an
+            optional suffix after ``-`` (e.g. month names for quarters).
 
     Returns:
-        Tuple containing:
-            - freq_ind (FrequencyType): Base frequency code ('M', 'Q', 'W', etc.)
+        ParsedFrequency, a named tuple ``(freq, position, suffix, multiplier)``:
+            - freq (FrequencyType): Base frequency code ('M', 'Q', 'W', etc.)
             - position (str): Position indicator ('S', 'E', or None)
             - suffix (str): Suffix component (e.g., 'DEC') or None
+            - multiplier (int): Leading multiplier, 1 if absent
 
     Raises:
         ValueError: If frequency_str is None (no frequency detected)
-        ValueError: If frequency_str doesn't match expected format
+        ValueError: If frequency_str doesn't match expected format, or if its
+            multiplier is zero
 
     Examples:
         >>> # Monthly start frequency
         >>> parse_frequency('MS')
-        ('M', 'S', None)
+        ParsedFrequency(freq='M', position='S', suffix=None, multiplier=1)
         >>>
         >>> # Quarterly end with December anchor
         >>> parse_frequency('QE-DEC')
-        ('Q', 'E', 'DEC')
+        ParsedFrequency(freq='Q', position='E', suffix='DEC', multiplier=1)
+        >>>
+        >>> # Multiplied frequency (every two months, at month start)
+        >>> parse_frequency('2MS')
+        ParsedFrequency(freq='M', position='S', suffix=None, multiplier=2)
         >>>
         >>> # Daily frequency (no position or suffix)
         >>> parse_frequency('D')
-        ('D', None, None)
-        >>>
-        >>> # Weekly frequency
-        >>> parse_frequency('W')
-        ('W', None, None)
+        ParsedFrequency(freq='D', position=None, suffix=None, multiplier=1)
     """
     # Levée d'une erreur si aucune fréquence n'est détectée
     if frequency_str is None:
@@ -71,28 +102,35 @@ def parse_frequency(frequency_str : str) -> Tuple[FrequencyType, str, str]:
             "Index may be irregular or have insufficient observations."
         )
 
-    # Séparation de la fréquence de sa position et de son suffixe
-    # Expression régulière pour matcher: indicateur [S|E] optionnel [-suffixe] optionnel
+    # Séparation du multiplicateur, de la fréquence, de sa position et de son suffixe
+    # Expression régulière pour matcher: [multiplicateur] optionnel, indicateur, [S|E] optionnel, [-suffixe] optionnel
     # L'indicateur autorise aussi les minuscules (ex: 'h', 'min', 'ms', 'us', 'ns')
     # pour couvrir les fréquences infra-journalières ; S/E restent en majuscules,
-    # seules les fréquences position-aware (M/Q/Y/W/B) les utilisant réellement
-    match = re.match(r"([A-Za-z]+?)([SE])?(-(.*?))?$", frequency_str)
+    # seules les fréquences position-aware (M/Q/Y/SM) les utilisant réellement
+    match = re.match(r"(\d*)([A-Za-z]+?)([SE])?(-(.*?))?$", frequency_str)
 
     # Extraction des éléments si un appariement est trouvé
     if match:
-        freq_ind, position, _, suffix = match.groups()
-        return freq_ind, position, suffix
+        multiplier, freq_ind, position, _, suffix = match.groups()
+        # Multiplicateur absent -> 1 ; un multiplicateur nul n'a pas de sens
+        n = int(multiplier) if multiplier else 1
+        if n < 1:
+            raise ValueError(
+                f"Frequency multiplier must be a positive integer, got '{multiplier}' in '{frequency_str}'"
+            )
+        return ParsedFrequency(freq_ind, position, suffix, n)
     else:
         raise ValueError(
             f"Unable to parse frequency, position and suffix in '{frequency_str}'. "
-            "Should follow the format: [FREQ][S|E?]-[SUFFIX?]"
+            "Should follow the format: [N][FREQ][S|E?]-[SUFFIX?]"
         )
 
 # Fonction de construction d'une chaine de caractère de fréquence à partir de la fréquence, de la position et du suffixe
 def build_frequency_string(
     frequency: str,
     position: Optional[str] = None,
-    suffix: Optional[str] = None
+    suffix: Optional[str] = None,
+    multiplier: int = 1
 ) -> str:
     """Build complete pandas frequency string from components.
 
@@ -107,16 +145,22 @@ def build_frequency_string(
             - 'S': Start of period (e.g., 'MS' for month start, 'QS' for quarter start)
             - 'E': End of period (e.g., 'ME' for month end, 'QE' for quarter end)
             - None: No position specification
+            Only applied to frequencies with a start/end variant in pandas
+            ('M', 'Q', 'Y', 'SM'); silently ignored otherwise ('D', 'W',
+            'B', 'h', ...), so the result is always a valid pandas alias.
         suffix: Optional suffix for anchoring:
             - For quarterly: 'JAN', 'FEB', 'MAR', ..., 'DEC'
             - For other frequencies: may be ignored by pandas
             - None: No suffix
+        multiplier: Positive integer multiplier put in front of the string
+            (default 1, omitted from the result).
 
     Returns:
-        Complete frequency string (e.g., 'D', 'MS', 'QE-DEC')
+        Complete frequency string (e.g., 'D', 'MS', 'QE-DEC', '2MS')
 
     Raises:
-        ValueError: If position is invalid (not in ['S', 'E', None])
+        ValueError: If position is invalid (not in ['S', 'E', None]) or if
+            multiplier is not a positive integer
 
     Examples:
         >>> # Daily frequency (no position/suffix)
@@ -138,6 +182,10 @@ def build_frequency_string(
         >>> # Weekly anchored on Monday (no S/E position for weekly anchors)
         >>> build_frequency_string('W', suffix='MON')
         'W-MON'
+        >>>
+        >>> # Every two months, at month start (inverse of parse_frequency)
+        >>> build_frequency_string('M', position='S', multiplier=2)
+        '2MS'
     """
     from ..frequency.utils import normalize_frequency
 
@@ -147,6 +195,10 @@ def build_frequency_string(
     # Validité du paramètre position
     if position is not None and position not in ['S', 'E']:
         raise ValueError(f"position must be 'S' (start), 'E' (end), or None, got '{position}'")
+
+    # Validité du multiplicateur (bool exclu : True == 1 passerait sinon)
+    if isinstance(multiplier, bool) or not isinstance(multiplier, int) or multiplier < 1:
+        raise ValueError(f"multiplier must be a positive integer, got {multiplier!r}")
 
     # Ajout de la position uniquement si elle est fournie et si la fréquence la
     # supporte (ex: 'D' n'a pas de déclinaison S/E) ; sinon la position est
@@ -159,8 +211,8 @@ def build_frequency_string(
         else base_freq
     )
 
-    # Ajout du suffixe si présent
+    # Ajout du suffixe si présent, puis du multiplicateur (omis lorsqu'il vaut 1)
     if suffix is not None:
-        return f"{freq_with_position}-{suffix}"
+        freq_with_position = f"{freq_with_position}-{suffix}"
 
-    return freq_with_position
+    return f"{multiplier}{freq_with_position}" if multiplier != 1 else freq_with_position

@@ -103,6 +103,75 @@ class TestFrequencyNormalizerComplexStrings:
         assert normalizer.normalize('W-MON') == 'W'
 
 
+class TestFrequencyNormalizerMultiplier:
+    """A leading multiplier ('2MS') is parsed by ``parse_frequency``."""
+
+    @pytest.fixture
+    def normalizer(self):
+        """Create a FrequencyNormalizer instance for testing."""
+        return FrequencyNormalizer()
+
+    @pytest.mark.parametrize("value, expected", [("2MS", "M"), ("3QS-FEB", "Q"), ("2D", "D"), ("15min", "min")])
+    def test_normalize_drops_the_multiplier(self, normalizer, value, expected):
+        """Like the position and the anchor, the multiplier is left out of the base code."""
+        assert normalizer.normalize(value) == expected
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [("2MS", ("M", 2)), ("3QS-FEB", ("Q", 3)), ("MS", ("M", 1)), ("daily", ("D", 1)),
+         ("business_daily", ("B", 1)), ("15min", ("min", 15))],
+    )
+    def test_normalize_with_multiplier(self, normalizer, value, expected):
+        """The code and the multiplier are returned together."""
+        assert normalizer.normalize_with_multiplier(value) == expected
+
+    @pytest.mark.parametrize("value", ["2foo", "", None])
+    def test_normalize_with_multiplier_rejects_invalid_values(self, normalizer, value):
+        """An invalid value is rejected like by ``normalize``."""
+        with pytest.raises(ValueError):
+            normalizer.normalize_with_multiplier(value)
+
+    @pytest.mark.parametrize(
+        "freq1, freq2, expected",
+        [
+            # Même base : le plus petit multiplicateur est la fréquence la plus élevée
+            pytest.param("MS", "2MS", True, id="same-base-lower-multiplier"),
+            pytest.param("2MS", "MS", False, id="same-base-higher-multiplier"),
+            pytest.param("2MS", "2ME", False, id="same-multiplier-same-base"),
+            # Bases différentes : durées nominales
+            pytest.param("2MS", "QS", True, id="two-months-vs-quarter"),
+            pytest.param("4MS", "QS", False, id="four-months-vs-quarter"),
+            pytest.param("QS", "2MS", False, id="quarter-vs-two-months"),
+            pytest.param("2D", "W", True, id="two-days-vs-week"),
+            pytest.param("15min", "h", True, id="fifteen-minutes-vs-hour"),
+            # Sans multiplicateur : ordre des codes inchangé
+            pytest.param("daily", "monthly", True, id="no-multiplier"),
+            pytest.param("B", "D", False, id="business-day-vs-day"),
+        ],
+    )
+    def test_is_higher_frequency_with_multiplier(self, normalizer, freq1, freq2, expected):
+        """A multiplier lengthens the period, hence lowers the frequency."""
+        assert normalizer.is_higher_frequency(freq1, freq2) is expected
+
+    def test_validate_accepts_a_multiplied_frequency(self, normalizer):
+        """A multiplied frequency is a supported frequency."""
+        assert normalizer.validate("2MS") is True
+
+    @pytest.mark.parametrize("value", ["2MS", "3QS-FEB", "2W-MON", "15min", "2D"])
+    def test_to_pandas_freq_keeps_the_multiplier(self, normalizer, value):
+        """The multiplier is carried over when the string is rebuilt."""
+        assert normalizer.to_pandas_freq(value) == value
+
+    def test_to_dateoffset_honours_the_multiplier(self, normalizer):
+        """The resulting offset steps by the multiplier."""
+        assert normalizer.to_dateoffset('2MS').n == 2
+
+    def test_unsupported_base_after_multiplier_raises(self, normalizer):
+        """The multiplier does not make an unknown base frequency valid."""
+        with pytest.raises(ValueError, match="Unsupported frequency"):
+            normalizer.normalize('2foo')
+
+
 class TestFrequencyNormalizerEdgeCases:
     """Test edge cases and error handling."""
 
@@ -369,10 +438,10 @@ class TestNormalizeFrequencyReturnFormats:
         """Test 'components' format (tuple)."""
         from tsforecast.utils.frequency.utils import normalize_frequency
 
-        assert normalize_frequency('QE-DEC', return_format='components') == ('Q', 'E', 'DEC')
-        assert normalize_frequency('MS', return_format='components') == ('M', 'S', None)
-        assert normalize_frequency('D', return_format='components') == ('D', None, None)
-        assert normalize_frequency('AS-JAN', return_format='components') == ('Y', 'S', 'JAN')
+        assert normalize_frequency('QE-DEC', return_format='components') == ('Q', 'E', 'DEC', 1)
+        assert normalize_frequency('MS', return_format='components') == ('M', 'S', None, 1)
+        assert normalize_frequency('D', return_format='components') == ('D', None, None, 1)
+        assert normalize_frequency('AS-JAN', return_format='components') == ('Y', 'S', 'JAN', 1)
 
     def test_return_format_invalid(self):
         """Test invalid return_format raises ValueError."""
@@ -389,8 +458,9 @@ class TestNormalizeFrequencyReturnFormats:
         from tsforecast.utils.frequency.utils import normalize_frequency
 
         assert normalize_frequency('monthly', return_format='base') == 'M'
-        assert normalize_frequency('monthly', return_format='components') == ('M', None, None)
-        assert normalize_frequency('quarterly', return_format='components') == ('Q', None, None)
+        assert normalize_frequency('monthly', return_format='components') == ('M', None, None, 1)
+        assert normalize_frequency('quarterly', return_format='components') == ('Q', None, None, 1)
+        assert normalize_frequency('business_daily', return_format='components') == ('B', None, None, 1)
         assert normalize_frequency('annual', return_format='base') == 'Y'
 
     def test_return_format_all_formats_for_same_input(self):
@@ -413,11 +483,53 @@ class TestNormalizeFrequencyReturnFormats:
 
         # Components
         components = normalize_frequency(freq, return_format='components')
-        assert components == ('Q', 'E', 'DEC')
+        assert components == ('Q', 'E', 'DEC', 1)
 
         # Verify consistency
-        assert components[0] == base
-        assert f"{components[0]}{components[1]}" == with_pos
+        assert components.freq == base
+        assert f"{components.freq}{components.position}" == with_pos
+
+
+class TestNormalizeFrequencyMultiplier:
+    """``normalize_frequency`` with a leading multiplier, in every return format."""
+
+    @pytest.mark.parametrize(
+        "frequency, return_format, expected",
+        [
+            # 'base' et 'with_position' : le multiplicateur n'y figure pas
+            pytest.param("2MS", "base", "M", id="base"),
+            pytest.param("3QS-FEB", "base", "Q", id="base-anchored"),
+            pytest.param("2MS", "with_position", "MS", id="with-position"),
+            pytest.param("15min", "with_position", "min", id="with-position-subdaily"),
+            # 'full' : chaîne d'origine, multiplicateur compris
+            pytest.param("2MS", "full", "2MS", id="full"),
+            pytest.param("3QS-FEB", "full", "3QS-FEB", id="full-anchored"),
+            # 'components' : le multiplicateur est le 4e élément
+            pytest.param("2MS", "components", ("M", "S", None, 2), id="components"),
+            pytest.param("3QS-FEB", "components", ("Q", "S", "FEB", 3), id="components-anchored"),
+            pytest.param("15min", "components", ("min", None, None, 15), id="components-subdaily"),
+            pytest.param("2W-MON", "components", ("W", None, "MON", 2), id="components-weekly-anchor"),
+        ],
+    )
+    def test_formats(self, frequency, return_format, expected):
+        """Base and position exclude the multiplier; 'full' and 'components' keep it."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+        assert normalize_frequency(frequency, return_format=return_format) == expected
+
+    def test_components_is_a_parsed_frequency(self):
+        """Components are reachable by name."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+        from tsforecast.utils.parse import ParsedFrequency
+        parsed = normalize_frequency("2MS", return_format="components")
+        assert isinstance(parsed, ParsedFrequency)
+        assert parsed.multiplier == 2
+
+    @pytest.mark.parametrize("return_format", ["base", "with_position", "full", "components"])
+    def test_unsupported_base_after_multiplier_raises(self, return_format):
+        """The multiplier does not make an unknown base frequency valid."""
+        from tsforecast.utils.frequency.utils import normalize_frequency
+        with pytest.raises(ValueError, match="Unsupported frequency"):
+            normalize_frequency("2foo", return_format=return_format)
 
 
 class TestConverterIntegration:
@@ -429,11 +541,12 @@ class TestConverterIntegration:
 
         # Simulate what converter.py does at line 151
         detected_freq = 'QE-DEC'
-        base, position, anchor = normalize_frequency(detected_freq, return_format='components')
+        base, position, anchor, multiplier = normalize_frequency(detected_freq, return_format='components')
 
         assert base == 'Q'
         assert position == 'E'
         assert anchor == 'DEC'
+        assert multiplier == 1
 
     def test_converter_decompose_source_target(self):
         """Test converter can decompose source/target frequencies."""
@@ -443,8 +556,8 @@ class TestConverterIntegration:
         source_freq = 'QE-DEC'
         target_freq = 'MS'
 
-        source_base, _, _ = normalize_frequency(source_freq, return_format='components')
-        target_base, _, _ = normalize_frequency(target_freq, return_format='components')
+        source_base = normalize_frequency(source_freq, return_format='components').freq
+        target_base = normalize_frequency(target_freq, return_format='components').freq
 
         assert source_base == 'Q'
         assert target_base == 'M'
@@ -463,7 +576,7 @@ class TestConverterIntegration:
 
         # Simulate detection of 'AS-JAN'
         detected_freq = 'AS-JAN'
-        base, position, anchor = normalize_frequency(detected_freq, return_format='components')
+        base, position, anchor, _ = normalize_frequency(detected_freq, return_format='components')
 
         assert base == 'Y'  # Normalized from 'A'
         assert position == 'S'

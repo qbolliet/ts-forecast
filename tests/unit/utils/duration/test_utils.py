@@ -36,7 +36,7 @@ class TestNormalizeDuration:
 
     @pytest.mark.parametrize("value", _CODES + _LITERALS)
     def test_matches_normalizer_instance(self, value):
-        """Résultat identique à une instance dédiée de ``DurationNormalizer``."""
+        """Same result as a dedicated ``DurationNormalizer`` instance."""
         assert normalize_duration(value) == DurationNormalizer().normalize(value)
 
     def test_unsupported_value_raises(self):
@@ -121,7 +121,7 @@ class TestConvertDuration:
         ],
     )
     def test_rounding_is_forwarded(self, rounding, expected):
-        """Le paramètre ``rounding`` est bien transmis au convertisseur sous-jacent."""
+        """The ``rounding`` parameter is forwarded to the underlying converter."""
         assert convert_duration(90, "minute", "hour", rounding=rounding) == pytest.approx(expected)
 
     def test_matches_converter_instance(self):
@@ -137,10 +137,10 @@ class TestConvertDuration:
 class TestGetDurationOrder:
     """``get_duration_order`` reads ``DurationNormalizer._duration_order`` directly.
 
-    Point de couplage fragile relevé par le notebook ``duration_normalizer.ipynb`` :
-    contrairement aux autres fonctions de ce module, ``get_duration_order`` ne
-    passe par aucune méthode publique de ``DurationNormalizer`` pour lire
-    l'ordre associé à un code.
+    Fragile coupling point raised by the ``duration_normalizer.ipynb``
+    notebook: unlike the other functions of this module,
+    ``get_duration_order`` goes through no public method of
+    ``DurationNormalizer`` to read the order of a code.
     """
 
     @pytest.mark.parametrize(
@@ -160,9 +160,10 @@ class TestGetDurationOrder:
         assert get_duration_order("quarter") > get_duration_order("month")
 
     def test_consistent_with_is_longer_duration_for_every_pair(self):
-        """Propriété : ``get_duration_order(a) > get_duration_order(b)`` est
-        équivalent à ``DurationNormalizer().is_longer_duration(a, b)`` pour
-        toute paire de codes.
+        """Property: ``get_duration_order(a) > get_duration_order(b)`` iff ``is_longer_duration(a, b)``.
+
+        Checked for every pair of codes against
+        ``DurationNormalizer().is_longer_duration``.
         """
         normalizer = DurationNormalizer()
         for a in _CODES:
@@ -170,10 +171,12 @@ class TestGetDurationOrder:
                 assert (get_duration_order(a) > get_duration_order(b)) == normalizer.is_longer_duration(a, b)
 
     def test_unknown_duration_raises_via_normalize_duration(self):
-        """``get_duration_order`` appelle d'abord ``normalize_duration``, qui
-        lève une ``ValueError`` pour une durée inconnue : le repli
-        ``.get(code, 0)`` interne n'est donc jamais atteint pour une entrée
-        invalide (code mort avec les mappings actuels).
+        """An unknown duration raises through ``normalize_duration``.
+
+        ``get_duration_order`` first calls ``normalize_duration``, which
+        raises a ``ValueError``: the internal ``.get(code, 0)`` fallback is
+        never reached for an invalid input (dead code with the current
+        mappings).
         """
         with pytest.raises(ValueError, match="Unsupported duration"):
             get_duration_order("xyz")

@@ -8,6 +8,7 @@ from typing import Union
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
+from ..abc.converter import _CONVERSION_FACTORS_TO_SECONDS
 # Importation des types
 from .types import DurationType, UserDurationType
 # Importation de la fonction de parsing des fréquences pandas / durées
@@ -76,6 +77,9 @@ class DurationNormalizer(TemporalNormalizer):
     def normalize(self, value: Union[DurationType, UserDurationType]) -> DurationType:
         """Normalize any duration representation to duration code.
 
+        A leading multiplier ('2D') is accepted and dropped from the returned
+        code; use :meth:`normalize_with_multiplier` to keep it.
+
         Args:
             value: Duration string (code or literal name)
 
@@ -106,7 +110,7 @@ class DurationNormalizer(TemporalNormalizer):
 
         # Tentative d'extraction de la fréquence de base via parse_frequency
         try:
-            base, _, _ = parse_frequency(value)
+            base = parse_frequency(value).freq
             # Récursion seulement si la base est différente de la valeur d'entrée (évite boucle infinie)
             if base != value:
                 return self.normalize(base)
@@ -189,6 +193,10 @@ class DurationNormalizer(TemporalNormalizer):
     def is_longer_duration(self, dur1: DurationType, dur2: DurationType) -> bool:
         """Check if dur1 is a longer duration than dur2.
 
+        A multiplier lengthens the duration: ``'2D'`` is longer than ``'D'``
+        and shorter than ``'W'``. Without any multiplier the comparison
+        follows the order of the codes.
+
         Args:
             dur1: First duration
             dur2: Second duration
@@ -202,16 +210,24 @@ class DurationNormalizer(TemporalNormalizer):
             True
             >>> normalizer.is_longer_duration('week', 'quarter')
             False
+            >>> normalizer.is_longer_duration('2D', 'D')
+            True
         """
-        # Conversion en code
-        code1 = self.to_code(dur1)
-        code2 = self.to_code(dur2)
+        # Conversion en code et extraction des multiplicateurs
+        code1, multiplier1 = self.normalize_with_multiplier(dur1)
+        code2, multiplier2 = self.normalize_with_multiplier(dur2)
 
-        # Extraction de l'ordre associé à chaque durée
-        order1 = self._duration_order.get(code1, 0)
-        order2 = self._duration_order.get(code2, 0)
+        # Sans multiplicateur : ordre des codes
+        if multiplier1 == multiplier2 == 1:
+            return self._duration_order.get(code1, 0) > self._duration_order.get(code2, 0)
 
-        return order1 > order2
+        # Même code : le plus grand multiplicateur donne la durée la plus longue
+        if code1 == code2:
+            return multiplier1 > multiplier2
+
+        # Codes différents : comparaison des durées nominales
+        return (multiplier1 * _CONVERSION_FACTORS_TO_SECONDS[code1]
+                > multiplier2 * _CONVERSION_FACTORS_TO_SECONDS[code2])
 
     # Méthode de vérification que deux expressions de durées sont compatibles
     def are_compatible_durations(self, dur1: DurationType, dur2: DurationType) -> bool:

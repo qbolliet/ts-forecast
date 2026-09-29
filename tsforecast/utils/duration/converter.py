@@ -11,9 +11,13 @@ from typing import Union, Literal, Optional
 from ..abc.converter import TemporalConverter, _CONVERSION_FACTORS_TO_SECONDS, _CALENDAR_SUBPERIODS
 
 # Import du normalizer
-from .utils import normalize_duration
+from .normalizer import DurationNormalizer
 # Importation des types
 from .types import DurationType, UserDurationType, RoundingType
+
+
+# Instance du normalizer, pour extraire codes et multiplicateurs
+_normalizer = DurationNormalizer()
 
 
 # Classe de conversion entre durées
@@ -101,7 +105,9 @@ class DurationConverter(TemporalConverter):
             to_unit: Target duration unit
 
         Returns:
-            Conversion factor to multiply by source value
+            Conversion factor to multiply by source value. A leading
+            multiplier scales the unit it prefixes (``'2D'`` is a unit of two
+            days).
 
         Raises:
             ValueError: If duration units are not supported
@@ -112,11 +118,32 @@ class DurationConverter(TemporalConverter):
             60.0
             >>> converter.get_conversion_factor('day', 'hour')
             24.0
+            >>> converter.get_conversion_factor('2D', 'hour')
+            48.0
+            >>> converter.get_conversion_factor('D', '2D')
+            0.5
         """
-        # Normalisation des durées (sans positions S/E ni ancrage)
-        from_code = normalize_duration(from_unit)
-        to_code = normalize_duration(to_unit)
-        
+        # Normalisation des durées (sans positions S/E ni ancrage) et extraction
+        # des multiplicateurs, qui mettent à l'échelle l'unité qu'ils préfixent
+        from_code, from_multiplier = _normalizer.normalize_with_multiplier(from_unit)
+        to_code, to_multiplier = _normalizer.normalize_with_multiplier(to_unit)
+        return self._code_conversion_factor(from_code, to_code) * from_multiplier / to_multiplier
+
+    # Méthode auxiliaire de calcul du facteur entre deux codes de durée
+    def _code_conversion_factor(self, from_code: str, to_code: str) -> float:
+        """Get the conversion factor between two normalized duration codes.
+
+        Args:
+            from_code: Source duration code ('D', 'M', ...).
+            to_code: Target duration code.
+
+        Returns:
+            Conversion factor to multiply by source value.
+
+        Examples:
+            >>> DurationConverter()._code_conversion_factor('h', 'min')
+            60.0
+        """
         # Même durée
         if from_code == to_code:
             return 1.0

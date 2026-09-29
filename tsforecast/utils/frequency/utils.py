@@ -6,7 +6,7 @@ import pandas as pd
 # Importation des modules du package
 from .normalizer import FrequencyNormalizer
 from .types import FrequencyType, UserFrequencyType
-from ..parse.utils import parse_frequency, build_frequency_string
+from ..parse.utils import MONTH_ABBREVIATIONS, ParsedFrequency, parse_frequency, build_frequency_string
 from ...panel.utils import normalize_entity_key
 
 # Import réservé au typage statique : .detector importe des noms définis dans
@@ -18,13 +18,73 @@ if TYPE_CHECKING:
 # Instance globale pour faciliter l'utilisation
 _normalizer = FrequencyNormalizer()
 
+# Fonction de mise sous forme canonique d'une fréquence
+def canonicalize_frequency(frequency: Optional[str]) -> Optional[str]:
+    """Rewrite a frequency string to the canonical spelling of its equivalence class.
+
+    Some pandas frequencies generate exactly the same dates under several
+    spellings, and ``pd.infer_freq`` returns any of them. This function maps
+    every spelling of a class to a single, readable representative. Anything
+    that is not affected is returned unchanged, so it is safe to apply to any
+    inferred frequency.
+
+    Rules:
+        - Quarterly anchors come in classes of three equivalent months:
+          ``QS-JAN``, ``QS-APR``, ``QS-JUL`` and ``QS-OCT`` generate the same
+          dates (``pd.infer_freq`` reports ``'QS-OCT'`` for a plain ``'QS'``
+          index). The canonical anchor is the first month of the calendar
+          year for a start position (``JAN`` / ``FEB`` / ``MAR``) and the
+          month preceding it for an end position (``DEC`` / ``JAN`` /
+          ``FEB``): the pandas defaults (``QS-JAN`` / ``QE-DEC``) are
+          preserved, and a start anchor and its end counterpart describe the
+          same periods (``QS-FEB`` / ``QE-JAN``).
+
+    Args:
+        frequency: Frequency string (multiplier, position and anchor allowed),
+            or None.
+
+    Returns:
+        The canonical frequency string; ``frequency`` itself when no rule
+        applies (unparsable, unanchored, other frequencies, None).
+
+    Examples:
+        >>> canonicalize_frequency('QS-OCT')
+        'QS-JAN'
+        >>> canonicalize_frequency('2QE-MAR')
+        '2QE-DEC'
+        >>> canonicalize_frequency('QE-NOV')
+        'QE-FEB'
+        >>> canonicalize_frequency('MS')
+        'MS'
+    """
+    if frequency is None:
+        return None
+    try:
+        parsed = parse_frequency(frequency)
+    except ValueError:
+        return frequency
+
+    # Ancres trimestrielles : trois mois consécutifs modulo 3 décrivent les mêmes dates
+    if parsed.freq == 'Q' and parsed.suffix in MONTH_ABBREVIATIONS:
+        month = MONTH_ABBREVIATIONS.index(parsed.suffix)
+        if parsed.position == 'S':
+            # Premier début de trimestre de l'année civile : JAN, FEB ou MAR
+            canonical = MONTH_ABBREVIATIONS[month % 3]
+        else:
+            # Fin (ou ancre sans position, lue comme fin par pandas) : mois qui précède
+            # le début canonique du même cycle -> DEC, JAN ou FEB
+            canonical = MONTH_ABBREVIATIONS[(month + 1) % 3 - 1]
+        return build_frequency_string(*parsed._replace(suffix=canonical))
+
+    return frequency
+
 
 # Fonctions de commodité pour accès direct
 # Fonction de normalisation de la fréquence
 def normalize_frequency(
     frequency: Union[str, FrequencyType, UserFrequencyType],
     return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
-) -> Union[str, Tuple[str, Optional[str], Optional[str]]]:
+) -> Union[str, ParsedFrequency]:
     """Normalize frequency with configurable output format.
 
     This function provides flexible frequency normalization with multiple
@@ -36,13 +96,20 @@ def normalize_frequency(
         return_format: Output format level (default: 'base' for backward compatibility):
             - 'base': Base frequency only → 'Q'
             - 'with_position': Base + position if present → 'QE'
-            - 'full': Complete validated string → 'QE-DEC'
-            - 'components': Tuple (base, position, anchor) → ('Q', 'E', 'DEC')
+            - 'full': Complete validated string → 'QE-DEC' (a leading
+              multiplier is kept: '2MS' → '2MS')
+            - 'components': ParsedFrequency (base, position, anchor,
+              multiplier) → ('Q', 'E', 'DEC', 1)
+
+        A leading multiplier is accepted by every format. 'base' and
+        'with_position' leave it out ('2MS' → 'M' / 'MS'); 'full' and
+        'components' keep it.
 
     Returns:
         Normalized frequency in requested format:
         - 'base', 'with_position', 'full': str
-        - 'components': Tuple[str, Optional[str], Optional[str]]
+        - 'components': ParsedFrequency, a named tuple
+          ``(freq, position, suffix, multiplier)``
 
     Raises:
         ValueError: If frequency is invalid or return_format is unsupported
@@ -66,11 +133,11 @@ def normalize_frequency(
 
         >>> # Components: complete parsing
         >>> normalize_frequency('QE-DEC', return_format='components')
-        ('Q', 'E', 'DEC')
-        >>> normalize_frequency('MS', return_format='components')
-        ('M', 'S', None)
+        ParsedFrequency(freq='Q', position='E', suffix='DEC', multiplier=1)
+        >>> normalize_frequency('2MS', return_format='components')
+        ParsedFrequency(freq='M', position='S', suffix=None, multiplier=2)
         >>> normalize_frequency('D', return_format='components')
-        ('D', None, None)
+        ParsedFrequency(freq='D', position=None, suffix=None, multiplier=1)
     """
     if return_format == 'base':
         # Comportement actuel (backward compatible)
@@ -79,30 +146,28 @@ def normalize_frequency(
     elif return_format == 'components':
         # Décomposition complète via parse_frequency
         try:
-            base, position, suffix = parse_frequency(frequency)
-            normalized_base = _normalizer.normalize(base)
-            return (normalized_base, position, suffix)
+            parsed = parse_frequency(frequency)
+            return parsed._replace(freq=_normalizer.normalize(parsed.freq))
         except ValueError:
             # Fallback pour les noms littéraux ('daily', 'monthly', etc.)
-            normalized_base = _normalizer.normalize(frequency)
-            return (normalized_base, None, None)
+            return ParsedFrequency(_normalizer.normalize(frequency), None, None)
 
     elif return_format == 'with_position':
         # Base + position si présente
         try:
-            base, position, _ = parse_frequency(frequency)
-            normalized_base = _normalizer.normalize(base)
-            if position:
-                return f"{normalized_base}{position}"
+            parsed = parse_frequency(frequency)
+            normalized_base = _normalizer.normalize(parsed.freq)
+            if parsed.position:
+                return f"{normalized_base}{parsed.position}"
             return normalized_base
         except ValueError:
             return _normalizer.normalize(frequency)
 
     elif return_format == 'full':
-        # Validation + retour de la chaîne complète
+        # Validation + retour de la chaîne complète, multiplicateur en tête compris
+        # ('2MS', détecté par pandas sur un index bimestriel)
         try:
-            base, _, _ = parse_frequency(frequency)
-            _normalizer.normalize(base)  # Validation seulement
+            _normalizer.normalize(parse_frequency(frequency).freq)  # Validation seulement
         except ValueError:
             _normalizer.normalize(frequency)  # Validation via normalize
         return frequency
@@ -306,7 +371,7 @@ def detect_frequency(data: Union[pd.Series, pd.DataFrame],
             - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
             - 'with_position': Frequency with position (e.g. 'MS', 'QE')
             - 'full': Full pandas frequency string (e.g. 'QE-DEC')
-            - 'components': Tuple of (base, position, suffix)
+            - 'components': ParsedFrequency (base, position, suffix, multiplier)
         check_consistency: If True, check frequency consistency across panel groups or columns
         consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
             - 'modal': Returns the most common frequency (default)
@@ -407,7 +472,7 @@ def detect_dataset_frequency(df: pd.DataFrame,
             - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
             - 'with_position': Frequency with position (e.g. 'MS', 'QE')
             - 'full': Full pandas frequency string (e.g. 'QE-DEC')
-            - 'components': Tuple of (base, position, suffix)
+            - 'components': ParsedFrequency (base, position, suffix, multiplier)
         check_consistency: If True, check the frequency consistency across columns
         consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
             - 'modal': Returns the most common frequency (default)
@@ -464,7 +529,7 @@ def detect_index_frequency(
             - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
             - 'with_position': Frequency with position (e.g. 'MS', 'QE')
             - 'full': Full pandas frequency string (e.g. 'QE-DEC')
-            - 'components': Tuple of (base, position, suffix)
+            - 'components': ParsedFrequency (base, position, suffix, multiplier)
 
     Returns:
         For DatetimeIndex: Frequency in the requested format
@@ -487,7 +552,7 @@ def detect_index_frequency(
         >>> # With components format
         >>> dates = pd.date_range('2024-01-01', periods=5, freq='MS')
         >>> detect_index_frequency(dates, return_format='components')
-        ('M', 'S', None)
+        ParsedFrequency(freq='M', position='S', suffix=None, multiplier=1)
         >>>
         >>> # MultiIndex panel data
         >>> idx = pd.MultiIndex.from_product([
@@ -534,8 +599,8 @@ def detect_index_frequency(
             fallback_result = FrequencyDetector().detect_time_series_frequency(series, return_format)
             return fallback_result
 
-        # Normalisation au format demandé
-        return normalize_frequency(frequency=freq, return_format=return_format)
+        # Normalisation au format demandé, sous forme canonique ('QS-OCT' -> 'QS-JAN')
+        return normalize_frequency(frequency=canonicalize_frequency(freq), return_format=return_format)
 
 
 # Fonction de construction d'un offset cible ancré comme un index source
@@ -583,7 +648,7 @@ def target_offset_for_index(
     """
     # Détection de la position (début/fin) de l'index source
     try:
-        _, position, _ = detect_index_frequency(index, return_format='components')
+        position = detect_index_frequency(index, return_format='components').position
     except Exception:
         position = None
 

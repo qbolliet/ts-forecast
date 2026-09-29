@@ -10,7 +10,7 @@ import numpy as np
 from typing import Dict, Literal, Optional, Union, Tuple, List
 
 # Import des utilitaires de fréquence
-from .utils import normalize_frequency
+from .utils import normalize_frequency, canonicalize_frequency
 from .types import FrequencyType, UserFrequencyType
 from ..parse.utils import build_frequency_string
 from ...panel.utils import normalize_entity_key, detect_panel_structure, extract_time_series_from_multiindex
@@ -60,7 +60,7 @@ class FrequencyDetector:
                 - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
                 - 'with_position': Frequency with position (e.g. 'MS', 'QE')
                 - 'full': Full pandas frequency string (e.g. 'QE-DEC')
-                - 'components': Tuple of (base, position, suffix)
+                - 'components': ParsedFrequency (base, position, suffix, multiplier)
 
         Returns:
             Detected frequency in the requested format, or None if detection fails
@@ -96,6 +96,10 @@ class FrequencyDetector:
         else:
             time_index = clean_series.index
 
+        # Dédoublonnage : un écart nul entre deux dates identiques n'est pas une
+        # fréquence (sinon l'écart modal peut valoir 0 et être pris pour 'ns')
+        time_index = time_index.unique()
+
         # Tri de l'index temporel pour assurer la cohérence
         if not time_index.is_monotonic_increasing:
             time_index = time_index.sort_values()
@@ -103,8 +107,10 @@ class FrequencyDetector:
         # Utilisation principale de pandas.infer_freq
         try:
             inferred_freq = pd.infer_freq(time_index)
-            # Normalisation au format demandé
-            result = normalize_frequency(frequency=inferred_freq, return_format=return_format)
+            # Normalisation au format demandé, sous forme canonique ('QS-OCT' -> 'QS-JAN')
+            result = normalize_frequency(
+                frequency=canonicalize_frequency(inferred_freq), return_format=return_format
+            )
             if result:
                 return result
         except Exception:
@@ -161,7 +167,7 @@ class FrequencyDetector:
                 - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
                 - 'with_position': Frequency with position (e.g. 'MS', 'QE')
                 - 'full': Full pandas frequency string (e.g. 'QE-DEC')
-                - 'components': Tuple of (base, position, suffix)
+                - 'components': ParsedFrequency (base, position, suffix, multiplier)
 
         Returns:
             - For simple series: Detected frequency as string, or None if detection fails
@@ -355,7 +361,7 @@ class FrequencyDetector:
                 - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
                 - 'with_position': Frequency with position (e.g. 'MS', 'QE')
                 - 'full': Full pandas frequency string (e.g. 'QE-DEC')
-                - 'components': Tuple of (base, position, suffix)
+                - 'components': ParsedFrequency (base, position, suffix, multiplier)
 
         Returns:
             Dictionary mapping column names (or (panel_id, column) tuples) to frequencies
@@ -660,7 +666,10 @@ class FrequencyDetector:
             time_index: Sorted datetime index
 
         Returns:
-            'SM' if semi-monthly frequency is detected, None otherwise
+            'SMS' if dates fall exactly on the pandas semi-month start grid
+            (1st and 15th), 'SME' if they fall exactly on the semi-month end
+            grid (15th and month end), 'SM' for a looser semi-monthly pattern,
+            None otherwise
 
         Notes:
             Checks if dates correspond to bi-monthly occurrences
@@ -668,6 +677,12 @@ class FrequencyDetector:
         """
         # Extraction des jours du mois
         days = time_index.day
+
+        # Grilles natives pandas : position détectable sans ambiguïté
+        if len(days) > 0 and np.isin(days, (1, 15)).all():
+            return 'SMS'
+        if len(days) > 0 and ((days == 15) | time_index.is_month_end).all():
+            return 'SME'
 
         # Vérification si les dates sont regroupées autour de 2 moments du mois
         # Typiquement début (1-5) et milieu (15-20) du mois

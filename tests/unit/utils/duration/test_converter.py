@@ -13,8 +13,8 @@ days, 1 year = 365 days, ...), looked up before falling back to a
 seconds-based ratio for any other pair. This makes ``Y -> M`` exactly ``12.0``
 (not ``365 / 30 = 12.1667``): a divergence from ``notebooks/utils/
 duration_converter.ipynb``, which predates this exact calendar table and is
-outdated on this specific point (CLAUDE.md §2.3 : code prioritaire sur les
-notebooks en cas de désaccord).
+outdated on this specific point (§2.3 of the campaign: the code prevails
+over the notebooks when they disagree).
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class TestConvert:
 
     @pytest.mark.parametrize("unit", _UNITS)
     def test_identity_conversion(self, converter, unit):
-        """Convertir une unité vers elle-même renvoie la valeur inchangée."""
+        """Converting a unit to itself returns the value unchanged."""
         assert converter.convert(5, unit, unit) == 5
 
     @pytest.mark.parametrize(
@@ -56,14 +56,16 @@ class TestConvert:
         ],
     )
     def test_golden_conversions(self, converter, value, from_unit, to_unit, expected):
-        """Table de conversions d'or (valeurs calculées à la main, cf. facteurs
-        exacts de ``_CALENDAR_SUBPERIODS`` pour les paires emboîtées).
+        """Table of golden conversions, computed by hand.
+
+        Nested pairs use the exact factors of ``_CALENDAR_SUBPERIODS``.
         """
         assert converter.convert(value, from_unit, to_unit) == pytest.approx(expected)
 
     def test_mixed_code_and_literal_formats_agree(self, converter):
-        """``convert`` accepte indifféremment codes et littéraux, et peut
-        mélanger les deux formats entre ``from_unit`` et ``to_unit``.
+        """``convert`` accepts codes and literals alike.
+
+        Both formats may be mixed between ``from_unit`` and ``to_unit``.
         """
         results = {
             "code-to-code": converter.convert(1, "D", "h"),
@@ -82,23 +84,24 @@ class TestConvert:
         ],
     )
     def test_roundtrip_is_identity(self, converter, value, from_unit, to_unit):
-        """``convert(convert(v, a, b), b, a) == v`` aux erreurs de flottants près."""
+        """``convert(convert(v, a, b), b, a) == v`` up to floating-point errors."""
         forward = converter.convert(value, from_unit, to_unit)
         backward = converter.convert(forward, to_unit, from_unit)
         assert backward == pytest.approx(value)
 
     def test_zero_value(self, converter):
-        """Une durée nulle se convertit vers zéro."""
+        """A zero duration converts to zero."""
         assert converter.convert(0, "D", "h") == 0
 
     def test_negative_value_is_not_rejected(self, converter):
-        """Aucune validation de signe n'est effectuée : une valeur négative
-        (sans sens métier pour une durée) est convertie normalement.
+        """No sign validation is performed.
+
+        A negative value (meaningless for a duration) is converted normally.
         """
         assert converter.convert(-5, "h", "min") == -300.0
 
     def test_extreme_magnitudes(self, converter):
-        """Valeurs très grandes et très petites, sans erreur ni perte de sens."""
+        """Very large and very small values, without error nor loss of meaning."""
         assert converter.convert(1e12, "ns", "Y") == pytest.approx(1e12 * 1e-9 / 31536000)
         assert converter.convert(1e-6, "Y", "ns") == pytest.approx(1e-6 * 31536000 / 1e-9)
 
@@ -111,28 +114,30 @@ class TestConvert:
         ],
     )
     def test_rounding_modes(self, converter, rounding, expected_type, expected_value):
-        """``rounding`` change à la fois la valeur et le type de retour :
-        ``float`` sans arrondi, ``int`` avec ``'floor'``/``'ceil'`` (même
-        quand le résultat exact est déjà entier).
+        """``rounding`` changes both the value and the return type.
+
+        ``float`` without rounding, ``int`` with ``'floor'`` / ``'ceil'``
+        (even when the exact result already is an integer).
         """
         result = converter.convert(37, "h", "D", rounding=rounding)
         assert type(result) is expected_type
         assert result == pytest.approx(expected_value)
 
     def test_rounding_follows_mathematical_convention_for_negative_values(self, converter):
-        """``floor``/``ceil`` suivent la convention mathématique standard,
-        y compris pour les valeurs négatives (floor vers -inf, ceil vers +inf).
+        """``floor`` / ``ceil`` follow the standard mathematical convention.
+
+        This includes negative values (floor towards -inf, ceil towards +inf).
         """
         assert converter.convert(-37, "h", "D", rounding="floor") == -2
         assert converter.convert(-37, "h", "D", rounding="ceil") == -1
 
     def test_unrecognized_rounding_value_raises(self, converter):
-        """Durcissement suite à ``ANO-UTILS-004`` (point de vigilance relevé
-        dans ``notebooks/utils/duration_converter.ipynb`` §3.4, ignoré
-        silencieusement à l'origine) : une valeur de ``rounding`` non reconnue
-        (ni ``'floor'``, ni ``'ceil'``, ni ``None``) lève désormais une
-        ``ValueError`` explicite, au lieu de retourner silencieusement la
-        valeur non arrondie.
+        """An unrecognized ``rounding`` value raises an explicit ``ValueError``.
+
+        Hardening after ``ANO-UTILS-004`` (caveat raised in
+        ``notebooks/utils/duration_converter.ipynb`` §3.4, originally ignored
+        silently): a value other than ``'floor'``, ``'ceil'`` or ``None`` no
+        longer silently returns the unrounded value.
         """
         with pytest.raises(ValueError, match="Unsupported rounding mode"):
             converter.convert(37, "h", "D", rounding="round")
@@ -145,7 +150,7 @@ class TestConvert:
         ],
     )
     def test_unsupported_unit_raises(self, converter, from_unit, to_unit):
-        """Une unité non supportée (source ou cible) lève une ``ValueError``."""
+        """An unsupported unit (source or target) raises a ``ValueError``."""
         with pytest.raises(ValueError, match="Unsupported duration"):
             converter.convert(1, from_unit, to_unit)
 
@@ -158,11 +163,46 @@ class TestConvert:
         ],
     )
     def test_non_numeric_value_raises_type_error(self, converter, invalid_value):
-        """``convert`` applique simplement ``value * facteur`` : une valeur non
-        numérique lève un ``TypeError`` natif, sans message dédié.
+        """A non-numeric value raises a native ``TypeError``.
+
+        ``convert`` merely computes ``value * factor``: no dedicated message.
         """
         with pytest.raises(TypeError):
             converter.convert(invalid_value, "D", "h")
+
+
+class TestMultipliedUnits:
+    """A leading multiplier scales the unit it prefixes ('2D' is a unit of two days)."""
+
+    @pytest.mark.parametrize(
+        "value, from_unit, to_unit, expected",
+        [
+            pytest.param(1, "2D", "h", 48.0, id="two-days-in-hours"),
+            pytest.param(1, "h", "2h", 0.5, id="hour-in-two-hours"),
+            pytest.param(3, "2D", "D", 6.0, id="value-times-multiplier"),
+            pytest.param(1, "3M", "M", 3.0, id="three-months-in-months"),
+            pytest.param(1, "Y", "3M", 4.0, id="year-in-quarters-of-months"),
+            pytest.param(1, "2D", "2D", 1.0, id="same-multiplied-unit"),
+            pytest.param(1, "2D", "4D", 0.5, id="same-code-two-multipliers"),
+            pytest.param(1, "12MS", "Y", 1.0, id="twelve-months-in-a-year"),
+        ],
+    )
+    def test_golden_conversions(self, converter, value, from_unit, to_unit, expected):
+        """The multiplier of each unit enters the factor."""
+        assert converter.convert(value, from_unit, to_unit) == pytest.approx(expected)
+
+    def test_multiplier_one_is_transparent(self, converter):
+        """'1D' is 'D'."""
+        assert converter.get_conversion_factor("1D", "h") == converter.get_conversion_factor("D", "h")
+
+    def test_factors_are_inverse_of_each_other(self, converter):
+        """Swapping the units inverts the factor, multipliers included."""
+        assert converter.get_conversion_factor("2D", "h") * converter.get_conversion_factor("h", "2D") == pytest.approx(1.0)
+
+    def test_unsupported_unit_after_multiplier_raises(self, converter):
+        """The multiplier does not make an unknown unit valid."""
+        with pytest.raises(ValueError, match="Unsupported duration"):
+            converter.get_conversion_factor("2xyz", "h")
 
 
 class TestGetConversionFactor:
@@ -195,8 +235,10 @@ class TestGetConversionFactor:
         ],
     )
     def test_golden_factors(self, converter, from_unit, to_unit, expected):
-        """Table de facteurs d'or, croisant paires emboîtées exactes, paires
-        inversées et paires hors table (repli sur les secondes).
+        """Table of golden factors.
+
+        It crosses exact nested pairs, inverted pairs and pairs outside the
+        table (fallback on seconds).
         """
         assert converter.get_conversion_factor(from_unit, to_unit) == pytest.approx(expected)
 
@@ -207,8 +249,9 @@ class TestGetConversionFactor:
             assert converter.convert(value, from_unit, to_unit) == pytest.approx(value * factor)
 
     def test_symmetry_for_all_unit_pairs(self, converter):
-        """Propriété : ``factor(a, b) * factor(b, a) == 1`` pour toute paire
-        d'unités, qu'elle passe par la table calendaire ou par les secondes.
+        """Property: ``factor(a, b) * factor(b, a) == 1`` for every pair of units.
+
+        Whether the pair goes through the calendar table or through seconds.
         """
         for a, b in itertools.combinations(_UNITS, 2):
             factor_ab = converter.get_conversion_factor(a, b)
@@ -216,10 +259,11 @@ class TestGetConversionFactor:
             assert np.isclose(factor_ab * factor_ba, 1.0)
 
     def test_business_day_treated_as_calendar_day(self, converter):
-        """Limitation documentée (notebook duration_converter §4.4) :
-        ``'B'`` (jour ouvré) n'est PAS dans la table calendaire emboîtée et
-        retombe donc sur le calcul via les secondes, identique à ``'D'`` :
-        aucun ajustement pour les jours non ouvrés (5/7).
+        """Documented limitation (notebook duration_converter §4.4): ``'B'`` is a calendar day.
+
+        ``'B'`` (business day) is NOT in the nested calendar table and falls
+        back on the seconds-based computation, identical to ``'D'``: no
+        adjustment for non-business days (5/7).
         """
         assert converter.get_conversion_factor("B", "D") == 1.0
         assert converter.get_conversion_factor("B", "h") == converter.get_conversion_factor("D", "h")
@@ -232,6 +276,6 @@ class TestGetConversionFactor:
         ],
     )
     def test_unsupported_unit_raises(self, converter, from_unit, to_unit):
-        """Une unité non supportée lève une ``ValueError``."""
+        """An unsupported unit raises a ``ValueError``."""
         with pytest.raises(ValueError, match="Unsupported duration"):
             converter.get_conversion_factor(from_unit, to_unit)

@@ -6,7 +6,10 @@ temporal types.
 """
 # Importation des modules
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, Tuple
+
+# Import de la fonction de parsing des chaînes de fréquence / durée
+from ..parse.utils import parse_frequency
 
 # Classe abstraite de normalisation 
 class TemporalNormalizer(ABC):
@@ -90,6 +93,40 @@ class TemporalNormalizer(ABC):
             return True
         except ValueError:
             return False
+
+    # Méthode de normalisation d'une valeur avec extraction de son multiplicateur
+    def normalize_with_multiplier(self, value: str) -> Tuple[str, int]:
+        """Normalize a value and extract its leading multiplier.
+
+        ``normalize`` returns the code alone (``'2MS'`` -> ``'M'``); this
+        method keeps the multiplier next to it, for the callers that compare
+        or scale quantities (``'2D'`` is twice ``'D'``).
+
+        Args:
+            value: Value to normalize, possibly multiplied (``'2D'``, ``'3QS-FEB'``)
+                or a literal name without multiplier (``'day'``).
+
+        Returns:
+            Tuple ``(code, multiplier)``, the multiplier being 1 when absent.
+
+        Raises:
+            ValueError: If value format is not supported
+
+        Examples:
+            >>> from tsforecast.utils.frequency.normalizer import FrequencyNormalizer
+            >>> FrequencyNormalizer().normalize_with_multiplier('2MS')
+            ('M', 2)
+            >>> FrequencyNormalizer().normalize_with_multiplier('daily')
+            ('D', 1)
+        """
+        # Extraction du multiplier
+        try:
+            multiplier = parse_frequency(value).multiplier
+        except (ValueError, TypeError):
+            # Nom littéral ne se parsant pas ('business_day') ou valeur invalide,
+            # cette dernière étant rejetée par normalize
+            multiplier = 1
+        return self.normalize(value), multiplier
 
     # Méthode auxiliaire de construction du mapping inverse entre les codes temporels et leur expression littéraire
     @staticmethod

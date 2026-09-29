@@ -78,8 +78,10 @@ validated = validate_temporal_data(series)   # objet validé, index temporel pro
 ```python
 from tsforecast.utils.parse import parse_frequency, build_frequency_string
 
-parse_frequency("QE-DEC")             # -> ('Q', 'E', 'DEC')
-build_frequency_string("Q", "E", "DEC")   # -> 'QE-DEC'
+parse_frequency("QE-DEC")     # -> ParsedFrequency(freq='Q', position='E', suffix='DEC', multiplier=1)
+parse_frequency("2MS")        # -> ParsedFrequency(freq='M', position='S', suffix=None, multiplier=2)
+build_frequency_string("Q", "E", "DEC")                # -> 'QE-DEC'
+build_frequency_string(*parse_frequency("2MS"))        # -> '2MS' (aller-retour)
 ```
 
 ## Voir aussi

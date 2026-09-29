@@ -1,11 +1,12 @@
-"""Constructeurs purs des jeux de données de référence des tests.
+"""Pure builders of the reference datasets of the tests.
 
-Regroupe les constructeurs historiquement privés de
-``tests/frequency/conftest.py`` (répliques par code, sans lecture de
-notebook, du notebook 2 ``notebooks/2 - QB - Mixed frequencies.ipynb`` et du
-jeu unifié ``PANEL-X`` de ``high_frequency_imputer2_architecture.md`` §2.6),
-rendus publics pour être importés directement par les tests et les
-notebooks (``from tests.support.datasets import build_panel_reference``).
+Gathers the builders historically private to
+``tests/frequency/conftest.py`` (code replicas, without reading the
+notebook, of notebook 2 ``notebooks/2 - QB - Mixed frequencies.ipynb``
+and of the unified ``PANEL-X`` dataset of
+``high_frequency_imputer2_architecture.md`` §2.6), made public to be
+imported directly by tests and notebooks
+(``from tests.support.datasets import build_panel_reference``).
 """
 # Modules de base
 import zlib
@@ -23,37 +24,38 @@ def build_mixed_frequency_timeseries(
 ) -> pd.DataFrame:
     """Build the mixed-frequency time series dataset of notebook 2.
 
-    Réplique par code (sans lecture du notebook) de ``df_timeseries`` dans
-    ``notebooks/2 - QB - Mixed frequencies.ipynb``, utilisée comme référence
-    empirique dans ``high_frequency_imputer_review.md``. Généralisée pour
-    couvrir également le jeu, plus réaliste, de ``create_timeseries_dataset``
-    dans ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb`` :
-    ``annual_start_date`` antérieur à ``start_date`` (paramètres par défaut de
-    ce notebook) rend l'index global irrégulier — quelques ancres annuelles
-    isolées avant le début de la grille mensuelle. Ce paramètre vaut
-    ``start_date`` par défaut, ce qui préserve le jeu régulier historique.
+    Code replica (without reading the notebook) of ``df_timeseries`` in
+    ``notebooks/2 - QB - Mixed frequencies.ipynb``, used as empirical
+    reference in ``high_frequency_imputer_review.md``. Generalized to also
+    cover the more realistic dataset of ``create_timeseries_dataset`` in
+    ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb``: an
+    ``annual_start_date`` earlier than ``start_date`` (default parameters
+    of that notebook) makes the global index irregular - a few isolated
+    annual anchors before the start of the monthly grid. This parameter
+    defaults to ``start_date``, which preserves the historical regular
+    dataset.
 
     Args:
-        start_date: Début de la grille mensuelle (variables mensuelle et
-            trimestrielle).
-        end_date: Fin du jeu (grille mensuelle et série annuelle).
-        annual_start_date: Début de la série annuelle de balance
-            commerciale. ``None`` (défaut) la borne à ``start_date`` : la
-            série reste incluse dans la grille mensuelle et l'index résultant
-            est régulier. Une date antérieure à ``start_date`` ajoute des
-            ancres annuelles hors grille et rend l'index irrégulier.
-        seed: Graine du générateur pseudo-aléatoire NumPy.
+        start_date: Start of the monthly grid (monthly and quarterly
+            variables).
+        end_date: End of the dataset (monthly grid and annual series).
+        annual_start_date: Start of the annual trade balance series.
+            ``None`` (default) bounds it to ``start_date``: the series stays
+            within the monthly grid and the resulting index is regular. A
+            date earlier than ``start_date`` adds annual anchors outside the
+            grid and makes the index irregular.
+        seed: Seed of the NumPy pseudo-random generator.
 
     Returns:
-        ``DataFrame`` à ``DatetimeIndex`` nommé ``date``, ancré en début de
-        mois (``MS``) sur la grille mensuelle, avec colonnes :
-        ``production_industrielle`` (mensuelle, dense à partir de 2019-01,
-        NaN avant), ``inflation_ipc`` (mensuelle, dense, dernière valeur
-        NaN), ``taux_chomage`` (mensuelle, dense, dernière valeur NaN),
-        ``pib_trimestriel`` (trimestrielle, NaN hors fin de trimestre,
-        dernier trimestre disponible NaN), ``balance_commerciale_annuelle``
-        (annuelle, ancrée en début d'année (``YS``) à partir de
-        ``annual_start_date``, dernière année disponible NaN).
+        ``DataFrame`` with a ``DatetimeIndex`` named ``date``, anchored at
+        month start (``MS``) on the monthly grid, with columns:
+        ``production_industrielle`` (monthly, dense from 2019-01, NaN
+        before), ``inflation_ipc`` (monthly, dense, last value NaN),
+        ``taux_chomage`` (monthly, dense, last value NaN),
+        ``pib_trimestriel`` (quarterly, NaN outside quarter ends, last
+        available quarter NaN), ``balance_commerciale_annuelle`` (annual,
+        anchored at year start (``YS``) from ``annual_start_date``, last
+        available year NaN).
 
     Examples:
         >>> df = build_mixed_frequency_timeseries()
@@ -62,9 +64,8 @@ def build_mixed_frequency_timeseries(
         >>> len(df)
         79
 
-        Avec un historique de balance commerciale antérieur à la grille
-        mensuelle (paramètres du notebook 3), l'index global devient
-        irrégulier :
+        With a trade balance history earlier than the monthly grid
+        (notebook 3 parameters), the global index becomes irregular:
 
         >>> from tsforecast.frequency import is_regular
         >>> df_irregular = build_mixed_frequency_timeseries(annual_start_date='2015-01-01')
@@ -175,46 +176,46 @@ def build_mixed_frequency_panel(
 ) -> pd.DataFrame:
     """Build the mixed-frequency panel dataset of notebook 2.
 
-    Réplique par code de ``df_panel`` dans
-    ``notebooks/2 - QB - Mixed frequencies.ipynb``. Généralisée pour couvrir
-    également le jeu, plus réaliste et hétérogène, de
-    ``create_panel_dataset`` dans ``notebooks/3 - QB - Panel a frequences
-    mixtes heterogene.ipynb`` : passer ``countries=HETEROGENEOUS_PANEL_COUNTRIES``
-    (défini plus bas dans ce module) reproduit ce jeu à l'identique — couverture
-    propre à chaque entité, ``depenses_publiques_pib`` à fréquence de
-    publication hétérogène, ``climat_affaires`` structurellement absente pour
-    une entité. Le dictionnaire par défaut ne fixe aucune de ces clés : le jeu
-    régulier historique (3 entités sur la même grille mensuelle, sans
-    ``depenses_publiques_pib`` ni ``climat_affaires``) reste inchangé.
+    Code replica of ``df_panel`` in
+    ``notebooks/2 - QB - Mixed frequencies.ipynb``. Generalized to also
+    cover the more realistic and heterogeneous dataset of
+    ``create_panel_dataset`` in ``notebooks/3 - QB - Panel a frequences
+    mixtes heterogene.ipynb``: passing
+    ``countries=HETEROGENEOUS_PANEL_COUNTRIES`` (defined below in this
+    module) reproduces that dataset's structure - coverage specific to each
+    entity, ``depenses_publiques_pib`` with a heterogeneous publication
+    frequency, ``climat_affaires`` structurally absent for one entity. The
+    default dictionary sets none of these keys: the historical regular
+    dataset (3 entities on the same monthly grid, without
+    ``depenses_publiques_pib`` nor ``climat_affaires``) is unchanged.
 
     Args:
-        seed: Graine de base du générateur pseudo-aléatoire NumPy ; chaque
-            entité tire après ``np.random.seed(seed + zlib.crc32(pays) %
-            1000)`` — ``crc32`` (et non ``hash``) garde la graine
-            reproductible d'une exécution à l'autre.
-        countries: Dictionnaire ``{nom_entité: paramètres}``. ``None``
-            (défaut) utilise 3 entités (``France``, ``Allemagne``,
-            ``Italie``) sur une grille mensuelle commune. Clés reconnues par
-            entité : ``pib_base``, ``inflation_base``, ``chomage_base``,
-            ``prod_ind_start`` (toujours requises) ; ``start_date`` /
-            ``end_date`` (défaut ``'2018-01-01'`` / ``'2024-07-01'``,
-            propres à chaque entité si fournies — couverture hétérogène) ;
-            ``annual_start_date`` (défaut ``start_date`` ; une date
-            antérieure rend l'index de l'entité irrégulier, comme
-            :func:`build_mixed_frequency_timeseries`) ; ``depenses_base`` /
-            ``depenses_frequency`` (``'annuelle'`` ou ``'trimestrielle'`` —
-            absente : colonne ``depenses_publiques_pib`` omise) ;
-            ``climat_affaires_observe`` (``bool`` — absente : colonne
-            ``climat_affaires`` omise).
+        seed: Base seed of the NumPy pseudo-random generator; each entity
+            draws after ``np.random.seed(seed + zlib.crc32(country) %
+            1000)`` - ``crc32`` (not ``hash``) keeps the seed reproducible
+            from one run to the next.
+        countries: Dictionary ``{entity_name: parameters}``. ``None``
+            (default) uses 3 entities (``France``, ``Allemagne``,
+            ``Italie``) on a common monthly grid. Keys recognized per
+            entity: ``pib_base``, ``inflation_base``, ``chomage_base``,
+            ``prod_ind_start`` (always required); ``start_date`` /
+            ``end_date`` (default ``'2018-01-01'`` / ``'2024-07-01'``,
+            specific to each entity when given - heterogeneous coverage);
+            ``annual_start_date`` (default ``start_date``; an earlier date
+            makes the entity's index irregular, as in
+            :func:`build_mixed_frequency_timeseries`); ``depenses_base`` /
+            ``depenses_frequency`` (``'annuelle'`` or ``'trimestrielle'`` -
+            absent: column ``depenses_publiques_pib`` omitted);
+            ``climat_affaires_observe`` (``bool`` - absent: column
+            ``climat_affaires`` omitted).
 
     Returns:
-        ``DataFrame`` panel à ``MultiIndex`` (``country``, ``date``) trié.
-        Avec le dictionnaire par défaut : 3 entités (``France``,
-        ``Allemagne``, ``Italie``), chacune sur les 79 mêmes dates
-        mensuelles (``MS``) de 2018-01-01 à 2024-07-01 (237 lignes). Mêmes
-        colonnes et ordres de grandeur que :func:`build_mixed_frequency_timeseries`,
-        avec dates de démarrage et niveaux de base spécifiques à chaque
-        entité.
+        Sorted panel ``DataFrame`` with a ``MultiIndex`` (``country``,
+        ``date``). With the default dictionary: 3 entities (``France``,
+        ``Allemagne``, ``Italie``), each on the same 79 monthly dates
+        (``MS``) from 2018-01-01 to 2024-07-01 (237 rows). Same columns
+        and orders of magnitude as :func:`build_mixed_frequency_timeseries`,
+        with start dates and base levels specific to each entity.
 
     Examples:
         >>> df = build_mixed_frequency_panel()
@@ -223,8 +224,8 @@ def build_mixed_frequency_panel(
         >>> sorted(df.index.get_level_values('country').unique())
         ['Allemagne', 'France', 'Italie']
 
-        Couverture hétérogène, fréquence de publication par entité et index
-        irrégulier (paramètres du notebook 3) :
+        Heterogeneous coverage, per-entity publication frequency and
+        irregular index (notebook 3 parameters):
 
         >>> df_heterogeneous = build_mixed_frequency_panel(countries=HETEROGENEOUS_PANEL_COUNTRIES)
         >>> int(df_heterogeneous.loc['Italie', 'climat_affaires'].notna().sum())
@@ -409,18 +410,18 @@ def build_panel_two_level(seed: int = 7) -> pd.DataFrame:
     """Build a two-level entity panel (country x sector), 2x2 entities.
 
     Args:
-        seed: Graine de base du générateur pseudo-aléatoire NumPy ; chaque
-            couple (pays, secteur) tire après
-            ``np.random.seed(seed + zlib.crc32(f"{pays}|{secteur}") % 1000)``.
+        seed: Base seed of the NumPy pseudo-random generator; each
+            (country, sector) pair draws after
+            ``np.random.seed(seed + zlib.crc32(f"{country}|{sector}") % 1000)``.
 
     Returns:
-        ``DataFrame`` panel à ``MultiIndex`` (``country``, ``sector``,
-        ``date``) avec 2 pays (``France``, ``Allemagne``) x 2 secteurs
-        (``Industrie``, ``Services``), chacun sur les 48 mêmes dates
-        mensuelles (``MS``) de 2019-01-01 à 2022-12-01 (192 lignes).
-        Colonnes : ``indicateur_mensuel`` (mensuelle, dense, sans NaN),
-        ``indicateur_trimestriel`` (trimestrielle, NaN hors fin de
-        trimestre, variable à imputer).
+        Panel ``DataFrame`` with a ``MultiIndex`` (``country``, ``sector``,
+        ``date``): 2 countries (``France``, ``Allemagne``) x 2 sectors
+        (``Industrie``, ``Services``), each on the same 48 monthly dates
+        (``MS``) from 2019-01-01 to 2022-12-01 (192 rows). Columns:
+        ``indicateur_mensuel`` (monthly, dense, no NaN),
+        ``indicateur_trimestriel`` (quarterly, NaN outside quarter ends,
+        variable to impute).
 
     Examples:
         >>> df = build_panel_two_level()
@@ -476,46 +477,44 @@ def build_panel_two_level(seed: int = 7) -> pd.DataFrame:
 def build_panel_reference(seed: int = 42) -> pd.DataFrame:
     """Build the unified ``PANEL-X`` reference dataset.
 
-    Source de vérité unique derrière les trois jeux de référence figés de la
-    spec (``high_frequency_imputer2_architecture.md`` §2.6) : ``TS`` (§2.2),
-    ``PANEL`` (§2.3) et ``PANEL-F`` (§2.5) en sont des projections strictes
-    (fixtures ``reference_timeseries``, ``mixed_freq_panel_heterogeneous``,
-    ``mixed_freq_panel_multifrequency``). Trois entités ``FR`` / ``DE`` /
-    ``IT`` partagent un index en fin de mois (``ME``) de 2021-01-31 à
-    2023-12-31 (36 dates par entité, 108 lignes). Chaque colonne est
-    additive (une valeur annuelle est la somme de ses sous-périodes).
-    Colonnes, dans l'ordre d'union des trois jeux :
+    Single source of truth behind the three frozen reference datasets of
+    the spec (``high_frequency_imputer2_architecture.md`` §2.6): ``TS``
+    (§2.2), ``PANEL`` (§2.3) and ``PANEL-F`` (§2.5) are strict projections
+    of it (fixtures ``reference_timeseries``,
+    ``mixed_freq_panel_heterogeneous``, ``mixed_freq_panel_multifrequency``).
+    Three entities ``FR`` / ``DE`` / ``IT`` share a month-end index
+    (``ME``) from 2021-01-31 to 2023-12-31 (36 dates per entity, 108
+    rows). Each column is additive (an annual value is the sum of its
+    sub-periods). Columns, in the union order of the three datasets:
 
-    - ``m1`` (mensuelle, dense, jamais NaN) : ``100 + rang``, identique
-      entre entités.
-    - ``q1`` (trimestrielle : non-NaN uniquement aux mois de fin de
-      trimestre 3/6/9/12) : ``10 * k``, identique entre entités.
-    - ``a1`` (annuelle : non-NaN uniquement aux trois ancres de fin
-      d'année) — valeurs d'or §2.2 120 / 132 / 150, identiques entre
-      entités.
-    - ``a2`` (annuelle, mêmes ancres) — valeurs d'or §2.2 60 / 66 / 72.
-    - ``climat_affaires`` (enquête mensuelle) : observée pour ``FR`` et
-      ``DE`` (niveau ~100 avec bruit reproductible), entièrement NaN pour
-      ``IT`` (la colonne existe pour chaque entité, seule ``IT`` ne
-      l'observe jamais) — support de ``covariate_eligibility`` (§4.5).
-    - ``v`` (fréquence hétérogène par entité) : annuelle pour ``FR`` (3
-      ancres), trimestrielle pour ``DE`` (12 ancres), mensuelle pour ``IT``
-      (36 valeurs), choisie pour que les trois entités portent le même
-      total annuel (120 / 132 / 150) — support de la mutualisation
-      inter-entités (§5.8) et des invariants I14 à I16 (§16).
+    - ``m1`` (monthly, dense, never NaN): ``100 + rank``, identical across
+      entities.
+    - ``q1`` (quarterly: non-NaN only at quarter-end months 3/6/9/12):
+      ``10 * k``, identical across entities.
+    - ``a1`` (annual: non-NaN only at the three year-end anchors) - golden
+      values §2.2 120 / 132 / 150, identical across entities.
+    - ``a2`` (annual, same anchors) - golden values §2.2 60 / 66 / 72.
+    - ``climat_affaires`` (monthly survey): observed for ``FR`` and ``DE``
+      (level ~100 with reproducible noise), entirely NaN for ``IT`` (the
+      column exists for each entity, only ``IT`` never observes it) -
+      support of ``covariate_eligibility`` (§4.5).
+    - ``v`` (frequency heterogeneous across entities): annual for ``FR``
+      (3 anchors), quarterly for ``DE`` (12 anchors), monthly for ``IT``
+      (36 values), chosen so that the three entities carry the same
+      annual total (120 / 132 / 150) - support of cross-entity pooling
+      (§5.8) and of invariants I14 to I16 (§16).
 
     Args:
-        seed: Graine de base pour le bruit de ``climat_affaires`` ; chaque
-            entité tire après ``np.random.seed(seed + zlib.crc32(entité) %
-            1000)``. ``crc32`` (et non ``hash``) garde la graine
-            reproductible d'un processus à l'autre — aucune valeur d'or ne
-            dépend de ``climat_affaires``, dont les valeurs sont
-            informatives uniquement.
+        seed: Base seed for the ``climat_affaires`` noise; each entity
+            draws after ``np.random.seed(seed + zlib.crc32(entity) %
+            1000)``. ``crc32`` (not ``hash``) keeps the seed reproducible
+            from one process to the next - no golden value depends on
+            ``climat_affaires``, whose values are informative only.
 
     Returns:
-        ``DataFrame`` panel à ``MultiIndex`` trié (``country``, ``date``),
-        entités ``FR`` / ``DE`` / ``IT``, colonnes ``m1``, ``q1``, ``a1``,
-        ``a2``, ``climat_affaires``, ``v``.
+        Sorted panel ``DataFrame`` with a ``MultiIndex`` (``country``,
+        ``date``), entities ``FR`` / ``DE`` / ``IT``, columns ``m1``,
+        ``q1``, ``a1``, ``a2``, ``climat_affaires``, ``v``.
 
     Examples:
         >>> df = build_panel_reference()

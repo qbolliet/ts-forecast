@@ -167,6 +167,391 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   (`tests/unit/utils/duration/test_converter.py`).
 - **Statut** : corrigée
 
+### ANO-UTILS-006 — Conversion début → fin : dates à 23:59:59.999999999, hors grille `ME` / `QE` / `YE`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/position/converter.py::PeriodPositionConverter._convert_datetime_index`
+- **Sévérité** : majeure
+- **Observé** : la conversion `'S'` → `'E'` passe par
+  `index.to_period(base).to_timestamp(how='end')`, qui renvoie le **dernier
+  instant** de la période : `2024-02-01` (`MS`) devient
+  `2024-02-29 23:59:59.999999999`, pas `2024-02-29` (minuit, convention de
+  `pd.date_range(freq='ME')` et de tous les jeux `ME` du paquet, dont
+  `PANEL-X`). Conséquences : un index `MS` converti en fin ne s'aligne pas
+  (jointure, `reindex`) sur un index `ME` natif du même calendrier ; l'aller-
+  retour fin → début → fin d'un index `ME` n'est pas l'identité ; un index
+  journalier ou horaire, sans notion de position (`convert_offset('D', 'E')`
+  renvoie `'D'`), est tout de même décalé (`2024-01-01` →
+  `2024-01-01 23:59:59.999999999`). L'observation reste dans sa période (même
+  jour calendaire) : pas de sortie de période, d'où « majeure » et non
+  « bloquante ». Relevé comme « point de vigilance » dans
+  `notebooks/utils/period_position_converter.ipynb` §5.1, non corrigé depuis.
+- **Attendu** : la date de fin est le **jour** de fin de période à minuit
+  (grille pandas `ME` / `QE` / `YE`), et la conversion est l'identité pour les
+  fréquences sans position (`D`, `h`), comme `convert_offset`.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.position import convert_position
+  idx = pd.date_range('2024-01-01', periods=3, freq='MS')
+  convert_position(idx, 'S', 'E')[1]   # Timestamp('2024-02-29 23:59:59.999999999')
+  pd.date_range('2024-01-31', periods=3, freq='ME')[1]   # Timestamp('2024-02-29 00:00:00')
+  ```
+- **Correctif** : `_convert_datetime_index` ne passe plus par
+  `to_period(...).to_timestamp(how='end')` mais par l'arithmétique des offsets
+  pandas au jour calendaire (fin = début de période + n périodes − 1 jour, à
+  minuit) : un index `MS` converti est exactement `pd.date_range(freq='ME')`.
+  Décision de l'auteur (2026-09-28) : fréquences sans variante début / fin en
+  pandas (`D`, `B`, `W`, `h`, …) laissées **inchangées**, comme par
+  `convert_offset`. Effets liés : heure du jour abandonnée (bornes à minuit),
+  fuseau horaire conservé (calcul en heure locale naïve, correct au changement
+  d'heure ; il était auparavant perdu avec un avertissement pandas).
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertDatetimeIndex::test_start_to_end_matches_pandas_end_grid`,
+  `::test_end_start_end_roundtrip_is_identity`, `::test_frequency_without_position_is_identity`,
+  `::test_time_zone_is_kept_across_dst`
+- **Statut** : corrigée
+
+### ANO-UTILS-007 — Conversion d'index : l'ancre de la fréquence est ignorée (`QS-FEB`, `QE-NOV`, `YS-JUL`, `W-WED`)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/position/converter.py::PeriodPositionConverter._convert_datetime_index`
+- **Sévérité** : majeure
+- **Observé** : la fréquence est réduite à sa base
+  (`normalize_frequency(freq, return_format='base')` : `'QS-FEB'` → `'Q'`),
+  puis `to_period('Q')` utilise l'ancre par défaut de pandas (`Q-DEC`,
+  trimestres civils). Un index `QS-FEB` (trimestres févr.-avr., mai-juil., …)
+  converti en fin donne `2024-03-31`, `2024-06-30`, … au lieu de
+  `2024-04-30`, `2024-07-31`, … ; `QE-NOV` → début donne le 1er janvier au lieu
+  du 1er décembre ; `YS-JUL` (exercice juillet-juin) → fin donne le 31/12 au
+  lieu du 30/06 ; `W-WED` → début donne le lundi au lieu du jeudi. Chaque date
+  reste dans sa période d'origine, mais pas à sa borne, et l'index produit
+  suit un autre découpage (trimestres civils) : l'aller-retour début → fin →
+  début sur `QS-FEB` renvoie `2024-02-01` → `2024-03-31` → `2024-01-01`, date
+  **hors** du trimestre d'origine (févr.-avr.). D'où « majeure ».
+- **Attendu** : la conversion se fait dans les périodes de la fréquence
+  ancrée (`to_period('Q-JAN')` pour `QS-FEB`, etc.) ; aller-retour identité.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.position import convert_position
+  idx = pd.date_range('2024-02-01', periods=3, freq='QS-FEB')
+  end = convert_position(idx, 'S', 'E')        # 2024-03-31, 2024-06-30, 2024-09-30 (au lieu de 04-30, 07-31, 10-31)
+  convert_position(end, 'E', 'S')[0]           # Timestamp('2024-01-01') : hors du trimestre févr.-avr.
+  ```
+- **Correctif** : `PeriodPositionConverter._resolve_period_offsets` décompose
+  la fréquence (multiplicateur, base, position, ancre) et construit le couple
+  d'offsets début / fin décrivant les mêmes périodes (`QS-FEB` / `QE-JAN`) ;
+  la conversion se fait dans ces périodes. Le cas `W-WED` n'a plus d'objet :
+  les semaines n'ont pas de position (voir ANO-UTILS-006 et 009), l'index est
+  laissé inchangé.
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertDatetimeIndex::test_anchored_frequency_uses_its_own_periods`,
+  `::test_start_end_start_roundtrip_is_identity`, `::test_converted_index_follows_convert_offset`
+- **Statut** : corrigée
+
+### ANO-UTILS-008 — `convert_offset` perd le suffixe d'ancrage et redéfinit les périodes
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/position/converter.py::PeriodPositionConverter.convert_offset`
+- **Sévérité** : mineure
+- **Observé** : `freq, _, _ = parse_frequency(base_offset)` jette le suffixe,
+  puis `build_frequency_string(freq, to_pos)` le recompose sans lui.
+  `convert_offset('QE-NOV', 'start')` renvoie `'QS'` (= `QS-JAN`, trimestres
+  civils) au lieu de `'QS-DEC'` (mêmes trimestres déc.-févr., …) ;
+  `convert_offset('YS-JUL', 'end')` renvoie `'YE'` au lieu de `'YE-JUN'` ;
+  même sans changement de position, `convert_offset('QS-FEB', 'start')`
+  renvoie `'QS'`. Sans conséquence pour les ancres par défaut (`QE-DEC` →
+  `'QS'` est équivalent à `QS-JAN`).
+- **Attendu** : l'offset renvoyé décrit les **mêmes périodes** que l'offset
+  source (`QS-<m>` ↔ `QE-<m-1>`, `YS-<m>` ↔ `YE-<m-1>`), multiplicateur
+  conservé.
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.position import convert_offset
+  convert_offset('QE-NOV', 'start')   # 'QS' au lieu de 'QS-DEC'
+  convert_offset('QS-FEB', 'start')   # 'QS' au lieu de 'QS-FEB'
+  ```
+- **Correctif** : `convert_offset` conserve le suffixe et, pour une ancre
+  mensuelle (trimestriel, annuel), le décale d'un mois selon le sens de la
+  conversion (`_shift_anchor` : `QS-<m>` ↔ `QE-<m−1>`) ; une ancre sans
+  position (`'Q-DEC'`) est lue comme mois de fin, conformément à pandas ; un
+  mois inconnu est rejeté.
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertOffset::test_anchor_is_shifted_to_describe_the_same_periods`
+- **Statut** : corrigée
+
+### ANO-UTILS-009 — `convert_offset` renvoie des alias inconnus de pandas pour `W` et `B`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/position/converter.py::PeriodPositionConverter.convert_offset`
+  (cause : `_POSITION_AWARE_FREQUENCIES` de `tsforecast/utils/parse/utils.py`,
+  qui contient `'W'` et `'B'`)
+- **Sévérité** : mineure
+- **Observé** : `build_frequency_string` traite `'W'` et `'B'` comme
+  « position-aware » et leur accole `S` / `E` : `convert_offset('W', 'end')`
+  renvoie `'WE'`, `convert_offset('W-MON', 'start')` renvoie `'WS'` (ancre
+  perdue en plus), `convert_offset('B', 'end')` renvoie `'BE'`. Aucun de ces
+  alias n'existe en pandas : `to_offset('WE')` lève
+  `ValueError: Invalid frequency: WE`. Le docstring annonce pourtant
+  « Converted pandas DateOffset string ». Le notebook
+  `period_position_normalizer.ipynb` montre que `WS` / `WE` / `BS` / `BE`
+  étaient des codes internes de l'ancien `_legacy_offset_mapping`, supprimé
+  lors de la consolidation `parse_frequency`.
+- **Attendu** : pour une fréquence sans variante S/E en pandas (`W`,
+  `W-<jour>`, `B`), `convert_offset` renvoie un offset pandas valide (au
+  minimum l'offset d'origine, comme pour `D` / `h`).
+- **Reproduction** :
+  ```python
+  from pandas.tseries.frequencies import to_offset
+  from tsforecast.utils.position import convert_offset
+  convert_offset('W', 'end')            # 'WE'
+  to_offset(convert_offset('W', 'end'))  # ValueError: Invalid frequency: WE
+  ```
+- **Correctif** : à la source, `_POSITION_AWARE_FREQUENCIES`
+  (`tsforecast/utils/parse/utils.py`) vaut désormais `('M', 'Q', 'Y', 'SM')` :
+  `W` et `B` n'y figurent plus (aucune variante S/E en pandas), `SM` y entre
+  (`SMS` / `SME`). `build_frequency_string` ignore donc la position pour `W`
+  et `B` : `convert_offset('W-MON', 'end')` renvoie `'W-MON'` (décision de
+  l'auteur : offset hebdomadaire inchangé). Le test U1
+  `test_builds_expected_string[business-daily-end]`, qui épinglait `'BE'`, a
+  été réécrit (même intention, comportement corrigé). Effet de bord favorable :
+  `FrequencyConverter` construisait lui aussi `'WS'` / `'WE'` pour une cible
+  hebdomadaire.
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertOffset::test_frequency_without_position_is_unchanged`,
+  `::test_result_is_a_valid_pandas_offset`,
+  `tests/unit/utils/parse/test_utils.py::TestBuiltStringIsValidPandas`
+- **Statut** : corrigée
+
+### ANO-UTILS-010 — `freq` explicite plus grossière que les données : observations déplacées hors de leur période, index dupliqué
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/position/converter.py::PeriodPositionConverter.convert`
+  (`_convert_time_series`, `_convert_panel`)
+- **Sévérité** : majeure
+- **Observé** : une `freq` fournie est appliquée telle quelle, sans contrôle de
+  cohérence avec les dates. Sur une série mensuelle, `freq='Q'` envoie
+  janvier, février et mars 2024 au `2024-03-31` : les observations de janvier
+  et de février quittent leur mois (leur période d'origine) et l'index
+  devient dupliqué, sans erreur ni avertissement. Sur un panel, la `freq`
+  s'applique à **toutes** les entités : une entité mensuelle dans un panel
+  trimestriel subit le même sort. Relevé comme « point de vigilance majeur »
+  dans `period_position_converter.ipynb` §5.4, non corrigé depuis.
+- **Attendu** : une conversion ne fusionne jamais deux dates distinctes d'une
+  même entité ; si la `freq` fournie est plus grossière que l'espacement des
+  dates (deux dates dans la même période), lever une `ValueError` explicite.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.position import convert_position
+  s = pd.Series([1., 2., 3.], index=pd.date_range('2024-01-01', periods=3, freq='MS'))
+  convert_position(s, 'S', 'E', freq='Q').index.normalize()
+  # DatetimeIndex(['2024-03-31', '2024-03-31', '2024-03-31'])
+  ```
+- **Correctif** : `_convert_datetime_index` vérifie que le nombre de dates
+  distinctes est conservé (par entité pour un panel) et lève sinon
+  `ValueError: Frequency '<freq>' is coarser than the data: …` en orientant
+  vers `groupby` / `resample`. Décision de l'auteur (2026-09-28) : erreur
+  plutôt qu'avertissement. Limite connue : une `freq` multipliée sur des
+  données plus fines (`'2MS'` sur du mensuel) ne fusionne aucune date (blocs
+  chevauchants) et n'est pas détectable sans connaître la vraie fréquence.
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertTimeSeries::test_coarser_explicit_frequency_is_rejected`,
+  `::TestConvertDatetimeIndex::test_coarser_frequency_is_rejected`,
+  `::TestConvertPanel::test_explicit_frequency_incompatible_with_an_entity_is_rejected`
+- **Statut** : corrigée
+
+### ANO-UTILS-011 — Panel : le repli `detect_dataset_frequency` renvoie un `dict`, message d'erreur dédié inatteignable
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/position/converter.py::PeriodPositionConverter._convert_panel`
+- **Sévérité** : mineure
+- **Observé** : quand `detect_index_frequency` renvoie `None` pour une entité
+  (espacement irrégulier sans fréquence reconnue, ex. 45 puis 50 jours), le
+  repli appelle `detect_dataset_frequency(df=group_data,
+  consistency_mode='highest', strict=False)` **sans** `check_consistency=True` :
+  la fonction renvoie alors la carte `{(entité, colonne): fréquence}` et non
+  une fréquence. Ce `dict` (non vide, donc jamais `None`) est passé à
+  `normalize_frequency`, qui lève `ValueError: Frequency must be a string, got
+  <class 'dict'>` : le message dédié « Cannot infer frequency for entity … »
+  n'est jamais atteint, et le repli ne peut jamais réussir.
+- **Attendu** : soit le repli renvoie une fréquence unique
+  (`check_consistency=True`), soit l'erreur dédiée nommant l'entité est levée.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.position import convert_position
+  dates = list(pd.date_range('2024-01-01', periods=3, freq='MS')) + \
+      list(pd.to_datetime(['2023-01-01', '2023-02-15', '2023-04-06']))
+  idx = pd.MultiIndex.from_arrays([['A'] * 3 + ['B'] * 3, dates])
+  convert_position(pd.DataFrame({'v': range(6)}, index=idx), 'S', 'E')
+  # ValueError: Frequency must be a string, got <class 'dict'>
+  ```
+- **Correctif** : le repli appelle `detect_dataset_frequency(...,
+  return_format='full', check_consistency=True, consistency_mode='highest')`
+  sur le groupe réduit à son index temporel (le `MultiIndex` à niveaux sans
+  nom faisait échouer la détection de structure panel) et obtient une
+  fréquence unique ; une `ValueError` de la détection sur l'index (entité à
+  une seule date) mène aussi au repli, puis au message dédié nommant l'entité.
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertPanel::test_undetectable_entity_frequency_raises_dedicated_error`,
+  `::test_column_frequency_fallback`, `::test_single_observation_entity_without_frequency_raises`,
+  `::TestDeferredFrequencyImports::test_panel_falls_back_on_dataset_detection`
+- **Statut** : corrigée
+
+### ANO-UTILS-012 — `DataFrame` converti : dtypes des colonnes perdus
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/position/converter.py::PeriodPositionConverter._convert_time_series`
+  et `::_convert_panel`
+- **Sévérité** : mineure
+- **Observé** : le résultat est reconstruit par
+  `pd.DataFrame(data.values, index=new_index, columns=data.columns)`.
+  `.values` produit un tableau NumPy **commun** à toutes les colonnes : un
+  `DataFrame` `int64` / `float64` / `bool` / `object` ressort entièrement en
+  `object`, un `DataFrame` `int64` / `float64` entièrement en `float64`. Même
+  reconstruction pour chaque segment d'un panel. Les attributs (`attrs`) sont
+  aussi perdus. Changer la position ne devrait toucher que l'index.
+- **Attendu** : valeurs et dtypes inchangés, seul l'index est remplacé (ex.
+  `data.set_axis(new_index)` ou copie + affectation de l'index).
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.position import convert_position
+  df = pd.DataFrame({'a': [1, 2], 'b': [0.5, 1.5], 'c': ['u', 'v']},
+                    index=pd.date_range('2024-01-01', periods=2, freq='MS'))
+  convert_position(df, 'S', 'E', freq='M').dtypes   # a, b, c : object
+  ```
+- **Correctif** : copie de l'objet puis remplacement de son index
+  (`result = data.copy(); result.index = …`), pour les séries comme pour les
+  panels : dtypes, `attrs` et nom des colonnes conservés.
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertTimeSeries::test_dataframe_keeps_mixed_dtypes`,
+  `::TestConvertPanel::test_dataframe_panel_keeps_mixed_dtypes`
+- **Statut** : corrigée
+
+### ANO-UTILS-013 — Panel vide : `ValueError('No objects to concatenate')`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/position/converter.py::PeriodPositionConverter._convert_panel`
+- **Sévérité** : mineure
+- **Observé** : un panel sans ligne (colonnes et noms d'index conservés), même
+  avec `freq` fournie, lève l'erreur interne de pandas
+  `ValueError: No objects to concatenate` : aucun groupe, donc
+  `pd.concat([])`. Un `DatetimeIndex` ou une série simple vides sont, eux,
+  convertis sans erreur.
+- **Attendu** : un panel vide ressort vide, avec la même structure (cas limite
+  « jeu vide » de `CLAUDE.md`).
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.position import convert_position
+  idx = pd.MultiIndex.from_arrays([['A'], pd.to_datetime(['2024-01-01'])], names=['entity', 'date'])
+  convert_position(pd.Series([1.0], index=idx).iloc[0:0], 'S', 'E', freq='M')
+  # ValueError: No objects to concatenate
+  ```
+- **Correctif** : corrigée par effet du correctif d'ANO-UTILS-012 (non demandé
+  explicitement) : `_convert_panel` ne concatène plus de segments mais
+  replace les dates converties à la position de leurs lignes ; sans groupe,
+  le niveau temporel vide est conservé.
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertPanel::test_empty_panel_with_explicit_frequency`
+- **Statut** : corrigée
+
+### ANO-UTILS-014 — Index court à doublons détecté `'ns'` : conversion silencieusement sans effet
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/detector.py::FrequencyDetector._extend_infer_freq`
+  (symptôme dans `PeriodPositionConverter.convert` sans `freq`)
+- **Sévérité** : mineure
+- **Observé** : sur `['2024-01-01', '2024-01-01', '2024-02-01', '2024-03-01']`,
+  `pd.infer_freq` renvoie `None` (doublon) ; le repli calcule les écarts triés
+  0, 31 et 29 jours, tous modaux ; `mode()[0]` retient le plus petit, **0**,
+  classé comme infra-journalier → `'ns'`. La conversion début → fin à la
+  nanoseconde laisse alors les dates au 1er du mois, sans erreur ni
+  avertissement. Dès que les doublons sont minoritaires (plus d'observations),
+  l'écart modal redevient mensuel et la conversion est correcte.
+- **Attendu** : un écart nul (doublon) n'est jamais candidat à la fréquence ;
+  la détection se fait sur les dates uniques (ici mensuelle, `'MS'`).
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.frequency import detect_index_frequency
+  from tsforecast.utils.position import convert_position
+  idx = pd.to_datetime(['2024-01-01', '2024-01-01', '2024-02-01', '2024-03-01'])
+  detect_index_frequency(idx, return_format='full')   # 'ns'
+  convert_position(idx, 'S', 'E')                    # dates inchangées
+  ```
+- **Correctif** : `FrequencyDetector.detect_time_series_frequency` dédoublonne
+  l'index temporel avant `pd.infer_freq` et le calcul de l'écart modal.
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertDatetimeIndex::test_short_index_with_duplicates_is_converted`,
+  `tests/unit/utils/frequency/test_detector.py::TestFrequencyDetectorDuplicatedDates`
+- **Statut** : corrigée
+
+### ANO-UTILS-015 — Index à fréquence multipliée (`'2MS'`) rejeté par la conversion de position
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/parse/utils.py::parse_frequency`,
+  `tsforecast/utils/frequency/utils.py::normalize_frequency`
+  (format `'full'`), `tsforecast/utils/position/converter.py::PeriodPositionConverter._convert_datetime_index`
+- **Sévérité** : mineure
+- **Observé** : `convert_offset('2MS', 'E')` renvoyait `'2ME'`, mais un index
+  bimestriel était rejeté : `detect_index_frequency` échouait
+  (`normalize_frequency('2MS', 'full')` → `Unsupported frequency: 2MS`, le
+  multiplicateur n'étant pas géré par `parse_frequency`), et une `freq='2MS'`
+  explicite échouait de même.
+- **Attendu** : cohérence avec `convert_offset` : un index `2MS` se convertit
+  par blocs de deux mois (`2024-01-01` → `2024-02-29`).
+- **Correctif** : `parse_frequency` gère le multiplicateur (résultat
+  `ParsedFrequency(freq, position, suffix, multiplier)`) et
+  `build_frequency_string` l'accepte (`multiplier=`), ce qui supprime les trois
+  contournements (`_split_multiplier`, `_strip_multiplier`, regex de
+  `normalize_frequency`). `normalize_frequency(..., 'full')` valide la base et
+  renvoie la chaîne complète ; la conversion d'index convertit des blocs de `n`
+  périodes. Extension (2026-09-29) : `FrequencyNormalizer.normalize` et
+  `DurationNormalizer.normalize` acceptent le multiplicateur (code de base
+  renvoyé, `normalize_with_multiplier` le conserve) ; `normalize_frequency(...,
+  'components')` renvoie un `ParsedFrequency` à 4 champs (les formats `'base'` et
+  `'with_position'` sont inchangés) ; `is_higher_frequency`,
+  `is_longer_duration` et `DurationConverter` en tiennent compte ;
+  `FrequencyConverter` décompose `target_freq` via `ParsedFrequency` (les
+  opérations à décompte de périodes de base rejettent le multiplicateur par
+  `NotImplementedError`) ; `tsforecast.delays` rejette un index multiplié.
+  `convert_offset('1MS', 'E')` renvoie `'ME'` (un multiplicateur 1 explicite
+  est omis).
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertDatetimeIndex::test_multiplied_frequency`,
+  `tests/unit/utils/frequency/test_utils.py::TestNormalizeFrequencyFullMultiplier`
+- **Statut** : corrigée
+
+### ANO-UTILS-016 — Semi-mensuel : `convert_offset('SMS', …)` renvoyait `'SM'`, index `SMS` en échec
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/parse/utils.py::build_frequency_string`,
+  `tsforecast/utils/position/converter.py::PeriodPositionConverter`,
+  `tsforecast/utils/frequency/detector.py::FrequencyDetector._detect_semi_monthly_frequency`
+- **Sévérité** : mineure
+- **Observé** : `SM` n'était pas « position-aware » : `convert_offset('SMS',
+  'E')` renvoyait `'SM'` (position perdue) ; la conversion d'un index `SMS`
+  levait l'erreur brute de pandas `SME-15 is not supported as period
+  frequency` ; le détecteur ne reconnaissait pas la grille `SME` (15 et fin de
+  mois) et renvoyait `'SM'` sans position pour `SMS`.
+- **Attendu** : les grilles natives pandas `SMS` (1 et 15) et `SME` (15 et fin
+  de mois) sont des positions début / fin l'une de l'autre.
+- **Correctif** : `SM` ajouté à `_POSITION_AWARE_FREQUENCIES` ; conversion
+  d'index par rang de la demi-période dans le mois (1er ↔ 15, 15 ↔ fin de
+  mois) ; variantes multipliées ou à jour non standard (`2SMS`, `SMS-10`)
+  rejetées par un message dédié ; détecteur renvoyant `'SMS'` / `'SME'` sur
+  ces grilles exactes (motif approché : `'SM'`, inchangé).
+- **Test** : `tests/unit/utils/position/test_converter.py::TestConvertDatetimeIndex::test_semi_monthly_pairs_native_grids`,
+  `::test_unsupported_semi_monthly_variant_raises`,
+  `tests/unit/utils/frequency/test_detector.py::TestFrequencyDetectorSemiMonthly`
+- **Statut** : corrigée
+
+### ANO-UTILS-017 — Détection trimestrielle : ancre non canonique (`'QS-OCT'` pour un index `QS`)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/utils.py::detect_index_frequency`,
+  `tsforecast/utils/frequency/detector.py::FrequencyDetector.detect_time_series_frequency`
+- **Sévérité** : cosmétique
+- **Observé** : `pd.infer_freq` renvoie une ancre quelconque de la classe
+  d'équivalence (`QS-JAN` = `QS-APR` = `QS-JUL` = `QS-OCT`) : un index `QS`
+  débutant en janvier est détecté `'QS-OCT'`, un index `QS-FEB` `'QS-NOV'`.
+  Les dates générées sont identiques, mais la chaîne est trompeuse.
+- **Attendu** : une ancre canonique, stable et lisible.
+- **Correctif** : `canonicalize_frequency` (utils, réexportée par
+  `utils.frequency`) : début → `JAN` /
+  `FEB` / `MAR`, fin (ou ancre sans position) → mois précédent (`DEC` /
+  `JAN` / `FEB`), de sorte que les défauts pandas (`QS-JAN` / `QE-DEC`) sont
+  préservés et qu'un début et sa fin canoniques décrivent les mêmes
+  trimestres (`QS-FEB` / `QE-JAN`). Appliqué aux deux chemins de détection.
+  La fonction est générale (point d'extension pour d'autres classes
+  d'écritures équivalentes) et s'appuie sur `parse_frequency` /
+  `build_frequency_string` : multiplicateur conservé.
+- **Test** : `tests/unit/utils/frequency/test_utils.py::TestDetectIndexFrequencyAnchors`,
+  `::TestCanonicalizeFrequency`
+- **Statut** : corrigée
+
 ## DELAYS
 
 _Aucune entrée._

@@ -1,13 +1,13 @@
-"""Tests des jeux de référence de ``high_frequency_imputer2_architecture.md``.
+"""Tests of the reference datasets of ``high_frequency_imputer2_architecture.md``.
 
-Le jeu ``PANEL`` (§2.3) et le jeu ``TS`` (§2.2) servent de support à tous les
-tests et notebooks de ``HighFrequencyImputer``. Leur structure et leurs valeurs
-d'or sont verrouillées ici : elles ne doivent plus bouger une fois ce lot livré.
+The ``PANEL`` (§2.3) and ``TS`` (§2.2) datasets support every test and
+notebook of ``HighFrequencyImputer``. Their structure and golden values
+are locked here: they must not move anymore once this batch is delivered.
 
-Depuis le lot L13-0b (§2.6), les trois jeux sont des PROJECTIONS d'un jeu unique
-``PANEL-X`` (fixture ``panel_reference_full``). Les identités de projection sont
-testées par ``TestPanelXProjections`` : elles garantissent que la factorisation
-ne dérive pas.
+Since batch L13-0b (§2.6), the three datasets are PROJECTIONS of a
+single ``PANEL-X`` dataset (fixture ``panel_reference_full``). The
+projection identities are tested by ``TestPanelXProjections``: they
+guarantee that the factorization does not drift.
 """
 # Manipulation de données
 import pandas as pd
@@ -24,12 +24,12 @@ from tests.support.datasets import (
 
 
 class TestHeterogeneousPanel:
-    """Jeu ``PANEL`` : covariable structurellement absente pour une entité (§2.3, §4.5)."""
+    """``PANEL`` dataset: covariate structurally absent for one entity (§2.3, §4.5)."""
 
     def test_heterogeneous_panel_it_has_no_climat_affaires(
         self, mixed_freq_panel_heterogeneous: pd.DataFrame
     ) -> None:
-        """``climat_affaires`` existe pour toutes les entités mais IT ne l'observe jamais."""
+        """``climat_affaires`` exists for every entity but IT never observes it."""
         df = mixed_freq_panel_heterogeneous
 
         # La colonne appartient au schéma, pour les trois entités.
@@ -44,12 +44,12 @@ class TestHeterogeneousPanel:
 
 
 class TestReferenceTimeseries:
-    """Jeu ``TS`` : valeurs d'or annuelles du document (§2.2)."""
+    """``TS`` dataset: annual golden values of the document (§2.2)."""
 
     def test_reference_timeseries_matches_spec_anchors(
         self, reference_timeseries: pd.DataFrame
     ) -> None:
-        """Les six valeurs d'or de ``a1`` et ``a2`` sont celles du §2.2, aux trois ancres."""
+        """The six golden values of ``a1`` and ``a2`` are those of §2.2, at the three anchors."""
         df = reference_timeseries
         anchors = pd.to_datetime(['2021-12-31', '2022-12-31', '2023-12-31'])
 
@@ -58,10 +58,10 @@ class TestReferenceTimeseries:
 
 
 class TestMultiFrequencyPanel:
-    """Jeu ``PANEL-F`` : une même colonne à trois fréquences détectées par entité (§2.5, §5.8)."""
+    """``PANEL-F`` dataset: one column with three detected frequencies across entities (§2.5, §5.8)."""
 
     def test_shape_and_index(self, mixed_freq_panel_multifrequency: pd.DataFrame) -> None:
-        """108 lignes, MultiIndex (``country``, ``date``) trié, 36 dates par entité."""
+        """108 rows, sorted ``MultiIndex`` (``country``, ``date``), 36 dates per entity."""
         df = mixed_freq_panel_multifrequency
 
         assert df.shape[0] == 108
@@ -74,7 +74,7 @@ class TestMultiFrequencyPanel:
     def test_v_observation_counts_per_entity(
         self, mixed_freq_panel_multifrequency: pd.DataFrame
     ) -> None:
-        """``v`` est observée 3 fois pour FR, 12 fois pour DE, 36 fois pour IT."""
+        """``v`` is observed 3 times for FR, 12 times for DE, 36 times for IT."""
         df = mixed_freq_panel_multifrequency
 
         # ``count`` exclut les NaN : décompte des observations réelles par entité.
@@ -85,7 +85,7 @@ class TestMultiFrequencyPanel:
         assert n_obs['IT'] == 36
 
     def test_v_gold_values(self, mixed_freq_panel_multifrequency: pd.DataFrame) -> None:
-        """Les valeurs d'or de ``v`` du §2.5, recopiées telles quelles par entité."""
+        """The golden values of ``v`` of §2.5, copied as is per entity."""
         df = mixed_freq_panel_multifrequency
 
         assert df.loc['FR', 'v'].dropna().tolist() == [120.0, 132.0, 150.0]
@@ -99,7 +99,7 @@ class TestMultiFrequencyPanel:
     def test_annual_totals_agree_across_entities(
         self, mixed_freq_panel_multifrequency: pd.DataFrame
     ) -> None:
-        """La somme annuelle de ``v`` vaut 120 / 132 / 150 pour chacune des trois entités."""
+        """The annual sum of ``v`` is 120 / 132 / 150 for each of the three entities."""
         df = mixed_freq_panel_multifrequency
 
         for entity in ('FR', 'DE', 'IT'):
@@ -110,7 +110,7 @@ class TestMultiFrequencyPanel:
     def test_italian_quarterly_aggregates(
         self, mixed_freq_panel_multifrequency: pd.DataFrame
     ) -> None:
-        """L'agrégation trimestrielle (somme) de ``v`` pour IT vaut 30 / 33 / 37.5, ×4 par an."""
+        """The quarterly aggregation (sum) of ``v`` for IT is 30 / 33 / 37.5, x4 per year."""
         df = mixed_freq_panel_multifrequency
 
         v_it = df.loc['IT', 'v']
@@ -123,7 +123,7 @@ class TestMultiFrequencyPanel:
         mixed_freq_panel_multifrequency: pd.DataFrame,
         reference_timeseries: pd.DataFrame,
     ) -> None:
-        """``m1`` et ``q1`` de chaque entité sont exactement celles du jeu ``TS``."""
+        """``m1`` and ``q1`` of each entity are exactly those of the ``TS`` dataset."""
         df = mixed_freq_panel_multifrequency
 
         for entity in ('FR', 'DE', 'IT'):
@@ -137,7 +137,7 @@ class TestMultiFrequencyPanel:
     def test_detected_frequencies_disagree_across_entities(
         self, mixed_freq_panel_multifrequency: pd.DataFrame
     ) -> None:
-        """``v`` porte trois fréquences détectées différentes selon l'entité (§2.1)."""
+        """``v`` carries three different detected frequencies depending on the entity (§2.1)."""
         df = mixed_freq_panel_multifrequency
 
         detected = detect_frequency(data=df)
@@ -152,14 +152,14 @@ class TestMultiFrequencyPanel:
 
 
 class TestPanelXProjections:
-    """§2.6 — ``TS``, ``PANEL`` et ``PANEL-F`` sont des projections de ``PANEL-X``."""
+    """§2.6 - ``TS``, ``PANEL`` and ``PANEL-F`` are projections of ``PANEL-X``."""
 
     def test_reference_timeseries_is_the_fr_projection(
         self,
         reference_timeseries: pd.DataFrame,
         panel_reference_full: pd.DataFrame,
     ) -> None:
-        """``TS`` == ``PANEL-X.loc['FR', ['m1', 'q1', 'a1', 'a2']]``, au bit près."""
+        """``TS`` == ``PANEL-X.loc['FR', ['m1', 'q1', 'a1', 'a2']]``, bit for bit."""
         projection = panel_reference_full.loc['FR', ['m1', 'q1', 'a1', 'a2']]
 
         # ``check_freq=False`` : le découpage d'un MultiIndex perd l'attribut
@@ -197,7 +197,7 @@ class TestPanelXProjections:
         mixed_freq_panel_heterogeneous: pd.DataFrame,
         mixed_freq_panel_multifrequency: pd.DataFrame,
     ) -> None:
-        """Les deux projections panel portent l'index de ``PANEL-X``, à l'identique."""
+        """Both panel projections carry the index of ``PANEL-X``, identically."""
         assert mixed_freq_panel_heterogeneous.index.equals(
             panel_reference_full.index
         )
@@ -207,15 +207,16 @@ class TestPanelXProjections:
 
 
 class TestRealisticMixedFrequencyDatasets:
-    """Jeu réaliste du notebook 3 (§2.4 de ``tests_and_refactoring_prompts.md``).
+    """Realistic dataset of notebook 3 (§2.4 of ``tests_and_refactoring_prompts.md``).
 
-    ``irregular_index_timeseries`` / ``heterogeneous_coverage_panel`` ne sont pas des constructeurs dédiés :
-    ce sont des appels particuliers de :func:`build_mixed_frequency_timeseries` et
-    :func:`build_mixed_frequency_panel`, généralisés pour reproduire
-    ``create_timeseries_dataset`` / ``create_panel_dataset`` du notebook
-    ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb`` (cellules
-    5 et 7). Chaque test ci-dessous vérifie une caractéristique annoncée par ce
-    notebook (cellules 0, 6, 8, 10, 11), exercée via les fixtures.
+    ``irregular_index_timeseries`` / ``heterogeneous_coverage_panel`` are
+    not dedicated builders: they are specific calls of
+    :func:`build_mixed_frequency_timeseries` and
+    :func:`build_mixed_frequency_panel`, generalized to reproduce
+    ``create_timeseries_dataset`` / ``create_panel_dataset`` of the
+    notebook ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb``
+    (cells 5 and 7). Each test below checks a feature announced by this
+    notebook (cells 0, 6, 8, 10, 11), exercised through the fixtures.
     """
 
     # ----- Couverture propre à chaque entité (cellule 6, notebook 3) -----
@@ -223,7 +224,7 @@ class TestRealisticMixedFrequencyDatasets:
     def test_panel_entities_have_their_own_monthly_grid_coverage(
         self, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
-        """Chaque entité couvre sa propre grille mensuelle (§2.2 du notebook)."""
+        """Each entity covers its own monthly grid (§2.2 of the notebook)."""
         df = heterogeneous_coverage_panel
 
         # Valeurs d'or : dates de couverture mensuelle du dictionnaire
@@ -250,13 +251,13 @@ class TestRealisticMixedFrequencyDatasets:
     def test_timeseries_and_each_entity_index_is_irregular(
         self, irregular_index_timeseries: pd.DataFrame, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
-        """L'historique annuel antérieur à la grille mensuelle rend l'index irrégulier.
+        """The annual history earlier than the monthly grid makes the index irregular.
 
-        Cas limite CLAUDE.md « fréquences irrégulières » : contrairement aux
-        autres jeux de la suite (grille régulière ponctuée de NaN),
-        ``balance_commerciale_annuelle`` introduit ici des ancres annuelles
-        réellement hors grille — ``is_regular`` doit le détecter, pour la
-        série seule comme pour chaque entité du panel.
+        CLAUDE.md edge case "irregular frequencies": unlike the other datasets
+        of the suite (regular grid dotted with NaN),
+        ``balance_commerciale_annuelle`` introduces annual anchors genuinely
+        outside the grid - ``is_regular`` must detect it, for the series alone
+        as for each entity of the panel.
         """
         assert is_regular(irregular_index_timeseries) is False
 
@@ -268,7 +269,7 @@ class TestRealisticMixedFrequencyDatasets:
     def test_depenses_publiques_pib_publication_frequency_per_entity(
         self, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
-        """Publication annuelle pour France/Italie, trimestrielle pour Allemagne, dernière valeur NaN."""
+        """Annual publication for France / Italie, quarterly for Allemagne, last value NaN."""
         df = heterogeneous_coverage_panel
 
         annual_entities = {'France': 6, 'Italie': 5}
@@ -302,7 +303,7 @@ class TestRealisticMixedFrequencyDatasets:
     def test_climat_affaires_structurally_absent_for_italy(
         self, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
-        """Colonne présente pour les trois entités, zéro observation pour l'Italie."""
+        """Column present for the three entities, zero observation for Italie."""
         df = heterogeneous_coverage_panel
 
         assert 'climat_affaires' in df.columns
@@ -317,7 +318,7 @@ class TestRealisticMixedFrequencyDatasets:
     def test_last_row_of_inflation_and_chomage_is_nan(
         self, irregular_index_timeseries: pd.DataFrame, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
-        """Délai de publication d'un mois simulé : dernière observation retirée."""
+        """Simulated one-month publication delay: last observation removed."""
         assert pd.isna(irregular_index_timeseries['inflation_ipc'].iloc[-1])
         assert pd.isna(irregular_index_timeseries['taux_chomage'].iloc[-1])
 
@@ -329,17 +330,17 @@ class TestRealisticMixedFrequencyDatasets:
     # ----- Reproductibilité -----
 
     def test_irregular_index_timeseries_is_reproducible(self, irregular_index_timeseries: pd.DataFrame) -> None:
-        """Deux appels avec les mêmes arguments rendent un jeu bit-identique."""
+        """Two calls with the same arguments return a bit-identical dataset."""
         rebuilt = build_mixed_frequency_timeseries(annual_start_date='2015-01-01')
         pd.testing.assert_frame_equal(irregular_index_timeseries, rebuilt)
 
     def test_heterogeneous_coverage_panel_is_reproducible(self, heterogeneous_coverage_panel: pd.DataFrame) -> None:
-        """Deux appels avec les mêmes arguments rendent un jeu bit-identique."""
+        """Two calls with the same arguments return a bit-identical dataset."""
         rebuilt = build_mixed_frequency_panel(countries=HETEROGENEOUS_PANEL_COUNTRIES)
         pd.testing.assert_frame_equal(heterogeneous_coverage_panel, rebuilt)
 
     def test_irregular_index_timeseries_gold_values(self, irregular_index_timeseries: pd.DataFrame) -> None:
-        """Quatre valeurs d'or relevées une fois sur le jeu construit, puis écrites en dur."""
+        """Four golden values read once on the built dataset, then hard-coded."""
         df = irregular_index_timeseries
 
         assert df.loc['2019-01-01', 'production_industrielle'] == pytest.approx(102.67063571504136)
@@ -348,7 +349,7 @@ class TestRealisticMixedFrequencyDatasets:
         assert df.loc['2015-01-01', 'balance_commerciale_annuelle'] == pytest.approx(-35.2628407569658)
 
     def test_heterogeneous_coverage_panel_gold_values(self, heterogeneous_coverage_panel: pd.DataFrame) -> None:
-        """Trois valeurs d'or relevées une fois sur le jeu construit, puis écrites en dur."""
+        """Three golden values read once on the built dataset, then hard-coded."""
         df = heterogeneous_coverage_panel
 
         assert df.loc[('France', '2018-01-01'), 'inflation_ipc'] == pytest.approx(1.8353430756890152)
@@ -358,12 +359,12 @@ class TestRealisticMixedFrequencyDatasets:
     # ----- Régression : les valeurs par défaut restent le jeu historique régulier -----
 
     def test_default_build_mixed_frequency_timeseries_stays_regular(self) -> None:
-        """Sans ``annual_start_date``, l'index reste régulier (généralisation non contaminante)."""
+        """Without ``annual_start_date``, the index stays regular (non-contaminating generalization)."""
         df = build_mixed_frequency_timeseries()
         assert is_regular(df) is True
 
     def test_default_build_mixed_frequency_panel_stays_regular_and_without_heterogeneous_columns(self) -> None:
-        """Sans ``countries``, le panel reste régulier et sans les colonnes propres au notebook 3."""
+        """Without ``countries``, the panel stays regular and without the columns specific to notebook 3."""
         df = build_mixed_frequency_panel()
 
         assert 'depenses_publiques_pib' not in df.columns

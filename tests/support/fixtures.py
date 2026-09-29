@@ -1,10 +1,10 @@
-"""Fixtures pytest partagées par toute la suite ``tests/``.
+"""Pytest fixtures shared by the whole ``tests/`` suite.
 
-Regroupe les fixtures historiquement définies dans ``tests/conftest.py``
-(jeux synthétiques génériques) et ``tests/frequency/conftest.py`` (jeux
-mixtes de fréquences reproduisant les notebooks 2 et le jeu ``PANEL-X`` de
-la spec ``HighFrequencyImputer``). Enregistré par
-``pytest_plugins = ["tests.support.fixtures"]`` dans ``tests/conftest.py``.
+Gathers the fixtures historically defined in ``tests/conftest.py``
+(generic synthetic datasets) and ``tests/frequency/conftest.py``
+(mixed-frequency datasets reproducing notebook 2 and the ``PANEL-X``
+dataset of the ``HighFrequencyImputer`` spec). Registered by
+``pytest_plugins = ["tests.support.fixtures"]`` in ``tests/conftest.py``.
 """
 # Modules de base
 import numpy as np

@@ -21,6 +21,7 @@ from .detector import (
 )
 from .utils import (
     normalize_frequency,
+    canonicalize_frequency,
     to_literal,
     to_code,
     to_pandas_freq,
@@ -47,6 +48,7 @@ __all__ = [
     'InterpolationMethod',
     'FrequencyDetector',
     'normalize_frequency',
+    'canonicalize_frequency',
     'to_literal',
     'to_code',
     'to_pandas_freq',

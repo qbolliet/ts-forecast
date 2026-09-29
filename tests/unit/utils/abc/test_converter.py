@@ -29,7 +29,7 @@ class TestTemporalConverterContract:
     """Structural contract enforced by the ``ABC``/``abstractmethod`` machinery."""
 
     def test_cannot_instantiate_base_class_directly(self):
-        """La classe abstraite ne peut pas être instanciée telle quelle."""
+        """The abstract class cannot be instantiated as is."""
         with pytest.raises(TypeError, match="abstract"):
             TemporalConverter()
 
@@ -49,32 +49,30 @@ class TestTemporalConverterContract:
         ],
     )
     def test_partial_implementation_still_abstract(self, missing_method, class_body):
-        """Une sous-classe n'implémentant qu'une des deux méthodes reste
-        abstraite et ne peut pas être instanciée.
+        """A subclass implementing only one of the two methods stays abstract.
+
+        It cannot be instantiated.
         """
         partial_class = type("PartialConverter", (TemporalConverter,), class_body)
         with pytest.raises(TypeError, match=missing_method):
             partial_class()
 
     def test_full_implementation_is_instantiable(self):
-        """Une sous-classe implémentant les deux méthodes abstraites
-        s'instancie normalement.
-        """
+        """A subclass implementing both abstract methods is instantiated normally."""
         converter = _MinimalConverter()
         assert isinstance(converter, TemporalConverter)
 
     def test_concrete_methods_are_used_as_defined_by_subclass(self):
-        """``convert`` délègue bien à l'implémentation fournie par la
-        sous-classe pour le facteur de conversion.
-        """
+        """``convert`` delegates to the subclass implementation of the conversion factor."""
         converter = _MinimalConverter()
         assert converter.get_conversion_factor("min", "s") == 60
         assert converter.convert(2, "min", "s") == 120
 
     def test_abstract_method_bodies_are_reachable_via_super(self):
-        """Les corps des méthodes abstraites (``pass``, donc ``None``) restent
-        atteignables via ``super()`` depuis une sous-classe, comme le fait
-        ``TemporalNormalizer.validate`` : on les exerce ici explicitement.
+        """Abstract method bodies stay reachable through ``super()`` from a subclass.
+
+        The bodies (``pass``, hence ``None``) are exercised explicitly here,
+        as ``TemporalNormalizer.validate`` does for its own body.
         """
 
         class _SuperCallingConverter(TemporalConverter):

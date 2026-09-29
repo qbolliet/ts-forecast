@@ -1003,10 +1003,10 @@ class ImputationWindowCalculator:
             if len(hf_dates) >= 2:
                 # Détection de la position
                 try:
-                    _, pos, _ = detect_index_frequency(
+                    pos = detect_index_frequency(
                         cast(pd.DatetimeIndex, hf_dates),
                         return_format='components'
-                    )
+                    ).position
                     if pos is not None:
                         hf_pos = pos
                 except Exception:

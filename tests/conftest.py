@@ -1,9 +1,9 @@
-"""Configuration racine de la suite ``tests/``.
+"""Root configuration of the ``tests/`` suite.
 
-Enregistre les fixtures partagées de ``tests/support/fixtures.py``, ignore
-transitoirement les modules dont l'import est cassé par un renommage encore
-non traité par la campagne de tests, et marque automatiquement chaque test
-``unit`` ou ``integration`` selon son chemin.
+Registers the shared fixtures of ``tests/support/fixtures.py``,
+transiently ignores the modules whose import is broken by a renaming
+not yet handled by the test campaign, and automatically marks each
+test ``unit`` or ``integration`` according to its path.
 """
 from __future__ import annotations
 
@@ -28,14 +28,14 @@ collect_ignore = [
 # Échecs hérités — TRANSITOIRE (voir tests/legacy_failures.txt)
 # =============================================================================
 def _load_legacy_failures() -> dict[str, str]:
-    """Lit ``tests/legacy_failures.txt`` et associe chaque node id à son motif.
+    """Read ``tests/legacy_failures.txt`` and map each node id to its reason.
 
-    Format du fichier : lignes groupées par bloc, chaque bloc précédé d'un
-    commentaire ``# prompt <id>`` ou ``# hors campagne`` ; les lignes vides et
-    les commentaires d'en-tête (avant le premier groupe) sont ignorés.
+    File format: lines grouped by block, each block preceded by a
+    ``# prompt <id>`` or ``# hors campagne`` comment; empty lines and
+    header comments (before the first group) are ignored.
 
     Returns:
-        Dictionnaire ``{node_id: raison_xfail}``.
+        Dictionary ``{node_id: xfail_reason}``.
     """
     path = Path(__file__).parent / "legacy_failures.txt"
     if not path.exists():
@@ -64,18 +64,18 @@ _LEGACY_FAILURES = _load_legacy_failures()
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Marque chaque test ``unit``/``integration`` et applique les xfail hérités.
+    """Mark each test ``unit`` / ``integration`` and apply the inherited xfails.
 
-    Le marqueur est déduit du chemin du test relatif à ``tests/`` :
-    ``tests/integration/...`` reçoit ``integration``, tout le reste
-    (``tests/unit/...`` et ``tests/support/...``) reçoit ``unit``. Les node
-    ids listés dans ``tests/legacy_failures.txt`` reçoivent en plus un
-    ``xfail(strict=False)`` transitoire, retiré au fur et à mesure du tri des
-    échecs hérités (parties D, U, F du plan de campagne).
+    The marker is derived from the test path relative to ``tests/``:
+    ``tests/integration/...`` gets ``integration``, everything else
+    (``tests/unit/...`` and ``tests/support/...``) gets ``unit``. Node
+    ids listed in ``tests/legacy_failures.txt`` additionally get a
+    transient ``xfail(strict=False)``, removed as the inherited failures
+    are triaged (parts D, U, F of the campaign plan).
 
     Args:
-        config: Configuration pytest de la session.
-        items: Éléments de test collectés, modifiés en place.
+        config: Pytest configuration of the session.
+        items: Collected test items, modified in place.
     """
     root = Path(config.rootpath) / "tests"
 

@@ -6,18 +6,19 @@ base frequency, position and suffix components) and ``build_frequency_string``
 (reassembles those components into a pandas-compatible frequency string).
 Coverage includes the parse/build round trip for every supported frequency
 family (calendar and sub-daily), anchored offsets, deliberate rejections
-(pandas ``'A'``/``'AS'``/``'AE'`` aliases, an unhandled leading multiplier) and
-casing sensitivity.
+(pandas ``'A'``/``'AS'``/``'AE'`` aliases, a null or lone multiplier), leading
+multipliers (``'2MS'``) and casing sensitivity.
 """
 from __future__ import annotations
 
 import pytest
+from pandas.tseries.frequencies import to_offset
 
-from tsforecast.utils.parse.utils import build_frequency_string, parse_frequency
+from tsforecast.utils.parse.utils import ParsedFrequency, build_frequency_string, parse_frequency
 
 
 class TestParseFrequency:
-    """Contract of ``parse_frequency``: string -> (freq, position, suffix)."""
+    """Contract of ``parse_frequency``: string -> (freq, position, suffix, multiplier)."""
 
     @pytest.mark.parametrize(
         "frequency_str, expected",
@@ -42,8 +43,8 @@ class TestParseFrequency:
         ],
     )
     def test_splits_frequency_position_and_suffix(self, frequency_str, expected):
-        """Base frequency, position and suffix are extracted correctly."""
-        assert parse_frequency(frequency_str) == expected
+        """Base frequency, position and suffix are extracted correctly (multiplier 1)."""
+        assert parse_frequency(frequency_str) == (*expected, 1)
 
     @pytest.mark.parametrize(
         "frequency_str, expected",
@@ -58,7 +59,7 @@ class TestParseFrequency:
     )
     def test_splits_anchored_frequency(self, frequency_str, expected):
         """Anchor suffixes (quarter month, week day) are extracted correctly."""
-        assert parse_frequency(frequency_str) == expected
+        assert parse_frequency(frequency_str) == (*expected, 1)
 
     def test_none_input_raises_could_not_detect(self):
         """A ``None`` input (no frequency detected upstream) raises explicitly."""
@@ -70,13 +71,45 @@ class TestParseFrequency:
         with pytest.raises(ValueError, match="Unable to parse"):
             parse_frequency("")
 
-    def test_leading_multiplier_not_supported(self):
-        """Comportement actuel à épingler : un multiplicateur en tête ('2MS')
-        n'est pas géré par ``parse_frequency`` (non documenté comme supporté) :
-        le chiffre initial fait échouer le motif de la grammaire attendue.
-        """
+    @pytest.mark.parametrize(
+        "frequency_str, expected",
+        [
+            pytest.param("2MS", ("M", "S", None, 2), id="bimonthly-start"),
+            pytest.param("12ME", ("M", "E", None, 12), id="twelve-months-end"),
+            pytest.param("3QS-FEB", ("Q", "S", "FEB", 3), id="multiplier-and-anchor"),
+            pytest.param("2W-MON", ("W", None, "MON", 2), id="biweekly-monday"),
+            pytest.param("2D", ("D", None, None, 2), id="two-days"),
+            pytest.param("15min", ("min", None, None, 15), id="fifteen-minutes"),
+            pytest.param("2SMS", ("SM", "S", None, 2), id="multiplied-semi-monthly"),
+            # Un 1 explicite équivaut à l'absence de multiplicateur
+            pytest.param("1MS", ("M", "S", None, 1), id="explicit-one"),
+        ],
+    )
+    def test_leading_multiplier_is_extracted(self, frequency_str, expected):
+        """A leading integer is the multiplier, kept out of the base frequency code."""
+        assert parse_frequency(frequency_str) == expected
+
+    def test_result_is_a_named_tuple(self):
+        """Components are reachable by name and keep the positional order."""
+        parsed = parse_frequency("2QS-FEB")
+        assert isinstance(parsed, ParsedFrequency)
+        assert (parsed.freq, parsed.position, parsed.suffix, parsed.multiplier) == ("Q", "S", "FEB", 2)
+
+    def test_multiplier_defaults_to_one(self):
+        """Building a ParsedFrequency without multiplier gives 1."""
+        assert ParsedFrequency("M", "S", None).multiplier == 1
+
+    @pytest.mark.parametrize("frequency_str", ["0MS", "00D"])
+    def test_null_multiplier_raises(self, frequency_str):
+        """A null multiplier is meaningless for pandas and rejected."""
+        with pytest.raises(ValueError, match="positive integer"):
+            parse_frequency(frequency_str)
+
+    @pytest.mark.parametrize("frequency_str", ["2", "12", "2-DEC"])
+    def test_multiplier_without_frequency_raises(self, frequency_str):
+        """A multiplier alone does not describe a frequency."""
         with pytest.raises(ValueError, match="Unable to parse"):
-            parse_frequency("2MS")
+            parse_frequency(frequency_str)
 
     @pytest.mark.parametrize(
         "frequency_str, expected",
@@ -91,16 +124,16 @@ class TestParseFrequency:
     )
     def test_bare_position_letters_are_not_positions(self, frequency_str, expected):
         """A lone 'S'/'E' is parsed as a base frequency code, not a position."""
-        assert parse_frequency(frequency_str) == expected
+        assert parse_frequency(frequency_str) == (*expected, 1)
 
     def test_case_sensitivity_lowercase_ms_is_not_month_start(self):
-        """Casse significative : 'ms' (millisecondes) != 'MS' (début de mois)."""
-        assert parse_frequency("ms") == ("ms", None, None)
-        assert parse_frequency("MS") == ("M", "S", None)
+        """Case matters: 'ms' (milliseconds) != 'MS' (month start)."""
+        assert parse_frequency("ms") == ("ms", None, None, 1)
+        assert parse_frequency("MS") == ("M", "S", None, 1)
 
 
 class TestBuildFrequencyString:
-    """Contract of ``build_frequency_string``: (freq, position, suffix) -> string."""
+    """Contract of ``build_frequency_string``: (freq, position, suffix, multiplier) -> string."""
 
     @pytest.mark.parametrize(
         "frequency, position, suffix, expected",
@@ -113,7 +146,14 @@ class TestBuildFrequencyString:
             pytest.param("Q", "E", None, "QE", id="quarterly-end"),
             pytest.param("Y", "S", None, "YS", id="yearly-start"),
             pytest.param("Y", "E", None, "YE", id="yearly-end"),
-            pytest.param("B", "E", None, "BE", id="business-daily-end"),
+            # Jour ouvré et semaine : pas de variante S/E en pandas ('BE', 'WS'
+            # n'existent pas), la position est ignorée (ANO-UTILS-009)
+            pytest.param("B", "E", None, "B", id="business-daily-position-ignored"),
+            pytest.param("W", "S", None, "W", id="weekly-position-ignored"),
+            pytest.param("W", "E", "MON", "W-MON", id="weekly-anchor-position-ignored"),
+            # Semi-mensuel : grilles pandas SMS / SME
+            pytest.param("SM", "S", None, "SMS", id="semi-monthly-start"),
+            pytest.param("SM", "E", None, "SME", id="semi-monthly-end"),
             pytest.param("Q", "E", "DEC", "QE-DEC", id="quarterly-end-dec-anchor"),
             pytest.param("Q", "S", "JAN", "QS-JAN", id="quarterly-start-jan-anchor"),
             # Fréquences sous-journalières : non "position-aware", la position
@@ -130,20 +170,41 @@ class TestBuildFrequencyString:
         """Base frequency, position and suffix are reassembled correctly."""
         assert build_frequency_string(frequency, position=position, suffix=suffix) == expected
 
+    @pytest.mark.parametrize(
+        "frequency, position, suffix, multiplier, expected",
+        [
+            pytest.param("M", "S", None, 2, "2MS", id="bimonthly-start"),
+            pytest.param("Q", "S", "FEB", 3, "3QS-FEB", id="multiplier-and-anchor"),
+            pytest.param("W", None, "MON", 2, "2W-MON", id="biweekly-monday"),
+            pytest.param("min", None, None, 15, "15min", id="fifteen-minutes"),
+            # Le multiplicateur 1 est omis
+            pytest.param("M", "E", None, 1, "ME", id="multiplier-one-omitted"),
+        ],
+    )
+    def test_multiplier_is_put_in_front(self, frequency, position, suffix, multiplier, expected):
+        """A multiplier above 1 prefixes the string; 1 is left out."""
+        assert build_frequency_string(frequency, position, suffix, multiplier) == expected
+
+    @pytest.mark.parametrize("multiplier", [0, -2, 1.5, "2", True, None])
+    def test_invalid_multiplier_raises(self, multiplier):
+        """The multiplier must be a positive integer (booleans excluded)."""
+        with pytest.raises(ValueError, match="multiplier must be"):
+            build_frequency_string("M", multiplier=multiplier)
+
     def test_suffix_kept_without_position(self):
-        """Le suffixe est toujours accolé quand il est fourni, y compris sans
-        position : nécessaire pour les ancres qui n'ont pas de notion de
-        position S/E (ex : jour de la semaine, ``'W-MON'``) — cf.
-        ``ANO-UTILS-001``, corrigée.
+        """The suffix is always appended when given, even without a position.
+
+        Required for anchors without an S/E position notion (e.g. a weekday,
+        ``'W-MON'``) - see ``ANO-UTILS-001``, fixed.
         """
         assert build_frequency_string("Q", position=None, suffix="DEC") == "Q-DEC"
         assert build_frequency_string("W", position=None, suffix="MON") == "W-MON"
 
     def test_suffix_kept_even_when_position_is_silently_ignored(self):
-        """Comportement actuel à épingler : pour une fréquence non
-        position-aware, la position demandée est ignorée mais le suffixe,
-        lui, est tout de même accolé (chemin de code indépendant de la
-        vérification ``_POSITION_AWARE_FREQUENCIES``).
+        """Pinned current behaviour: for a frequency without position, the suffix is still appended.
+
+        The requested position is ignored, but the suffix is appended anyway
+        (code path independent of the ``_POSITION_AWARE_FREQUENCIES`` check).
         """
         assert build_frequency_string("h", position="S", suffix="FOO") == "h-FOO"
 
@@ -158,7 +219,7 @@ class TestBuildFrequencyString:
         ],
     )
     def test_invalid_position_raises(self, invalid_position):
-        """Seuls 'S', 'E' et None sont des positions valides."""
+        """Only 'S', 'E' and None are valid positions."""
         with pytest.raises(ValueError, match="position must be"):
             build_frequency_string("D", position=invalid_position)
 
@@ -171,23 +232,25 @@ class TestBuildFrequencyString:
         ],
     )
     def test_deprecated_annual_aliases_rejected(self, frequency):
-        """Rejet explicite et délibéré des alias pandas 'A'/'AS'/'AE'
-        (consolidation de ``parse_frequency``/``build_frequency_string`` comme
-        seules primitives de fréquence, acceptée par l'auteur) : la fréquence
-        de base est passée par ``normalize_frequency``, qui ne les reconnaît
-        plus.
+        """Explicit and deliberate rejection of the pandas aliases 'A' / 'AS' / 'AE'.
+
+        Consolidation of ``parse_frequency`` / ``build_frequency_string`` as
+        the only frequency primitives, accepted by the author: the base
+        frequency goes through ``normalize_frequency``, which no longer
+        recognizes them.
         """
         with pytest.raises(ValueError, match="Unsupported frequency"):
             build_frequency_string(frequency)
 
     def test_unsupported_base_frequency_raises(self):
-        """Une fréquence de base inconnue est rejetée par la normalisation."""
+        """An unknown base frequency is rejected by the normalization."""
         with pytest.raises(ValueError, match="Unsupported frequency"):
             build_frequency_string("not_a_frequency")
 
     def test_case_insensitive_base_frequency_normalization(self):
-        """La fréquence de base passe par ``normalize_frequency`` : les noms
-        littéraux (« monthly ») sont acceptés au même titre que les codes.
+        """The base frequency goes through ``normalize_frequency``.
+
+        Literal names ('monthly') are accepted just like codes.
         """
         assert build_frequency_string("monthly", position="S") == "MS"
 
@@ -207,10 +270,24 @@ class TestParseBuildRoundTrip:
             "D", "W", "B",
             "MS", "ME", "QS", "QE", "YS", "YE",
             "h", "min", "s", "ms", "us", "ns",
-            "QE-DEC", "QS-JAN", "W-MON", "W-SUN",
+            "QE-DEC", "QS-JAN", "W-MON", "W-SUN", "SMS", "SME",
+            "2MS", "12ME", "3QS-FEB", "2W-MON", "2D", "15min", "2SMS",
         ],
     )
     def test_roundtrip_is_identity(self, frequency_str):
-        """parse puis build reproduit exactement la chaîne d'origine."""
-        freq, position, suffix = parse_frequency(frequency_str)
-        assert build_frequency_string(freq, position=position, suffix=suffix) == frequency_str
+        """Parse then build reproduces the original string exactly."""
+        assert build_frequency_string(*parse_frequency(frequency_str)) == frequency_str
+
+
+class TestBuiltStringIsValidPandas:
+    """``build_frequency_string`` only produces aliases understood by pandas."""
+
+    @pytest.mark.parametrize("position", ["S", "E", None])
+    @pytest.mark.parametrize("frequency", ["D", "B", "W", "SM", "M", "Q", "Y", "h", "min", "s"])
+    def test_every_base_and_position_gives_a_valid_offset(self, frequency, position):
+        """Any supported base frequency combined with any position is a valid pandas offset.
+
+        Before the fix (ANO-UTILS-009), ``'W'`` and ``'B'`` received a position
+        suffix (``'WS'``, ``'BE'``) unknown to pandas.
+        """
+        assert to_offset(build_frequency_string(frequency, position=position)) is not None

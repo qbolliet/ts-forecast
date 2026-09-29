@@ -10,6 +10,7 @@ from typing import Union
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
+from ..abc.converter import _CONVERSION_FACTORS_TO_SECONDS
 
 # Import de l'utilitaire du package
 from .types import FrequencyType, UserFrequencyType
@@ -80,7 +81,9 @@ class FrequencyNormalizer(TemporalNormalizer):
         """Normalize any frequency representation to pandas frequency code.
 
         Automatically extracts base frequencies from complex pandas frequency strings
-        (e.g., 'QE-DEC' → 'Q', 'MS' → 'M', 'YS-JAN' → 'Y').
+        (e.g., 'QE-DEC' → 'Q', 'MS' → 'M', 'YS-JAN' → 'Y'). A leading multiplier
+        is accepted and dropped like the position and the anchor ('2MS' → 'M');
+        use :meth:`normalize_with_multiplier` to keep it.
 
         Args:
             value: Frequency string (pandas code, literal name, or complex pandas string)
@@ -119,7 +122,7 @@ class FrequencyNormalizer(TemporalNormalizer):
 
         # Tentative d'extraction de la fréquence de base via parse_frequency
         try:
-            base, _, _ = parse_frequency(value)
+            base = parse_frequency(value).freq
             # Récursion seulement si la base est différente de la valeur d'entrée (évite boucle infinie)
             if base != value:
                 return self.normalize(base)
@@ -221,11 +224,9 @@ class FrequencyNormalizer(TemporalNormalizer):
             pandas_freq = frequency
         else:
             # Parsing de la fréquence en entrée
-            parsed_freq, parsed_position, parsed_suffix = parse_frequency(frequency)
-            # Normalisation de la fréquence
-            normalized_parsed_freq = self.normalize(parsed_freq)
-            # Réassemblage 
-            pandas_freq = build_frequency_string(frequency=normalized_parsed_freq, position=parsed_position, suffix=parsed_suffix)
+            parsed = parse_frequency(frequency)
+            # Normalisation de la fréquence, puis réassemblage (multiplicateur compris)
+            pandas_freq = build_frequency_string(*parsed._replace(freq=self.normalize(parsed.freq)))
             
         return pandas_freq
 
@@ -254,6 +255,10 @@ class FrequencyNormalizer(TemporalNormalizer):
     def is_higher_frequency(self, freq1: FrequencyType, freq2: FrequencyType) -> bool:
         """Check if freq1 is a higher frequency than freq2.
 
+        A multiplier lengthens the period: ``'MS'`` is a higher frequency than
+        ``'2MS'``, and ``'2MS'`` a higher one than ``'QS'``. Without any
+        multiplier the comparison follows the granularity order of the codes.
+
         Args:
             freq1: First frequency
             freq2: Second frequency
@@ -267,16 +272,26 @@ class FrequencyNormalizer(TemporalNormalizer):
             True
             >>> normalizer.is_higher_frequency('quarterly', 'weekly')
             False
+            >>> normalizer.is_higher_frequency('MS', '2MS')
+            True
+            >>> normalizer.is_higher_frequency('2MS', 'QS')
+            True
         """
-        # Normalisation des fréquences
-        code1 = self.to_code(freq1)
-        code2 = self.to_code(freq2)
+        # Normalisation des fréquences et extraction de leurs multiplicateurs
+        code1, multiplier1 = self.normalize_with_multiplier(freq1)
+        code2, multiplier2 = self.normalize_with_multiplier(freq2)
 
-        # Extraction de l'ordre associé à chaque fréquence
-        order1 = self._frequency_order.get(code1, 0)
-        order2 = self._frequency_order.get(code2, 0)
+        # Sans multiplicateur : ordre de granularité des codes
+        if multiplier1 == multiplier2 == 1:
+            return self._frequency_order.get(code1, 0) < self._frequency_order.get(code2, 0)
 
-        return order1 < order2
+        # Même code : le plus petit multiplicateur donne la période la plus courte
+        if code1 == code2:
+            return multiplier1 < multiplier2
+
+        # Codes différents : comparaison des durées nominales des périodes
+        return (multiplier1 * _CONVERSION_FACTORS_TO_SECONDS[code1]
+                < multiplier2 * _CONVERSION_FACTORS_TO_SECONDS[code2])
 
     # Méthode de vérification que deux expressions de fréquences sont compatibles
     def are_compatible_frequencies(self, freq1: FrequencyType, freq2: FrequencyType) -> bool:

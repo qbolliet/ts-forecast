@@ -19,7 +19,8 @@ from tsforecast.delays.transformers import (
     prepare_entity_kwargs_from_delays,
     _build_entity_params,
     _extract_param_by_variable,
-    _resolve_strategy
+    _resolve_strategy,
+    _detect_index_components
 )
 
 # ============================================================================
@@ -336,6 +337,31 @@ class TestShiftTransformerFrequencies:
         for d in shifted.index:
             next_day = d + pd.Timedelta(days=1)
             assert next_day.day == 1
+
+
+class TestMultipliedIndexFrequency:
+    """Les transformateurs décalent par périodes d'index entières : un index multiplié est rejeté."""
+
+    def test_detect_index_components(self):
+        """Base, position et ancre de l'index (sans multiplicateur)."""
+        assert _detect_index_components(pd.date_range('2024-01-01', periods=6, freq='QS')) == ('Q', 'S', 'JAN')
+
+    def test_multiplied_index_is_rejected(self):
+        """Un index '2MS' ne doit pas être traité comme mensuel."""
+        with pytest.raises(ValueError, match="Multiplied index frequency"):
+            _detect_index_components(pd.date_range('2024-01-01', periods=6, freq='2MS'))
+
+    def test_shift_fit_rejects_a_multiplied_index(self):
+        """Le rejet intervient dès le fit."""
+        series = pd.Series(range(6), index=pd.date_range('2024-01-01', periods=6, freq='2MS'), dtype=float)
+        with pytest.raises(ValueError, match="Multiplied index frequency"):
+            ShiftTransformer(n_periods=1, frequency='M').fit(series)
+
+    def test_mask_fit_rejects_a_multiplied_index(self):
+        """Idem pour le masquage."""
+        series = pd.Series(range(6), index=pd.date_range('2024-01-01', periods=6, freq='2MS'), dtype=float)
+        with pytest.raises(ValueError, match="Multiplied index frequency"):
+            MaskTransformer(n_obs=1, mask_frequency='Q', how='last').fit(series)
 
 
 class TestShiftTransformerEdgeCases:

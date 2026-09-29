@@ -40,7 +40,7 @@ class TestTemporalNormalizerContract:
     """Structural contract enforced by the ``ABC``/``abstractmethod`` machinery."""
 
     def test_cannot_instantiate_base_class_directly(self):
-        """La classe abstraite ne peut pas être instanciée telle quelle."""
+        """The abstract class cannot be instantiated as is."""
         with pytest.raises(TypeError, match="abstract"):
             TemporalNormalizer()
 
@@ -68,9 +68,10 @@ class TestTemporalNormalizerContract:
         ],
     )
     def test_partial_implementation_still_abstract(self, missing_methods, class_body):
-        """Une sous-classe n'implémentant pas toutes les méthodes abstraites
-        reste abstraite, y compris ``validate`` qui porte pourtant déjà un
-        corps concret dans la classe de base.
+        """A subclass not implementing every abstract method stays abstract.
+
+        This includes ``validate``, although it already has a concrete body in
+        the base class.
         """
         partial_class = type("PartialNormalizer", (TemporalNormalizer,), class_body)
         with pytest.raises(TypeError) as exc_info:
@@ -79,9 +80,7 @@ class TestTemporalNormalizerContract:
             assert method_name in str(exc_info.value)
 
     def test_full_implementation_is_instantiable(self):
-        """Une sous-classe implémentant les trois méthodes abstraites
-        s'instancie normalement.
-        """
+        """A subclass implementing the three abstract methods is instantiated normally."""
         normalizer = _MinimalNormalizer()
         assert isinstance(normalizer, TemporalNormalizer)
 
@@ -94,28 +93,29 @@ class TestTemporalNormalizerConcreteBehavior:
         return _MinimalNormalizer()
 
     def test_normalize_resolves_code_and_literal(self, normalizer):
-        """Code et littéral se normalisent tous deux vers le code."""
+        """Both a code and a literal normalize to the code."""
         assert normalizer.normalize("D") == "D"
         assert normalizer.normalize("daily") == "D"
 
     def test_normalize_unknown_value_raises(self, normalizer):
-        """Une valeur non supportée lève une ``ValueError``."""
+        """An unsupported value raises a ``ValueError``."""
         with pytest.raises(ValueError, match="Unknown value"):
             normalizer.normalize("unknown")
 
     def test_to_literal_conversion(self, normalizer):
-        """Conversion code -> littéral."""
+        """Code -> literal conversion."""
         assert normalizer.to_literal("W") == "weekly"
 
     def test_validate_delegates_to_inherited_concrete_body(self, normalizer):
-        """``validate`` (surchargée par simple délégation à ``super()``) réutilise
-        le corps concret défini sur la méthode abstraite de la classe de base.
+        """``validate`` reuses the concrete body defined on the base abstract method.
+
+        The subclass overrides it by a mere delegation to ``super()``.
         """
         assert normalizer.validate("D") is True
         assert normalizer.validate("unknown") is False
 
     def test_build_reverse_mapping_is_inherited_unchanged(self):
-        """La méthode statique utilitaire est héritée sans modification."""
+        """The static utility method is inherited unchanged."""
         mapping = {"D": "daily", "W": "weekly"}
         assert TemporalNormalizer._build_reverse_mapping(mapping) == {
             "daily": "D",
@@ -123,9 +123,10 @@ class TestTemporalNormalizerConcreteBehavior:
         }
 
     def test_abstract_method_bodies_are_reachable_via_super(self):
-        """Les corps des méthodes abstraites ``normalize``/``to_literal``
-        (``pass``, donc ``None``) restent atteignables via ``super()`` depuis
-        une sous-classe, à l'instar de ce que fait déjà ``validate``.
+        """Abstract ``normalize`` / ``to_literal`` bodies stay reachable through ``super()``.
+
+        The bodies (``pass``, hence ``None``) are reachable from a subclass,
+        just as ``validate`` already does.
         """
 
         class _SuperCallingNormalizer(TemporalNormalizer):

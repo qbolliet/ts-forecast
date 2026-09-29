@@ -288,7 +288,7 @@ class IndexRegularizer:
         for key, freq_str in freq_map.items():
             try:
                 # Extraction des positions
-                _, position, _ = normalize_frequency(freq_str, return_format='components')
+                position = normalize_frequency(freq_str, return_format='components').position
                 # Ajout au dictionnaire
                 if position is not None:
                     positions[key] = position

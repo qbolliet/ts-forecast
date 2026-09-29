@@ -37,6 +37,21 @@ sa période. Ce sous-paquet normalise cette position et la convertit.
 - `normalize_position()`, `flip_position()`, `convert_position()`,
   `convert_offset()`
 
+Conventions de conversion :
+
+- seules les fréquences ayant une variante début / fin en pandas portent une
+  position : mensuelle (`MS` / `ME`), trimestrielle (`QS` / `QE`), annuelle
+  (`YS` / `YE`) et semi-mensuelle (`SMS` / `SME`), avec multiplicateur et
+  ancre éventuels (`2MS`, `QS-FEB`, `YE-JUN`). Les autres (`D`, `B`, `W-SUN`,
+  `h`...) sont laissées inchangées, par `convert_offset()` comme par
+  `convert_position()` ;
+- une date convertie tombe sur la grille native pandas de l'offset cible
+  (`MS` converti en fin donne exactement `pd.date_range(freq='ME')`, à minuit),
+  dans la période de sa date source ; l'ancre décrit les mêmes périodes
+  (`QS-FEB` ↔ `QE-JAN`) ;
+- une conversion ne fusionne jamais deux dates : une `freq` plus grossière que
+  les données lève une `ValueError` (agréger avec `groupby` / `resample`).
+
 ## `utils/time/` — dates et bornes de périodes
 
 - `resolve_date()` — conversion souple chaîne / datetime → date
@@ -53,11 +68,36 @@ sa période. Ce sous-paquet normalise cette position et la convertit.
 
 ## `utils/parse/` — parsing des chaînes de fréquence
 
-- `parse_frequency()` — `'QE-DEC'` → `('Q', 'E', 'DEC')`
-- `build_frequency_string()` — l'opération inverse
+- `parse_frequency()` — `'QE-DEC'` → `ParsedFrequency('Q', 'E', 'DEC', 1)` ;
+  le multiplicateur en tête fait partie de la grammaire (`'2MS'` →
+  `ParsedFrequency('M', 'S', None, 2)`)
+- `build_frequency_string()` — l'opération inverse (paramètre `multiplier`)
 
 Ce sont les deux seules primitives de manipulation textuelle des fréquences ;
 tout le reste passe par le Normalizer.
+
+### Multiplicateurs (`'2MS'`, `'3QS-FEB'`)
+
+Les Normalizer de fréquence et de durée acceptent un multiplicateur en tête :
+
+- `normalize()` renvoie le code de base (`'2MS'` → `'M'`), comme pour la
+  position et l'ancre ; `normalize_with_multiplier()` renvoie `('M', 2)`.
+- `normalize_frequency()` : `'base'` (`'M'`) et `'with_position'` (`'MS'`)
+  ignorent le multiplicateur ; `'full'` renvoie la chaîne d'origine ;
+  `'components'` renvoie un `ParsedFrequency` dont le 4ᵉ champ est le
+  multiplicateur. Les fonctions de détection (`detect_*_frequency`) suivent.
+- `is_higher_frequency()` / `is_longer_duration()` tiennent compte du
+  multiplicateur : `'MS'` est plus fréquent que `'2MS'`, et `'2MS'` que `'QS'`.
+- `DurationConverter` met à l'échelle l'unité préfixée : `'2D'` vaut 48 h.
+- `FrequencyConverter` décompose `target_freq` via `ParsedFrequency` et
+  convertit vers / depuis une fréquence multipliée. Les opérations qui
+  comptent des périodes de base (`full_periods_only`, `method='all'`,
+  `anchor_fraction` avec une source multipliée) lèvent `NotImplementedError`.
+- Les transformateurs de `tsforecast.delays` rejettent un index multiplié.
+
+Pour les fréquences inférées par pandas, `canonicalize_frequency()` (dans
+`utils/frequency/`) ramène les écritures équivalentes à un représentant
+unique : `'QS-OCT'` → `'QS-JAN'`, `'QE-NOV'` → `'QE-FEB'`.
 
 ## `utils/abc/` — classes abstraites
 

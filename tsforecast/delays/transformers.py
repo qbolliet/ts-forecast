@@ -797,6 +797,42 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         return list_df_inversed
 
 # Fonction de création d'une factory de PublicationDelayTransformer pour l'utilisation sur des données de panel
+def _detect_index_components(index: pd.Index) -> Tuple[str, Optional[str], Optional[str]]:
+    """Detect the base frequency, position and anchor of an index.
+
+    The delay transformers shift and mask by whole index periods, which
+    assumes one period per index step: a multiplied frequency ('2MS')
+    is rejected rather than treated as its base.
+
+    Args:
+        index: Time index of the data.
+
+    Returns:
+        Tuple ``(base, position, suffix)`` of the index frequency.
+
+    Raises:
+        ValueError: If no frequency can be detected or if it carries a
+            multiplier.
+
+    Examples:
+        >>> _detect_index_components(pd.date_range('2024-01-01', periods=6, freq='QS'))
+        ('Q', 'S', 'JAN')
+    """
+    # Détection de la fréquence de l'index
+    parsed = detect_index_frequency(index, return_format='components')
+    # Cas où la fréquence n'a pas pu être détectée
+    if parsed is None:
+        raise ValueError("Could not detect index frequency. Index may be irregular or have insufficient observations.")
+    # Les index multipliés ne sont pas supportés
+    if parsed.multiplier != 1:
+        raise ValueError(
+            f"Multiplied index frequency is not supported by the delay transformers "
+            f"(detected multiplier {parsed.multiplier}). Resample the data to a "
+            f"regular one-period frequency first."
+        )
+    return parsed.freq, parsed.position, parsed.suffix
+
+
 def create_delay_transformer_factory(
     df_delays: pd.DataFrame,
     strategy: Union[
@@ -1303,7 +1339,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_index_frequency(X.index, return_format='components')
+        self.index_frequency_, self.index_position_, self.index_suffix_ = _detect_index_components(X.index)
 
         return self
 
@@ -1328,7 +1364,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_index_frequency(X.index, return_format='components')
+        self.index_frequency_, self.index_position_, self.index_suffix_ = _detect_index_components(X.index)
 
         # Branchement selon le type de données
         return self._shift_by_periods(data=X, n_periods=self.n_periods)
@@ -1356,7 +1392,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_index_frequency(X.index, return_format='components')
+        self.index_frequency_, self.index_position_, self.index_suffix_ = _detect_index_components(X.index)
 
         # Branchement selon le type de données (shift opposé)
         return self._shift_by_periods(data=X, n_periods=-self.n_periods,)
@@ -1613,7 +1649,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_index_frequency(X.index, return_format='components')
+        self.index_frequency_, self.index_position_, self.index_suffix_ = _detect_index_components(X.index)
 
         return self
 
@@ -1638,7 +1674,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = detect_index_frequency(X.index, return_format='components')
+        self.index_frequency_, self.index_position_, self.index_suffix_ = _detect_index_components(X.index)
     
         return self._mask_n_obs_per_period(X)
 
