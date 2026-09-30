@@ -70,13 +70,6 @@ tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_w
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflowPanel::test_panel_each_entity_has_delays
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflowPanel::test_panel_last_observation_per_entity
 
-# prompt U7
-tests/unit/utils/frequency/test_detector.py::TestDetectDatasetFrequency::test_dataframe_with_3level_multiindex
-tests/unit/utils/frequency/test_detector.py::TestDetectFrequencyWrapper::test_series_multiindex_without_consistency
-tests/unit/utils/frequency/test_detector.py::TestFrequencyDetectorMultiIndex::test_series_multiindex_insufficient_observations
-tests/unit/utils/frequency/test_detector.py::TestFrequencyDetectorMultiIndex::test_series_multiindex_unsorted
-tests/unit/utils/frequency/test_detector.py::TestFrequencyDetectorMultiIndex::test_series_with_2level_multiindex
-
 # prompt U8
 tests/unit/utils/frequency/converter/test_positions.py::TestExtendIndexForUpsampling::test_unsupported_frequency_pair_returns_original
 

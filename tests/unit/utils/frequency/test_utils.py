@@ -1,4 +1,4 @@
-"""Tests for ``tsforecast.utils.frequency.utils`` (everything but the detection, see ``test_detector.py``).
+"""Tests for ``tsforecast.utils.frequency.utils`` (everything but the detection, see ``detector/``).
 
 Covers the module-level functions that wrap ``FrequencyNormalizer``:
 ``normalize_frequency`` (every ``return_format``, multipliers, unknown or removed
@@ -16,7 +16,7 @@ anchor (``'QS-JAN'`` rather than the equivalent ``'QS-OCT'`` reported by
 
 Detection itself (``detect_frequency``, ``detect_dataset_frequency``,
 ``detect_index_frequency``, ``target_offset_for_index``) is tested in
-``test_detector.py`` (prompt U7).
+the ``detector/`` test package (prompt U7).
 """
 from __future__ import annotations
 

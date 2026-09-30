@@ -303,7 +303,8 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
     # Détection de la fréquence pour chaque indicateur dans new_data (conversion en littéral)
     frequency_map_raw = detect_frequency(new_data)
     if isinstance(frequency_map_raw, dict):
-        frequency_map = {k: to_literal(v) for k, v in frequency_map_raw.items()}
+        # Couple (ou colonne) indétectable : fréquence None conservée telle quelle
+        frequency_map = {k: to_literal(v) if v is not None else None for k, v in frequency_map_raw.items()}
     elif frequency_map_raw is not None:
         frequency_map = to_literal(frequency_map_raw)
     else:

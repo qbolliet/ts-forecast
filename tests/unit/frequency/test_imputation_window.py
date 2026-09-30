@@ -496,12 +496,12 @@ class TestStructurallyAbsentColumns:
         # L'exclusion porte sur le dénominateur, pas sur la couverture rendue
         assert calc.column_coverage_[('B',)]['b'] == (None, None)
 
-    def test_notion_is_panel_only_on_a_time_series(self):
-        """Sur série temporelle, une colonne vide est rejetée en amont.
+    def test_empty_column_of_a_time_series_is_absent(self):
+        """Sur série temporelle, une colonne vide est structurellement absente, comme en panel.
 
-        La détection de fréquence lève avant que le calculateur ne voie la
-        colonne : la notion de colonne structurellement absente n'a de sens
-        que par entité, une colonne présente ailleurs dans le panel.
+        Depuis ANO-UTILS-042, la détection de fréquence associe ``None`` à la
+        colonne vide au lieu de lever : le calculateur la voit et l'exclut du
+        dénominateur, sans réduire la fenêtre stricte des deux autres colonnes.
         """
         dates = pd.date_range('2020-01-01', periods=12, freq='MS')
         df = pd.DataFrame(
@@ -511,8 +511,12 @@ class TestStructurallyAbsentColumns:
             index=dates,
         )
         calc = ImputationWindowCalculator(coverage_threshold=0.5)
-        with pytest.raises(ValueError):
+        with pytest.warns(UserWarning, match='coverage denominator'):
             calc.fit(df)
+
+        assert (calc.structurally_absent_columns_,
+                calc.imputation_strict_window_start_,
+                calc.imputation_strict_window_end_) == (('c',), dates[0], dates[-1])
 
     def test_no_absent_column_is_silent(self):
         """Sans colonne absente, ni avertissement ni entrée non vide."""

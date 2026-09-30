@@ -469,7 +469,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Correctif** : `FrequencyDetector.detect_time_series_frequency` dédoublonne
   l'index temporel avant `pd.infer_freq` et le calcul de l'écart modal.
 - **Test** : `tests/unit/utils/position/test_converter.py::TestConvertDatetimeIndex::test_short_index_with_duplicates_is_converted`,
-  `tests/unit/utils/frequency/test_detector.py::TestFrequencyDetectorDuplicatedDates`
+  `tests/unit/utils/frequency/detector/test_time_series.py::TestFrequencyDetectorDuplicatedDates`
 - **Statut** : corrigée
 
 ### ANO-UTILS-015 — Index à fréquence multipliée (`'2MS'`) rejeté par la conversion de position
@@ -526,7 +526,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ces grilles exactes (motif approché : `'SM'`, inchangé).
 - **Test** : `tests/unit/utils/position/test_converter.py::TestConvertDatetimeIndex::test_semi_monthly_pairs_native_grids`,
   `::test_unsupported_semi_monthly_variant_raises`,
-  `tests/unit/utils/frequency/test_detector.py::TestFrequencyDetectorSemiMonthly`
+  `tests/unit/utils/frequency/detector/test_time_series.py::TestFrequencyDetectorSemiMonthly`
 - **Statut** : corrigée
 
 ### ANO-UTILS-017 — Détection trimestrielle : ancre non canonique (`'QS-OCT'` pour un index `QS`)
@@ -1157,6 +1157,289 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/utils/parse/test_utils.py::TestDefaultPosition`,
   `tests/unit/utils/frequency/converter/test_positions.py::TestWithPositionIsAPandasAlias`,
   `tests/unit/delays/test_transformers.py::TestMaskTransformerPandasAliases`
+- **Statut** : corrigée
+
+### ANO-UTILS-042 — Série temporelle : une colonne indétectable fait échouer toute la détection, ou disparaît
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/detector.py::FrequencyDetector._detect_time_series_frequencies`
+  (via `detect_dataset_frequency` / `detect_frequency` sur un `DataFrame` non panel)
+- **Sévérité** : mineure
+- **Observé** : deux comportements, tous deux différents du panel. (1) Une colonne ayant moins de
+  `min_observations` valeurs (colonne entièrement NaN, observée une fois) lève
+  `ValueError: Series has only 1 non-null observations, minimum required is 2` pour **tout** le
+  jeu : `_detect_time_series_frequencies` appelle `detect_frequency` (qui lève) et non
+  `_detect_column_frequency` (qui renvoie `None`), comme le fait le chemin panel. (2) Une colonne
+  dont l'espacement n'est pas reconnu (`None`) est **omise** de la carte (`elif freq_result:`).
+  Un jeu de données vide lève la même `ValueError`.
+- **Attendu** : la clé présente, associée à `None`, comme pour un couple (entité, colonne) depuis
+  le commit `906da2e` (« rather than being silently dropped »). C'est aussi la convention de
+  `HighFrequencyImputer._detect_frequencies_robustly` / `_undetected_frequencies_`, qui contourne
+  aujourd'hui l'exception par une détection colonne par colonne.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.utils.frequency import detect_dataset_frequency
+  df = pd.DataFrame({'dense': np.arange(5.0), 'sparse': [np.nan] * 4 + [1.0]},
+                    index=pd.date_range('2024-01-01', periods=5, freq='D'))
+  detect_dataset_frequency(df)   # ValueError: Series has only 1 non-null observations ...
+  # attendu : {'dense': 'D', 'sparse': None}
+  ```
+- **Test** : `tests/unit/utils/frequency/detector/test_panel.py::TestDetectDatasetFrequencyTimeSeries::test_column_with_too_few_observations_is_none`,
+  `::test_column_with_unrecognized_spacing_is_none`, `::test_empty_frame_maps_every_column_to_none`
+- **Correctif** : décision de l'auteur (2026-09-30) : `None` est la convention. `_detect_time_series_frequencies`
+  passe par `_detect_column_frequency` et garde toutes les colonnes ; `_detect_column_frequency` ne rattrape plus
+  d'exception : il compte les valeurs non nulles et renvoie `None` sous `min_observations`, toute autre erreur
+  (index non temporel, `return_format` inconnu) remonte. Effets de bord : `ImputationWindowCalculator` traite
+  désormais une colonne vide de série temporelle comme en panel (structurellement absente, exclue du
+  dénominateur, avertissement) — le test `tests/unit/frequency/test_imputation_window.py::TestStructurallyAbsentColumns::test_notion_is_panel_only_on_a_time_series`,
+  qui épinglait l'ancienne exception, est réécrit en `::test_empty_column_of_a_time_series_is_absent` (catégorie
+  (a)) ; `delays/data_manager.py::compare_and_detect_delays` ne passe plus `None` à `to_literal`.
+- **Statut** : corrigée
+
+### ANO-UTILS-043 — Repli heuristique : ancre non par défaut perdue, offset hors de la grille des données
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/detector.py::FrequencyDetector._detect_day_frequency`
+  (et `_with_detected_position` / `_detect_period_position`)
+- **Sévérité** : mineure
+- **Observé** : quand `pd.infer_freq` échoue (deux dates, ou grille à trous), le repli ne renvoie
+  que des codes sans ancre. Semaine au lundi → `'W'` (lu `W-SUN` par pandas) ; trimestres
+  février-mai-août-novembre → `'Q'` (trous) ou `'QS'` (deux dates, l'index portant sa `freq`) ;
+  exercice juillet-juin → `'Y'` / `'YS'`. En format `'full'`, l'offset renvoyé ne contient
+  **aucune** des dates observées (`is_on_offset` faux) ; `'components'` perd l'ancre (et la
+  position, `is_quarter_start` étant calendaire sur un index sans `freq`). Les grilles à ancre
+  par défaut (`W-SUN`, `MS`/`ME`, `QS-JAN`/`QE-DEC`, `YS-JAN`/`YE-DEC`) ne sont pas touchées.
+- **Attendu** : l'ancre lue sur les dates (jour de semaine pour `W`, mois pour `Q` / `Y`), avec
+  forme canonique (`canonicalize_frequency`), comme sur le chemin `pd.infer_freq` : sur une grille
+  régulière, `QS-FEB`, `W-MON`, `YS-JUL` sont bien détectés.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.frequency import detect_index_frequency
+  idx = pd.date_range('2024-01-01', periods=12, freq='W-MON').delete([3, 7, 8])
+  detect_index_frequency(idx, return_format='full')   # 'W' (dimanches), attendu 'W-MON'
+  detect_index_frequency(pd.date_range('2020-02-01', periods=2, freq='QS-FEB'), return_format='full')
+  # 'QS' (janvier, avril, ...), attendu 'QS-FEB'
+  ```
+- **Test** : `tests/unit/utils/frequency/detector/test_time_series.py::TestFallbackKeepsNonDefaultAnchors`
+- **Correctif** : le repli lit les grilles calendaires (dates toutes en début de mois, toutes en fin de mois,
+  ou toutes le même jour du mois) en **mois** et ancre trimestres et années sur le mois des dates, sous forme
+  canonique (`_detect_calendar_frequency`) ; les grilles hebdomadaires sont ancrées sur leur jour de semaine
+  commun (`_detect_weekly_frequency`, `'W-SUN'` explicite comme sur le chemin `pd.infer_freq`). Remplace
+  `_with_detected_position` / `_detect_period_position` (calendaires, sans ancre). Voir aussi ANO-UTILS-051.
+- **Statut** : corrigée
+
+### ANO-UTILS-044 — Détection : index entier lu comme des nanosecondes depuis 1970
+- **Type** : [CODE] comportement (même cause qu'ANO-UTILS-028)
+- **Composant** : `tsforecast/utils/frequency/detector.py::FrequencyDetector.detect_time_series_frequency`,
+  `tsforecast/utils/frequency/utils.py::detect_index_frequency`
+- **Sévérité** : mineure
+- **Observé** : une série indexée par des années (`2020, 2021, …`) ou un `RangeIndex` est convertie
+  par `pd.to_datetime` nu et détectée `'ns'`, sans erreur ; `detect_index_frequency` sur le même
+  index lève `AttributeError: 'Index' object has no attribute 'inferred_freq'`.
+- **Attendu** : `ValueError`, selon la décision de l'auteur pour ANO-UTILS-028 (2026-09-29 :
+  **rejeter** un index numérique), déjà appliquée par `validate_temporal_data` et
+  `TimeSeriesTransformerMixin._validate_time_index` (helper `_convert_to_datetime`).
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.frequency import detect_frequency, detect_index_frequency
+  detect_frequency(pd.Series([1.0, 2.0, 3.0]))             # 'ns'
+  detect_index_frequency(pd.Index([2020, 2021, 2022]))     # AttributeError
+  ```
+- **Test** : `tests/unit/utils/frequency/detector/test_time_series.py::TestDetectTimeSeriesFrequencyIndexTypes::test_integer_index_is_rejected`,
+  `tests/unit/utils/frequency/detector/test_index_and_offset.py::TestDetectIndexFrequency::test_integer_index_raises_value_error`,
+  `tests/unit/utils/frequency/detector/test_panel.py::TestDetectorDetectFrequencyPanelSeries::test_non_date_level_raises`
+- **Correctif** : conversion de l'index par `tsforecast/utils/validation/utils.py::_convert_to_datetime` (le
+  helper d'ANO-UTILS-028 / 029) dans `detect_time_series_frequency` et, pour un index non `DatetimeIndex`,
+  dans `detect_index_frequency` : `ValueError: ... cannot be converted to datetime (numeric labels are not
+  dates)`. Sur un panel, un niveau de dates entier lève aussi (il n'est plus avalé en `None`, cf. ANO-UTILS-047).
+- **Statut** : corrigée
+
+### ANO-UTILS-045 — Détection : `PeriodIndex` refusé
+- **Type** : [CODE] comportement (même cause qu'ANO-UTILS-029)
+- **Composant** : `tsforecast/utils/frequency/detector.py::FrequencyDetector.detect_time_series_frequency`,
+  `tsforecast/utils/frequency/utils.py::detect_index_frequency`
+- **Sévérité** : mineure
+- **Observé** : `pd.to_datetime` refuse un `PeriodIndex` : `ValueError: Series index cannot be
+  converted to datetime` pour une série, `None` pour un couple de panel (erreur avalée par
+  `_detect_column_frequency`), `AttributeError: 'PeriodIndex' object has no attribute
+  'inferred_freq'` pour `detect_index_frequency`.
+- **Attendu** : décision de l'auteur pour ANO-UTILS-029 (2026-09-29) : **accepter** les périodes,
+  converties à leur premier instant (`to_timestamp()`) ; un `PeriodIndex` mensuel est mensuel.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.frequency import detect_frequency, detect_index_frequency
+  detect_frequency(pd.Series([1.0, 2.0, 3.0], index=pd.period_range('2024-01', periods=3, freq='M')))
+  # ValueError: Series index cannot be converted to datetime
+  detect_index_frequency(pd.period_range('2024Q1', periods=4, freq='Q'))   # AttributeError
+  ```
+- **Test** : `tests/unit/utils/frequency/detector/test_time_series.py::TestDetectTimeSeriesFrequencyIndexTypes::test_period_index_is_accepted`,
+  `tests/unit/utils/frequency/detector/test_panel.py::TestDetectDatasetFrequencyPanel::test_period_dates`,
+  `tests/unit/utils/frequency/detector/test_index_and_offset.py::TestDetectIndexFrequency::test_period_index`,
+  `::test_period_date_level`
+- **Correctif** : même helper `_convert_to_datetime` qu'ANO-UTILS-044 : périodes converties à leur premier
+  instant ; un `PeriodIndex` mensuel est détecté `'M'` / `'MS'`, trimestriel `'QS-JAN'`.
+- **Statut** : corrigée
+
+### ANO-UTILS-046 — Panel à niveaux d'index sans nom : `TypeError`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/detector.py::FrequencyDetector._detect_panel_frequencies`
+  (structure fournie par `tsforecast/panel/utils.py::detect_panel_structure`)
+- **Sévérité** : mineure
+- **Observé** : sur un `DataFrame` dont le `MultiIndex` (entité, date) n'a pas de noms,
+  `detect_panel_structure` renvoie `panel_cols=[None]`, puis `df.groupby(level=None)` lève
+  `TypeError: You have to supply one of 'by' and 'level'`. Une `Series` au même index est, elle,
+  détectée (groupement par position). Le correctif d'ANO-UTILS-011 contournait déjà ce cas
+  côté `PeriodPositionConverter`.
+- **Attendu** : niveaux d'entité désignés par leur position quand ils n'ont pas de nom ; même
+  carte qu'avec des niveaux nommés (cas « noms d'index non standards » de `CLAUDE.md`).
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.frequency import detect_dataset_frequency
+  dates = pd.date_range('2023-01-01', periods=3, freq='D').tolist()
+  idx = pd.MultiIndex.from_arrays([['A'] * 3 + ['B'] * 3, dates * 2])
+  detect_dataset_frequency(pd.DataFrame({'v': range(6)}, index=idx))   # TypeError
+  ```
+- **Test** : `tests/unit/utils/frequency/detector/test_panel.py::TestDetectDatasetFrequencyPanel::test_unnamed_levels`
+- **Correctif** : `_detect_panel_frequencies` groupe par **position** de niveau : position du nom pour un
+  niveau nommé, rang pour un niveau sans nom (les niveaux auto-détectés sont les premiers de l'index).
+  `detect_panel_structure` (`panel/utils.py`) est inchangée.
+- **Statut** : corrigée
+
+### ANO-UTILS-047 — Panel : `return_format` invalide avalé, chaque couple associé à `None`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/detector.py::FrequencyDetector._detect_column_frequency`
+  (appelée par `detect_frequency` sur `MultiIndex` et `_detect_panel_frequencies`)
+- **Sévérité** : mineure
+- **Observé** : `_detect_column_frequency` intercepte **toute** `ValueError` pour traduire « trop
+  peu d'observations » en `None` ; l'erreur `Invalid return_format` est interceptée de la même
+  façon. Sur un panel, `return_format='bogus'` renvoie donc `{(entité, colonne): None, …}` sans
+  erreur, alors qu'une série simple ou un `DataFrame` non panel lèvent `ValueError`.
+- **Attendu** : `ValueError: Invalid return_format` quel que soit le type de données (erreur de
+  l'appelant, pas propriété des données) ; seul le manque d'observations mène à `None`.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.frequency import detect_dataset_frequency
+  idx = pd.MultiIndex.from_product([['A'], pd.date_range('2024-01-01', periods=3)], names=['e', 'd'])
+  detect_dataset_frequency(pd.DataFrame({'v': range(3)}, index=idx), return_format='bogus')
+  # {('A', 'v'): None}
+  ```
+- **Test** : `tests/unit/utils/frequency/detector/test_panel.py::TestDetectorDetectFrequencyPanelSeries::test_invalid_return_format_raises`,
+  `::TestDetectDatasetFrequencyPanel::test_invalid_return_format_raises`
+- **Correctif** : `return_format` vérifié à l'entrée de `detect_time_series_frequency`, `detect_frequency` et
+  `detect_dataset_frequency` (`_check_return_format`), y compris pour un panel sans ligne ; plus aucune
+  exception avalée par `_detect_column_frequency` (cf. ANO-UTILS-042).
+- **Statut** : corrigée
+
+### ANO-UTILS-048 — `target_offset_for_index` perd le multiplicateur et l'ancre de la cible
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/utils.py::target_offset_for_index`
+- **Sévérité** : mineure
+- **Observé** : la cible est réduite à son code de base (`normalize_frequency(…, 'base')`) avant
+  d'y greffer la position de la source. `'2Q'` (semestre) sur un index `ME` devient `'QE'`
+  (trimestre) ; `'QE-NOV'` sur un index `MS` devient `'QS'` (`QS-JAN` : trimestres janv.-mars au
+  lieu de déc.-févr.) ; `'YE-JUN'` devient `'YS'` (année civile au lieu de l'exercice juillet-juin).
+  Les périodes d'agrégation changent silencieusement. Les appelants actuels
+  (`FrequencyAligner`, `ImputationWindowCalculator`, `CovariateMaterializer`) passent des codes à
+  ancre par défaut sans multiplicateur : sans effet observé aujourd'hui.
+- **Attendu** : seule la position change ; multiplicateur et périodes conservés (`'2QE'`,
+  `'QS-DEC'` ou équivalent canonique `'QS-MAR'`, `'YS-JUL'`). Même esprit qu'ANO-UTILS-015.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.frequency import target_offset_for_index
+  target_offset_for_index(pd.date_range('2024-01-31', periods=6, freq='ME'), '2Q')       # 'QE'
+  target_offset_for_index(pd.date_range('2024-01-01', periods=6, freq='MS'), 'QE-NOV')   # 'QS'
+  ```
+- **Test** : `tests/unit/utils/frequency/detector/test_index_and_offset.py::TestTargetOffsetForIndex::test_target_multiplier_is_kept`,
+  `::test_target_periods_are_kept`, `::test_reanchored_target_describes_the_same_periods`
+- **Correctif** : la cible est décomposée (`'components'`) ; multiplicateur conservé ; une ancre mensuelle de
+  trimestre ou d'année est déplacée sur l'autre bord des mêmes périodes (fin en novembre ↔ début en décembre,
+  ancre sans position lue comme une fin, comme pandas), puis mise sous forme canonique ; l'ancre par défaut de
+  pandas reste implicite (`'QS'`, pas `'QS-JAN'`, sorties inchangées pour les appelants actuels). Résultats :
+  `'2Q'` → `'2QE'`, `'QE-NOV'` → `'QS-MAR'` (≡ `'QS-DEC'`), `'YE-JUN'` → `'YS-JUL'`.
+- **Statut** : corrigée
+
+### ANO-UTILS-049 — Contrôles de cohérence : les couples indétectables (`None`) comptent comme une fréquence
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/detector.py::FrequencyDetector.validate_frequency_consistency`
+  (via `detect_frequency` / `detect_dataset_frequency` avec `check_consistency=True`)
+- **Sévérité** : à arbitrer
+- **Observé** : depuis le commit `906da2e`, les cartes de panel contiennent des `None` ; les
+  contrôles de cohérence n'ont pas été adaptés. En mode strict, une seule entité indétectable
+  rend le panel « incohérent » (`None`) alors que toutes les autres ont la même fréquence ; en
+  mode modal non strict, `None` est compté comme une fréquence et peut être **renvoyé** s'il est
+  majoritaire. Le mode `'highest'` (`_get_highest_frequency`) ignore déjà les `None`.
+- **Attendu** : décision de l'auteur (2026-09-30) : ignorer les `None` (inconnu ≠ différent) dans les
+  deux modes, comme `'highest'`.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.frequency import detect_frequency
+  idx = pd.MultiIndex.from_tuples(
+      [('A', pd.Timestamp('2024-01-01')), ('B', pd.Timestamp('2024-01-01'))]
+      + [('C', d) for d in pd.date_range('2024-01-01', periods=3)])
+  detect_frequency(pd.Series(range(5), index=idx), check_consistency=True, strict=False)   # None
+  ```
+- **Test** : `tests/unit/utils/frequency/detector/test_consistency.py::TestConsistencyWithUndetectablePairs`
+- **Correctif** : `validate_frequency_consistency` écarte les `None` avant tout calcul ; une carte sans aucune
+  fréquence détectée donne `(False, None)` ; un vrai désaccord reste incohérent en mode strict.
+- **Statut** : corrigée
+
+### ANO-UTILS-050 — Docstrings de la détection ≠ comportement
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/utils/frequency/detector.py::FrequencyDetector`,
+  `::FrequencyDetector.detect_dataset_frequency`, `tsforecast/utils/frequency/utils.py::detect_index_frequency`,
+  `::detect_dataset_frequency`
+- **Sévérité** : cosmétique
+- **Observé** :
+  - exemple de la classe `FrequencyDetector` : `detect_frequency(series)` annoncé `'monthly'`,
+    renvoie `'M'` (seul doctest en échec des deux modules ; l'exemple utilise en outre l'alias
+    déprécié `freq='M'`) ;
+  - `detect_index_frequency` : « With 'components' format, returns a tuple of (base, position,
+    suffix) » — c'est un `ParsedFrequency` à **quatre** champs (multiplicateur) ; « Raises
+    ValueError … irregular spacing » — un espacement non reconnu renvoie `None` sans erreur ;
+  - `detect_dataset_frequency` (méthode et fonction) : « (panel_id, column) tuples » — les clés
+    sont **aplaties** `(entité…, colonne)` depuis `67529a5` (la docstring privée
+    `_detect_panel_frequencies` le dit correctement).
+- **Attendu** : docstrings alignées sur le code (le code est juste).
+- **Test** : `tests/unit/utils/frequency/detector/test_index_and_offset.py::TestDetectIndexFrequency::test_irregular_index_is_none`,
+  `::test_irregular_index_gives_the_dominant_grid`,
+  `tests/unit/utils/frequency/detector/test_panel.py::TestDetectDatasetFrequencyPanel::test_three_level_index_keys_are_flat`
+- **Correctif** : docstrings réalignées (exemple de classe `'M'` / `'ME'`, `ParsedFrequency` à quatre champs,
+  `None` sur espacement sans écart dominant, clés aplaties, `None` des couples indétectables). Ajout, à la
+  demande de l'auteur, de la documentation de l'**écart modal** : sur un index irrégulier, la fréquence
+  renvoyée est celle de la grille dominante (utile pour imputer sur cette grille), pas un test de
+  régularité (`is_regular`) — `detect_time_series_frequency` et `detect_index_frequency`.
+- **Statut** : corrigée
+
+### ANO-UTILS-051 — Repli heuristique sans multiplicateur
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/detector.py::FrequencyDetector._extend_infer_freq` et ses auxiliaires
+- **Sévérité** : mineure
+- **Observé** : le repli (grille à trous, deux dates) ne produisait que des codes simples, reconnus par
+  plages d'écart modal (1, 7, 13-16, 28-31, 89-92, 365-366 jours ; 5 % autour de 1 h / 1 min / 1 s ; ordre de
+  grandeur sous la seconde). Une grille bimestrielle, bihebdomadaire ou semestrielle à trous était
+  indétectable (`None`), alors que `pd.infer_freq` renvoie `'2MS'`, `'2W-WED'`, `'2QS-OCT'` sur la même grille
+  sans trou ; un écart de 10 ms était lu `'ms'`.
+- **Attendu** : demande de l'auteur (2026-09-30) : le repli produit aussi des multiplicateurs, avec les
+  mêmes chaînes que le chemin `pd.infer_freq` (forme canonique). Non retenu, à la demande de l'auteur :
+  deux jours ouvrés consécutifs restent `'D'` (aucun week-end observé).
+- **Correctif** : mois comptés sur les grilles calendaires (`'2MS'`, semestres `'2QS-JAN'`, `'2YS-JAN'`),
+  semaines ancrées (`'2W-WED'`), sinon multiple de la plus grande unité qui divise l'écart (`'3D'`, `'90min'`,
+  `'36h'`, `'10ms'`). Garde-fou `_is_dominant` : un multiplicateur exige un écart modal **observé au moins
+  deux fois** et **strictement majoritaire** — deux dates seules ne donnent jamais `'45D'` (sinon toute paire de
+  dates aurait une fréquence ; c'est ce qu'a révélé `tests/unit/utils/position/test_converter.py::TestConvertPanel::test_column_frequency_fallback`),
+  et des écarts de 45 puis 50 jours restent `None`. Un multiple de 7 jours n'est hebdomadaire que si les dates
+  partagent un jour de semaine (91 jours entre jours variables : `'Q'`, pas `'13W'`). Tolérance d'une heure
+  sur les jours entiers (changement d'heure d'un index localisé). Les alias `pd.infer_freq` non pris en charge
+  (`'BME'`) passent toujours par le repli.
+- **Test** : `tests/unit/utils/frequency/detector/test_time_series.py::TestFallbackMultipliedFrequencies`,
+  `::TestFallbackWithoutCalendarPattern`, `::TestDetectTimeSeriesFrequencyTwoObservations`,
+  `::TestDetectTimeSeriesFrequencyWithGaps::test_timezone_aware_gapped_grid`
 - **Statut** : corrigée
 
 ## DELAYS

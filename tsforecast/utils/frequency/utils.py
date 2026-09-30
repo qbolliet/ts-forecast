@@ -363,10 +363,15 @@ def detect_frequency(data: Union[pd.Series, pd.DataFrame],
             - 'highest': Returns the highest frequency (most granular)
         strict: If True, all frequencies must be identical (used with check_consistency)
 
+        Undetectable entities or columns (None) are ignored by the consistency
+        check: they neither break a strict check nor count in the modal one.
+
     Returns:
         For Series without MultiIndex: Detected frequency as string, or None if detection fails
-        For Series with MultiIndex: Dictionary mapping panel_id to frequencies, or single frequency if check_consistency=True
-        For DataFrame without check_consistency: Dictionary mapping columns to frequencies
+        For Series with MultiIndex: Dictionary mapping panel_id tuples to frequencies
+            (None for an undetectable entity), or single frequency if check_consistency=True
+        For DataFrame without check_consistency: Dictionary mapping columns (or flattened
+            ``(entity..., column)`` tuples) to frequencies, None when undetectable
         For DataFrame with check_consistency: Single consistent frequency or None
 
     Examples:
@@ -462,10 +467,14 @@ def detect_dataset_frequency(df: pd.DataFrame,
         consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
             - 'modal': Returns the most common frequency (default)
             - 'highest': Returns the highest frequency (most granular)
-        strict: If True, all frequencies must be identical
+        strict: If True, all detected frequencies must be identical. Undetectable
+            columns or pairs (None) are ignored by the consistency check.
 
     Returns:
-        Dictionary mapping column names (or (panel_id, column) tuples) to frequencies or consistent frequency
+        Without ``check_consistency``: dictionary mapping column names (time
+        series) or FLATTENED ``(entity..., column)`` tuples (panel, e.g.
+        ``('FR', 'gdp')``) to frequencies, None for an undetectable column or
+        pair. With ``check_consistency``: the consistent frequency, or None.
     """
     # Importation du locale du détector (pour éviter les imports circulaires)
     from .detector import FrequencyDetector
@@ -496,20 +505,25 @@ def detect_index_frequency(
     """Detect and parse DatetimeIndex or MultiIndex frequency.
 
     For a DatetimeIndex, analyzes the frequency and returns it in the
-    requested format. With 'components' format, returns a tuple of
-    (base, position, suffix). When pandas' own inference (``inferred_freq``)
-    fails to detect a frequency, falls back to ``FrequencyDetector``, which
-    extends detection to patterns ``inferred_freq`` misses (e.g. quarterly,
-    business daily, semi-monthly).
+    requested format. With 'components' format, returns a ``ParsedFrequency``
+    ``(freq, position, suffix, multiplier)``. When pandas' own inference
+    (``inferred_freq``) fails (gaps, two dates, irregular spacing), falls
+    back to ``FrequencyDetector``, which reads the **modal spacing** between
+    consecutive dates (see
+    :meth:`FrequencyDetector.detect_time_series_frequency`). On an irregular
+    index the result is therefore the frequency of the dominant grid (e.g.
+    ``'MS'`` for a monthly grid preceded by a few isolated annual dates), or
+    None when no spacing dominates; it is not a regularity check.
 
     For a MultiIndex with dates as the last level, detects frequency
     for each unique entity (combination of non-date levels) and returns
     a dictionary mapping entity keys to their frequencies.
 
     Args:
-        index: DatetimeIndex or MultiIndex to analyze. For MultiIndex,
-            the last level must be a DatetimeIndex. Must have at least 2
-            observations and a regular frequency pattern.
+        index: DatetimeIndex or MultiIndex to analyze (for a MultiIndex, the
+            dates are the last level). Strings parsable as dates and
+            ``Period`` labels (first instant of each period) are accepted;
+            numeric labels are not dates and are rejected.
         return_format: Output format for the detected frequency:
             - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
             - 'with_position': Frequency with position (e.g. 'MS', 'QE')
@@ -517,15 +531,17 @@ def detect_index_frequency(
             - 'components': ParsedFrequency (base, position, suffix, multiplier)
 
     Returns:
-        For DatetimeIndex: Frequency in the requested format
+        For DatetimeIndex: Frequency in the requested format, or None if no
+            frequency can be read from the dates
         For MultiIndex: Dict mapping entity keys to frequencies. Entity keys
             are ALWAYS tuples, even for a single entity level (``('FR',)``,
             never ``'FR'``), so that they match the keys produced by
             ``get_unique_panel_entities`` and ``detect_dataset_frequency``.
 
     Raises:
-        ValueError: If frequency cannot be detected or if the index has
-            insufficient observations (<2) or irregular spacing.
+        ValueError: If the index (or one entity of a MultiIndex) has fewer
+            than 2 dates, if the labels cannot be converted to datetime, or
+            if ``return_format`` is unknown.
 
     Examples:
         >>> import pandas as pd
@@ -570,6 +586,17 @@ def detect_index_frequency(
 
         return result
     else:
+        # Conversion d'un index non temporel (chaînes, périodes) ; mêmes règles que
+        # la validation temporelle : étiquettes numériques refusées
+        if not isinstance(index, pd.DatetimeIndex):
+            from ..validation.utils import _convert_to_datetime
+            converted = _convert_to_datetime(index)
+            if converted is None:
+                raise ValueError(
+                    "Index cannot be converted to datetime (numeric labels are not dates)"
+                )
+            index = converted
+
         # Traitement du DatetimeIndex
         # Inférence de la fréquence de l'index
         freq = index.inferred_freq
@@ -610,11 +637,15 @@ def target_offset_for_index(
             any existing target position is stripped and overridden by it,
             so a caller passing an end-anchored frequency against a
             start-anchored index still gets rebased correctly instead of
-            keeping the mismatched position as-is.
+            keeping the mismatched position as-is. Its multiplier and its
+            periods are kept: an anchor is moved to the other side of the
+            same periods ('QE-NOV', quarters ending in November, becomes the
+            start of those quarters, 'QS-DEC', written canonically 'QS-MAR').
 
     Returns:
         Pandas offset alias anchored like ``index`` (e.g. 'QS') when a
-        position can be detected on ``index``. Falls back to
+        position can be detected on ``index``; the pandas default anchor is
+        left implicit ('QS', not 'QS-JAN'). Falls back to
         ``target_frequency`` unchanged when the source position cannot be
         detected at all (e.g. a position-less source frequency like daily,
         or an index too short to detect a frequency): there is then nothing
@@ -627,6 +658,10 @@ def target_offset_for_index(
         'QS'
         >>> target_offset_for_index(ms_index, 'QE')
         'QS'
+        >>> target_offset_for_index(ms_index, '2Q')
+        '2QS'
+        >>> target_offset_for_index(ms_index, 'YE-JUN')
+        'YS-JUL'
         >>> daily_index = pd.date_range('2024-01-01', periods=59, freq='D')
         >>> target_offset_for_index(daily_index, 'ME')
         'ME'
@@ -643,19 +678,31 @@ def target_offset_for_index(
     if position is None:
         return target_frequency
 
-    # Une position cible déjà présente (ex. 'QE') serait sinon transmise telle
-    # quelle par build_frequency_string, qui ignore silencieusement les
-    # fréquences déjà suffixées : on repart de la base pour l'écraser par la
-    # position détectée sur la source
+    # Décomposition de la cible : sa position est écrasée par celle de la source,
+    # son multiplicateur et ses périodes (ancre) sont conservés
     try:
-        target_base = normalize_frequency(target_frequency, return_format='base')
-    except Exception:
+        target = normalize_frequency(target_frequency, return_format='components')
+    except ValueError:
         return target_frequency
 
-    try:
-        return build_frequency_string(target_base, position)
-    except Exception:
-        return target_frequency
+    # Ancre mensuelle d'un trimestre ou d'une année : mêmes périodes vues de
+    # l'autre bord (fin en novembre <-> début en décembre). Une ancre sans
+    # position est lue comme une fin, comme le fait pandas ('Q-NOV' = 'QE-NOV')
+    suffix = target.suffix
+    if target.freq in ('Q', 'Y') and suffix in MONTH_ABBREVIATIONS:
+        month = MONTH_ABBREVIATIONS.index(suffix)
+        if (target.position or 'E') == 'E' and position == 'S':
+            suffix = MONTH_ABBREVIATIONS[(month + 1) % 12]
+        elif target.position == 'S' and position == 'E':
+            suffix = MONTH_ABBREVIATIONS[(month - 1) % 12]
+
+    # Assemblage, forme canonique, puis ancre par défaut de pandas laissée implicite
+    anchored = parse_frequency(canonicalize_frequency(
+        build_frequency_string(target.freq, position, suffix, target.multiplier)
+    ))
+    if (anchored.position, anchored.suffix) in (('S', 'JAN'), ('E', 'DEC')):
+        anchored = anchored._replace(suffix=None)
+    return build_frequency_string(*anchored)
 
 
 # Fonction auxiliaire d'extraction de la fréquence la plus haute d'un dictionnaire de fréquences
