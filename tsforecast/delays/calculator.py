@@ -46,19 +46,33 @@ def calculate_applicable_delay(
     Args:
         publication_delays: DataFrame returned by compare_and_detect_delays()
             containing columns: observation_date, download_date, frequency,
-            period_start, period_end, reference_point, delay, unit
-        reference_point: Reference point for delay calculation ('start' or 'end')
-        frequency: Target frequency for delay calculation (applied to all indicators).
-            Examples: 'monthly', 'M', 'quarterly', 'Q', etc.
-        unit: Unit for output delays. If None, uses the unit from input data.
-            Options: 'us'/'microsecond', 's'/'second', 'D'/'day'
+            period_start, period_end, reference_point, delay, unit. The last
+            level of its index is the indicator; any other level identifies a
+            panel entity. The ``unit`` values must be duration names or codes
+            (``'day'``/``'D'``, ``'second'``/``'s'``, ``'microsecond'``/``'us'``,
+            ...): plural forms such as ``'days'`` are rejected. All rows of an
+            indicator are expected to share the same unit (the aggregated
+            ``unit`` is the first one of the group).
+        reference_point: Reference point for delay calculation ('start' or 'end'): the
+            delay is counted from the start of the target period, or from its end,
+            which is exclusive (the period of March ends on April 1st).
+        frequency: Target frequency for delay calculation. Either a single
+            frequency applied to all indicators ('monthly', 'M', 'quarterly',
+            'Q', ...), or a dict ``{indicator: frequency}`` that must cover every
+            indicator of the (filtered) data.
+        unit: Unit for output delays. If None, keeps the unit of the input data
+            (its label is then unchanged, e.g. ``'day'``). Otherwise any duration
+            supported by ``convert_duration`` ('us'/'microsecond', 's'/'second',
+            'D'/'day', 'h'/'hour', 'W'/'week', ...): delays are converted with
+            ceiling rounding and the ``unit`` column then holds the duration
+            *code* (``'D'``, ``'h'``, ...).
         indicators: List of indicators to calculate delays for. If None, uses all
             indicators found in the data.
         aggregate_by_panel: If True, calculate separate delays for each (panel_entity, indicator)
             combination. If False, aggregate across all panel entities for each indicator.
         aggregation_method: Method to aggregate delays. Can be:
             - String: any method supported by pandas.agg ('mean', 'median', 'max', 'min', etc.)
-            - Callable: custom aggregation function
+            - Callable: custom aggregation function (reported by its ``__name__``)
 
     Returns:
         DataFrame with calculated applicable delays, indexed by indicator
@@ -66,25 +80,47 @@ def calculate_applicable_delay(
         Contains columns:
         - delay: The calculated delay value
         - unit: Unit of the delay
-        - frequency: The target frequency used
+        - frequency: The target frequency used, as given (literal name or code)
         - reference_point: The target reference point used
         - n_observations: Number of observations used in aggregation
         - aggregation_method: The aggregation method used
 
     Raises:
-        ValueError: If parameters are invalid or incompatible
+        ValueError: If a required column is missing, if reference_point is not
+            'start' or 'end', if none of the requested indicators is found, or if a
+            frequency or a unit is not supported (this includes an indicator that
+            ``frequency`` does not cover when it is a dict)
+        TypeError: If frequency is neither a string nor a dict
 
     Examples:
-        >>> # Calculate monthly delay from start for quarterly data
+        >>> # Quarterly GDP of two countries and monthly CPI, all observed in March 2024
+        >>> index = pd.MultiIndex.from_tuples(
+        ...     [('FR', 'GDP'), ('DE', 'GDP'), ('FR', 'CPI')], names=['country', 'indicator'])
+        >>> delays_df = pd.DataFrame({
+        ...     'observation_date': pd.to_datetime(['2024-03-15'] * 3),
+        ...     'download_date': pd.to_datetime(['2024-05-15', '2024-05-25', '2024-04-10']),
+        ...     'frequency': ['Q', 'Q', 'M'],
+        ...     'period_start': pd.to_datetime(['2024-01-01', '2024-01-01', '2024-03-01']),
+        ...     'period_end': pd.to_datetime(['2024-03-31', '2024-03-31', '2024-03-31']),
+        ...     'reference_point': ['end', 'end', 'end'],
+        ...     'delay': [45, 55, 10],
+        ...     'unit': ['day', 'day', 'day'],
+        ... }, index=index)
+
+        >>> # Monthly delay from the start of the month, median over the countries:
+        >>> # GDP observed in March, downloaded May 15 (FR) and May 25 (DE), gives
+        >>> # 75 and 85 days after March 1st, hence a median of 80
         >>> applicable = calculate_applicable_delay(
         ...     publication_delays=delays_df,
         ...     reference_point='start',
         ...     frequency='monthly',
-        ...     indicators=['GDP', 'Unemployment'],
         ...     aggregation_method='median'
         ... )
+        >>> applicable['delay'].to_dict()
+        {'CPI': 40.0, 'GDP': 80.0}
 
-        >>> # Calculate with panel-level aggregation
+        >>> # Panel-level aggregation, delays counted from the end of the quarter
+        >>> # (April 1st, exclusive)
         >>> applicable = calculate_applicable_delay(
         ...     publication_delays=delays_df,
         ...     reference_point='end',
@@ -92,6 +128,18 @@ def calculate_applicable_delay(
         ...     aggregate_by_panel=True,
         ...     aggregation_method='mean'
         ... )
+        >>> applicable['delay'].to_dict()
+        {('DE', 'GDP'): 54.0, ('FR', 'CPI'): 9.0, ('FR', 'GDP'): 44.0}
+
+        >>> # One target frequency per indicator, delays expressed in hours
+        >>> applicable = calculate_applicable_delay(
+        ...     publication_delays=delays_df,
+        ...     reference_point='start',
+        ...     frequency={'GDP': 'monthly', 'CPI': 'quarterly'},
+        ...     unit='hour'
+        ... )
+        >>> applicable['delay'].to_dict(), applicable['unit'].unique().tolist()
+        ({'CPI': 2400.0, 'GDP': 1920.0}, ['h'])
     """
     # Validation des colonnes requises dans le DataFrame
     _validate_columns(publication_delays)
@@ -120,7 +168,7 @@ def calculate_applicable_delay(
     elif isinstance(frequency, dict):
         target_freq_map = frequency.copy()
     else:
-        raise TypeError(f"'frequency' should be a string or a dict, git a {type(frequency).__name__}")
+        raise TypeError(f"'frequency' should be a string or a dict, got a {type(frequency).__name__}")
     
     # Conversion des délais au point de référence et à la fréquence cibles
     delays = _convert_to_target_frequency_and_reference(
@@ -157,8 +205,10 @@ def _validate_columns(df: pd.DataFrame) -> None:
         ValueError: If any required column is missing
 
     Examples:
-        >>> _validate_columns(publication_delays_df)
-        # Raises ValueError if columns are missing
+        >>> _validate_columns(pd.DataFrame({'delay': [45]}))  # doctest: +ELLIPSIS
+        Traceback (most recent call last):
+        ...
+        ValueError: Missing required columns in publication_delays DataFrame: ['observation_date', ...
     """
     # Colonnes requises pour le calcul des délais
     required_columns = [
@@ -191,6 +241,10 @@ def _convert_to_target_frequency_and_reference(
 ) -> pd.DataFrame:
     """Convert delays to target frequency and reference point.
 
+    The columns ``target_frequency``, ``target_frequency_normalized`` and
+    ``current_frequency_normalized`` are added to ``delays`` in place; the
+    conversion of each row is then delegated to ``_calculate_converted_delay``.
+
     Args:
         delays: Publication delays DataFrame
         target_freq_map: Mapping of indicator to target frequency
@@ -198,7 +252,13 @@ def _convert_to_target_frequency_and_reference(
         indicator_level_name: Name of the indicator level in the index
 
     Returns:
-        DataFrame with converted delays
+        DataFrame with the input columns, the three frequency columns above and
+        ``converted_delay``, ``target_period_start``, ``target_period_end`` and
+        ``target_reference_point``
+
+    Raises:
+        ValueError: If an indicator has no target frequency in ``target_freq_map``
+            (its frequency is then NaN), or if a frequency is not supported
     """
     # Ajout d'une colonne pour la fréquence cible
     delays['target_frequency'] = delays.index.get_level_values(indicator_level_name).map(target_freq_map)
@@ -226,7 +286,8 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
        by adding the delay to the original reference date.
 
     2. **Determination of target period**: Calculates the period boundaries
-       at the target frequency. The logic differs based on frequency conversion:
+       at the target frequency, the end being **exclusive** (the period of
+       March ends on April 1st). The logic differs based on frequency conversion:
 
        - **Higher frequency** (e.g., quarterly → monthly): Identifies the sub-period
          that contains the observation_date. For example, if converting Q1 (Jan-Mar)
@@ -244,19 +305,21 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
 
     Args:
         row: Row from delays DataFrame containing:
+            - observation_date: Date the observation refers to
             - period_start, period_end: Original period boundaries
             - reference_point: Original reference ('start' or 'end')
             - delay: Numeric delay value
-            - unit: Time unit ('days', 'seconds', 'microseconds')
-            - target_frequency_normalized: Target frequency
-            - current_frequency_normalized: Current frequency
+            - unit: Duration name or code of the delay ('day'/'D', 'second'/'s',
+              'microsecond'/'us', ...; plural forms such as 'days' are rejected)
+            - target_frequency_normalized: Target frequency, as a base code ('M')
+            - current_frequency_normalized: Current frequency, as a base code ('Q')
         target_reference_point: Target reference point ('start' or 'end')
 
     Returns:
         Updated row with:
-            - converted_delay: Delay value in original unit
+            - converted_delay: Delay value in original unit, rounded up
             - target_period_start: Start of target period
-            - target_period_end: End of target period
+            - target_period_end: End of target period (exclusive)
             - target_reference_point: Target reference point used
 
     Examples:
@@ -268,14 +331,18 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
         ...     'period_end': pd.Timestamp('2024-03-31'),
         ...     'reference_point': 'end',
         ...     'delay': 45,
-        ...     'unit': 'days',
+        ...     'unit': 'day',
         ...     'target_frequency_normalized': 'M',
         ...     'current_frequency_normalized': 'Q'
         ... })
         >>> result = _calculate_converted_delay(row, 'start')
-        # Download date: Mar 31 + 45 days = May 15
-        # Target period: March 2024 (Mar 1 - Mar 31) because observation_date is in March
-        # Converted delay: May 15 - Mar 1 = 75 days
+        >>> # Download date: Mar 31 + 45 days = May 15
+        >>> # Target period: March 2024 because observation_date is in March
+        >>> result['target_period_start'], result['target_period_end']
+        (Timestamp('2024-03-01 00:00:00'), Timestamp('2024-04-01 00:00:00'))
+        >>> # Converted delay: May 15 - Mar 1 = 75 days
+        >>> result['converted_delay']
+        75
     """
     # Reconstruction de la date de téléchargement originale
     # download_date = reference_date + delay
@@ -373,11 +440,18 @@ def _convert_delay_unit(delays: pd.DataFrame, target_unit: str) -> pd.DataFrame:
     """Convert delay values to target unit using convert_duration utility.
 
     Args:
-        delays: DataFrame with delays
-        target_unit: Target unit ('us'/'microsecond', 's'/'second', 'D'/'day')
+        delays: DataFrame with delays, holding ``converted_delay`` and ``unit``
+        target_unit: Target duration, name or code: 'us'/'microsecond',
+            's'/'second', 'D'/'day', 'h'/'hour', 'W'/'week', ... (any duration
+            supported by ``convert_duration``)
 
     Returns:
-        DataFrame with converted delays
+        DataFrame with ``converted_delay`` converted (ceiling rounding; rows
+        already in the target unit are left as they are) and ``unit`` set to the duration
+        *code* of the target unit (``'D'``, not ``'day'``)
+
+    Raises:
+        ValueError: If a unit is not a supported duration
     """
     # Normalisation de l'unité cible avec la fonction utilitaire to_code
     # qui gère déjà tous les formats possibles
@@ -428,7 +502,10 @@ def _aggregate_delays(
         target_freq_map: Mapping of indicator to target frequency
 
     Returns:
-        Aggregated DataFrame
+        DataFrame indexed by the grouping levels (indicator, or panel entities and
+        indicator) with the columns ``delay``, ``unit`` (first of the group),
+        ``frequency`` (target frequency as given, first of the group),
+        ``reference_point``, ``n_observations`` and ``aggregation_method``
     """
     # Détermination des niveaux de groupement
     if aggregate_by_panel:

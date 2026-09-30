@@ -1477,7 +1477,8 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         full_freq = build_frequency_string(
             self.index_frequency_,
             self.index_position_,
-            self.index_suffix_
+            self.index_suffix_,
+            default_position='E'
         )
 
         if index_periods > 0:
@@ -1862,7 +1863,8 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         pandas_freq = build_frequency_string(
             self.index_frequency_,
             self.index_position_,
-            self.index_suffix_
+            self.index_suffix_,
+            default_position='E'
         )
         
         # Génération de l'index complet pour cette période
@@ -1949,7 +1951,8 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         pandas_freq = build_frequency_string(
             frequency,
             self.index_position_,
-            self.index_suffix_
+            self.index_suffix_,
+            default_position='E'
         )
 
         # Génération des dates de début de période

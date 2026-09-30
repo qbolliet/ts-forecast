@@ -383,20 +383,26 @@ class FrequencyConverter(TemporalConverter):
         """Build the frequency string of a decomposed frequency at a given position.
 
         The anchor is left out: the converters work on the base, the position
-        and the multiplier.
+        and the multiplier. The string goes to pandas (``resample``): without
+        position, a month, quarter, year or semi-month gets its end variant
+        (``'ME'``).
 
         Args:
             parsed: Decomposed frequency.
             position: Position ('S', 'E') or None.
 
         Returns:
-            Frequency string ('MS', '2QE', 'D').
+            Pandas frequency alias ('MS', '2QE', 'D').
 
         Examples:
             >>> FrequencyConverter._with_position(ParsedFrequency('M', None, None, 2), 'S')
             '2MS'
+            >>> FrequencyConverter._with_position(ParsedFrequency('M', None, None, 1), None)
+            'ME'
         """
-        return build_frequency_string(parsed.freq, position, multiplier=parsed.multiplier)
+        return build_frequency_string(
+            parsed.freq, position, multiplier=parsed.multiplier, default_position='E'
+        )
 
     # Méthode auxiliaire de rejet des fréquences multipliées
     @staticmethod

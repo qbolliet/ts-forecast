@@ -14,7 +14,16 @@ from ..abc.converter import _CONVERSION_FACTORS_TO_SECONDS
 
 # Import de l'utilitaire du package
 from .types import FrequencyType, UserFrequencyType
-from ..parse.utils import parse_frequency, build_frequency_string
+from ..parse.utils import (
+    MONTH_ABBREVIATIONS, WEEKDAY_ABBREVIATIONS,
+    ParsedFrequency, parse_frequency, build_frequency_string,
+)
+
+# Durées nominales (en secondes) servant à comparer des fréquences multipliées. Celles des
+# conversions, sauf le jour ouvré : ses 5 observations par semaine espacent en moyenne les
+# dates de 7/5 jours calendaires, si bien que 'kB' est une fréquence plus basse que 'kD'
+# (cohérence avec l'ordre sans multiplicateur, où 'D' est plus élevée que 'B')
+_NOMINAL_SECONDS = {**_CONVERSION_FACTORS_TO_SECONDS, 'B': _CONVERSION_FACTORS_TO_SECONDS['D'] * 7 / 5}
 
 
 # Classe de normalisation des fréquences
@@ -29,7 +38,7 @@ class FrequencyNormalizer(TemporalNormalizer):
     Examples:
         >>> normalizer = FrequencyNormalizer()
         >>> normalizer.to_pandas_freq('monthly')
-        'M'
+        'ME'
         >>> normalizer.to_literal('Q')
         'quarterly'
         >>> normalizer.normalize('daily')
@@ -83,7 +92,9 @@ class FrequencyNormalizer(TemporalNormalizer):
         Automatically extracts base frequencies from complex pandas frequency strings
         (e.g., 'QE-DEC' → 'Q', 'MS' → 'M', 'YS-JAN' → 'Y'). A leading multiplier
         is accepted and dropped like the position and the anchor ('2MS' → 'M');
-        use :meth:`normalize_with_multiplier` to keep it.
+        use :meth:`normalize_with_multiplier` to keep it. The anchor is dropped
+        but checked: ``'QS-JAN'`` and ``'W-MON'`` are valid, ``'QS-XYZ'``,
+        ``'MS-JAN'`` and ``'D-MON'`` are not (see :meth:`_validate_anchor`).
 
         Args:
             value: Frequency string (pandas code, literal name, or complex pandas string)
@@ -92,7 +103,8 @@ class FrequencyNormalizer(TemporalNormalizer):
             Pandas frequency code string
 
         Raises:
-            ValueError: If value format is not supported
+            ValueError: If value format is not supported, or if its anchor is
+                not valid for its base frequency
 
         Examples:
             >>> normalizer = FrequencyNormalizer()
@@ -121,13 +133,20 @@ class FrequencyNormalizer(TemporalNormalizer):
             return code
 
         # Tentative d'extraction de la fréquence de base via parse_frequency
+        code = None
         try:
-            base = parse_frequency(value).freq
+            parsed = parse_frequency(value)
             # Récursion seulement si la base est différente de la valeur d'entrée (évite boucle infinie)
-            if base != value:
-                return self.normalize(base)
+            if parsed.freq != value:
+                code = self.normalize(parsed.freq)
         except ValueError:
             pass
+
+        # Validation de l'ancre hors du try : son message précis ne doit pas être
+        # remplacé par l'erreur générique ci-dessous
+        if code is not None:
+            self._validate_anchor(value, code, parsed)
+            return code
 
         # Renvoie une erreur si le code est inconnu
         raise ValueError(
@@ -135,6 +154,57 @@ class FrequencyNormalizer(TemporalNormalizer):
             f"Supported frequencies: {list(self._literal_to_pandas.keys())} "
             f"or pandas codes: {list(self._pandas_to_literal.keys())}"
         )
+
+    # Méthode de validation de l'ancre d'une chaîne de fréquence pandas
+    @staticmethod
+    def _validate_anchor(value: str, code: str, parsed: ParsedFrequency) -> None:
+        """Check that the anchor of a parsed frequency string exists in pandas.
+
+        The rules are those of ``pandas.tseries.frequencies.to_offset``:
+        quarterly and yearly anchors are months (``'QS-JAN'``, ``'YE-DEC'``,
+        ``'Q-DEC'``), weekly anchors are weekdays (``'W-MON'``), semi-monthly
+        anchors are a day of the month behind a position (``'SMS-15'``: 2 to 27;
+        ``'SME-15'``: 1 to 27), and every other frequency takes no anchor
+        (``'MS-JAN'`` and ``'D-MON'`` are not pandas frequencies).
+
+        Args:
+            value: Original frequency string, quoted in the error message.
+            code: Normalized base code of ``value``.
+            parsed: Components of ``value`` given by ``parse_frequency``.
+
+        Raises:
+            ValueError: If the anchor is not valid for the base frequency.
+        """
+        # Extraction de l'ancre
+        anchor = parsed.suffix
+        if anchor is None:
+            return
+
+        # Ancres admises, par fréquence de base
+        if code in ('Q', 'Y'):
+            valid = anchor in MONTH_ABBREVIATIONS
+            expected = f"a month among {', '.join(MONTH_ABBREVIATIONS)}"
+        elif code == 'W':
+            valid = anchor in WEEKDAY_ABBREVIATIONS
+            expected = f"a weekday among {', '.join(WEEKDAY_ABBREVIATIONS)}"
+        elif code == 'SM':
+            # Jour du mois, borné par pandas : 2 à 27 pour un début, 1 à 27 pour une fin
+            lowest = {'S': 2, 'E': 1}.get(parsed.position)
+            valid = lowest is not None and anchor.isdigit() and lowest <= int(anchor) <= 27
+            expected = "a day of the month (2 to 27 after 'SMS', 1 to 27 after 'SME')"
+        else:
+            # Aucune ancre admise
+            raise ValueError(
+                f"Unsupported frequency: {value}. "
+                f"Base frequency '{code}' does not accept an anchor ('-{anchor}')."
+            )
+
+        # Message d'erreur quand l'ancre est invalide
+        if not valid:
+            raise ValueError(
+                f"Unsupported frequency: {value}. Invalid anchor '{anchor}' "
+                f"for base frequency '{code}': expected {expected}."
+            )
 
     # Méthode de conversion en nom littéraire
     def to_literal(self, frequency: FrequencyType) -> UserFrequencyType:
@@ -203,32 +273,56 @@ class FrequencyNormalizer(TemporalNormalizer):
 
     # Conversion d'une fréquence dans son expression pandas
     def to_pandas_freq(self, frequency: str) -> str:
-        """Convert frequency to pandas frequency code.
+        """Convert frequency to a pandas frequency alias.
+
+        The result is an alias pandas accepts (``pd.date_range``, ``to_offset``)
+        without deprecation warning. Position, anchor and multiplier are kept.
+        A frequency that has start and end variants (month, quarter, year,
+        semi-month) but no position is given its **end** variant, as pandas did
+        with the bare aliases that pandas 2.2 deprecated and pandas 3 removes:
+        ``'M'`` → ``'ME'``, ``'Q'`` → ``'QE'``, ``'Y'`` → ``'YE'``, ``'SM'`` →
+        ``'SME'``. To get the base code (``'M'``) rather than a pandas alias, use
+        :meth:`normalize` or :meth:`to_code`.
 
         Args:
             frequency: Frequency in any supported format
 
         Returns:
-            Pandas frequency code
+            Pandas frequency alias
+
+        Raises:
+            ValueError: If frequency is not a string, is not supported, or has an
+                anchor that does not exist in pandas
 
         Examples:
             >>> normalizer = FrequencyNormalizer()
             >>> normalizer.to_pandas_freq('monthly')
-            'M'
+            'ME'
+            >>> normalizer.to_pandas_freq('MS')
+            'MS'
+            >>> normalizer.to_pandas_freq('Q-DEC')
+            'QE-DEC'
+            >>> normalizer.to_pandas_freq('daily')
+            'D'
         """
+        # Vérification du type avant tout accès à un dictionnaire (une liste n'est pas hachable)
+        if not isinstance(frequency, str):
+            raise ValueError(f"Frequency must be a string, got {type(frequency)}")
+
         # Distinction suivant la nature de l'entrée
         if frequency in self._literal_to_pandas:
-            # Normalisation de la fréquence
-            pandas_freq = self.normalize(frequency)
+            parsed = ParsedFrequency(self.normalize(frequency), None, None, 1)
         elif frequency in self._pandas_to_literal:
-            pandas_freq = frequency
+            parsed = ParsedFrequency(frequency, None, None, 1)
         else:
-            # Parsing de la fréquence en entrée
-            parsed = parse_frequency(frequency)
-            # Normalisation de la fréquence, puis réassemblage (multiplicateur compris)
-            pandas_freq = build_frequency_string(*parsed._replace(freq=self.normalize(parsed.freq)))
-            
-        return pandas_freq
+            # Validation de la chaîne complète (base, ancre, multiplicateur), puis
+            # parsing : la base normalisée remplace celle de l'entrée
+            code = self.normalize(frequency)
+            parsed = parse_frequency(frequency)._replace(freq=code)
+
+        # Réassemblage (multiplicateur compris), variante fin par défaut : les alias
+        # nus 'M', 'Q', 'Y' et 'SM' sont dépréciés
+        return build_frequency_string(*parsed, default_position='E')
 
     # Conversion d'une fréquence en DateOffset
     def to_dateoffset(self, frequency: str) -> pd.DateOffset:
@@ -258,6 +352,10 @@ class FrequencyNormalizer(TemporalNormalizer):
         A multiplier lengthens the period: ``'MS'`` is a higher frequency than
         ``'2MS'``, and ``'2MS'`` a higher one than ``'QS'``. Without any
         multiplier the comparison follows the granularity order of the codes.
+        With multipliers, nominal durations are compared, a business day
+        counting for 7/5 of a calendar day: ``'2D'`` is a higher frequency than
+        ``'2B'``, like ``'D'`` than ``'B'``. Two different codes of equal
+        nominal duration (``'24h'`` and ``'D'``) are neither higher nor lower.
 
         Args:
             freq1: First frequency
@@ -276,6 +374,8 @@ class FrequencyNormalizer(TemporalNormalizer):
             True
             >>> normalizer.is_higher_frequency('2MS', 'QS')
             True
+            >>> normalizer.is_higher_frequency('2D', '2B')
+            True
         """
         # Normalisation des fréquences et extraction de leurs multiplicateurs
         code1, multiplier1 = self.normalize_with_multiplier(freq1)
@@ -290,8 +390,7 @@ class FrequencyNormalizer(TemporalNormalizer):
             return multiplier1 < multiplier2
 
         # Codes différents : comparaison des durées nominales des périodes
-        return (multiplier1 * _CONVERSION_FACTORS_TO_SECONDS[code1]
-                < multiplier2 * _CONVERSION_FACTORS_TO_SECONDS[code2])
+        return multiplier1 * _NOMINAL_SECONDS[code1] < multiplier2 * _NOMINAL_SECONDS[code2]
 
     # Méthode de vérification que deux expressions de fréquences sont compatibles
     def are_compatible_frequencies(self, freq1: FrequencyType, freq2: FrequencyType) -> bool:

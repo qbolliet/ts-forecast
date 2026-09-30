@@ -12,7 +12,7 @@ noms conviviaux) et convertit entre elles.
 
 - `FrequencyNormalizer`, `normalize_frequency()`, `to_pandas_freq()`,
   `to_dateoffset()`, `to_code()`, `to_literal()`
-- `FrequencyConverter`, `convert_frequency()` — agrégation vers le bas,
+- `FrequencyConverter` (`convert()`, `convert_frequency()`) — agrégation vers le bas,
   interpolation vers le haut, avec choix de la méthode et de l'ancrage
 - `is_higher_frequency()`, `get_frequency_order()`, `validate_frequency()`
 - **Détection** : `FrequencyDetector`, `detect_frequency()`,

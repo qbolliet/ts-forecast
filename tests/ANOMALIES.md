@@ -980,9 +980,243 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `::TestValidateEntitiesGrouped::test_ambiguous_panel_col_is_rejected`
 - **Statut** : corrigée
 
+### ANO-UTILS-035 — Docstring de `get_frequency_order` : `7.0` et « renvoie 0 si inconnue » ≠ comportement observé
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/utils/frequency/utils.py::get_frequency_order`
+- **Sévérité** : cosmétique
+- **Observé** : le docstring annonce `Returns: Frequency order as float` et « Returns 0 if
+  frequency is not found in the order mapping », avec les exemples `get_frequency_order('daily')
+  -> 7.0` et `'monthly' -> 9.0`. Le code renvoie l'`int` `7` (seuls `'B'` et `'SM'` valent `7.5` /
+  `8.5`), donc `--doctest-modules` échoue sur ces exemples. Une fréquence inconnue ne renvoie pas
+  `0` : `normalize_frequency` lève `ValueError('Unsupported frequency: ...')` avant, et le défaut
+  de `_normalizer._frequency_order.get(base_freq, 0)` est inatteignable (tout code renvoyé par
+  `normalize` est une clé de la table d'ordre : même situation qu'ANO-UTILS-005).
+- **Attendu** : docstring documentant le type réel (`int` ou `float`) et la levée de `ValueError` ;
+  le défaut `0` peut être retiré (code mort). Même famille qu'ANO-UTILS-003 (`get_duration_order`).
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.frequency.utils import get_frequency_order
+  get_frequency_order('daily')   # 7 (int), pas 7.0
+  get_frequency_order('xyz')     # ValueError, pas 0
+  ```
+- **Test** : `tests/unit/utils/frequency/test_utils.py::TestGetFrequencyOrder::test_documented_values`,
+  `::test_order_is_a_number`, `::test_unsupported_frequency_raises` (le test suit le code).
+- **Correctif** : docstring de `get_frequency_order` corrigé : type réel (`int`, ou `float` pour `'B'` et `'SM'`), `Raises: ValueError`, multiplicateur ignoré ; le défaut `.get(base_freq, 0)` inatteignable est remplacé par un accès direct `[base_freq]`. `--doctest-modules` passe.
+- **Statut** : corrigée
+
+### ANO-UTILS-036 — `convert_frequency` (fonction) levait toujours `TypeError`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/utils.py::convert_frequency`
+- **Sévérité** : majeure
+- **Observé** : la fonction appelle `FrequencyConverter().convert(value, to_unit, **kwargs)`, alors
+  que `FrequencyConverter.convert(value, from_unit, to_unit, **kwargs)` attend trois arguments
+  (`from_unit` y est ignoré, la fréquence source étant détectée). Tout appel échoue :
+  `TypeError: FrequencyConverter.convert() missing 1 required positional argument: 'to_unit'`.
+  Le docstring est lui aussi faux : type de retour annoncé `float` (le résultat est une `Series` /
+  un `DataFrame`) et exemple `convert_frequency(series, 'daily', 'monthly', method='mean')` à trois
+  arguments positionnels sur une signature `(value, to_unit, **kwargs)`
+  (`TypeError: convert_frequency() takes 2 positional arguments but 3 were given`). La fonction est
+  exportée par `tsforecast.utils.frequency` et citée dans `docs/concepts/temporal_utils.md` ; aucun
+  appelant interne (les notebooks et la spec parlent de la *méthode*
+  `FrequencyConverter.convert_frequency`, qui fonctionne).
+- **Attendu** : `convert_frequency(series, 'MS', method='mean')` renvoie la série convertie, comme
+  `FrequencyConverter().convert_frequency(series, 'MS', method='mean')`. Valeur d'or : valeurs
+  journalières 1..59 (janvier-février 2023) -> `[16.0, 45.5]` (moyenne de 1..31, puis de 32..59).
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.frequency.utils import convert_frequency
+  s = pd.Series(range(1, 60), index=pd.date_range('2023-01-01', periods=59, freq='D'), dtype=float)
+  convert_frequency(s, 'MS', method='mean')  # TypeError
+  ```
+- **Test** : test supprimé avec la fonction (`TestConvertFrequency`) ; la méthode `FrequencyConverter.convert_frequency` reste testée par `tests/unit/utils/frequency/converter/`.
+- **Correctif** : `convert_frequency` **supprimée** (aucun appelant dans `tsforecast/`) de `utils.py` et de `tsforecast.utils.frequency.__all__` ; `docs/concepts/temporal_utils.md` renvoie à `FrequencyConverter.convert()` / `convert_frequency()` (la méthode, inchangée).
+- **Statut** : corrigée
+
+### ANO-UTILS-037 — Entrée non `str` : `TypeError` (ou `unhashable`) au lieu de `ValueError`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/normalizer.py::FrequencyNormalizer.to_pandas_freq` /
+  `to_dateoffset` ; `tsforecast/utils/frequency/utils.py::normalize_frequency` (formats autres que
+  `'base'`)
+- **Sévérité** : mineure
+- **Observé** : `normalize`, `to_literal`, `to_code`, `get_frequency_order` lèvent
+  `ValueError("Frequency must be a string, got ...")` et `validate` renvoie `False` pour un entier,
+  un flottant, une liste, un dictionnaire ou des `bytes`. `to_pandas_freq` / `to_dateoffset` et
+  `normalize_frequency(..., return_format='with_position' | 'full' | 'components')` lèvent
+  `TypeError: expected string or bytes-like object, got 'int'` (`re.match` dans `parse_frequency`),
+  `TypeError: unhashable type: 'list'` (`x in dict`) ou `TypeError: cannot use a string pattern on
+  a bytes-like object`. `None` donne un `ValueError` dont le message parle de détection d'index
+  (« Could not detect index frequency »). Le contrat de `TemporalNormalizer.normalize` promet une
+  `ValueError`, et `normalize_with_multiplier` intercepte déjà `(ValueError, TypeError)` :
+  l'auteur attendait donc ce `TypeError` sans le traiter ailleurs.
+- **Attendu** : une `ValueError` uniforme, quel que soit le point d'entrée (cohérence avec les
+  autres méthodes du même normaliseur ; `notebooks/utils/frequency_normalizer.ipynb` §2.5, à propos de
+  `normalize` : « lève toujours un `ValueError` (jamais un `TypeError`) »).
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.frequency.utils import normalize_frequency, to_pandas_freq
+  normalize_frequency(123, return_format='full')  # TypeError (ValueError en 'base')
+  to_pandas_freq(123)                              # TypeError
+  ```
+- **Test** : `tests/unit/utils/frequency/test_normalizer.py::TestRebuiltPandasStrings::test_non_string_input_raises_value_error`, `tests/unit/utils/frequency/test_utils.py::TestNormalizeFrequencyReturnFormats::test_non_string_raises_value_error_in_every_format`
+- **Correctif** : `to_pandas_freq` vérifie le type avant tout accès à un dictionnaire ; `normalize_frequency` valide la chaîne complète par `FrequencyNormalizer.normalize` avant de la décomposer (formats `with_position`, `full`, `components`). `ValueError('Frequency must be a string, got ...')` partout, `None` compris. Les `xfail(strict)` sont retirés.
+- **Statut** : corrigée
+
+### ANO-UTILS-038 — `is_higher_frequency('2D', '2B')` : ni l'un ni l'autre n'est plus fin
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/normalizer.py::FrequencyNormalizer.is_higher_frequency`
+- **Sévérité** : mineure (arbitrée par l’auteur)
+- **Observé** : sans multiplicateur, `'D'` est plus fin que `'B'` (ordre 7 contre 7.5). Dès qu'un
+  multiplicateur > 1 est présent, la comparaison porte sur les durées nominales, identiques pour
+  `D` et `B` (`_CONVERSION_FACTORS_TO_SECONDS`) : `is_higher_frequency('2D', '2B')` et
+  `('2B', '2D')` valent tous deux `False`. L'incomparabilité n'est plus transitive :
+  `'D'` et `'24h'` sont incomparables, `'24h'` et `'B'` aussi, mais `'D'` est plus fin que `'B'`.
+  Irréflexivité, antisymétrie et transitivité de « plus fin que » restent vérifiées (propriétés
+  testées sur 75 fréquences multipliées).
+- **Attendu** : à arbitrer. Un jour ouvré saute les week-ends, donc `kB` est plus grossier que
+  `kD` (cohérence avec le cas sans multiplicateur), ce qui suppose de départager les durées égales
+  par l'ordre des codes ; ou bien assumer l'égalité nominale, sans départage pour `k = 1` non plus.
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.frequency.utils import is_higher_frequency
+  is_higher_frequency('D', 'B')                                   # True
+  is_higher_frequency('2D', '2B'), is_higher_frequency('2B', '2D')  # (False, False)
+  ```
+- **Test** : `tests/unit/utils/frequency/test_utils.py::TestIsHigherFrequencyDayVersusBusinessDay`
+- **Correctif** : `is_higher_frequency` compare les durées nominales avec un jour ouvré valant 7/5 de jour calendaire (5 observations par semaine) : `'2D'` est plus fin que `'2B'`, comme `'D'` que `'B'`. Le tableau de conversion partagé (`_CONVERSION_FACTORS_TO_SECONDS`, `'B'` = `'D'`) est inchangé ; l'écart est local à la comparaison (`_NOMINAL_SECONDS`). Deux codes de même durée (`'24h'`, `'D'`) restent incomparables, et l'incomparabilité est désormais transitive ; `'5B'` égale `'W'`.
+- **Statut** : corrigée
+
+### ANO-UTILS-039 — `to_pandas_freq` / `to_dateoffset` : codes sans position = alias dépréciés par pandas
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/normalizer.py::FrequencyNormalizer.to_pandas_freq`
+  (et `to_dateoffset`)
+- **Sévérité** : mineure (arbitrée par l’auteur)
+- **Observé** : `to_pandas_freq('monthly')` renvoie `'M'` (valeur donnée par le docstring),
+  `'quarterly'` -> `'Q'`, `'annual'` -> `'Y'`, `'semi_monthly'` -> `'SM'`. Sous pandas 2.3
+  (`pandas>=2.3.1,<3` dans `pyproject.toml`), `to_dateoffset` de ces quatre codes émet
+  `FutureWarning: 'M' is deprecated and will be removed in a future version, please use 'ME'
+  instead` (idem `'Q'` -> `'QE'`, `'Y'` -> `'YE'`, `'SM'` -> `'SME'`) ; pandas 3 les supprimera. Les
+  variantes positionnées (`MS`, `ME`, `QS`, ...) n'émettent rien.
+- **Attendu** : à arbitrer. Soit conserver le code nu comme code *interne* (le docstring de
+  `to_pandas_freq` promet pourtant « pandas frequency code »), soit renvoyer l'alias positionné par
+  défaut (`'ME'`, `'QE'`, `'YE'`, `'SME'`) avant la montée vers pandas 3.
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.frequency.utils import to_pandas_freq, to_dateoffset
+  to_pandas_freq('monthly')   # 'M'
+  to_dateoffset('monthly')    # FutureWarning: 'M' is deprecated ... please use 'ME' instead
+  ```
+- **Test** : `tests/unit/utils/frequency/test_normalizer.py::TestBareCodesGiveTheEndVariant`, `tests/unit/utils/frequency/test_utils.py::TestToPandasFreqEveryCodeAndPosition`
+- **Correctif** : `to_pandas_freq` (et donc `to_dateoffset`) renvoie la variante fin par défaut des codes sans position : `'M'` → `'ME'`, `'Q'` → `'QE'`, `'Y'` → `'YE'`, `'SM'` → `'SME'` (multiplicateur et ancre conservés : `'2M'` → `'2ME'`, `'Q-DEC'` → `'QE-DEC'`). Mêmes dates que les alias nus de pandas 2, aucun avertissement, valides en pandas 3. Le code de base (`'M'`) reste renvoyé par `normalize` / `to_code` / `normalize_frequency`. Seul appelant du package : `delays/calculator.py`, qui veut un alias pour `pd.date_range` (comportement inchangé).
+- **Statut** : corrigée
+
+### ANO-UTILS-040 — L'ancre d'une chaîne de fréquence n'est jamais validée
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/normalizer.py::FrequencyNormalizer.normalize` /
+  `validate` / `to_pandas_freq`
+- **Sévérité** : mineure (arbitrée par l’auteur)
+- **Observé** : seule la base est contrôlée. `validate('QS-XYZ')`, `validate('MS-JAN')`,
+  `validate('D-MON')`, `validate('YE-FOO')`, `validate('W-XYZ')` valent `True` ;
+  `to_pandas_freq` renvoie la chaîne telle quelle ; l'erreur ne vient que de pandas quand l'offset
+  est construit (`ValueError: Invalid frequency: QS-XYZ, failed to parse with error message ...`).
+  `normalize` documente pourtant seulement une *extraction* de la base ; et `validate` promet de
+  dire si la fréquence est « supportée ».
+- **Attendu** : à arbitrer : valider l'ancre (mois pour `Q` / `Y`, jour de semaine pour `W`, aucune
+  pour `D`, `M`, ...), ou documenter que `validate` ne vérifie que la base.
+- **Reproduction** :
+  ```python
+  from tsforecast.utils.frequency.utils import validate_frequency, to_dateoffset
+  validate_frequency('QS-XYZ')   # True
+  to_dateoffset('QS-XYZ')        # ValueError (pandas)
+  ```
+- **Test** : `tests/unit/utils/frequency/test_normalizer.py::TestAnchorValidation` (dont un test de propriété confrontant 375 chaînes à `pandas.to_offset`)
+- **Correctif** : `FrequencyNormalizer._validate_anchor`, appelée par `normalize` (donc par `validate`, `to_pandas_freq`, `to_dateoffset` et `normalize_frequency`) : mois pour `Q` / `Y`, jour de semaine pour `W`, jour du mois derrière une position pour `SM` (2 à 27 pour `SMS`, 1 à 27 pour `SME`), aucune ancre ailleurs ; majuscules uniquement. Message : `Unsupported frequency: QS-XYZ. Invalid anchor 'XYZ' for base frequency 'Q': expected a month among JAN, ...`. Nouvelle constante `WEEKDAY_ABBREVIATIONS` (`utils/parse/utils.py`).
+- **Statut** : corrigée
+
+### ANO-UTILS-041 — `build_frequency_string` : un code sans position sortait comme alias pandas déprécié
+- **Type** : [CODE] comportement (suite d'ANO-UTILS-039)
+- **Composant** : `tsforecast/utils/parse/utils.py::build_frequency_string`
+- **Sévérité** : mineure (arbitrée par l’auteur : migration vers pandas 3)
+- **Observé** : `build_frequency_string('M')` renvoie `'M'`, alias que pandas 2.2 déprécie et que
+  pandas 3 supprime. Quatre appelants transmettaient ce résultat à pandas
+  (`FrequencyConverter._with_position` -> `resample` ; `MaskTransformer` / `ShiftTransformer`
+  ×3 -> `pd.date_range`, la position étant `None` pour un index journalier) : `FutureWarning`
+  aujourd'hui, `ValueError` avec pandas 3. Trois autres appelants veulent au contraire le **code
+  de base** (`FrequencyConverter._duration_of` et le calcul de ratio d'`_extend_index_for_upsampling`
+  passent la chaîne à `DurationConverter`, `canonicalize_frequency` préserve l'orthographe
+  `'Q-DEC'`) : un défaut global les aurait cassés.
+- **Attendu** : distinguer les deux intentions par l'appelant, sans changer le comportement par défaut.
+- **Correctif** : nouveau paramètre `default_position` (`'S'`, `'E'` ou `None`) : appliqué aux
+  fréquences `M`, `Q`, `Y`, `SM` sans position explicite (`'M'` -> `'ME'`), sans effet sur les autres
+  ni sur une position explicite ; `None` (défaut) laisse le code de base nu. Passé à `'E'` par les
+  quatre appelants « alias pandas » et par `FrequencyNormalizer.to_pandas_freq` (qui reprend ainsi
+  ANO-UTILS-039 sur le même mécanisme). Inchangés : les appelants « durée » et ceux dont la
+  position est explicite ou déjà `'E'` par défaut (`imputation_window`).
+  Non traité : le repli de `target_offset_for_index` (position source indétectable) renvoie la
+  fréquence cible fournie, donc un `'M'` nu si l'appelant en donne un (choix documenté).
+- **Test** : `tests/unit/utils/parse/test_utils.py::TestDefaultPosition`,
+  `tests/unit/utils/frequency/converter/test_positions.py::TestWithPositionIsAPandasAlias`,
+  `tests/unit/delays/test_transformers.py::TestMaskTransformerPandasAliases`
+- **Statut** : corrigée
+
 ## DELAYS
 
-_Aucune entrée._
+### ANO-DELAYS-001 — Docstrings de `calculator.py` périmées
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/delays/calculator.py` (`calculate_applicable_delay`,
+  `_convert_to_target_frequency_and_reference`, `_calculate_converted_delay`, `_convert_delay_unit`,
+  `_aggregate_delays`, `_validate_columns`)
+- **Sévérité** : cosmétique
+- **Observé** : `unit` documenté comme limité à `us` / `s` / `D` alors que toute durée de
+  `convert_duration` est acceptée (`'hour'`, `'W'`, ...) ; `frequency` documenté comme chaîne seule
+  alors qu'un dictionnaire `{indicateur: fréquence}` est accepté ; index attendu (dernier niveau =
+  indicateur) et unités d'entrée valides non décrits ; `Raises` sans `TypeError` ; colonne `unit`
+  de sortie contenant le **code** (`'D'`) et non l'étiquette d'entrée (`'day'`) quand `unit` est
+  fourni ; exemple de `_calculate_converted_delay` avec `'unit': 'days'` (rejeté : `Unsupported
+  duration: days`), `observation_date` absent de la liste des colonnes de `row`, fin de période
+  annoncée « Mar 31 » alors qu'elle est **exclusive** (`2024-04-01`), exemples non exécutables
+  (`delays_df` indéfini, sorties en commentaires). Message d'erreur `TypeError` : « git a » pour « got a ».
+- **Correctif** : docstrings réécrits d'après le comportement observé ; exemples exécutables sur un
+  jeu de données défini, sorties calculées à la main (75 j = 15 mai - 1er mars ; médiane de 75 et 85 = 80 ;
+  1920 h) ; coquille corrigée. `pytest --doctest-modules tsforecast/delays/calculator.py` passe.
+- **Test** : doctests du module (le test suit le code).
+- **Statut** : corrigée
+
+### ANO-DELAYS-002 — Unités d'entrée mixtes agrégées sans conversion quand `unit=None`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/calculator.py::calculate_applicable_delay` / `_aggregate_delays`
+- **Sévérité** : majeure
+- **Observé** : `converted_delay` reste dans l'unité de chaque ligne ; sans `unit`, `_aggregate_delays`
+  agrège ces valeurs telles quelles et étiquette le résultat avec l'unité du premier élément
+  (`'unit': 'first'`). Deux lignes du même indicateur à 75 `day` et 6 480 000 `second` donnent
+  un délai médian de `3240037.5` étiqueté `day`.
+- **Attendu** : convertir vers une unité commune (celle de la première ligne, ou la plus fine) avant
+  d'agréger, ou lever une `ValueError` si les unités diffèrent. Le docstring demande aujourd'hui que
+  les lignes d'un indicateur partagent une unité, sans que le code le vérifie.
+- **Reproduction** :
+  ```python
+  # deux lignes (FR, DE) de l'indicateur GDP : delay=[45, 3888000], unit=['day', 'second']
+  calculate_applicable_delay(delays, 'start', 'M')  # delay=3240037.5, unit='day'
+  ```
+- **Test** : à écrire au prompt D2 (`tests/unit/delays/test_calculator.py::TestEdgeCases::test_mixed_units`
+  existe, marqué hérité).
+- **Statut** : ouvert
+
+### ANO-DELAYS-003 — `frequency` en dictionnaire incomplet : message d'erreur trompeur
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/calculator.py::_convert_to_target_frequency_and_reference`
+- **Sévérité** : mineure
+- **Observé** : un indicateur absent du dictionnaire reçoit `NaN` comme fréquence cible (`.map`), puis
+  `normalize_frequency` lève `ValueError: Frequency must be a string, got <class 'float'>`, sans
+  nommer l'indicateur.
+- **Attendu** : une erreur nommant les indicateurs sans fréquence cible.
+- **Reproduction** :
+  ```python
+  calculate_applicable_delay(delays, 'start', {'GDP': 'M'})  # avec un indicateur CPI dans les données
+  ```
+- **Test** : à écrire au prompt D2.
+- **Statut** : ouvert
+
 
 ## FREQ
 

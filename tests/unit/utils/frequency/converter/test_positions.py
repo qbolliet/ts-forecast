@@ -3,10 +3,13 @@
 Ce module teste la préservation des positions (start/end) lors des conversions
 de fréquence et l'extension de la plage temporelle lors de l'upsampling.
 """
+import warnings
+
 import pytest
 import pandas as pd
 import numpy as np
 from tsforecast.utils.frequency.converter import FrequencyConverter
+from tsforecast.utils.parse import ParsedFrequency
 
 
 class TestFrequencyConverterPositions:
@@ -450,3 +453,45 @@ class TestCrossPositionUpsampling:
 
         # Les dates sont inchangées
         assert list(reanchored) == list(qs_index)
+
+
+class TestWithPositionIsAPandasAlias:
+    """``FrequencyConverter._with_position`` builds the alias handed to ``resample``.
+
+    Without position, a month, quarter, year or semi-month gets its end variant, so that
+    pandas neither warns (pandas 2.2) nor fails (pandas 3) on a bare ``'M'``.
+    """
+
+    @pytest.mark.internal
+    @pytest.mark.parametrize(
+        "base, position, multiplier, expected",
+        [
+            pytest.param("M", None, 1, "ME", id="month-no-position"),
+            pytest.param("Q", None, 1, "QE", id="quarter-no-position"),
+            pytest.param("Y", None, 2, "2YE", id="year-multiplied-no-position"),
+            pytest.param("SM", None, 1, "SME", id="semi-month-no-position"),
+            pytest.param("M", "S", 1, "MS", id="month-start"),
+            pytest.param("Q", "E", 3, "3QE", id="quarter-end-multiplied"),
+            pytest.param("D", None, 1, "D", id="day"),
+            pytest.param("W", "S", 1, "W", id="week-ignores-position"),
+        ],
+    )
+    def test_alias(self, base, position, multiplier, expected):
+        """Golden values: end variant by default, explicit position kept, others unchanged."""
+        parsed = ParsedFrequency(base, None, None, multiplier)
+        assert FrequencyConverter._with_position(parsed, position) == expected
+
+    @pytest.mark.internal
+    def test_anchor_is_left_out(self):
+        """The anchor of the decomposed frequency is not carried over."""
+        assert FrequencyConverter._with_position(ParsedFrequency("Q", "E", "DEC", 1), "E") == "QE"
+
+    def test_conversion_without_source_position_raises_no_pandas_warning(self):
+        """A monthly index at month end converts to quarterly without any deprecation warning."""
+        index = pd.date_range("2023-01-31", periods=6, freq="ME")
+        series = pd.Series(range(1, 7), index=index, dtype=float)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            result = FrequencyConverter().convert_frequency(series, "Q", method="sum")
+        # Valeur d'or : 1+2+3 = 6 puis 4+5+6 = 15
+        assert result.tolist() == [6.0, 15.0]

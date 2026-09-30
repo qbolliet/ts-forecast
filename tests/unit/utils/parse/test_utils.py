@@ -11,6 +11,9 @@ multipliers (``'2MS'``) and casing sensitivity.
 """
 from __future__ import annotations
 
+import warnings
+
+import pandas as pd
 import pytest
 from pandas.tseries.frequencies import to_offset
 
@@ -291,3 +294,86 @@ class TestBuiltStringIsValidPandas:
         suffix (``'WS'``, ``'BE'``) unknown to pandas.
         """
         assert to_offset(build_frequency_string(frequency, position=position)) is not None
+
+
+class TestDefaultPosition:
+    """``default_position`` turns a bare base code into a pandas alias (period end by default).
+
+    A bare ``'M'`` / ``'Q'`` / ``'Y'`` / ``'SM'`` is a base code, not a pandas alias any more
+    (deprecated in pandas 2.2, removed in pandas 3). Callers that hand the string to pandas
+    pass ``default_position='E'``; the others (durations, comparisons) keep the bare code.
+    """
+
+    @pytest.mark.parametrize("frequency", ["M", "Q", "Y", "SM"])
+    def test_bare_code_stays_bare_without_default_position(self, frequency):
+        """Without ``default_position`` the string is the faithful assembly of its components."""
+        assert build_frequency_string(frequency) == frequency
+
+    @pytest.mark.parametrize(
+        "frequency, expected",
+        [("M", "ME"), ("Q", "QE"), ("Y", "YE"), ("SM", "SME")],
+    )
+    def test_end_default(self, frequency, expected):
+        """Position-aware frequencies get the period-end variant."""
+        assert build_frequency_string(frequency, default_position="E") == expected
+
+    @pytest.mark.parametrize(
+        "frequency, expected",
+        [("M", "MS"), ("Q", "QS"), ("Y", "YS"), ("SM", "SMS")],
+    )
+    def test_start_default(self, frequency, expected):
+        """The default position can be the period start."""
+        assert build_frequency_string(frequency, default_position="S") == expected
+
+    @pytest.mark.parametrize("position", ["S", "E"])
+    @pytest.mark.parametrize("default_position", ["S", "E", None])
+    def test_explicit_position_wins(self, position, default_position):
+        """``default_position`` never overrides an explicit position."""
+        assert build_frequency_string("M", position, default_position=default_position) == f"M{position}"
+
+    @pytest.mark.parametrize("frequency", ["D", "B", "W", "h", "min", "s", "ms", "us", "ns"])
+    def test_ignored_without_start_end_variant(self, frequency):
+        """Frequencies pandas has no start / end variant for stay unchanged."""
+        assert build_frequency_string(frequency, default_position="E") == frequency
+
+    @pytest.mark.parametrize(
+        "frequency, suffix, multiplier, expected",
+        [
+            ("Q", "DEC", 1, "QE-DEC"),
+            ("Q", "FEB", 3, "3QE-FEB"),
+            ("M", None, 2, "2ME"),
+            ("W", "MON", 2, "2W-MON"),
+        ],
+    )
+    def test_suffix_and_multiplier_are_kept(self, frequency, suffix, multiplier, expected):
+        """The anchor and the multiplier go through unchanged."""
+        assert build_frequency_string(frequency, suffix=suffix, multiplier=multiplier, default_position="E") == expected
+
+    @pytest.mark.parametrize("default_position", ["X", "start", "s", ""])
+    def test_invalid_default_position_raises(self, default_position):
+        """Only ``'S'``, ``'E'`` and None are accepted."""
+        with pytest.raises(ValueError, match="default_position"):
+            build_frequency_string("M", default_position=default_position)
+
+    @pytest.mark.parametrize("frequency", ["D", "B", "W", "SM", "M", "Q", "Y", "h", "min", "s"])
+    @pytest.mark.parametrize("default_position", ["S", "E"])
+    def test_result_is_a_pandas_alias_without_warning(self, frequency, default_position):
+        """Property: with a default position, pandas reads the string and does not deprecate it."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert to_offset(build_frequency_string(frequency, default_position=default_position)) is not None
+
+    @pytest.mark.parametrize("frequency", ["M", "Q", "Y", "SM"])
+    def test_bare_code_is_deprecated_by_pandas(self, frequency):
+        """Why the parameter exists: the bare code makes pandas warn (and fails in pandas 3)."""
+        with pytest.warns(FutureWarning, match="deprecated"):
+            to_offset(build_frequency_string(frequency))
+
+    @pytest.mark.parametrize("frequency", ["M", "Q", "Y", "SM"])
+    def test_end_alias_generates_the_dates_of_the_former_bare_alias(self, frequency):
+        """Property: the end alias generates the dates the bare alias generated in pandas 2."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            former = pd.date_range("2023-01-01", periods=6, freq=frequency)
+        current = pd.date_range("2023-01-01", periods=6, freq=build_frequency_string(frequency, default_position="E"))
+        assert list(current) == list(former)

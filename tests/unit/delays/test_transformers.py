@@ -1447,3 +1447,30 @@ class TestAuxiliaryFunctions:
         """Validation de stratégie invalide (chaîne)."""
         with pytest.raises(ValueError, match="Invalid strategy"):
             _resolve_strategy('invalid', ('France',))
+
+
+# ============================================================================
+# Tests de la classe MaskTransformer - alias pandas des périodes de masquage
+# ============================================================================
+
+class TestMaskTransformerPandasAliases:
+    """Periods of a daily index are generated with alias pandas accepts, position-less codes included."""
+
+    @pytest.mark.parametrize(
+        "mask_frequency, expected_masked",
+        [
+            # Valeur d'or : 2 derniers jours de chaque mois complet (janvier, février 2024 bissextile, mars) ;
+            # avril, incomplet, n'est pas masqué
+            pytest.param('M', ['01-30', '01-31', '02-28', '02-29', '03-30', '03-31'], id="monthly"),
+            # Le premier trimestre est le seul complet dans les 120 jours de la série
+            pytest.param('Q', ['03-30', '03-31'], id="quarterly"),
+        ],
+    )
+    def test_position_less_frequency_raises_no_pandas_deprecation(self, mask_frequency, expected_masked):
+        """A daily index has no position: ``'M'`` / ``'Q'`` must not reach pandas as bare aliases."""
+        series = pd.Series(range(120), index=pd.date_range('2024-01-01', periods=120, freq='D'), name='x', dtype=float)
+        masker = MaskTransformer(n_obs=2, mask_frequency=mask_frequency, how='last')
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error', message=".*is deprecated", category=FutureWarning)
+            masked = masker.fit_transform(series)
+        assert masked[masked.isna()].index.strftime('%m-%d').tolist() == expected_masked

@@ -70,27 +70,6 @@ tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_w
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflowPanel::test_panel_each_entity_has_delays
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflowPanel::test_panel_last_observation_per_entity
 
-# prompt U6
-tests/unit/utils/frequency/test_normalizer.py::TestConverterIntegration::test_converter_handle_a_alias
-tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_a_in_dictionaries
-tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_a_literal_conversion
-tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_a_same_order_as_y
-tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_a_validate
-tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_normalize_a_with_anchor
-tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_normalize_a_with_position
-tests/unit/utils/frequency/test_normalizer.py::TestDeprecatedAliasNormalization::test_normalize_deprecated_alias_a
-tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerComplexStrings::test_normalize_anchor_strings_year
-tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerComplexStrings::test_normalize_position_strings_end
-tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerComplexStrings::test_normalize_position_strings_start
-tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerIntegration::test_normalize_complex_then_is_higher_frequency
-tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerIntegration::test_real_world_frequency_detector_output
-tests/unit/utils/frequency/test_normalizer.py::TestFrequencyNormalizerIntegration::test_validate_complex_strings
-tests/unit/utils/frequency/test_normalizer.py::TestNormalizeFrequencyReturnFormats::test_return_format_base_default
-tests/unit/utils/frequency/test_normalizer.py::TestNormalizeFrequencyReturnFormats::test_return_format_base_explicit
-tests/unit/utils/frequency/test_normalizer.py::TestNormalizeFrequencyReturnFormats::test_return_format_components
-tests/unit/utils/frequency/test_normalizer.py::TestNormalizeFrequencyReturnFormats::test_return_format_full
-tests/unit/utils/frequency/test_normalizer.py::TestNormalizeFrequencyReturnFormats::test_return_format_with_position
-
 # prompt U7
 tests/unit/utils/frequency/test_detector.py::TestDetectDatasetFrequency::test_dataframe_with_3level_multiindex
 tests/unit/utils/frequency/test_detector.py::TestDetectFrequencyWrapper::test_series_multiindex_without_consistency

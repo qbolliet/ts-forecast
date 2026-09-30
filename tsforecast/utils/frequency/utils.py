@@ -112,7 +112,8 @@ def normalize_frequency(
           ``(freq, position, suffix, multiplier)``
 
     Raises:
-        ValueError: If frequency is invalid or return_format is unsupported
+        ValueError: If frequency is invalid (not a string, unsupported, or with an
+            anchor that does not exist in pandas) or return_format is unsupported
 
     Examples:
         >>> # Default: backward compatible base extraction
@@ -139,44 +140,45 @@ def normalize_frequency(
         >>> normalize_frequency('D', return_format='components')
         ParsedFrequency(freq='D', position=None, suffix=None, multiplier=1)
     """
-    if return_format == 'base':
-        # Comportement actuel (backward compatible)
-        return _normalizer.normalize(frequency)
-
-    elif return_format == 'components':
-        # Décomposition complète via parse_frequency
-        try:
-            parsed = parse_frequency(frequency)
-            return parsed._replace(freq=_normalizer.normalize(parsed.freq))
-        except ValueError:
-            # Fallback pour les noms littéraux ('daily', 'monthly', etc.)
-            return ParsedFrequency(_normalizer.normalize(frequency), None, None)
-
-    elif return_format == 'with_position':
-        # Base + position si présente
-        try:
-            parsed = parse_frequency(frequency)
-            normalized_base = _normalizer.normalize(parsed.freq)
-            if parsed.position:
-                return f"{normalized_base}{parsed.position}"
-            return normalized_base
-        except ValueError:
-            return _normalizer.normalize(frequency)
-
-    elif return_format == 'full':
-        # Validation + retour de la chaîne complète, multiplicateur en tête compris
-        # ('2MS', détecté par pandas sur un index bimestriel)
-        try:
-            _normalizer.normalize(parse_frequency(frequency).freq)  # Validation seulement
-        except ValueError:
-            _normalizer.normalize(frequency)  # Validation via normalize
-        return frequency
-
-    else:
+    # Vérification du format demandé, avant toute analyse de la fréquence
+    if return_format not in ('base', 'with_position', 'full', 'components'):
         raise ValueError(
             f"Invalid return_format: {return_format}. "
             f"Must be one of: 'base', 'with_position', 'full', 'components'"
         )
+
+    # Format de base -> normalisation
+    if return_format == 'base':
+        # Comportement actuel (backward compatible)
+        return _normalizer.normalize(frequency)
+
+    # Validation de la chaîne complète (type, base, ancre) : erreur uniforme quel que
+    # soit le format, y compris pour une entrée qui n'est pas une chaîne
+    _normalizer.normalize(frequency)
+
+    # Format complet
+    if return_format == 'full':
+        # Chaîne d'entrée telle quelle, multiplicateur en tête compris
+        # ('2MS', détecté par pandas sur un index bimestriel)
+        return frequency
+
+    # Parsing pour les composants
+    try:
+        parsed = parse_frequency(frequency)
+    except ValueError:
+        # Nom littéral que parse_frequency ne lit pas ('business_daily') : ni position,
+        # ni ancre, ni multiplicateur
+        base = _normalizer.normalize(frequency)
+        return ParsedFrequency(base, None, None) if return_format == 'components' else base
+
+    # Composants
+    if return_format == 'components':
+        # Décomposition complète via parse_frequency
+        return parsed._replace(freq=_normalizer.normalize(parsed.freq))
+
+    # 'with_position' : base + position si présente
+    normalized_base = _normalizer.normalize(parsed.freq)
+    return f"{normalized_base}{parsed.position}" if parsed.position else normalized_base
 
 # Fonction de conversion en expression littéraire
 def to_literal(frequency: Union[FrequencyType, UserFrequencyType]) -> str:
@@ -216,17 +218,28 @@ def to_code(frequency: Union[FrequencyType, UserFrequencyType]) -> str:
 
 # Fonction de conversion en code de fréquence pandas
 def to_pandas_freq(frequency: Union[FrequencyType, UserFrequencyType]) -> str:
-    """Convert frequency to pandas frequency code.
+    """Convert frequency to a pandas frequency alias.
+
+    A frequency with start and end variants but no position gets its end variant
+    (``'M'`` → ``'ME'``), the bare aliases being deprecated in pandas 2.2 and removed
+    in pandas 3. To get the base code (``'M'``), use :func:`normalize_frequency` or
+    :func:`to_code`.
 
     Args:
         frequency: Frequency in any supported format (pandas code or literal name).
 
     Returns:
-        Pandas frequency code string.
+        Pandas frequency alias string.
+
+    Raises:
+        ValueError: If frequency is not a string, is not supported, or has an anchor
+            that does not exist in pandas.
 
     Examples:
         >>> to_pandas_freq('monthly')
-        'M'
+        'ME'
+        >>> to_pandas_freq('MS')
+        'MS'
         >>> to_pandas_freq('D')
         'D'
     """
@@ -303,51 +316,23 @@ def get_frequency_order(frequency: Union[FrequencyType, UserFrequencyType]) -> f
         frequency: Frequency to get order for. Can be pandas code or literal name.
 
     Returns:
-        Frequency order as float. Higher number means lower frequency/granularity.
-        Returns 0 if frequency is not found in the order mapping.
+        Frequency order, an ``int`` for most codes and a ``float`` for ``'B'`` (7.5)
+        and ``'SM'`` (8.5). Higher number means lower frequency/granularity. A
+        leading multiplier is ignored (``'2MS'`` has the order of ``'M'``).
+
+    Raises:
+        ValueError: If frequency is not supported.
 
     Examples:
         >>> get_frequency_order('daily')
-        7.0
+        7
         >>> get_frequency_order('monthly')
-        9.0
+        9
         >>> get_frequency_order('quarterly') > get_frequency_order('monthly')
         True
     """
     base_freq = normalize_frequency(frequency)
-    return _normalizer._frequency_order.get(base_freq, 0)
-
-# Conversion entre fréquences
-def convert_frequency(
-    value: Union[pd.Series, pd.DataFrame],
-    to_unit: str,
-    **kwargs
-) -> float:
-    """Convert data from one frequency to another.
-
-    Args:
-        value: Time series data to convert (Series or DataFrame)
-        to_unit: Target frequency
-        **kwargs: Additional conversion parameters (method, fill_method, etc.)
-
-    Returns:
-        Converted time series data
-
-    Raises:
-        ValueError: If conversion parameters are invalid
-
-    Examples:
-        >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
-        >>> series = pd.Series([1, 2, 3, 4, 5], index=dates)
-        >>> monthly = convert_frequency(series, 'daily', 'monthly', method='mean')
-        >>> len(monthly)
-        1
-    """
-    # Import local pour éviter l'import circulaire
-    from .converter import FrequencyConverter
-
-    converter = FrequencyConverter()
-    return converter.convert(value, to_unit, **kwargs)
+    return _normalizer._frequency_order[base_freq]
 
 # Fonction de détection de la fréquence d'une série
 def detect_frequency(data: Union[pd.Series, pd.DataFrame],

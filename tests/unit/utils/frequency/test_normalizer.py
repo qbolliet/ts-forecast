@@ -1,14 +1,31 @@
-"""Tests for FrequencyNormalizer class.
+"""Tests for the ``FrequencyNormalizer`` class.
 
-This test suite verifies:
-1. Backward compatibility with simple codes and literal names
-2. New functionality for complex pandas frequency strings
-3. Edge cases and error handling
-4. Integration with other frequency utilities
+Covers the mappings between codes and literal names, the extraction of the base
+code from complex pandas strings (position, anchor, multiplier), the rebuilding
+of pandas strings (``to_pandas_freq`` / ``to_dateoffset``), the explicit
+rejection of the pandas aliases abandoned by the package (``'A'``, ``'AS'``,
+``'AE'``), ``validate`` / ``are_compatible_frequencies`` and the comparison
+``is_higher_frequency``.
+
+The module-level functions of ``utils.py`` (``normalize_frequency`` and its
+``return_format``, ``get_frequency_order``...) are tested in ``test_utils.py``.
 """
-import pytest
+import warnings
+from typing import get_args
+
 import pandas as pd
+import pytest
+
 from tsforecast.utils.frequency.normalizer import FrequencyNormalizer
+from tsforecast.utils.frequency.types import FrequencyType, UserFrequencyType
+
+# Codes supportés par le package et noms littéraux associés (valeurs d'or, écrites
+# indépendamment des dictionnaires internes du normaliseur)
+CODE_TO_LITERAL = {
+    'ns': 'nanosecond', 'us': 'microsecond', 'ms': 'millisecond', 's': 'second',
+    'min': 'minute', 'h': 'hourly', 'D': 'daily', 'B': 'business_daily',
+    'W': 'weekly', 'SM': 'semi_monthly', 'M': 'monthly', 'Q': 'quarterly', 'Y': 'annual',
+}
 
 
 class TestFrequencyNormalizerBasic:
@@ -53,10 +70,16 @@ class TestFrequencyNormalizerBasic:
         assert normalizer.to_code('daily') == 'D'
         assert normalizer.to_code('M') == 'M'
 
-    def test_to_pandas_freq_alias(self, normalizer):
-        """Test that to_pandas_freq() is an alias for normalize()."""
-        assert normalizer.to_pandas_freq('monthly') == 'M'
-        assert normalizer.to_pandas_freq('Q') == 'Q'
+    def test_to_pandas_freq_of_plain_codes_and_literals(self, normalizer):
+        """to_pandas_freq() maps literal names and plain codes to pandas aliases (end variant by default)."""
+        assert normalizer.to_pandas_freq('monthly') == 'ME'
+        assert normalizer.to_pandas_freq('Q') == 'QE'
+        assert normalizer.to_pandas_freq('D') == 'D'
+
+    def test_to_pandas_freq_is_no_longer_an_alias_of_normalize(self, normalizer):
+        """Unlike normalize(), to_pandas_freq() keeps the position and the anchor."""
+        assert normalizer.normalize('QE-DEC') == 'Q'
+        assert normalizer.to_pandas_freq('QE-DEC') == 'QE-DEC'
 
 
 class TestFrequencyNormalizerComplexStrings:
@@ -71,15 +94,15 @@ class TestFrequencyNormalizerComplexStrings:
         """Test extraction from position strings with 'S' suffix (start)."""
         assert normalizer.normalize('MS') == 'M'
         assert normalizer.normalize('QS') == 'Q'
-        assert normalizer.normalize('AS') == 'Y'  # 'A' normalized to 'Y'
         assert normalizer.normalize('YS') == 'Y'
+        assert normalizer.normalize('SMS') == 'SM'
 
     def test_normalize_position_strings_end(self, normalizer):
         """Test extraction from position strings with 'E' suffix (end)."""
         assert normalizer.normalize('ME') == 'M'
         assert normalizer.normalize('QE') == 'Q'
-        assert normalizer.normalize('AE') == 'Y'  # 'A' normalized to 'Y'
         assert normalizer.normalize('YE') == 'Y'
+        assert normalizer.normalize('SME') == 'SM'
 
     def test_normalize_anchor_strings_quarter(self, normalizer):
         """Test extraction from quarter anchor strings."""
@@ -91,11 +114,10 @@ class TestFrequencyNormalizerComplexStrings:
 
     def test_normalize_anchor_strings_year(self, normalizer):
         """Test extraction from year anchor strings."""
-        assert normalizer.normalize('AS-JAN') == 'Y'
-        assert normalizer.normalize('AE-DEC') == 'Y'
-        assert normalizer.normalize('AS-MAR') == 'Y'
         assert normalizer.normalize('YS-JAN') == 'Y'
         assert normalizer.normalize('YE-DEC') == 'Y'
+        assert normalizer.normalize('YS-MAR') == 'Y'
+        assert normalizer.normalize('YE-JUN') == 'Y'
 
     def test_normalize_week_anchor_strings(self, normalizer):
         """Test extraction from week anchor strings."""
@@ -292,7 +314,7 @@ class TestFrequencyNormalizerIntegration:
         """Test that normalized complex strings work with is_higher_frequency()."""
         # This should work without manual split() workaround
         assert normalizer.is_higher_frequency('MS', 'QE-DEC') is True
-        assert normalizer.is_higher_frequency('QE-DEC', 'AS-JAN') is True
+        assert normalizer.is_higher_frequency('QE-DEC', 'YS-JAN') is True
         assert normalizer.is_higher_frequency('D', 'MS') is True
 
     def test_normalize_complex_then_are_compatible(self, normalizer):
@@ -315,7 +337,7 @@ class TestFrequencyNormalizerIntegration:
         detector_outputs = [
             'MS',      # Month start
             'QE-DEC',  # Quarter end December (fiscal year)
-            'AS-JAN',  # Year start January
+            'YS-JAN',  # Year start January
             'W-SUN',   # Week ending Sunday
             'D',       # Daily (unchanged)
             'M',       # Monthly (unchanged)
@@ -343,241 +365,462 @@ class TestFrequencyNormalizerIntegration:
 
     def test_validate_complex_strings(self, normalizer):
         """Test that validate() works correctly with complex strings."""
-        complex_strings = ['MS', 'ME', 'QS', 'QE', 'QE-DEC', 'AS-JAN', 'W-SUN']
+        complex_strings = ['MS', 'ME', 'QS', 'QE', 'QE-DEC', 'YS-JAN', 'YE-DEC', 'W-SUN']
 
         for freq in complex_strings:
             assert normalizer.validate(freq) is True, f"Failed to validate {freq}"
 
 
-class TestDeprecatedAliasNormalization:
-    """Test normalization of deprecated 'A' alias to 'Y'."""
+# Alias pandas abandonnés : ancienne écriture de l'année (dépréciée par pandas 2.2 au profit
+# de 'Y' / 'YS' / 'YE'), avec position, ancre et multiplicateur
+REMOVED_YEAR_ALIASES = ['A', 'AS', 'AE', 'AS-JAN', 'AE-DEC', 'AS-MAR', 'A-DEC', '2A', '2AS-JAN']
+
+
+class TestRemovedAliasRejection:
+    """The pandas aliases ``'A'`` / ``'AS'`` / ``'AE'`` are explicitly rejected.
+
+    Their abandon is deliberate: ``normalize`` stopped mapping ``'A'`` to ``'Y'`` in commit
+    ``9ce944e`` and ``'A'`` left ``FrequencyType`` in ``0ec1f29``. The year is written
+    ``'Y'`` / ``'YS'`` / ``'YE'``. Every entry point must fail loudly rather than translate
+    the old spelling.
+    """
 
     @pytest.fixture
     def normalizer(self):
         """Create a FrequencyNormalizer instance for testing."""
         return FrequencyNormalizer()
 
-    def test_normalize_deprecated_alias_a(self, normalizer):
-        """Test that 'A' is recognized but normalized to 'Y'."""
-        assert normalizer.normalize('A') == 'Y'
+    @pytest.mark.parametrize("alias", REMOVED_YEAR_ALIASES)
+    @pytest.mark.parametrize("method", ['normalize', 'to_literal', 'to_code', 'to_pandas_freq', 'to_dateoffset'])
+    def test_every_conversion_rejects_the_alias(self, normalizer, method, alias):
+        """Each conversion method raises ``ValueError('Unsupported frequency ...')``."""
+        with pytest.raises(ValueError, match="Unsupported frequency"):
+            getattr(normalizer, method)(alias)
 
-    def test_normalize_a_with_position(self, normalizer):
-        """Test that 'A' with position suffixes normalizes to 'Y'."""
-        assert normalizer.normalize('AS') == 'Y'
-        assert normalizer.normalize('AE') == 'Y'
+    @pytest.mark.parametrize("alias", REMOVED_YEAR_ALIASES)
+    def test_error_message_names_the_input_and_lists_the_year_code(self, normalizer, alias):
+        """The message quotes the rejected string and offers ``'Y'`` among the supported codes."""
+        with pytest.raises(ValueError) as error:
+            normalizer.normalize(alias)
+        message = str(error.value)
+        assert alias in message
+        assert "'Y'" in message and "'annual'" in message
 
-    def test_normalize_a_with_anchor(self, normalizer):
-        """Test that 'A' with anchor normalizes to 'Y'."""
-        assert normalizer.normalize('AS-JAN') == 'Y'
-        assert normalizer.normalize('AE-DEC') == 'Y'
-        assert normalizer.normalize('AS-MAR') == 'Y'
+    @pytest.mark.parametrize("alias", REMOVED_YEAR_ALIASES)
+    def test_validate_is_false(self, normalizer, alias):
+        """``validate`` reports the alias as unsupported instead of raising."""
+        assert normalizer.validate(alias) is False
 
-    def test_a_in_dictionaries(self, normalizer):
-        """Test that 'A' is recognized in dictionaries."""
-        assert 'A' in normalizer._pandas_to_literal
-        assert 'A' in normalizer._frequency_order
+    @pytest.mark.parametrize("alias", ['A', 'AS-JAN', '2A'])
+    def test_comparisons_reject_the_alias_on_either_side(self, normalizer, alias):
+        """``is_higher_frequency`` does not fall back on a default order for the alias."""
+        with pytest.raises(ValueError, match="Unsupported frequency"):
+            normalizer.is_higher_frequency(alias, 'M')
+        with pytest.raises(ValueError, match="Unsupported frequency"):
+            normalizer.is_higher_frequency('M', alias)
 
-    def test_a_same_order_as_y(self, normalizer):
-        """Test that 'A' and 'Y' have the same order."""
-        assert normalizer._frequency_order['A'] == normalizer._frequency_order['Y']
+    @pytest.mark.parametrize("alias", ['A', 'AS-JAN'])
+    def test_are_compatible_frequencies_is_false(self, normalizer, alias):
+        """A pair containing the alias is not compatible."""
+        assert normalizer.are_compatible_frequencies(alias, 'M') is False
+        assert normalizer.are_compatible_frequencies('M', alias) is False
 
-    def test_a_literal_conversion(self, normalizer):
-        """Test that 'A' converts to 'annual' literal."""
-        assert normalizer.to_literal('A') == 'annual'
-        assert normalizer.to_literal('Y') == 'annual'
+    @pytest.mark.internal
+    def test_alias_is_absent_from_the_internal_tables(self, normalizer):
+        """``'A'`` has no entry in the code, literal or order tables."""
+        assert 'A' not in normalizer._pandas_to_literal
+        assert 'A' not in normalizer._frequency_order
+        assert 'A' not in normalizer._literal_to_pandas.values()
 
-    def test_a_validate(self, normalizer):
-        """Test that 'A' and variations are valid."""
-        assert normalizer.validate('A') is True
-        assert normalizer.validate('AS') is True
-        assert normalizer.validate('AE') is True
-        assert normalizer.validate('AS-JAN') is True
+    def test_alias_is_absent_from_the_declared_types(self):
+        """``FrequencyType`` no longer declares ``'A'`` (nor the ``'T'`` minute alias)."""
+        assert 'A' not in get_args(FrequencyType)
+        assert 'T' not in get_args(FrequencyType)
 
-
-
-class TestNormalizeFrequencyReturnFormats:
-    """Test normalize_frequency() with different return formats."""
-
-    def test_return_format_base_default(self):
-        """Test default 'base' format (backward compatible)."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-
-        assert normalize_frequency('QE-DEC') == 'Q'
-        assert normalize_frequency('MS') == 'M'
-        assert normalize_frequency('AS-JAN') == 'Y'
-        assert normalize_frequency('D') == 'D'
-
-    def test_return_format_base_explicit(self):
-        """Test explicit 'base' format."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-
-        assert normalize_frequency('QE-DEC', return_format='base') == 'Q'
-        assert normalize_frequency('MS', return_format='base') == 'M'
-        assert normalize_frequency('AS-JAN', return_format='base') == 'Y'
-
-    def test_return_format_with_position(self):
-        """Test 'with_position' format."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-
-        assert normalize_frequency('QE-DEC', return_format='with_position') == 'QE'
-        assert normalize_frequency('MS', return_format='with_position') == 'MS'
-        assert normalize_frequency('D', return_format='with_position') == 'D'
-        assert normalize_frequency('AS-JAN', return_format='with_position') == 'YS'
-        assert normalize_frequency('W-SUN', return_format='with_position') == 'W'
-
-    def test_return_format_full(self):
-        """Test 'full' format (validated original)."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-
-        assert normalize_frequency('QE-DEC', return_format='full') == 'QE-DEC'
-        assert normalize_frequency('MS', return_format='full') == 'MS'
-        assert normalize_frequency('D', return_format='full') == 'D'
-        assert normalize_frequency('AS-JAN', return_format='full') == 'AS-JAN'
-
-    def test_return_format_components(self):
-        """Test 'components' format (tuple)."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-
-        assert normalize_frequency('QE-DEC', return_format='components') == ('Q', 'E', 'DEC', 1)
-        assert normalize_frequency('MS', return_format='components') == ('M', 'S', None, 1)
-        assert normalize_frequency('D', return_format='components') == ('D', None, None, 1)
-        assert normalize_frequency('AS-JAN', return_format='components') == ('Y', 'S', 'JAN', 1)
-
-    def test_return_format_invalid(self):
-        """Test invalid return_format raises ValueError."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-
-        with pytest.raises(ValueError, match="Invalid return_format"):
-            normalize_frequency('M', return_format='invalid')
-
-        with pytest.raises(ValueError, match="Invalid return_format"):
-            normalize_frequency('D', return_format='xyz')
-
-    def test_return_format_with_literal_names(self):
-        """Test return formats work with literal names."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-
-        assert normalize_frequency('monthly', return_format='base') == 'M'
-        assert normalize_frequency('monthly', return_format='components') == ('M', None, None, 1)
-        assert normalize_frequency('quarterly', return_format='components') == ('Q', None, None, 1)
-        assert normalize_frequency('business_daily', return_format='components') == ('B', None, None, 1)
-        assert normalize_frequency('annual', return_format='base') == 'Y'
-
-    def test_return_format_all_formats_for_same_input(self):
-        """Test all formats for the same input give consistent results."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-
-        freq = 'QE-DEC'
-
-        # Base extraction
-        base = normalize_frequency(freq, return_format='base')
-        assert base == 'Q'
-
-        # With position
-        with_pos = normalize_frequency(freq, return_format='with_position')
-        assert with_pos == 'QE'
-
-        # Full
-        full = normalize_frequency(freq, return_format='full')
-        assert full == 'QE-DEC'
-
-        # Components
-        components = normalize_frequency(freq, return_format='components')
-        assert components == ('Q', 'E', 'DEC', 1)
-
-        # Verify consistency
-        assert components.freq == base
-        assert f"{components.freq}{components.position}" == with_pos
-
-
-class TestNormalizeFrequencyMultiplier:
-    """``normalize_frequency`` with a leading multiplier, in every return format."""
+    @pytest.mark.parametrize("alias", ['T', 'H'])
+    def test_legacy_subdaily_aliases_are_rejected_too(self, normalizer, alias):
+        """The historical ``'T'`` (minute) and ``'H'`` (hour) aliases are not supported either."""
+        with pytest.raises(ValueError, match="Unsupported frequency"):
+            normalizer.normalize(alias)
 
     @pytest.mark.parametrize(
-        "frequency, return_format, expected",
+        "modern", ['Y', 'YS', 'YE', 'YS-JAN', 'YE-DEC', 'annual'],
+    )
+    def test_year_is_written_with_y(self, normalizer, modern):
+        """The supported spellings of the year all normalize to ``'Y'``."""
+        assert normalizer.normalize(modern) == 'Y'
+
+
+class TestSupportedFrequencyMappings:
+    """Tables between codes and literal names, and their declared types."""
+
+    @pytest.fixture
+    def normalizer(self):
+        """Create a FrequencyNormalizer instance for testing."""
+        return FrequencyNormalizer()
+
+    def test_declared_codes_are_the_supported_codes(self):
+        """``FrequencyType`` declares exactly the supported codes (no phantom value)."""
+        assert set(get_args(FrequencyType)) == set(CODE_TO_LITERAL)
+
+    def test_declared_literals_are_the_supported_literals(self):
+        """``UserFrequencyType`` declares exactly the supported literal names."""
+        assert set(get_args(UserFrequencyType)) == set(CODE_TO_LITERAL.values())
+
+    @pytest.mark.parametrize("code, literal", list(CODE_TO_LITERAL.items()))
+    def test_code_and_literal_correspondence(self, normalizer, code, literal):
+        """Each code is its own normal form and each literal name maps to its code."""
+        assert normalizer.normalize(code) == code
+        assert normalizer.normalize(literal) == code
+        assert normalizer.to_literal(code) == literal
+
+    @pytest.mark.parametrize("code, literal", list(CODE_TO_LITERAL.items()))
+    def test_round_trip_code_literal_code(self, normalizer, code, literal):
+        """``to_code(to_literal(code))`` is the identity, and ``to_literal`` is idempotent."""
+        assert normalizer.to_code(normalizer.to_literal(code)) == code
+        assert normalizer.to_literal(literal) == literal
+
+    @pytest.mark.parametrize("code, literal", list(CODE_TO_LITERAL.items()))
+    def test_to_pandas_freq_of_a_literal_name_is_the_alias_of_its_code(self, normalizer, code, literal):
+        """A literal name is rebuilt as the pandas alias it stands for (end variant by default)."""
+        expected = f"{code}E" if code in {'M', 'Q', 'Y', 'SM'} else code
+        assert normalizer.to_pandas_freq(literal) == expected
+
+    @pytest.mark.parametrize("value", ['M', 'monthly', 'QE-DEC', 'MS', 'W-MON', '2MS'])
+    def test_to_code_is_normalize(self, normalizer, value):
+        """``to_code`` gives the same result as ``normalize``."""
+        assert normalizer.to_code(value) == normalizer.normalize(value)
+
+    @pytest.mark.parametrize("value", ['xyz', '', 'A', None, 5])
+    def test_to_code_fails_like_normalize(self, normalizer, value):
+        """``to_code`` raises the very same error as ``normalize``."""
+        with pytest.raises(ValueError) as expected:
+            normalizer.normalize(value)
+        with pytest.raises(ValueError) as obtained:
+            normalizer.to_code(value)
+        assert str(obtained.value) == str(expected.value)
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [('QE-DEC', 'quarterly'), ('MS', 'monthly'), ('YS-JAN', 'annual'), ('W-MON', 'weekly'), ('2D', 'daily')],
+    )
+    def test_to_literal_of_complex_strings(self, normalizer, value, expected):
+        """The literal name of a complex string is the one of its base code."""
+        assert normalizer.to_literal(value) == expected
+
+    @pytest.mark.internal
+    def test_order_table_covers_exactly_the_codes(self, normalizer):
+        """The granularity order is defined for every supported code and nothing else."""
+        assert set(normalizer._frequency_order) == set(CODE_TO_LITERAL)
+
+
+class TestRebuiltPandasStrings:
+    """``to_pandas_freq`` / ``to_dateoffset`` keep position, anchor and multiplier."""
+
+    @pytest.fixture
+    def normalizer(self):
+        """Create a FrequencyNormalizer instance for testing."""
+        return FrequencyNormalizer()
+
+    @pytest.mark.parametrize(
+        "value",
+        ['MS', 'ME', 'QS', 'QE', 'YS', 'YE', 'SMS', 'SME', 'QE-DEC', 'QS-FEB', 'YS-JAN', 'YE-JUN',
+         'W-MON', 'W-SUN', '2MS', '3QS-FEB', '2W-MON', '15min', '2D'],
+    )
+    def test_valid_pandas_string_is_unchanged(self, normalizer, value):
+        """A valid pandas string goes through the parse / normalize / rebuild round trip unchanged."""
+        assert normalizer.to_pandas_freq(value) == value
+
+    @pytest.mark.parametrize(
+        "value, expected",
         [
-            # 'base' et 'with_position' : le multiplicateur n'y figure pas
-            pytest.param("2MS", "base", "M", id="base"),
-            pytest.param("3QS-FEB", "base", "Q", id="base-anchored"),
-            pytest.param("2MS", "with_position", "MS", id="with-position"),
-            pytest.param("15min", "with_position", "min", id="with-position-subdaily"),
-            # 'full' : chaîne d'origine, multiplicateur compris
-            pytest.param("2MS", "full", "2MS", id="full"),
-            pytest.param("3QS-FEB", "full", "3QS-FEB", id="full-anchored"),
-            # 'components' : le multiplicateur est le 4e élément
-            pytest.param("2MS", "components", ("M", "S", None, 2), id="components"),
-            pytest.param("3QS-FEB", "components", ("Q", "S", "FEB", 3), id="components-anchored"),
-            pytest.param("15min", "components", ("min", None, None, 15), id="components-subdaily"),
-            pytest.param("2W-MON", "components", ("W", None, "MON", 2), id="components-weekly-anchor"),
+            pytest.param('MS', pd.offsets.MonthBegin(), id="month-start"),
+            pytest.param('ME', pd.offsets.MonthEnd(), id="month-end"),
+            pytest.param('QS', pd.offsets.QuarterBegin(startingMonth=1), id="quarter-start"),
+            pytest.param('QE-DEC', pd.offsets.QuarterEnd(startingMonth=12), id="quarter-end"),
+            pytest.param('YS-JAN', pd.offsets.YearBegin(month=1), id="year-start"),
+            pytest.param('YE-JUN', pd.offsets.YearEnd(month=6), id="year-end-june"),
+            pytest.param('SMS', pd.offsets.SemiMonthBegin(), id="semi-month-start"),
+            pytest.param('W-MON', pd.offsets.Week(weekday=0), id="week-monday"),
+            pytest.param('2MS', pd.offsets.MonthBegin(2), id="multiplied"),
+            pytest.param('daily', pd.offsets.Day(), id="literal-daily"),
+            pytest.param('business_daily', pd.offsets.BusinessDay(), id="literal-business-daily"),
         ],
     )
-    def test_formats(self, frequency, return_format, expected):
-        """Base and position exclude the multiplier; 'full' and 'components' keep it."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-        assert normalize_frequency(frequency, return_format=return_format) == expected
+    def test_to_dateoffset_keeps_the_position(self, normalizer, value, expected):
+        """The start / end position and the anchor survive the conversion into an offset.
 
-    def test_components_is_a_parsed_frequency(self):
-        """Components are reachable by name."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-        from tsforecast.utils.parse import ParsedFrequency
-        parsed = normalize_frequency("2MS", return_format="components")
-        assert isinstance(parsed, ParsedFrequency)
-        assert parsed.multiplier == 2
+        The start and end positions give different offsets (``MonthBegin`` vs ``MonthEnd``),
+        contrary to what the first version of ``frequency_normalizer.ipynb`` reported.
+        """
+        # Aucun alias déprécié ici : toute alerte pandas serait une régression
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            assert normalizer.to_dateoffset(value) == expected
 
-    @pytest.mark.parametrize("return_format", ["base", "with_position", "full", "components"])
-    def test_unsupported_base_after_multiplier_raises(self, return_format):
-        """The multiplier does not make an unknown base frequency valid."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
-        with pytest.raises(ValueError, match="Unsupported frequency"):
-            normalize_frequency("2foo", return_format=return_format)
+    def test_start_and_end_offsets_differ(self, normalizer):
+        """``'MS'`` and ``'ME'`` are distinct offsets."""
+        assert normalizer.to_dateoffset('MS') != normalizer.to_dateoffset('ME')
+
+    @pytest.mark.parametrize(
+        "value, multiplier", [('2MS', 2), ('3QS-FEB', 3), ('15min', 15), ('2D', 2), ('MS', 1)],
+    )
+    def test_to_dateoffset_honours_the_multiplier(self, normalizer, value, multiplier):
+        """The offset steps by the leading multiplier."""
+        assert normalizer.to_dateoffset(value).n == multiplier
+
+    @pytest.mark.parametrize("value", ['DS', 'DE', 'WS', 'BE', 'hS', 'minE', 'sS', 'msE'])
+    def test_position_is_dropped_where_pandas_has_no_start_end_variant(self, normalizer, value):
+        """A position on a code without S / E variant is silently ignored (``build_frequency_string``)."""
+        assert normalizer.to_pandas_freq(value) == normalizer.normalize(value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [pytest.param(123, id="int"), pytest.param(3.14, id="float"), pytest.param(['M'], id="list"),
+         pytest.param({'a': 1}, id="dict"), pytest.param(b'M', id="bytes"), pytest.param(None, id="none")],
+    )
+    @pytest.mark.parametrize("method", ['to_pandas_freq', 'to_dateoffset'])
+    def test_non_string_input_raises_value_error(self, normalizer, method, value):
+        """Like ``normalize`` / ``to_literal``, a non-string is a ``ValueError`` (ANO-UTILS-037)."""
+        with pytest.raises(ValueError, match="must be a string"):
+            getattr(normalizer, method)(value)
+
+    @pytest.mark.parametrize("value", ['AS', 'AS-JAN', 'BQS', 'xyz'])
+    def test_error_names_the_whole_input(self, normalizer, value):
+        """The message quotes the string given, not the fragment left after parsing (``'AS'``, not ``'A'``)."""
+        with pytest.raises(ValueError) as error:
+            normalizer.to_pandas_freq(value)
+        assert f"Unsupported frequency: {value}." in str(error.value)
+
+    @pytest.mark.parametrize("value", ['xyz', '', 'M ', ' M', '-1D', '0D', 'MONTHLY', 'qe-dec'])
+    @pytest.mark.parametrize("method", ['to_pandas_freq', 'to_dateoffset'])
+    def test_invalid_strings_raise_value_error(self, normalizer, method, value):
+        """Unknown, blank-padded, non-positive multiplier or lower-cased strings are rejected."""
+        with pytest.raises(ValueError):
+            getattr(normalizer, method)(value)
 
 
-class TestConverterIntegration:
-    """Test that converter.py can use new normalize_frequency features."""
+# Chaînes base + position + ancre confrontées à pandas. Les fréquences sans variante début / fin
+# (W, D, B) n'ont pas de position : le package en ignorerait une silencieusement
+# (voir build_frequency_string), pandas la rejetterait
+PANDAS_ANCHOR_CANDIDATES = [
+    f"{base}{position}-{anchor}"
+    for base, positions in [('M', 'SE'), ('Q', 'SE'), ('Y', 'SE'), ('SM', 'SE'), ('W', ''), ('D', ''), ('B', '')]
+    for position in ('', *positions)
+    for anchor in [
+        'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC',
+        'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN', '1', '2', '15', '27', '28', 'XYZ',
+    ]
+]
 
-    def test_converter_decompose_detected_frequency(self):
-        """Test converter can decompose detected frequencies."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
 
-        # Simulate what converter.py does at line 151
-        detected_freq = 'QE-DEC'
-        base, position, anchor, multiplier = normalize_frequency(detected_freq, return_format='components')
+class TestBareCodesGiveTheEndVariant:
+    """A code with start / end variants and no position gets its end variant (ANO-UTILS-039).
 
-        assert base == 'Q'
-        assert position == 'E'
-        assert anchor == 'DEC'
-        assert multiplier == 1
+    ``'M'``, ``'Q'``, ``'Y'`` and ``'SM'`` are the aliases pandas 2.2 deprecates (removed in
+    pandas 3); they designated the end of the period. ``to_pandas_freq`` therefore answers
+    ``'ME'``, ``'QE'``, ``'YE'`` and ``'SME'`` and the offsets are built without any warning.
+    The base code (``'M'``) stays what ``normalize`` / ``to_code`` return.
+    """
 
-    def test_converter_decompose_source_target(self):
-        """Test converter can decompose source/target frequencies."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
+    @pytest.fixture
+    def normalizer(self):
+        """Create a FrequencyNormalizer instance for testing."""
+        return FrequencyNormalizer()
 
-        # Simulate what converter.py does at lines 707-708
-        source_freq = 'QE-DEC'
-        target_freq = 'MS'
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            ('monthly', 'ME'), ('quarterly', 'QE'), ('annual', 'YE'), ('semi_monthly', 'SME'),
+            ('M', 'ME'), ('Q', 'QE'), ('Y', 'YE'), ('SM', 'SME'),
+            ('2M', '2ME'), ('3Q', '3QE'), ('Q-DEC', 'QE-DEC'), ('Y-JUN', 'YE-JUN'),
+        ],
+    )
+    def test_bare_code_becomes_the_end_alias(self, normalizer, value, expected):
+        """Literal names, bare codes, multiplied and anchored bare codes get the end variant."""
+        assert normalizer.to_pandas_freq(value) == expected
 
-        source_base = normalize_frequency(source_freq, return_format='components').freq
-        target_base = normalize_frequency(target_freq, return_format='components').freq
+    @pytest.mark.parametrize("value", ['MS', 'QS', 'YS-JAN', 'SMS', 'QS-FEB', '2MS'])
+    def test_explicit_start_position_is_not_overridden(self, normalizer, value):
+        """The default only applies without position."""
+        assert normalizer.to_pandas_freq(value) == value
 
-        assert source_base == 'Q'
-        assert target_base == 'M'
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            ('M', pd.offsets.MonthEnd()), ('Q', pd.offsets.QuarterEnd(startingMonth=12)),
+            ('Y', pd.offsets.YearEnd(month=12)), ('SM', pd.offsets.SemiMonthEnd()),
+            ('monthly', pd.offsets.MonthEnd()),
+        ],
+    )
+    def test_offset_of_a_bare_code_is_the_end_of_period_offset_without_warning(self, normalizer, value, expected):
+        """The offset is the one pandas 2 used for the bare alias, and pandas does not warn."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            assert normalizer.to_dateoffset(value) == expected
 
-    def test_converter_preserve_position(self):
-        """Test converter can preserve position information."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
+    @pytest.mark.parametrize("value, base", [('monthly', 'M'), ('Q', 'Q'), ('YS-JAN', 'Y'), ('SM', 'SM')])
+    def test_base_code_comes_from_normalize(self, normalizer, value, base):
+        """To get the base code rather than an alias, ``normalize`` / ``to_code`` are the entry points."""
+        assert normalizer.normalize(value) == normalizer.to_code(value) == base
 
-        freq = 'QE-DEC'
-        with_position = normalize_frequency(freq, return_format='with_position')
-        assert with_position == 'QE'
+    @pytest.mark.parametrize("code", ['M', 'Q', 'Y', 'SM'])
+    def test_end_alias_generates_the_dates_of_the_former_bare_alias(self, normalizer, code):
+        """Property: the end alias generates the same dates as the bare alias of pandas 2."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            former = pd.date_range('2023-01-01', periods=6, freq=code)
+        current = pd.date_range('2023-01-01', periods=6, freq=normalizer.to_pandas_freq(code))
+        assert list(current) == list(former)
 
-    def test_converter_handle_a_alias(self):
-        """Test converter correctly handles 'A' alias."""
-        from tsforecast.utils.frequency.utils import normalize_frequency
 
-        # Simulate detection of 'AS-JAN'
-        detected_freq = 'AS-JAN'
-        base, position, anchor, _ = normalize_frequency(detected_freq, return_format='components')
+class TestAnchorValidation:
+    """The anchor after the dash is checked against the base frequency (ANO-UTILS-040).
 
-        assert base == 'Y'  # Normalized from 'A'
-        assert position == 'S'
-        assert anchor == 'JAN'
+    Rules of pandas: a month for ``Q`` / ``Y`` (``'QS-JAN'``, ``'Y-DEC'``), a weekday for ``W``
+    (``'W-MON'``), a day of the month behind a position for ``SM`` (``'SMS-15'``: 2 to 27,
+    ``'SME-15'``: 1 to 27), and no anchor for the other frequencies.
+    """
+
+    MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+    WEEKDAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN']
+
+    @pytest.fixture
+    def normalizer(self):
+        """Create a FrequencyNormalizer instance for testing."""
+        return FrequencyNormalizer()
+
+    @pytest.mark.parametrize("month", MONTHS)
+    @pytest.mark.parametrize("base", ['QS', 'QE', 'Q', 'YS', 'YE', 'Y'])
+    def test_every_month_is_a_valid_quarterly_or_yearly_anchor(self, normalizer, base, month):
+        """The twelve months anchor quarters and years, with or without position."""
+        assert normalizer.validate(f"{base}-{month}") is True
+
+    @pytest.mark.parametrize("weekday", WEEKDAYS)
+    def test_every_weekday_is_a_valid_weekly_anchor(self, normalizer, weekday):
+        """The seven weekdays anchor weeks."""
+        assert normalizer.normalize(f"W-{weekday}") == 'W'
+
+    @pytest.mark.parametrize("value", ['SMS-2', 'SMS-15', 'SMS-27', 'SME-1', 'SME-15', 'SME-27', '2SME-10'])
+    def test_semi_monthly_day_of_month_is_valid(self, normalizer, value):
+        """A day of the month anchors the semi-month, within the bounds pandas accepts."""
+        assert normalizer.normalize(value) == 'SM'
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            'QS-XYZ', 'YE-FOO', 'Q-', 'QS-13', 'Y-MON',   # ni mois ni vide pour Q / Y
+            'W-XYZ', 'W-JAN', 'W-',                        # ni jour pour W
+            'MS-JAN', 'ME-1', 'M-JAN', 'D-MON', 'B-MON', 'h-1', 'min-5',   # aucune ancre admise
+            'SMS-1', 'SMS-28', 'SME-0', 'SME-28', 'SM-15', 'SMS-XYZ', 'SMS-',   # jour hors bornes ou sans position
+            'QS-jan', 'W-mon',                             # casse : seules les majuscules
+        ],
+    )
+    def test_invalid_anchor_is_rejected(self, normalizer, value):
+        """An anchor pandas does not read makes the frequency unsupported, everywhere."""
+        assert normalizer.validate(value) is False
+        for method in (normalizer.normalize, normalizer.to_pandas_freq, normalizer.to_dateoffset):
+            with pytest.raises(ValueError, match="Invalid anchor|does not accept an anchor"):
+                method(value)
+
+    def test_error_message_gives_the_anchor_the_base_and_the_expected_values(self, normalizer):
+        """The message says what was rejected and what would be accepted."""
+        with pytest.raises(ValueError) as error:
+            normalizer.normalize('QS-XYZ')
+        message = str(error.value)
+        assert "Unsupported frequency: QS-XYZ" in message
+        assert "'XYZ'" in message and "'Q'" in message and "JAN" in message and "DEC" in message
+
+    def test_error_message_for_a_frequency_without_anchor(self, normalizer):
+        """A frequency that takes no anchor says so."""
+        with pytest.raises(ValueError, match=r"Base frequency 'D' does not accept an anchor \('-MON'\)"):
+            normalizer.normalize('D-MON')
+
+    @pytest.mark.parametrize("value", ['2QS-XYZ', '3MS-JAN'])
+    def test_multiplied_frequency_is_checked_too(self, normalizer, value):
+        """The anchor of a multiplied frequency is checked like any other."""
+        with pytest.raises(ValueError, match="Invalid anchor|does not accept an anchor"):
+            normalizer.normalize(value)
+
+    @pytest.mark.parametrize("value", ['QS-XYZ', 'MS-JAN'])
+    def test_normalize_with_multiplier_rejects_an_invalid_anchor(self, normalizer, value):
+        """The multiplier-aware variant validates through ``normalize``."""
+        with pytest.raises(ValueError, match="Invalid anchor|does not accept an anchor"):
+            normalizer.normalize_with_multiplier(value)
+
+    @pytest.mark.parametrize("candidate", PANDAS_ANCHOR_CANDIDATES)
+    def test_validation_agrees_with_pandas(self, normalizer, candidate):
+        """Property: for a frequency the package supports, a valid anchor is one pandas accepts."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            try:
+                pd.tseries.frequencies.to_offset(candidate)
+                pandas_accepts = True
+            except ValueError:
+                pandas_accepts = False
+        assert normalizer.validate(candidate) is pandas_accepts
+
+
+class TestValidateAndCompatibility:
+    """``validate`` never raises; ``are_compatible_frequencies`` is ``validate`` on both sides."""
+
+    @pytest.fixture
+    def normalizer(self):
+        """Create a FrequencyNormalizer instance for testing."""
+        return FrequencyNormalizer()
+
+    @pytest.mark.parametrize(
+        "value",
+        [pytest.param(123, id="int"), pytest.param(3.14, id="float"), pytest.param(None, id="none"),
+         pytest.param(['D'], id="list"), pytest.param({'a': 1}, id="dict"), pytest.param(b'M', id="bytes"),
+         pytest.param(object(), id="object")],
+    )
+    def test_validate_of_a_non_string_is_false(self, normalizer, value):
+        """Whatever the type, ``validate`` answers ``False`` instead of raising."""
+        assert normalizer.validate(value) is False
+
+    @pytest.mark.parametrize("value", ['d', 'MONTHLY', 'Monthly', 'MIN', 'Min', 'qe-dec', ' M', 'M ', 'm', 'q'])
+    def test_matching_is_case_and_whitespace_sensitive(self, normalizer, value):
+        """Lookups are exact: another case or a padded string is not a supported frequency."""
+        assert normalizer.validate(value) is False
+
+    @pytest.mark.parametrize(
+        "freq1, freq2",
+        [('D', 'M'), ('ns', 'Y'), ('B', 'monthly'), ('QE-DEC', 'MS'), ('D', 'xyz'), ('xyz', 'D'),
+         ('xyz', 'abc'), ('A', 'D'), (None, 'D'), ('D', 5)],
+    )
+    def test_are_compatible_is_validate_on_both(self, normalizer, freq1, freq2):
+        """No conversion ratio is checked: two supported frequencies are always compatible."""
+        assert normalizer.are_compatible_frequencies(freq1, freq2) is (
+            normalizer.validate(freq1) and normalizer.validate(freq2)
+        )
+
+
+class TestIsHigherFrequencyStrictness:
+    """``is_higher_frequency`` is a strict comparison that ignores the spelling."""
+
+    @pytest.fixture
+    def normalizer(self):
+        """Create a FrequencyNormalizer instance for testing."""
+        return FrequencyNormalizer()
+
+    @pytest.mark.parametrize(
+        "freq1, freq2",
+        [('M', 'M'), ('M', 'monthly'), ('MS', 'ME'), ('QE-DEC', 'QS-FEB'), ('D', 'D')],
+    )
+    def test_equal_frequencies_are_not_higher(self, normalizer, freq1, freq2):
+        """A frequency is never higher than itself, whatever its position or anchor."""
+        assert normalizer.is_higher_frequency(freq1, freq2) is False
+
+    @pytest.mark.parametrize(
+        "freq1, freq2, expected",
+        [
+            pytest.param('daily', 'QE-DEC', True, id="daily-vs-quarter-end"),
+            pytest.param('QE-DEC', 'daily', False, id="quarter-end-vs-daily"),
+            pytest.param('hourly', 'W-MON', True, id="hourly-vs-weekly-anchor"),
+            pytest.param('YS-JAN', 'min', False, id="year-start-vs-minute"),
+        ],
+    )
+    def test_spellings_can_be_mixed(self, normalizer, freq1, freq2, expected):
+        """Literal names, codes and complex strings are compared through their base code."""
+        assert normalizer.is_higher_frequency(freq1, freq2) is expected

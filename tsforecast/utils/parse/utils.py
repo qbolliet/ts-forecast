@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 # Abréviations pandas des mois, dans l'ordre (ancres trimestrielles et annuelles)
 MONTH_ABBREVIATIONS = ('JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC')
 
+# Abréviations pandas des jours de la semaine (ancres hebdomadaires, ex: 'W-MON')
+WEEKDAY_ABBREVIATIONS = ('MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')
+
 # Fréquences pandas supportant un suffixe de position S/E (ex: 'MS', 'QE', 'SMS').
 # 'W' et 'B' n'en font pas partie : pandas ne connaît ni 'WS'/'WE' ni 'BS'/'BE'
 # (l'ancre hebdomadaire est un jour de la semaine, pas une position)
@@ -130,14 +133,19 @@ def build_frequency_string(
     frequency: str,
     position: Optional[str] = None,
     suffix: Optional[str] = None,
-    multiplier: int = 1
+    multiplier: int = 1,
+    default_position: Optional[str] = None
 ) -> str:
     """Build complete pandas frequency string from components.
 
-    Constructs a complete frequency string suitable for pandas operations
-    by combining a base frequency code with optional position and suffix
-    indicators. This is useful for extending DatetimeIndex with proper
-    frequency specification.
+    Constructs a complete frequency string by combining a base frequency
+    code with optional position and suffix indicators. Without
+    ``default_position`` the string is a faithful assembly of its components:
+    a bare ``'M'`` stays ``'M'``, which is a base code (fit for a duration or
+    a comparison) but not a pandas alias. When the string goes to pandas (``pd.date_range``,
+    ``resample``, ``to_offset``), pass ``default_position='E'``: a bare month,
+    quarter, year or semi-month then becomes ``'ME'``, ``'QE'``, ``'YE'``,
+    ``'SME'``, the period end that the bare aliases designated.
 
     Args:
         frequency: Base frequency code ('D', 'M', 'Q', 'W', 'h', 'T', 'S', etc.)
@@ -154,13 +162,17 @@ def build_frequency_string(
             - None: No suffix
         multiplier: Positive integer multiplier put in front of the string
             (default 1, omitted from the result).
+        default_position: Position ('S', 'E' or None) used when ``position`` is
+            None, for the frequencies that have start / end variants (``'M'``,
+            ``'Q'``, ``'Y'``, ``'SM'``); ignored for the others and when
+            ``position`` is given. None (default) leaves the base code bare.
 
     Returns:
         Complete frequency string (e.g., 'D', 'MS', 'QE-DEC', '2MS')
 
     Raises:
-        ValueError: If position is invalid (not in ['S', 'E', None]) or if
-            multiplier is not a positive integer
+        ValueError: If position or default_position is invalid (not in
+            ['S', 'E', None]) or if multiplier is not a positive integer
 
     Examples:
         >>> # Daily frequency (no position/suffix)
@@ -186,6 +198,14 @@ def build_frequency_string(
         >>> # Every two months, at month start (inverse of parse_frequency)
         >>> build_frequency_string('M', position='S', multiplier=2)
         '2MS'
+        >>>
+        >>> # Bare base code, then pandas alias (period end by default)
+        >>> build_frequency_string('M')
+        'M'
+        >>> build_frequency_string('M', default_position='E')
+        'ME'
+        >>> build_frequency_string('M', position='S', default_position='E')
+        'MS'
     """
     from ..frequency.utils import normalize_frequency
 
@@ -196,6 +216,10 @@ def build_frequency_string(
     if position is not None and position not in ['S', 'E']:
         raise ValueError(f"position must be 'S' (start), 'E' (end), or None, got '{position}'")
 
+    # Validité de la position par défaut
+    if default_position not in (None, 'S', 'E'):
+        raise ValueError(f"default_position must be 'S' (start), 'E' (end), or None, got '{default_position}'")
+
     # Validité du multiplicateur (bool exclu : True == 1 passerait sinon)
     if isinstance(multiplier, bool) or not isinstance(multiplier, int) or multiplier < 1:
         raise ValueError(f"multiplier must be a positive integer, got {multiplier!r}")
@@ -205,9 +229,11 @@ def build_frequency_string(
     # silencieusement ignorée. Le suffixe, lui, reste ajouté indépendamment de
     # la position : certaines fréquences portent une ancre significative sans
     # notion de position (ex: 'W-MON', jour de la semaine, pas de S/E en pandas).
+    # La position par défaut ne sert qu'en l'absence de position explicite
+    effective_position = position if position is not None else default_position
     freq_with_position = (
-        f"{base_freq}{position}"
-        if position is not None and base_freq in _POSITION_AWARE_FREQUENCIES
+        f"{base_freq}{effective_position}"
+        if effective_position is not None and base_freq in _POSITION_AWARE_FREQUENCIES
         else base_freq
     )
 
