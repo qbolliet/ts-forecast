@@ -6,7 +6,8 @@ import pandas as pd
 # Importation des modules du package
 from .normalizer import FrequencyNormalizer
 from .types import FrequencyType, UserFrequencyType
-from ..parse.utils import MONTH_ABBREVIATIONS, ParsedFrequency, parse_frequency, build_frequency_string
+from .._constants import MONTH_ABBREVIATIONS
+from ..parse.utils import ParsedFrequency, parse_frequency, build_frequency_string
 from ...panel.utils import normalize_entity_key
 
 # Import réservé au typage statique : .detector importe des noms définis dans

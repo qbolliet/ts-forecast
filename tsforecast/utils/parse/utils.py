@@ -12,22 +12,14 @@ import re
 import pandas as pd
 from typing import NamedTuple, Optional, TYPE_CHECKING
 
+# Constantes transverses
+from .._constants import POSITION_AWARE_FREQUENCIES
+
 # Import réservé au typage statique : ..frequency et ..position importent ce
 # module au niveau package (via frequency/normalizer.py et position/utils.py),
 # un import réel ici créerait un cycle
 if TYPE_CHECKING:
     from ..frequency.types import FrequencyType
-
-# Abréviations pandas des mois, dans l'ordre (ancres trimestrielles et annuelles)
-MONTH_ABBREVIATIONS = ('JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC')
-
-# Abréviations pandas des jours de la semaine (ancres hebdomadaires, ex: 'W-MON')
-WEEKDAY_ABBREVIATIONS = ('MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')
-
-# Fréquences pandas supportant un suffixe de position S/E (ex: 'MS', 'QE', 'SMS').
-# 'W' et 'B' n'en font pas partie : pandas ne connaît ni 'WS'/'WE' ni 'BS'/'BE'
-# (l'ancre hebdomadaire est un jour de la semaine, pas une position)
-_POSITION_AWARE_FREQUENCIES = ('M', 'Q', 'Y', 'SM')
 
 # Composants d'une chaîne de fréquence pandas
 class ParsedFrequency(NamedTuple):
@@ -233,7 +225,7 @@ def build_frequency_string(
     effective_position = position if position is not None else default_position
     freq_with_position = (
         f"{base_freq}{effective_position}"
-        if effective_position is not None and base_freq in _POSITION_AWARE_FREQUENCIES
+        if effective_position is not None and base_freq in POSITION_AWARE_FREQUENCIES
         else base_freq
     )
 

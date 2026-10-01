@@ -8,7 +8,8 @@ import math
 from typing import Union, Literal, Optional
 
 # Import de la classe parente
-from ..abc.converter import TemporalConverter, _CONVERSION_FACTORS_TO_SECONDS, _CALENDAR_SUBPERIODS
+from ..abc.converter import TemporalConverter
+from .._constants import CONVERSION_FACTORS_TO_SECONDS, CALENDAR_SUBPERIODS
 
 # Import du normalizer
 from .normalizer import DurationNormalizer
@@ -149,21 +150,21 @@ class DurationConverter(TemporalConverter):
             return 1.0
 
         # Recherche dans la table calendaire
-        exact = _CALENDAR_SUBPERIODS.get((from_code, to_code))
+        exact = CALENDAR_SUBPERIODS.get((from_code, to_code))
         if exact is not None:
             return float(exact)
 
         # Recherche de la paire inverse : un appel « à l'envers » (fréquence
         # haute en premier) répond par la fraction de période correspondante
-        inverted = _CALENDAR_SUBPERIODS.get((to_code, from_code))
+        inverted = CALENDAR_SUBPERIODS.get((to_code, from_code))
         if inverted is not None:
             return 1.0 / float(inverted)
 
         # Calcul du facteur via l'unité de référence (secondes) : from_code et
-        # to_code sont garantis présents dans _CONVERSION_FACTORS_TO_SECONDS à
+        # to_code sont garantis présents dans CONVERSION_FACTORS_TO_SECONDS à
         # ce stade (normalize_duration ne renvoie que des codes qui y figurent)
-        from_to_seconds = _CONVERSION_FACTORS_TO_SECONDS[from_code]
-        to_to_seconds = _CONVERSION_FACTORS_TO_SECONDS[to_code]
+        from_to_seconds = CONVERSION_FACTORS_TO_SECONDS[from_code]
+        to_to_seconds = CONVERSION_FACTORS_TO_SECONDS[to_code]
 
         return from_to_seconds / to_to_seconds
 

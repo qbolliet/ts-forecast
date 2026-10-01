@@ -38,6 +38,9 @@ from ..position.utils import normalize_position
 # Import des utilitaires de gestion des durées
 from ..duration.utils import get_duration_conversion_factor
 
+# Constantes transverses
+from .._constants import BLOCK_START_FREQUENCIES, NON_PERIOD_FREQUENCIES
+
 # Import des utilitaires de panel
 from ...panel.utils import is_panel_data
 
@@ -56,16 +59,6 @@ _DEPRECATED_PERIOD_END_ALIASES = {'Y': 'YE', 'A': 'YE', 'Q': 'QE', 'M': 'ME'}
 _INTERPOLATION_METHODS = frozenset({
     'linear', 'time', 'index', 'values', 'nearest', 'zero', 'slinear', 'quadratic', 'cubic',
 })
-
-# Bases de fréquence sans position S/E, comptées en jours ou en unités
-# infra-journalières : un horodatage y marque le DÉBUT de sa période (ou de son
-# bloc de n périodes), comme les étiquettes de pandas.resample
-_BLOCK_START_BASES = frozenset({'D', 'B', 'h', 'min', 's', 'ms', 'us', 'ns'})
-
-# Base de fréquence sans équivalent pd.Period (semi-mensuelle) : ses périodes
-# sont bornées par les offsets pandas 'SMS' / 'SME'
-_NON_PERIOD_BASES = frozenset({'SM'})
-
 
 # Fonction de modernisation d'un alias de fréquence déprécié
 def _modernize_resample_freq(freq: str) -> str:
@@ -1139,7 +1132,7 @@ class FrequencyConverter(TemporalConverter):
         # Base sans position (jours, unités infra-journalières) : la grille cible
         # porte le début de chaque période, à l'heure près — aucune remise à
         # minuit, qui confondrait toutes les heures d'une même journée
-        if target_base in _BLOCK_START_BASES:
+        if target_base in BLOCK_START_FREQUENCIES:
             return pd.DatetimeIndex(index.to_period(target_base).to_timestamp(how='start'))
 
         # Convention du package en l'absence de position explicite : fin de période
@@ -1147,7 +1140,7 @@ class FrequencyConverter(TemporalConverter):
 
         # Base semi-mensuelle, sans pd.Period : ancre 'SMS' précédente ou ancre
         # 'SME' suivante, selon la position cible
-        if target_base in _NON_PERIOD_BASES:
+        if target_base in NON_PERIOD_FREQUENCIES:
             offset = to_offset(build_frequency_string(target_base, target_pos))
             roll = offset.rollback if target_pos == 'S' else offset.rollforward
             return pd.DatetimeIndex([roll(timestamp) for timestamp in index]).normalize()
@@ -1249,7 +1242,7 @@ class FrequencyConverter(TemporalConverter):
 
         # Base sans pd.Period (semi-mensuelle) : repli de l'appelant sur le
         # comportement anchor_fraction=None
-        if source_base in _NON_PERIOD_BASES:
+        if source_base in NON_PERIOD_FREQUENCIES:
             return None
 
         # Périodes source réelles
@@ -1943,13 +1936,13 @@ class FrequencyConverter(TemporalConverter):
         if source.position is not None:
             source_pos = source.position
         else:
-            source_pos = 'S' if source_base in _BLOCK_START_BASES else 'E'
+            source_pos = 'S' if source_base in BLOCK_START_FREQUENCIES else 'E'
 
         # Bornes de la plage : un horodatage multiplié couvre un bloc de n
         # périodes de base, à partir de lui en position début, jusqu'à lui en
         # position fin. pd.Period n'accepte que la base (sans S/E)
         start_date, end_date = original_index[0], original_index[-1]
-        if source_base in _NON_PERIOD_BASES:
+        if source_base in NON_PERIOD_FREQUENCIES:
             extended_start, extended_end = self._offset_block_bounds(
                 start_date, end_date, source_base, source_pos, source_multiplier
             )

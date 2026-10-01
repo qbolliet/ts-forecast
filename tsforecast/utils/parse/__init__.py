@@ -1,6 +1,6 @@
 # Import des éléments du module
+from .._constants import MONTH_ABBREVIATIONS
 from .utils import (
-    MONTH_ABBREVIATIONS,
     ParsedFrequency,
     parse_frequency,
     build_frequency_string

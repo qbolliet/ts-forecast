@@ -27,12 +27,10 @@ from ..abc.converter import TemporalConverter
 # Import du normalizer et des types
 from .types import PositionType, UserPositionType
 from .utils import normalize_position
-from ..parse.utils import MONTH_ABBREVIATIONS, ParsedFrequency, parse_frequency, build_frequency_string
+from .._constants import MONTH_ABBREVIATIONS, MONTH_BASED_FREQUENCIES
+from ..parse.utils import ParsedFrequency, parse_frequency, build_frequency_string
 # Import des utilitaires de validation
 from ..validation import validate_entities_grouped, validate_sorted_within_groups
-
-# Fréquences de base dont les périodes sont décrites par un couple d'offsets début / fin
-_PERIOD_FREQUENCIES = ('M', 'Q', 'Y')
 
 # Jour de bascule par défaut des fréquences semi-mensuelles pandas ('SMS' = 1 et 15,
 # 'SME' = 15 et fin de mois) : seul jour supporté
@@ -257,7 +255,7 @@ class PeriodPositionConverter(TemporalConverter):
         base_freq = normalize_frequency(frequency=parsed.freq)
 
         # Cas où la fréquence tolère une position
-        if base_freq in _PERIOD_FREQUENCIES:
+        if base_freq in MONTH_BASED_FREQUENCIES:
             if base_freq == 'M':
                 return 'period', n, to_offset('MS'), to_offset('ME')
             # Sans position explicite, une ancre pandas désigne le mois de fin ('Q-DEC')

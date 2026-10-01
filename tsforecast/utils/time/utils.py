@@ -9,6 +9,9 @@ from datetime import datetime
 # Import des utilitaires de fréquence
 from ..frequency import normalize_frequency, FrequencyType, UserFrequencyType
 from ..parse import parse_frequency
+from .._constants import (
+    MONTH_ABBREVIATIONS, WEEKDAY_ABBREVIATIONS, MONTH_BASED_FREQUENCIES, SUBDAILY_NS,
+)
 
 # Fonction de conversion d'une chaîne de caractères en date
 def resolve_date(date: Union[str, datetime], format: str = None) -> datetime:
@@ -130,28 +133,10 @@ def string_to_timeseries(ts: pd.Series, format: str = None) -> pd.Series:
 
     return pd.Series(ts.values, index=datetime_index, name=ts.name)
 
-# Jours de la semaine et mois, dans l'ordre des suffixes d'ancre pandas
-_WEEKDAYS = ('MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')
-_MONTHS = ('JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC')
-
 # Origine par défaut des grilles à multiplicateur : l'époque Unix (jeudi 1er janvier 1970)
 _EPOCH = pd.Timestamp('1970-01-01')
 _EPOCH_WEEKDAY = _EPOCH.weekday()
 _EPOCH_MONTH_INDEX = 1970 * 12
-
-# Durée en nanosecondes des fréquences infra-journalières
-_SUBDAILY_NS = {
-    'ns': 1,
-    'us': 1_000,
-    'ms': 1_000_000,
-    's': 1_000_000_000,
-    'min': 60 * 1_000_000_000,
-    'h': 3_600 * 1_000_000_000,
-}
-
-# Nombre de mois par unité des fréquences calendaires à base mensuelle
-_MONTHS_PER_UNIT = {'M': 1, 'Q': 3, 'Y': 12}
-
 
 class _PeriodSpec(NamedTuple):
     """Components of a frequency needed to delimit periods.
@@ -204,7 +189,7 @@ def _resolve_spec(frequency: Union[FrequencyType, UserFrequencyType]) -> _Period
 
     # Vérification de l'ancre : jour de semaine pour W, mois pour Q / Y, rien ailleurs
     if suffix is not None:
-        allowed = {'W': _WEEKDAYS, 'Q': _MONTHS, 'Y': _MONTHS}.get(base)
+        allowed = {'W': WEEKDAY_ABBREVIATIONS, 'Q': MONTH_ABBREVIATIONS, 'Y': MONTH_ABBREVIATIONS}.get(base)
         if allowed is None:
             raise ValueError(
                 f"Unsupported frequency: {frequency}. "
@@ -325,7 +310,7 @@ def _subdaily_bounds(
 
     Args:
         date: Reference date (may be time zone aware).
-        spec: Frequency components (base in ``_SUBDAILY_NS``).
+        spec: Frequency components (base in ``SUBDAILY_NS``).
         origin: Grid origin already aligned on the time zone of ``date``, or None
             (grid anchored on the Unix epoch).
 
@@ -337,7 +322,7 @@ def _subdaily_bounds(
         >>> _subdaily_bounds(pd.Timestamp('2023-06-15 14:35'), spec, None)
         (Timestamp('2023-06-15 14:00:00'), Timestamp('2023-06-15 16:00:00'))
     """
-    length = spec.multiplier * _SUBDAILY_NS[spec.base]
+    length = spec.multiplier * SUBDAILY_NS[spec.base]
     wall = date.tz_localize(None) if date.tzinfo is not None else date
     origin_wall = 0
     if origin is not None:
@@ -378,7 +363,7 @@ def _day_bounds(
         origin_day = (origin.tz_localize(None) if origin.tzinfo is not None else origin).normalize()
     elif spec.base == 'W':
         # La semaine `W-X` se termine le jour X : elle commence le lendemain
-        start_weekday = (_WEEKDAYS.index(spec.suffix or 'SUN') + 1) % 7
+        start_weekday = (WEEKDAY_ABBREVIATIONS.index(spec.suffix or 'SUN') + 1) % 7
         origin_day = _EPOCH - pd.Timedelta(days=(_EPOCH_WEEKDAY - start_weekday) % 7)
     else:
         origin_day = _EPOCH
@@ -433,13 +418,13 @@ def _month_bounds(
         return to_date(start_index), to_date(start_index + spec.multiplier)
 
     # M / Q / Y : grille en mois ; l'ancre fixe le premier mois de la période
-    length = spec.multiplier * _MONTHS_PER_UNIT[spec.base]
+    length = spec.multiplier * MONTH_BASED_FREQUENCIES[spec.base]
     if origin is not None:
         origin_index = origin.year * 12 + origin.month - 1
     elif spec.suffix is None or spec.base == 'M':
         origin_index = _EPOCH_MONTH_INDEX
     else:
-        anchor_month = _MONTHS.index(spec.suffix) + 1
+        anchor_month = MONTH_ABBREVIATIONS.index(spec.suffix) + 1
         # 'S' : l'ancre est le premier mois ; sinon (E ou absente) le dernier
         first_month = anchor_month if spec.position == 'S' else anchor_month % 12 + 1
         if spec.base == 'Q':
@@ -496,7 +481,7 @@ def _period_bounds(
     aligned_origin = _align_origin(origin, tz)
 
     # Cas des fréquences infrajournalières
-    if spec.base in _SUBDAILY_NS:
+    if spec.base in SUBDAILY_NS:
         return _subdaily_bounds(timestamp, spec, aligned_origin)
 
     # Fréquences calendaires : découpage sur l'horloge murale, puis retour au fuseau

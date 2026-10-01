@@ -10,12 +10,11 @@ from typing import Union
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
-from ..abc.converter import _CONVERSION_FACTORS_TO_SECONDS
+from .._constants import CONVERSION_FACTORS_TO_SECONDS, MONTH_ABBREVIATIONS, WEEKDAY_ABBREVIATIONS
 
 # Import de l'utilitaire du package
 from .types import FrequencyType, UserFrequencyType
 from ..parse.utils import (
-    MONTH_ABBREVIATIONS, WEEKDAY_ABBREVIATIONS,
     ParsedFrequency, parse_frequency, build_frequency_string,
 )
 
@@ -23,7 +22,7 @@ from ..parse.utils import (
 # conversions, sauf le jour ouvré : ses 5 observations par semaine espacent en moyenne les
 # dates de 7/5 jours calendaires, si bien que 'kB' est une fréquence plus basse que 'kD'
 # (cohérence avec l'ordre sans multiplicateur, où 'D' est plus élevée que 'B')
-_NOMINAL_SECONDS = {**_CONVERSION_FACTORS_TO_SECONDS, 'B': _CONVERSION_FACTORS_TO_SECONDS['D'] * 7 / 5}
+_NOMINAL_SECONDS = {**CONVERSION_FACTORS_TO_SECONDS, 'B': CONVERSION_FACTORS_TO_SECONDS['D'] * 7 / 5}
 
 
 # Classe de normalisation des fréquences

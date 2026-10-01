@@ -12,22 +12,13 @@ from typing import Dict, Literal, Optional, Union, Tuple, List
 # Import des utilitaires de fréquence
 from .utils import normalize_frequency, canonicalize_frequency
 from .types import FrequencyType, UserFrequencyType
-from ..parse.utils import MONTH_ABBREVIATIONS, WEEKDAY_ABBREVIATIONS, build_frequency_string
+from .._constants import INTRADAY_UNITS, MONTH_ABBREVIATIONS, WEEKDAY_ABBREVIATIONS
+from ..parse.utils import build_frequency_string
 from ..validation.utils import _convert_to_datetime
 from ...panel.utils import normalize_entity_key, detect_panel_structure, extract_time_series_from_multiindex
 
 # Formats de sortie acceptés par toutes les méthodes de détection
 _RETURN_FORMATS = ('base', 'with_position', 'full', 'components')
-
-# Unités infra-journalières, de la plus grande à la plus petite, en nanosecondes
-_INTRADAY_UNITS = (
-    ('h', 3_600_000_000_000),
-    ('min', 60_000_000_000),
-    ('s', 1_000_000_000),
-    ('ms', 1_000_000),
-    ('us', 1_000),
-    ('ns', 1),
-)
 
 # Écart toléré entre un écart modal et un nombre entier de jours (changement d'heure
 # d'un index localisé : 23 h ou 25 h entre deux minuits)
@@ -812,7 +803,7 @@ class FrequencyDetector:
         # divise tout écart : une unité est toujours trouvée)
         nanoseconds = modal_diff.value
         unit, unit_nanoseconds = next(
-            (unit, size) for unit, size in _INTRADAY_UNITS if nanoseconds % size == 0
+            (unit, size) for unit, size in INTRADAY_UNITS if nanoseconds % size == 0
         )
         multiplier = nanoseconds // unit_nanoseconds
         if multiplier > 1 and not dominant:

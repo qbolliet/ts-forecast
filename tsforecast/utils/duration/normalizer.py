@@ -8,7 +8,7 @@ from typing import Union
 
 # Import de la classe parente
 from ..abc.normalizer import TemporalNormalizer
-from ..abc.converter import _CONVERSION_FACTORS_TO_SECONDS
+from .._constants import CONVERSION_FACTORS_TO_SECONDS
 # Importation des types
 from .types import DurationType, UserDurationType
 # Importation de la fonction de parsing des fréquences pandas / durées
@@ -226,8 +226,8 @@ class DurationNormalizer(TemporalNormalizer):
             return multiplier1 > multiplier2
 
         # Codes différents : comparaison des durées nominales
-        return (multiplier1 * _CONVERSION_FACTORS_TO_SECONDS[code1]
-                > multiplier2 * _CONVERSION_FACTORS_TO_SECONDS[code2])
+        return (multiplier1 * CONVERSION_FACTORS_TO_SECONDS[code1]
+                > multiplier2 * CONVERSION_FACTORS_TO_SECONDS[code2])
 
     # Méthode de vérification que deux expressions de durées sont compatibles
     def are_compatible_durations(self, dur1: DurationType, dur2: DurationType) -> bool:
