@@ -442,6 +442,11 @@ class TestDetectTimeSeriesFrequencyUnsortedData:
                                   '2024-01-01', '2024-04-01', '2024-02-01'])
         assert FrequencyDetector().detect_time_series_frequency(make_series(dates), 'full') == 'MS'
 
+    def test_reversed_series(self):
+        """A series in decreasing order is detected as the sorted one."""
+        series = make_series(pd.date_range('2023-01-01', periods=10, freq='MS'))[::-1]
+        assert FrequencyDetector().detect_time_series_frequency(series, 'full') == 'MS'
+
 
 class TestFrequencyDetectorDuplicatedDates:
     """Duplicated dates never yield a zero spacing (ANO-UTILS-014)."""

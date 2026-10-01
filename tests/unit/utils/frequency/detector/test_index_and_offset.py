@@ -52,6 +52,24 @@ class TestDetectIndexFrequency:
         dates = pd.date_range('2023-01-31', periods=6, freq='ME')[[3, 0, 5, 1, 4, 2]]
         assert detect_index_frequency(dates, return_format='full') == 'ME'
 
+    @pytest.mark.parametrize(
+        'dates, expected',
+        [
+            pytest.param(pd.date_range('2023-03-31', periods=6, freq='QE')[::-1], 'QE', id='regular'),
+            pytest.param(pd.date_range('2020-01-01', periods=10, freq='QS').delete([4])[::-1], 'QS',
+                         id='gapped'),
+            pytest.param(pd.DatetimeIndex(['2024-03-01', '2024-02-01', '2024-02-01', '2024-01-01']),
+                         'MS', id='with-duplicates'),
+        ],
+    )
+    def test_decreasing_index_is_sorted(self, dates, expected):
+        """A decreasing index is detected as the sorted one (ANO-UTILS-069).
+
+        pandas reads a reversed regular index as a negative frequency ('-1QE-DEC'),
+        which used to surface as an unsupported frequency.
+        """
+        assert detect_index_frequency(dates, return_format='with_position') == expected
+
     def test_irregular_index_is_none(self):
         """An index without a dominant spacing gives ``None``, not an error (ANO-UTILS-050)."""
         # Écarts de 45 puis 50 jours

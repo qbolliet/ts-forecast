@@ -13,6 +13,7 @@ densified (as required by the HighFrequencyImputer), see
 delegates the actual conversions to this class.
 """
 # Importation des modules
+import numbers
 import numpy as np
 import pandas as pd
 from typing import Any, Union, Optional, Literal, Dict, Tuple, List
@@ -22,7 +23,6 @@ from pandas.tseries.frequencies import to_offset
 from ..abc.converter import TemporalConverter
 
 # Import des utilitaires de fréquence
-from .normalizer import FrequencyType, UserFrequencyType
 from .utils import (
     normalize_frequency,
     is_higher_frequency,
@@ -34,10 +34,7 @@ from ..validation import validate_temporal_data
 from ..parse import ParsedFrequency, parse_frequency, build_frequency_string
 
 # Import des utilitaires de gestion des positions
-from ..position.utils import (
-    normalize_position,
-    validate_position,
-)
+from ..position.utils import normalize_position
 # Import des utilitaires de gestion des durées
 from ..duration.utils import get_duration_conversion_factor
 
@@ -54,6 +51,20 @@ InterpolationMethod = Literal['linear', 'time', 'index', 'values', 'nearest', 'z
 # nues : seules les fréquences destinées à resample/asfreq/date_range doivent
 # être modernisées
 _DEPRECATED_PERIOD_END_ALIASES = {'Y': 'YE', 'A': 'YE', 'Q': 'QE', 'M': 'ME'}
+
+# Méthodes d'interpolation acceptées par interpolate_to_higher_frequency
+_INTERPOLATION_METHODS = frozenset({
+    'linear', 'time', 'index', 'values', 'nearest', 'zero', 'slinear', 'quadratic', 'cubic',
+})
+
+# Bases de fréquence sans position S/E, comptées en jours ou en unités
+# infra-journalières : un horodatage y marque le DÉBUT de sa période (ou de son
+# bloc de n périodes), comme les étiquettes de pandas.resample
+_BLOCK_START_BASES = frozenset({'D', 'B', 'h', 'min', 's', 'ms', 'us', 'ns'})
+
+# Base de fréquence sans équivalent pd.Period (semi-mensuelle) : ses périodes
+# sont bornées par les offsets pandas 'SMS' / 'SME'
+_NON_PERIOD_BASES = frozenset({'SM'})
 
 
 # Fonction de modernisation d'un alias de fréquence déprécié
@@ -164,32 +175,50 @@ class FrequencyConverter(TemporalConverter):
         frequency relationship. Supports both Series and DataFrame with flexible
         target frequency specification.
 
-        The output index carries the target frequency. With a dict
-        ``target_freq``, the output index is the union of the target indexes of
-        the converted columns: the source index disappears as soon as every
-        column is converted, and only columns absent from the dict (or whose
-        source frequency already matches the target) keep their original dates
-        in the union. NaN introduced by the mixed-frequency union are filled
-        according to ``alignment_method``.
+        The output index carries the target frequency. Each column is converted
+        from its own frequency, detected on its observed (non-NaN) values, and
+        the output index is the union of the target indexes of the converted
+        columns: the rows of the source grid do not survive. Columns that are
+        not converted — absent from a dict ``target_freq``, already at their
+        target frequency, or never observed — keep their values at their
+        observed dates only (a never observed column contributes no date and
+        comes out entirely NaN). When several target frequencies (or
+        preserved columns) are mixed, the NaN a converted column gets on the
+        union are filled according to ``alignment_method``. The result does
+        not depend on the order of the columns.
+
+        Series and DataFrames follow the same rule for degenerate inputs: no
+        row raises; rows without any observed value give an empty result (no
+        date to keep); observed values without any detectable frequency raise.
+
+        Panels (entities in the leading levels of a MultiIndex) are converted
+        entity by entity; an entity that no key of a dict ``target_freq``
+        targets is returned unchanged, an entity without any observation of
+        the converted columns is left out.
 
         Args:
             data: Time series data to convert (Series or DataFrame)
             target_freq: Target frequency specification:
                 - str: Apply same frequency to all columns
                 - Dict[str, str]: Map each column to its target frequency
+                  (panels also accept ``(entity...,)`` and
+                  ``(entity..., column)`` keys; a panel Series matches column
+                  keys on its name)
             method: Aggregation method for downsampling or interpolation method
-                for upsampling
+                for upsampling. The default ``'mean'`` is an aggregation method:
+                an upsampling needs an interpolation method (``'linear'``, ...)
             alignment_method: Method to align indexes when mixing frequencies
                 ('ffill', 'bfill', 'nearest', 'none')
             time_col: Identifier of time columns to exclude from conversion
             panel_cols: List of panel identifier columns to exclude from
                 conversion
             target_position: Optional position for target frequency ('S', 'E',
-                'start', 'end'). If None, preserves source position when
-                identifiable, otherwise uses default 'E'
+                'start', 'end'). If None, the position of ``target_freq`` is
+                used, otherwise the position of each source (column by column),
+                otherwise the default 'E'
             full_periods_only: If True, periods where the number of non-NaN
-                observations is less than expected (based on frequency conversion
-                factor) produce NaN during downsampling.
+                observations is less than the calendar count of expected
+                sub-periods produce NaN during downsampling.
             limit: Maximum number of consecutive NaN values to fill during
                 upsampling interpolation. ``'default'`` uses the frequency
                 conversion factor. None applies no limit.
@@ -203,7 +232,12 @@ class FrequencyConverter(TemporalConverter):
             Converted time series data
 
         Raises:
-            ValueError: If conversion parameters are invalid
+            ValueError: If the data is empty, if conversion parameters are
+                invalid, if observed values have no detectable frequency (a
+                Series, or every column of a DataFrame), or if ``method`` does
+                not fit the direction of the conversion.
+            NotImplementedError: If ``full_periods_only`` or ``method='all'``
+                is combined with a multiplied frequency (``'2MS'``).
 
         Examples:
             >>> import pandas as pd
@@ -243,8 +277,12 @@ class FrequencyConverter(TemporalConverter):
                 limit_area=limit_area,
             )
 
-        # Cas 1: Traitement des Series
+        # Cas 1 : Series (la validation garantit une chaîne de caractères pour target_freq hors panel)
         if isinstance(data, pd.Series):
+            # Aucune valeur observée : aucune date à conserver (comme un DataFrame)
+            if data.isna().all():
+                return data.iloc[0:0]
+
             # Détection de la fréquence actuelle (avec position, anchor et multiplicateur)
             source = detect_frequency(data=data, return_format='components')
 
@@ -252,9 +290,7 @@ class FrequencyConverter(TemporalConverter):
             if not source:
                 raise ValueError("Cannot detect current frequency of the data")
 
-            # Décomposition de la fréquence cible (doit être str pour Series)
-            if isinstance(target_freq, dict):
-                raise ValueError("target_freq must be a string for Series input")
+            # Décomposition de la fréquence cible
             target = normalize_frequency(target_freq, return_format='components')
 
             # Position cible : explicite, sinon celle de la fréquence cible, sinon celle de la source
@@ -270,50 +306,36 @@ class FrequencyConverter(TemporalConverter):
 
             # Détermination de la direction de conversion
             if is_higher_frequency(target_freq_with_position, source_freq_with_position):
-                # Upsampling
-                return self._upsample(
-                    data=data,
-                    target_freq=target_freq_with_position,
-                    method=method,
-                    limit=limit,
-                    limit_direction=limit_direction,
-                    limit_area=limit_area,
-                    source_freq=source_freq_with_position,
+                # Upsampling (la fréquence source vient d'être détectée)
+                return self.interpolate_to_higher_frequency(
+                    data, target_freq_with_position, method,
+                    limit=limit, limit_direction=limit_direction,
+                    limit_area=limit_area, source_freq=source_freq_with_position,
                 )
-            else:
-                # Downsampling
-                return self._downsample(
-                    data=data,
-                    target_freq=target_freq_with_position,
-                    method=method,
-                    full_periods_only=full_periods_only,
-                    source_freq=source_freq_with_position
-                )
-
-        # Cas 2: Traitement des DataFrames
-        elif isinstance(data, pd.DataFrame):
-            # Construction du frequency_map complet
-            frequency_map = self._build_frequency_map(data=data, target_freq=target_freq, target_position=target_position)
-
-            # Groupement des conversions identiques pour optimisation
-            grouped_conversions = self._group_conversions_by_operation(frequency_map=frequency_map, method=method)
-
-            # Application des conversions groupées
-            result = self._apply_grouped_conversions(
-                data=data,
-                grouped_conversions=grouped_conversions,
-                alignment_method=alignment_method,
-                full_periods_only=full_periods_only,
-                limit=limit,
-                limit_direction=limit_direction,
-                limit_area=limit_area
+            # Downsampling (la fréquence source vient d'être détectée)
+            return self.aggregate_to_lower_frequency(
+                data, target_freq_with_position, method, full_periods_only,
+                source_freq=source_freq_with_position,
             )
 
-            return result
+        # Cas 2 : DataFrame (colonne par colonne)
+        # Construction du frequency_map complet
+        frequency_map = self._build_frequency_map(data=data, target_freq=target_freq, target_position=target_position)
 
-        else:
-            raise ValueError("Data must be a pandas Series or DataFrame")
-            
+        # Groupement des conversions identiques pour optimisation
+        grouped_conversions = self._group_conversions_by_operation(frequency_map=frequency_map, method=method)
+
+        # Application des conversions groupées
+        return self._apply_grouped_conversions(
+            data=data,
+            grouped_conversions=grouped_conversions,
+            alignment_method=alignment_method,
+            full_periods_only=full_periods_only,
+            limit=limit,
+            limit_direction=limit_direction,
+            limit_area=limit_area
+        )
+
     # Implémentation de la méthode abstraite get_conversion_factor de TemporalConverter
     def get_conversion_factor(self, from_unit: str, to_unit: str) -> float:
         """Get approximate conversion factor between two frequencies.
@@ -497,10 +519,16 @@ class FrequencyConverter(TemporalConverter):
                                    source_freq: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
         """Aggregate data to a lower frequency using resample.
 
+        The rows are sorted chronologically first. A period without any
+        observation is NaN for every numeric method, ``'sum'`` included
+        (``'count'`` gives 0).
+
         Args:
-            data: Time series data to aggregate
-            target_freq: Target frequency (must be lower than current), with
-                optional position ('MS', 'QE', etc.)
+            data: Time series data to aggregate, on a simple DatetimeIndex
+                (panels go through :meth:`convert_frequency`)
+            target_freq: Target pandas offset (must be lower than current), with
+                optional position ('MS', 'QE', etc.). User labels such as
+                ``'quarterly'`` are not offsets and are rejected.
             method: Aggregation method. ``'all'``/``'any'`` reduce boolean
                 (or boolean-castable) data: ``'all'`` is True iff every
                 sub-period of the target period is present in ``data`` and
@@ -528,17 +556,27 @@ class FrequencyConverter(TemporalConverter):
                 carried on a monthly index, or a monthly one carried on a
                 daily grid), which is also the case where inference from the
                 index is both wrong and silent. Used by
-                ``full_periods_only`` and by ``method='all'``.
+                ``full_periods_only`` and by ``method='all'``. When it is
+                neither supplied nor detectable on the index (irregular index,
+                fewer than two dates), no expected count exists and both
+                coverage guards are skipped.
 
         Returns:
             Aggregated time series data
+
+        Raises:
+            ValueError: If ``data`` is empty, if ``target_freq`` is not a valid
+                pandas offset, if ``method`` is unknown, or if a supplied
+                ``source_freq`` is not a supported frequency.
+            NotImplementedError: If a coverage guard (``full_periods_only``,
+                ``method='all'``) meets a multiplied frequency (``'2MS'``).
 
         Examples:
             >>> import pandas as pd
             >>> converter = FrequencyConverter()
             >>> daily_dates = pd.date_range('2023-01-01', periods=31, freq='D')
             >>> daily_series = pd.Series(range(31), index=daily_dates)
-            >>> monthly = converter.aggregate_to_lower_frequency(daily_series, 'monthly', 'sum')
+            >>> monthly = converter.aggregate_to_lower_frequency(daily_series, 'ME', 'sum')
             >>> len(monthly)
             1
             >>> # Périodes incomplètes remplacées par NaN
@@ -552,6 +590,9 @@ class FrequencyConverter(TemporalConverter):
             >>> converter.aggregate_to_lower_frequency(monthly_mask, 'YE', method='all').tolist()
             [True]
         """
+        # Refus des données vides : aucune période à agréger
+        self._reject_empty(data, 'aggregate')
+
         # Modernisation des alias dépréciés ('Y'/'A'/'Q'/'M' -> 'YE'/'YE'/'QE'/'ME')
         # avant tout resample, sans changer la position (S/E) déjà préservée
         target_freq = _modernize_resample_freq(target_freq)
@@ -563,6 +604,14 @@ class FrequencyConverter(TemporalConverter):
         except Exception as e:
             raise ValueError(f"Invalid target frequency '{target_freq}': {e}")
 
+        # Validation de la fréquence source fournie par l'appelant : une valeur
+        # invalide est une erreur, pas une fréquence « indétectable »
+        if source_freq is not None:
+            normalize_frequency(source_freq)
+
+        # Tri chronologique des lignes avant resample et détection
+        data = self._sorted(data)
+
         # Resampling à la bonne fréquence (avec position préservée)
         resampled = data.resample(target_freq)
 
@@ -570,7 +619,9 @@ class FrequencyConverter(TemporalConverter):
         if method == 'mean':
             result = resampled.mean()
         elif method == 'sum':
-            result = resampled.sum()
+            # Somme d'une période sans observation : NaN (comme 'mean'), et non
+            # le 0.0 de pandas (min_count=0), indiscernable d'un vrai zéro
+            result = resampled.sum(min_count=1)
         elif method == 'first':
             result = resampled.first()
         elif method == 'last':
@@ -610,13 +661,11 @@ class FrequencyConverter(TemporalConverter):
         # Masquage des périodes incomplètes si demandé ('all'/'any' encodent déjà
         # leur propre sémantique de couverture, en booléen plutôt qu'en NaN)
         if full_periods_only and method not in ('all', 'any'):
-            try:
-                # Nombre attendu de sous-périodes, période cible par période cible
-                expected_counts = self._expected_subperiod_counts(
-                    data, target_freq, result.index, source_freq=source_freq
-                )
-            except (ValueError, KeyError):
-                expected_counts = None
+            # Nombre attendu de sous-périodes, période cible par période cible
+            # (None sans fréquence source fournie ni détectable)
+            expected_counts = self._expected_subperiod_counts(
+                data, target_freq, result.index, source_freq=source_freq
+            )
 
             # Masquage des périodes incomplètes si le décompte a pu être établi
             if expected_counts is not None:
@@ -663,11 +712,11 @@ class FrequencyConverter(TemporalConverter):
         Returns:
             Series of expected sub-period counts aligned on ``target_index``,
             or None when the source frequency is neither supplied nor
-            detectable.
+            detectable (irregular index, fewer than two dates).
 
         Raises:
-            ValueError: If either frequency cannot be normalized (callers
-                that tolerate this case catch it themselves).
+            ValueError: If either frequency cannot be normalized.
+            NotImplementedError: If either frequency is multiplied.
 
         Examples:
             >>> import pandas as pd
@@ -679,9 +728,13 @@ class FrequencyConverter(TemporalConverter):
             [31.0, 28.0, 31.0]
         """
         # Fréquence source de l'appelant, sinon détectée sur l'index : sans
-        # elle, aucun nombre de sous-périodes attendu n'est définissable
+        # elle (index irrégulier ou trop court), aucun nombre de sous-périodes
+        # attendu n'est définissable
         if source_freq is None:
-            source_freq = detect_index_frequency(index=data.index, return_format='full')
+            try:
+                source_freq = detect_index_frequency(index=data.index, return_format='full')
+            except ValueError:
+                source_freq = None
         if not source_freq:
             return None
 
@@ -773,16 +826,31 @@ class FrequencyConverter(TemporalConverter):
                                       limit_area: Optional[Literal['inside', 'outside']] = None,
                                       source_freq: Optional[str] = None,
                                       anchor_fraction: Optional[float] = None) -> Union[pd.Series, pd.DataFrame]:
-        """Interpolate data to a higher frequency using asfreq.
+        """Interpolate data to a higher frequency.
+
+        The rows are sorted chronologically and restricted to the observed
+        ones (rows entirely NaN are dropped): a variable carried on a grid
+        finer than its own frequency is interpolated from its observations
+        only. Each observation is re-stamped on the target period that
+        contains it, and the output index is the target grid covering the
+        whole source periods of the first and last observations (whatever the
+        ratio between the two frequencies, e.g. monthly to weekly). A
+        position-less multiplied source (``'2D'``, ``'6h'``) stamps the start
+        of its block, a monthly, quarterly, yearly, weekly or semi-monthly one
+        without position its end.
 
         Args:
-            data: Time series data to interpolate
-            target_freq: Target frequency (must be higher than current), with
-                optional position ('MS', 'QE', etc.)
+            data: Time series data to interpolate, on a simple DatetimeIndex
+                (panels go through :meth:`convert_frequency`)
+            target_freq: Target pandas offset (must be higher than current),
+                with optional position ('MS', 'QE', etc.). User labels such as
+                ``'daily'`` are not offsets and are rejected.
             method: Interpolation method (same semantics as pandas interpolate)
-            limit: Maximum number of consecutive NaN values to fill. If
-                ``'default'``, uses the frequency conversion factor (e.g. 3 for
-                quarterly to monthly). If None, no limit is applied.
+            limit: Maximum number of consecutive NaN values to fill: an integer
+                (numpy integers included). If ``'default'``, uses the frequency
+                conversion factor (e.g. 3 for quarterly to monthly), or no
+                limit when the source frequency is unknown. If None, no limit
+                is applied.
             limit_direction: Direction in which to fill NaN values. If None,
                 defaults to ``'forward'`` when target_position is start
                 (``'S'``/``'start'``) and ``'backward'`` when target_position is
@@ -793,9 +861,10 @@ class FrequencyConverter(TemporalConverter):
                 only NaN outside valid values. See
                 :meth:`pandas.DataFrame.interpolate` for details.
             source_freq: Source frequency of the data. If None, it is inferred
-                from the index. Provide it explicitly when the index frequency
-                differs from the variable's own frequency (e.g. a quarterly
-                variable carried on a monthly index).
+                from the dates of the observed rows; when it cannot be inferred
+                (irregular dates, single observation), the observations are
+                placed on the target grid spanning them (``asfreq``), without
+                extension to whole periods.
             anchor_fraction: Position, within its own source period, at which
                 each observed value is considered reached. ``0.0`` is the start
                 of the period, ``0.5`` its middle, ``1.0`` its end. ``None``
@@ -829,10 +898,10 @@ class FrequencyConverter(TemporalConverter):
                 - ``limit`` counts consecutive NaN on the union index, which is
                   denser than the target grid.
                 - if the source frequency base cannot be expressed as a
-                  ``pd.Period`` (irregular base), the ``None`` behaviour is
-                  silently used instead. A frequency multiplier (``'2M'``) is
-                  handled as its base, like in
-                  :meth:`_extend_index_for_upsampling`.
+                  ``pd.Period`` (semi-monthly base), the ``None`` behaviour is
+                  silently used instead. A multiplied source frequency
+                  (``'2M'``) is rejected: each timestamp would stand for a
+                  block of several periods.
 
                 This parameter applies to **interpolation only** — never to
                 aggregation, nor to disaggregation by period totals, which stay
@@ -842,22 +911,27 @@ class FrequencyConverter(TemporalConverter):
                 that order and without conflict.
 
         Returns:
-            Interpolated time series data
+            Interpolated time series data; an empty object of the same type
+            when no value is observed
 
         Raises:
-            ValueError: If ``target_freq`` is not a valid pandas offset, if
-                ``method`` is not a supported interpolation method, or if
-                ``anchor_fraction`` is neither None nor a real number in
-                ``[0, 1]``.
+            ValueError: If ``data`` has no row, if
+                ``target_freq`` is not a valid pandas offset, if ``method`` is
+                not a supported interpolation method, if ``limit`` is invalid,
+                if ``anchor_fraction`` is neither None nor a real number in
+                ``[0, 1]``, or if several observations fall in the same target
+                period (the data is not at a lower frequency than the target).
+            NotImplementedError: If ``anchor_fraction`` is combined with a
+                multiplied source frequency.
 
         Examples:
             >>> import pandas as pd
             >>> converter = FrequencyConverter()
-            >>> monthly_dates = pd.date_range('2023-01-01', periods=3, freq='M')
+            >>> monthly_dates = pd.date_range('2023-01-31', periods=3, freq='ME')
             >>> monthly_series = pd.Series([10, 20, 30], index=monthly_dates)
-            >>> daily = converter.interpolate_to_higher_frequency(monthly_series, 'daily', 'linear')
-            >>> len(daily) > len(monthly_series)
-            True
+            >>> daily = converter.interpolate_to_higher_frequency(monthly_series, 'D', 'linear')
+            >>> len(daily)
+            90
 
             Yearly series interpolated to quarters. Without an anchor, the
             values are held at the end of each year and the 2022 quarters step
@@ -883,10 +957,18 @@ class FrequencyConverter(TemporalConverter):
             >>> list(mid['2022'].round(2))
             [128.94, 131.93, nan, nan]
         """
-        # Validation de la position d'ancrage, sans coercition : le chemin
-        # anchor_fraction=None n'exécute que ce test d'identité
+        # Validation des paramètres, avant tout calcul : position d'ancrage
+        # (sans coercition) et méthode d'interpolation
         if anchor_fraction is not None:
             anchor_fraction = self._validate_anchor_fraction(anchor_fraction)
+        if method not in _INTERPOLATION_METHODS:
+            raise ValueError(
+                f"Unsupported interpolation method: {method}, "
+                f"should be in {sorted(_INTERPOLATION_METHODS)}"
+            )
+
+        # Refus des données vides : aucune observation à interpoler
+        self._reject_empty(data, 'interpolate')
 
         # Modernisation des alias dépréciés ('Y'/'A'/'Q'/'M' -> 'YE'/'YE'/'QE'/'ME')
         # avant tout resample/asfreq/date_range, sans changer la position (S/E)
@@ -905,11 +987,23 @@ class FrequencyConverter(TemporalConverter):
         except Exception as e:
             raise ValueError(f"Invalid target frequency '{target_freq}': {e}")
 
-        # Détection de la fréquence source à partir de l'index, sauf si elle est fournie explicitement
-        # La détection peut échouer (index court ou irrégulier) : repli sur asfreq dans ce cas
+        # Restriction aux lignes observées, dans l'ordre chronologique : une
+        # variable portée par une grille plus fine que sa propre fréquence (NaN
+        # de bourrage) n'est interpolée qu'à partir de ses observations, et
+        # l'extension part de la première et de la dernière d'entre elles
+        observed = self._sorted(data).dropna(how='all')
+
+        # Aucune valeur observée : aucune date à produire (même règle que
+        # convert_frequency, pour une Series comme pour un DataFrame)
+        if observed.empty:
+            return data.iloc[0:0]
+
+        # Détection de la fréquence source sur les dates observées, sauf si elle
+        # est fournie explicitement. La détection peut échouer (une seule
+        # observation, dates irrégulières) : repli sur asfreq dans ce cas
         if not source_freq:
             try:
-                source_freq = detect_index_frequency(index=data.index, return_format='full')
+                source_freq = detect_index_frequency(index=observed.index, return_format='full')
             except ValueError:
                 source_freq = None
 
@@ -917,7 +1011,7 @@ class FrequencyConverter(TemporalConverter):
         if source_freq:
             # Extension de l'index pour inclure toutes les périodes intermédiaires
             extended_index = self._extend_index_for_upsampling(
-                original_index=data.index,
+                original_index=observed.index,
                 source_freq=source_freq,
                 target_freq=target_freq
             )
@@ -926,11 +1020,19 @@ class FrequencyConverter(TemporalConverter):
             # source en position 'S' (ex. QS → 2024-01-01) n'intersecte pas une
             # grille cible en position 'E' (ex. ME → 2024-01-31) et la
             # réindexation perdrait toutes les observations
-            anchored = data.copy()
+            anchored = observed.copy()
             anchored.index = self._reanchor_index_to_target(
-                index=data.index,
+                index=observed.index,
                 target_freq=target_freq
             )
+
+            # Deux observations dans une même période cible : la donnée n'est pas
+            # d'une fréquence plus basse que la cible
+            if anchored.index.has_duplicates:
+                raise ValueError(
+                    f"Several observations fall in the same '{target_freq}' period: "
+                    f"the data is not at a lower frequency than the target"
+                )
 
             if anchor_fraction is None:
                 # Réindexation des données sur l'index étendu
@@ -938,7 +1040,7 @@ class FrequencyConverter(TemporalConverter):
             else:
                 # Décalage des ancres à la fraction demandée de leur période source
                 shifted_index = self._shift_index_to_anchor_fraction(
-                    index=data.index,
+                    index=observed.index,
                     source_freq=source_freq,
                     target_freq=target_freq,
                     anchor_fraction=anchor_fraction
@@ -963,42 +1065,36 @@ class FrequencyConverter(TemporalConverter):
                         method = 'time'
         else:
             # Fallback : utilisation de asfreq si la fréquence source n'est pas détectable
-            upsampled = data.asfreq(target_freq)
+            upsampled = observed.asfreq(target_freq)
 
-        # Résolution de la valeur par défaut de limit
+        # Arguments d'interpolation : direction et limite résolues (valeurs par défaut)
+        interpolate_kwargs = {
+            'method': method,
+            'limit_direction': self._resolve_limit_direction(
+                limit_direction=limit_direction,
+                target_position=target_position,
+                target_freq=target_freq
+            ),
+        }
         resolved_limit = self._resolve_interpolation_limit(
             limit=limit,
             source_freq=source_freq,
             target_freq=target_freq
         )
-
-        # Résolution de la valeur par défaut de limit_direction
-        resolved_limit_direction = self._resolve_limit_direction(
-            limit_direction=limit_direction,
-            target_position=target_position,
-            target_freq=target_freq
-        )
-
-        # Construction des arguments d'interpolation
-        interpolate_kwargs = {'method': method}
         if resolved_limit is not None:
             interpolate_kwargs['limit'] = resolved_limit
-        if resolved_limit_direction is not None:
-            interpolate_kwargs['limit_direction'] = resolved_limit_direction
         if limit_area is not None:
             interpolate_kwargs['limit_area'] = limit_area
 
         # Application de l'interpolation
-        valid_methods = {'linear', 'time', 'index', 'values', 'nearest',
-                         'zero', 'slinear', 'quadratic', 'cubic'}
-        if method not in valid_methods:
-            raise ValueError(f"Unsupported aggregation method: {method}, should be in {valid_methods}")
-
         result = upsampled.interpolate(**interpolate_kwargs)
 
         # Restriction à la grille cible : les ancres décalées ne survivent pas
         if final_index is not None:
             result = result.reindex(final_index)
+
+        # Conservation du nom de l'index source (la grille étendue n'en porte pas)
+        result.index.name = data.index.name
 
         return result
 
@@ -1015,39 +1111,50 @@ class FrequencyConverter(TemporalConverter):
         index becomes 2024-01-31 when the target is ``ME``.
 
         This is a no-op when the source and target positions already agree.
+        Position-less targets counted in days or finer units (``'D'``, ``'h'``,
+        ``'min'``, ...) are stamped at the start of their period, time of day
+        kept; semi-monthly targets, which have no ``pd.Period``, roll to the
+        ``'SMS'`` anchor at or before each timestamp, or to the ``'SME'``
+        anchor at or after it.
 
         Args:
             index: Source datetime index
             target_freq: Target frequency string, with optional position
 
         Returns:
-            Re-anchored DatetimeIndex, or the original index if the target
-            frequency cannot be decomposed into a base and a position
+            Re-anchored DatetimeIndex
 
         Examples:
             >>> converter = FrequencyConverter()
             >>> qs_index = pd.date_range('2024-01-01', periods=2, freq='QS')
             >>> converter._reanchor_index_to_target(qs_index, 'ME')
             DatetimeIndex(['2024-01-31', '2024-04-30'], dtype='datetime64[ns]', freq=None)
+            >>> converter._reanchor_index_to_target(pd.DatetimeIndex(['2024-01-31']), 'SMS')
+            DatetimeIndex(['2024-01-15'], dtype='datetime64[ns]', freq=None)
         """
         # Décomposition de la fréquence cible
         target = normalize_frequency(target_freq, return_format='components')
         target_base = target.freq
 
-        # Convention du package en l'absence de position explicite
+        # Base sans position (jours, unités infra-journalières) : la grille cible
+        # porte le début de chaque période, à l'heure près — aucune remise à
+        # minuit, qui confondrait toutes les heures d'une même journée
+        if target_base in _BLOCK_START_BASES:
+            return pd.DatetimeIndex(index.to_period(target_base).to_timestamp(how='start'))
+
+        # Convention du package en l'absence de position explicite : fin de période
         target_pos = target.position if target.position is not None else 'E'
-        how = 'start' if normalize_position(target_pos) == 'S' else 'end'
 
-        # Ré-ancrage période par période, avec repli sur l'index d'origine si la
-        # fréquence de base n'est pas convertible en Period (ex. fréquences
-        # irrégulières ou multiples non supportés)
-        try:
-            periods = index.to_period(target_base)
-            reanchored = periods.to_timestamp(how=how).normalize()
-        except (ValueError, AttributeError):
-            return index
+        # Base semi-mensuelle, sans pd.Period : ancre 'SMS' précédente ou ancre
+        # 'SME' suivante, selon la position cible
+        if target_base in _NON_PERIOD_BASES:
+            offset = to_offset(build_frequency_string(target_base, target_pos))
+            roll = offset.rollback if target_pos == 'S' else offset.rollforward
+            return pd.DatetimeIndex([roll(timestamp) for timestamp in index]).normalize()
 
-        return pd.DatetimeIndex(reanchored)
+        # Ré-ancrage période par période, au début ou à la fin (jour entier)
+        how = 'start' if target_pos == 'S' else 'end'
+        return pd.DatetimeIndex(index.to_period(target_base).to_timestamp(how=how).normalize())
 
     # Méthode auxiliaire de validation de la position d'ancrage
     def _validate_anchor_fraction(self, anchor_fraction: Any) -> float:
@@ -1140,14 +1247,15 @@ class FrequencyConverter(TemporalConverter):
         # Normalisation de la base source (sans position S/E)
         source_base = normalize_frequency(source_freq, return_format='base')
 
-        # Périodes source réelles, avec repli quand la base n'est pas convertible
-        # en Period (fréquences irrégulières ou multiples non supportés)
-        try:
-            periods = index.to_period(source_base)
-            starts = periods.start_time
-            ends = periods.end_time
-        except (ValueError, AttributeError):
+        # Base sans pd.Period (semi-mensuelle) : repli de l'appelant sur le
+        # comportement anchor_fraction=None
+        if source_base in _NON_PERIOD_BASES:
             return None
+
+        # Périodes source réelles
+        periods = index.to_period(source_base)
+        starts = periods.start_time
+        ends = periods.end_time
 
         # Durée calendaire pleine de chaque période : end_time est la dernière
         # nanoseconde de la période, d'où le +1 ns. La longueur pleine est de
@@ -1179,36 +1287,51 @@ class FrequencyConverter(TemporalConverter):
         factor between the source (low) and target (high) frequency.
 
         Args:
-            limit: Raw limit value (int, ``'default'``, or None)
+            limit: Raw limit value (integer — numpy integers included —,
+                ``'default'``, or None)
             source_freq: Detected source frequency (may be None)
             target_freq: Target frequency string
 
         Returns:
-            Resolved integer limit or None
+            Resolved integer limit, or None for no limit (``None``, or
+            ``'default'`` without a known source frequency)
+
+        Raises:
+            ValueError: If ``limit`` is neither None, ``'default'`` nor an
+                integer (booleans, floats and other strings are rejected).
+
+        Examples:
+            >>> converter = FrequencyConverter()
+            >>> converter._resolve_interpolation_limit('default', 'QS', 'MS')
+            3
+            >>> converter._resolve_interpolation_limit(np.int64(2), 'QS', 'MS')
+            2
         """
-        # Retourne le paramètre si ce n'est pas la valeur "default" qui n'est pas tolérée par "interpolate" de pandas
+        # Absence de limite
         if limit is None:
             return None
-        if isinstance(limit, int):
-            return limit
 
-        # Cas 'default' : calcul du facteur de conversion
-        if limit == 'default' and source_freq:
-            # Calcul du facteur de conversion (multiplicateurs compris) :
-            # « combien de périodes cibles dans une période source »
-            try:
-                factor = self.get_conversion_factor(target_freq, source_freq)
-                return int(round(factor))
-            except (ValueError, KeyError):
+        # Entier Python ou numpy (les booléens, sous-classe d'int, sont refusés)
+        if isinstance(limit, numbers.Integral) and not isinstance(limit, (bool, np.bool_)):
+            return int(limit)
+
+        # Cas 'default' : facteur de conversion (multiplicateurs compris),
+        # « combien de périodes cibles dans une période source » ; sans
+        # fréquence source connue, aucune limite
+        if isinstance(limit, str) and limit == 'default':
+            if not source_freq:
                 return None
+            return int(round(self.get_conversion_factor(target_freq, source_freq)))
 
-        return None
+        raise ValueError(
+            f"Invalid limit {limit!r}: expected None, 'default' or an integer"
+        )
 
     # Méthode auxiliaire de résolution de la direction d'interpolation
     def _resolve_limit_direction(self,
                                  limit_direction: Optional[str],
                                  target_position: Optional[str],
-                                 target_freq: str) -> Optional[str]:
+                                 target_freq: str) -> str:
         """Resolve the default limit_direction based on target position.
 
         Args:
@@ -1218,29 +1341,20 @@ class FrequencyConverter(TemporalConverter):
                 the position)
 
         Returns:
-            Resolved direction string or None
+            ``limit_direction`` when given, otherwise ``'forward'`` for a
+            start position and ``'backward'`` for an end position (the
+            package convention without explicit position)
         """
         # Valeur explicite : retour immédiat
         if limit_direction is not None:
             return limit_direction
 
-        # Résolution de la position cible
-        position = target_position
-        if position is None:
-            # Extraction de la position depuis la fréquence cible ;
-            # convention du package en l'absence de position explicite : fin de période
-            extracted_pos = parse_frequency(target_freq).position
-            position = extracted_pos if extracted_pos is not None else 'E'
+        # Résolution de la position cible ; convention du package en l'absence
+        # de position explicite : fin de période
+        position = target_position or parse_frequency(target_freq).position or 'E'
 
-        # Normalisation et conversion en direction
-        if position is not None:
-            normalized_pos = normalize_position(position)
-            if normalized_pos == 'S':
-                return 'forward'
-            elif normalized_pos == 'E':
-                return 'backward'
-
-        return None
+        # Conversion en direction
+        return 'forward' if normalize_position(position) == 'S' else 'backward'
 
     # Méthode auxiliaire de validation des paramètres
     def _validate_conversion_params(self,
@@ -1257,29 +1371,26 @@ class FrequencyConverter(TemporalConverter):
             panel_cols: Panel identifier columns
 
         Returns:
-            Validated data
-        
+            Validated data, sorted
+
         Raises:
-            ValueError: If parameters are invalid
+            ValueError: If the data is empty or if parameters are invalid
         """
         # Vérification du jeu de données
         data = validate_temporal_data(data=data, time_col=time_col, panel_cols=panel_cols, strict=True, sort_data=True, return_metadata=False)
+
+        # Refus des données vides (Series, DataFrame ou panel sans aucune ligne)
+        self._reject_empty(data, 'convert')
 
         # Vérification que la fréquence cible est spécifiée
         if not target_freq:
             raise ValueError("Target frequency cannot be empty")
 
-        # Validation de target_freq selon son type
+        # Validation de target_freq selon son type. Seule la base est à valider :
+        # parse_frequency ne rend comme position que 'S', 'E' ou None
         if isinstance(target_freq, str):
-            # Validation de la fréquence en décomposant d'abord pour gérer les positions S/E
             try:
-                # Décomposition de la fréquence pour extraire la base et la position
-                freq_base, freq_pos, _, _ = parse_frequency(target_freq)
-                # Normalisation de la fréquence de base uniquement
-                normalize_frequency(freq_base)
-                # Validation de la position si elle est spécifiée et non-default
-                if freq_pos and not validate_position(freq_pos):
-                    raise ValueError(f"Invalid position '{freq_pos}' in target frequency '{target_freq}'")
+                normalize_frequency(parse_frequency(target_freq).freq)
             except ValueError as e:
                 raise ValueError(f"Invalid target frequency: {e}")
         elif isinstance(target_freq, dict):
@@ -1316,13 +1427,7 @@ class FrequencyConverter(TemporalConverter):
             # Validation de chaque fréquence cible (clé = colonne, entité ou (entité, colonne))
             for key, freq in target_freq.items():
                 try:
-                    # Décomposition de la fréquence pour extraire la base et la position
-                    freq_base, freq_pos, _, _ = parse_frequency(freq)
-                    # Normalisation de la fréquence de base uniquement
-                    normalize_frequency(freq_base)
-                    # Validation de la position si elle est spécifiée et non-default
-                    if freq_pos and not validate_position(freq_pos):
-                        raise ValueError(f"Invalid position '{freq_pos}' in frequency '{freq}'")
+                    normalize_frequency(parse_frequency(freq).freq)
                 except ValueError as e:
                     raise ValueError(f"Invalid target frequency for key '{key}': {e}")
         else:
@@ -1369,13 +1474,16 @@ class FrequencyConverter(TemporalConverter):
 
         Returns:
             Converted panel data with a MultiIndex combining each entity with its
-            converted time index.
+            converted time index. An entity that no key targets is returned
+            unchanged, for a Series as for a DataFrame; an entity without any
+            observation of the converted columns is left out.
         """
         # Import local pour éviter les imports circulaires
         from ...panel.utils import get_unique_panel_entities, get_entity_mask
 
-        # Colonnes disponibles (None pour une Series)
+        # Colonnes disponibles (None pour une Series, repérée par son nom)
         columns = list(data.columns) if isinstance(data, pd.DataFrame) else None
+        series_name = data.name if isinstance(data, pd.Series) else None
         # Niveaux d'entité (tous sauf le dernier, temporel)
         entity_levels = list(range(data.index.nlevels - 1))
         # Noms des niveaux de l'index d'origine
@@ -1392,7 +1500,7 @@ class FrequencyConverter(TemporalConverter):
             entity_data = data.loc[entity_mask].droplevel(entity_levels)
 
             # Résolution de la fréquence cible propre à l'entité
-            entity_target = self._resolve_panel_target(target_freq, entity, columns)
+            entity_target = self._resolve_panel_target(target_freq, entity, columns, series_name)
 
             # Cas d'une entité sans aucune colonne ciblée : conservation telle quelle
             if isinstance(entity_target, dict) and not entity_target:
@@ -1412,6 +1520,11 @@ class FrequencyConverter(TemporalConverter):
                 limit_area=limit_area,
             )
 
+            # Entité sans aucune observation des colonnes converties : aucune
+            # date à conserver, l'entité disparaît de la sortie
+            if converted.empty:
+                continue
+
             # Reconstruction de l'index MultiIndex en réattachant l'entité
             new_index = pd.MultiIndex.from_tuples(
                 [(*entity, time) for time in converted.index],
@@ -1422,9 +1535,9 @@ class FrequencyConverter(TemporalConverter):
 
             converted_parts.append(converted)
 
-        # Cas où aucune entité n'a pu être convertie
+        # Aucune entité observée : aucune ligne
         if not converted_parts:
-            return data
+            return data.iloc[0:0]
 
         # Concaténation des entités et tri de l'index
         result = pd.concat(converted_parts)
@@ -1436,37 +1549,40 @@ class FrequencyConverter(TemporalConverter):
     def _resolve_panel_target(self,
                               target_freq: Union[str, Dict[str, str]],
                               entity: tuple,
-                              columns: Optional[List[str]]) -> Union[str, Dict[str, str]]:
+                              columns: Optional[List[str]],
+                              series_name: Any = None) -> Union[str, Dict[str, str]]:
         """Resolve the target frequency applicable to a given panel entity.
 
         Supports mixed dict keys: ``(entity..., column)`` tuples, ``(entity...)``
         tuples, or plain column names, with precedence
         ``(entity, column)`` > ``(entity,)`` > ``column`` (see
-        :func:`resolve_entity_column_frequencies`).
+        :func:`resolve_entity_column_frequencies`). A panel Series is resolved
+        as a single column named after the Series.
 
         Args:
             target_freq: Target specification (str or dict with mixed keys).
             entity: Entity tuple.
             columns: Available data columns (None for Series inputs).
+            series_name: Name of the Series, for Series inputs.
 
         Returns:
-            A frequency string (for str inputs or Series entities) or a
-            ``{col: freq}`` dict (for DataFrame entities). Columns not covered by
-            the mapping are omitted from the dict (left unchanged by the caller).
+            A frequency string (for str inputs or targeted Series entities) or
+            a ``{col: freq}`` dict (for DataFrame entities). Columns not covered
+            by the mapping are omitted from the dict, and an untargeted Series
+            entity gives an empty dict: the caller leaves them unchanged.
         """
         # Import local pour éviter les imports circulaires
-        from ...panel.utils import (
-            get_entity_target_frequency,
-            resolve_entity_column_frequencies,
-        )
+        from ...panel.utils import resolve_entity_column_frequencies
 
         # Cas d'une chaîne : même cible pour toutes les entités et colonnes
         if not isinstance(target_freq, dict):
             return target_freq
 
-        # Cas Series (pas de colonnes) : résolution vers une fréquence unique par entité
+        # Cas Series : une colonne unique, repérée par le nom de la Series ;
+        # entité non ciblée → dict vide (conservée telle quelle par l'appelant)
         if columns is None:
-            return get_entity_target_frequency(entity, target_freq)
+            resolved = resolve_entity_column_frequencies(entity, [series_name], target_freq)
+            return resolved.get(series_name, {})
 
         # Cas DataFrame : résolution par colonne selon la précédence de spécificité
         return resolve_entity_column_frequencies(entity, columns, target_freq)
@@ -1478,52 +1594,55 @@ class FrequencyConverter(TemporalConverter):
                             target_position: Optional[str]) -> Dict[str, Tuple[str, str]]:
         """Build complete frequency map for DataFrame conversion.
 
+        The target position of each column is, in order: ``target_position``,
+        the position carried by its target frequency, the position of the
+        column's own source frequency (as for a Series), the default 'E'.
+
         Args:
             data: Input DataFrame
             target_freq: Target frequency (str or dict)
+            target_position: Explicit target position code ('S', 'E') or None
 
         Returns:
-            Dictionary mapping column names to (source_freq, target_freq) tuples
+            Dictionary mapping the columns with a detectable frequency to
+            (source_freq, target_freq) tuples; undetectable columns and
+            columns absent from a dict ``target_freq`` are left out
+
+        Raises:
+            ValueError: If the data holds observations but no column has a
+                detectable frequency.
         """
         # Détection des fréquences source de chaque colonne (index simple → {col: freq})
-        # detect_dataset_frequency gère la détection par colonne et la normalisation ;
-        # les composants sont recomposés en chaîne avec position et multiplicateur
-        current_frequencies = {
-            col: self._with_position(parsed, parsed.position)
+        # sous forme décomposée : la position source sert aussi de repli à la cible
+        sources = {
+            col: parsed
             for col, parsed in detect_dataset_frequency(data, return_format='components').items()
             if parsed
         }
 
-        # Construction du frequency_map
-        frequency_map = {}
+        # Des observations sans aucune fréquence détectable : erreur, comme pour
+        # une Series (un cadre sans aucune observation, lui, rend zéro ligne)
+        if not sources and data.notna().any().any():
+            raise ValueError("Cannot detect current frequency of any column of the data")
 
+        # Fréquence cible de chaque colonne détectée (même cible pour toutes si chaîne)
         if isinstance(target_freq, str):
-            # Même fréquence cible pour toutes les colonnes : décomposition, puis
-            # construction de la fréquence complète (position explicite prioritaire)
-            target = normalize_frequency(target_freq, return_format='components')
-            target_freq_with_position = self._with_position(target, target_position or target.position)
-
-            for col in list(data.columns):
-                # Extraction de la fréquence de la colonne
-                current_freq = current_frequencies.get(col)
-                # Création de l'association pour la colonne
-                if current_freq:
-                    frequency_map[col] = (current_freq, target_freq_with_position)
+            targets = {col: target_freq for col in data.columns if col in sources}
         else:
-            # Fréquences cibles spécifiques par colonne
-            for col, target in target_freq.items():
-                # Extraction de la fréquence de la colonne
-                current_freq = current_frequencies.get(col)
-                # Ignore les colonnes absentes du jeu de données ou sans fréquence détectée
-                if not current_freq:
-                    continue
+            targets = {col: target for col, target in target_freq.items() if col in sources}
 
-                # Décomposition de la fréquence cible de la colonne, puis construction de
-                # la fréquence complète (position explicite prioritaire ; variables locales
-                # pour ne pas propager la position d'une colonne à la suivante)
-                col_target = normalize_frequency(target, return_format='components')
-                col_target_with_position = self._with_position(col_target, target_position or col_target.position)
-                frequency_map[col] = (current_freq, col_target_with_position)
+        # Construction du frequency_map : fréquences complètes (base + position +
+        # multiplicateur), position explicite prioritaire, puis celle de la cible,
+        # puis celle de la source (variables locales par colonne)
+        frequency_map = {}
+        for col, target in targets.items():
+            source = sources[col]
+            col_target = normalize_frequency(target, return_format='components')
+            col_position = target_position or col_target.position or source.position
+            frequency_map[col] = (
+                self._with_position(source, source.position),
+                self._with_position(col_target, col_position),
+            )
 
         return frequency_map
 
@@ -1569,12 +1688,24 @@ class FrequencyConverter(TemporalConverter):
                                   limit: Union[int, str, None] = None,
                                   limit_direction: Optional[str] = None,
                                   limit_area: Optional[str] = None) -> pd.DataFrame:
-        """Apply grouped conversions efficiently with proper index alignment.
+        """Apply grouped conversions and assemble them on the union of their indexes.
+
+        Each group of columns is converted by
+        :meth:`interpolate_to_higher_frequency` or
+        :meth:`aggregate_to_lower_frequency`. The output index is the union of
+        the target indexes of the converted columns and of the observed dates
+        of the columns left unconverted (absent from a dict target, already at
+        their target frequency, or without a detectable frequency): the rows
+        of the source grid do not survive, and the result does not depend on
+        the order of the columns. When nothing is converted, the rows where
+        at least one column is observed are returned.
 
         Args:
             data: Input DataFrame
             grouped_conversions: Dictionary of grouped conversions
-            alignment_method: Method to align indexes when mixing frequencies
+            alignment_method: Method filling the NaN a converted column gets on
+                the union when frequencies are mixed ('ffill', 'bfill',
+                'nearest', 'none')
             full_periods_only: If True, incomplete periods produce NaN
                 (downsampling only)
             limit: Maximum number of consecutive NaN to fill (upsampling only)
@@ -1582,307 +1713,247 @@ class FrequencyConverter(TemporalConverter):
             limit_area: Restriction area for NaN filling (upsampling only)
 
         Returns:
-            DataFrame with all conversions applied and properly aligned
+            DataFrame with all conversions applied, columns in their original
+            order, index named like the source index
         """
-        # Dictionnaire pour stocker les colonnes converties
-        converted_columns = {}
-
-        # Ensemble des colonnes qui seront converties
-        columns_to_convert = set()
-        for columns_list in grouped_conversions.values():
-            columns_to_convert.update(columns_list)
-
-        # Traitement de chaque groupe de conversions
+        # Conversion de chaque groupe (colonnes de même source, cible et méthode)
+        converted_columns: Dict[str, pd.Series] = {}
         for (source_freq, target_freq, conv_method), columns in grouped_conversions.items():
-            # Extraction des colonnes à convertir
             subset = data[columns]
 
-            # Détermination de la direction de conversion (bases et multiplicateurs ;
-            # positions et anchors sont sans effet sur l'ordre des fréquences)
+            # Direction de conversion (bases et multiplicateurs ; positions et
+            # ancres sont sans effet sur l'ordre des fréquences) ; la fréquence
+            # source du groupe est déjà détectée
             if is_higher_frequency(target_freq, source_freq):
-                # Upsampling (la fréquence source du groupe est déjà détectée)
-                converted = self._upsample(
-                    data=subset, target_freq=target_freq,
-                    method=conv_method, limit=limit,
-                    limit_direction=limit_direction, limit_area=limit_area,
-                    source_freq=source_freq
+                converted = self.interpolate_to_higher_frequency(
+                    subset, target_freq, conv_method,
+                    limit=limit, limit_direction=limit_direction,
+                    limit_area=limit_area, source_freq=source_freq,
                 )
             else:
-                # Downsampling (la fréquence source du groupe est déjà détectée)
-                converted = self._downsample(
-                    data=subset, target_freq=target_freq,
-                    method=conv_method,
-                    full_periods_only=full_periods_only,
-                    source_freq=source_freq
+                converted = self.aggregate_to_lower_frequency(
+                    subset, target_freq, conv_method, full_periods_only,
+                    source_freq=source_freq,
                 )
 
-            # Stockage des colonnes converties
             for col in columns:
-                if isinstance(converted, pd.Series):
-                    converted_columns[col] = converted
-                else:
-                    converted_columns[col] = converted[col]
+                converted_columns[col] = converted[col]
 
-        # Cas où aucune colonne n'a été convertie (ex: fréquence source == cible partout)
+        # Rien à convertir : lignes où au moins une colonne est observée
         if not converted_columns:
-            return data
+            observed_rows = data.notna().any(axis=1)
+            return data if observed_rows.all() else data.loc[observed_rows]
 
-        # Colonnes présentes mais non converties (à préserver telles quelles)
-        non_converted_cols = [col for col in data.columns if col not in columns_to_convert]
+        # Colonnes conservées (hors dict, déjà à la cible ou sans fréquence
+        # détectable) : valeurs aux seules dates observées
+        preserved_columns = {
+            col: data[col].dropna() for col in data.columns if col not in converted_columns
+        }
 
-        # Vérification si toutes les colonnes converties ont la même fréquence cible
-        unique_target_freqs = {target_freq for (_, target_freq, _) in grouped_conversions.keys()}
+        # Index de sortie : union des index cibles et des dates observées des
+        # colonnes conservées, indépendante de l'ordre des colonnes
+        unified_index = data.index[:0]
+        for series in (*converted_columns.values(), *preserved_columns.values()):
+            unified_index = unified_index.union(series.index)
 
-        # Chemin simple : une seule fréquence cible et aucune colonne à préserver
-        if len(unique_target_freqs) == 1 and not non_converted_cols:
-            # Reconstruction simple du DataFrame
-            result = pd.DataFrame(index=list(converted_columns.values())[0].index)
-            for col, conv_series in converted_columns.items():
-                result[col] = conv_series
-            # Préservation de l'ordre original des colonnes
-            return result[[col for col in data.columns if col in result.columns]]
-
-        # Sinon : alignement des fréquences mixtes et/ou conservation des colonnes non converties
-        if non_converted_cols:
-            base_data = data[non_converted_cols].copy()
-        else:
-            # Toutes les colonnes sont converties : l'index source ne doit pas
-            # survivre dans l'union — l'index de sortie est l'union des index cibles
-            base_data = pd.DataFrame(index=data.index[:0])
-
-        # Alignement des colonnes converties (et réattachement des colonnes non converties)
-        result = self._align_mixed_frequency_columns(
-            base_data=base_data,
-            converted_columns=converted_columns,
-            alignment_method=alignment_method
+        # Fréquences mélangées : plusieurs cibles, ou des colonnes conservées
+        # observées ; seul ce mélange introduit des NaN à combler
+        mixed = (
+            len({target_freq for (_, target_freq, _) in grouped_conversions}) > 1
+            or any(not series.empty for series in preserved_columns.values())
         )
 
-        # Préservation de l'ordre original des colonnes
-        return result[[col for col in data.columns if col in result.columns]]
-
-    # Méthode auxiliaire d'alignement des indexes de différentes fréquences
-    def _align_mixed_frequency_columns(self,
-                                      base_data: pd.DataFrame,
-                                      converted_columns: Dict[str, pd.DataFrame],
-                                      alignment_method: str) -> pd.DataFrame:
-        """Align columns with different frequencies using specified method.
-
-        Args:
-            base_data: Original DataFrame with base index
-            converted_columns: Dictionary mapping column names to converted Series/DataFrames
-            alignment_method: Method to use for alignment ('ffill', 'bfill', 'nearest', 'none')
-
-        Returns:
-            DataFrame with aligned columns
-        """
-        if not converted_columns:
-            return base_data
-
-        # Collecte de tous les indexes uniques
-        all_indexes = [base_data.index]
-        for conv_data in converted_columns.values():
-            if isinstance(conv_data, pd.Series):
-                all_indexes.append(conv_data.index)
-            else:
-                all_indexes.append(conv_data.index)
-
-        # Création d'un index unifié (union de tous les indexes)
-        unified_index = all_indexes[0]
-        for idx in all_indexes[1:]:
-            unified_index = unified_index.union(idx)
-
-        # Tri de l'index unifié
-        if isinstance(unified_index, pd.MultiIndex):
-            unified_index = unified_index.sort_values()
-        else:
-            unified_index = unified_index.sort_values()
-
-        # Réindexation de toutes les colonnes sur l'index unifié
+        # Réindexation de chaque colonne sur l'union, dans l'ordre d'origine
         result = pd.DataFrame(index=unified_index)
-
-        # Copie des colonnes non converties
-        for col in base_data.columns:
-            if col not in converted_columns:
-                result[col] = base_data[col].reindex(unified_index)
-
-        # Ajout des colonnes converties avec alignement
-        for col, conv_data in converted_columns.items():
-            if isinstance(conv_data, pd.Series):
-                result[col] = conv_data.reindex(unified_index)
+        for col in data.columns:
+            if col in converted_columns:
+                series = converted_columns[col].reindex(unified_index)
+                result[col] = self._fill_union_gaps(series, alignment_method) if mixed else series
             else:
-                result[col] = conv_data[col].reindex(unified_index)
+                result[col] = preserved_columns[col].reindex(unified_index)
 
-            # Application de la méthode d'alignement
-            if alignment_method == 'ffill':
-                result[col] = result[col].ffill()
-            elif alignment_method == 'bfill':
-                result[col] = result[col].bfill()
-            elif alignment_method == 'nearest':
-                result[col] = result[col].interpolate(method='nearest')
-            # 'none' ne fait rien, garde les NaN
-
+        # Nom de l'index source conservé
+        result.index.name = data.index.name
         return result
 
-    # Méthode auxiliaire d'augmentation de la fréquence par interpolation
-    def _upsample(self,
-                data: Union[pd.Series, pd.DataFrame],
-                target_freq: Union[FrequencyType, UserFrequencyType],
-                method: str,
-                limit: Union[int, str, None] = None,
-                limit_direction: Optional[str] = None,
-                limit_area: Optional[str] = None,
-                source_freq: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
-        """Perform upsampling using asfreq and interpolation.
+    # Méthode auxiliaire de comblement des NaN introduits par l'union des index
+    @staticmethod
+    def _fill_union_gaps(series: pd.Series, alignment_method: str) -> pd.Series:
+        """Fill the NaN a converted column gets on a mixed-frequency union.
 
         Args:
-            data: Input data
-            target_freq: Target frequency (pandas format)
-            method: Interpolation method
-            limit: Maximum number of consecutive NaN to fill (int,
-                ``'default'``, or None)
-            limit_direction: Direction for NaN filling
-            limit_area: Restriction area for NaN filling
-            source_freq: Source frequency already detected by the caller
-                (avoids a second detection, which can fail on short indexes)
+            series: Converted column reindexed on the union of indexes.
+            alignment_method: 'ffill', 'bfill', 'nearest' (in time, without
+                extrapolation) or 'none'.
 
         Returns:
-            Upsampled data
+            The filled column ('none': unchanged).
+
+        Examples:
+            >>> s = pd.Series([1.0, None, 3.0], index=pd.date_range('2024-01-31', periods=3, freq='ME'))
+            >>> FrequencyConverter._fill_union_gaps(s, 'ffill').tolist()
+            [1.0, 1.0, 3.0]
         """
-        # Délégation directe pour les données sans panel
-        if not is_panel_data(data):
-            return self.interpolate_to_higher_frequency(
-                data, target_freq, method,
-                limit=limit, limit_direction=limit_direction,
-                limit_area=limit_area, source_freq=source_freq
-            )
+        if alignment_method == 'ffill':
+            return series.ffill()
+        if alignment_method == 'bfill':
+            return series.bfill()
+        if alignment_method == 'nearest':
+            return series.interpolate(method='nearest')
+        # 'none' : NaN conservés
+        return series
 
-        # Données de panel : application par entité via groupby
-        panel_levels = list(range(data.index.nlevels - 1))
-        return data.groupby(level=panel_levels, group_keys=False).apply(
-            lambda x: self.interpolate_to_higher_frequency(
-                x.droplevel(panel_levels),
-                target_freq, method,
-                limit=limit, limit_direction=limit_direction,
-                limit_area=limit_area, source_freq=source_freq
-            )
-        )
-
-    # Méthode auxiliaire de diminution de la fréquence par agrégation
-    def _downsample(self,
-                data: Union[pd.Series, pd.DataFrame],
-                target_freq: Union[FrequencyType, UserFrequencyType],
-                method: str,
-                full_periods_only: bool = False,
-                source_freq: Optional[str] = None) -> Union[pd.Series, pd.DataFrame]:
-        """Perform downsampling using resample and aggregation.
+    # Méthode auxiliaire de refus des données vides
+    @staticmethod
+    def _reject_empty(data: Union[pd.Series, pd.DataFrame], operation: str) -> None:
+        """Reject data without any row.
 
         Args:
-            data: Input data
-            target_freq: Target frequency (pandas format)
-            method: Aggregation method
-            full_periods_only: If True, incomplete periods produce NaN
-            source_freq: Source frequency already detected by the caller
-                (avoids a second detection, which can be wrong when the index
-                grid is finer than the variable's own frequency)
+            data: Series, DataFrame or panel to check.
+            operation: Name of the operation, for the error message.
+
+        Raises:
+            ValueError: If ``data`` has no row.
+
+        Examples:
+            >>> FrequencyConverter._reject_empty(pd.Series([], dtype=float), 'convert')
+            Traceback (most recent call last):
+                ...
+            ValueError: Cannot convert empty data: no row to convert
+        """
+        if len(data) == 0:
+            raise ValueError(f"Cannot {operation} empty data: no row to {operation}")
+
+    # Méthode auxiliaire de tri chronologique
+    @staticmethod
+    def _sorted(data: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
+        """Sort data by date, unless it is already in increasing order.
+
+        Args:
+            data: Series or DataFrame on a DatetimeIndex.
 
         Returns:
-            Downsampled data
+            ``data`` itself when its index is increasing, a sorted copy otherwise.
         """
-        # Délégation directe pour les données sans panel
-        if not is_panel_data(data):
-            return self.aggregate_to_lower_frequency(
-                data, target_freq, method, full_periods_only,
-                source_freq=source_freq
-            )
+        return data if data.index.is_monotonic_increasing else data.sort_index()
 
-        # Données de panel : application par entité via groupby
-        panel_levels = list(range(data.index.nlevels - 1))
-        return data.groupby(level=panel_levels, group_keys=False).apply(
-            lambda x: self.aggregate_to_lower_frequency(
-                x.droplevel(panel_levels),
-                target_freq, method, full_periods_only,
-                source_freq=source_freq
-            )
-        )
+    # Méthode auxiliaire de bornage des blocs d'une base sans pd.Period
+    @staticmethod
+    def _offset_block_bounds(start_date: pd.Timestamp,
+                             end_date: pd.Timestamp,
+                             base: str,
+                             position: str,
+                             multiplier: int) -> Tuple[pd.Timestamp, pd.Timestamp]:
+        """Bounds of the source blocks of a base without ``pd.Period`` (semi-monthly).
+
+        The periods are delimited by the pandas offset of the base at the
+        given position: a ``'SMS'`` stamp opens its half-month, a ``'SME'``
+        stamp closes it.
+
+        Args:
+            start_date: First source timestamp.
+            end_date: Last source timestamp.
+            base: Frequency base (``'SM'``).
+            position: ``'S'`` or ``'E'``.
+            multiplier: Number of base periods in a block.
+
+        Returns:
+            ``(start, end)``: first instant of the first block, last instant of
+            the last block.
+
+        Examples:
+            >>> FrequencyConverter._offset_block_bounds(
+            ...     pd.Timestamp('2024-01-15'), pd.Timestamp('2024-02-29'), 'SM', 'E', 1
+            ... )
+            (Timestamp('2024-01-01 00:00:00'), Timestamp('2024-02-29 23:59:59.999999999'))
+        """
+        offset = to_offset(build_frequency_string(base, position))
+        one_day = pd.Timedelta(1, unit='D')
+        one_ns = pd.Timedelta(1, unit='ns')
+        if position == 'S':
+            # Début de bloc : de l'ancre qui ouvre le premier bloc à la veille de
+            # l'ancre qui suit le dernier
+            start = offset.rollback(start_date).normalize()
+            end = offset.rollback(end_date).normalize() + multiplier * offset - one_ns
+        else:
+            # Fin de bloc : du lendemain de l'ancre qui précède le premier bloc à
+            # la fin du jour de l'ancre qui ferme le dernier
+            start = offset.rollforward(start_date).normalize() - multiplier * offset + one_day
+            end = offset.rollforward(end_date).normalize() + one_day - one_ns
+        return start, end
 
     # Méthode auxiliaire d'extension de l'index pour l'upsampling
     def _extend_index_for_upsampling(self,
                                      original_index: pd.DatetimeIndex,
                                      source_freq: str,
                                      target_freq: str) -> pd.DatetimeIndex:
-        """Extend index to include all periods when upsampling between frequencies.
+        """Extend the index to the whole source periods when upsampling.
 
-        Cette méthode gère l'extension de la plage temporelle lors de l'upsampling
-        pour s'assurer que toutes les périodes intermédiaires sont incluses.
+        The returned index is the target grid running from the start of the
+        source period (or block, for a multiplied source) of the first
+        timestamp to the end of the period of the last one, whatever the
+        ratio between the two frequencies (monthly to weekly included). A
+        position-less source counted in days or finer units (``'2D'``,
+        ``'6h'``) stamps the start of its block, like the labels of
+        ``pandas.resample``; the other position-less sources (``'W'``,
+        ``'SM'``, bare ``'M'`` / ``'Q'`` / ``'Y'``) stamp its end.
+        Semi-monthly sources, which have no ``pd.Period``, are bounded with
+        the ``'SMS'`` / ``'SME'`` offsets.
 
         Args:
-            original_index: Index original de la série temporelle
-            source_freq: Fréquence source avec position (ex: 'QE', 'QS')
-            target_freq: Fréquence cible avec position (ex: 'ME', 'MS')
+            original_index: Sorted source timestamps.
+            source_freq: Source frequency, with optional position ('QE', 'QS').
+            target_freq: Target frequency, with optional position ('ME', 'MS').
 
         Returns:
-            Index étendu incluant toutes les périodes
+            The target grid covering the source periods, or ``original_index``
+            itself when there is nothing to extend: same base and multiplier,
+            or a target that is not finer than the source.
 
         Examples:
-            >>> # QE to ME: 4 quarters -> 12 months
+            >>> converter = FrequencyConverter()
             >>> qe_index = pd.date_range('2024-03-31', periods=4, freq='QE')
-            >>> extended = _extend_index_for_upsampling(qe_index, 'QE', 'ME')
-            >>> len(extended)
+            >>> len(converter._extend_index_for_upsampling(qe_index, 'QE', 'ME'))
             12
+            >>> me_index = pd.date_range('2024-01-31', periods=3, freq='ME')
+            >>> converter._extend_index_for_upsampling(me_index, 'ME', 'W')[[0, -1]]
+            DatetimeIndex(['2024-01-07', '2024-03-31'], dtype='datetime64[ns]', freq=None)
         """
         # Extraction des informations de fréquence, position et multiplicateur
         source = normalize_frequency(source_freq, return_format='components')
         target = normalize_frequency(target_freq, return_format='components')
         source_base, source_multiplier = source.freq, source.multiplier
-        target_base, target_multiplier = target.freq, target.multiplier
 
-        # Définir la position source par défaut si None (convention: 'E')
-        source_pos = source.position if source.position is not None else 'E'
-
-        # Vérification si extension nécessaire
-        # On étend seulement si les fréquences sont différentes et compatibles
-        # Ex: Q->M nécessite extension, mais M->M ne nécessite pas extension
-        if source_base == target_base and source_multiplier == target_multiplier:
-            # Même fréquence (base et multiplicateur), pas d'extension nécessaire
+        # Même fréquence (base et multiplicateur) : pas d'extension nécessaire
+        if source_base == target.freq and source_multiplier == target.multiplier:
             return original_index
 
-        # Calcul dynamique du ratio de conversion en utilisant DurationConverter
-        # Cela garantit la cohérence avec les facteurs de conversion du reste du package
-        # Ex: 1 trimestre (Q) = 3 mois (M) → ratio = 3.0
-        try:
-            # Récupération du facteur de conversion depuis DurationConverter
-            # (multiplicateurs compris : 1 bloc source '2M' = 2 mois)
-            ratio = get_duration_conversion_factor(
-                build_frequency_string(source_base, multiplier=source_multiplier),
-                build_frequency_string(target_base, multiplier=target_multiplier),
+        # Cible pas plus fine que la source (rapport de durées < 1) : pas
+        # d'extension. Le rapport n'a pas à être entier (M → W : 30/7), la
+        # grille cible étant construite par date_range sur les bornes des périodes
+        ratio = get_duration_conversion_factor(
+            build_frequency_string(source_base, multiplier=source_multiplier),
+            build_frequency_string(target.freq, multiplier=target.multiplier),
+        )
+        if ratio < 1:
+            return original_index
+
+        # Position de l'horodatage dans son bloc : explicite, sinon début pour les
+        # bases comptées en jours ou unités infra-journalières, fin pour les autres
+        if source.position is not None:
+            source_pos = source.position
+        else:
+            source_pos = 'S' if source_base in _BLOCK_START_BASES else 'E'
+
+        # Bornes de la plage : un horodatage multiplié couvre un bloc de n
+        # périodes de base, à partir de lui en position début, jusqu'à lui en
+        # position fin. pd.Period n'accepte que la base (sans S/E)
+        start_date, end_date = original_index[0], original_index[-1]
+        if source_base in _NON_PERIOD_BASES:
+            extended_start, extended_end = self._offset_block_bounds(
+                start_date, end_date, source_base, source_pos, source_multiplier
             )
-
-            # Vérification que le ratio est un entier positif (ou proche d'un entier)
-            # Pour l'extension d'index, on a besoin d'un ratio entier ; avec un
-            # multiplicateur, le ratio peut être fractionnaire ('QS' -> '2MS' : 1,5)
-            # et seule la contrainte ratio >= 1 est conservée
-            has_multiplier = source_multiplier != 1 or target_multiplier != 1
-            if ratio < 1 or (not has_multiplier and abs(ratio - round(ratio)) > 1e-6):
-                # Le ratio n'est pas un entier ou est < 1, pas d'extension possible
-                return original_index
-
-        except (ValueError, KeyError):
-            # Si la paire (source_base, target_base) n'est pas supportée par DurationConverter
-            # retourner l'index original sans extension
-            return original_index
-
-        # Détermination de la plage complète en fonction de la position
-        # IMPORTANT: pd.Period() n'accepte pas les suffixes S/E, il faut utiliser les fréquences de base
-        # On utilise donc source_base et target_base pour créer les périodes
-        start_date = original_index[0]
-        end_date = original_index[-1]
-
-        # Construction du nouvel index
-        try:
-            # Conversion en périodes pandas en utilisant la fréquence de BASE (sans S/E)
-            # Pour déterminer les bornes de la plage étendue. Un timestamp multiplié
-            # couvre un bloc de n périodes de base : à partir de lui en position début,
-            # jusqu'à lui en position fin
+        else:
             block_extra = source_multiplier - 1
             first_period = pd.Period(start_date, freq=source_base)
             last_period = pd.Period(end_date, freq=source_base)
@@ -1893,10 +1964,5 @@ class FrequencyConverter(TemporalConverter):
                 extended_start = (first_period - block_extra).to_timestamp(how='start')
                 extended_end = last_period.to_timestamp(how='end')
 
-            # Création de l'index complet avec la fréquence cible (incluant position S/E)
-            extended_index = pd.date_range(start=extended_start, end=extended_end, freq=target_freq)
-        except Exception:
-            # Si la création de Period échoue, retourner l'index original
-            return original_index
-
-        return extended_index
+        # Grille cible complète (position S/E et multiplicateur de la cible inclus)
+        return pd.date_range(start=extended_start, end=extended_end, freq=target_freq)

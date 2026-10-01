@@ -541,7 +541,8 @@ def detect_index_frequency(
     Raises:
         ValueError: If the index (or one entity of a MultiIndex) has fewer
             than 2 dates, if the labels cannot be converted to datetime, or
-            if ``return_format`` is unknown.
+            if ``return_format`` is unknown. An unsorted index (decreasing
+            included) is detected as the sorted one.
 
     Examples:
         >>> import pandas as pd
@@ -596,6 +597,10 @@ def detect_index_frequency(
                     "Index cannot be converted to datetime (numeric labels are not dates)"
                 )
             index = converted
+
+        # Tri d'un index désordonné ou décroissant
+        if not index.is_monotonic_increasing:
+            index = index.sort_values()
 
         # Traitement du DatetimeIndex
         # Inférence de la fréquence de l'index

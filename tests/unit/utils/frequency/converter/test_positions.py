@@ -150,10 +150,12 @@ class TestFrequencyConverterPositions:
         # Conversion vers trimestriel
         quarterly = converter.convert_frequency(ye_series, 'QE', method='linear')
 
-        # L'extension YE→QE crée des trimestres entre la première et la dernière année
-        # 2023-12-31 (fin 2023) à 2024-12-31 (fin 2024) = 5 trimestres
-        # (Q4-2023, Q1-2024, Q2-2024, Q3-2024, Q4-2024)
-        assert len(quarterly) >= 4, f"Expected at least 4 quarters, got {len(quarterly)}"
+        # Valeur d'or : l'extension couvre les années ENTIÈRES de la première et de la
+        # dernière observation (2023 et 2024), soit 8 trimestres de T1-2023 à T4-2024
+        # (et non 5 à partir de 2023-12-31, comme l'annonçait l'ancien commentaire)
+        pd.testing.assert_index_equal(
+            quarterly.index, pd.date_range('2023-03-31', '2024-12-31', freq='QE'), exact=False
+        )
 
     # Tests de gestion des anchors (positions de référence)
 
@@ -185,21 +187,11 @@ class TestFrequencyConverterPositions:
         # ('backward' pour une fréquence cible positionnée en fin de période)
         monthly = converter.convert_frequency(qe_series, 'ME', method='linear')
 
-        # Vérification qu'il n'y a pas de NaN après interpolation + fill
-        assert not monthly.isna().any(), "Interpolation with bfill should fill all NaN values"
-
-        # Vérification que les valeurs originales sont préservées aux positions trimestrielles
-        # Mars, Juin, Septembre, Décembre devraient contenir les valeurs d'origine
-        # Trouver les index des mois de fin de trimestre
-        march_idx = monthly.index.get_loc(pd.Timestamp('2024-03-31'))
-        june_idx = monthly.index.get_loc(pd.Timestamp('2024-06-30'))
-        sept_idx = monthly.index.get_loc(pd.Timestamp('2024-09-30'))
-        dec_idx = monthly.index.get_loc(pd.Timestamp('2024-12-31'))
-
-        assert monthly.iloc[march_idx] == pytest.approx(100, rel=0.1), "March value should be ~100"
-        assert monthly.iloc[june_idx] == pytest.approx(200, rel=0.1), "June value should be ~200"
-        assert monthly.iloc[sept_idx] == pytest.approx(300, rel=0.1), "September value should be ~300"
-        assert monthly.iloc[dec_idx] == pytest.approx(400, rel=0.1), "December value should be ~400"
+        # Valeurs d'or exactes : janvier et février comblés vers l'arrière depuis mars
+        # (100), fins de trimestre inchangées, pas de 100/3 entre deux fins de trimestre
+        expected = [100.0, 100.0, 100.0, 400 / 3, 500 / 3, 200.0,
+                    700 / 3, 800 / 3, 300.0, 1000 / 3, 1100 / 3, 400.0]
+        assert monthly.tolist() == pytest.approx(expected)
 
     # Tests de cas limites
 
@@ -218,8 +210,12 @@ class TestFrequencyConverterPositions:
             target_position='start'
         )
 
-        # Vérification que la conversion produit une sortie
-        assert len(ms_series) > 0, "Conversion should produce non-empty result"
+        # Valeurs d'or : chaque mois ré-étiqueté à son premier jour, valeur inchangée
+        # (moyenne d'une seule observation par mois)
+        expected = pd.Series(
+            np.arange(1.0, 13.0), index=pd.date_range('2024-01-01', periods=12, freq='MS')
+        )
+        pd.testing.assert_series_equal(ms_series, expected, check_freq=False)
 
     def test_default_position_when_not_detectable(self, converter):
         """Test que la position par défaut 'E' est utilisée si non détectable."""
@@ -257,6 +253,7 @@ class TestFrequencyConverterPositions:
         assert list(monthly_df.columns) == ['col1', 'col2'], "Columns should be preserved"
 
 
+@pytest.mark.internal
 class TestExtendIndexForUpsampling:
     """Tests spécifiques pour la méthode _extend_index_for_upsampling."""
 
@@ -306,16 +303,20 @@ class TestExtendIndexForUpsampling:
         # (la méthode retourne l'index original si même fréquence de base)
         assert len(extended) == len(me_index), "Index should not be extended for same base frequency"
 
-    def test_unsupported_frequency_pair_returns_original(self, converter):
-        """Test que les paires de fréquences non supportées retournent l'index original."""
-        # Création d'un index avec fréquence non standard
-        index = pd.date_range('2024-01-01', periods=10, freq='2D')
+    def test_pair_without_extension_returns_original_index(self, converter):
+        """Test qu'une paire sans extension possible renvoie l'index d'origine, sans lever.
 
-        # Tentative d'extension vers une autre fréquence
-        extended = converter._extend_index_for_upsampling(index, '2D', 'D')
+        Réécriture (tri §4.4, catégorie a) de l'ancien
+        ``test_unsupported_frequency_pair_returns_original`` : sa paire ``'2D' → 'D'``
+        est supportée depuis ``469d37f`` ; le cas public ``'2D' → 'D'`` est désormais
+        ``test_interpolation.py::TestMultipliedPositionlessSource``.
+        """
+        # Cible moins fine que la source (ME → QE) : rapport 1/3 < 1, aucune extension
+        index = pd.date_range('2024-01-31', periods=6, freq='ME')
 
-        # L'index devrait être retourné tel quel
-        assert len(extended) >= len(index), "Should return original or extended index"
+        extended = converter._extend_index_for_upsampling(index, 'ME', 'QE')
+
+        pd.testing.assert_index_equal(extended, index)
 
 
 class TestCrossPositionUpsampling:
@@ -415,6 +416,7 @@ class TestCrossPositionUpsampling:
 
     # Tests unitaires de la méthode de ré-ancrage
 
+    @pytest.mark.internal
     def test_reanchor_start_to_end(self, converter):
         """Test le ré-ancrage d'un index start vers une position end."""
         # Index trimestriel en position start
@@ -429,6 +431,7 @@ class TestCrossPositionUpsampling:
         )
         assert list(reanchored) == list(expected)
 
+    @pytest.mark.internal
     def test_reanchor_end_to_start(self, converter):
         """Test le ré-ancrage d'un index end vers une position start."""
         # Index trimestriel en position end
@@ -443,6 +446,7 @@ class TestCrossPositionUpsampling:
         )
         assert list(reanchored) == list(expected)
 
+    @pytest.mark.internal
     def test_reanchor_is_noop_for_matching_position(self, converter):
         """Test que le ré-ancrage ne modifie pas un index déjà bien positionné."""
         # Index trimestriel en position start

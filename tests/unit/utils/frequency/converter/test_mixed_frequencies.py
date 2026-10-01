@@ -116,3 +116,52 @@ class TestMixedFrequencyIndexContract:
         result = converter.convert_frequency(df, target_freq={'x': 'monthly'}, method='mean')
 
         pd.testing.assert_frame_equal(result, df)
+
+
+class TestAlignmentMethods:
+    """``alignment_method`` fills the NaN a coarser column gets on the union index."""
+
+    @pytest.fixture
+    def converter(self):
+        """A fresh ``FrequencyConverter``."""
+        return FrequencyConverter()
+
+    @pytest.fixture
+    def two_years(self):
+        """Month ends of 2024-2025, both columns 1..24."""
+        values = np.arange(1.0, 25.0)
+        return pd.DataFrame(
+            {'a': values, 'b': values}, index=pd.date_range('2024-01-31', periods=24, freq='ME')
+        )
+
+    # Union des index cibles : les 8 fins de trimestre (les fins d'année en font partie).
+    # Sommes d'or de b : 2024 = 1 + … + 12 = 78, 2025 = 13 + … + 24 = 222
+    # - ffill : rien avant la fin 2024, puis 78 reporté sur 2025 jusqu'à la fin 2025
+    # - bfill : chaque trimestre prend la fin d'année suivante
+    # - nearest : fin d'année la plus proche en jours (30 juin 2025 : 181 j de fin 2024,
+    #   184 j de fin 2025 → 78) ; pas d'extrapolation avant la première fin d'année
+    # - none : NaN hors des fins d'année
+    @pytest.mark.parametrize(
+        'alignment_method, expected_b',
+        [
+            pytest.param('ffill', [np.nan, np.nan, np.nan, 78.0, 78.0, 78.0, 78.0, 222.0], id='ffill'),
+            pytest.param('bfill', [78.0, 78.0, 78.0, 78.0, 222.0, 222.0, 222.0, 222.0], id='bfill'),
+            pytest.param('nearest', [np.nan, np.nan, np.nan, 78.0, 78.0, 78.0, 222.0, 222.0], id='nearest'),
+            pytest.param('none', [np.nan, np.nan, np.nan, 78.0, np.nan, np.nan, np.nan, 222.0], id='none'),
+        ],
+    )
+    def test_yearly_column_on_quarterly_union(self, converter, two_years, alignment_method, expected_b):
+        """Golden values of the yearly column on the quarter ends."""
+        result = converter.convert_frequency(
+            two_years, {'a': 'QE', 'b': 'YE'}, method='sum', alignment_method=alignment_method
+        )
+        assert result['b'].tolist() == pytest.approx(expected_b, nan_ok=True)
+
+    @pytest.mark.parametrize('alignment_method', ['ffill', 'bfill', 'nearest', 'none'])
+    def test_finest_column_is_untouched(self, converter, two_years, alignment_method):
+        """The quarterly column already lives on the whole union: nothing to fill."""
+        result = converter.convert_frequency(
+            two_years, {'a': 'QE', 'b': 'YE'}, method='sum', alignment_method=alignment_method
+        )
+        # Valeurs d'or : sommes trimestrielles 6, 15, …, 69 (pas de 9)
+        assert result['a'].tolist() == list(np.arange(6.0, 70.0, 9.0))

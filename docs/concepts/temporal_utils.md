@@ -12,8 +12,15 @@ noms conviviaux) et convertit entre elles.
 
 - `FrequencyNormalizer`, `normalize_frequency()`, `to_pandas_freq()`,
   `to_dateoffset()`, `to_code()`, `to_literal()`
-- `FrequencyConverter` (`convert()`, `convert_frequency()`) — agrégation vers le bas,
-  interpolation vers le haut, avec choix de la méthode et de l'ancrage
+- `FrequencyConverter` (`convert()`, `convert_frequency()`) — agrégation vers les basses fréquences,
+  interpolation vers les hautes fréquences, avec choix de la méthode et de l'ancrage. Chaque
+  colonne part de sa propre fréquence, lue sur ses valeurs observées ; l'index de
+  sortie est la grille cible (quel que soit le rapport des fréquences, mensuel →
+  hebdomadaire compris), réunie aux dates observées des colonnes non converties.
+  Sans position cible, la position de la source est conservée. Une période sans
+  observation somme à `NaN`. Même règle pour Series, DataFrame et panels : sans
+  ligne → `ValueError` ; sans aucune valeur observée → résultat vide (entité
+  écartée d'un panel) ; des observations sans fréquence détectable → `ValueError`
 - `is_higher_frequency()`, `get_frequency_order()`, `validate_frequency()`
 - **Détection** : `FrequencyDetector`, `detect_frequency()`,
   `detect_index_frequency()`, `detect_dataset_frequency()` — inférence modale, à
@@ -101,6 +108,10 @@ Les Normalizer de fréquence et de durée acceptent un multiplicateur en tête :
   convertit vers / depuis une fréquence multipliée. Les opérations qui
   comptent des périodes de base (`full_periods_only`, `method='all'`,
   `anchor_fraction` avec une source multipliée) lèvent `NotImplementedError`.
+  Un horodatage multiplié sans position à base jour ou infra-journalière
+  (`'2D'`, `'6h'`) marque le **début** de son bloc, comme les étiquettes de
+  `pandas.resample` ; `W`, `SM` et `M` / `Q` / `Y` sans position marquent la fin.
+- Les détecteurs trient un index désordonné ou décroissant avant la détection.
 - Les transformateurs de `tsforecast.delays` rejettent un index multiplié.
 
 Pour les fréquences inférées par pandas, `canonicalize_frequency()` (dans

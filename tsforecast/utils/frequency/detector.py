@@ -109,7 +109,8 @@ class FrequencyDetector:
         """Detect the frequency of a single time series with DatetimeIndex.
 
         NaN values are dropped, then duplicated dates are merged and the dates
-        sorted. ``pandas.infer_freq`` is tried first; it only succeeds on a
+        sorted (a decreasing index is read as the increasing one).
+        ``pandas.infer_freq`` is tried first; it only succeeds on a
         perfectly regular grid of at least three dates. Otherwise (two dates,
         gaps, irregular spacing) a heuristic fallback reads the **modal
         spacing** between consecutive dates:

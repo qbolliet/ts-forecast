@@ -124,6 +124,59 @@ class TestFrequencyValidation:
         assert 'col2' in result.columns
 
 
+class TestConvertFrequencyParameterErrors:
+    """``convert_frequency`` rejects malformed targets and data before converting anything."""
+
+    @pytest.fixture
+    def converter(self):
+        """A fresh ``FrequencyConverter``."""
+        return FrequencyConverter()
+
+    @pytest.fixture
+    def monthly_series(self):
+        """Month ends of 2024 H1."""
+        return pd.Series(range(6), index=pd.date_range('2024-01-31', periods=6, freq='ME'), dtype=float)
+
+    @pytest.fixture
+    def monthly_frame(self, monthly_series):
+        """Two monthly columns ``a`` and ``b``."""
+        return pd.DataFrame({'a': monthly_series, 'b': monthly_series * 2})
+
+    @pytest.mark.parametrize(
+        'target, message',
+        [
+            pytest.param('', 'Target frequency cannot be empty', id='empty-string'),
+            pytest.param({}, 'Target frequency cannot be empty', id='empty-dict'),
+            pytest.param(3, 'target_freq must be a string or dictionary', id='integer'),
+            pytest.param(['QE'], 'target_freq must be a string or dictionary', id='list'),
+        ],
+    )
+    def test_malformed_target(self, converter, monthly_frame, target, message):
+        """Empty targets and targets that are neither str nor dict."""
+        with pytest.raises(ValueError, match=message):
+            converter.convert_frequency(monthly_frame, target, method='sum')
+
+    def test_dict_target_on_simple_series(self, converter, monthly_series):
+        """A dictionary needs columns or entities to map."""
+        with pytest.raises(ValueError, match='Dictionary target_freq is only valid for DataFrame or panel inputs'):
+            converter.convert_frequency(monthly_series, {'a': 'QE'}, method='sum')
+
+    def test_tuple_key_without_panel(self, converter, monthly_frame):
+        """Entity keys make no sense without a panel index."""
+        with pytest.raises(ValueError, match='Tuple keys in target_freq are only valid for panel inputs'):
+            converter.convert_frequency(monthly_frame, {('FR', 'a'): 'QE'}, method='sum')
+
+    def test_unknown_column(self, converter, monthly_frame):
+        """Every dictionary key must be a column of the DataFrame."""
+        with pytest.raises(ValueError, match="Columns in target_freq not found in data: {'zz'}"):
+            converter.convert_frequency(monthly_frame, {'a': 'QE', 'zz': 'QE'}, method='sum')
+
+    def test_non_pandas_data(self, converter):
+        """Only pandas objects are converted."""
+        with pytest.raises(ValueError, match='Input data must be a pandas Series or DataFrame'):
+            converter.convert_frequency([1.0, 2.0, 3.0], 'QE', method='sum')
+
+
 class TestDurationConverterIntegration:
     """Tests pour l'intégration de DurationConverter dans FrequencyConverter."""
 
@@ -156,22 +209,31 @@ class TestDurationConverterIntegration:
         # méthode d'interpolation, pas 'mean')
         quarterly = converter.convert_frequency(ye_series, 'QE', method='linear')
 
-        # Vérification que l'extension fonctionne
-        # (ratio Y→Q devrait être 4)
-        assert len(quarterly) >= 4, f"Expected at least 4 quarters, got {len(quarterly)}"
+        # Valeur d'or : rapport Y → Q = 4 par année, sur les deux années entières
+        # 2023 et 2024 → 8 trimestres exactement
+        assert len(quarterly) == 8
 
-    def test_unsupported_frequency_pair_returns_original(self, converter):
-        """Test que les paires non supportées retournent l'index original."""
-        # Utilisation d'une fréquence de base non standard
-        # Le test vérifie que l'extension ne plante pas même si DurationConverter
-        # ne supporte pas certaines paires
+    def test_daily_to_business_daily_is_an_aggregation(self, converter):
+        """Test que D → B agrège les week-ends dans le vendredi qui les précède.
+
+        Réécriture (catégorie c) de l'ancien ``test_unsupported_frequency_pair_returns_original`` :
+        D → B n'est pas un sur-échantillonnage (un jour ouvré est moins fin qu'un jour
+        calendaire), l'extension d'index n'y intervient pas ; l'ancien test se bornait
+        à ``len(result) > 0``.
+        """
+        # Du lundi 1er au mercredi 10 janvier 2024, valeurs 0 … 9
         dates = pd.date_range('2024-01-01', periods=10, freq='D')
-        series = pd.Series(range(10), index=dates)
+        series = pd.Series(range(10), index=dates, dtype=float)
 
-        # Conversion D→B (business days)
-        # Si non supporté par DurationConverter, devrait retourner quelque chose
         result = converter.convert_frequency(series, 'B', method='mean')
-        assert len(result) > 0
+
+        # Valeurs d'or : un compartiment par jour ouvré ; celui du vendredi 5 couvre
+        # samedi 6 et dimanche 7 → moyenne de 4, 5, 6 = 5
+        expected = pd.Series(
+            [0.0, 1.0, 2.0, 3.0, 5.0, 7.0, 8.0, 9.0],
+            index=pd.bdate_range('2024-01-01', '2024-01-10'),
+        )
+        pd.testing.assert_series_equal(result, expected, check_freq=False)
 
     def test_conversion_factors_match_duration_converter(self, converter):
         """Test que les ratios calculés correspondent à DurationConverter.

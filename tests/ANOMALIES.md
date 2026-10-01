@@ -1442,6 +1442,463 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `::TestDetectTimeSeriesFrequencyWithGaps::test_timezone_aware_gapped_grid`
 - **Statut** : corrigée
 
+### ANO-UTILS-052 — Sur-échantillonnage à rapport non entier (M → W) : grille source conservée, valeurs écrasées
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter._extend_index_for_upsampling`
+  (via `interpolate_to_higher_frequency` et `convert_frequency`)
+- **Sévérité** : majeure
+- **Observé** : `get_duration_conversion_factor('M', 'W')` = 30/7 n'est pas entier : l'extension renvoie
+  l'index **d'origine** (mensuel). Le ré-ancrage sur `'W'` déplace chaque fin de mois au dimanche qui
+  clôt sa semaine (04/02, 03/03, 31/03) ; seul le 31/03 coïncide avec l'index d'origine → `[NaN, NaN, 3]`,
+  puis comblement arrière → `[3, 3, 3]` sur un index `ME`. Deux observations sur trois perdues, en
+  silence, et aucune date hebdomadaire. Q → W (rapport 13) et Y → W (52) fonctionnent.
+- **Attendu** : docstring de `convert_frequency` : « The output index carries the target frequency » —
+  une grille `W-SUN` couvrant les périodes source, les observations interpolées dessus.
+- **Reproduction** :
+  ```python
+  monthly = pd.Series([1.0, 2.0, 3.0], index=pd.date_range('2024-01-31', periods=3, freq='ME'))
+  FrequencyConverter().convert_frequency(monthly, 'W', method='linear')
+  # 2024-01-31 3.0 / 2024-02-29 3.0 / 2024-03-31 3.0 (Freq: ME)
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_interpolation.py::TestUpsamplingTargetGrid::test_monthly_to_weekly_gives_a_weekly_grid`
+- **Correctif** : `_extend_index_for_upsampling` n'exige plus un rapport de durées entier : dès que la cible est plus fine (rapport ≥ 1), la grille cible est construite par `date_range` sur les bornes des périodes source. M → W : dimanches du 7 janvier au 31 mars 2024, chaque fin de mois ré-ancrée sur le dimanche qui clôt sa semaine.
+- **Statut** : corrigée
+
+### ANO-UTILS-053 — Sur-échantillonnage semi-mensuel : cible `SMS` tout-NaN, source `SM` jamais densifiée
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter._reanchor_index_to_target`,
+  `::_extend_index_for_upsampling`
+- **Sévérité** : majeure
+- **Observé** : `pd.Period` n'a pas de fréquence `'SM'`. (1) Cible `'SMS'` : `_reanchor_index_to_target`
+  retombe sur l'index source (fins de mois), qui n'intersecte pas la grille des 1er et 15 → sortie de
+  6 dates **entièrement NaN**, même défaut que la régression `QS → ME` corrigée auparavant
+  (`test_positions.py::TestCrossPositionUpsampling`). (2) Source `'SME'` vers `'D'` :
+  `_extend_index_for_upsampling` échoue sur `pd.Period(..., freq='SM')` et renvoie l'index d'origine → la
+  sortie reste semi-mensuelle, aucune date journalière. `count_subperiods_per_period` a un repli
+  constant pour `'SM'` ; le chemin d'interpolation n'en a pas.
+- **Attendu** : les fréquences semi-mensuelles sont supportées par le paquet (`'semi_monthly'`,
+  `_with_position('SM') == 'SME'`) : grille cible produite, observations conservées.
+- **Reproduction** :
+  ```python
+  monthly = pd.Series([1.0, 2.0, 3.0], index=pd.date_range('2024-01-31', periods=3, freq='ME'))
+  FrequencyConverter().interpolate_to_higher_frequency(monthly, 'SMS')      # 6 dates, toutes NaN
+  semi = pd.Series([1.0, 2.0, 3.0, 4.0], index=pd.date_range('2024-01-15', periods=4, freq='SME'))
+  FrequencyConverter().interpolate_to_higher_frequency(semi, 'D')           # index SME inchangé
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_interpolation.py::TestUpsamplingTargetGrid::test_monthly_to_semi_monthly_keeps_the_observations`,
+  `::test_semi_monthly_to_daily_gives_a_daily_grid`
+- **Correctif** : périodes semi-mensuelles bornées par les offsets pandas `SMS` / `SME` (`_offset_block_bounds`) ; ré-ancrage sur une cible semi-mensuelle par `rollback` (`SMS`) ou `rollforward` (`SME`). `anchor_fraction` garde son repli documenté (comportement `None`) pour une source semi-mensuelle.
+- **Statut** : corrigée
+
+### ANO-UTILS-054 — Variable portée par une grille de lignes plus fine que la cible : `cannot reindex on an axis with duplicate labels`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter.interpolate_to_higher_frequency`
+  (`_reanchor_index_to_target`), `::convert_frequency` (chemin DataFrame / panel)
+- **Sévérité** : majeure
+- **Observé** : une variable annuelle portée par une grille mensuelle (NaN hors janvier), sur-échantillonnée
+  vers `'QS'` : `_reanchor_index_to_target` ré-ancre **toutes** les lignes, NaN compris, sur le trimestre
+  qui les contient → trois lignes par trimestre → `ValueError: cannot reindex on an axis with duplicate
+  labels`. `convert_frequency` passe toujours la grille complète (`data[columns]`) : c'est le cas de tout
+  DataFrame à fréquences mixtes dont une colonne monte vers une fréquence intermédiaire —
+  `irregular_index_timeseries[['balance_commerciale_annuelle']]` → `'QS'`, dépenses annuelles de la
+  France (`heterogeneous_coverage_panel`) → `'QS'`. L'extension part aussi de la première et de la dernière
+  **ligne** du cadre, pas des observations de la colonne. `FrequencyAligner._interpolate_series` évite le
+  défaut en ne passant que les valeurs observées (`_observed_series`) : `HighFrequencyImputer` n'est pas
+  exposé, l'API publique du convertisseur l'est. La docstring de `source_freq` annonce pourtant le cas
+  (« a quarterly variable carried on a monthly index »).
+- **Attendu** : interpoler les seules observations de la variable (comme `FrequencyAligner`) : 100, 110,
+  120, 130, 140 puis 140 jusqu'à la fin de 2021 dans la reproduction. **À arbitrer ensuite** : même
+  corrigé, un DataFrame dont certaines colonnes descendent (mensuel) et d'autres montent (annuel) vers la
+  même cible ne peut pas être converti en un appel, `method` servant aux deux sens (toute valeur est
+  invalide pour l'un des deux).
+- **Reproduction** :
+  ```python
+  grid = pd.date_range('2020-01-01', '2021-12-01', freq='MS')
+  annual = pd.Series(np.nan, index=grid)
+  annual.loc[['2020-01-01', '2021-01-01']] = [100.0, 140.0]
+  FrequencyConverter().interpolate_to_higher_frequency(annual, 'QS', source_freq='YS')
+  # ValueError: cannot reindex on an axis with duplicate labels
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_interpolation.py::TestUpsamplingTargetGrid::test_variable_on_a_finer_row_grid`,
+  `tests/unit/utils/frequency/converter/test_realistic_datasets.py::TestIrregularIndexTimeseries::test_annual_column_to_quarters`,
+  `::TestHeterogeneousCoveragePanel::test_annual_spending_to_quarters`
+- **Correctif** : `interpolate_to_higher_frequency` trie les lignes et ne garde que les lignes observées (`dropna(how='all')`) avant détection, extension et ré-ancrage : l'extension part de la première et de la dernière observation. Deux observations dans une même période cible lèvent une `ValueError` explicite (« Several observations fall in the same … period »). **Arbitrage de l'auteur (2026-09-30)** : le cas des colonnes qui montent et descendent vers une même cible relève de `FrequencyAligner`, pas du convertisseur (une seule `method` par appel).
+- **Statut** : corrigée
+
+### ANO-UTILS-055 — Colonnes non converties : toute la grille des lignes survit, la sortie n'est plus à la fréquence cible
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter._apply_grouped_conversions`
+  (et `::_build_frequency_map`)
+- **Sévérité** : majeure
+- **Observé** : une colonne non convertie — fréquence déjà égale à la cible, ou indétectable (jamais
+  observée) — est réattachée avec `data.index` **entier**, lignes de bourrage NaN comprises. L'union des
+  index garde alors la grille source et `alignment_method='ffill'` y propage les agrégats des colonnes
+  converties (une somme trimestrielle répétée sur trois mois). Cas observés : cible `str` avec une
+  colonne tout-NaN ou une colonne trimestrielle portée par la grille mensuelle ; cible `dict` dont une
+  clé nomme une colonne jamais observée ; `heterogeneous_coverage_panel[['inflation_ipc',
+  'climat_affaires']]` → `'QS'` : l'Italie (climat jamais observé) garde ses 79 lignes mensuelles ;
+  `irregular_index_timeseries[['production_industrielle', 'pib_trimestriel']]` → `'QS'` : dates
+  mensuelles en sortie ; `[['depenses_publiques_pib']]` → `'YS'` : France et Italie rendues telles
+  quelles (grille mensuelle).
+- **Attendu** : « The output index carries the target frequency » (docstring) : pour une cible `str`,
+  index = grille cible, colonne déjà à la cible → ses observations sur cette grille, colonne jamais
+  observée → NaN ; pour un `dict`, seules les colonnes **absentes** du dictionnaire gardent leurs dates
+  (docstring) — une clé présente mais indétectable n'en fait pas partie.
+- **Reproduction** :
+  ```python
+  df = pd.DataFrame({'ventes': np.arange(1.0, 7.0), 'prix': np.nan},
+                    index=pd.date_range('2024-01-31', periods=6, freq='ME'))
+  FrequencyConverter().convert_frequency(df, 'QE', method='sum')
+  # 6 lignes mensuelles : ventes NaN, NaN, 6, 6, 6, 15 ; prix NaN
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_conversion.py::TestDataFrameOutputContract::test_all_nan_column_does_not_keep_the_source_grid`,
+  `::test_dict_key_on_all_nan_column_does_not_keep_the_source_grid`,
+  `::test_column_already_at_target_does_not_keep_the_row_grid`,
+  `tests/unit/utils/frequency/converter/test_realistic_datasets.py::TestIrregularIndexTimeseries::test_quarterly_output_has_quarter_starts_only`,
+  `::TestHeterogeneousCoveragePanel::test_never_observed_column_does_not_keep_the_monthly_grid`
+- **Correctif** : **arbitrage de l'auteur (2026-09-30)** : les colonnes absentes du dictionnaire gardent leurs valeurs aux seules dates observées. `_apply_grouped_conversions` construit l'index de sortie comme l'union des index cibles des colonnes converties et des dates observées des colonnes conservées (absentes du dict, déjà à la cible, jamais observées) ; sans colonne à convertir, seules les lignes où au moins une colonne est observée sont rendues (un cadre jamais observé rend zéro ligne, comme une Series : ANO-UTILS-070). Une entité de panel qu'aucune clé ne cible reste rendue telle quelle.
+- **Statut** : corrigée
+
+### ANO-UTILS-056 — DataFrame et panel : une cible sans position ignore la position de la source
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter._build_frequency_map`
+- **Sévérité** : majeure
+- **Observé** : le chemin Series résout `target_position or target.position or source.position`
+  (source `MS` + cible `'Q'` → `QS`) ; `_build_frequency_map` s'arrête à `target_position or
+  target.position` et retombe sur `'E'` (→ `QE`). Même appel, étiquettes différentes selon que la
+  donnée est une Series ou un DataFrame ; les panels DataFrame (convertis entité par entité en
+  DataFrame) héritent du défaut, les panels Series non. Risque : jointure silencieusement décalée avec
+  des données en début de période. (Le notebook `frequency_converter.ipynb` §6.3 signalait l'écart pour
+  les Series, corrigé depuis pour elles seules.)
+- **Attendu** : docstring de `target_position` : « If None, preserves source position when
+  identifiable, otherwise uses default 'E' », pour tous les types d'entrée, colonne par colonne.
+- **Reproduction** :
+  ```python
+  c = FrequencyConverter()
+  s = pd.Series(np.arange(1.0, 7.0), index=pd.date_range('2024-01-01', periods=6, freq='MS'))
+  c.convert_frequency(s, 'Q', method='sum').index                # 2024-01-01, 2024-04-01
+  c.convert_frequency(s.to_frame('a'), 'Q', method='sum').index  # 2024-03-31, 2024-06-30
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_conversion.py::TestDataFrameOutputContract::test_dataframe_keeps_the_source_position`,
+  `tests/unit/utils/frequency/converter/test_panel.py::TestPanelStringTarget::test_source_position_is_kept`
+- **Correctif** : `_build_frequency_map` résout la position cible colonne par colonne : explicite, puis celle de la cible, puis celle de la source, puis `'E'` — la règle du chemin Series.
+- **Statut** : corrigée
+
+### ANO-UTILS-057 — `interpolate_to_higher_frequency` sur un index décroissant : extension de la première période perdue
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter.interpolate_to_higher_frequency`
+- **Sévérité** : mineure
+- **Observé** : la méthode publique ne trie pas son entrée (contrairement à `convert_frequency`, qui passe
+  par `validate_temporal_data(sort_data=True)`). Sur un index décroissant, pandas infère `'-1QE-DEC'`, que
+  le normaliseur refuse ; la `ValueError` est interceptée, la fréquence source devient `None` et le repli
+  `asfreq` ne couvre que mars → décembre : 10 mois au lieu de 12, janvier et février absents.
+  `aggregate_to_lower_frequency` n'est pas touchée (`resample` trie).
+- **Attendu** : même sortie que sur l'entrée triée (cas limite « données non triées » de `CLAUDE.md`).
+- **Reproduction** :
+  ```python
+  q = pd.Series([10.0, 20.0, 30.0, 40.0], index=pd.date_range('2021-03-31', periods=4, freq='QE'))
+  FrequencyConverter().interpolate_to_higher_frequency(q.iloc[::-1], 'ME')  # 10 mois, dès le 31 mars
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_interpolation.py::TestUpsamplingTargetGrid::test_unsorted_input_gives_the_sorted_result`
+- **Correctif** : lignes triées en tête d'`interpolate_to_higher_frequency` et d'`aggregate_to_lower_frequency` (`_sorted`) ; la détection trie désormais elle-même un index décroissant (ANO-UTILS-069).
+- **Statut** : corrigée
+
+### ANO-UTILS-058 — Le sur-échantillonnage perd le nom de l'index
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter.interpolate_to_higher_frequency`
+  (index étendu construit par `pd.date_range`, sans nom)
+- **Sévérité** : cosmétique
+- **Observé** : un index nommé `'date'` ressort sans nom (`None`) d'une interpolation, directe ou via
+  `convert_frequency` ; l'agrégation le conserve, et le chemin panel restaure les noms.
+- **Attendu** : nom de l'index conservé, comme par l'agrégation.
+- **Reproduction** :
+  ```python
+  q = pd.Series([1.0, 2.0], index=pd.date_range('2021-03-31', periods=2, freq='QE', name='date'))
+  FrequencyConverter().interpolate_to_higher_frequency(q, 'ME').index.name  # None
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_interpolation.py::TestUpsamplingTargetGrid::test_index_name_is_kept`,
+  `tests/unit/utils/frequency/converter/test_conversion.py::TestDataFrameOutputContract::test_upsampling_keeps_the_index_name`
+- **Correctif** : nom de l'index source réaffecté à la sortie de l'interpolation et de l'assemblage des colonnes.
+- **Statut** : corrigée
+
+### ANO-UTILS-059 — `full_periods_only` ignore en silence une `source_freq` invalide
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter.aggregate_to_lower_frequency`
+- **Sévérité** : mineure
+- **Observé** : le décompte attendu est calculé dans un `try / except (ValueError, KeyError)` ; une
+  `source_freq='foo'` fournie par l'appelant lève `ValueError` dans `normalize_frequency`, interceptée :
+  le garde-fou saute et les périodes incomplètes sont agrégées. Pour la même entrée, `method='all'` lève
+  `ValueError: Unsupported frequency: foo`.
+- **Attendu** : `ValueError`, comme `method='all'` : un paramètre explicite invalide n'est pas une
+  fréquence « indétectable ». Le repli silencieux reste légitime quand `source_freq` est `None` et la
+  détection impossible (comportement épinglé par `TestCoverageGuardsWithoutSourceFrequency`).
+- **Reproduction** :
+  ```python
+  c = FrequencyConverter()
+  m = pd.Series([1.0, 2.0, 3.0], index=pd.date_range('2024-01-31', periods=3, freq='ME'))
+  c.aggregate_to_lower_frequency(m, 'QE', 'sum', full_periods_only=True, source_freq='foo')  # [6.0]
+  c.aggregate_to_lower_frequency(m > 0, 'QE', 'all', source_freq='foo')                      # ValueError
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_aggregation.py::TestCoverageGuardsWithoutSourceFrequency::test_invalid_source_frequency_raises_for_full_periods_only`
+- **Correctif** : une `source_freq` fournie est validée (`normalize_frequency`) avant l'agrégation ; seul l'échec de la **détection** (fréquence ni fournie ni détectable) fait sauter les gardes, dans `_expected_subperiod_counts`, pour `full_periods_only` comme pour `'all'`.
+- **Statut** : corrigée
+
+### ANO-UTILS-060 — Panel Series + dictionnaire d'entités incomplet : `ValueError` au lieu de laisser l'entité inchangée
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter._resolve_panel_target`
+  (`tsforecast/panel/utils.py::get_entity_target_frequency`)
+- **Sévérité** : mineure
+- **Observé** : `convert_frequency(panel['x'], {('A',): 'QE'})` lève `ValueError: No target frequency found
+  for entity ('B',)` ; le même dictionnaire sur le panel DataFrame laisse l'entité `B` inchangée
+  (`_convert_panel_frequency` : « entité sans aucune colonne ciblée : conservation telle quelle »).
+- **Attendu** : cohérence Series / DataFrame : une entité absente du dictionnaire est rendue inchangée.
+- **Reproduction** :
+  ```python
+  idx = pd.MultiIndex.from_product([['A', 'B'], pd.date_range('2024-01-31', periods=6, freq='ME')])
+  x = pd.Series(np.arange(12.0), index=idx)
+  FrequencyConverter().convert_frequency(x, {('A',): 'QE'}, method='sum')  # ValueError
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_panel.py::TestPanelSeries::test_untargeted_entity_is_unchanged`
+- **Correctif** : `_resolve_panel_target` résout une Series de panel comme une colonne unique nommée d'après la Series (`resolve_entity_column_frequencies`) : entité non ciblée → rendue inchangée ; une clé de colonne égale au nom de la Series cible toutes les entités, comme pour un DataFrame.
+- **Statut** : corrigée
+
+### ANO-UTILS-061 — Méthode d'interpolation inconnue : message « Unsupported aggregation method »
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter.interpolate_to_higher_frequency`
+- **Sévérité** : cosmétique
+- **Observé** : `ValueError: Unsupported aggregation method: mean, should be in {...}` pour une
+  **interpolation** — message trompeur, d'autant que `method='mean'` est la valeur par défaut de
+  `convert_frequency` : tout sur-échantillonnage sans `method` explicite le produit.
+- **Attendu** : « Unsupported interpolation method: mean, should be in {...} » (et, idéalement, rappeler
+  que `method` doit être une méthode d'interpolation pour un sur-échantillonnage).
+- **Reproduction** :
+  ```python
+  q = pd.Series([1.0, 2.0], index=pd.date_range('2021-03-31', periods=2, freq='QE'))
+  FrequencyConverter().convert_frequency(q, 'ME')  # ValueError: Unsupported aggregation method: mean, …
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_interpolation.py::TestInterpolationMethods::test_unsupported_method_message_names_interpolation`
+- **Correctif** : « Unsupported interpolation method: … » ; la méthode est validée avant tout calcul.
+- **Statut** : corrigée
+
+### ANO-UTILS-062 — Docstrings de `FrequencyConverter` ≠ comportement
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter.aggregate_to_lower_frequency`,
+  `::interpolate_to_higher_frequency`, `::convert_frequency`, `::_extend_index_for_upsampling`
+- **Sévérité** : cosmétique
+- **Observé** : `pytest --doctest-modules tsforecast/utils/frequency/converter.py` : 3 échecs sur 16.
+  - exemples d'`aggregate_to_lower_frequency` (`'monthly'`) et d'`interpolate_to_higher_frequency`
+    (`'daily'`) : libellés refusés (`Invalid target frequency 'monthly'`) — ces deux méthodes n'acceptent
+    que des offsets pandas depuis `013d929` (« On ne normalise plus la fréquence pour préserver la
+    position »), changement délibéré ; l'exemple d'interpolation utilise en outre `freq='M'` (déprécié) ;
+  - exemple de `_extend_index_for_upsampling` : appel d'une fonction libre inexistante ;
+  - `aggregate_to_lower_frequency` : `target_freq` documenté sans préciser « offset pandas » ; rien ne dit
+    que les gardes de couverture (`full_periods_only`, `method='all'`) sont **sautées** quand la fréquence
+    source n'est ni fournie ni détectable (index irrégulier) — seule la docstring privée
+    `_require_full_subperiod_coverage` le dit ;
+  - `convert_frequency` : `Raises` sans `NotImplementedError` (fréquence multipliée avec
+    `full_periods_only` / `'all'`), ni la `ValueError` d'un sur-échantillonnage laissé à `method='mean'`
+    (valeur par défaut, voir ANO-UTILS-061).
+- **Attendu** : docstrings alignées sur le code (le code est juste sur ces points).
+- **Test** : le comportement est épinglé par `tests/unit/utils/frequency/converter/test_aggregation.py::TestAggregationEdgeCases::test_user_label_is_not_an_offset`,
+  `::TestCoverageGuardsWithoutSourceFrequency`, `tests/unit/utils/frequency/converter/test_conversion.py::TestConversionDirection::test_default_method_only_fits_downsampling`
+- **Correctif** : docstrings réalignées : exemples en offsets pandas (`'ME'`, `'D'`), `Raises` complets (données vides, `NotImplementedError`, `limit`), gardes sautées sans fréquence source, `method` d'agrégation par défaut, nouveau contrat d'index de `convert_frequency`, source multipliée refusée par `anchor_fraction` (la docstring la disait « traitée comme sa base »). `pytest --doctest-modules tsforecast/utils/frequency/converter.py` : 20 passés.
+- **Statut** : corrigée
+
+### ANO-UTILS-063 — `converter.py` : branches inatteignables (code mort)
+- **Type** : [CODE] comportement (nettoyage, pas un bogue)
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter`
+- **Sévérité** : cosmétique
+- **Observé** : seules lignes non couvertes après U8 (couverture 95 %, lignes et branches), toutes
+  inatteignables par l'API publique :
+  - `convert_frequency` : `target_freq` dict sur une Series simple (rejeté par la validation ; une Series
+    de panel reçoit une chaîne par entité) ; « Data must be a pandas Series or DataFrame » (rejeté par
+    `validate_temporal_data`) ;
+  - `_validate_conversion_params` : les deux `Invalid position` — `parse_frequency` ne rend que `S`, `E`
+    ou `None` (`([SE])?`), toutes valides ;
+  - `_resolve_limit_direction` : `return None` et le test `if position is not None` (position toujours
+    résolue en `S` / `E`) ; donc `resolved_limit_direction is None` jamais vrai ;
+  - `_resolve_interpolation_limit` et `_extend_index_for_upsampling` : `except (ValueError, KeyError)`
+    autour du facteur de durée — les fréquences sont déjà normalisées hors du `try` et
+    `get_duration_conversion_factor` est total sur les codes normalisés (vérifié sur 13 × 13 codes,
+    multiplicateurs compris) ;
+  - `_apply_grouped_conversions` : branche `converted` Series (`data[columns]` est toujours un DataFrame) ;
+  - `_align_mixed_frequency_columns` : `converted_columns` vide (l'appelant retourne avant), valeurs
+    DataFrame (toujours des Series), branche `MultiIndex` (identique à l'autre ; les panels sont
+    découpés par entité en amont), colonne de base déjà convertie ;
+  - `_upsample` / `_downsample` : branches panel `groupby(...).apply` — jamais atteintes (panels découpés
+    en amont) et fausses si elles l'étaient : `droplevel` + `group_keys=False` perdent le niveau entité
+    (dates dupliquées sans entité).
+- **Attendu** : suppression du code mort, sans changement de comportement.
+- **Test** : couverture de `converter.py` par `tests/unit/utils/frequency/converter/` (lignes restantes :
+  257, 315, 986→988, 1202-1203, 1243, 1282, 1325, 1622, 1679, 1687, 1696, 1705→1704, 1713, 1760-1761,
+  1799-1800, 1869-1872 au commit `f61ed61`).
+- **Correctif** : code mort supprimé : branches listées, `_upsample` / `_downsample` (appels directs aux méthodes publiques), `_align_mixed_frequency_columns` (remplacée par `_fill_union_gaps`), `try / except` larges de `_reanchor_index_to_target`, `_shift_index_to_anchor_fraction` et `_extend_index_for_upsampling` (base semi-mensuelle traitée explicitement), import `validate_position`. `converter.py` : 100 % de couverture, lignes et branches.
+- **Statut** : corrigée
+
+### ANO-UTILS-064 — Fréquence *Tick* multipliée sans position (`'2D'`) lue en fin de bloc
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter._extend_index_for_upsampling`
+- **Sévérité** : mineure
+- **Observé** : depuis `469d37f`, un horodatage multiplié couvre un bloc de n périodes « à partir de lui
+  en position début, jusqu'à lui en position fin » ; sans position, la convention du paquet `'E'`
+  s'applique. Une source `'2D'` (01/01 … 19/01/2024) sur-échantillonnée en `'D'` donne une grille du
+  **31/12/2023** (avant la première observation, comblé vers l'arrière) au 19/01, et ampute le second jour
+  du dernier bloc. Origine : échec hérité `test_positions.py::TestExtendIndexForUpsampling::test_unsupported_frequency_pair_returns_original`
+  (en XPASS depuis `469d37f`), réécrit en U8.
+- **Attendu** : **arbitrage de l'auteur (2026-09-30)** : une fréquence *Tick* multipliée (`D`, `h`,
+  `min`, `s`, …) marque le **début** de son bloc, comme les étiquettes de `pandas.resample` ; grille
+  du 01/01 au 20/01/2024. `W`, `SM` et M / Q / Y sans position restent en fin de période.
+- **Reproduction** :
+  ```python
+  s = pd.Series(np.arange(10.0), index=pd.date_range('2024-01-01', periods=10, freq='2D'))
+  FrequencyConverter().convert_frequency(s, 'D', method='linear').index[[0, -1]]
+  # DatetimeIndex(['2023-12-31', '2024-01-19'])
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_interpolation.py::TestMultipliedPositionlessSource::test_daily_grid_covers_the_blocks`
+- **Correctif** : `_extend_index_for_upsampling` lit une source sans position à base jour ou infra-journalière (`D`, `B`, `h`, `min`, `s`, `ms`, `us`, `ns`) en début de bloc : `'2D'` → `'D'` du 01/01 au 20/01/2024. `B` suit les jours (étiquette à gauche de `resample('2B')`).
+- **Statut** : corrigée
+
+### ANO-UTILS-065 — `method='sum'` : une période sans aucune observation vaut 0.0
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter.aggregate_to_lower_frequency`
+- **Sévérité** : mineure
+- **Observé** : `resample(...).sum()` (pandas, `min_count=0`) rend `0.0` pour une période sans
+  observation, indiscernable d'un vrai zéro ; `mean`, `median`, `min`, `max`, `first`, `last`, `std`
+  rendent NaN. Sur `irregular_index_timeseries` → `'YS'`, `production_industrielle` vaut 0.0 de 2015 à
+  2018 (série démarrant en 2019). `full_periods_only=True` masque ces périodes.
+- **Attendu** : **arbitrage de l'auteur (2026-09-30)** : NaN, comme `mean` (« pas d'observation → pas de
+  valeur ») ; `count` reste 0.
+- **Reproduction** :
+  ```python
+  m = pd.Series([1.0, 2.0, 3.0, np.nan, np.nan, np.nan],
+                index=pd.date_range('2024-01-31', periods=6, freq='ME'))
+  FrequencyConverter().aggregate_to_lower_frequency(m, 'QE', method='sum')  # [6.0, 0.0]
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_aggregation.py::TestPeriodsWithoutObservation::test_sum_gives_nan`,
+  `tests/unit/utils/frequency/converter/test_realistic_datasets.py::TestIrregularIndexTimeseries::test_years_without_observation_do_not_sum_to_zero`
+- **Correctif** : `resample(...).sum(min_count=1)`.
+- **Statut** : corrigée
+
+### ANO-UTILS-066 — `limit` : entier numpy, flottant ou chaîne quelconque ignorés en silence
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter._resolve_interpolation_limit`
+- **Sévérité** : mineure
+- **Observé** : seuls `None`, un `int` Python et `'default'` sont reconnus ; toute autre valeur —
+  `np.int64(1)` (`isinstance(np.int64(1), int)` est faux), `1.0`, `'foo'` — est résolue en `None`, soit
+  **aucune limite**, sans erreur. pandas refuserait ces valeurs (`limit` doit être un entier).
+- **Attendu** : entiers numpy acceptés comme des `int` ; autre valeur → `ValueError`.
+- **Reproduction** :
+  ```python
+  c = FrequencyConverter()
+  q = pd.Series([10.0, 20.0], index=pd.date_range('2021-03-31', periods=2, freq='QE'))
+  c.interpolate_to_higher_frequency(q, 'ME', limit=np.int64(1))  # janvier comblé : aucune limite
+  c.interpolate_to_higher_frequency(q, 'ME', limit='foo')        # idem, sans erreur
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_interpolation.py::TestInterpolationLimit::test_numpy_integer_limit_is_honoured`,
+  `::test_invalid_limit_raises`
+- **Correctif** : entiers numpy acceptés (`numbers.Integral`, booléens exclus) ; toute autre valeur que `None`, `'default'` ou un entier → `ValueError: Invalid limit …`.
+- **Statut** : corrigée
+
+### ANO-UTILS-067 — Sources différentes vers une même cible : l'index de sortie est celui de la première colonne
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter._apply_grouped_conversions`
+  (« chemin simple »)
+- **Sévérité** : mineure
+- **Observé** : quand toutes les colonnes vont vers la même cible sans colonne préservée, le résultat est
+  construit sur l'index de la **première** colonne convertie ; les dates propres aux autres groupes
+  (sources différentes → extensions différentes) sont perdues. Sur une grille mensuelle de janvier 2020
+  à juin 2021, `q` (trimestrielle, extension jusqu'à juin 2021) et `y` (annuelle, jusqu'à décembre 2021)
+  vers `'MS'` : 18 lignes pour `[['q', 'y']]`, 24 pour `[['y', 'q']]`. Le chemin « fréquences mixtes »
+  prend, lui, l'union des index.
+- **Attendu** : résultat indépendant de l'ordre des colonnes (permuter les colonnes permute la sortie,
+  rien d'autre) — l'union des index cibles, comme le chemin mixte.
+- **Reproduction** :
+  ```python
+  c = FrequencyConverter()
+  grid = pd.date_range('2020-01-01', '2021-06-01', freq='MS')
+  df = pd.DataFrame({'q': np.nan, 'y': np.nan}, index=grid)
+  df.loc[grid.month.isin([1, 4, 7, 10]), 'q'] = [1.0, 2, 3, 4, 5, 6]
+  df.loc[['2020-01-01', '2021-01-01'], 'y'] = [100.0, 112.0]
+  len(c.convert_frequency(df[['q', 'y']], 'MS', method='linear'))  # 18
+  len(c.convert_frequency(df[['y', 'q']], 'MS', method='linear'))  # 24
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_conversion.py::TestDataFrameOutputContract::test_result_does_not_depend_on_column_order`
+- **Correctif** : index de sortie = union des index cibles, sans comblement tant qu'une seule fréquence cible est en jeu et qu'aucune colonne conservée n'est observée (`_apply_grouped_conversions`).
+- **Statut** : corrigée
+
+### ANO-UTILS-068 — Sur-échantillonnage vers une cible infra-journalière : `cannot reindex on an axis with duplicate labels`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter._reanchor_index_to_target`
+- **Sévérité** : majeure
+- **Observé** : le ré-ancrage appliquait `to_timestamp(how='end').normalize()` : toutes les heures d'une
+  journée revenaient à minuit. Tout sur-échantillonnage vers une cible infra-journalière (6 h → h, h → min)
+  levait `ValueError: cannot reindex on an axis with duplicate labels`. Décelé en corrigeant ANO-UTILS-064.
+- **Attendu** : grille infra-journalière, heure de chaque observation conservée.
+- **Reproduction** :
+  ```python
+  s = pd.Series([0.0, 6.0, 12.0, 18.0], index=pd.date_range('2024-01-01', periods=4, freq='6h'))
+  FrequencyConverter().interpolate_to_higher_frequency(s, 'h')  # ValueError (duplicate labels)
+  ```
+- **Correctif** : les cibles sans position à base jour ou infra-journalière sont ré-ancrées au début de
+  leur période, sans remise à minuit (`_BLOCK_START_BASES`).
+- **Test** : `tests/unit/utils/frequency/converter/test_interpolation.py::TestUpsamplingTargetGrid::test_sub_daily_target_keeps_the_time_of_day`,
+  `::test_six_hours_block_starts_at_its_stamp`
+- **Statut** : corrigée
+
+### ANO-UTILS-069 — Détection sur un index décroissant : erreur cryptique ou tri silencieux selon le chemin
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/utils.py::detect_index_frequency`
+- **Sévérité** : mineure
+- **Observé** : sur un index régulier décroissant, `detect_index_frequency` passait `'-1QE-DEC'` (inférence
+  pandas) au normaliseur : `ValueError: Unsupported frequency: -1QE-DEC`. Avec des trous, le repli
+  heuristique triait l'index en silence, comme `FrequencyDetector.detect_time_series_frequency` (donc
+  `detect_frequency`, `detect_dataset_frequency`). Cause de ANO-UTILS-057 côté convertisseur.
+- **Attendu** : **arbitrage de l'auteur (2026-09-30)** : un index décroissant est trié comme un index
+  désordonné (même règle que la validation des séries temporelles) — un premier correctif levant une
+  erreur sur l'index décroissant a été écarté, l'asymétrie avec l'index désordonné n'étant pas logique.
+- **Correctif** : `detect_index_frequency` trie un index non croissant avant l'inférence pandas ;
+  `detect_time_series_frequency` triait déjà.
+- **Test** : `tests/unit/utils/frequency/detector/test_index_and_offset.py::TestDetectIndexFrequency::test_decreasing_index_is_sorted`,
+  `tests/unit/utils/frequency/detector/test_time_series.py::TestDetectTimeSeriesFrequencyUnsortedData::test_reversed_series`,
+  `tests/unit/utils/frequency/detector/test_panel.py::TestDetectDatasetFrequencyTimeSeries::test_time_column[reversed]`
+- **Statut** : corrigée
+
+### ANO-UTILS-070 — Données vides ou jamais observées : comportements différents entre Series et DataFrame
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter.convert_frequency`,
+  `::aggregate_to_lower_frequency`, `::interpolate_to_higher_frequency`
+- **Sévérité** : mineure
+- **Observé** : un panel vide était rendu inchangé par `convert_frequency`, une Series vide refusée par
+  la détection (« Series has only 0 non-null observations ») ; `aggregate_to_lower_frequency` rendait une
+  sortie vide. Sans aucune valeur observée, une Series levait une erreur et un DataFrame rendait zéro
+  ligne ; avec des observations mais sans fréquence détectable, une Series levait une erreur et un
+  DataFrame était rendu sans conversion. Relevé comme comportement surprenant au rapport U8.
+- **Attendu** : **arbitrage de l'auteur (2026-09-30)** : un panel ou une série vide renvoient une erreur ;
+  même comportement pour les Series et les DataFrame, le choix entre erreur et objet vide étant laissé au
+  correctif. Règle retenue, identique pour Series, DataFrame et panels :
+  1. aucune ligne → `ValueError` ;
+  2. des lignes mais aucune valeur observée → résultat vide (aucune date à conserver) ; dans un panel,
+     l'entité jamais observée disparaît — une erreur rendrait inconvertible tout panel à colonne
+     structurellement absente pour une entité (`climat_affaires` / Italie) ;
+  3. des observations sans fréquence détectable (Series, ou toutes les colonnes d'un DataFrame) →
+     `ValueError`.
+- **Correctif** : `_reject_empty` en tête des trois méthodes (après validation pour `convert_frequency`) :
+  `ValueError: Cannot <convert|aggregate|interpolate> empty data: no row to …`. Series sans observation :
+  `convert_frequency` et `interpolate_to_higher_frequency` rendent un objet vide du même type ;
+  `_build_frequency_map` lève « Cannot detect current frequency of any column of the data » quand des
+  valeurs sont observées sans qu'aucune colonne ait de fréquence détectable ;
+  `_convert_panel_frequency` écarte les entités sans observation. `aggregate_to_lower_frequency` garde,
+  sur des lignes jamais observées, ses périodes à `NaN` (une période par période couverte par les lignes).
+- **Test** : `tests/unit/utils/frequency/converter/test_conversion.py::TestSeriesEdgeCases::test_empty_series_raises`,
+  `::TestDataFrameConversion::test_empty_dataframe_raises`,
+  `::TestDataFrameOutputContract::test_never_observed_frame_gives_no_row`,
+  `::test_never_observed_series_gives_no_row`, `::test_frame_without_detectable_column_raises`,
+  `tests/unit/utils/frequency/converter/test_panel.py::TestPanelStringTarget::test_empty_panel_raises`,
+  `::test_never_observed_entity_is_left_out`, `::test_never_observed_panel_gives_no_row`,
+  `tests/unit/utils/frequency/converter/test_aggregation.py::TestAggregationEdgeCases::test_empty_series_raises`,
+  `tests/unit/utils/frequency/converter/test_interpolation.py::TestEmptyOrUnobservedInput`
+- **Statut** : corrigée
+
 ## DELAYS
 
 ### ANO-DELAYS-001 — Docstrings de `calculator.py` périmées

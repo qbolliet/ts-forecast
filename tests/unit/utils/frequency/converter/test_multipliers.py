@@ -140,6 +140,7 @@ class TestConversionFactors:
         """How many ``from_unit`` periods fit in one ``to_unit`` period."""
         assert converter.get_conversion_factor(from_unit, to_unit) == pytest.approx(expected)
 
+    @pytest.mark.internal
     def test_default_interpolation_limit_follows_the_multiplier(self, converter):
         """Target periods per source period: 3 months in a quarter, 1.5 bimonthly ones."""
         assert converter._resolve_interpolation_limit("default", "QS", "MS") == 3
@@ -200,6 +201,7 @@ class TestUnsupportedMultipliedTargets:
 class TestModernizeResampleFreq:
     """Deprecated bare aliases are modernised, multiplier and anchor kept."""
 
+    @pytest.mark.internal
     @pytest.mark.parametrize(
         "freq, expected",
         [
