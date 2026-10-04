@@ -17,11 +17,7 @@ pytest_plugins = ["tests.support.fixtures"]
 # =============================================================================
 # Modules dont l'import est cassé — TRANSITOIRE, retiré au prompt qui répare
 # =============================================================================
-collect_ignore = [
-    # Renommage délibéré `_calculate_release_delays` → `_calculate_publication_delays`
-    # (tsforecast/delays/data_manager.py) — à traiter au prompt D1.
-    "unit/delays/test_data_manager.py",
-]
+collect_ignore: list[str] = []
 
 
 # =============================================================================

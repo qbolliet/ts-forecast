@@ -28,10 +28,13 @@ pas encore.
 
 ### 1. Inférer les délais — `compare_and_detect_delays()`
 
-À partir de deux extractions datées d'un même jeu de données (ou d'une seule avec
-une colonne de date de téléchargement), la fonction déduit le délai observé par
-variable et par observation. Deux modes : `new_only` (nouvelles valeurs) et
-`all_changes` (révisions comprises).
+À partir de deux extractions datées d'un même jeu de données (ou d'une seule :
+la dernière observation de chaque variable est alors retenue), la fonction déduit
+le délai observé par variable et par observation. Deux modes : `new_only`
+(nouvelles valeurs) et `all_changes` (révisions comprises). Le délai se compte
+toujours depuis le même point de la période (`reference_point`), quel que soit le
+mode : le délai entre la première publication et une révision s'obtient par
+différence entre les deux résultats.
 
 ### 2. Calculer le délai applicable — `calculate_applicable_delay()`
 

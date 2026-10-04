@@ -1958,6 +1958,229 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Statut** : ouvert
 
 
+### ANO-DELAYS-004 — Délai en microsecondes majoré de 1 µs au-delà d'environ 800 jours
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/data_manager.py::_calculate_publication_delays` (via `compare_and_detect_delays(delay_unit='us')`)
+- **Sévérité** : mineure
+- **Observé** : le délai en microsecondes est `np.ceil(timedelta.total_seconds() * 1_000_000)`. Le produit flottant de
+  `total_seconds()` (≈ 1,5e8 s, soit 9 chiffres entiers + 6 décimales : à la limite de la précision d'un `float64`) par
+  1e6 tombe parfois juste au-dessus de l'entier exact, et `ceil` ajoute alors 1 µs. Sur 300 dates de téléchargement
+  tirées au hasard entre 60 et 2 000 jours après la période, 32 sont majorées de 1 µs. Aucune erreur observée sous
+  ≈ 800 jours (l'erreur d'arrondi y reste inférieure à 1e-2 µs) ; en jours et en secondes la formule est exacte.
+- **Attendu** : l'entier exact de microsecondes écoulées, `(téléchargement - début) // 1 µs` : le `ceil` n'a d'objet que
+  pour les fractions de l'unité (docstring : « ceil-rounded »), pas pour une erreur de représentation.
+- **Reproduction** :
+  ```python
+  from datetime import datetime, timedelta
+  import pandas as pd
+  from tsforecast.delays.data_manager import compare_and_detect_delays
+  data = pd.DataFrame({'PIB': [1.0, 2.0, 3.0, 4.0]}, index=pd.date_range('2023-01-01', periods=4, freq='MS'))
+  dl = datetime(2027, 11, 26, 17, 18, 56, 578903)
+  compare_and_detect_delays(data, None, dl, delay_unit='us')['delay'].iloc[0]   # 146942336578904.0
+  (dl - datetime(2023, 4, 1)) // timedelta(microseconds=1)                      # 146942336578903
+  ```
+- **Test** : `tests/unit/delays/test_data_manager.py::TestReferencePointAndUnit::test_microsecond_delay_is_exact`
+- **Correctif** : le délai est calculé en entiers de nanosecondes (`as_unit('ns')`, division entière par excès
+  `-(-n // u)`), avec la durée de chaque unité en nanosecondes (`_DELAY_UNITS`) : plus aucun produit flottant, arrondi
+  au supérieur uniquement pour les fractions de l'unité.
+- **Statut** : corrigée
+
+### ANO-DELAYS-005 — Jeux vides ou sans observation : `TypeError` / `IndexError` / `ValueError` cryptiques
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/data_manager.py::compare_and_detect_delays`
+  (`_identify_new_observations` sans `existing_data`, puis `_calculate_publication_delays`)
+- **Sévérité** : mineure
+- **Observé** : trois familles de jeux dégénérés, tous rejetés par une exception interne sans rapport avec le problème,
+  alors que le chemin « comparaison » rend un résultat vide pour les mêmes données :
+  1. série **sans aucune valeur observée**, `existing_data=None` : `TypeError: Addition/subtraction of integers and
+     integer-arrays with Timestamp is no longer supported` (la liste de résultats vide donne un index d'objets, la
+     soustraction `download_date - période` échoue). Panel dans le même cas : `ValueError: Length of new names must be
+     1, got 2`. Avec `existing_data` fourni, les mêmes données donnent un `DataFrame` vide (colonnes de sortie
+     présentes) ;
+  2. jeu **sans aucune ligne** (série ou panel) : mêmes exceptions (`TypeError`, `ValueError: Length of new names…`) ;
+  3. jeu **sans aucune colonne** (dates seules), avec ou sans `existing_data` : `IndexError: index 0 is out of bounds
+     for axis 0 with size 0` (`freq_df.index[0]` sur une carte de fréquences vide).
+- **Attendu** : règle d'**ANO-UTILS-070** (arbitrage de l'auteur du 2026-09-30 pour la conversion de fréquence, reprise
+  ici par analogie, **à confirmer**) : (1) aucune ligne → `ValueError` explicite (le message contient « empty ») ; (2) des
+  lignes mais aucune valeur observée, ou aucune colonne → résultat vide, avec les colonnes de sortie et les niveaux
+  d'index habituels, comme le fait déjà le chemin avec `existing_data`.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.data_manager import compare_and_detect_delays
+  idx = pd.date_range('2023-01-01', periods=5, freq='MS')
+  compare_and_detect_delays(pd.DataFrame({'PIB': [np.nan] * 5}, index=idx), None, '2023-06-15')   # TypeError
+  compare_and_detect_delays(pd.DataFrame(index=idx), None, '2023-06-15')                          # IndexError
+  compare_and_detect_delays(pd.DataFrame({'PIB': []}, index=pd.DatetimeIndex([])), None, '2023-06-15')  # TypeError
+  ```
+- **Test** : `tests/unit/delays/test_data_manager.py::TestEmptyAndDegenerateInputs::test_all_null_data_on_first_download_gives_an_empty_frame`,
+  `::test_all_null_panel_on_first_download_gives_an_empty_frame`, `::test_dataset_without_rows_raises_a_clear_error`,
+  `::test_panel_without_rows_raises_a_clear_error`, `::test_frame_without_columns_gives_an_empty_frame`
+- **Correctif** : décision de l'auteur (2026-10-04) : règle d'ANO-UTILS-070. `compare_and_detect_delays` lève
+  `ValueError: Cannot detect publication delays on empty data: new_data has no row` pour un `new_data` sans ligne
+  (avec ou sans `existing_data` ; un `existing_data` vide signifie « rien de connu » : tout est nouveau) ; des lignes sans
+  valeur observée, ou aucune colonne, donnent un résultat vide. Tous les chemins vides (rien de changé, rien
+  d'observé, aucune colonne) passent par `_empty_publication_delays` : mêmes colonnes, mêmes types, mêmes niveaux
+  d'index (entités, puis `column`).
+- **Statut** : corrigée
+
+### ANO-DELAYS-006 — Fréquence indétectable : message sans le nom de la colonne ; une entité fait échouer tout le panel
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/data_manager.py::_calculate_publication_delays`
+- **Sévérité** : à arbitrer
+- **Observé** : depuis le commit `f61ed61` (ANO-UTILS-042 : un couple indétectable est associé à `None`, non plus une
+  exception), une observation dont la fréquence est indétectable (colonne observée une seule fois, ou entité à une seule
+  observation dans un panel) atteint `get_period_boundaries(frequency=None)` et lève
+  `ValueError: Frequency must be a string, got <class 'NoneType'>` : le message ne nomme ni la colonne ni l'entité. Dans un
+  panel, un seul couple de ce type fait échouer le calcul des délais de **tous** les autres. L'ancien message du
+  détecteur (« Series has only 1 non-null observations, minimum required is 2 », attendu par le test historique
+  `test_single_observation`) a disparu avec ce commit : changement délibéré, le test historique est de catégorie (a).
+- **Attendu** : (1) une `ValueError` nommant les couples sans fréquence détectable — attente testée ; (2) à arbitrer :
+  lever pour tout le panel (comportement actuel, épinglé), ou écarter les couples indétectables avec un avertissement,
+  ou les rendre avec `frequency=None` et des bornes / un délai `NaN`.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.delays.data_manager import compare_and_detect_delays
+  data = pd.DataFrame({'PIB': [100.0]}, index=pd.date_range('2023-01-01', periods=1, freq='MS'))
+  compare_and_detect_delays(data, None, '2023-02-15')   # ValueError: Frequency must be a string, got <class 'NoneType'>
+  ```
+- **Test** : `tests/unit/delays/test_data_manager.py::TestFrequencyAndPeriodBoundaries::test_undetectable_frequency_gives_a_row_without_period_or_delay`,
+  `::test_undetectable_frequency_warning_names_the_column`, `::test_one_undetectable_entity_does_not_spoil_the_panel`,
+  `::test_undetectable_frequency_in_comparison`
+- **Correctif** : décision de l'auteur (2026-10-04) : le couple indétectable est **renvoyé** avec `frequency=None`,
+  `period_start` / `period_end` à `NaT` et `delay` à `NaN` (l'unité reste renseignée), et un `UserWarning` nomme les
+  couples concernés (`The frequency could not be detected for [('B', 'PIB')]: ...`). Les autres couples sont calculés.
+  Conséquence en aval : `calculate_applicable_delay` rejette une ligne sans fréquence (voir ANO-DELAYS-011).
+- **Statut** : corrigée
+
+### ANO-DELAYS-007 — Une colonne de données nommée `has_changes` fait échouer la comparaison
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/data_manager.py::_identify_new_observations` (chemin `existing_data` fourni)
+- **Sévérité** : mineure
+- **Observé** : `pd.melt(changes_mask, var_name="column", value_name="has_changes", ...)` lève
+  `ValueError: value_name (has_changes) cannot match an element in the DataFrame columns.` quand une colonne de données
+  s'appelle `has_changes`. Les autres noms de colonnes de sortie (`column`, `delay`, `frequency`, `observation_date`,
+  `unit`, `download_date`, `period_start`, `reference_point`) et `index` passent, et le chemin `existing_data=None`
+  accepte aussi `has_changes` : l'échec est propre au chemin de comparaison.
+- **Attendu** : toute colonne de données se compare comme les autres, quel que soit son nom (CLAUDE.md : noms de colonnes
+  non standards).
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.data_manager import compare_and_detect_delays
+  idx = pd.date_range('2023-01-01', periods=4, freq='MS')
+  new = pd.DataFrame({'has_changes': [1.0, 2.0, 3.0, 4.0]}, index=idx)
+  old = new.copy(); old.iloc[3] = np.nan
+  compare_and_detect_delays(new, old, '2023-06-15')   # ValueError: value_name (has_changes) cannot match ...
+  ```
+- **Test** : `tests/unit/delays/test_data_manager.py::TestInputLayout::test_column_named_has_changes_in_comparison`
+- **Correctif** : `pd.melt` est remplacé par une construction par colonne (`_flag_observations`) : aucun nom de
+  colonne de données ne peut plus entrer en collision avec `has_changes`.
+- **Statut** : corrigée
+
+### ANO-DELAYS-008 — `FutureWarning` pandas à chaque appel sur un panel à deux niveaux (sans `existing_data`)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/data_manager.py::_identify_new_observations`
+- **Sévérité** : cosmétique
+- **Observé** : `new_data.groupby(level=[0])` (liste d'un seul niveau, `panel_levels = list(range(nlevels - 1))`) émet
+  `FutureWarning: Creating a Groupby object with a length-1 list-like level parameter will yield indexes as tuples in a
+  future version` une fois **par colonne** (21 occurrences sur la suite de ce fichier de tests). Sans conséquence
+  aujourd'hui (la clé du groupe n'est pas utilisée), mais le groupement est en outre refait pour chaque colonne.
+- **Attendu** : aucun avertissement ; un seul `groupby` hors de la boucle sur les colonnes.
+- **Reproduction** :
+  ```python
+  import warnings, pandas as pd
+  from tsforecast.delays.data_manager import compare_and_detect_delays
+  idx = pd.MultiIndex.from_product([['A', 'B'], pd.date_range('2023-01-01', periods=4, freq='MS')], names=['country', 'date'])
+  panel = pd.DataFrame({'PIB': range(8), 'CPI': range(8)}, index=idx)
+  warnings.simplefilter('error', FutureWarning)
+  compare_and_detect_delays(panel, None, '2023-06-15')   # FutureWarning
+  ```
+- **Test** : `tests/unit/delays/test_data_manager.py::TestWarnings::test_panel_call_is_silent`
+- **Correctif** : le premier téléchargement est réécrit sans boucle de groupes : `dropna()` puis
+  `groupby(level=...).tail(1)` par colonne, avec un niveau scalaire quand il n'y en a qu'un ; l'index d'origine
+  (noms de niveaux compris) est conservé sans reconstruction par tuples.
+- **Statut** : corrigée
+
+### ANO-DELAYS-009 — Docstring de `compare_and_detect_delays` et documentation : sortie, noms de colonnes, valeurs de `frequency`
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/delays/data_manager.py::compare_and_detect_delays` ; `docs/tutorials/publication_delays.md`
+  §4.1.2 ; `docs/concepts/publication_delays.md` §« Inférer les délais »
+- **Sévérité** : cosmétique
+- **Observé** : (1) la colonne `has_changes` (toujours `True`) figure dans la sortie mais pas dans la docstring ; (2) la
+  docstring et le tutoriel présentent `column` comme une colonne : c'est le dernier niveau de l'**index** (niveaux
+  d'entité éventuels, puis `column`), `observation_date` étant, elle, une vraie colonne ; le tutoriel annonce un
+  `DataFrame` « indexé par les dates » ; (3) le tutoriel nomme encore la colonne `release_delay` (renommée `delay` par
+  `4b3d3bc`) ; (4) `frequency` vaut `'monthly'` / `'quarterly'` / `'annual'` / `'daily'` / `'weekly'` / `'hourly'` (littéraux
+  de `to_literal`), non `'M'` / `'Q'` / `'A'` comme le dit le tutoriel ; (5) `period_end` est la borne **exclusive**
+  (1er jour de la période suivante : `2023-05-01` pour avril) ; (6) `docs/concepts/publication_delays.md` évoque
+  « une seule [extraction] avec une colonne de date de téléchargement » : aucune telle colonne n'est lue, le mode à
+  un seul jeu est `existing_data=None` (dernière observation par variable) ; (7) `Raises` omet le `TypeError`
+  d'un `download_date` aware avec des données naïves (et l'inverse), et le `ValueError` de `resolve_date` pour un type
+  inattendu (`datetime.date`) ; (8) `download_date` est annoncé `Union[str, datetime]` mais sa valeur par défaut est `None`.
+- **Correctif** : docstring et pages à réécrire d'après le comportement observé (le test suit le code).
+- **Test** : `tests/unit/delays/test_data_manager.py::TestOutputContract` (colonnes, ordre, index),
+  `::TestFrequencyAndPeriodBoundaries` (littéraux de fréquence, bornes), `::TestDownloadDate`
+- **Correctif** : docstrings de `compare_and_detect_delays` et `_calculate_publication_delays` réécrites d'après le
+  comportement (colonnes et ordre, index, littéraux de fréquence, borne de fin exclusive, délai des révisions, fuseaux,
+  `Raises` / `Warns`, exemple exécutable) ; `docs/tutorials/publication_delays.md` §4.1.1-4.1.2 et
+  `docs/concepts/publication_delays.md` corrigés.
+- **Statut** : corrigée
+
+### ANO-DELAYS-010 — `_calculate_publication_delays` : branches inatteignables (code mort)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/data_manager.py::_calculate_publication_delays` (branches `elif frequency_map_raw is not None`
+  / `else` de la conversion en littéral ; `if freq_df.index.nlevels == 1 and isinstance(freq_df.index[0], tuple)` ;
+  `else` de la construction de `freq_df` à partir d'une fréquence unique)
+- **Sévérité** : cosmétique
+- **Observé** : `detect_frequency(new_data)` reçoit toujours un `DataFrame` (une `Series` lève `AttributeError: 'Series'
+  object has no attribute 'columns'` dès `_identify_new_observations`) et renvoie alors toujours un `dict`. Les
+  traitements d'une fréquence unique (`str`) ou `None` ne sont donc jamais exécutés ; les clés de panel sont
+  aplaties, jamais des tuples sur un index à un niveau (`pd.Series(dict)` construit lui-même le `MultiIndex`). Ces
+  lignes (308-311, 319, 322) restent non couvertes (couverture du module : 93 %).
+- **Attendu** : supprimer ces branches, ou accepter réellement une `Series` (le type annoncé est `pd.DataFrame`) ;
+  à défaut, un `TypeError` explicite plutôt que l'`AttributeError`.
+- **Test** : `tests/unit/delays/test_data_manager.py::TestEmptyAndDegenerateInputs::test_series_instead_of_frame_raises` ; couverture du module : 100 %.
+- **Correctif** : branches mortes supprimées (`detect_frequency` d'un `DataFrame` est toujours un `dict`) ; un
+  `new_data` ou `existing_data` qui n'est pas un `DataFrame` lève `TypeError: new_data must be a pandas DataFrame, got Series`.
+- **Statut** : corrigée
+
+### ANO-DELAYS-011 — `calculate_applicable_delay` rejette les lignes sans fréquence renvoyées par `compare_and_detect_delays`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/calculator.py::calculate_applicable_delay`
+- **Sévérité** : mineure
+- **Observé** : depuis ANO-DELAYS-006, un couple dont la fréquence est indétectable est renvoyé avec `frequency=None` et
+  un délai `NaN`. Passé à `calculate_applicable_delay`, il lève `ValueError: Frequency must be a string, got <class
+  'NoneType'>` (sans nommer le couple) : la chaîne `compare_and_detect_delays` → `calculate_applicable_delay` échoue
+  dès qu'un couple est indétectable.
+- **Attendu** : à traiter au prompt D2 : écarter ces lignes (délai inconnu) avec un avertissement nommant les couples,
+  ou les conserver avec un délai `NaN` ; dans les deux cas sans exception cryptique.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays import compare_and_detect_delays, calculate_applicable_delay
+  idx = pd.MultiIndex.from_product([['A', 'B'], pd.date_range('2023-01-01', periods=4, freq='MS')], names=['country', 'date'])
+  panel = pd.DataFrame({'PIB': [1., 2, 3, 4, 1, np.nan, np.nan, np.nan]}, index=idx)
+  calculate_applicable_delay(compare_and_detect_delays(panel, None, '2023-06-15'), 'start', 'M')   # ValueError
+  ```
+- **Test** : à écrire au prompt D2.
+- **Statut** : ouvert
+
+### Arbitrages de l'auteur (2026-10-04) sur `compare_and_detect_delays`
+- **Fuseaux horaires** : une date sans fuseau est lue en UTC face à une date avec fuseau ; deux dates avec fuseaux sont
+  comparées comme des instants ; la colonne `download_date` garde la date telle que fournie. (Auparavant : `TypeError`
+  pandas sur un `download_date` aware avec des données naïves.) Tests : `TestDownloadDate::test_timezone_aware_*`,
+  `::test_naive_download_date_with_timezone_aware_data`, `::test_aware_download_date_in_another_zone_than_the_data`.
+- **Délai négatif** : légitime et conservé (une prévision utilisée comme observation d'une autre prévision anticipe sa
+  valeur). Test : `TestReferencePointAndUnit::test_download_before_the_period_start_gives_a_negative_delay`.
+- **Valeur retirée** (valeur dans `existing_data`, `NaN` dans `new_data`) : non signalée par aucun mode, faute de
+  valeur à laquelle rattacher un délai. Test : `TestDetectionModes::test_withdrawn_value_is_not_reported`.
+- **Révisions** (`all_changes`) : le point de référence est le même qu'en `new_only` (début ou fin de la période) ; le délai
+  entre première publication et révision s'obtient par différence entre deux résultats. Test :
+  `TestDetectionModes::test_all_changes_detects_revisions`.
+
+
 ## FREQ
 
 _Aucune entrée._

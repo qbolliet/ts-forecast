@@ -210,7 +210,7 @@ df_delays = compare_and_detect_delays(
 |----------|------|-------------|
 | `new_data` | `pd.DataFrame` | Nouveau jeu de données à analyser. L'index doit contenir les dates (ou un MultiIndex pour les données panel). |
 | `existing_data` | `pd.DataFrame` ou `None` | Jeu de données existant pour comparaison. Si `None`, identifie l'observation non nulle la plus récente par variable. |
-| `download_date` | `str` ou `datetime` | Date de téléchargement des données. Si `None`, utilise `datetime.now()`. |
+| `download_date` | `str` ou `datetime` | Date de téléchargement des données (`'today'` accepté). Si `None`, utilise `datetime.now()`. Une date sans fuseau horaire est lue en UTC face à une date avec fuseau (et réciproquement) ; deux dates avec fuseaux sont comparées comme des instants. |
 | `detection_mode` | `'new_only'` ou `'all_changes'` | Mode de détection : `'new_only'` détecte uniquement les transitions NaN→valeur, `'all_changes'` détecte aussi les révisions. |
 | `reference_point` | `'start'` ou `'end'` | Point de référence pour le calcul du délai : début ou fin de la période. |
 | `delay_unit` | `str` | Unité du délai retourné : `'day'`/`'D'`, `'second'`/`'s'`, ou `'microsecond'`/`'us'`. |
@@ -219,18 +219,18 @@ df_delays = compare_and_detect_delays(
 
 #### 4.1.2 Valeur retournée
 
-La fonction retourne un `DataFrame` indexé par les dates (et entités pour les données panel), avec les colonnes suivantes :
+La fonction retourne un `DataFrame` indexé par les niveaux d'entité des données (aucun pour une série) suivis d'un niveau `column` portant le nom de la variable ; une variable peut figurer sur plusieurs lignes. Les colonnes, dans l'ordre :
 
 | Colonne | Description |
 |---------|-------------|
 | `observation_date` | Date de l'observation détectée |
-| `column` | Nom de la variable concernée |
+| `has_changes` | Toujours `True` (marque les observations détectées) |
 | `download_date` | Date de téléchargement des données à partir de laquelle est calculé le délai |
-| `frequency` | Fréquence détectée de la série (`'M'`, `'Q'`, `'A'`, etc.) |
+| `frequency` | Fréquence détectée du couple (entité, variable), en toutes lettres (`'daily'`, `'weekly'`, `'monthly'`, `'quarterly'`, `'annual'`, ...) ; `None` si elle est indétectable (une seule observation) — un avertissement est alors émis et `period_start`, `period_end` et `delay` valent `NaT` / `NaN` |
 | `period_start` | Date de début de la période de référence de l'observation à la fréquence détectée |
-| `period_end` | Date de fin de la période de référence de l'observation à la fréquence détectée |
+| `period_end` | Borne de fin **exclusive** de la période de référence (premier instant de la période suivante : `2023-05-01` pour avril) |
 | `reference_point` | Point de référence utilisé (`'start'` ou `'end'`) |
-| `release_delay` | Délai de publication calculé (arrondi à l'entier supérieur) entre le point de référence de la période de l'observation et la date de téléchargement |
+| `delay` | Délai de publication calculé (arrondi à l'entier supérieur de l'unité) entre le point de référence de la période de l'observation et la date de téléchargement ; négatif si le téléchargement précède ce point (par exemple une prévision utilisée comme observation) |
 | `unit` | Unité du délai (`'day'`, `'second'`, `'microsecond'`) |
 
 #### 4.1.3 Cas d'usage 1 : Comparaison de deux jeux de données
