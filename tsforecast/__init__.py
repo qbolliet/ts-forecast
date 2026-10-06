@@ -39,7 +39,7 @@ from .delays import PublicationDelayTransformer
 from .frequency import HighFrequencyImputer
 from .panel import PanelwiseTransformer
 from .xy import XYPipeline, XYTransformerMixin
-from .tracking import imputation_metrics, delay_metrics, split_summary
+from .tracking import imputation_metrics, delay_metrics, detection_metrics, split_summary
 
 __all__ = [
     # Cross-validation
@@ -62,5 +62,6 @@ __all__ = [
     # Tracking
     "imputation_metrics",
     "delay_metrics",
+    "detection_metrics",
     "split_summary",
 ]

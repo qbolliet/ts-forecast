@@ -1474,3 +1474,121 @@ class TestMaskTransformerPandasAliases:
             warnings.filterwarnings('error', message=".*is deprecated", category=FutureWarning)
             masked = masker.fit_transform(series)
         assert masked[masked.isna()].index.strftime('%m-%d').tolist() == expected_masked
+
+
+# ============================================================================
+# Rapport d'ajustement (fit_report_)
+# ============================================================================
+
+class TestFitReport:
+    """``fit_report_`` gathers what ``fit`` resolved, beyond the warnings it emits."""
+
+    @staticmethod
+    def _monthly(columns=('GDP', 'CPI'), periods=12):
+        index = pd.date_range('2023-01-01', periods=periods, freq='MS')
+        return pd.DataFrame({col: range(periods) for col in columns}, index=index)
+
+    @staticmethod
+    def _delays(columns=('GDP', 'CPI'), delays=(45.0, 20.0), **extra):
+        data = {'column': list(columns), 'delay': list(delays), 'unit': ['D'] * len(columns),
+                'reference_point': ['start'] * len(columns), 'frequency': ['Q'] * len(columns)}
+        data.update(extra)
+        return pd.DataFrame(data)
+
+    def test_report_exists_only_after_fit(self):
+        transformer = PublicationDelayTransformer(delays=self._delays(), prediction_date='2023-12-15')
+        assert not hasattr(transformer, 'fit_report_')
+        transformer.fit(self._monthly())
+        assert transformer.fit_report_.prediction_date == datetime(2023, 12, 15)
+
+    def test_report_matches_the_fitted_parameters(self):
+        transformer = PublicationDelayTransformer(delays=self._delays(), prediction_date='2023-12-15')
+        report = transformer.fit(self._monthly()).fit_report_
+        records = {record.column: record for record in report.columns}
+        assert set(records) == set(transformer.shift_params)
+        for col, params in transformer.shift_params.items():
+            assert records[col].strategy == 'shift'
+            assert records[col].n_periods == params['n_periods']
+            assert records[col].frequency == params['frequency']
+        assert (records['GDP'].delay, records['GDP'].delay_unit, records['GDP'].reference_point) == (45.0, 'D', 'start')
+
+    def test_columns_unaffected_and_ignored(self):
+        X = self._monthly(columns=('GDP', 'Z'))
+        delays = self._delays(columns=('GDP', 'OLD'), delays=(45.0, 5.0))
+        with pytest.warns(UserWarning):
+            report = PublicationDelayTransformer(delays=delays, prediction_date='2023-12-15').fit(X).fit_report_
+        assert report.columns_unaffected == ('Z',)
+        assert report.columns_ignored == ('OLD',)
+
+    def test_parameter_sources_inferred_and_explicit(self):
+        X = self._monthly()
+        inferred = PublicationDelayTransformer(
+            delays=self._delays(), prediction_date='2023-12-15').fit(X).fit_report_
+        assert {r.reference_point_source for r in inferred.columns} == {'inferred'}
+        assert {r.delay_unit_source for r in inferred.columns} == {'inferred'}
+        explicit = PublicationDelayTransformer(
+            delays=self._delays(), prediction_date='2023-12-15', reference_point='end').fit(X).fit_report_
+        assert {r.reference_point_source for r in explicit.columns} == {'explicit'}
+        assert {r.reference_point for r in explicit.columns} == {'end'}
+
+    def test_explicit_dict_wins_for_its_columns_only(self):
+        X = self._monthly()
+        report = PublicationDelayTransformer(
+            delays=self._delays(), prediction_date='2023-12-15', delay_unit={'GDP': 'W'}
+        ).fit(X).fit_report_
+        sources = {r.column: (r.delay_unit, r.delay_unit_source) for r in report.columns}
+        assert sources == {'GDP': ('W', 'explicit'), 'CPI': ('D', 'inferred')}
+
+    def test_defaults_imputed_are_listed(self):
+        X = self._monthly()
+        delays = self._delays().drop(columns='reference_point')
+        defaults = {'delay': 1.0, 'unit': 'D', 'reference_point': 'end'}
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            report = PublicationDelayTransformer(
+                delays=delays, prediction_date='2023-12-15', default_values=defaults).fit(X).fit_report_
+        assert report.defaults_imputed == (('GDP', 'reference_point'), ('CPI', 'reference_point'))
+        assert {r.reference_point_source for r in report.columns} == {'default'}
+
+    def test_mask_strategy_records_the_masked_observations(self):
+        X = self._monthly()
+        delays = self._delays(delays=(20.0, 20.0))
+        report = PublicationDelayTransformer(
+            delays=delays, strategy='mask', prediction_date='2023-12-15').fit(X).fit_report_
+        for record in report.columns:
+            assert record.strategy == 'mask'
+            assert record.n_obs == 1 and record.n_periods is None
+            assert (record.target_frequency, record.target_frequency_source) == ('Q', 'inferred')
+            assert record.moved_from_mask is False
+        assert report.mask_fallbacks == ()
+
+    def test_mask_fallback_is_reported(self):
+        X = self._monthly()
+        delays = self._delays(delays=(400.0, 20.0))
+        with pytest.warns(UserWarning, match="Could not mask the column 'GDP'"):
+            transformer = PublicationDelayTransformer(delays=delays, strategy='mask', prediction_date='2023-12-15')
+            report = transformer.fit(X).fit_report_
+        assert report.mask_fallbacks == ('GDP',)
+        records = {record.column: record for record in report.columns}
+        assert (records['GDP'].strategy, records['GDP'].moved_from_mask) == ('shift', True)
+        assert records['GDP'].n_periods == transformer.shift_params['GDP']['n_periods']
+        assert records['CPI'].strategy == 'mask'
+
+    def test_refit_replaces_the_report(self):
+        transformer = PublicationDelayTransformer(delays=self._delays(), prediction_date='2023-12-15')
+        first = transformer.fit(self._monthly()).fit_report_
+        second = transformer.fit(self._monthly(columns=('GDP',))).fit_report_
+        assert first is not second
+        assert [r.column for r in second.columns] == ['GDP']
+
+    def test_fit_is_logged_at_info_level(self, caplog):
+        transformer = PublicationDelayTransformer(delays=self._delays(), prediction_date='2023-12-15')
+        with caplog.at_level('INFO', logger='tsforecast.delays.transformers'):
+            report = transformer.fit(self._monthly()).fit_report_
+        assert report.summary() in caplog.messages
+
+    def test_clone_does_not_copy_the_report(self):
+        from sklearn.base import clone
+        transformer = PublicationDelayTransformer(delays=self._delays(), prediction_date='2023-12-15')
+        transformer.fit(self._monthly())
+        assert not hasattr(clone(transformer), 'fit_report_')

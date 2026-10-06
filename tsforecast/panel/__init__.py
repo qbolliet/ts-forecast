@@ -2,6 +2,7 @@
 from .transformers import PanelwiseTransformer
 from .utils import (
     is_panel_data,
+    get_entity_levels,
     normalize_entity_key,
     split_variable_key,
     get_unique_panel_entities,
@@ -16,6 +17,7 @@ from .utils import (
 __all__ = [
     'PanelwiseTransformer',
     'is_panel_data',
+    'get_entity_levels',
     'normalize_entity_key',
     'split_variable_key',
     'get_unique_panel_entities',

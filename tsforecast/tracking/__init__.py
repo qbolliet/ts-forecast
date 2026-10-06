@@ -11,14 +11,17 @@ Functions:
         ``HighFrequencyImputer``.
     delay_metrics: Applied-delay summary of a fitted
         ``PublicationDelayTransformer``.
+    detection_metrics: Summary of a ``DelayDetectionReport`` returned by
+        ``compare_and_detect_delays(..., return_report=True)``.
     split_summary: Fold-count and train/test size summary of any tsforecast
         cross-validation splitter.
 """
 # Réexport des helpers de tracking
-from .metrics import imputation_metrics, delay_metrics, split_summary
+from .metrics import imputation_metrics, delay_metrics, detection_metrics, split_summary
 
 __all__ = [
     "imputation_metrics",
     "delay_metrics",
+    "detection_metrics",
     "split_summary",
 ]

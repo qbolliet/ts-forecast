@@ -203,6 +203,80 @@ def delay_metrics(delay_transformer: Any) -> Dict[str, float]:
         raw_values = []
     metrics.update(_summarize(raw_values, "delay"))
 
+    # Événements de l'ajustement, lorsque le rapport d'ajustement est disponible
+    fit_report = getattr(delay_transformer, "fit_report_", None)
+    if fit_report is not None:
+        metrics["n_defaults_imputed"] = float(len(fit_report.defaults_imputed))
+        metrics["n_mask_fallbacks"] = float(len(fit_report.mask_fallbacks))
+        metrics["n_columns_ignored"] = float(len(fit_report.columns_ignored))
+        metrics["n_columns_unaffected"] = float(len(fit_report.columns_unaffected))
+
+    return metrics
+
+
+# Métriques d'un rapport de détection des délais de publication
+def detection_metrics(
+    report: Any,
+    *,
+    per_column: bool = False,
+) -> Dict[str, float]:
+    """Summarize a publication delays detection report as flat tracking metrics.
+
+    Args:
+        report: The :class:`~tsforecast.delays.DelayDetectionReport` returned by
+            ``compare_and_detect_delays(..., return_report=True)``.
+        per_column: When ``True``, also emit ``<column>.n_detected`` for every
+            compared variable.
+
+    Returns:
+        Mapping ``{metric_name: float}``. Keys: ``n_rows_new``, ``n_rows_existing``
+        (only with ``existing_data``), ``n_entities``, ``n_columns``,
+        ``n_columns_compared``, ``n_columns_new_only``, ``n_columns_existing_only``,
+        ``n_columns_without_detection``; ``n_detected``, ``n_new_values``,
+        ``n_revisions``, ``n_vanished_values``; ``n_undetected_frequencies``;
+        ``delay.{n,n_negative,min,max,mean,median}`` over the known delays, in the
+        unit of the report (``min`` … ``median`` only when a delay is known); and
+        ``<column>.n_detected`` per column when ``per_column=True``.
+
+    Raises:
+        AttributeError: If ``report`` is not a detection report.
+
+    Examples:
+        >>> _, report = compare_and_detect_delays(new, existing, return_report=True)  # doctest: +SKIP
+        >>> import mlflow                                                             # doctest: +SKIP
+        >>> mlflow.log_metrics(detection_metrics(report))                            # doctest: +SKIP
+    """
+    # COnstruction du dictionnaire de métriques
+    metrics: Dict[str, float] = {
+        "n_rows_new": float(report.n_rows_new),
+        "n_entities": float(report.n_entities),
+        "n_columns": float(report.n_columns),
+        "n_columns_compared": float(len(report.columns_compared)),
+        "n_columns_new_only": float(len(report.columns_new_only)),
+        "n_columns_existing_only": float(len(report.columns_existing_only)),
+        "n_columns_without_detection": float(len(report.columns_without_detection)),
+        "n_detected": float(report.n_detected),
+        "n_new_values": float(report.n_new_values),
+        "n_revisions": float(report.n_revisions),
+        "n_vanished_values": float(report.n_vanished_values),
+        "n_undetected_frequencies": float(len(report.undetected_keys)),
+        "delay.n": float(report.n_known),
+        "delay.n_negative": float(report.n_negative),
+    }
+    if report.n_rows_existing is not None:
+        metrics["n_rows_existing"] = float(report.n_rows_existing)
+
+    # Statistiques des délais : absentes lorsqu'aucun délai n'est connu
+    for name in ("min", "max", "mean", "median"):
+        number = _finite(getattr(report, f"delay_{name}"))
+        if number is not None:
+            metrics[f"delay.{name}"] = number
+
+    # Détections par variable, optionnelles
+    if per_column:
+        for column, count in report.n_detected_by_column.items():
+            metrics[f"{column}.n_detected"] = float(count)
+
     return metrics
 
 

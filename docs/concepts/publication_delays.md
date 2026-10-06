@@ -62,10 +62,33 @@ Les stratégies sont configurables par variable (`strategy={'gdp': 'shift',
 automatiquement dans un [`PanelwiseTransformer`](panelwise_transforms.md) ; les
 briques bas niveau `ShiftTransformer` et `MaskTransformer` restent accessibles.
 
+## Observabilité : rapports de détection et d'ajustement
+
+Pour une utilisation en production, deux rapports immuables rassemblent ce qu'on
+voudrait logger (dans des logs ou dans MLflow) :
+
+- `compare_and_detect_delays(..., return_report=True)` renvoie `(délais, rapport)`
+  avec un `DelayDetectionReport` : colonnes comparées / ignorées, observations
+  nouvelles, révisées et **disparues** (non nulles avant, `NaN` maintenant :
+  jamais reportées par la fonction), fréquences détectées (et non détectées),
+  statistiques des délais ;
+- `PublicationDelayTransformer.fit_report_` (`DelayFitReport`) : paramétrage résolu
+  de chaque colonne et **origine** de chaque paramètre (explicite, inféré,
+  par défaut), colonnes non affectées ou ignorées, valeurs par défaut imputées,
+  replis du masquage vers le décalage.
+
+Chaque rapport se rend en une ligne (`summary()`), en dictionnaire compatible JSON
+(`to_dict()`) et en `DataFrame` (`to_frame()`). Les métriques plates sont produites
+par `detection_metrics()` et `delay_metrics()` ; les deux composants écrivent aussi
+`report.summary()` au niveau `INFO` du logger standard
+(`tsforecast.delays.data_manager`, `tsforecast.delays.transformers`) — aucun handler
+n'est configuré par le paquet. Voir le [guide de tracking](../guides/mlflow_tracking.md).
+
 ## Pour aller plus loin
 
 - Tutoriel : [Délais de publication](../tutorials/publication_delays.md)
 - API : [PublicationDelayTransformer](../api/delays/PublicationDelayTransformer.md),
   [compare_and_detect_delays](../api/delays/compare_and_detect_delays.md),
-  [calculate_applicable_delay](../api/delays/calculate_applicable_delay.md)
-- Métriques de tracking : [`delay_metrics`](../guides/mlflow_tracking.md)
+  [calculate_applicable_delay](../api/delays/calculate_applicable_delay.md),
+  [rapports](../api/delays/report.md)
+- Métriques de tracking : [`delay_metrics`, `detection_metrics`](../guides/mlflow_tracking.md)

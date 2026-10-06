@@ -1250,3 +1250,110 @@ class TestWarnings:
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             compare_and_detect_delays(small_panel, existing, '2023-06-15')
+
+
+# =============================================================================
+# Rapport de détection (return_report=True)
+# =============================================================================
+class TestDetectionReport:
+    """``return_report=True`` returns a ``DelayDetectionReport`` next to the frame."""
+
+    EXISTING = pd.DataFrame({'PIB': [1.0, 2.0, 3.0, np.nan], 'OLD': [1.0] * 4}, index=_months(4))
+    NEW = pd.DataFrame({'PIB': [1.0, 2.5, 3.0, 4.0], 'NEW': [1.0] * 4}, index=_months(4))
+
+    def test_default_returns_the_frame_only(self):
+        result = compare_and_detect_delays(self.NEW, self.EXISTING, download_date='2023-06-15')
+        assert isinstance(result, pd.DataFrame)
+
+    def test_frame_is_the_same_with_and_without_report(self):
+        plain = compare_and_detect_delays(self.NEW, self.EXISTING, '2023-06-15', detection_mode='all_changes')
+        frame, _ = compare_and_detect_delays(
+            self.NEW, self.EXISTING, '2023-06-15', detection_mode='all_changes', return_report=True)
+        pd.testing.assert_frame_equal(plain, frame)
+
+    def test_return_report_is_keyword_only(self):
+        with pytest.raises(TypeError):
+            compare_and_detect_delays(  # type: ignore[call-overload]
+                self.NEW, self.EXISTING, '2023-06-15', 'new_only', 'start', 'day', None, None, True)
+
+    def test_new_only_counts(self):
+        _, report = compare_and_detect_delays(self.NEW, self.EXISTING, '2023-06-15', return_report=True)
+        assert (report.n_detected, report.n_new_values, report.n_revisions) == (1, 1, 0)
+        assert report.n_vanished_values == 0
+        assert report.n_detected_by_column == {'PIB': 1}
+        assert report.columns_without_detection == ()
+
+    def test_all_changes_counts_the_revision_with_gold_delays(self):
+        frame, report = compare_and_detect_delays(
+            self.NEW, self.EXISTING, '2023-06-15', detection_mode='all_changes', return_report=True)
+        # Avril publié (75 j depuis le 1er avril) et février révisé (134 j depuis le 1er février)
+        assert sorted(frame['delay']) == [75.0, 134.0]
+        assert (report.n_detected, report.n_new_values, report.n_revisions) == (2, 1, 1)
+        assert (report.delay_min, report.delay_max, report.delay_mean, report.delay_median) == (75.0, 134.0, 104.5, 104.5)
+        assert (report.n_known, report.n_negative) == (2, 0)
+        assert report.delay_unit == 'day'
+
+    def test_compared_and_ignored_columns(self):
+        _, report = compare_and_detect_delays(self.NEW, self.EXISTING, '2023-06-15', return_report=True)
+        assert report.columns_compared == ('PIB',)
+        assert report.columns_new_only == ('NEW',)
+        assert report.columns_existing_only == ('OLD',)
+        assert (report.n_rows_new, report.n_rows_existing, report.n_columns, report.n_entities) == (4, 4, 2, 0)
+
+    def test_vanished_values_are_counted_and_not_detected(self):
+        existing = _series([1.0, 2.0, 3.0, 4.0])
+        new = _series([1.0, 2.0, 3.0, np.nan])
+        frame, report = compare_and_detect_delays(
+            new, existing, '2023-06-15', detection_mode='all_changes', return_report=True)
+        assert frame.empty
+        assert report.n_vanished_values == 1
+        assert report.n_detected == 0
+        assert report.columns_without_detection == ('PIB',)
+        assert (report.n_known, report.delay_min, report.delay_median) == (0, None, None)
+
+    def test_without_existing_data_the_latest_observation_is_a_new_value(self):
+        _, report = compare_and_detect_delays(self.NEW, download_date='2023-06-15', return_report=True)
+        assert report.has_existing_data is False
+        assert report.n_rows_existing is None
+        assert (report.n_detected, report.n_new_values, report.n_revisions) == (2, 2, 0)
+
+    def test_panel_counts_and_frequencies_per_entity(self):
+        index = pd.MultiIndex.from_product([['FR', 'DE'], _months(4)], names=['country', 'date'])
+        existing = pd.DataFrame({'PIB': [1.0, 2.0, 3.0, np.nan] * 2}, index=index)
+        new = pd.DataFrame({'PIB': [1.0, 2.0, 3.0, 4.0] * 2}, index=index)
+        _, report = compare_and_detect_delays(new, existing, '2023-06-15', return_report=True)
+        assert report.n_entities == 2
+        assert report.n_detected == 2
+        assert report.frequencies == {('DE', 'PIB'): 'monthly', ('FR', 'PIB'): 'monthly'}
+        assert report.undetected_keys == ()
+
+    def test_undetectable_frequency_is_reported(self):
+        new = _series([1.0])
+        with pytest.warns(UserWarning, match="frequency could not be detected"):
+            frame, report = compare_and_detect_delays(new, download_date='2023-06-15', return_report=True)
+        assert report.undetected_keys == ('PIB',)
+        assert report.frequencies == {'PIB': None}
+        assert (report.n_detected, report.n_known) == (1, 0)
+
+    def test_negative_delays_are_counted(self):
+        _, report = compare_and_detect_delays(self.NEW, download_date='2023-01-10', return_report=True)
+        assert report.n_negative == report.n_known
+
+    def test_report_is_logged_at_info_level(self, caplog):
+        with caplog.at_level('INFO', logger='tsforecast.delays.data_manager'):
+            _, report = compare_and_detect_delays(self.NEW, self.EXISTING, '2023-06-15', return_report=True)
+        assert report.summary() in caplog.messages
+
+    def test_unit_label_follows_the_unit(self):
+        _, report = compare_and_detect_delays(
+            self.NEW, self.EXISTING, '2023-06-15', delay_unit='us', return_report=True)
+        assert report.delay_unit == 'microsecond'
+
+
+class TestDelayUnitResolution:
+    """The delay units rest on ``utils.duration``; only day, second and microsecond are accepted."""
+
+    @pytest.mark.parametrize('unit', ['h', 'hour', 'W', 'ms', 'days', 'D ', '', None, 3])
+    def test_other_units_are_rejected_with_the_same_message(self, unit):
+        with pytest.raises(ValueError, match="Unit must be one of"):
+            compare_and_detect_delays(_series([1.0, 2.0, 3.0]), download_date='2023-06-15', delay_unit=unit)

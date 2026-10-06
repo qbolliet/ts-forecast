@@ -10,6 +10,7 @@ from typing import Union
 # Import des classes depuis les modules spécialisés
 from .normalizer import DurationNormalizer
 from .types import DurationType, UserDurationType, RoundingType
+from .._constants import CONVERSION_FACTORS_TO_SECONDS, SUBDAILY_NS
 
 
 # Instance globale pour faciliter l'utilisation
@@ -180,6 +181,39 @@ def convert_duration(
     _converter = DurationConverter()
 
     return _converter.convert(value, from_duration, to_duration, rounding)
+
+
+# Extraction de la durée d'une unité en nanosecondes entières
+def get_duration_nanoseconds(duration: Union[DurationType, UserDurationType]) -> int:
+    """Get the length of a duration unit, in whole nanoseconds.
+
+    Meant for exact integer arithmetic: the float seconds of
+    :func:`convert_duration` are not exact to the microsecond beyond a few days.
+    Sub-daily units are exact; calendar units use the conventional lengths of
+    :func:`convert_duration` ('W' = 7 days, 'M' = 30 days, 'Q' = 90 days, ...).
+
+    Args:
+        duration: Duration in any supported format (code or literal name).
+
+    Returns:
+        Number of nanoseconds in the unit.
+
+    Raises:
+        ValueError: If the duration is not supported.
+
+    Examples:
+        >>> get_duration_nanoseconds('microsecond'), get_duration_nanoseconds('D')
+        (1000, 86400000000000)
+        >>> get_duration_nanoseconds('hour')
+        3600000000000
+    """
+    # Conversion de l'unité de durée en code
+    code = to_code(duration)
+    # Unités infra-journalières : durées entières exactes
+    if code in SUBDAILY_NS:
+        return SUBDAILY_NS[code]
+    # Unités calendaires : facteurs conventionnels, entiers en secondes
+    return int(CONVERSION_FACTORS_TO_SECONDS[code]) * 10**9
 
 
 # Extraction de l'ordre des durées

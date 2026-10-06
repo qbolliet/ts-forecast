@@ -121,6 +121,7 @@ nav:
     - MaskTransformer: api/delays/MaskTransformer.md
     - compare_and_detect_delays: api/delays/compare_and_detect_delays.md
     - calculate_applicable_delay: api/delays/calculate_applicable_delay.md
+    - Rapports (détection, ajustement): api/delays/report.md
   - frequency:
     - HighFrequencyImputer: api/frequency/HighFrequencyImputer.md
     - provenance: api/frequency/provenance.md

@@ -13,7 +13,8 @@ Aucun composant du paquet ne dépend de MLflow.
 | Composant | Paramètres | Métriques | Artefacts |
 |-----------|-----------|-----------|-----------|
 | Splitters `crossvals` | `get_params()` | `split_summary()` | — |
-| `PublicationDelayTransformer` | `get_params()` | `delay_metrics()` | délais inférés (`compare_and_detect_delays` → CSV) |
+| `compare_and_detect_delays` | arguments de l'appel | `detection_metrics()` | `DelayDetectionReport.to_dict()` (JSON), délais inférés (CSV) |
+| `PublicationDelayTransformer` | `get_params()` | `delay_metrics()` | `fit_report_` (`to_dict()` / `to_frame()`), délais inférés (CSV) |
 | `HighFrequencyImputer` | `get_params()` | `imputation_metrics()` | `imputation_provenance_` (CSV), `imputation_plan_` (repr), `frequency_progression_` |
 | `PanelwiseTransformer` | `get_params()` | — | `failed_entities_` |
 | `XYPipeline` | `get_params()` | score du modèle final | — |
@@ -55,13 +56,54 @@ mlflow.log_metrics(split_summary(cv, X, y))
 Résumé des délais appliqués par un `PublicationDelayTransformer` ajusté :
 `n_shift_columns`, `n_mask_columns`, `n_delayed_columns`,
 `shift_periods.{min,max,mean,n}`, `mask_obs.{min,max,mean,n}`,
-`delay.{min,max,mean,n}`.
+`delay.{min,max,mean,n}`, ainsi que les événements du `fit` lus dans
+`fit_report_` : `n_defaults_imputed`, `n_mask_fallbacks`, `n_columns_ignored`,
+`n_columns_unaffected`.
 
 ```python
 from tsforecast import delay_metrics
 
 pdt.fit(X)
 mlflow.log_metrics(delay_metrics(pdt))
+mlflow.log_dict(pdt.fit_report_.to_dict(), "delay_fit_report.json")
+```
+
+### `detection_metrics(report, *, per_column=False)`
+
+Résumé d'un `DelayDetectionReport`, obtenu avec `return_report=True` :
+`n_rows_new`, `n_rows_existing`, `n_entities`, `n_columns`,
+`n_columns_{compared,new_only,existing_only,without_detection}`, `n_detected`,
+`n_new_values`, `n_revisions`, `n_vanished_values`, `n_undetected_frequencies`,
+`delay.{n,n_negative,min,max,mean,median}` (dans l'unité du rapport ; les quatre
+statistiques sont absentes si aucun délai n'est connu) et, avec `per_column=True`,
+`<colonne>.n_detected`.
+
+```python
+from tsforecast import detection_metrics
+from tsforecast.delays import compare_and_detect_delays
+
+delays, report = compare_and_detect_delays(
+    new_data, existing_data, download_date="2024-05-15", return_report=True
+)
+mlflow.log_metrics(detection_metrics(report))
+mlflow.log_dict(report.to_dict(), "delay_detection.json")
+```
+
+`n_vanished_values` mérite une alerte en production : ces valeurs non nulles dans
+`existing_data` et absentes de `new_data` ne sont reportées par aucun mode de
+détection.
+
+### Logs
+
+Les rapports ne remplacent pas les logs, ils en sont la source : chaque
+`compare_and_detect_delays` et chaque `PublicationDelayTransformer.fit` écrit
+`report.summary()` au niveau `INFO` (`tsforecast.delays.data_manager`,
+`tsforecast.delays.transformers`) et un détail au niveau `DEBUG`. Le paquet ne
+configure aucun handler : c'est à l'application de le faire.
+
+```python
+import logging
+logging.getLogger("tsforecast.delays").setLevel(logging.INFO)
 ```
 
 ### `imputation_metrics(imputer, *, per_column=False)`

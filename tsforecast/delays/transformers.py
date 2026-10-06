@@ -12,6 +12,7 @@ import numpy as np
 import math
 from typing import Any, Callable, Dict, Optional, Union, List, Literal, Tuple
 from datetime import datetime
+import logging
 import warnings
 
 # Sklearn
@@ -27,9 +28,13 @@ from tsforecast.utils.frequency import (
 )
 from tsforecast.utils.time import resolve_date, get_period_start, get_period_boundaries
 from tsforecast.utils.duration import convert_duration, normalize_duration, DurationConverter
-from ..panel import PanelwiseTransformer, normalize_entity_key
+from ..panel import PanelwiseTransformer, normalize_entity_key, is_panel_data, get_entity_levels
 from tsforecast.utils.validation import validate_temporal_data
 from tsforecast.utils.parse import build_frequency_string
+from .report import DelayFitReport, ColumnDelayRecord
+
+# Journalisation : aucun handler n'est configuré ici, c'est à l'application d'en fournir un
+logger = logging.getLogger(__name__)
 
 # Classe d'application des délais de publication
 class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
@@ -56,6 +61,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         column_transformers_: Dict mapping column names to helper transformers
         inferred_params_: Dict of parameters inferred from delays DataFrame
         detected_frequencies_: Dict of detected frequencies per column
+        fit_report_: :class:`~tsforecast.delays.DelayFitReport` of the last ``fit``: resolved
+            setting of each column and its origin, columns ignored or unaffected, defaults
+            imputed, mask-to-shift fallbacks
 
     Examples:
         >>> import pandas as pd
@@ -237,8 +245,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             self.shift_params[col] = {'n_periods': n_periods, 'frequency': self.detected_frequencies_[col]}
 
         # Calcul du nombre d'observations à masquer pour chaque variable
-        # Initialisation du dictionnaire résultat
+        # Initialisation du dictionnaire résultat et de la liste des variables masquables seulement par décalage
         self.mask_params = {}
+        mask_fallbacks: List[str] = []
         # Parcours des variables
         for col in mask_columns:
             # Calcul du nombre de périodes à masquer
@@ -263,8 +272,127 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                 warnings.warn(f"Could not mask the column '{col}' because it would have created a series of Nan. Moved it to the shifted columns")
                 # Ajout au dictionnaire des variables à shift
                 self.shift_params[col] = {'n_periods': result['n_periods'], 'frequency': self.detected_frequencies_[col]}
+                mask_fallbacks.append(col)
+
+        # Rapport d'ajustement : tout ce que le fit a résolu, sans avertissement à relire
+        self.fit_report_ = self._build_fit_report(
+            X=X,
+            delays_dict=delays_dict,
+            delay_unit_dict=delay_unit_dict,
+            reference_point_dict=reference_point_dict,
+            target_frequency_dict=target_frequency_dict,
+            mask_fallbacks=mask_fallbacks
+        )
+        # Logging
+        logger.info(self.fit_report_.summary())
 
         return self
+
+    # Méthode auxiliaire de détermination de l'origine d'un paramètre
+    def _parameter_source(
+        self,
+        col: str,
+        explicit_value: Optional[Union[str, Dict[str, str]]],
+        inferred_key: str,
+        default_key: str,
+        resolved: Dict[str, str]
+    ) -> Optional[str]:
+        """Tell where the resolved value of a parameter comes from for a column.
+
+        Follows the priority of ``_build_parameter_dict``: explicit > inferred > default.
+
+        Args:
+            col: Column name.
+            explicit_value: Value given to the constructor (str, dict or None).
+            inferred_key: Key of the parameter in ``inferred_params_``.
+            default_key: Key of the parameter in ``default_values``.
+            resolved: Resolved parameter dictionary (column -> value).
+
+        Returns:
+            'explicit', 'inferred', 'default', or None if the column has no resolved value.
+        """
+        # Colonne sans valeur résolue
+        if col not in resolved:
+            return None
+        # Valeur passée au constructeur, par colonne ou pour toutes les colonnes
+        if isinstance(explicit_value, str) or (isinstance(explicit_value, dict) and col in explicit_value):
+            return 'explicit'
+        # Valeur déduite du DataFrame des délais
+        if col in self.inferred_params_.get(inferred_key, {}):
+            return 'inferred'
+        # Valeur par défaut, seule origine restante
+        if self.default_values is not None and default_key in self.default_values:
+            return 'default'
+        return None
+
+    # Méthode auxiliaire de construction du rapport d'ajustement
+    def _build_fit_report(
+        self,
+        X: pd.DataFrame,
+        delays_dict: Dict[str, float],
+        delay_unit_dict: Dict[str, str],
+        reference_point_dict: Dict[str, str],
+        target_frequency_dict: Dict[str, str],
+        mask_fallbacks: List[str]
+    ) -> DelayFitReport:
+        """Build the :class:`DelayFitReport` of the fit from the resolved parameters.
+
+        Args:
+            X: Data the transformer was fitted on.
+            delays_dict: Delay of each variable.
+            delay_unit_dict: Resolved delay unit of each variable.
+            reference_point_dict: Resolved reference point of each variable.
+            target_frequency_dict: Resolved target frequency of each variable.
+            mask_fallbacks: Variables moved from mask to shift.
+
+        Returns:
+            The immutable fit report.
+        """
+        # Une ligne par variable retardée, 'shift' d'abord puis 'mask' (ordre de l'application)
+        records = []
+        for strategy, params_dict in (('shift', self.shift_params), ('mask', self.mask_params)):
+            for col, params in params_dict.items():
+                is_mask = strategy == 'mask'
+                records.append(ColumnDelayRecord(
+                    column=col,
+                    strategy=strategy,
+                    delay=delays_dict.get(col),
+                    delay_unit=delay_unit_dict.get(col),
+                    reference_point=reference_point_dict.get(col),
+                    frequency=params.get('frequency') if not is_mask else self.detected_frequencies_.get(col),
+                    n_periods=None if is_mask else params['n_periods'],
+                    n_obs=params['n_obs'] if is_mask else None,
+                    target_frequency=params['mask_frequency'] if is_mask else None,
+                    delay_unit_source=self._parameter_source(
+                        col, self.delay_unit, 'delay_unit', 'delay_unit', delay_unit_dict),
+                    reference_point_source=self._parameter_source(
+                        col, self.reference_point, 'reference_point', 'reference_point', reference_point_dict),
+                    target_frequency_source=(
+                        self._parameter_source(
+                            col, self.target_frequency, 'target_frequency', 'target_frequency', target_frequency_dict)
+                        if is_mask else None
+                    ),
+                    moved_from_mask=(not is_mask) and (col in mask_fallbacks)
+                ))
+
+        # Couples (variable, paramètre) complétés par les valeurs par défaut
+        defaults_imputed = tuple(
+            (record.column, name)
+            for record in records
+            for name in ('delay_unit', 'reference_point', 'target_frequency')
+            if getattr(record, f'{name}_source') == 'default'
+        )
+
+        # Variables de X sans délai, et variables de la spécification des délais absentes de X
+        delayed = {record.column for record in records}
+        return DelayFitReport(
+            prediction_date=self.prediction_date_,
+            columns=tuple(records),
+            columns_unaffected=tuple(col for col in X.columns if col not in delayed),
+            columns_ignored=tuple(col for col in delays_dict if col not in X.columns),
+            defaults_imputed=defaults_imputed,
+            mask_fallbacks=tuple(mask_fallbacks)
+        )
 
     # Méthode de transformation des données
     def transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
@@ -287,7 +415,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         check_is_fitted(self)
 
         # Détection de la structure de panel
-        is_panel = isinstance(X.index, pd.MultiIndex)
+        is_panel = is_panel_data(X)
 
         # Initialisation du dictionnaire des transformers auxiliaires pour les transformations inverses
         self.auxiliary_transformers_: Dict[str, Dict[tuple, BaseEstimator]] = {'shift': {}, 'mask': {}}
@@ -1047,7 +1175,7 @@ def _build_entity_params(
     entity_params = {}
 
     # Groupement par entité panel
-    for entity_key, group in df_delays.groupby(level=list(range(df_delays.index.nlevels - 1))):
+    for entity_key, group in df_delays.groupby(level=get_entity_levels(df_delays)):
         # Normalisation de la clé en tuple
         entity_key = normalize_entity_key(entity_key)
 

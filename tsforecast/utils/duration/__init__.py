@@ -16,6 +16,7 @@ from .utils import (
     validate_duration,
     get_duration_conversion_factor,
     convert_duration,
+    get_duration_nanoseconds,
     get_duration_order
 )
 
@@ -35,6 +36,7 @@ __all__ = [
     'validate_duration',
     'get_duration_conversion_factor',
     'convert_duration',
+    'get_duration_nanoseconds',
     'get_duration_order',
 
     # Types

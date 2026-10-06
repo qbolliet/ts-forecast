@@ -1985,7 +1985,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```
 - **Test** : `tests/unit/delays/test_data_manager.py::TestReferencePointAndUnit::test_microsecond_delay_is_exact`
 - **Correctif** : le délai est calculé en entiers de nanosecondes (`as_unit('ns')`, division entière par excès
-  `-(-n // u)`), avec la durée de chaque unité en nanosecondes (`_DELAY_UNITS`) : plus aucun produit flottant, arrondi
+  `-(-n // u)`), avec la durée de chaque unité en nanosecondes (`get_duration_nanoseconds`, alimentée par `utils/_constants.py` ;
+  anciennement la table locale `_DELAY_UNITS`) : plus aucun produit flottant, arrondi
   au supérieur uniquement pour les fractions de l'unité.
 - **Statut** : corrigée
 

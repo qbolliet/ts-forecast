@@ -7,8 +7,9 @@ and managing publication delay information using pandas DataFrames.
 # Modules de base
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, Union, Tuple, List, Any, Literal, cast
+from typing import Dict, Optional, Union, Tuple, List, Any, Literal, cast, overload
 from datetime import datetime, timedelta
+import logging
 import warnings
 # Module de détection de la fréquence des séries et de conversion en littéral
 from ..utils.frequency import detect_frequency, to_literal
@@ -16,21 +17,28 @@ from ..utils.frequency import detect_frequency, to_literal
 from ..utils.validation import validate_temporal_data
 # Module de manipulation temporelle
 from ..utils.time import resolve_date, get_period_boundaries
+# Module de conversion des durées (le calcul des délais se fait en nanosecondes entières :
+# un produit flottant par 1e6 fausserait le dernier chiffre au-delà de ~800 jours)
+from ..utils.duration import to_code as duration_to_code, to_literal as duration_to_literal, get_duration_nanoseconds
+# Module de manipulation des structures de panel
+from ..panel.utils import is_panel_data, get_entity_levels, get_unique_panel_entities
+# Module de rapport de détection
+from .report import DelayDetectionReport, delay_statistics
 
-# Unités de délai acceptées : étiquette de sortie et durée de l'unité en nanosecondes
-# (le calcul se fait en entiers, un produit flottant par 1e6 faussant le dernier chiffre au-delà de ~800 jours)
-_DELAY_UNITS = {
-    'D': ('day', 86_400 * 10**9),
-    'day': ('day', 86_400 * 10**9),
-    's': ('second', 10**9),
-    'second': ('second', 10**9),
-    'us': ('microsecond', 10**3),
-    'microsecond': ('microsecond', 10**3),
-}
+# Journalisation : aucun handler n'est configuré ici, c'est à l'application d'en fournir un
+logger = logging.getLogger(__name__)
 
-# /!\ Faire un prompt pour intégrer un logger à cette fonction : comment mettre du logging optionnel + implémentation
+# Codes des unités de délai acceptées (sous-ensemble des durées supportées par utils.duration)
+_DELAY_UNIT_CODES = frozenset({'D', 's', 'us'})
+
+# Signatures typées de la fonction de comparaison : le type de retour dépend de return_report
+@overload
+def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd.DataFrame] = None, download_date: Union[str, datetime, None] = None, detection_mode: str = 'new_only', reference_point: str = 'start', delay_unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day'] = 'day', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None, *, return_report: Literal[False] = False) -> pd.DataFrame: ...
+@overload
+def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd.DataFrame] = None, download_date: Union[str, datetime, None] = None, detection_mode: str = 'new_only', reference_point: str = 'start', delay_unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day'] = 'day', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None, *, return_report: Literal[True]) -> Tuple[pd.DataFrame, DelayDetectionReport]: ...
+
 # Fonction de comparaison et d'inférence des délais de publication
-def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd.DataFrame] = None, download_date: Union[str, datetime, None] = None, detection_mode: str = 'new_only', reference_point: str = 'start', delay_unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day'] = 'day', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None) -> pd.DataFrame:
+def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd.DataFrame] = None, download_date: Union[str, datetime, None] = None, detection_mode: str = 'new_only', reference_point: str = 'start', delay_unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day'] = 'day', time_col: Optional[str] = None, panel_cols: Optional[List[str]] = None, *, return_report: bool = False) -> Union[pd.DataFrame, Tuple[pd.DataFrame, DelayDetectionReport]]:
     """Compare new data with existing data and detect publication delays.
 
     This function identifies new or changed observations by comparing new_data with
@@ -74,9 +82,13 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
         delay_unit: Unit for delay calculation - 'day'/'D', 'second'/'s', or 'microsecond'/'us'
         time_col: Name of the time column (optional)
         panel_cols: List of panel column names for panel data (optional)
+        return_report: If True, also return a :class:`~tsforecast.delays.DelayDetectionReport`
+            describing what was compared and detected (counts, ignored columns, vanished
+            values, frequencies, delay statistics), ready to be logged. Keyword-only
 
     Returns:
-        DataFrame containing detected observations with publication delay information.
+        DataFrame containing detected observations with publication delay information
+        (or the tuple ``(DataFrame, DelayDetectionReport)`` if ``return_report`` is True).
         Its index is the entity levels of the data (none for a time series) followed by a
         level named ``'column'`` holding the variable name; a variable can appear on several
         rows. It contains the following columns, in this order:
@@ -150,15 +162,21 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
         download_date = datetime.now()
     download_date = resolve_date(date=download_date)
 
+    # Logging
+    logger.debug(
+        "Detecting publication delays: mode=%s, reference_point=%s, unit=%s, existing_data=%s, %d rows",
+        detection_mode, reference_point, delay_unit, existing_data is not None, len(new_data)
+    )
+
     # Identification des nouvelles observations
-    new_observations = _identify_new_observations(
+    new_observations, comparison = _identify_new_observations(
         new_data=new_data,
         existing_data=existing_data,
         detection_mode=detection_mode
     )
 
     # Fonction de calcul des délais associés aux observations nouvellement publiées
-    new_observations = _calculate_publication_delays(
+    new_observations, frequency_map = _calculate_publication_delays(
         new_observations=new_observations,
         new_data=new_data,
         download_date=download_date,
@@ -166,6 +184,23 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
         unit=delay_unit
     )
 
+    # Rapport : toujours construit (coût négligeable), car il alimente aussi le journal
+    report = _build_detection_report(
+        delays=new_observations,
+        comparison=comparison,
+        frequency_map=frequency_map,
+        new_data=new_data,
+        existing_data=existing_data,
+        download_date=download_date,
+        detection_mode=detection_mode,
+        reference_point=reference_point,
+        unit_label=_resolve_delay_unit(delay_unit)[0]
+    )
+    # Logging
+    logger.info(report.summary())
+
+    if return_report:
+        return new_observations, report
     return new_observations
 
 
@@ -182,9 +217,19 @@ def _resolve_delay_unit(unit: str) -> Tuple[str, int]:
     Raises:
         ValueError: If unit is not one of 'us', 's', 'D', 'microsecond', 'second', 'day'
     """
-    if not isinstance(unit, str) or unit not in _DELAY_UNITS:
-        raise ValueError(f"Unit must be one of 'us', 's', 'D', 'microsecond', 'second', 'day', got {unit}")
-    return _DELAY_UNITS[unit]
+    # Initialisation du message d'erreur
+    error = ValueError(f"Unit must be one of 'us', 's', 'D', 'microsecond', 'second', 'day', got {unit}")
+    # Une unité non textuelle ou inconnue des utilitaires de durée est refusée avec le même message
+    if not isinstance(unit, str):
+        raise error
+    try:
+        code = duration_to_code(unit)
+    except ValueError:
+        raise error from None
+    # Les durées supportées au-delà de ces trois unités (heure, semaine, ...) ne sont pas des unités de délai
+    if code not in _DELAY_UNIT_CODES:
+        raise error
+    return duration_to_literal(code), get_duration_nanoseconds(code)
 
 
 # Fonction auxiliaire de validation des jeux de données en entrée
@@ -236,7 +281,7 @@ def _flag_observations(index: pd.Index, column: Any) -> pd.DataFrame:
 
 
 # Fonction auxiliaire d'identification des nouvelles observations
-def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[pd.DataFrame] = None, detection_mode: str = 'new_only') -> pd.DataFrame:
+def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[pd.DataFrame] = None, detection_mode: str = 'new_only') -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Identify new or changed observations.
 
     When existing_data is provided, compares the two DataFrames to identify changes.
@@ -250,28 +295,39 @@ def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[p
         detection_mode: 'new_only' or 'all_changes'. Only used when existing_data is provided
 
     Returns:
-        DataFrame containing only new or changed observations with columns 'column' and 'has_changes',
-        indexed by the dates (and entities) of the observations
+        Tuple ``(observations, comparison)``: the DataFrame containing only new or changed
+        observations with columns 'column' and 'has_changes', indexed by the dates (and
+        entities) of the observations; and the counters of the comparison
+        (``columns_compared``, ``columns_new_only``, ``columns_existing_only``,
+        ``n_new_values``, ``n_revisions``, ``n_vanished_values``)
     """
     # Liste des résultats, un jeu par colonne (ordre des colonnes puis des index)
     frames = []
+    # Compteurs de la comparaison, remontés au rapport
+    comparison: Dict[str, Any] = {
+        'columns_compared': tuple(new_data.columns),
+        'columns_new_only': (),
+        'columns_existing_only': (),
+        'n_new_values': 0,
+        'n_revisions': 0,
+        'n_vanished_values': 0,
+    }
 
     # Cas où existing_data n'est pas fourni : identification des observations les plus récentes
     if existing_data is None:
-        # Niveaux de groupement du panel : toutes les dimensions sauf la dernière (le temps) ;
-        # un niveau unique est passé en scalaire
-        is_panel = isinstance(new_data.index, pd.MultiIndex)
-        group_levels = None
-        if is_panel:
-            panel_levels = list(range(new_data.index.nlevels - 1))
-            group_levels = panel_levels[0] if len(panel_levels) == 1 else panel_levels
+        # Niveaux d'entité du panel : toutes les dimensions sauf la dernière (le temps)
+        is_panel = is_panel_data(new_data)
+        entity_levels = get_entity_levels(new_data)
 
         # Parcours des colonnes
         for col in new_data.columns:
             # Observations non nulles, triées : la dernière de chaque entité est la plus récente
             observed = new_data[col].dropna()
-            last = observed.groupby(level=group_levels).tail(1) if is_panel else observed.tail(1)
+            last = observed.groupby(level=entity_levels).tail(1) if is_panel else observed.tail(1)
             frames.append(_flag_observations(last.index, col))
+
+        # Sans jeu de référence, la dernière observation de chaque entité est comptée comme nouvelle valeur
+        comparison['n_new_values'] = sum(len(frame) for frame in frames)
 
         reference_index = new_data.index
     else:
@@ -291,27 +347,37 @@ def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[p
         existing_isnull = aligned_existing.isnull()
 
         # Détection des changements
+        # Valeurs null → non-null : valeur existante null ET nouvelle valeur non nulle
+        appeared_mask = existing_isnull & ~new_isnull
         if detection_mode == 'new_only':
             # Détection uniquement des valeurs null → non-null
-            # Condition: valeur existante était null ET nouvelle valeur n'est pas null
-            changes_mask = existing_isnull & ~new_isnull
+            changes_mask = appeared_mask
+            comparison['n_revisions'] = 0
         else:  # 'all_changes'
+            # Valeurs révisées : valeur → autre valeur (calculées seulement dans ce mode)
+            revised_mask = ~new_isnull & ~existing_isnull & (aligned_new != aligned_existing)
             # Détection de tous les changements (null → non-null ET valeur → nouvelle valeur)
-            # Condition: (ancien null ET nouveau non-null) OU (valeurs différentes)
-            changes_mask = (existing_isnull & ~new_isnull) | (
-                ~new_isnull & ~existing_isnull & (aligned_new != aligned_existing)
-            )
+            changes_mask = appeared_mask | revised_mask
+            comparison['n_revisions'] = int(revised_mask.to_numpy().sum())
 
         # Mise en forme : une ligne par changement
         for col in common_columns:
             frames.append(_flag_observations(changes_mask.index[changes_mask[col].to_numpy()], col))
 
+        # Compteurs de la comparaison
+        comparison['columns_compared'] = tuple(common_columns)
+        comparison['columns_new_only'] = tuple(col for col in new_data.columns if col not in existing_data.columns)
+        comparison['columns_existing_only'] = tuple(col for col in existing_data.columns if col not in new_data.columns)
+        comparison['n_new_values'] = int(appeared_mask.to_numpy().sum())
+        # Valeurs disparues : non nulles dans existing_data, nulles ou absentes de new_data (jamais reportées)
+        comparison['n_vanished_values'] = int((~existing_isnull & new_isnull).to_numpy().sum())
+
         reference_index = changes_mask.index
 
     # Concaténation, ou jeu vide d'index de même structure quand rien n'est détecté
     if frames:
-        return pd.concat(frames)
-    return _flag_observations(reference_index[:0], None)
+        return pd.concat(frames), comparison
+    return _flag_observations(reference_index[:0], None), comparison
 
 
 # Fonction auxiliaire de construction du résultat vide
@@ -358,7 +424,7 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
                                 download_date: datetime,
                                 reference_point: Literal['start', 'end'],
                                 unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day']
-                                ) -> pd.DataFrame :
+                                ) -> Tuple[pd.DataFrame, Dict[Any, Optional[str]]]:
     """Calculate publication delays for observed data points.
 
     Computes the delay between the observation date (period start or end) and the
@@ -378,7 +444,8 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
         unit: Unit for delay values - 'day'/'D', 'second'/'s', or 'microsecond'/'us'
 
     Returns:
-        DataFrame with computed publication delays containing columns:
+        Tuple ``(delays, frequency_map)``. ``delays`` is the DataFrame with computed
+        publication delays containing columns:
         - 'observation_date': The date of the observation
         - 'has_changes': Always True
         - 'download_date': Date when data was downloaded
@@ -388,6 +455,9 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
         - 'reference_point': Reference point used ('start' or 'end')
         - 'delay': Calculated publication delay (ceil-rounded, NaN without frequency)
         - 'unit': Unit of the delay value
+
+        ``frequency_map`` maps each (entity, column) key of ``new_data`` to its detected
+        frequency literal (None if undetectable); it is empty when nothing is detected.
 
     Raises:
         ValueError: If unit is not one of 'us', 's', 'D', 'microsecond', 'second', 'day'
@@ -400,7 +470,7 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
 
     # Cas où aucune observation n'est détectée : résultat vide de même structure
     if new_observations.empty:
-        return _empty_publication_delays(new_observations, download_date, reference_point, unit_label)
+        return _empty_publication_delays(new_observations, download_date, reference_point, unit_label), {}
 
     # Copie indépendante du jeu de données
     publication_delays = new_observations.copy()
@@ -489,7 +559,78 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
     publication_delays["unit"] = unit_label
 
     # Ordre des colonnes de sortie
-    return publication_delays[[
+    output_columns = [
         'observation_date', 'has_changes', 'download_date', 'frequency',
         'period_start', 'period_end', 'reference_point', 'delay', 'unit',
-    ]]
+    ]
+    return publication_delays[output_columns], frequency_map
+
+
+# Fonction auxiliaire de construction du rapport de détection
+def _build_detection_report(
+    delays: pd.DataFrame,
+    comparison: Dict[str, Any],
+    frequency_map: Dict[Any, Optional[str]],
+    new_data: pd.DataFrame,
+    existing_data: Optional[pd.DataFrame],
+    download_date: datetime,
+    detection_mode: str,
+    reference_point: str,
+    unit_label: str,
+) -> DelayDetectionReport:
+    """Build the report of a detection from its result and its comparison counters.
+
+    Args:
+        delays: Result of ``_calculate_publication_delays``
+        comparison: Counters returned by ``_identify_new_observations``
+        frequency_map: Detected frequency of each (entity, column) key of ``new_data``
+        new_data: Validated new dataset
+        existing_data: Validated existing dataset, or None
+        download_date: Resolved download date
+        detection_mode: 'new_only' or 'all_changes'
+        reference_point: 'start' or 'end'
+        unit_label: Label of the delay unit
+
+    Returns:
+        The immutable :class:`DelayDetectionReport` of the call
+    """
+    # Nombre de détections par variable : la variable est le dernier niveau de l'index du résultat
+    counts = delays.index.get_level_values(-1).value_counts() if len(delays) else pd.Series(dtype='int64')
+    compared = comparison['columns_compared']
+    n_detected_by_column = {col: int(counts.get(col, 0)) for col in compared}
+
+    # Couples détectés dont la fréquence n'a pas pu être déterminée (clés uniques, ordre d'apparition)
+    undetected = delays.index[delays['frequency'].isna().to_numpy()]
+    undetected_keys = tuple(dict.fromkeys(undetected))
+
+    # Statistiques des délais connus, dans l'unité du résultat
+    stats = delay_statistics(delays['delay'])
+
+    return DelayDetectionReport(
+        detection_mode=detection_mode,
+        reference_point=reference_point,
+        delay_unit=unit_label,
+        download_date=download_date,
+        has_existing_data=existing_data is not None,
+        n_rows_new=len(new_data),
+        n_rows_existing=None if existing_data is None else len(existing_data),
+        n_entities=len(get_unique_panel_entities(new_data)) if is_panel_data(new_data) else 0,
+        n_columns=new_data.shape[1],
+        columns_compared=compared,
+        columns_new_only=comparison['columns_new_only'],
+        columns_existing_only=comparison['columns_existing_only'],
+        n_detected=len(delays),
+        n_new_values=comparison['n_new_values'],
+        n_revisions=comparison['n_revisions'],
+        n_vanished_values=comparison['n_vanished_values'],
+        n_detected_by_column=n_detected_by_column,
+        columns_without_detection=tuple(col for col, n in n_detected_by_column.items() if n == 0),
+        frequencies=dict(frequency_map),
+        undetected_keys=undetected_keys,
+        n_known=stats['n_known'],
+        n_negative=stats['n_negative'],
+        delay_min=stats['min'],
+        delay_max=stats['max'],
+        delay_mean=stats['mean'],
+        delay_median=stats['median'],
+    )

@@ -195,3 +195,91 @@ def test_split_summary_panel_with_groups():
 
     assert _is_flat_scalar_mapping(summary)
     assert summary["n_splits"] == 3.0
+
+
+# =============================================================================
+# detection_metrics et enrichissement de delay_metrics par fit_report_
+# =============================================================================
+def _detection_report(**kwargs):
+    from tsforecast.delays import compare_and_detect_delays
+    dates = pd.date_range('2023-01-01', periods=4, freq='MS')
+    existing = pd.DataFrame({'PIB': [1.0, 2.0, 3.0, np.nan], 'OLD': [1.0] * 4}, index=dates)
+    new = pd.DataFrame({'PIB': [1.0, 2.5, 3.0, 4.0], 'NEW': [1.0] * 4}, index=dates)
+    return compare_and_detect_delays(
+        new, existing, '2023-06-15', detection_mode='all_changes', return_report=True, **kwargs)[1]
+
+
+def test_detection_metrics_gold_values():
+    from tsforecast.tracking import detection_metrics
+    metrics = detection_metrics(_detection_report())
+    assert metrics['n_detected'] == 2.0
+    assert metrics['n_new_values'] == 1.0
+    assert metrics['n_revisions'] == 1.0
+    assert metrics['n_vanished_values'] == 0.0
+    assert metrics['n_columns_compared'] == 1.0
+    assert metrics['n_columns_new_only'] == 1.0
+    assert metrics['n_columns_existing_only'] == 1.0
+    assert metrics['n_undetected_frequencies'] == 0.0
+    assert metrics['n_rows_new'] == 4.0 and metrics['n_rows_existing'] == 4.0
+    assert (metrics['delay.min'], metrics['delay.max'], metrics['delay.mean'], metrics['delay.median']) == (75.0, 134.0, 104.5, 104.5)
+    assert (metrics['delay.n'], metrics['delay.n_negative']) == (2.0, 0.0)
+
+
+def test_detection_metrics_flat_and_finite():
+    from tsforecast.tracking import detection_metrics
+    metrics = detection_metrics(_detection_report(), per_column=True)
+    assert _is_flat_scalar_mapping(metrics)
+    assert all(math.isfinite(v) for v in metrics.values())
+    assert metrics['PIB.n_detected'] == 2.0
+
+
+def test_detection_metrics_per_column_is_optional():
+    from tsforecast.tracking import detection_metrics
+    assert not any(key.endswith('.n_detected') for key in detection_metrics(_detection_report()))
+
+
+def test_detection_metrics_without_known_delay_drops_the_statistics():
+    from tsforecast.delays import compare_and_detect_delays
+    from tsforecast.tracking import detection_metrics
+    new = pd.DataFrame({'PIB': [1.0]}, index=pd.date_range('2023-01-01', periods=1, freq='MS'))
+    with pytest.warns(UserWarning):
+        _, report = compare_and_detect_delays(new, download_date='2023-06-15', return_report=True)
+    metrics = detection_metrics(report)
+    assert 'n_rows_existing' not in metrics
+    assert metrics['delay.n'] == 0.0
+    assert metrics['n_undetected_frequencies'] == 1.0
+    assert not any(key in metrics for key in ('delay.min', 'delay.max', 'delay.mean', 'delay.median'))
+
+
+def test_detection_metrics_rejects_anything_but_a_report():
+    from tsforecast.tracking import detection_metrics
+    with pytest.raises(AttributeError):
+        detection_metrics(object())
+
+
+def test_delay_metrics_reports_the_fit_events():
+    index = pd.date_range('2023-01-01', periods=12, freq='MS')
+    X = pd.DataFrame({'GDP': range(12), 'Z': range(12)}, index=index)
+    delays = pd.DataFrame({'column': ['GDP', 'OLD'], 'delay': [400.0, 5.0], 'unit': ['D', 'D'],
+                           'reference_point': ['start', 'start'], 'frequency': ['Q', 'Q']})
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        transformer = PublicationDelayTransformer(
+            delays=delays, strategy='mask', prediction_date='2023-12-15').fit(X)
+    metrics = delay_metrics(transformer)
+    assert metrics['n_mask_fallbacks'] == 1.0
+    assert metrics['n_columns_ignored'] == 1.0
+    assert metrics['n_columns_unaffected'] == 1.0
+    assert metrics['n_defaults_imputed'] == 0.0
+    assert _is_flat_scalar_mapping(metrics)
+
+
+def test_delay_metrics_keeps_working_without_a_fit_report():
+    class Legacy:
+        shift_params = {'a': {'n_periods': 2}}
+        mask_params = {}
+        delays = {'a': 10.0}
+
+    metrics = delay_metrics(Legacy())
+    assert metrics['n_shift_columns'] == 1.0
+    assert 'n_mask_fallbacks' not in metrics

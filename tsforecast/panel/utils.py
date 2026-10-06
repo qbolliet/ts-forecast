@@ -28,6 +28,33 @@ def is_panel_data(data: Union[pd.DataFrame, pd.Series]) -> bool:
     """
     return isinstance(data.index, pd.MultiIndex) and data.index.nlevels >= 2
 
+# Fonction d'identification des niveaux d'index associés aux entités
+def get_entity_levels(data: Union[pd.DataFrame, pd.Series]) -> List[int]:
+    """Get the positions of the index levels holding the entities of a panel.
+
+    The entities are all the levels but the last one, which is the time.
+
+    Args:
+        data: Input data (DataFrame or Series).
+
+    Returns:
+        Positions of the entity levels, in order; an empty list when ``data`` is
+        not panel data (see :func:`is_panel_data`).
+
+    Examples:
+        >>> idx = pd.MultiIndex.from_tuples(
+        ...     [('FR', 'a', '2023-01'), ('FR', 'b', '2023-01')], names=['c', 's', 'date']
+        ... )
+        >>> get_entity_levels(pd.Series([1, 2], index=idx))
+        [0, 1]
+        >>> get_entity_levels(pd.Series([1, 2], index=pd.date_range('2023', periods=2)))
+        []
+    """
+    # Cas des données sans structure de panel : aucun niveau d'entité
+    if not is_panel_data(data):
+        return []
+    return list(range(data.index.nlevels - 1))
+
 # Fonction de détection de la structure de panel d'un DataFrame
 def detect_panel_structure(
     df: pd.DataFrame,
@@ -398,7 +425,7 @@ def iter_entity_blocks(
         return
 
     # Niveaux d'entité à retirer pour ramener chaque bloc à un index daté
-    entity_levels = list(range(data.index.nlevels - 1))
+    entity_levels = get_entity_levels(data)
 
     # Parcours des entités du panel
     for entity in get_unique_panel_entities(data):

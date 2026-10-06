@@ -11,8 +11,13 @@ from .data_manager import compare_and_detect_delays
 from .calculator import calculate_applicable_delay
 # Importation du module d'application des délais de publication à des données
 from .transformers import ShiftTransformer, MaskTransformer, PublicationDelayTransformer, create_delay_transformer_factory, prepare_entity_kwargs_from_delays
+# Importation des rapports structurés (détection et ajustement)
+from .report import DelayDetectionReport, DelayFitReport, ColumnDelayRecord
 
 __all__ = [
+    'DelayDetectionReport',
+    'DelayFitReport',
+    'ColumnDelayRecord',
     'compare_and_detect_delays',
     'calculate_applicable_delay',
     'ShiftTransformer',

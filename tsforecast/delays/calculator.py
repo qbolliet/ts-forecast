@@ -12,10 +12,9 @@ import pandas as pd
 from typing import Dict, List, Optional, Tuple, Union, Literal
 
 # Modules du package
-from ..utils._constants import CONVERSION_FACTORS_TO_SECONDS, SUBDAILY_NS
 from ..utils.frequency import normalize_frequency, is_higher_frequency, to_pandas_freq
 from ..utils.time.utils import get_period_boundaries
-from ..utils.duration import to_code as duration_to_code
+from ..utils.duration import to_code as duration_to_code, get_duration_nanoseconds
 
 # Fonction de calcul du délai applicable
 def calculate_applicable_delay(
@@ -419,33 +418,6 @@ def _convert_to_target_frequency_and_reference(
     return delays
 
 
-# Fonction auxiliaire de durée d'une unité en nanosecondes
-def _nanoseconds_per_unit(unit: str) -> int:
-    """Return the length of a duration unit, in whole nanoseconds.
-
-    The delays are converted with integers: the float seconds of ``convert_duration``
-    are not exact to the microsecond beyond a few days.
-
-    Args:
-        unit: Duration name or code ('day', 'D', 'microsecond', 'us', ...)
-
-    Returns:
-        Number of nanoseconds in the unit (calendar units use the conventional
-        lengths of ``convert_duration``)
-
-    Raises:
-        ValueError: If the unit is not a supported duration
-
-    Examples:
-        >>> _nanoseconds_per_unit('microsecond'), _nanoseconds_per_unit('D')
-        (1000, 86400000000000)
-    """
-    code = duration_to_code(unit)
-    if code in SUBDAILY_NS:
-        return SUBDAILY_NS[code]
-    return int(CONVERSION_FACTORS_TO_SECONDS[code]) * 10**9
-
-
 # Fonction auxiliaire de conversion d'une valeur en nanosecondes entières
 def _to_nanoseconds(value: float, nanoseconds_per_unit: int) -> int:
     """Convert a delay value to whole nanoseconds, exactly.
@@ -564,7 +536,7 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
         original_reference_date = row['period_end']
 
     # Durée de l'unité du délai en nanosecondes entières (calcul exact, sans secondes flottantes)
-    nanoseconds_per_unit = _nanoseconds_per_unit(row['unit'])
+    nanoseconds_per_unit = get_duration_nanoseconds(row['unit'])
     delay_timedelta = pd.Timedelta(_to_nanoseconds(row['delay'], nanoseconds_per_unit), unit='ns')
 
     # Calcul de la date de téléchargement
@@ -659,7 +631,7 @@ def _convert_delay_unit(delays: pd.DataFrame, target_unit: str) -> pd.DataFrame:
     # Normalisation de l'unité cible avec la fonction utilitaire to_code
     # qui gère déjà tous les formats possibles
     target_unit_code = duration_to_code(target_unit)
-    target_nanoseconds = _nanoseconds_per_unit(target_unit_code)
+    target_nanoseconds = get_duration_nanoseconds(target_unit_code)
 
     # Fonction de conversion en nanosecondes entières
     def convert_value(row):
@@ -677,7 +649,7 @@ def _convert_delay_unit(delays: pd.DataFrame, target_unit: str) -> pd.DataFrame:
             return value
 
         # Conversion exacte, arrondie au supérieur
-        nanoseconds = _to_nanoseconds(value, _nanoseconds_per_unit(current_unit_code))
+        nanoseconds = _to_nanoseconds(value, get_duration_nanoseconds(current_unit_code))
         return -(-nanoseconds // target_nanoseconds)
 
     # Conversion

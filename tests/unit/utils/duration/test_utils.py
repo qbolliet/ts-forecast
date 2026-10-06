@@ -17,6 +17,7 @@ from tsforecast.utils.duration.normalizer import DurationNormalizer
 from tsforecast.utils.duration.utils import (
     convert_duration,
     get_duration_conversion_factor,
+    get_duration_nanoseconds,
     get_duration_order,
     normalize_duration,
     to_code,
@@ -180,3 +181,36 @@ class TestGetDurationOrder:
         """
         with pytest.raises(ValueError, match="Unsupported duration"):
             get_duration_order("xyz")
+
+
+# =============================================================================
+# get_duration_nanoseconds
+# =============================================================================
+class TestGetDurationNanoseconds:
+    """Exact integer length of a duration unit, from ``utils._constants``."""
+
+    @pytest.mark.parametrize("unit, expected", [
+        ("ns", 1), ("us", 1_000), ("ms", 1_000_000), ("s", 10**9),
+        ("min", 60 * 10**9), ("h", 3_600 * 10**9), ("D", 86_400 * 10**9),
+        ("W", 7 * 86_400 * 10**9), ("M", 30 * 86_400 * 10**9),
+        ("Q", 90 * 86_400 * 10**9), ("Y", 365 * 86_400 * 10**9),
+    ])
+    def test_gold_values(self, unit, expected):
+        assert get_duration_nanoseconds(unit) == expected
+
+    @pytest.mark.parametrize("code, literal", list(zip(_CODES, _LITERALS)))
+    def test_code_and_literal_give_the_same_length(self, code, literal):
+        assert get_duration_nanoseconds(code) == get_duration_nanoseconds(literal)
+
+    def test_result_is_a_python_int(self):
+        assert type(get_duration_nanoseconds("D")) is int
+
+    def test_is_consistent_with_the_float_conversion(self):
+        for code in _CODES:
+            assert get_duration_nanoseconds(code) == pytest.approx(
+                convert_duration(1, code, "ns"), rel=1e-9)
+
+    @pytest.mark.parametrize("unit", ["days", "decade", "", "d"])
+    def test_unknown_unit_raises(self, unit):
+        with pytest.raises(ValueError):
+            get_duration_nanoseconds(unit)
