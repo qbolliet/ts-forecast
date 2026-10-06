@@ -333,9 +333,9 @@ from tsforecast.delays import calculate_applicable_delay
 
 df_applicable = calculate_applicable_delay(
     publication_delays: pd.DataFrame,
-    target_reference_point: Literal['start', 'end'],
-    target_frequency: Union[str, Dict[str, str]],
-    target_unit: Optional[Literal['us', 's', 'D', 'microsecond', 'second', 'day']] = None
+    reference_point: Literal['start', 'end'],
+    frequency: Union[str, Dict[Union[str, tuple], str]],
+    unit: Optional[Literal['us', 's', 'D', 'microsecond', 'second', 'day']] = None,
     indicators: Optional[List[str]] = None,
     aggregate_by_panel: bool = False,
     aggregation_method: Union[str, callable] = 'median'
@@ -345,12 +345,12 @@ df_applicable = calculate_applicable_delay(
 | Argument | Type | Description |
 |----------|------|-------------|
 | `publication_delays` | `pd.DataFrame` | DataFrame retourné par `compare_and_detect_delays()`. |
-| `target_reference_point` | `'start'` ou `'end'` | Point de référence cible pour le délai converti. |
-| `target_frequency` | `str` ou `Dict` | Fréquence cible (`'M'`, `'Q'`, `'A'`, etc.) ou dictionnaire par indicateur. |
-| `target_unit` | `str` ou `None` | Unité cible. Si `None`, utilise l'unité des données d'entrée. |
+| `reference_point` | `'start'` ou `'end'` | Point de référence cible pour le délai converti (la fin est la borne exclusive). |
+| `frequency` | `str` ou `Dict` | Fréquence cible (`'M'`, `'Q'`, `'Y'`, `'monthly'`, etc.) ou dictionnaire : clés = indicateurs (`{'GDP': 'M'}`) et/ou couples complets de l'index `(entité, ..., indicateur)` (`{('FR', 'GDP'): 'M'}`), la clé du couple l'emportant sur celle de l'indicateur. Chaque ligne doit être couverte. |
+| `unit` | `str` ou `None` | Unité cible (toute durée : `'D'`, `'h'`, `'W'`, `'s'`, ...), arrondie au supérieur. Si `None`, utilise l'unité des données d'entrée (les lignes agrégées ensemble doivent alors en partager une). |
 | `indicators` | `List[str]` ou `None` | Liste des indicateurs à traiter. Si `None`, traite tous les indicateurs. |
 | `aggregate_by_panel` | `bool` | Si `True`, calcule des délais séparés par entité panel. Sinon, agrège sur toutes les entités. |
-| `aggregation_method` | `str` ou `callable` | Méthode d'agrégation : `'mean'`, `'median'`, `'max'`, `'min'`, ou fonction personnalisée. |
+| `aggregation_method` | `str` ou `callable` | Méthode d'agrégation : `'mean'`, `'median'`, `'max'`, `'min'`, ou fonction personnalisée. Un nom inconnu lève une `ValueError`. |
 
 #### 4.2.2 Valeur de retour
 
@@ -358,12 +358,14 @@ Le DataFrame retourné est indexé par indicateur (ou par entité et indicateur 
 
 | Colonne | Description |
 |---------|-------------|
-| `applicable_delay` | Délai calculé après conversion et agrégation |
-| `unit` | Unité du délai |
-| `target_frequency` | Fréquence cible utilisée |
-| `target_reference_point` | Point de référence cible |
-| `n_observations` | Nombre d'observations utilisées dans l'agrégation |
+| `delay` | Délai calculé après conversion et agrégation |
+| `unit` | Unité du délai (son code, `'D'`, si `unit` est fourni) |
+| `frequency` | Fréquence cible utilisée, telle que fournie |
+| `reference_point` | Point de référence cible |
+| `n_observations` | Nombre d'observations (de délai connu) utilisées dans l'agrégation |
 | `aggregation_method` | Méthode d'agrégation utilisée |
+
+Une ligne dont le délai est `NaN` ou la fréquence `None` (couple à fréquence indétectable renvoyé par `compare_and_detect_delays`) est **conservée avec un délai `NaN`** : elle n'est pas comptée dans `n_observations`, et un groupe composé uniquement de telles lignes a un délai `NaN` et `n_observations=0`.
 
 #### 4.2.3 Conversion de fréquence
 
@@ -383,12 +385,26 @@ La sous-période sélectionnée est celle qui contient `observation_date`. Par e
 
 df_applicable = calculate_applicable_delay(
     publication_delays=df_delays,
-    target_reference_point='end',
-    target_frequency='M',  # Mensuel
+    reference_point='end',
+    frequency='M',  # Mensuel
     aggregation_method='median'
 )
 # La sous-période mars est sélectionnée car elle contient observation_date
 ```
+
+**Une fréquence cible par couple (entité, indicateur)** :
+
+```python
+df_applicable = calculate_applicable_delay(
+    publication_delays=df_delays,
+    reference_point='start',
+    frequency={('DE', 'GDP'): 'quarterly', 'GDP': 'monthly', 'CPI': 'monthly'},
+    aggregate_by_panel=True,
+)
+# Allemagne : PIB trimestriel ; PIB des autres entités et CPI : mensuel
+```
+
+Sans `aggregate_by_panel`, les entités d'un même indicateur doivent partager la même fréquence cible (leurs délais sont agrégés ensemble) ; sinon une `ValueError` demande d'agréger par entité.
 
 **Cas de conversion vers une fréquence plus basse** (ex: trimestriel → annuel) :
 
@@ -427,17 +443,17 @@ df_delays = compare_and_detect_delays(
 # 2. Calcul des délais applicables (conversion vers mensuel, ref='start')
 df_applicable = calculate_applicable_delay(
     publication_delays=df_delays,
-    target_reference_point='start',
-    target_frequency='M',
-    target_unit='day'
+    reference_point='start',
+    frequency='M',
+    unit='day',
     aggregation_method='median'
 )
 
 print(df_applicable)
-#              applicable_delay unit target_frequency target_reference_point  n_observations aggregation_method
-# column                                                                                                        
-# GDP                      75.0    D                M                  start               4             median
-# inflation                45.0    D                M                  start               4             median
+#              delay unit frequency reference_point  n_observations aggregation_method
+# column
+# GDP           75.0    D         M           start               4             median
+# inflation     45.0    D         M           start               4             median
 ```
 
 ---

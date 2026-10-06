@@ -8,48 +8,6 @@
 # permanent : le prompt C2 exige qu'il ne reste plus, en fin de campagne, que le
 # groupe "# hors campagne".
 
-# prompt D2
-tests/unit/delays/test_calculator.py::TestAggregateDelays::test_aggregate_by_indicator_only
-tests/unit/delays/test_calculator.py::TestAggregateDelays::test_aggregation_metadata
-tests/unit/delays/test_calculator.py::TestAggregateDelays::test_aggregation_method_max
-tests/unit/delays/test_calculator.py::TestAggregateDelays::test_aggregation_method_mean
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_aggregate_by_panel_false
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_aggregate_by_panel_true
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_basic_usage
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_custom_aggregation_function
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_different_aggregation_methods
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_frequency_conversion_monthly_to_quarterly
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_frequency_conversion_quarterly_to_monthly
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_invalid_target_frequency_type
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_output_unit_conversion
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_reference_point_start
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_reference_point_validation
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_simple_time_series_no_panel
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_target_frequency_as_dict
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_with_invalid_indicators
-tests/unit/delays/test_calculator.py::TestCalculateApplicableDelay::test_with_specific_indicators
-tests/unit/delays/test_calculator.py::TestCalculateConvertedDelay::test_higher_frequency_conversion
-tests/unit/delays/test_calculator.py::TestCalculateConvertedDelay::test_lower_frequency_conversion
-tests/unit/delays/test_calculator.py::TestCalculateConvertedDelay::test_same_frequency_different_reference
-tests/unit/delays/test_calculator.py::TestCalculateConvertedDelay::test_same_frequency_same_reference
-tests/unit/delays/test_calculator.py::TestCalculateConvertedDelay::test_unit_conversion_in_delay
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_empty_dataframe_after_filtering
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_mixed_units
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_negative_delay
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_preserve_index_names
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_result_column_order
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_single_observation
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_special_frequency_aliases
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_very_large_delay
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_weekly_frequency
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_yearly_frequency
-tests/unit/delays/test_calculator.py::TestEdgeCases::test_zero_delay
-tests/unit/delays/test_calculator.py::TestIntegrationWithDataManager::test_full_pipeline_frequency_conversion
-tests/unit/delays/test_calculator.py::TestIntegrationWithDataManager::test_full_pipeline_panel_data
-tests/unit/delays/test_calculator.py::TestIntegrationWithDataManager::test_full_pipeline_simple_time_series
-tests/unit/delays/test_calculator.py::TestValidateColumns::test_empty_dataframe
-tests/unit/delays/test_calculator.py::TestValidateColumns::test_valid_columns
-
 # prompt D3
 tests/unit/delays/test_transformers.py::TestMaskTransformerBoundaries::test_series_end_with_how_first
 tests/unit/delays/test_transformers.py::TestMaskTransformerBoundaries::test_series_end_with_how_last

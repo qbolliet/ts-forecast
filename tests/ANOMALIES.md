@@ -1938,9 +1938,11 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   # deux lignes (FR, DE) de l'indicateur GDP : delay=[45, 3888000], unit=['day', 'second']
   calculate_applicable_delay(delays, 'start', 'M')  # delay=3240037.5, unit='day'
   ```
-- **Test** : à écrire au prompt D2 (`tests/unit/delays/test_calculator.py::TestEdgeCases::test_mixed_units`
-  existe, marqué hérité).
-- **Statut** : ouvert
+- **Test** : `tests/unit/delays/test_calculator.py::TestTargetUnit::test_mixed_input_units_are_refused_without_target_unit`,
+  `::test_mixed_input_units_are_accepted_when_aggregated_per_couple`, `::test_day_name_and_code_are_the_same_unit`,
+  `::test_mixed_input_units_are_converted_with_a_target_unit`.
+- **Correctif** : décision de l'auteur (2026-10-05) : `ValueError` quand les lignes agrégées ensemble (par indicateur, ou par couple avec `aggregate_by_panel`) n'ont pas la même unité, `'day'` et `'D'` étant une même unité ; le message nomme les groupes et demande une `unit` commune.
+- **Statut** : corrigée
 
 ### ANO-DELAYS-003 — `frequency` en dictionnaire incomplet : message d'erreur trompeur
 - **Type** : [CODE] comportement
@@ -1954,8 +1956,10 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```python
   calculate_applicable_delay(delays, 'start', {'GDP': 'M'})  # avec un indicateur CPI dans les données
   ```
-- **Test** : à écrire au prompt D2.
-- **Statut** : ouvert
+- **Test** : `tests/unit/delays/test_calculator.py::TestTargetFrequencyDictionary::test_uncovered_indicator_is_named`,
+  `::test_uncovered_couple_is_named`.
+- **Correctif** : le dictionnaire est résolu ligne par ligne (`_resolve_target_frequencies`) ; les clés non couvertes sont nommées dans la `ValueError` (`'frequency' does not give a target frequency for: ['CPI']`). Le dictionnaire accepte désormais aussi des clés `(entité, ..., indicateur)` (décision de l'auteur, 2026-10-05 : une fréquence cible par couple), voir `TestTargetFrequencyDictionary`.
+- **Statut** : corrigée
 
 
 ### ANO-DELAYS-004 — Délai en microsecondes majoré de 1 µs au-delà d'environ 800 jours
@@ -2164,8 +2168,112 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   panel = pd.DataFrame({'PIB': [1., 2, 3, 4, 1, np.nan, np.nan, np.nan]}, index=idx)
   calculate_applicable_delay(compare_and_detect_delays(panel, None, '2023-06-15'), 'start', 'M')   # ValueError
   ```
-- **Test** : à écrire au prompt D2.
-- **Statut** : ouvert
+  Le même échec survient pour une ligne dont le délai est `NaN` alors que sa fréquence est valide
+  (`ValueError: cannot convert float NaN to integer`, levée par `pd.Timedelta(seconds=nan)` dans
+  `_calculate_converted_delay`) : le chemin « délai inconnu » n'est géré nulle part.
+- **Test** : `tests/unit/delays/test_calculator.py::TestContractWithDataManager::test_undetectable_frequency_does_not_break_the_chain`,
+  `::test_undetectable_couple_is_kept_with_a_nan_delay`, `::TestDelayMagnitudes::test_unknown_delay_row_is_kept_with_a_nan_delay`,
+  `::test_unknown_delay_row_is_ignored_by_the_aggregation`, `::test_group_of_unknown_delays_has_a_nan_delay`,
+  `::test_unknown_delay_survives_the_unit_conversion_and_the_reference_change`.
+- **Correctif** : décision de l'auteur (2026-10-05) : la ligne est **conservée avec un délai `NaN`** (délai `NaN` ou fréquence source `None`). Elle n'est pas comptée dans `n_observations` ; un groupe sans délai connu a un délai `NaN` (même pour `sum`) et `n_observations=0`. Aucun avertissement n'est ajouté (celui de `compare_and_detect_delays` suffit).
+- **Statut** : corrigée
+
+### ANO-DELAYS-012 — Délai en microsecondes décalé de 1 µs par le passage par des secondes flottantes
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/calculator.py::_calculate_converted_delay` (via `calculate_applicable_delay` sur des
+  lignes d'unité `'microsecond'`, sortie de `compare_and_detect_delays(delay_unit='us')`)
+- **Sévérité** : mineure
+- **Observé** : le délai d'entrée est converti en secondes **flottantes** (`convert_duration(..., 'us' -> 's', rounding=None)`),
+  transformé en `pd.Timedelta(seconds=...)` (tronqué à la nanoseconde), puis le nouveau délai est reconverti
+  par `total_seconds()` (flottant) et `convert_duration(..., 's' -> 'us', rounding='ceil')`. Sur 400 délais tirés au hasard
+  sous 100 jours, **108 sortent diminués de 1 µs** (et 1 augmenté), y compris quand le point de référence ne change pas
+  (`'end'` -> `'end'`, même fréquence : le délai devrait être restitué à l'identique) ; sur 800 à 2 000 jours, plus d'un
+  cas sur deux. Aucune erreur en jours ni en secondes entières (200 tirages chacun). Même famille que ANO-DELAYS-004
+  (`data_manager`), dans l'autre sens : la troncature à la nanoseconde de `pd.Timedelta(seconds=8183426.019069999)`
+  rend `8183426019069` µs au lieu de `8183426019070`.
+- **Attendu** : un calcul en entiers (nanosecondes, comme le correctif d'ANO-DELAYS-004) : le délai converti est exact, et
+  restitué à l'identique quand ni la fréquence ni le point de référence ne changent.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.delays.calculator import calculate_applicable_delay
+  ts = pd.Timestamp
+  delays = pd.DataFrame({
+      'observation_date': [ts('2023-12-15')], 'download_date': [ts('2024-05-15')], 'frequency': ['monthly'],
+      'period_start': [ts('2023-12-01')], 'period_end': [ts('2024-01-01')], 'reference_point': ['end'],
+      'delay': [8_183_426_019_070], 'unit': ['microsecond']}, index=pd.Index(['PIB'], name='indicator'))
+  calculate_applicable_delay(delays, 'end', 'M')['delay'].iloc[0]   # 8183426019069.0
+  ```
+- **Test** : `tests/unit/delays/test_calculator.py::TestTargetUnit::test_microsecond_delay_is_exact` (trois cas)
+- **Correctif** : délais reconstruits et reconvertis en nanosecondes **entières** (`_nanoseconds_per_unit`, `_to_nanoseconds` via `Fraction`, division entière par excès), y compris pour le changement d'unité (`_convert_delay_unit`) ; plus aucune seconde flottante. Vérifié sur 1 200 délais tirés au hasard (0 écart).
+- **Statut** : corrigée
+
+### ANO-DELAYS-013 — Jeu sans aucune ligne : `KeyError` cryptique
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/calculator.py::calculate_applicable_delay` (`_aggregate_delays`)
+- **Sévérité** : mineure
+- **Observé** : un `DataFrame` sans ligne mais avec les colonnes requises passe `_validate_columns` puis échoue avec
+  `KeyError: "Column(s) ['converted_delay'] do not exist"` (`delays.apply(..., axis=1)` d'un frame vide ne crée aucune
+  colonne). Même famille qu'ANO-DELAYS-005 côté `data_manager`.
+- **Attendu** : soit un `DataFrame` vide avec les six colonnes de sortie, soit une `ValueError` explicite (« no row ») ; l'attente du
+  test admet les deux.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.delays.calculator import calculate_applicable_delay
+  cols = ['observation_date', 'download_date', 'frequency', 'period_start', 'period_end', 'reference_point', 'delay', 'unit']
+  calculate_applicable_delay(pd.DataFrame(columns=cols, index=pd.Index([], name='indicator')), 'end', 'M')   # KeyError
+  ```
+- **Test** : `tests/unit/delays/test_calculator.py::TestDelayMagnitudes::test_empty_frame_raises_a_clear_error`
+- **Correctif** : `ValueError: Cannot calculate applicable delays on empty data: publication_delays has no row`, comme `compare_and_detect_delays` (ANO-DELAYS-005).
+- **Statut** : corrigée
+
+### ANO-DELAYS-014 — Index sans nom : le niveau de l'indicateur est repéré par son nom
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/calculator.py::calculate_applicable_delay` (`indicator_level_name = delays.index.names[-1]`)
+- **Sévérité** : mineure
+- **Observé** : le dernier niveau de l'index est identifié par son **nom** puis passé à `groupby(level=[nom])`. Un index à un niveau
+  sans nom (`pd.Index([...], name=None)`) lève `TypeError: '>' not supported between instances of 'NoneType' and 'int'` ; un
+  `MultiIndex` dont tous les niveaux sont sans nom lève `ValueError: The name None occurs multiple times, use a level number`.
+  Un `MultiIndex` dont seul le dernier niveau est sans nom fonctionne (le nom `None` est unique). La sortie de
+  `compare_and_detect_delays` nomme toujours son dernier niveau `'column'`, mais la docstring décrit l'index par sa position
+  (« the last level of its index is the indicator »).
+- **Attendu** : le niveau est repéré par sa position (`-1`), les noms étant libres ; les noms existants sont conservés dans
+  la sortie.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.delays.calculator import calculate_applicable_delay
+  ts = pd.Timestamp
+  delays = pd.DataFrame({
+      'observation_date': [ts('2023-12-15')], 'download_date': [ts('2024-01-15')], 'frequency': ['monthly'],
+      'period_start': [ts('2023-12-01')], 'period_end': [ts('2024-01-01')], 'reference_point': ['end'],
+      'delay': [14], 'unit': ['day']}, index=['PIB'])                  # index sans nom
+  calculate_applicable_delay(delays, 'end', 'M')                       # TypeError
+  ```
+- **Test** : `tests/unit/delays/test_calculator.py::TestIndicatorsAndPanel::test_unnamed_index_levels` (deux cas),
+  `::test_unnamed_index_levels_stay_unnamed_in_the_panel_result`, `::test_duplicated_level_names_are_read_by_position`
+- **Correctif** : les niveaux de l'index sont repérés par leur **position** (`nlevels - 1` pour l'indicateur, `range(nlevels)` pour le panel) ; les noms sont libres, absents ou dupliqués, et conservés dans la sortie.
+- **Statut** : corrigée
+
+### ANO-DELAYS-015 — `aggregation_method` inconnu : `AttributeError` de pandas
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/calculator.py::_aggregate_delays`
+- **Sévérité** : cosmétique
+- **Observé** : un nom de méthode inconnu (`aggregation_method='nope'`) lève `AttributeError: 'SeriesGroupBy' object has no
+  attribute 'nope'` ; un objet non appelable (`3`) lève `TypeError: 'int' object is not callable`. Le `Raises` de la docstring
+  ne mentionne ni l'un ni l'autre.
+- **Attendu** : à arbitrer : laisser l'erreur de pandas (comportement actuel, **épinglé** par le test), ou lever une `ValueError` qui
+  nomme l'argument et les méthodes supportées.
+- **Reproduction** :
+  ```python
+  calculate_applicable_delay(delays, 'end', 'M', aggregation_method='nope')   # AttributeError
+  ```
+- **Test** : `tests/unit/delays/test_calculator.py::TestAggregation::test_unknown_method_name_raises_a_value_error_naming_the_argument`,
+  `::test_non_callable_method_raises_a_type_error_naming_the_argument`, `::test_method_is_validated_before_the_computation`,
+  `::test_callable_without_a_name_is_reported_by_its_type`
+- **Correctif** : décision de l'auteur (2026-10-05) : `aggregation_method` est validé avant tout calcul (`_validate_aggregation_method`, essai sur un groupe minimal) ; un nom inconnu lève `ValueError: Unsupported aggregation_method 'nope': ...`. Un objet ni chaîne ni appelable lève `TypeError: 'aggregation_method' should be a string or a callable, got a int` (choix du TypeError : même convention que `frequency`). Un appelable sans `__name__` (`functools.partial`) est nommé par son type.
+- **Statut** : corrigée
 
 ### Arbitrages de l'auteur (2026-10-04) sur `compare_and_detect_delays`
 - **Fuseaux horaires** : une date sans fuseau est lue en UTC face à une date avec fuseau ; deux dates avec fuseaux sont
