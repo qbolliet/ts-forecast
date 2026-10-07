@@ -62,6 +62,35 @@ Les stratégies sont configurables par variable (`strategy={'gdp': 'shift',
 automatiquement dans un [`PanelwiseTransformer`](panelwise_transforms.md) ; les
 briques bas niveau `ShiftTransformer` et `MaskTransformer` restent accessibles.
 
+### Briques bas niveau
+
+Les deux briques travaillent sur la **grille de la fréquence d'index détectée au
+`fit`** ; `transform` et `inverse_transform` exigent un `fit` préalable, mais
+acceptent ensuite une seule observation.
+
+- **`ShiftTransformer(n_periods, frequency)`** déplace chaque date de
+  `n_periods` périodes de `frequency`, converties en périodes d'index (un
+  trimestre = 3 mois exactement ; un mois = 30 jours sur un index journalier, 21
+  jours ouvrés sur un index `B`). Un `n_periods` **positif avance les valeurs
+  vers des dates antérieures**, un négatif vers des dates postérieures :
+  `PublicationDelayTransformer` passe un nombre négatif pour que la valeur de
+  *t* apparaisse à *t + délai*. Le décalage est une arithmétique calendaire date
+  par date : il reste exact sur un index lacunaire ou irrégulier, et
+  `inverse_transform` restitue l'entrée à l'identique.
+- **`MaskTransformer(n_obs, mask_frequency, how)`** met à `NaN` les
+  observations situées sur les `n_obs` dernières (`how='last'`) ou premières
+  (`how='first'`) **positions calendaires** de chaque période de
+  `mask_frequency`, comptées sur la grille régulière de l'index. Une position
+  absente des données (bord de série, lacune, index irrégulier) ne masque rien :
+  aucune observation n'est masquée parce qu'une voisine manque. Les cellules
+  masquées par chaque `transform` depuis le `fit` sont conservées ;
+  `inverse_transform` remet leur valeur d'origine pour celles présentes dans son
+  entrée (même si une prédiction y a été écrite) et rend aux colonnes entières
+  leur type.
+
+Les deux briques refusent un `MultiIndex` : sur un panel, elles s'appliquent
+entité par entité via `PanelwiseTransformer`.
+
 ## Observabilité : rapports de détection et d'ajustement
 
 Pour une utilisation en production, deux rapports immuables rassemblent ce qu'on

@@ -2276,6 +2276,291 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Correctif** : décision de l'auteur (2026-10-05) : `aggregation_method` est validé avant tout calcul (`_validate_aggregation_method`, essai sur un groupe minimal) ; un nom inconnu lève `ValueError: Unsupported aggregation_method 'nope': ...`. Un objet ni chaîne ni appelable lève `TypeError: 'aggregation_method' should be a string or a callable, got a int` (choix du TypeError : même convention que `frequency`). Un appelable sans `__name__` (`functools.partial`) est nommé par son type.
 - **Statut** : corrigée
 
+### ANO-DELAYS-016 — `MaskTransformer` : la période incomplète d'un bord n'est jamais générée
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::MaskTransformer` (`_generate_periods`)
+- **Sévérité** : majeure
+- **Observé** : les périodes sont générées par `pd.date_range(start=min, end=max, freq=<fréquence de masque ancrée>)`,
+  qui ne renvoie que les ancres comprises dans `[min, max]`. Avec un ancrage **fin** (index journalier ou `ME` →
+  `'ME'`, `'QE'`), la période qui contient la dernière date est omise dès que les données s'arrêtent avant sa fin ;
+  avec un ancrage **début** (index `MS` → `'QS'`), c'est la période qui contient la première date qui est omise dès
+  que les données commencent après son début. Rien n'y est masqué, même des positions présentes dans les données :
+  série journalière du 1er janvier au 10 mars, `n_obs=4, how='first'` → 1-4 mars non masqués ; index `MS` de
+  février à décembre, `mask_frequency='Q', how='last'` → mars non masqué ; 5 jours de janvier, `how='first'` → rien
+  masqué. Le code d'extension des bords (`_extend_period_if_incomplete`, commit `76ed126`) n'est donc atteint que
+  pour une moitié des cas. Le test vert `TestMaskTransformerPandasAliases[monthly]` (série de 120 jours finissant le
+  29 avril) épinglait cette omission (« avril, incomplet, n'est pas masqué ») alors que le 29 avril est l'avant-dernier
+  jour d'avril.
+- **Attendu** : toute période qui contient au moins une observation est traitée, quel que soit l'ancrage ; les
+  positions sont ensuite choisies selon la sémantique calendaire de l'extension des bords (1-4 mars masqués, mars
+  masqué, 29 avril masqué). Le résultat ne doit pas dépendre de la position (début / fin) de l'index.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import MaskTransformer
+  s = pd.Series(np.arange(70.), index=pd.date_range('2024-01-01', '2024-03-10', freq='D'))
+  MaskTransformer(n_obs=4, mask_frequency='M', how='first').fit_transform(s)['2024-03'].isna().sum()   # 0, attendu 4
+  m = pd.Series(np.arange(11.), index=pd.date_range('2024-02-01', periods=11, freq='MS'))
+  MaskTransformer(n_obs=1, mask_frequency='Q').fit_transform(m).loc['2024-03-01']                      # 1.0, attendu NaN
+  ```
+- **Test** : `tests/unit/delays/transformers/test_mask_transformer.py::TestBoundaries::test_series_end_with_how_first`,
+  `::test_first_incomplete_quarter_on_month_start_index`, `::test_single_incomplete_period_with_how_first`,
+  `::test_position_less_frequency_raises_no_pandas_deprecation[monthly]`
+- **Correctif** : décision de l'auteur (2026-10-06) : les périodes sont parcourues à partir de chaque observation restante (`get_period_boundaries(date, mask_frequency)`), sans `pd.date_range` ancré : toute période contenant au moins une observation est traitée, quel que soit l'ancrage de l'index (`MaskTransformer._rows_to_mask`).
+- **Statut** : corrigée
+
+### ANO-DELAYS-017 — `MaskTransformer` : positions calendaires aux bords, positions relatives dans une période lacunaire
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::MaskTransformer` (`_mask_n_obs_per_period`, `_extend_period_if_incomplete`)
+- **Sévérité** : majeure (arbitrée par l'auteur le 2026-10-06)
+- **Observé** : une période coupée par le **début ou la fin des données** est complétée par des dates artificielles
+  avant le choix des positions (commit `76ed126`) : les positions masquées sont calendaires et une position absente
+  ne masque rien (données commençant le 10 janvier, `how='first'` → aucun jour de janvier masqué). Une période
+  lacunaire **à l'intérieur** des données n'est pas complétée : les positions y sont comptées sur les dates
+  disponibles (31 janvier absent, `how='last'` → le 30 janvier est masqué). Sur `irregular_index_timeseries`, les
+  observations annuelles isolées du 1er janvier 2015, 2016 et 2017 (seules dans leur trimestre) sont ainsi masquées
+  comme « dernier mois du trimestre », alors qu'avec la règle des bords elles ne le seraient pas ; idem pour les
+  trimestres partiels d'`heterogeneous_coverage_panel` (Allemagne : janvier 2016, 2017, 2018).
+- **Attendu** : une seule règle. La règle calendaire (celle des bords) est cohérente avec la finalité dans
+  `PublicationDelayTransformer` (reproduire dans chaque période l'information manquante à la même position que la date
+  de prédiction) et avec le commit `76ed126` ; elle a été retenue pour trier les tests hérités
+  `test_series_start_with_how_first` et `test_series_end_with_how_last` (catégorie (c)), qui attendaient des positions
+  relatives aux données. À confirmer par l'auteur ; le comportement intérieur actuel est **épinglé**.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import MaskTransformer
+  idx = pd.date_range('2024-01-01', '2024-02-29', freq='D').drop(pd.Timestamp('2024-01-31'))
+  s = pd.Series(np.arange(len(idx), dtype=float), index=idx)
+  MaskTransformer(n_obs=1, mask_frequency='M').fit_transform(s).loc['2024-01-30']   # NaN (position relative)
+  ```
+- **Test** : `tests/unit/delays/transformers/test_mask_transformer.py::TestBoundaries::test_gap_inside_a_period_masks_the_last_available_date`,
+  `tests/integration/delays/test_shift_mask_realistic.py::TestIrregularIndexTimeseries::test_lone_annual_dates_are_masked`
+- **Correctif** : décision de l'auteur (2026-10-06) : règle calendaire partout. Dans chaque période, les positions sont celles de la grille régulière de la fréquence d'index détectée au `fit` (`pd.date_range(début, fin, freq=index_offset_, inclusive='left')`) ; une observation prend la position du dernier point de grille qui la précède ou l'égale. Une position absente (bord, lacune, index irrégulier) ne masque rien ; aucune observation n'est masquée parce qu'une voisine manque. `_extend_period_if_incomplete` et `_generate_periods` sont supprimées.
+- **Statut** : corrigée
+
+### ANO-DELAYS-018 — `MaskTransformer` non ajusté reconnu comme ajusté par sklearn
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::MaskTransformer.__init__`
+- **Sévérité** : mineure
+- **Observé** : `__init__` initialise `self.masked_data_ = None`. Un attribut à suffixe `_` posé dans `__init__` viole
+  la convention sklearn : `check_is_fitted(MaskTransformer(1, 'Q'))` ne lève pas `NotFittedError` (et
+  `check_estimator` signale un attribut posé hors paramètres). `ShiftTransformer` respecte la convention.
+- **Attendu** : aucun attribut ajusté dans `__init__` ; `inverse_transform` teste `getattr(self, 'masked_data_', None)`
+  (ou `check_is_fitted`) pour conserver son message « Must call transform before inverse_transform ».
+- **Reproduction** :
+  ```python
+  from sklearn.utils.validation import check_is_fitted
+  from tsforecast.delays.transformers import MaskTransformer
+  check_is_fitted(MaskTransformer(n_obs=1, mask_frequency='Q'))   # ne lève rien
+  ```
+- **Test** : `tests/unit/delays/transformers/test_mask_transformer.py::TestSklearnProtocol::test_unfitted_masker_is_reported_unfitted`
+- **Correctif** : `__init__` ne pose plus que les paramètres ; le stock (`masked_values_`, `original_dtypes_`) est créé par `fit`. `transform` et `inverse_transform` appellent `check_is_fitted` (`NotFittedError` avant `fit`).
+- **Statut** : corrigée
+
+### ANO-DELAYS-019 — `MaskTransformer` : `how` et `n_obs` non validés
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::MaskTransformer`
+- **Sévérité** : mineure
+- **Observé** : `how='middle'` ne masque rien, sans erreur (aucune des deux branches `'first'` / `'last'` n'est prise) ;
+  `n_obs=-1` masque **toutes les positions sauf la première** de chaque période (`index[-(-1):]` = `index[1:]`) :
+  58 jours masqués sur 60. Un `n_obs` négatif est atteignable depuis `PublicationDelayTransformer`
+  (`_compute_mask_periods` renvoie `ceil((délai - écoulé) / période)`, négatif quand la donnée est déjà publiée, et
+  `can_mask` est alors vrai) — à confirmer au prompt D4.
+- **Attendu** : `ValueError` explicite pour un `how` hors `{'first', 'last'}` et pour un `n_obs` négatif (ou, pour ce
+  dernier, traitement comme 0 — à arbitrer ; le test exige l'erreur).
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import MaskTransformer
+  s = pd.Series(np.arange(60.), index=pd.date_range('2024-01-01', periods=60, freq='D'))
+  MaskTransformer(2, 'M', how='middle').fit_transform(s).isna().sum()   # 0
+  MaskTransformer(-1, 'M').fit_transform(s).isna().sum()                # 58
+  ```
+- **Test** : `tests/unit/delays/transformers/test_mask_transformer.py::TestParameterValidation::test_unknown_how_raises`,
+  `::test_negative_n_obs_raises`
+- **Correctif** : décision de l'auteur (2026-10-06) : `fit` valide `n_obs` (`TypeError` si non entier, booléens compris ; `ValueError: 'n_obs' must be a non-negative integer, got -1`) et `how` (`ValueError: how must be 'first' or 'last'`). `PublicationDelayTransformer` ramène à 0 un nombre d'observations négatif (donnée déjà publiée) et ne construit aucun `MaskTransformer` pour `n_obs == 0` (`_active_params`).
+- **Statut** : corrigée
+
+### ANO-DELAYS-020 — `MaskTransformer.inverse_transform` réinjecte des lignes absentes de son entrée
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::MaskTransformer.inverse_transform`
+- **Sévérité** : mineure
+- **Observé** : l'inversion concatène l'entrée et **toutes** les lignes masquées lors du dernier `transform`. Inverser
+  une partie des données transformées (premier semestre de douze mois) renvoie aussi les lignes masquées du second
+  semestre : 6 lignes en entrée, 8 en sortie. Même effet si l'entrée vient d'un autre jeu que le dernier `transform`.
+- **Attendu** : la sortie a l'index de l'entrée (contrat sklearn de `inverse_transform`) ; seules les lignes masquées
+  présentes dans l'entrée sont restituées.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import MaskTransformer
+  s = pd.Series(np.arange(12.), index=pd.date_range('2024-01-01', periods=12, freq='MS'))
+  m = MaskTransformer(n_obs=1, mask_frequency='Q')
+  len(m.inverse_transform(m.fit_transform(s).iloc[:6]))   # 8
+  ```
+- **Test** : `tests/unit/delays/transformers/test_mask_transformer.py::TestRoundTrip::test_inverse_transform_keeps_the_index_of_its_input`
+- **Correctif** : décision de l'auteur (2026-10-06) : le stock cumule les cellules masquées par tous les `transform` depuis le `fit` (la dernière valeur l'emporte pour une même date) ; `inverse_transform` ne restitue que les cellules dont la date et la colonne sont dans son entrée, et renvoie l'index de son entrée. Les colonnes entières retrouvent leur type quand aucune valeur manquante ne subsiste et que la conversion est sans perte.
+- **Statut** : corrigée
+
+### ANO-DELAYS-021 — `ShiftTransformer` décale par position sur un index lacunaire ou irrégulier
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::ShiftTransformer` (`_shift_by_periods`)
+- **Sévérité** : majeure
+- **Observé** : le nouvel index est construit en prolongeant l'index d'entrée de `k` périodes régulières puis en
+  gardant `len(data)` dates, et les valeurs sont **réaffectées par position**. Tant que l'index est régulier, cela
+  revient à décaler de `k` périodes ; dès qu'il a des lacunes (détectées comme régulières par la détection de
+  fréquence), chaque valeur glisse vers la date **voisine dans l'index**, pas de `k` périodes : index journalier sans
+  le 3 janvier, `n_periods=1` → la valeur du 4 janvier arrive le 2. Sur `irregular_index_timeseries` (dates annuelles
+  2015-2017 puis grille mensuelle), `n_periods=-1` envoie la valeur annuelle 2017 au 1er janvier 2018 (douze mois
+  plus tard). L'aller-retour n'est pas non plus garanti : une lacune retirée par le décalage est reconstruite sur la
+  grille régulière à l'inversion (`n_periods=-2` puis inverse : les dates 2015-01 et 2016-01 reviennent en 2016-11 et
+  2016-12, données réalistes série et panel).
+- **Attendu** : chaque date recule de `k` périodes exactement (`index - k * offset`), quelle que soit la régularité de
+  l'index — ou, à défaut, une `ValueError` sur un index non régulier ; jamais un déplacement silencieux de durée variable.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.delays.transformers import ShiftTransformer
+  idx = pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-04', '2024-01-05'])
+  ShiftTransformer(n_periods=1, frequency='D').fit_transform(pd.Series([1., 2., 3., 4.], index=idx))
+  # 2023-12-31 1.0 / 2024-01-01 2.0 / 2024-01-02 3.0 / 2024-01-04 4.0  (attendu : 3.0 au 2024-01-03)
+  ```
+- **Test** : `tests/unit/delays/transformers/test_shift_transformer.py::TestIndexRobustness::test_index_with_gaps_shifts_by_calendar_periods`,
+  `::test_index_with_gaps_round_trip[leading-gap-k=-2]`,
+  `tests/integration/delays/test_shift_mask_realistic.py::TestIrregularIndexTimeseries::test_shift_moves_every_date_by_one_month`,
+  `::test_shift_round_trip[k=-2]`, `::TestHeterogeneousCoveragePanel::test_shift_round_trip_per_entity[k=-2]`
+- **Correctif** : décision de l'auteur (2026-10-06) : décalage calendaire `index - k * index_offset_` (arithmétique d'offset pandas, date par date), exactement réversible ; une date hors de la grille d'un offset calendaire (non `Tick`) lève `ValueError: ... date(s) are not on its grid`. L'extension / troncature positionnelle (`_extend_index_start`, `_extend_index_end`) est supprimée.
+- **Statut** : corrigée
+
+### ANO-DELAYS-022 — `ShiftTransformer` perd le nom de l'index
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::ShiftTransformer` (`_extend_index_start`, `_extend_index_end`)
+- **Sévérité** : mineure
+- **Observé** : l'index étendu est la concaténation d'un `pd.date_range` sans nom et de l'index d'origine ; le nom
+  (`'periode'`, `'date'`…) disparaît après `transform` comme après `inverse_transform`. `MaskTransformer` le conserve.
+- **Attendu** : le nom de l'index d'entrée est conservé.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import ShiftTransformer
+  s = pd.Series(np.arange(6.), index=pd.date_range('2024-01-01', periods=6, freq='MS', name='periode'))
+  ShiftTransformer(n_periods=2, frequency='M').fit_transform(s).index.name   # None
+  ```
+- **Test** : `tests/unit/delays/transformers/test_shift_transformer.py::TestIndexRobustness::test_index_name_is_preserved` (deux cas)
+- **Correctif** : conséquence du décalage par arithmétique d'offset, qui conserve le nom de l'index.
+- **Statut** : corrigée
+
+### ANO-DELAYS-023 — `ShiftTransformer` / `MaskTransformer` : un panel passé directement lève une `AttributeError`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::_detect_index_components` (via `ShiftTransformer.fit`, `MaskTransformer.fit`)
+- **Sévérité** : mineure
+- **Observé** : sur un `MultiIndex`, `detect_index_frequency` renvoie un dictionnaire par entité ; `fit` échoue avec
+  `AttributeError: 'dict' object has no attribute 'multiplier'`. Le chemin panel prévu est `PanelwiseTransformer`
+  (ce que fait `PublicationDelayTransformer`), mais rien ne l'indique.
+- **Attendu** : `ValueError` explicite (« panel data: wrap the transformer in a PanelwiseTransformer ») ou traitement par
+  entité ; le test exige une `ValueError`.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import ShiftTransformer
+  idx = pd.MultiIndex.from_product([['FR', 'DE'], pd.date_range('2024-01-01', periods=6, freq='MS')])
+  ShiftTransformer(1, 'M').fit(pd.DataFrame({'a': np.arange(12.)}, index=idx))   # AttributeError
+  ```
+- **Test** : `tests/unit/delays/transformers/test_shift_transformer.py::TestIndexRobustness::test_multiindex_input_raises_a_clear_error`,
+  `tests/unit/delays/transformers/test_mask_transformer.py::TestIndexRobustness::test_multiindex_input_raises_a_clear_error`
+- **Correctif** : `_validate_time_series_input` lève `ValueError: ... got a MultiIndex (panel data): wrap it in a PanelwiseTransformer to apply it entity by entity.` dans `fit`, `transform` et `inverse_transform` des deux classes.
+- **Statut** : corrigée
+
+### ANO-DELAYS-024 — `ShiftTransformer` sur un index en jours ouvrés : une semaine vaut 7 jours ouvrés
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::ShiftTransformer._convert_shift_periods_to_index_periods`
+- **Sévérité** : mineure
+- **Observé** : la conversion passe par `DurationConverter.get_conversion_factor`, dont la table partagée assimile
+  `'B'` à `'D'` (voir ANO-UTILS-038, correctif limité à la comparaison) : `'W' → 'B'` vaut 7, `'M' → 'B'` 30. Sur un
+  index `B`, `ShiftTransformer(1, 'W')` recule de 7 jours ouvrés (≈ 1,4 semaine), `ShiftTransformer(1, 'M')` de 30
+  jours ouvrés (≈ 6 semaines).
+- **Attendu** : une semaine = 5 jours ouvrés (et un mois ≈ 21-22 jours ouvrés, ou un décalage calendaire ramené sur la
+  grille ouvrée).
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import ShiftTransformer
+  b = pd.Series(np.arange(10.), index=pd.date_range('2024-01-01', periods=10, freq='B'))
+  ShiftTransformer(1, 'W').fit_transform(b).index[0]   # 2023-12-21, attendu 2023-12-25
+  ```
+- **Test** : `tests/unit/delays/transformers/test_shift_transformer.py::TestShiftFrequency::test_week_on_business_day_index_is_five_business_days`
+- **Correctif** : sur un index `B`, le facteur est calculé en jours calendaires puis ramené à 5 jours ouvrés par semaine (`ShiftTransformer._to_index_periods`) : une semaine = 5, un mois = round(30 × 5 / 7) = 21 jours ouvrés. La table partagée de `DurationConverter` est inchangée.
+- **Statut** : corrigée
+
+### ANO-DELAYS-025 — `ShiftTransformer` ignore le multiplicateur de `frequency`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::ShiftTransformer._convert_shift_periods_to_index_periods`
+- **Sévérité** : mineure
+- **Observé** : `normalize_frequency('2M')` rend `'M'`, égal à la fréquence de l'index : aucune conversion, et
+  `ShiftTransformer(1, '2M')` décale d'**un** mois sur un index `MS`. `MaskTransformer(…, mask_frequency='2Q')`
+  honore au contraire le multiplicateur (semestres), et un index multiplié est rejeté (`_detect_index_components`).
+- **Attendu** : un décalage de deux mois par période, ou une `ValueError` comme pour un index multiplié ; jamais un
+  multiplicateur ignoré en silence. Le test admet les deux.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import ShiftTransformer
+  m = pd.Series(np.arange(6.), index=pd.date_range('2024-01-01', periods=6, freq='MS'))
+  ShiftTransformer(1, '2M').fit_transform(m).index[0]   # 2023-12-01, attendu 2023-11-01
+  ```
+- **Test** : `tests/unit/delays/transformers/test_shift_transformer.py::TestShiftFrequency::test_multiplied_shift_frequency_is_honoured_or_rejected`
+- **Correctif** : le facteur vient de `DurationConverter.get_conversion_factor(frequency, base de l'index)`, qui honore le multiplicateur (`'2M'` → 2 mois par période) ; plus de raccourci par égalité des fréquences normalisées.
+- **Statut** : corrigée
+
+### ANO-DELAYS-026 — Docstrings de `ShiftTransformer` et `MaskTransformer` ≠ code
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/delays/transformers.py::ShiftTransformer`, `::MaskTransformer`
+- **Sévérité** : mineure
+- **Observé** :
+  - `ShiftTransformer` : paramètre `frequency_check` (« ignore » / « warn » / « raise ») et attribut `is_series_`
+    documentés mais inexistants (l'exemple `ShiftTransformer(..., frequency_check='warn')` lève `TypeError`) ;
+    l'exemple « Shift forward by 2 monthly periods » avec `n_periods=2` recule les valeurs de deux mois (un
+    `n_periods` positif avance l'index vers le passé) ; l'exemple « Perfect inverse » inverse avec le second
+    transformateur la sortie du premier (`original.equals(series)` est faux) ; `freq='M'` est un alias déprécié ;
+    `fit` annonce une erreur `frequency_check='raise'` ; l'exemple de `_convert_shift_periods_to_index_periods`
+    appelle `self` hors de la classe.
+  - `MaskTransformer` : paramètre `prediction_date` et attributs `prediction_date`, `original_data_` documentés mais
+    inexistants (l'exemple lève `TypeError`) ; `how` absent de la section *Parameters* ; « Mask N most recent
+    observations » alors que `how='first'` masque les plus anciennes ; `transform` annoté `-> pd.Series` (renvoie
+    aussi un `DataFrame`) ; ni la sémantique calendaire des bords (ANO-DELAYS-017) ni le sens du masquage d'une
+    cellule à l'inversion (valeur d'origine restituée même sous une prédiction) ne sont décrits.
+- **Attendu** : docstrings alignées sur le code ; sens du signe de `n_periods` explicite (positif = valeurs avancées
+  vers des dates antérieures ; `PublicationDelayTransformer` passe un `n_periods` négatif).
+- **Reproduction** : `ShiftTransformer(n_periods=1, frequency='M', frequency_check='warn')` → `TypeError` ;
+  `MaskTransformer(n_obs=2, mask_frequency='M', prediction_date=datetime(2024, 3, 31))` → `TypeError`.
+- **Test** : sans `xfail` ([DOC]) ; le comportement réel est fixé par `TestShiftGoldValues` et `TestMaskGoldValues`.
+- **Correctif** : docstrings des deux classes réécrites (paramètres et attributs réels, sens du signe de `n_periods`, sémantique calendaire des positions, cumul et restitution des cellules masquées, exemples exécutés par doctest).
+- **Statut** : corrigée
+
+### ANO-DELAYS-027 — `MaskTransformer` : index hebdomadaire masqué par mois ou trimestre → `Invalid frequency: ME-SUN`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::MaskTransformer._generate_periods`
+- **Sévérité** : majeure
+- **Observé** : la fréquence des périodes de masque est construite avec la position **et l'ancre de l'index**
+  (`build_frequency_string(mask_frequency, self.index_position_, self.index_suffix_)`). Pour un index `W-SUN`
+  (ancre `SUN` conservée depuis le correctif d'ANO-UTILS-001), `mask_frequency='M'` donne `'ME-SUN'` et `transform`
+  lève `ValueError: Invalid frequency: ME-SUN, failed to parse with error message: ValueError('Bad freq suffix SUN')`.
+  Tout index hebdomadaire est donc impossible à masquer par mois, trimestre ou année. Pour un index `QS-FEB`, le
+  même mécanisme produirait des années commençant en février (`'YS-FEB'`), ce qui peut être voulu ou non.
+- **Attendu** : l'ancre d'un jour de semaine n'est pas reportée sur une fréquence mensuelle ou plus basse ; un index
+  hebdomadaire se masque comme un index journalier (dernier dimanche de chaque mois pour `how='last'`).
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import MaskTransformer
+  w = pd.Series(np.arange(13.), index=pd.date_range('2024-01-07', periods=13, freq='W-SUN'))
+  MaskTransformer(n_obs=1, mask_frequency='M').fit_transform(w)   # ValueError: Invalid frequency: ME-SUN
+  ```
+- **Test** : `tests/unit/delays/transformers/test_mask_transformer.py::TestMaskGoldValues::test_weekly_index_masked_by_month` (deux cas)
+- **Correctif** : les périodes de masque sont calculées par `get_period_boundaries` sur `mask_frequency` seule : l'ancre de l'index n'est plus reportée sur la fréquence de masque. Une ancre explicite (`'YE-NOV'`) est honorée.
+- **Statut** : corrigée
+
 ### Arbitrages de l'auteur (2026-10-04) sur `compare_and_detect_delays`
 - **Fuseaux horaires** : une date sans fuseau est lue en UTC face à une date avec fuseau ; deux dates avec fuseaux sont
   comparées comme des instants ; la colonne `download_date` garde la date telle que fournie. (Auparavant : `TypeError`

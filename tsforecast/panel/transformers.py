@@ -8,7 +8,7 @@ parameterization via callable factories or entity_kwargs.
 # Modules de base
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, Union, List, Any, Callable
+from typing import Dict, Optional, Union, List, Any, Callable, Tuple
 import warnings
 # Joblib
 from joblib import Parallel, delayed
@@ -23,6 +23,32 @@ from ..base.transformers import (
     ReversibleTransformerMixin
 )
 from .utils import normalize_entity_key
+
+# Fonction auxuliaire d'itération sur les groupes d'entités dans l'ordre des données
+def _groups_in_order_of_appearance(entity_groups) -> List[Tuple[Any, pd.Index]]:
+    """List the entity groups in the order of their first row in the data.
+
+    ``GroupBy.groups`` is sorted by key: iterating over it would return the
+    entities sorted, not in the order of the input.
+
+    Args:
+        entity_groups: Pandas ``GroupBy`` object over the entity keys.
+
+    Returns:
+        List of ``(entity_key, row_labels)`` pairs, in order of first appearance.
+
+    Examples:
+        >>> df = pd.DataFrame({'country': ['FR', 'DE', 'FR'], 'v': [1, 2, 3]})
+        >>> [key for key, _ in _groups_in_order_of_appearance(df.groupby('country'))]
+        ['FR', 'DE']
+    """
+    # Identification des positions d'apparition des groupes
+    first_positions = {key: positions.min() for key, positions in entity_groups.indices.items()}
+    # Extraction des groupes
+    groups = entity_groups.groups
+    # Classement des groupes dans leur ordre d'apparition
+    return [(key, groups[key]) for key in sorted(first_positions, key=first_positions.get)]
+
 
 # Classe d'application d'un transformer indépendamment sur chaque entité du panel
 class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixin):
@@ -419,7 +445,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         transformed_parts = []
 
         # Parcours des entités
-        for entity_key, group_idx in entity_groups.groups.items():
+        for entity_key, group_idx in _groups_in_order_of_appearance(entity_groups):
             # Normalisation de la clé de l'entité
             entity_key = normalize_entity_key(entity_key)
 
@@ -504,7 +530,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         inverted_parts = []
 
         # Parcours des entités
-        for entity_key, group_idx in entity_groups.groups.items():
+        for entity_key, group_idx in _groups_in_order_of_appearance(entity_groups):
             # Normalisation de l'entité
             entity_key = normalize_entity_key(entity_key)
 

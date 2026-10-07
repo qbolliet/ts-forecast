@@ -20,6 +20,12 @@ MONTH_ABBREVIATIONS: Tuple[str, ...] = (
     'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC',
 )
 
+# Nombre de jours calendaires par semaine
+DAYS_PER_WEEK: int = 7
+
+# Nombre de jours ouvrés par semaine (conversion d'une durée calendaire en jours ouvrés)
+BUSINESS_DAYS_PER_WEEK: int = 5
+
 # Abréviations pandas des jours de la semaine (ancres hebdomadaires, ex: 'W-MON')
 WEEKDAY_ABBREVIATIONS: Tuple[str, ...] = ('MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN')
 

@@ -8,19 +8,14 @@
 # permanent : le prompt C2 exige qu'il ne reste plus, en fin de campagne, que le
 # groupe "# hors campagne".
 
-# prompt D3
-tests/unit/delays/test_transformers.py::TestMaskTransformerBoundaries::test_series_end_with_how_first
-tests/unit/delays/test_transformers.py::TestMaskTransformerBoundaries::test_series_end_with_how_last
-tests/unit/delays/test_transformers.py::TestMaskTransformerBoundaries::test_series_start_with_how_first
-tests/unit/delays/test_transformers.py::TestMaskTransformerDataFrame::test_mask_dataframe_inverse_transform
-tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransform::test_fit_basic
-tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransform::test_fit_creates_shift_params
-tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransform::test_fit_transform
-tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerFitTransform::test_transform_basic
-tests/unit/delays/test_transformers.py::TestPublicationDelayTransformerParams::test_params_with_dict_reference_point
+# prompt D4
+tests/unit/delays/transformers/test_publication_delay_transformer.py::TestPublicationDelayTransformerFitTransform::test_fit_basic
+tests/unit/delays/transformers/test_publication_delay_transformer.py::TestPublicationDelayTransformerFitTransform::test_fit_creates_shift_params
+tests/unit/delays/transformers/test_publication_delay_transformer.py::TestPublicationDelayTransformerFitTransform::test_fit_transform
+tests/unit/delays/transformers/test_publication_delay_transformer.py::TestPublicationDelayTransformerFitTransform::test_transform_basic
+tests/unit/delays/transformers/test_publication_delay_transformer.py::TestPublicationDelayTransformerParams::test_params_with_dict_reference_point
 
 # prompt D5
-tests/integration/delays/test_integration.py::TestCombinedTransformations::test_shift_then_mask
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_last_observation_aligned_with_prediction_date
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_workflow_multi_frequency
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_workflow_panel_mono_frequency

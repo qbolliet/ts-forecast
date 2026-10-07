@@ -9,6 +9,8 @@ This module provides a modular architecture with:
 # Modules de base
 import pandas as pd
 import numpy as np
+from pandas.tseries.frequencies import to_offset
+from pandas.tseries.offsets import Tick
 import math
 from typing import Any, Callable, Dict, Optional, Union, List, Literal, Tuple
 from datetime import datetime
@@ -31,6 +33,7 @@ from tsforecast.utils.duration import convert_duration, normalize_duration, Dura
 from ..panel import PanelwiseTransformer, normalize_entity_key, is_panel_data, get_entity_levels
 from tsforecast.utils.validation import validate_temporal_data
 from tsforecast.utils.parse import build_frequency_string
+from tsforecast.utils._constants import BUSINESS_DAYS_PER_WEEK, DAYS_PER_WEEK
 from .report import DelayFitReport, ColumnDelayRecord
 
 # Journalisation : aucun handler n'est configuré ici, c'est à l'application d'en fournir un
@@ -262,8 +265,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             # Distinction suivant que le masquage est possible ou non
             if result['can_mask']:
                 # Ajout au dictionnaire résultat
+                # Un nombre négatif signifie une donnée déjà publiée : rien à masquer
                 self.mask_params[col] = {
-                    'n_obs': result['n_periods'],
+                    'n_obs': max(0, result['n_periods']),
                     'mask_frequency': result['target_frequency'],
                     'how': 'last'
                 }
@@ -445,8 +449,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             )
         )
 
-        # Jointure sur l'index des données transformées
-        df_transformed = pd.concat(list_df_transformed, axis=1, join='outer', ignore_index=False)
+        # Jointure sur l'index des données transformées (aucune colonne transformée : index seul)
+        df_transformed = (pd.concat(list_df_transformed, axis=1, join='outer', ignore_index=False)
+                          if list_df_transformed else pd.DataFrame(index=X.index))
         # Ajout des colonnes non transformées
         untransformed_columns = set(X.columns) - set(df_transformed.columns)
         if untransformed_columns :
@@ -491,8 +496,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             )
         )
 
-        # Jointure sur l'index des données inversées
-        df_inversed = pd.concat(list_df_inversed, axis=1, join='outer', ignore_index=False)
+        # Jointure sur l'index des données inversées (aucune colonne inversée : index seul)
+        df_inversed = (pd.concat(list_df_inversed, axis=1, join='outer', ignore_index=False)
+                       if list_df_inversed else pd.DataFrame(index=X.index))
 
         # Ajout des colonnes non transformées
         untransformed_columns = set(X.columns) - set(df_inversed.columns)
@@ -846,7 +852,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         list_df_transformed = []
         # Suivi des paramètres déjà traités
         seen_params = set()
-        
+        # Les masques nuls ne transforment rien : colonnes laissées telles quelles
+        params_dict = _active_params(params_dict, transformer_type)
+
         # Parcours des colonnes et de leurs paramètres
         for params in params_dict.values():
             # Création d'une clé hashable à partir des paramètres
@@ -901,7 +909,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         list_df_inversed = []
         # Suivi des paramètres déjà traités
         seen_params = set()
-        
+        # Les masques nuls n'ont pas été appliqués
+        params_dict = _active_params(params_dict, transformer_type)
+
         # Parcours des colonnes et de leurs paramètres
         for params in params_dict.values():
             # Création d'une clé hashable à partir des paramètres
@@ -924,7 +934,33 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
 
         return list_df_inversed
 
-# Fonction de création d'une factory de PublicationDelayTransformer pour l'utilisation sur des données de panel
+# Fonction de filtrage des paramètres sans effet
+def _active_params(params_dict: Dict[str, Dict], transformer_type: str) -> Dict[str, Dict]:
+    """Drop the mask parameters that mask nothing (``n_obs == 0``).
+
+    A zero mask is a no-op: no ``MaskTransformer`` is built for it, which also
+    spares the check of its mask frequency (equal to the index frequency when
+    the delay is shorter than the elapsed part of the period).
+
+    Args:
+        params_dict: Dictionary mapping column names to transformation parameters.
+        transformer_type: ``'shift'`` or ``'mask'``.
+
+    Returns:
+        The parameters to apply.
+
+    Examples:
+        >>> _active_params({'a': {'n_obs': 0}, 'b': {'n_obs': 2}}, 'mask')
+        {'b': {'n_obs': 2}}
+    """
+    # Retourne les paramètres intacts pour le mode 'shift'
+    if transformer_type != 'mask':
+        return params_dict
+    # Filtre des colonnes pour lesquelles le nombre d'observations masquées est non nul
+    return {col: params for col, params in params_dict.items() if params['n_obs'] != 0}
+
+
+# Fonction de détection des composantes de la fréquence d'un index
 def _detect_index_components(index: pd.Index) -> Tuple[str, Optional[str], Optional[str]]:
     """Detect the base frequency, position and anchor of an index.
 
@@ -1371,59 +1407,167 @@ def prepare_entity_kwargs_from_delays(
     return entity_kwargs
 
 
-# Transformer 'shiftant' les séries sur un nombre donnée de périodes
+# Nom de colonne interne d'une Series convertie en DataFrame
+_SERIES_COLUMN = '__series__'
+
+
+# Fonction de validation d'un paramètre entier
+def _validate_integer(value: Any, name: str, allow_negative: bool) -> None:
+    """Check that a parameter is an integer, optionally non-negative.
+
+    Args:
+        value: Value of the parameter.
+        name: Name of the parameter, used in the error messages.
+        allow_negative: Whether negative values are accepted.
+
+    Raises:
+        TypeError: If ``value`` is not an integer (booleans are rejected).
+        ValueError: If ``value`` is negative while ``allow_negative`` is False.
+
+    Examples:
+        >>> _validate_integer(3, 'n_obs', allow_negative=False)
+        >>> _validate_integer(-1, 'n_obs', allow_negative=False)
+        Traceback (most recent call last):
+        ...
+        ValueError: 'n_obs' must be a non-negative integer, got -1
+    """
+    # Les booléens sont des entiers pour Python, mais pas un nombre de périodes valide
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"'{name}' must be an integer, got {type(value).__name__}")
+    if not allow_negative and value < 0:
+        raise ValueError(f"'{name}' must be a non-negative integer, got {value}")
+
+
+# Fonction de validation des données d'entrée des transformateurs auxiliaires
+def _validate_time_series_input(
+    X: Union[pd.Series, pd.DataFrame],
+    owner: str
+) -> Tuple[Union[pd.Series, pd.DataFrame], Optional[str]]:
+    """Validate a time series and return it sorted, on a ``DatetimeIndex``.
+
+    Args:
+        X: Series or DataFrame indexed by dates (``DatetimeIndex``, ``PeriodIndex``
+            or date strings).
+        owner: Name of the calling class, used in the error messages.
+
+    Returns:
+        Tuple ``(data, period_freq)``: the validated data, sorted by date, and the
+        frequency of the input ``PeriodIndex`` (None for any other index), used to
+        give the output the type of the input index.
+
+    Raises:
+        ValueError: If ``X`` is not a pandas object, has a ``MultiIndex`` (panel
+            data), or has an index that cannot be read as dates or with duplicates.
+
+    Examples:
+        >>> s = pd.Series([1.0, 2.0], index=pd.period_range('2024-01', periods=2, freq='M'))
+        >>> data, period_freq = _validate_time_series_input(s, 'ShiftTransformer')
+        >>> type(data.index).__name__, period_freq
+        ('DatetimeIndex', 'M')
+    """
+    # Validation du type de données
+    if not isinstance(X, (pd.Series, pd.DataFrame)):
+        raise ValueError("X must be a pandas Series or DataFrame")
+    # Les panels passent par PanelwiseTransformer, entité par entité
+    if isinstance(X.index, pd.MultiIndex):
+        raise ValueError(
+            f"{owner} expects a single time index, got a MultiIndex (panel data): "
+            f"wrap it in a PanelwiseTransformer to apply it entity by entity."
+        )
+    # Mémorisation du type d'index périodique pour la restitution
+    period_freq = X.index.freqstr if isinstance(X.index, pd.PeriodIndex) else None
+    # Validation de la structure temporelle et tri
+    data = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
+    return data, period_freq
+
+
+# Fonction de restitution du type d'index d'entrée
+def _restore_index_type(
+    data: Union[pd.Series, pd.DataFrame],
+    period_freq: Optional[str]
+) -> Union[pd.Series, pd.DataFrame]:
+    """Give back a ``PeriodIndex`` to data whose input index was periodic.
+
+    Args:
+        data: Data on a ``DatetimeIndex`` (period starts).
+        period_freq: Frequency of the input ``PeriodIndex``, None if the input
+            index was not periodic.
+
+    Returns:
+        ``data`` itself, its index converted to periods when ``period_freq`` is set.
+    """
+    # Cas où l'index est un period index
+    if period_freq is not None:
+        data.index = data.index.to_period(period_freq)
+    # Cas où l'index est un datetime index
+    return data
+
+
+# Fonction de détection de l'offset de la grille de l'index
+def _index_offset(base: str, position: Optional[str], suffix: Optional[str]) -> pd.DateOffset:
+    """Build the pandas offset of the grid of an index from its components.
+
+    Args:
+        base: Base frequency code ('M', 'Q', 'D', 'W', 'h', ...).
+        position: Position ('S', 'E' or None).
+        suffix: Anchor ('DEC', 'WED', ... or None).
+
+    Returns:
+        The offset of one index period (period end when no position is known).
+
+    Examples:
+        >>> _index_offset('Q', 'E', 'DEC').freqstr
+        'QE-DEC'
+    """
+    return to_offset(build_frequency_string(base, position, suffix, default_position='E'))
+
+
+# Transformer décalant les séries d'un nombre donné de périodes
 class ShiftTransformer(BaseEstimator, TransformerMixin):
-    """Shift time series data by N periods with no data loss.
+    """Shift time series data by a number of calendar periods, without data loss.
 
-    This transformer extends the index to avoid losing data at boundaries.
-    For positive shifts, extends at the beginning; for negative shifts, extends at the end.
-    Supports both Series and DataFrame inputs.
+    Every date moves by exactly ``n_periods`` periods of ``frequency``, converted
+    into periods of the index frequency detected at ``fit``: the values are kept,
+    only their dates change. A **positive** ``n_periods`` moves the values to
+    **earlier** dates, a negative one to later dates. ``PublicationDelayTransformer``
+    passes a negative ``n_periods``, so that the value observed at ``t`` appears at
+    ``t + delay``.
 
-    Parameters:
-        n_periods: Number of periods to shift (can be negative)
-        frequency: Frequency for period arithmetic ('D', 'M', 'Q', 'W', 'h', etc.)
-        frequency_check: Frequency validation mode
-            - "ignore": No validation (default)
-            - "warn": Issue warning if detected frequency differs
-            - "raise": Raise error if detected frequency differs
+    The shift is calendar arithmetic on each date (``date - n * offset``): it does
+    not depend on the neighbouring dates, so an index with gaps (or an irregular
+    index whose dates lie on the grid of the detected frequency) keeps its gaps,
+    and ``inverse_transform`` restores the input exactly.
+
+    When ``frequency`` is coarser than the index, the number of index periods is
+    ``round(n_periods * factor)``, with ``factor`` the nominal ratio of the two
+    durations (1 month = 30 days, 1 week = 7 days, 1 quarter = 3 months; on a
+    business-day index, 1 week = 5 business days). The conversion is exact for
+    nested calendar units (quarters on a monthly index, years on a quarterly one,
+    weeks on a daily one) and approximate otherwise (months on a daily index).
+    A multiplier of ``frequency`` is honoured (``'2M'`` = two months per period).
+
+    Args:
+        n_periods: Number of periods of ``frequency`` to shift; positive values
+            move the data to earlier dates, negative values to later dates.
+        frequency: Frequency of the shift arithmetic ('D', 'W', 'M', 'Q', 'Y',
+            'h', ...), possibly multiplied; it cannot be finer than the index.
 
     Attributes:
-        n_periods: Stored number of periods to shift
-        frequency: Stored frequency code
-        frequency_check: Frequency validation mode
-        is_series_: Whether input is Series (set during fit)
-        index_frequency_: Detected index frequency (set during fit)
-
-    Notes:
-        The `frequency` parameter is used for SHIFT ARITHMETIC (period calculation),
-        while the DETECTED INDEX FREQUENCY is used for INDEX EXTENSION.
-
-        This allows shifting monthly data on a daily index:
-        - Index frequency: 'D' (detected automatically)
-        - Shift frequency: 'M' (parameter)
-        - Result: Shifts by monthly periods, extends daily index
-
-        Use `frequency_check` to validate consistency between detected and parameter frequencies.
+        index_frequency_: Base code of the index frequency detected at ``fit``.
+        index_position_: Position ('S', 'E' or None) of the index frequency.
+        index_suffix_: Anchor of the index frequency (e.g. 'DEC', 'WED') or None.
+        index_offset_: Pandas offset of one index period.
+        index_periods_: Number of index periods the dates move by in ``transform``.
 
     Examples:
         >>> import pandas as pd
-        >>> dates = pd.date_range('2024-01-01', periods=5, freq='M')
-        >>> series = pd.Series([1, 2, 3, 4, 5], index=dates, name='GDP')
-        >>>
-        >>> # Shift forward by 2 monthly periods
-        >>> shifter = ShiftTransformer(n_periods=2, frequency='M')
+        >>> dates = pd.date_range('2024-01-01', periods=4, freq='MS')
+        >>> series = pd.Series([1.0, 2.0, 3.0, 4.0], index=dates, name='GDP')
+        >>> shifter = ShiftTransformer(n_periods=-2, frequency='M')
         >>> shifted = shifter.fit_transform(series)
-        >>> len(shifted)  # Same length, no data loss
-        5
-        >>>
-        >>> # Works with DataFrames
-        >>> df = pd.DataFrame({'GDP': [1, 2, 3], 'CPI': [100, 101, 102]}, index=dates[:3])
-        >>> shifter = ShiftTransformer(n_periods=1, frequency='M', frequency_check='warn')
-        >>> shifted_df = shifter.fit_transform(df)
-        >>>
-        >>> # Perfect inverse
-        >>> original = shifter.inverse_transform(shifted)
-        >>> original.equals(series)
+        >>> shifted.index[0].strftime('%Y-%m-%d')  # value of January published in March
+        '2024-03-01'
+        >>> shifter.inverse_transform(shifted).equals(series)
         True
     """
 
@@ -1433,11 +1577,11 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         n_periods: int,
         frequency: str,
     ):
-        """Initialize ShiftTransformer with frequency validation.
+        """Initialize ShiftTransformer.
 
         Args:
-            n_periods: Number of periods to shift (can be negative)
-            frequency: Frequency for period arithmetic ('D', 'M', 'Q', etc.)
+            n_periods: Number of periods to shift (positive = earlier dates).
+            frequency: Frequency of the shift arithmetic ('D', 'M', 'Q', ...).
         """
         # Initialisation des attributs
         self.n_periods = n_periods
@@ -1445,659 +1589,444 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
 
     # Méthode d'entraînement
     def fit(self, X: Union[pd.Series, pd.DataFrame], y=None):
-        """Fit transformer and detect index frequency.
+        """Validate the parameters and detect the index frequency.
 
         Args:
-            X: Time series or DataFrame to fit
-            y: Ignored
+            X: Time series or DataFrame indexed by dates.
+            y: Ignored.
 
         Returns:
             self
 
         Raises:
-            ValueError: If X doesn't have DatetimeIndex, has non-unique index,
-                       or has insufficient observations (< 2)
-            ValueError: If frequency_check='raise' and frequencies don't match
+            TypeError: If ``n_periods`` is not an integer.
+            ValueError: If ``X`` is not a pandas Series / DataFrame, has a
+                ``MultiIndex``, an index that cannot be read as dates, duplicated
+                dates, fewer than two observations, an undetectable or multiplied
+                frequency, or if ``frequency`` is unknown or finer than the index.
         """
-        # Validation du type de données
-        if not isinstance(X, (pd.Series, pd.DataFrame)):
-            raise ValueError("X must be a pandas Series or DataFrame")
+        # Validation des paramètres
+        _validate_integer(self.n_periods, 'n_periods', allow_negative=True)
 
         # Validation de la structure temporelle des données
-        X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
+        data, _ = _validate_time_series_input(X, 'ShiftTransformer')
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = _detect_index_components(X.index)
+        base, position, suffix = _detect_index_components(data.index)
+
+        # Validation : la fréquence du décalage ne doit pas être plus fine que l'index
+        if is_higher_frequency(self.frequency, base):
+            raise ValueError(
+                f"Shift frequency '{self.frequency}' cannot be more granular "
+                f"than index frequency '{base}'. "
+                f"Example: you can shift by months ('M') on a daily ('D') index, "
+                f"but not by days ('D') on a monthly ('M') index."
+            )
+
+        # Stockage des composantes de l'index et du décalage en périodes d'index
+        self.index_frequency_, self.index_position_, self.index_suffix_ = base, position, suffix
+        self.index_offset_ = _index_offset(base, position, suffix)
+        self.index_periods_ = self._to_index_periods(base)
 
         return self
 
     # Méthode de transformation
     def transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
-        """Shift series/dataframe by n_periods with index extension.
+        """Move every date by ``n_periods`` periods (earlier for a positive shift).
 
         Args:
-            X: Time series or DataFrame to transform
+            X: Time series or DataFrame indexed by dates on the grid of the index
+                frequency detected at ``fit`` (a single observation is enough).
 
         Returns:
-            Shifted time series or DataFrame with same type as input
+            Shifted data of the same type, sorted by date, with the same values,
+            columns, dtypes, names and index type.
 
         Raises:
-            ValueError: If X is not a pandas Series/DataFrame or doesn't have DatetimeIndex
+            NotFittedError: If the transformer is not fitted.
+            ValueError: If ``X`` is invalid (see ``fit``) or has dates off the grid
+                of the index frequency.
         """
-        # Validation du type de données
-        if not isinstance(X, (pd.Series, pd.DataFrame)):
-            raise ValueError("X must be a pandas Series or DataFrame")
+        # Vérification que le transformer est entraîné
+        check_is_fitted(self, 'index_offset_')
 
         # Validation de la structure temporelle des données
-        X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
+        data, period_freq = _validate_time_series_input(X, 'ShiftTransformer')
 
-        # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = _detect_index_components(X.index)
-
-        # Branchement selon le type de données
-        return self._shift_by_periods(data=X, n_periods=self.n_periods)
+        # Décalage vers le passé pour un nombre de périodes positif
+        return _restore_index_type(self._shift(data, self.index_periods_), period_freq)
 
     # Méthode d'inversion de la transformation
     def inverse_transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
-        """Reverse shift to recover original data.
+        """Move every date back by ``n_periods`` periods.
 
-        This is stateless - recalculates everything based on inverse logic.
+        ``inverse_transform(transform(X))`` restores ``X`` exactly (sorted by date).
 
         Args:
-            X: Transformed series or DataFrame
+            X: Shifted time series or DataFrame.
 
         Returns:
-            Original series or DataFrame (perfect symmetry with transform)
+            Data with its original dates.
 
         Raises:
-            ValueError: If X is not a pandas Series/DataFrame or doesn't have DatetimeIndex
+            NotFittedError: If the transformer is not fitted.
+            ValueError: If ``X`` is invalid (see ``fit``) or has dates off the grid
+                of the index frequency.
         """
-        # Validation du type de données
-        if not isinstance(X, (pd.Series, pd.DataFrame)):
-            raise ValueError("X must be a pandas Series or DataFrame")
+        # Vérification que le transformer est entraîné
+        check_is_fitted(self, 'index_offset_')
 
         # Validation de la structure temporelle des données
-        X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
+        data, period_freq = _validate_time_series_input(X, 'ShiftTransformer')
 
-        # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = _detect_index_components(X.index)
+        # Décalage opposé
+        return _restore_index_type(self._shift(data, -self.index_periods_), period_freq)
 
-        # Branchement selon le type de données (shift opposé)
-        return self._shift_by_periods(data=X, n_periods=-self.n_periods,)
-
-    # Méthode auxiliaire de conversion des périodes de shift en périodes d'index
-    def _convert_shift_periods_to_index_periods(self, n_periods: int) -> int:
-        """Convert shift periods to equivalent index periods.
-
-        When shift frequency is less granular than index frequency (e.g., monthly
-        on daily index), calculates how many index periods correspond to n_periods
-        in the shift frequency.
+    # Méthode auxiliaire de conversion du décalage en périodes d'index
+    def _to_index_periods(self, index_base: str) -> int:
+        """Convert ``n_periods`` periods of ``frequency`` into index periods.
 
         Args:
-            n_periods: Number of periods in shift frequency
+            index_base: Base code of the index frequency.
 
         Returns:
-            Number of equivalent periods in index frequency
-
-        Examples:
-            # Shifting by 2 months on daily index: 2 months ≈ 60 days
-            >>> self._convert_shift_periods_to_index_periods(2)
-            60
+            Number of index periods, rounded to the nearest integer.
         """
-        # Normalisation des fréquences
-        shift_freq_normalized = normalize_frequency(self.frequency)
-        index_freq_normalized = normalize_frequency(self.index_frequency_)
-
-        # Si les fréquences sont identiques, pas de conversion
-        if shift_freq_normalized == index_freq_normalized:
-            return n_periods
-
-        # Calcul du facteur de conversion via DurationConverter
+        # Conversion via le facteur nominal entre durées (multiplicateur inclus)
         converter = DurationConverter()
-        try:
-            # Exemple: get_conversion_factor('M', 'D') = 30 (1 mois = 30 jours)
-            conversion_factor = converter.get_conversion_factor(
-                shift_freq_normalized,
-                index_freq_normalized
-            )
-        except ValueError as e:
-            raise ValueError(
-                f"Cannot convert between frequencies '{self.frequency}' and "
-                f"'{self.index_frequency_}': {str(e)}"
-            )
+        if index_base == 'B' and normalize_frequency(self.frequency) != 'B':
+            # Index en jours ouvrés : durée calendaire ramenée à 5 jours ouvrés par semaine
+            factor = converter.get_conversion_factor(self.frequency, 'D') * BUSINESS_DAYS_PER_WEEK / DAYS_PER_WEEK
+        else:
+            factor = converter.get_conversion_factor(self.frequency, index_base)
 
-        # Application du facteur avec arrondi approprié
-        return round(n_periods * conversion_factor)
+        return int(round(self.n_periods * factor))
 
-    # Méthode auxiliaire de décalage des périodes
-    def _shift_by_periods(self, data: Union[pd.Series, pd.DataFrame], n_periods: int) -> Union[pd.Series, pd.DataFrame]:
-        """Core shift logic using index extension and truncation.
-
-        Positive shift: Extend at start, drop from end
-        Negative shift: Extend at end, drop from start
-        This avoids NaN introduction.
+    # Méthode auxiliaire de décalage calendaire
+    def _shift(self, data: Union[pd.Series, pd.DataFrame], index_periods: int) -> Union[pd.Series, pd.DataFrame]:
+        """Move every date of ``data`` back by ``index_periods`` index periods.
 
         Args:
-            data: Series or DataFrame to shift
-            n_periods: Number of periods to shift (in shift frequency)
+            data: Validated data (sorted, ``DatetimeIndex``).
+            index_periods: Number of index periods (positive = earlier dates).
 
         Returns:
-            Series or DataFrame with shifted index (same values, different dates)
+            Copy of ``data`` on the shifted index.
+
+        Raises:
+            ValueError: If a date is off the grid of the index frequency.
         """
-        # Cas où aucun shift n'est nécessaire
-        if n_periods == 0:
-            return data.copy()
-
-        # Validation : shift frequency ne doit PAS être plus granulaire que l'index
-        if is_higher_frequency(self.frequency, self.index_frequency_):
-            raise ValueError(
-                f"Shift frequency '{self.frequency}' cannot be more granular "
-                f"than index frequency '{self.index_frequency_}'. "
-                f"Cannot shift by {self.frequency} on a {self.index_frequency_} index.\n"
-                f"Example: You can shift by months ('M') on a daily ('D') index, "
-                f"but not by days ('D') on a monthly ('M') index."
-            )
-
-        # Conversion des périodes si les fréquences diffèrent
-        index_periods = self._convert_shift_periods_to_index_periods(n_periods)
-
-        # Construction de la fréquence complète avec position et suffixe
-        full_freq = build_frequency_string(
-            self.index_frequency_,
-            self.index_position_,
-            self.index_suffix_,
-            default_position='E'
-        )
-
-        if index_periods > 0:
-            # Shift positif : extension au début, suppression à la fin
-            extended_index = self._extend_index_start(
-                data.index,
-                abs(index_periods),
-                full_freq
-            )
-            # Conservation seulement des len(series) premières dates
-            new_index = extended_index[:len(data)]
-
-        else:  # index_periods < 0
-            # Shift négatif : extension à la fin, suppression au début
-            extended_index = self._extend_index_end(
-                data.index,
-                abs(index_periods),
-                full_freq
-            )
-            # Conservation seulement des len(series) dernières dates
-            new_index = extended_index[-len(data):]
-
-        # Création de la série avec le nouvel index
+        # Copie indépendante des données
         result = data.copy()
-        result.index = new_index
+        # Cas où aucun décalage n'est nécessaire
+        if index_periods == 0:
+            return result
 
+        # Vérification que les dates sont sur la grille (arithmétique d'offset exacte et réversible)
+        self._check_on_grid(data.index)
+
+        # Décalage calendaire de chaque date, indépendamment de ses voisines
+        result.index = data.index - index_periods * self.index_offset_
         return result
 
+    # Méthode auxiliaire de vérification de l'alignement des dates sur la grille de l'index
+    def _check_on_grid(self, index: pd.DatetimeIndex) -> None:
+        """Check that every date lies on the grid of the index frequency.
 
-    # Méthode auxiliaire d'extension de l'index au début
-    def _extend_index_start(
-        self,
-        original_index: pd.DatetimeIndex,
-        n_periods: int,
-        freq: str
-    ) -> pd.DatetimeIndex:
-        """Extend index backward by adding periods before the first date.
-
-        Used for positive shifts: adds dates before the original index,
-        preserving data by shifting the temporal alignment.
+        Fixed-length offsets (days, hours, ...) are exact on any date; calendar
+        offsets (month starts, quarter ends, Wednesdays, business days...) roll a
+        date that is not on their grid, which would break the inversion.
 
         Args:
-            original_index: Original DatetimeIndex
-            n_periods: Number of periods to add before first date
-            freq: Complete frequency string including position/suffix (e.g., 'MS', 'QE-DEC')
+            index: Dates to check.
 
-        Returns:
-            Extended DatetimeIndex with new periods prepended
-
-        Notes:
-            freq should be built using _build_complete_frequency_string()
+        Raises:
+            ValueError: If a date is off the grid.
         """
-        # Extraction de la première date
-        first_date = original_index[0]
-
-        # Génération de n_periods nouvelles dates avant la première date
-        new_dates = pd.date_range(
-            end=first_date,
-            periods=n_periods + 1,  # +1 car end est inclus
-            freq=freq
-        )[:-1]  # Exclure first_date (déjà dans original)
-
-        # Concaténation
-        return new_dates.append(original_index)
-
-    # Méthode auxiliaire d'extension de l'index à la fin
-    def _extend_index_end(
-        self,
-        original_index: pd.DatetimeIndex,
-        n_periods: int,
-        freq: str
-    ) -> pd.DatetimeIndex:
-        """Extend index forward by adding periods after the last date.
-
-        Used for negative shifts: adds dates after the original index,
-        preserving data by shifting the temporal alignment.
-
-        Args:
-            original_index: Original DatetimeIndex
-            n_periods: Number of periods to add after last date
-            freq: Complete frequency string including position/suffix (e.g., 'MS', 'QE-DEC')
-
-        Returns:
-            Extended DatetimeIndex with new periods appended
-
-        Notes:
-            freq should be built using _build_complete_frequency_string()
-        """
-        # Extraction de la dernière date
-        last_date = original_index[-1]
-
-        # Génération de n_periods nouvelles dates après la dernière date
-        new_dates = pd.date_range(
-            start=last_date,
-            periods=n_periods + 1, # +1, car start est déjà inclus
-            freq=freq
-        )[1:]  # Exclure last_date (déjà dans original)
-
-        # Concaténation
-        return original_index.append(new_dates)
+        # Les offsets de durée fixe sont exacts sur toute date
+        if isinstance(self.index_offset_, Tick):
+            return
+        off_grid = [date for date in index if not self.index_offset_.is_on_offset(date)]
+        if off_grid:
+            raise ValueError(
+                f"ShiftTransformer shifts by whole periods of the index frequency "
+                f"'{self.index_offset_.freqstr}', but {len(off_grid)} date(s) are not on its grid "
+                f"(first: {off_grid[0]}). Align the index on the frequency first."
+            )
 
 
-# Transformer masquant les séries sur un nombre donnée de périodes
+# Transformer masquant un nombre donné d'observations par période
 class MaskTransformer(BaseEstimator, TransformerMixin):
-    """Simple helper to mask N observations per period.
+    """Mask the first or last ``n_obs`` positions of each period.
 
-    This is a pure operational transformer with no inference logic.
+    The index is cut into the calendar periods of ``mask_frequency`` (anchors and
+    multipliers honoured: ``'QE-NOV'``, ``'2Q'``...). In each period, the positions
+    are those of the **regular grid** of the index frequency detected at ``fit``
+    (e.g. the 31 days of January for a daily index, the 3 months of a quarter for
+    a monthly one), whatever the dates present: ``how='last'`` masks the
+    observations on the last ``n_obs`` positions, ``how='first'`` those on the
+    first ones. A position absent from the data (start or end of the series, gap,
+    irregular index) masks nothing, and an observation is never masked because
+    a neighbouring one is missing. This reproduces, in every period of the
+    history, the information missing at the same position of the period as the
+    prediction date (``PublicationDelayTransformer``, strategy ``'mask'``).
 
-    Parameters:
-        n_obs: Number of observations to mask per period
-        mask_frequency: Frequency for period grouping ('D', 'M', 'Q', 'W', 'h', etc.)
+    Masked cells are set to NaN and stored; ``inverse_transform`` puts their
+    original values back. The store accumulates the cells masked by every
+    ``transform`` call since ``fit`` (the latest value wins for a date masked
+    twice), so that the train and test sets transformed by the same fitted
+    instance can both be inverted.
+
+    Args:
+        n_obs: Number of positions to mask per period (non-negative integer).
+        mask_frequency: Frequency of the periods ('W', 'M', 'Q', 'Y', '2Q', ...),
+            strictly coarser than the index frequency.
+        how: ``'last'`` (default) masks the last positions of each period,
+            ``'first'`` the first ones.
 
     Attributes:
-        n_obs: Stored number of observations to mask per period
-        mask_frequency: Stored frequency for period grouping
-        prediction_date: Stored prediction date
-        original_data_: Original data before masking (for inverse_transform)
+        index_frequency_: Base code of the index frequency detected at ``fit``.
+        index_position_: Position ('S', 'E' or None) of the index frequency.
+        index_suffix_: Anchor of the index frequency or None.
+        index_offset_: Pandas offset of one index period (grid of the positions).
+        masked_values_: Dictionary ``{column: Series}`` of the original values of
+            the masked cells (a Series is stored under an internal column name).
+        original_dtypes_: Dictionary ``{column: dtype}`` of the transformed data,
+            used to give integer columns back their dtype at the inversion.
 
     Examples:
         >>> import pandas as pd
-        >>> from datetime import datetime
-        >>> dates = pd.date_range('2024-01-01', periods=90, freq='D')
-        >>> series = pd.Series(range(90), index=dates, name='GDP')
-        >>>
-        >>> # Mask 2 most recent observations per month
-        >>> masker = MaskTransformer(
-        ...     n_obs=2,
-        ...     mask_frequency='M',
-        ...     prediction_date=datetime(2024, 3, 31)
-        ... )
+        >>> dates = pd.date_range('2024-01-01', periods=6, freq='MS')
+        >>> series = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], index=dates, name='GDP')
+        >>> masker = MaskTransformer(n_obs=1, mask_frequency='Q', how='last')
         >>> masked = masker.fit_transform(series)
-        >>>
-        >>> # Restore original data
-        >>> original = masker.inverse_transform(masked)
+        >>> masked[masked.isna()].index.strftime('%Y-%m').tolist()  # last month of each quarter
+        ['2024-03', '2024-06']
+        >>> masker.inverse_transform(masked).equals(series)
+        True
     """
 
     # Initialisation
-    def __init__(self, n_obs: int, mask_frequency: str, how: Literal['first', "last"]="last"):
+    def __init__(self, n_obs: int, mask_frequency: str, how: Literal['first', 'last'] = 'last'):
         """Initialize MaskTransformer.
 
         Args:
-            n_obs: Number of observations to mask per period
-            mask_frequency: Frequency for period grouping ('D', 'M', 'Q', etc.)
-            how: Reference date for masking
+            n_obs: Number of positions to mask per period.
+            mask_frequency: Frequency of the periods ('W', 'M', 'Q', ...).
+            how: ``'first'`` or ``'last'`` positions of each period.
         """
-        # Initialisation des attributs
+        # Initialisation des attributs (aucun attribut ajusté avant fit, convention sklearn)
         self.n_obs = n_obs
         self.mask_frequency = mask_frequency
         self.how = how
-        # Initialisation des données masquées pour les transformations inverses
-        self.masked_data_ = None
 
     # Méthode d'entraînement
     def fit(self, X: Union[pd.Series, pd.DataFrame], y=None):
-        """Fit transformer (no-op for MaskTransformer).
+        """Validate the parameters, detect the index frequency and empty the store.
 
         Args:
-            X: Time series to fit
-            y: Ignored
+            X: Time series or DataFrame indexed by dates.
+            y: Ignored.
 
         Returns:
             self
+
+        Raises:
+            TypeError: If ``n_obs`` is not an integer.
+            ValueError: If ``n_obs`` is negative, ``how`` is not ``'first'`` or
+                ``'last'``, ``mask_frequency`` is unknown or not strictly coarser
+                than the index frequency, or if ``X`` is invalid (not pandas,
+                ``MultiIndex``, non-date or duplicated index, fewer than two
+                observations, undetectable or multiplied frequency).
         """
-        # Validation du type de données
-        if not isinstance(X, (pd.Series, pd.DataFrame)):
-            raise ValueError("X must be a pandas Series or DataFrame")
+        # Validation des paramètres
+        _validate_integer(self.n_obs, 'n_obs', allow_negative=False)
+        if self.how not in ('first', 'last'):
+            raise ValueError(f"how must be 'first' or 'last', got {self.how!r}")
 
         # Validation de la structure temporelle des données
-        X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
+        data, _ = _validate_time_series_input(X, 'MaskTransformer')
 
         # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = _detect_index_components(X.index)
+        base, position, suffix = _detect_index_components(data.index)
+
+        # Vérification que la fréquence de l'index est strictement supérieure à la fréquence du masque
+        if not is_higher_frequency(base, self.mask_frequency):
+            raise ValueError(
+                "The index frequency should be strictly higher than the mask frequency. "
+                f"The index frequency is {base} and the mask frequency is {self.mask_frequency}"
+            )
+
+        # Stockage des composantes de l'index et réinitialisation du stock de cellules masquées
+        self.index_frequency_, self.index_position_, self.index_suffix_ = base, position, suffix
+        self.index_offset_ = _index_offset(base, position, suffix)
+        self.masked_values_: Dict[Any, pd.Series] = {}
+        self.original_dtypes_: Dict[Any, Any] = {}
 
         return self
 
     # Méthode de transformation des données
-    def transform(self, X: Union[pd.Series, pd.DataFrame]) -> pd.Series:
-        """Mask N most recent observations per period.
+    def transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
+        """Set to NaN the observations on the masked positions of each period.
 
         Args:
-            X: Time series to transform
+            X: Time series or DataFrame indexed by dates (a single observation is
+                enough).
 
         Returns:
-            Masked time series
+            Masked data of the same type, sorted by date (masked integer columns
+            become float).
 
         Raises:
-            ValueError: If X is not a pandas Series or doesn't have DatetimeIndex
+            NotFittedError: If the transformer is not fitted.
+            ValueError: If ``X`` is invalid (see ``fit``).
         """
-        # Validation du type de données
-        if not isinstance(X, (pd.Series, pd.DataFrame)):
-            raise ValueError("X must be a pandas Series or DataFrame")
+        # Vérification que le transformer est entraîné
+        check_is_fitted(self, 'index_offset_')
 
         # Validation de la structure temporelle des données
-        X = validate_temporal_data(data=X, time_col=None, panel_cols=None, strict=True, sort_data=True, return_metadata=False)
+        data, period_freq = _validate_time_series_input(X, 'MaskTransformer')
+        frame = data.to_frame(_SERIES_COLUMN) if isinstance(data, pd.Series) else data
 
-        # Détection de la fréquence de l'index
-        self.index_frequency_, self.index_position_, self.index_suffix_ = _detect_index_components(X.index)
-    
-        return self._mask_n_obs_per_period(X)
+        # Lignes situées sur une position masquée de leur période
+        rows = self._rows_to_mask(frame.index)
+
+        # Stockage des valeurs d'origine des cellules masquées
+        self._store(frame, rows)
+
+        # Masquage des lignes concernées (copie indépendante)
+        condition = pd.DataFrame(np.repeat(rows[:, None], frame.shape[1], axis=1), index=frame.index, columns=frame.columns)
+        masked = frame.mask(condition) if rows.any() else frame.copy()
+
+        # Retour au type d'entrée
+        if isinstance(data, pd.Series):
+            masked = masked[_SERIES_COLUMN].rename(data.name)
+        return _restore_index_type(masked, period_freq)
 
     # Méthode de transformation inverse des données
     def inverse_transform(self, X: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
-        """Restore masked values from stored masked data.
+        """Put back the original values of the masked cells present in ``X``.
 
-        Combines the input X with the masked rows stored during transform,
-        then validates and sorts the combined data to maintain temporal structure.
+        A cell masked by a ``transform`` call since ``fit`` recovers its original
+        value, even when ``X`` carries another value there (a prediction): the
+        inversion undoes the masking. Every other cell is returned as given, and
+        the output has the index of ``X`` (sorted by date): stored cells whose date
+        or column is not in ``X`` are ignored. Integer columns recover their dtype
+        when no NaN is left.
 
         Args:
-            X: Masked series or DataFrame
+            X: Masked series or DataFrame (or a part of it).
 
         Returns:
-            Restored series or DataFrame with original values restored for masked rows
+            Data with the masked cells restored.
 
         Raises:
-            ValueError: If transform has not been called yet
+            NotFittedError: If the transformer is not fitted.
+            ValueError: If ``X`` is invalid (see ``fit``).
         """
-        if self.masked_data_ is None:
-            raise ValueError("Must call transform before inverse_transform")
+        # Vérification que le transformer est entraîné
+        check_is_fitted(self, 'index_offset_')
 
-        # Validation du type de données
-        if not isinstance(X, (pd.Series, pd.DataFrame)):
-            raise ValueError("X must be a pandas Series or DataFrame")
+        # Validation de la structure temporelle des données
+        data, period_freq = _validate_time_series_input(X, 'MaskTransformer')
+        frame = data.to_frame(_SERIES_COLUMN) if isinstance(data, pd.Series) else data.copy()
 
-        # Si aucune donnée masquée n'a été stockée, retourner X tel quel
-        if len(self.masked_data_) == 0:
-            return X.copy()
+        # Restitution colonne par colonne des cellules masquées présentes dans X
+        for column in frame.columns:
+            stored = self.masked_values_.get(column)
+            if stored is None:
+                continue
+            is_restored = frame.index.isin(stored.index)
+            if is_restored.any():
+                frame[column] = frame[column].where(~is_restored, stored.reindex(frame.index))
+            # Restitution du type entier d'origine quand aucune valeur manquante ne subsiste
+            frame[column] = self._restore_dtype(frame[column], self.original_dtypes_.get(column))
 
-        # Combine X avec les lignes masquées
-        # Concaténation
-        combined = pd.concat([X, self.masked_data_])
-        # Gestion des duplicats en conservant la dernière occurrence (celles de masked_data_ qui viennent en dernier)
-        combined = combined[~combined.index.duplicated(keep='last')]
+        # Retour au type d'entrée
+        restored = frame[_SERIES_COLUMN].rename(data.name) if isinstance(data, pd.Series) else frame
+        return _restore_index_type(restored, period_freq)
 
-        # Tri des données pour maintenir la structure de série temporelle
-        restored = validate_temporal_data(
-            data=combined,
-            time_col=None,
-            panel_cols=None,
-            strict=True,
-            sort_data=True,
-            return_metadata=False
-        )
-
-        return restored
-
-    # Méthode auxiliaire de masque du nombre de périodes adapté
-    def _mask_n_obs_per_period(self, data: Union[pd.Series, pd.DataFrame]) -> Union[pd.Series, pd.DataFrame]:
-        """Core masking logic: mask N most recent observations per period.
-
-        Masks the N most recent observations within each period defined by
-        mask_frequency, setting masked values to NaN. For incomplete periods
-        at boundaries, artificially extends the period before masking, then
-        returns to original index. Stores masked rows in self.masked_data_ 
-        for later restoration via inverse_transform.
+    # Méthode auxiliaire de repérage des lignes à masquer
+    def _rows_to_mask(self, index: pd.DatetimeIndex) -> np.ndarray:
+        """Flag the dates on the first / last ``n_obs`` positions of their period.
 
         Args:
-            data: Series or DataFrame to mask
+            index: Sorted dates of the data.
 
         Returns:
-            Series or DataFrame with masked observations (NaN values)
-
-        Raises:
-            ValueError: If index frequency is not higher than mask frequency
+            Boolean array, True for the dates to mask.
         """
-        # Cas où aucun masquage n'est nécessaire
-        if self.n_obs == 0:
-            # Initialiser masked_data_ avec une structure vide
-            if isinstance(data, pd.Series):
-                self.masked_data_ = pd.Series(dtype=data.dtype, name=data.name)
+        # Initialisation du masque
+        n_dates = len(index)
+        rows = np.zeros(n_dates, dtype=bool)
+        if self.n_obs == 0 or n_dates == 0:
+            return rows
+
+        # Parcours des périodes contenant au moins une observation
+        start_pos = 0
+        while start_pos < n_dates:
+            # Bornes calendaires [début, fin) de la période de la première date restante
+            period_start, period_end = get_period_boundaries(index[start_pos], self.mask_frequency)
+            end_pos = max(int(index.searchsorted(period_end, side='left')), start_pos + 1)
+
+            # Grille régulière des positions de la période, à la fréquence de l'index
+            grid = pd.date_range(start=period_start, end=period_end, freq=self.index_offset_, inclusive='left')
+            if len(grid) > 0:
+                # Position de chaque observation : dernier point de grille qui la précède ou l'égale
+                positions = np.clip(grid.searchsorted(index[start_pos:end_pos], side='right') - 1, 0, None)
+                if self.how == 'first':
+                    rows[start_pos:end_pos] = positions < self.n_obs
+                else:
+                    rows[start_pos:end_pos] = (len(grid) - 1 - positions) < self.n_obs
+
+            start_pos = end_pos
+
+        return rows
+
+    # Méthode auxiliaire de stockage des cellules masquées
+    def _store(self, frame: pd.DataFrame, rows: np.ndarray) -> None:
+        """Add the original values of the masked rows to the store.
+
+        Args:
+            frame: Validated data before masking.
+            rows: Boolean array of the rows masked.
+        """
+        masked_rows = frame.loc[rows]
+        for column in frame.columns:
+            # Type d'origine de la colonne (pour la restitution)
+            self.original_dtypes_[column] = frame[column].dtype
+            if masked_rows.empty:
+                continue
+            new_values = masked_rows[column]
+            previous = self.masked_values_.get(column)
+            if previous is None:
+                self.masked_values_[column] = new_values
             else:
-                self.masked_data_ = pd.DataFrame(columns=data.columns)
-            return data.copy()
+                # Cumul des transform successifs : la dernière valeur l'emporte pour une même date
+                kept = previous[~previous.index.isin(new_values.index)]
+                self.masked_values_[column] = pd.concat([kept, new_values]).sort_index()
 
-        # Vérification que la fréquence de l'index est strictement supérieure à la fréquence du masque
-        if not is_higher_frequency(self.index_frequency_, self.mask_frequency):
-            raise ValueError(
-                "The index frequency should be strictly higher than the mask frequency."
-                f"The index frequency is {self.index_frequency_} and the mask frequency is {self.mask_frequency}"
-            )
-
-        # Copie indépendante des données
-        masked_data = data.copy()
-        
-        # Stockage de l'index original pour filtrer les résultats à la fin
-        original_index = data.index
-
-        # Génération des périodes
-        periods = self._generate_periods(
-            start_date=data.index.min(),
-            end_date=data.index.max(),
-            frequency=self.mask_frequency
-        )
-
-        # Liste pour collecter les lignes masquées
-        masked_rows_list = []
-
-        # Masque dans chaque période
-        for i, (period_start, period_end) in enumerate(periods):
-            # Détermination si c'est la première ou dernière période
-            is_first_period = (i == 0)
-            is_last_period = (i == len(periods) - 1)
-            
-            # Filtre des observations dans cette période
-            period_mask = (data.index >= period_start) & (data.index < period_end)
-            period_obs = data[period_mask]
-            
-            # Extension artificielle pour les périodes incomplètes aux extrémités
-            if (is_first_period or is_last_period) and len(period_obs) > 0:
-                period_obs = self._extend_period_if_incomplete(
-                    period_obs, 
-                    period_start, 
-                    period_end,
-                    is_first_period,
-                    is_last_period
-                )
-
-            # Calcul du nombre de périodes à masquer
-            n_to_mask = min(self.n_obs, len(period_obs))
-
-            if (len(period_obs) > 0) & (self.how == 'last'):
-                # Masque des n_obs plus récentes
-                most_recent_indices = period_obs.index[-n_to_mask:]
-                # Stockage uniquement des lignes qui existaient dans les données originales
-                original_most_recent = [idx for idx in most_recent_indices if idx in original_index]
-                if original_most_recent:
-                    masked_rows_list.append(data.loc[original_most_recent])
-                # Masquage dans masked_data (seulement les indices originaux)
-                for idx in most_recent_indices:
-                    if idx in masked_data.index:
-                        masked_data.loc[idx] = np.nan
-                        
-            elif (len(period_obs) > 0) & (self.how =='first'):
-                # Masque des n_obs les plus anciennes
-                oldest_indices = period_obs.index[:n_to_mask]
-                # Stockage uniquement des lignes qui existaient dans les données originales
-                original_oldest = [idx for idx in oldest_indices if idx in original_index]
-                if original_oldest:
-                    masked_rows_list.append(data.loc[original_oldest])
-                # Masquage dans masked_data (seulement les indices originaux)
-                for idx in oldest_indices:
-                    if idx in masked_data.index:
-                        masked_data.loc[idx] = np.nan
-
-        # Concaténation de toutes les lignes masquées dans self.masked_data_
-        if masked_rows_list:
-            self.masked_data_ = pd.concat(masked_rows_list)
-        else:
-            # Aucune ligne masquée
-            if isinstance(data, pd.Series):
-                self.masked_data_ = pd.Series(dtype=data.dtype, name=data.name)
-            else:
-                self.masked_data_ = pd.DataFrame(columns=data.columns)
-
-        return masked_data
-
-    # Méthode auxiliaire d'extension des périodes incomplètes
-    def _extend_period_if_incomplete(
-        self,
-        period_obs: Union[pd.Series, pd.DataFrame],
-        period_start: pd.Timestamp,
-        period_end: pd.Timestamp,
-        is_first_period: bool,
-        is_last_period: bool
-    ) -> Union[pd.Series, pd.DataFrame]:
-        """Extend incomplete periods at boundaries with artificial dates.
-        
-        For incomplete periods at the start or end of the data, this method
-        adds missing sub-periods (filled with NaN) to ensure proper masking
-        behavior. After masking, only the original indices are kept.
-        
-        Args:
-            period_obs: Observations in the current period
-            period_start: Start of the period
-            period_end: End of the period
-            is_first_period: Whether this is the first period
-            is_last_period: Whether this is the last period
-            
-        Returns:
-            Extended period observations (or original if already complete)
-        """
-        # Reconstitution de la fréquence avec position et suffixe
-        pandas_freq = build_frequency_string(
-            self.index_frequency_,
-            self.index_position_,
-            self.index_suffix_,
-            default_position='E'
-        )
-        
-        # Génération de l'index complet pour cette période
-        full_period_index = pd.date_range(
-            start=period_start,
-            end=period_end,
-            freq=pandas_freq,
-            inclusive='left'  # Exclusion de period_end
-        )
-        
-        # Vérification si la période est déjà complète
-        if len(period_obs) == len(full_period_index):
-            return period_obs
-        
-        # Extension seulement aux extrémités
-        first_obs_date = period_obs.index.min()
-        last_obs_date = period_obs.index.max()
-        
-        # Vérification que c'est bien une période incomplète aux extrémités
-        if is_first_period:
-            # Période incomplète au début : vérification si les premières dates manquent
-            if first_obs_date > period_start:
-                # Création des dates manquantes au début
-                missing_start_dates = full_period_index[full_period_index < first_obs_date]
-                if len(missing_start_dates) > 0:
-                    # Création d'une série/dataframe avec NaN pour les dates manquantes
-                    if isinstance(period_obs, pd.Series):
-                        missing_data = pd.Series(
-                            np.nan, 
-                            index=missing_start_dates,
-                            name=period_obs.name,
-                            dtype=period_obs.dtype
-                        )
-                    else:
-                        missing_data = pd.DataFrame(
-                            index=missing_start_dates,
-                            columns=period_obs.columns
-                        )
-                    # Concaténation avec les données existantes et tri
-                    period_obs = pd.concat([missing_data, period_obs]).sort_index()
-        
-        if is_last_period:
-            # Période incomplète à la fin : vérification si les dernières dates manquent
-            if last_obs_date < full_period_index[-1]:
-                # Création des dates manquantes à la fin
-                missing_end_dates = full_period_index[full_period_index > last_obs_date]
-                if len(missing_end_dates) > 0:
-                    # Création d'une série/dataframe avec NaN pour les dates manquantes
-                    if isinstance(period_obs, pd.Series):
-                        missing_data = pd.Series(
-                            np.nan,
-                            index=missing_end_dates,
-                            name=period_obs.name,
-                            dtype=period_obs.dtype
-                        )
-                    else:
-                        missing_data = pd.DataFrame(
-                            index=missing_end_dates,
-                            columns=period_obs.columns
-                        )
-                    # Concaténation avec les données existantes et tri
-                    period_obs = pd.concat([period_obs, missing_data]).sort_index()
-        
-        return period_obs
-
-    # Méthode auxiliaire de génération de période
-    def _generate_periods(
-        self,
-        start_date: pd.Timestamp,
-        end_date: pd.Timestamp,
-        frequency: str
-    ) -> List[tuple[datetime, datetime]]:
-        """Generate list of (period_start, period_end) tuples.
+    # Méthode auxiliaire de restitution du type entier d'une colonne
+    @staticmethod
+    def _restore_dtype(column: pd.Series, dtype: Any) -> pd.Series:
+        """Give an integer or boolean column back its dtype when it is lossless.
 
         Args:
-            start_date: Start date for period generation
-            end_date: End date for period generation
-            frequency: Frequency code for periods
+            column: Restored column.
+            dtype: Dtype of the column at ``transform`` time (None if unknown).
 
         Returns:
-            List of (period_start, period_end) tuples
+            The column, cast back to ``dtype`` when it has no NaN and the cast
+            does not change any value; unchanged otherwise.
         """
-        # Reconstitution de la fréquence avec position et suffixe
-        pandas_freq = build_frequency_string(
-            frequency,
-            self.index_position_,
-            self.index_suffix_,
-            default_position='E'
-        )
-
-        # Génération des dates de début de période
-        period_starts = pd.date_range(
-            start=start_date,
-            end=end_date,
-            freq=pandas_freq
-        )
-
-        # Création des tuples (start, end) pour chaque période
-        # Initialisation de la liste des périodes
-        periods = []
-        # Parcours des périodes
-        for period_date in period_starts:
-            # Extraction des dates de début et de fin de période
-            period_start, period_end = get_period_boundaries(period_date, frequency)
-            # Ajout du tuple à la liste
-            periods.append((period_start, period_end))
-
-        return periods
+        if dtype is None or column.dtype == dtype:
+            return column
+        if not (pd.api.types.is_integer_dtype(dtype) or pd.api.types.is_bool_dtype(dtype)):
+            return column
+        if column.isna().any():
+            return column
+        try:
+            converted = column.astype(dtype)
+        except (TypeError, ValueError):
+            return column
+        return converted if (converted == column).all() else column

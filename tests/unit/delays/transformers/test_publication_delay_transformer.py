@@ -1,7 +1,9 @@
-"""Tests unitaires pour le module transformers.
+"""Unit tests for ``PublicationDelayTransformer`` (``tsforecast.delays.transformers``).
 
-Ce module contient les tests pour ShiftTransformer, MaskTransformer,
-PublicationDelayTransformer et les fonctions auxiliaires associées.
+Moved as-is from ``tests/unit/delays/test_transformers.py`` by prompt D3 (split of
+the module tests into one file per tested symbol, mirror rule of
+``tests_and_refactoring_prompts.md`` §3). Triage of the inherited failures and
+completion of the scenarios: prompt D4.
 """
 
 import pytest
@@ -12,16 +14,7 @@ from datetime import datetime, timedelta
 from sklearn.utils.validation import check_is_fitted, NotFittedError
 
 # Import du module à tester
-from tsforecast.delays.transformers import (
-    PublicationDelayTransformer,
-    ShiftTransformer, 
-    MaskTransformer,
-    prepare_entity_kwargs_from_delays,
-    _build_entity_params,
-    _extract_param_by_variable,
-    _resolve_strategy,
-    _detect_index_components
-)
+from tsforecast.delays.transformers import PublicationDelayTransformer
 
 # ============================================================================
 # Fixtures de données de test
@@ -122,547 +115,6 @@ def delays_dataframe_panel():
     df = pd.DataFrame(data)
     df = df.set_index(['country', 'variable'])
     return df
-
-
-@pytest.fixture
-def daily_series():
-    """Generate daily time series for mask transformer tests.
-    
-    Returns:
-        pd.Series: Daily series spanning 3 months.
-    """
-    dates = pd.date_range('2024-01-01', '2024-03-31', freq='D')
-    return pd.Series(range(len(dates)), index=dates, name='value')
-
-
-@pytest.fixture
-def monthly_series():
-    """Generate monthly time series for shift transformer tests.
-    
-    Returns:
-        pd.Series: Monthly series spanning 12 months.
-    """
-    dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-    return pd.Series(range(12), index=dates, name='value')
-
-
-@pytest.fixture
-def daily_dataframe():
-    """Generate daily DataFrame for multi-column tests.
-    
-    Returns:
-        pd.DataFrame: Daily DataFrame with multiple columns.
-    """
-    dates = pd.date_range('2024-01-01', '2024-03-31', freq='D')
-    return pd.DataFrame({
-        'col1': range(len(dates)),
-        'col2': range(100, 100 + len(dates)),
-        'col3': np.random.randn(len(dates))
-    }, index=dates)
-
-
-# ============================================================================
-# Tests de la classe ShiftTransformer - Fonctionnement de base
-# ============================================================================
-
-class TestShiftTransformerBasic:
-    """Tests de base pour la classe ShiftTransformer."""
-
-    def test_shift_positive_no_nan_introduced(self, monthly_series):
-        """Vérification qu'un shift positif n'introduit pas de NaN."""
-        shifter = ShiftTransformer(n_periods=3, frequency='M')
-        shifted = shifter.fit_transform(monthly_series)
-        
-        # Aucun NaN ne doit être introduit
-        assert shifted.isna().sum() == 0
-        # Longueur identique
-        assert len(shifted) == len(monthly_series)
-
-    def test_shift_negative_no_nan_introduced(self, monthly_series):
-        """Vérification qu'un shift négatif n'introduit pas de NaN."""
-        shifter = ShiftTransformer(n_periods=-3, frequency='M')
-        shifted = shifter.fit_transform(monthly_series)
-        
-        # Aucun NaN ne doit être introduit
-        assert shifted.isna().sum() == 0
-        # Longueur identique
-        assert len(shifted) == len(monthly_series)
-
-    def test_shift_zero_returns_copy(self, monthly_series):
-        """Vérification qu'un shift de 0 retourne une copie identique."""
-        shifter = ShiftTransformer(n_periods=0, frequency='M')
-        shifted = shifter.fit_transform(monthly_series)
-        
-        # Données identiques
-        pd.testing.assert_series_equal(shifted, monthly_series)
-
-    def test_shift_correct_date_calculation_positive(self):
-        """Vérification que le shift positif déplace l'index correctement."""
-        dates = pd.date_range('2024-01-01', periods=5, freq='MS')
-        series = pd.Series([10, 20, 30, 40, 50], index=dates, name='test')
-        
-        shifter = ShiftTransformer(n_periods=2, frequency='M')
-        shifted = shifter.fit_transform(series)
-        
-        # Shift positif = extension au début, donc dates plus anciennes
-        # La première date originale était 2024-01-01, avec shift +2, elle devient 2023-11-01
-        expected_first_date = pd.Timestamp('2023-11-01')
-        assert shifted.index[0] == expected_first_date
-        
-        # Les valeurs doivent rester dans le même ordre
-        np.testing.assert_array_equal(shifted.values, series.values)
-
-    def test_shift_correct_date_calculation_negative(self):
-        """Vérification que le shift négatif déplace l'index correctement."""
-        dates = pd.date_range('2024-01-01', periods=5, freq='MS')
-        series = pd.Series([10, 20, 30, 40, 50], index=dates, name='test')
-        
-        shifter = ShiftTransformer(n_periods=-2, frequency='M')
-        shifted = shifter.fit_transform(series)
-        
-        # Shift négatif = extension à la fin, donc dates plus récentes
-        # La dernière date originale était 2024-05-01, avec shift -2, elle devient 2024-07-01
-        expected_last_date = pd.Timestamp('2024-07-01')
-        assert shifted.index[-1] == expected_last_date
-        
-        # Les valeurs doivent rester dans le même ordre
-        np.testing.assert_array_equal(shifted.values, series.values)
-
-    def test_shift_transform_then_inverse_transform_recovers_original(self, monthly_series):
-        """Vérification que transform puis inverse_transform retourne les données initiales."""
-        shifter = ShiftTransformer(n_periods=3, frequency='M')
-        
-        # Application de la transformation
-        shifted = shifter.fit_transform(monthly_series)
-        
-        # Application de la transformation inverse
-        recovered = shifter.inverse_transform(shifted)
-        
-        # Vérification de la récupération des données
-        pd.testing.assert_index_equal(recovered.index, monthly_series.index)
-        np.testing.assert_array_equal(recovered.values, monthly_series.values)
-        assert recovered.name == monthly_series.name
-
-    def test_shift_negative_transform_then_inverse_transform_recovers_original(self, monthly_series):
-        """Vérification que transform puis inverse_transform fonctionne avec shift négatif."""
-        shifter = ShiftTransformer(n_periods=-5, frequency='M')
-        
-        shifted = shifter.fit_transform(monthly_series)
-        recovered = shifter.inverse_transform(shifted)
-        
-        pd.testing.assert_index_equal(recovered.index, monthly_series.index)
-        np.testing.assert_array_equal(recovered.values, monthly_series.values)
-
-
-class TestShiftTransformerDataFrame:
-    """Tests du ShiftTransformer avec des DataFrames."""
-
-    def test_shift_dataframe_no_nan_introduced(self, daily_dataframe):
-        """Vérification qu'un shift sur DataFrame n'introduit pas de NaN."""
-        shifter = ShiftTransformer(n_periods=10, frequency='D')
-        shifted = shifter.fit_transform(daily_dataframe)
-        
-        # Aucun NaN ne doit être introduit (en plus de ceux éventuellement déjà présents)
-        original_nan_count = daily_dataframe.isna().sum().sum()
-        shifted_nan_count = shifted.isna().sum().sum()
-        assert shifted_nan_count == original_nan_count
-
-    def test_shift_dataframe_preserves_columns(self, daily_dataframe):
-        """Vérification que les colonnes sont préservées."""
-        shifter = ShiftTransformer(n_periods=5, frequency='D')
-        shifted = shifter.fit_transform(daily_dataframe)
-        
-        assert list(shifted.columns) == list(daily_dataframe.columns)
-
-    def test_shift_dataframe_transform_inverse_transform(self, daily_dataframe):
-        """Vérification de la récupération pour DataFrame."""
-        shifter = ShiftTransformer(n_periods=7, frequency='D')
-        
-        shifted = shifter.fit_transform(daily_dataframe)
-        recovered = shifter.inverse_transform(shifted)
-        
-        pd.testing.assert_index_equal(recovered.index, daily_dataframe.index)
-        pd.testing.assert_frame_equal(recovered, daily_dataframe, check_exact=False)
-
-
-class TestShiftTransformerFrequencies:
-    """Tests du ShiftTransformer avec différentes fréquences."""
-
-    def test_shift_monthly_on_daily_index(self):
-        """Test d'un shift mensuel sur un index journalier."""
-        dates = pd.date_range('2024-01-01', periods=90, freq='D')
-        series = pd.Series(range(90), index=dates)
-        
-        # Shift de 1 mois sur données journalières
-        shifter = ShiftTransformer(n_periods=1, frequency='M')
-        shifted = shifter.fit_transform(series)
-        
-        # L'index doit avoir reculé d'environ 30 jours
-        delta_days = (shifted.index[0] - series.index[0]).days
-        assert -35 <= delta_days <= -25  # Environ 1 mois
-
-    def test_shift_quarterly_on_monthly_index(self):
-        """Test d'un shift trimestriel sur un index mensuel."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        series = pd.Series(range(12), index=dates)
-        
-        shifter = ShiftTransformer(n_periods=1, frequency='Q')
-        shifted = shifter.fit_transform(series)
-        
-        # 1 trimestre = 3 mois, shift positif = extension au début
-        delta_months = (shifted.index[0].year - series.index[0].year) * 12 + \
-                       (shifted.index[0].month - series.index[0].month)
-        assert delta_months == -3
-
-    def test_shift_preserves_month_start_position(self):
-        """Vérification que la position de début de mois est préservée."""
-        dates = pd.date_range('2024-01-01', periods=5, freq='MS')
-        series = pd.Series([1, 2, 3, 4, 5], index=dates)
-        
-        shifter = ShiftTransformer(n_periods=1, frequency='M')
-        shifted = shifter.fit_transform(series)
-        
-        # Toutes les dates doivent être au début du mois (jour 1)
-        assert all(d.day == 1 for d in shifted.index)
-
-    def test_shift_preserves_month_end_position(self):
-        """Vérification que la position de fin de mois est préservée."""
-        dates = pd.date_range('2024-01-31', periods=5, freq='ME')
-        series = pd.Series([1, 2, 3, 4, 5], index=dates)
-        
-        shifter = ShiftTransformer(n_periods=1, frequency='M')
-        shifted = shifter.fit_transform(series)
-        
-        # Toutes les dates doivent être en fin de mois
-        for d in shifted.index:
-            next_day = d + pd.Timedelta(days=1)
-            assert next_day.day == 1
-
-
-class TestMultipliedIndexFrequency:
-    """Les transformateurs décalent par périodes d'index entières : un index multiplié est rejeté."""
-
-    def test_detect_index_components(self):
-        """Base, position et ancre de l'index (sans multiplicateur)."""
-        assert _detect_index_components(pd.date_range('2024-01-01', periods=6, freq='QS')) == ('Q', 'S', 'JAN')
-
-    def test_multiplied_index_is_rejected(self):
-        """Un index '2MS' ne doit pas être traité comme mensuel."""
-        with pytest.raises(ValueError, match="Multiplied index frequency"):
-            _detect_index_components(pd.date_range('2024-01-01', periods=6, freq='2MS'))
-
-    def test_shift_fit_rejects_a_multiplied_index(self):
-        """Le rejet intervient dès le fit."""
-        series = pd.Series(range(6), index=pd.date_range('2024-01-01', periods=6, freq='2MS'), dtype=float)
-        with pytest.raises(ValueError, match="Multiplied index frequency"):
-            ShiftTransformer(n_periods=1, frequency='M').fit(series)
-
-    def test_mask_fit_rejects_a_multiplied_index(self):
-        """Idem pour le masquage."""
-        series = pd.Series(range(6), index=pd.date_range('2024-01-01', periods=6, freq='2MS'), dtype=float)
-        with pytest.raises(ValueError, match="Multiplied index frequency"):
-            MaskTransformer(n_obs=1, mask_frequency='Q', how='last').fit(series)
-
-
-class TestShiftTransformerEdgeCases:
-    """Tests des cas limites pour ShiftTransformer."""
-
-    def test_invalid_input_type(self):
-        """Rejet des entrées non-pandas."""
-        shifter = ShiftTransformer(n_periods=1, frequency='D')
-        with pytest.raises(ValueError, match="must be a pandas Series or DataFrame"):
-            shifter.fit([1, 2, 3])
-
-    def test_non_datetime_index(self):
-        """Rejet des index non-datetime."""
-        series = pd.Series([1, 2, 3], index=[0, 1, 2])
-        shifter = ShiftTransformer(n_periods=1, frequency='D')
-        with pytest.raises(ValueError):
-            shifter.fit_transform(series)
-
-    def test_unsorted_index_auto_corrected(self):
-        """Les index non triés doivent être automatiquement triés."""
-        dates = pd.date_range('2024-01-01', periods=5, freq='D')
-        series = pd.Series([1, 2, 3, 4, 5], index=dates)
-        # Mélange de la série
-        series = series.iloc[[2, 0, 4, 1, 3]]
-        
-        shifter = ShiftTransformer(n_periods=1, frequency='D')
-        shifted = shifter.fit_transform(series)
-        
-        # Le résultat doit avoir un index trié
-        assert shifted.index.is_monotonic_increasing
-
-    def test_daily_frequency_multiday(self):
-        """Test avec plusieurs jours pour vérifier le shift."""
-        dates = pd.date_range('2024-01-01', periods=30, freq='D')
-        series = pd.Series(range(30), index=dates)
-        shifter = ShiftTransformer(n_periods=5, frequency='D')
-        
-        shifted = shifter.fit_transform(series)
-        
-        assert len(shifted) == len(series)
-        # Shift positif = extension au début (dates plus anciennes)
-        delta_days = (shifted.index[0] - series.index[0]).days
-        assert delta_days == -5
-
-    def test_dataframe_multicolumn_types_preserved(self):
-        """Test DataFrame avec plusieurs colonnes de types différents."""
-        dates = pd.date_range('2024-01-01', periods=10, freq='D')
-        df = pd.DataFrame({
-            'int_col': range(10),
-            'float_col': [float(x) for x in range(10)],
-            'str_col': [f'val_{x}' for x in range(10)]
-        }, index=dates)
-        
-        shifter = ShiftTransformer(n_periods=2, frequency='D')
-        shifted = shifter.fit_transform(df)
-        
-        # Toutes les colonnes doivent être préservées
-        assert list(shifted.columns) == list(df.columns)
-        # Le type string doit être préservé
-        assert shifted['str_col'].dtype == object
-
-    def test_higher_frequency_shift_raises_error(self):
-        """Test qu'un shift de fréquence plus granulaire que l'index lève une erreur."""
-        # Index mensuel
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        series = pd.Series(range(12), index=dates)
-        
-        # Tentative de shift journalier (plus granulaire)
-        shifter = ShiftTransformer(n_periods=5, frequency='D')
-        
-        with pytest.raises(ValueError, match="cannot be more granular"):
-            shifter.fit_transform(series)
-
-
-# ============================================================================
-# Tests de la classe MaskTransformer - Fonctionnement de base
-# ============================================================================
-
-class TestMaskTransformerBasic:
-    """Tests de base pour la classe MaskTransformer."""
-
-    def test_basic_masking_last(self, daily_series):
-        """Test de base du masquage des dernières observations."""
-        masker = MaskTransformer(n_obs=2, mask_frequency='M', how='last')
-        masked = masker.fit_transform(daily_series)
-        
-        # Des valeurs doivent être masquées (NaN)
-        assert masked.isna().sum() > 0
-        # La longueur doit rester la même
-        assert len(masked) == len(daily_series)
-
-    def test_basic_masking_first(self, daily_series):
-        """Test de base du masquage des premières observations."""
-        masker = MaskTransformer(n_obs=2, mask_frequency='M', how='first')
-        masked = masker.fit_transform(daily_series)
-        
-        # Des valeurs doivent être masquées (NaN)
-        assert masked.isna().sum() > 0
-        # La longueur doit rester la même
-        assert len(masked) == len(daily_series)
-
-    def test_zero_masking(self, daily_series):
-        """Test avec n_obs=0 (pas de masquage)."""
-        masker = MaskTransformer(n_obs=0, mask_frequency='M')
-        masked = masker.fit_transform(daily_series)
-        
-        # Aucune valeur ne doit être masquée
-        assert masked.isna().sum() == 0
-        pd.testing.assert_series_equal(masked, daily_series)
-
-    def test_transform_then_inverse_transform_recovers_original(self, daily_series):
-        """Vérification que transform puis inverse_transform retourne les données initiales."""
-        masker = MaskTransformer(n_obs=3, mask_frequency='M', how='last')
-        
-        masked = masker.fit_transform(daily_series)
-        recovered = masker.inverse_transform(masked)
-        
-        # Les données originales doivent être parfaitement restaurées
-        pd.testing.assert_index_equal(recovered.index, daily_series.index)
-        np.testing.assert_array_equal(recovered.values, daily_series.values)
-        assert recovered.name == daily_series.name
-
-    def test_transform_inverse_transform_how_first(self, daily_series):
-        """Vérification de la récupération avec how='first'."""
-        masker = MaskTransformer(n_obs=5, mask_frequency='M', how='first')
-        
-        masked = masker.fit_transform(daily_series)
-        recovered = masker.inverse_transform(masked)
-        
-        pd.testing.assert_index_equal(recovered.index, daily_series.index)
-        np.testing.assert_array_equal(recovered.values, daily_series.values)
-
-
-class TestMaskTransformerBoundaries:
-    """Tests de la gestion des débuts et fins de séries pour MaskTransformer."""
-
-    def test_series_start_with_how_first(self):
-        """Test de la gestion du début de série avec how='first'."""
-        # Série qui commence le 10 janvier (début incomplet de période)
-        dates = pd.date_range('2024-01-10', periods=50, freq='D')
-        series = pd.Series(range(50), index=dates, name='test')
-        
-        masker = MaskTransformer(n_obs=3, mask_frequency='M', how='first')
-        masked = masker.fit_transform(series)
-        
-        # Les premières observations de chaque mois doivent être masquées
-        # Le premier mois (janvier) commence le 10, donc les 3 premières dates disponibles
-        january_mask = masked.index.month == 1
-        january_masked = masked[january_mask]
-        
-        # Les 3 premières observations de janvier (10, 11, 12) doivent être NaN
-        assert january_masked.iloc[:3].isna().all()
-        
-        # Le reste de janvier (si présent) ne doit pas être NaN
-        if len(january_masked) > 3:
-            assert not january_masked.iloc[3:].isna().any()
-        
-        # Vérification de la récupération
-        recovered = masker.inverse_transform(masked)
-        np.testing.assert_array_equal(recovered.values, series.values)
-
-    def test_series_start_with_how_last(self):
-        """Test de la gestion du début de série avec how='last'."""
-        # Série qui commence le 15 janvier
-        dates = pd.date_range('2024-01-15', periods=60, freq='D')
-        series = pd.Series(range(60), index=dates, name='test')
-        
-        masker = MaskTransformer(n_obs=5, mask_frequency='M', how='last')
-        masked = masker.fit_transform(series)
-        
-        # Pour janvier, les dernières observations doivent être masquées
-        # La série a des observations du 15 au 31 janvier (17 jours)
-        # Les 5 dernières (27-31 janvier) doivent être masquées
-        january_mask = masked.index.month == 1
-        january_data = masked[january_mask]
-        
-        # Les 5 dernières observations de janvier doivent être NaN
-        assert january_data.iloc[-5:].isna().all()
-        
-        # Le début de janvier ne doit pas être masqué
-        assert not january_data.iloc[:-5].isna().any()
-        
-        # Vérification de la récupération
-        recovered = masker.inverse_transform(masked)
-        np.testing.assert_array_equal(recovered.values, series.values)
-
-    def test_series_end_with_how_first(self):
-        """Test de la gestion de la fin de série avec how='first'."""
-        # Série qui se termine le 10 mars
-        dates = pd.date_range('2024-01-01', '2024-03-10', freq='D')
-        series = pd.Series(range(len(dates)), index=dates, name='test')
-        
-        masker = MaskTransformer(n_obs=4, mask_frequency='M', how='first')
-        masked = masker.fit_transform(series)
-        
-        # Pour mars, les premières observations doivent être masquées
-        march_mask = masked.index.month == 3
-        march_data = masked[march_mask]
-        
-        # Les 4 premières observations de mars (1-4) doivent être NaN
-        assert march_data.iloc[:4].isna().all()
-        
-        # Le reste de mars ne doit pas être masqué
-        if len(march_data) > 4:
-            assert not march_data.iloc[4:].isna().any()
-        
-        # Vérification de la récupération
-        recovered = masker.inverse_transform(masked)
-        np.testing.assert_array_equal(recovered.values, series.values)
-
-    def test_series_end_with_how_last(self):
-        """Test de la gestion de la fin de série avec how='last'."""
-        # Série qui se termine le 15 mars (fin incomplète de période)
-        dates = pd.date_range('2024-01-01', '2024-03-15', freq='D')
-        series = pd.Series(range(len(dates)), index=dates, name='test')
-        
-        masker = MaskTransformer(n_obs=3, mask_frequency='M', how='last')
-        masked = masker.fit_transform(series)
-        
-        # Pour mars, les 3 dernières observations disponibles doivent être masquées
-        march_mask = masked.index.month == 3
-        march_data = masked[march_mask]
-        
-        # Les 3 dernières observations de mars (13, 14, 15) doivent être NaN
-        assert march_data.iloc[-3:].isna().all()
-        
-        # Le reste de mars ne doit pas être masqué
-        assert not march_data.iloc[:-3].isna().any()
-        
-        # Vérification de la récupération
-        recovered = masker.inverse_transform(masked)
-        np.testing.assert_array_equal(recovered.values, series.values)
-
-
-class TestMaskTransformerDataFrame:
-    """Tests du MaskTransformer avec des DataFrames."""
-
-    def test_mask_dataframe(self, daily_dataframe):
-        """Test du masquage sur DataFrame."""
-        masker = MaskTransformer(n_obs=2, mask_frequency='M', how='last')
-        masked = masker.fit_transform(daily_dataframe)
-        
-        # Toutes les colonnes doivent avoir le même pattern de NaN
-        nan_pattern_col1 = masked['col1'].isna()
-        nan_pattern_col2 = masked['col2'].isna()
-        assert (nan_pattern_col1 == nan_pattern_col2).all()
-
-    def test_mask_dataframe_inverse_transform(self, daily_dataframe):
-        """Test de la récupération pour DataFrame."""
-        masker = MaskTransformer(n_obs=4, mask_frequency='M', how='first')
-        
-        masked = masker.fit_transform(daily_dataframe)
-        recovered = masker.inverse_transform(masked)
-        
-        pd.testing.assert_frame_equal(recovered, daily_dataframe)
-
-
-class TestMaskTransformerEdgeCases:
-    """Tests des cas limites pour MaskTransformer."""
-
-    def test_mask_more_than_available(self):
-        """Masquage de plus d'observations qu'il n'y en a dans une période."""
-        dates = pd.date_range('2024-01-01', periods=5, freq='D')
-        series = pd.Series(range(5), index=dates)
-        
-        # Seulement 5 jours disponibles, demande de masquer 10 par mois
-        masker = MaskTransformer(n_obs=10, mask_frequency='M', how='last')
-        masked = masker.fit_transform(series)
-        
-        # Ne doit pas planter et retourner une série valide
-        assert len(masked) == len(series)
-        assert isinstance(masked.index, pd.DatetimeIndex)
-
-    def test_mask_without_transform_raises_error(self, daily_series):
-        """Appel de inverse_transform sans transform doit lever une erreur."""
-        masker = MaskTransformer(n_obs=2, mask_frequency='M')
-        
-        with pytest.raises(ValueError, match="Must call transform"):
-            masker.inverse_transform(daily_series)
-
-    def test_inverse_transform_with_filled_nans(self):
-        """Test de inverse_transform après remplissage des NaN avec des prédictions."""
-        dates = pd.date_range('2024-01-01', periods=60, freq='D')
-        series = pd.Series(range(60), index=dates)
-        
-        masker = MaskTransformer(n_obs=2, mask_frequency='M', how='last')
-        masked = masker.fit_transform(series)
-        
-        # Remplissage des NaN avec des prédictions (valeurs différentes)
-        predictions = masked.fillna(-999)
-        
-        # inverse_transform doit restaurer les valeurs originales (pas les -999)
-        restored = masker.inverse_transform(predictions)
-        
-        np.testing.assert_array_equal(restored.values, series.values)
-
-    def test_invalid_input_type(self):
-        """Rejet des entrées non-pandas."""
-        masker = MaskTransformer(n_obs=2, mask_frequency='M')
-        with pytest.raises(ValueError, match="must be a pandas Series or DataFrame"):
-            masker.fit([1, 2, 3])
 
 
 # ============================================================================
@@ -1365,118 +817,6 @@ class TestPublicationDelayTransformerParams:
 
 
 # ============================================================================
-# Tests des fonctions auxiliaires
-# ============================================================================
-
-class TestAuxiliaryFunctions:
-    """Tests for auxiliary functions."""
-    
-    def test_extract_param_by_variable_constant(self):
-        """Extraction de paramètre avec valeur constante."""
-        df = pd.DataFrame({
-            'variable': ['GDP', 'inflation'],
-            'unit': ['D', 'D']
-        }).set_index('variable')
-        
-        result = _extract_param_by_variable(df, 'unit')
-        
-        # Doit retourner la valeur unique
-        assert result == 'D'
-    
-    def test_extract_param_by_variable_varying(self):
-        """Extraction de paramètre avec valeurs variables."""
-        df = pd.DataFrame({
-            'variable': ['GDP', 'inflation'],
-            'unit': ['D', 'W']
-        }).set_index('variable')
-        
-        result = _extract_param_by_variable(df, 'unit')
-        
-        # Doit retourner un dictionnaire
-        assert isinstance(result, dict)
-        assert result['GDP'] == 'D'
-        assert result['inflation'] == 'W'
-    
-    def test_resolve_strategy_string(self):
-        """Résolution de stratégie avec chaîne de caractères."""
-        strategy = 'shift'
-        entity_key = ('France',)
-        
-        result = _resolve_strategy(strategy, entity_key)
-        assert result == 'shift'
-    
-    def test_resolve_strategy_dict_simple(self):
-        """Résolution de stratégie avec dictionnaire simple."""
-        strategy = {
-            ('France',): 'shift',
-            ('Germany',): 'mask'
-        }
-        
-        result_fr = _resolve_strategy(strategy, ('France',))
-        result_de = _resolve_strategy(strategy, ('Germany',))
-        
-        assert result_fr == 'shift'
-        assert result_de == 'mask'
-    
-    def test_resolve_strategy_dict_by_variable(self):
-        """Résolution de stratégie avec dictionnaire par variable."""
-        strategy = {
-            'GDP': 'shift',
-            'inflation': 'mask'
-        }
-        entity_key = ('France',)
-        
-        # Doit retourner le dictionnaire complet
-        result = _resolve_strategy(strategy, entity_key)
-        assert result == strategy
-    
-    def test_resolve_strategy_callable(self):
-        """Résolution de stratégie avec fonction callable."""
-        def strategy_func(entity_key):
-            if 'France' in entity_key:
-                return 'shift'
-            return 'mask'
-        
-        result_fr = _resolve_strategy(strategy_func, ('France',))
-        result_de = _resolve_strategy(strategy_func, ('Germany',))
-        
-        assert result_fr == 'shift'
-        assert result_de == 'mask'
-    
-    def test_resolve_strategy_invalid_string(self):
-        """Validation de stratégie invalide (chaîne)."""
-        with pytest.raises(ValueError, match="Invalid strategy"):
-            _resolve_strategy('invalid', ('France',))
-
-
-# ============================================================================
-# Tests de la classe MaskTransformer - alias pandas des périodes de masquage
-# ============================================================================
-
-class TestMaskTransformerPandasAliases:
-    """Periods of a daily index are generated with alias pandas accepts, position-less codes included."""
-
-    @pytest.mark.parametrize(
-        "mask_frequency, expected_masked",
-        [
-            # Valeur d'or : 2 derniers jours de chaque mois complet (janvier, février 2024 bissextile, mars) ;
-            # avril, incomplet, n'est pas masqué
-            pytest.param('M', ['01-30', '01-31', '02-28', '02-29', '03-30', '03-31'], id="monthly"),
-            # Le premier trimestre est le seul complet dans les 120 jours de la série
-            pytest.param('Q', ['03-30', '03-31'], id="quarterly"),
-        ],
-    )
-    def test_position_less_frequency_raises_no_pandas_deprecation(self, mask_frequency, expected_masked):
-        """A daily index has no position: ``'M'`` / ``'Q'`` must not reach pandas as bare aliases."""
-        series = pd.Series(range(120), index=pd.date_range('2024-01-01', periods=120, freq='D'), name='x', dtype=float)
-        masker = MaskTransformer(n_obs=2, mask_frequency=mask_frequency, how='last')
-        with warnings.catch_warnings():
-            warnings.filterwarnings('error', message=".*is deprecated", category=FutureWarning)
-            masked = masker.fit_transform(series)
-        assert masked[masked.isna()].index.strftime('%m-%d').tolist() == expected_masked
-
-
-# ============================================================================
 # Rapport d'ajustement (fit_report_)
 # ============================================================================
 
@@ -1592,3 +932,54 @@ class TestFitReport:
         transformer = PublicationDelayTransformer(delays=self._delays(), prediction_date='2023-12-15')
         transformer.fit(self._monthly())
         assert not hasattr(clone(transformer), 'fit_report_')
+
+
+# ============================================================================
+# Masques nuls ou négatifs (ajout D3 : contrat de MaskTransformer, n_obs >= 0)
+# ============================================================================
+
+class TestZeroAndNegativeMasks:
+    """A mask with nothing to mask leaves its column unchanged instead of building a ``MaskTransformer``.
+
+    Gold values (monthly column, delays at monthly frequency, so the mask frequency
+    equals the index frequency): ``n_obs = ceil((delay - elapsed) / 30)`` with 14
+    days elapsed since 1 December 2023 at the prediction date 2023-12-15 and the
+    reference point at the period start.
+    """
+
+    @staticmethod
+    def _monthly() -> pd.DataFrame:
+        index = pd.date_range('2023-01-01', periods=12, freq='MS')
+        return pd.DataFrame({'GDP': np.arange(12.0), 'CPI': np.arange(12.0) * 2}, index=index)
+
+    @staticmethod
+    def _transformer(delay: float) -> PublicationDelayTransformer:
+        delays = pd.DataFrame({'column': ['GDP'], 'delay': [delay], 'unit': ['D'],
+                               'reference_point': ['start'], 'frequency': ['M']})
+        return PublicationDelayTransformer(delays=delays, strategy='mask', prediction_date='2023-12-15')
+
+    @pytest.mark.parametrize(
+        'delay',
+        [
+            # Valeur d'or : ceil((5 - 14) / 30) = 0
+            pytest.param(5.0, id='zero'),
+            # Valeur d'or : ceil((-40 - 14) / 30) = -1, ramené à 0
+            pytest.param(-40.0, id='negative'),
+        ],
+    )
+    def test_n_obs_is_never_negative(self, delay):
+        """The number of observations to mask is clamped at zero."""
+        transformer = self._transformer(delay).fit(self._monthly())
+        assert transformer.mask_params['GDP']['n_obs'] == 0
+
+    @pytest.mark.parametrize('delay', [pytest.param(5.0, id='zero'), pytest.param(-40.0, id='negative')])
+    def test_zero_mask_leaves_the_data_unchanged(self, delay):
+        """``transform`` returns the data as given: nothing is unpublished at the prediction date."""
+        transformer = self._transformer(delay).fit(self._monthly())
+        pd.testing.assert_frame_equal(transformer.transform(self._monthly()), self._monthly())
+
+    def test_zero_mask_round_trip(self):
+        """``inverse_transform`` of an unchanged frame returns it unchanged."""
+        transformer = self._transformer(5.0).fit(self._monthly())
+        recovered = transformer.inverse_transform(transformer.transform(self._monthly()))
+        pd.testing.assert_frame_equal(recovered, self._monthly())
