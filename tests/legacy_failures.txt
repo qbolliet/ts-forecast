@@ -8,13 +8,6 @@
 # permanent : le prompt C2 exige qu'il ne reste plus, en fin de campagne, que le
 # groupe "# hors campagne".
 
-# prompt D4
-tests/unit/delays/transformers/test_publication_delay_transformer.py::TestPublicationDelayTransformerFitTransform::test_fit_basic
-tests/unit/delays/transformers/test_publication_delay_transformer.py::TestPublicationDelayTransformerFitTransform::test_fit_creates_shift_params
-tests/unit/delays/transformers/test_publication_delay_transformer.py::TestPublicationDelayTransformerFitTransform::test_fit_transform
-tests/unit/delays/transformers/test_publication_delay_transformer.py::TestPublicationDelayTransformerFitTransform::test_transform_basic
-tests/unit/delays/transformers/test_publication_delay_transformer.py::TestPublicationDelayTransformerParams::test_params_with_dict_reference_point
-
 # prompt D5
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_last_observation_aligned_with_prediction_date
 tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_workflow_multi_frequency

@@ -58,9 +58,34 @@ date. Deux stratégies :
 ![Comparaison des deux stratégies](../assets/approach_comparison.png)
 
 Les stratégies sont configurables par variable (`strategy={'gdp': 'shift',
-'cpi': 'mask'}`). En interne, sur un panel, le transformateur s'enveloppe
-automatiquement dans un [`PanelwiseTransformer`](panelwise_transforms.md) ; les
-briques bas niveau `ShiftTransformer` et `MaskTransformer` restent accessibles.
+'cpi': 'mask'}`) ; une variable retardée absente du dictionnaire est laissée
+telle quelle (avec un avertissement).
+
+- **Délais** : un dictionnaire `{colonne: délai}`, ou un tableau avec une ligne par
+  variable (colonne `delay`, et en option `unit`, `reference_point`, `frequency`),
+  la variable étant dans une colonne `column` ou dans l'index — la sortie de
+  `calculate_applicable_delay` s'utilise donc telle quelle. Un délai `NaN` est un
+  délai inconnu. Chaque paramètre se résout par variable : argument explicite
+  (valeur unique ou dictionnaire par variable), puis tableau, puis
+  `default_values` (clés `delay`, `unit`, `reference_point`, et `target_frequency`
+  pour le masque) ; une colonne retardée sans unité ou point de référence lève une
+  `ValueError`.
+- **Colonnes sans délai** : laissées telles quelles ; `handle_missing_delays`
+  choisit de les signaler (`'warn'`, défaut), de les refuser (`'error'`) ou de se
+  taire (`'ignore'`).
+- **Index** : le décalage déplace les dates sans perdre de valeur, l'index de
+  sortie est l'union des dates décalées des colonnes ; `inverse_transform` (qui
+  inverse le dernier `transform`) supprime les lignes ajoutées par `transform`,
+  si bien qu'un aller-retour restitue l'entrée à l'identique.
+- **Panel** : un panel peut être passé directement, mais les **mêmes délais**
+  s'appliquent alors à toutes les entités (un avertissement le rappelle) ; le
+  transformateur s'enveloppe en interne dans un
+  [`PanelwiseTransformer`](panelwise_transforms.md). Pour des délais propres à
+  chaque entité (sortie de `calculate_applicable_delay(..., aggregate_by_panel=True)`),
+  utiliser `create_delay_transformer_factory` (ou `prepare_entity_kwargs_from_delays`)
+  avec un `PanelwiseTransformer`.
+
+Les briques bas niveau `ShiftTransformer` et `MaskTransformer` restent accessibles.
 
 ### Briques bas niveau
 

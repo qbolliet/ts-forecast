@@ -2561,6 +2561,268 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Correctif** : les périodes de masque sont calculées par `get_period_boundaries` sur `mask_frequency` seule : l'ancre de l'index n'est plus reportée sur la fréquence de masque. Une ancre explicite (`'YE-NOV'`) est honorée.
 - **Statut** : corrigée
 
+### ANO-DELAYS-028 — `PublicationDelayTransformer` : `reference_point` en dictionnaire rejeté par `__init__`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer.__init__` (et, par ricochet,
+  `create_delay_transformer_factory`)
+- **Sévérité** : majeure
+- **Observé** : `reference_point not in ['start', 'end']` est vrai pour tout dictionnaire :
+  `ValueError: reference_point must be 'start' or 'end', got '{'GDP': 'end', 'CPI': 'start'}'`. La signature
+  (`Dict[str, Literal['start', 'end']]`), la docstring et `_build_parameter_dict` acceptent pourtant un dictionnaire, et
+  `_build_entity_params` en produit un dès que le point de référence varie d'une variable à l'autre d'une entité : la
+  fabrique échoue alors à chaque appel. (`calculate_applicable_delay` renvoie un point de référence unique : le cas ne
+  survient que pour un tableau assemblé à la main.)
+- **Attendu** : chaque valeur du dictionnaire validée, le point de référence appliqué variable par variable
+  (45 j depuis la fin → -3 ; depuis le début → -2 au 15/12/2023).
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import PublicationDelayTransformer
+  PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point={'GDP': 'end'})  # ValueError
+  ```
+- **Test** : `tests/unit/delays/transformers/test_publication_delay_transformer.py::TestReferencePoint::test_params_with_dict_reference_point`,
+  `tests/unit/delays/transformers/test_factories.py::TestCreateDelayTransformerFactory::test_reference_point_varying_by_variable`
+- **Correctif** : `__init__` valide un `reference_point` en dictionnaire valeur par valeur (`ValueError ... for variable 'CPI' got 'middle'`) ; `fit` résout le point de référence variable par variable (`_resolve_parameter`).
+- **Statut** : corrigée
+
+### ANO-DELAYS-029 — `PublicationDelayTransformer` : `strategy` en dictionnaire → `too many values to unpack`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer.fit` (énumération des colonnes par
+  stratégie), `::_build_parameter_dict`
+- **Sévérité** : majeure
+- **Observé** : `[k for k, v in self.strategy if v == 'shift']` itère sur les **clés** du dictionnaire (il manque
+  `.items()`) : `ValueError: too many values to unpack (expected 2)` pour tout nom de variable de plus de deux caractères.
+  La stratégie par variable, acceptée et validée par `__init__`, et transmise telle quelle par la fabrique
+  (`_resolve_strategy` renvoie le dictionnaire si ses clés sont des chaînes), est donc inutilisable. Accessoirement,
+  `_build_parameter_dict` impute les valeurs par défaut aux colonnes **hors** du dictionnaire de stratégies (jamais
+  retardées), alors que `__init__` annonce `'default_values' is ignored` dans ce cas.
+- **Attendu** : colonnes `'shift'` décalées, colonnes `'mask'` masquées ; aucune imputation par défaut (comme annoncé).
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import PublicationDelayTransformer
+  X = pd.DataFrame({'GDP': np.arange(12.), 'CPI': np.arange(12.)}, index=pd.date_range('2023-01-01', periods=12, freq='MS'))
+  PublicationDelayTransformer(delays={'GDP': 45.0, 'CPI': 20.0}, strategy={'GDP': 'shift', 'CPI': 'mask'},
+                              delay_unit='D', reference_point='start', target_frequency={'CPI': 'Q'},
+                              prediction_date='2023-12-15').fit(X)   # ValueError: too many values to unpack
+  ```
+- **Test** : `test_publication_delay_transformer.py::TestStrategy` (`test_strategy_per_variable*`, `test_delayed_column_without_strategy_is_left_unchanged`, `test_masked_variable_needs_a_target_frequency`),
+  `test_factories.py::TestPanelwiseIntegration::test_per_variable_strategy`
+- **Correctif** : itération sur `self.strategy.items()` (`_split_columns_by_strategy`) ; une variable retardée absente du dictionnaire est laissée telle quelle avec un avertissement ; `default_values` n'est plus imputé avec une stratégie par variable, comme annoncé (une variable masquée sans fréquence cible lève alors la `ValueError` d'ANO-DELAYS-033).
+- **Statut** : corrigée
+
+### ANO-DELAYS-030 — `PublicationDelayTransformer` : un panel passé directement → `KeyError` dans `fit`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer.fit`
+- **Sévérité** : majeure
+- **Observé** : sur un `MultiIndex` (entité, date), `detect_frequency` renvoie des clés `(entité, colonne)` ; `fit` lit
+  `self.detected_frequencies_[col]` → `KeyError: 'CPI'`. La docstring promet « Automatic panel wrapping with
+  PanelwiseTransformer » et `transform` contient la branche panel (`is_panel`), inatteignable. Pas une régression d'un
+  renommage : le contrat de `detect_dataset_frequency` renvoyait déjà des tuples `(panel_id, column)` en mars 2026
+  (`3f2fcc7`), et `fit` lit `detected_frequencies_[col]` depuis `e0a664b`. Cause probable des `KeyError` dans `fit` du
+  groupe D5 (`tests/integration/delays/test_integration.py`).
+- **Attendu** : un jeu de délais par colonne appliqué à chaque entité (fréquence détectée par entité), ou une
+  `ValueError` orientant vers `create_delay_transformer_factory` + `PanelwiseTransformer`.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import PublicationDelayTransformer
+  X = pd.DataFrame({'GDP': np.arange(12.)}, index=pd.date_range('2023-01-01', periods=12, freq='MS'))
+  panel = pd.concat({'FR': X, 'DE': X}, names=['country', 'date'])
+  PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start').fit(panel)  # KeyError
+  ```
+- **Test** : `test_publication_delay_transformer.py::TestInputTypes::test_panel_gets_the_shift_of_each_column`
+- **Correctif** : arbitrage de l'auteur (2026-10-08) : panel accepté, avec l'avertissement « Panel data: the same publication delays are applied to every entity. Use create_delay_transformer_factory (or prepare_entity_kwargs_from_delays) with a PanelwiseTransformer to apply per-entity delays. » La fréquence d'une colonne est celle que partagent ses entités (`_detect_column_frequencies`, une entité où la colonne est vide est ignorée) ; des fréquences différentes pour une colonne retardée, ou des fréquences d'index différentes pour le masque, lèvent une `ValueError` qui renvoie vers la fabrique. `transform` / `inverse_transform` passent par `PanelwiseTransformer` (branche panel désormais atteinte).
+- **Statut** : corrigée
+
+### ANO-DELAYS-031 — Repli masque → décalage : `n_periods` positif, les valeurs apparaissent avant leur publication
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer.fit` (branche `not result['can_mask']`)
+- **Sévérité** : majeure (fuite d'information : anticipation silencieuse)
+- **Observé** : quand le masque couvrirait toute la période cible, la colonne passe au décalage avec
+  `n_periods = result['n_periods']`, c'est-à-dire le nombre **positif** d'observations d'index à masquer, alors que la
+  convention de `ShiftTransformer` (et de `_compute_shift_periods`) est négative pour retarder. Exemple : 400 jours,
+  cible trimestrielle, série mensuelle, 15/12/2023 → `n_periods = +13` : la valeur de janvier 2023 est datée de
+  décembre 2021. Le nombre est en plus exprimé en périodes d'index, pas de la fréquence de la colonne.
+- **Attendu** : le décalage de la stratégie 'shift' (`_compute_shift_periods`) : -13 ici, -3 pour 75 jours.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import PublicationDelayTransformer
+  X = pd.DataFrame({'GDP': np.arange(12.)}, index=pd.date_range('2023-01-01', periods=12, freq='MS'))
+  t = PublicationDelayTransformer(delays={'GDP': 75.0}, strategy='mask', delay_unit='D', reference_point='start',
+                                  target_frequency='Q', prediction_date='2023-12-15').fit(X)
+  t.shift_params   # {'GDP': {'n_periods': 3, ...}}, attendu -3
+  ```
+- **Test** : `test_publication_delay_transformer.py::TestMaskParams::test_fallback_shift_moves_values_to_later_dates`,
+  `test_publication_delay_transformer_transform.py::TestRoundTrip::test_fallback_never_shows_a_value_before_its_date`
+- **Correctif** : le repli calcule le décalage de la stratégie 'shift' (`_compute_shift_periods` : périodes de la colonne, signe négatif).
+- **Statut** : corrigée
+
+### ANO-DELAYS-032 — `default_values` : `delay` et `unit` jamais appliqués
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer.fit`, `::_build_parameter_dict`
+- **Sévérité** : majeure
+- **Observé** : `__init__` exige les clés `delay`, `unit`, `reference_point` (et `target_frequency` pour 'mask'), mais :
+  (1) `fit` cherche l'unité sous la clé `'delay_unit'` (`default_key='delay_unit'`), absente : l'unité par défaut n'est
+  jamais imputée (avertissement « Could not impute a default 'delay_unit' » puis `KeyError`) ; (2) `default_values['delay']`
+  n'est jamais lu : avec `default_values`, toutes les colonnes de `X` sont retenues mais `delays_dict[col]` lève
+  `KeyError` pour une colonne sans délai. Seuls `reference_point` et `target_frequency` par défaut fonctionnent.
+- **Attendu** : une colonne sans délai reçoit le délai et l'unité par défaut (20 j depuis le début → -1).
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import PublicationDelayTransformer
+  X = pd.DataFrame({'GDP': np.arange(12.), 'CPI': np.arange(12.)}, index=pd.date_range('2023-01-01', periods=12, freq='MS'))
+  PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start', prediction_date='2023-12-15',
+                              default_values={'delay': 20.0, 'unit': 'D', 'reference_point': 'start'}).fit(X)  # KeyError: 'CPI'
+  ```
+- **Test** : `test_publication_delay_transformer.py::TestDefaultValues::test_default_delay_for_a_column_without_delay`,
+  `::test_default_unit`
+- **Correctif** : `_build_delays_dict` donne `default_values['delay']` aux colonnes de `X` sans délai connu (avertissement « Imputed default delay value ... ») ; l'unité par défaut est lue sous la clé `'unit'`. Le rapport porte l'origine du délai (`ColumnDelayRecord.delay_source`, `'explicit'` / `'default'`) et `defaults_imputed` liste `(colonne, 'delay')`.
+- **Statut** : corrigée
+
+### ANO-DELAYS-033 — Unité ou point de référence non résolus : avertissement puis `KeyError` brut
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer.fit` (`_compute_shift_periods`,
+  `_compute_mask_periods`)
+- **Sévérité** : mineure
+- **Observé** : un dictionnaire de délais sans `delay_unit` (ou `reference_point`) produit un avertissement « Could not
+  impute… » puis `KeyError: 'GDP'` dans `_compute_shift_periods`. C'était la cause des 4 échecs hérités
+  `TestPublicationDelayTransformerFitTransform::*` (tests corrigés, catégorie (c) : rien ne permet d'inférer l'unité
+  d'un dictionnaire ; aucun renommage en cause, la signature est inchangée depuis `d16b0b2`).
+- **Attendu** : `ValueError` nommant le paramètre et les colonnes concernées.
+- **Reproduction** : `PublicationDelayTransformer(delays={'GDP': 45.0}, reference_point='start').fit(X)` → `KeyError: 'GDP'`.
+- **Test** : `test_publication_delay_transformer.py::TestMissingDelays::test_unresolved_unit_raises_a_clear_error`
+- **Correctif** : `_check_resolved` lève `ValueError: No 'delay_unit' for the delayed columns ['GDP']: give it to the constructor, in the delays table, or in 'default_values'` (idem pour `reference_point` et, en masque, `target_frequency`). Seules les colonnes retardées doivent avoir ces paramètres.
+- **Statut** : corrigée
+
+### ANO-DELAYS-034 — `handle_missing_delays` validé mais sans effet
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer`
+- **Sévérité** : mineure
+- **Observé** : le paramètre est validé et stocké, puis jamais lu : `'error'` ne lève rien pour une colonne de `X` sans
+  délai, `'warn'` n'avertit pas, `'ignore'` est le comportement de fait (la colonne est laissée intacte et listée dans
+  `fit_report_.columns_unaffected`).
+- **Attendu** : `'error'` → `ValueError` nommant les colonnes sans délai ; `'warn'` → avertissement ; `'ignore'` → rien.
+- **Reproduction** : `PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
+  handle_missing_delays='error').fit(X.assign(Z=1.0))` → aucun effet.
+- **Test** : `test_publication_delay_transformer.py::TestMissingDelays::test_handle_missing_delays_error`
+- **Correctif** : `_handle_missing_delays` : `'warn'` (défaut) → « No publication delay for the columns [...]: they are left unchanged », `'error'` → `ValueError` avec le même message, `'ignore'` → silence.
+- **Statut** : corrigée
+
+### ANO-DELAYS-035 — Délai `NaN` → `ValueError: cannot convert float NaN to integer`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer._compute_shift_periods`
+- **Sévérité** : mineure
+- **Observé** : `calculate_applicable_delay` renvoie un délai `NaN` pour un couple sans délai connu (`n_observations = 0`,
+  cf. ANO-DELAYS-011) ; transmis à la PDT (directement ou par la fabrique), il fait échouer `math.ceil`.
+- **Attendu** : un délai inconnu traité comme un délai manquant (colonne laissée intacte, signalée selon
+  `handle_missing_delays`).
+- **Reproduction** : `PublicationDelayTransformer(delays={'GDP': float('nan')}, delay_unit='D', reference_point='start').fit(X)`.
+- **Test** : `test_publication_delay_transformer.py::TestMissingDelays::test_unknown_delay_is_treated_as_missing`
+- **Correctif** : un délai `NaN` (ou `None`) est un délai inconnu (`_is_missing`) : colonne traitée comme sans délai (`handle_missing_delays`), ou complétée par `default_values['delay']`.
+- **Statut** : corrigée
+
+### ANO-DELAYS-036 — `PublicationDelayTransformer` refuse une `Series`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer.fit`
+- **Sévérité** : mineure
+- **Observé** : `fit` / `transform` sont annotés `Union[pd.Series, pd.DataFrame]` mais lisent `X.columns` :
+  `AttributeError: 'Series' object has no attribute 'columns'`.
+- **Attendu** : une `Series` nommée traitée comme un DataFrame d'une colonne (et restituée en `Series`), ou annotation
+  restreinte au DataFrame avec une erreur explicite.
+- **Reproduction** : `PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start').fit(X['GDP'])`.
+- **Test** : `test_publication_delay_transformer.py::TestInputTypes::test_series_is_accepted`
+- **Correctif** : `_as_frame` / `_restore_series` : une `Series` (nommée ou non) est traitée comme un DataFrame d'une colonne et restituée en `Series` par `transform` / `inverse_transform` ; tout autre type lève `TypeError`.
+- **Statut** : corrigée
+
+### ANO-DELAYS-037 — `inverse_transform` sans `transform` préalable → `AttributeError`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer.inverse_transform`
+- **Sévérité** : mineure
+- **Observé** : les transformateurs auxiliaires sont créés (et ajustés) par `transform`, pas par `fit` :
+  `inverse_transform` juste après `fit` lève `AttributeError: ... no attribute 'auxiliary_transformers_'` alors que
+  `check_is_fitted` passe. L'inversion dépend aussi des données du **dernier** `transform` (index détecté à ce moment,
+  cellules masquées mémorisées par `MaskTransformer`).
+- **Attendu** : `NotFittedError` explicite (« call transform first ») — arbitrage de l'auteur.
+- **Reproduction** : `t = PublicationDelayTransformer(...).fit(X); t.inverse_transform(X)` → `AttributeError`.
+- **Test** : `test_publication_delay_transformer.py::TestSklearnProtocol::test_inverse_transform_before_transform`
+- **Correctif** : arbitrage de l'auteur (2026-10-08) : l'inversion ne sert qu'après un `transform`. `inverse_transform` sans `transform` depuis le dernier `fit` lève `NotFittedError: inverse_transform reverses the last transform: call transform before inverse_transform` ; `fit` oublie les auxiliaires d'un `transform` précédent.
+- **Statut** : corrigée
+
+### ANO-DELAYS-038 — Sortie de `calculate_applicable_delay` non acceptée telle quelle par `PublicationDelayTransformer`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer._infer_parameters_from_delays`
+- **Sévérité** : mineure
+- **Observé** : la PDT attend un tableau **à plat** avec une colonne `column` ; `calculate_applicable_delay` (sans
+  `aggregate_by_panel`) porte la variable dans l'**index** nommé `column` → `KeyError: "['column'] not in index"`.
+  Il faut `delays=applicable.reset_index()` (contrat vérifié par
+  `TestDelaysFormat::test_output_of_calculate_applicable_delay`). À l'inverse, les fabriques lisent la variable dans
+  l'index : deux conventions pour le même tableau.
+- **Attendu** : à trancher — accepter la variable dans l'index (niveau `column` ou dernier niveau, comme les fabriques),
+  ou documenter `reset_index()`.
+- **Reproduction** : `PublicationDelayTransformer(delays=calculate_applicable_delay(detected, 'start', 'M')).fit(X)`.
+- **Test** : `test_publication_delay_transformer.py::TestDelaysFormat::test_raw_output_of_calculate_applicable_delay`
+- **Correctif** : arbitrage de l'auteur (2026-10-08) : la variable est lue dans la colonne `column`, à défaut dans le niveau d'index `'column'`, à défaut dans le dernier niveau (convention des fabriques) — la sortie de `calculate_applicable_delay` est acceptée telle quelle. Une variable listée plusieurs fois (délais par entité) lève une `ValueError` qui renvoie vers la fabrique ; un tableau sans colonne `delay` aussi.
+- **Statut** : corrigée
+
+### ANO-DELAYS-039 — Avertissements parasites (`fit` et fabrique)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer._build_parameter_dict`, `::__init__`
+  (via `create_delay_transformer_factory`)
+- **Sévérité** : cosmétique
+- **Observé** : (1) sans `default_values`, chaque `fit` émet « Could not impute a default 'delay_unit' for columns set()… »
+  (et idem pour `reference_point`) même quand tout est résolu (ensemble vide) ; (2) la fabrique passe toujours
+  `target_frequency` (colonne `frequency` du tableau), d'où « 'target_frequency' is ignored when a shifting strategy is
+  applied » pour chaque entité en stratégie 'shift'. Le bruit masque les avertissements utiles.
+- **Attendu** : avertissement seulement pour un ensemble non vide ; pas d'avertissement quand la fabrique transmet
+  une fréquence cible qu'elle n'a pas choisie.
+- **Reproduction** : `PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start').fit(X)`
+  → 2 avertissements.
+- **Test** : `test_publication_delay_transformer.py::TestWarnings::test_fully_resolved_fit_emits_no_warning`,
+  `test_factories.py::TestCreateDelayTransformerFactory::test_shift_factory_emits_no_warning`
+- **Correctif** : (1) les avertissements « Could not impute ... » ont disparu : un paramètre manquant d'une colonne retardée lève l'erreur d'ANO-DELAYS-033, une colonne sans délai n'a besoin d'aucun paramètre ; (2) la fabrique et `prepare_entity_kwargs_from_delays` ne passent `target_frequency` qu'aux entités dont la stratégie n'est pas 'shift' (`_entity_kwargs`).
+- **Statut** : corrigée
+
+### ANO-DELAYS-040 — Colonne retardée entièrement `NaN` : `ValueError` cryptique au lieu d'un avertissement
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer.fit`
+- **Sévérité** : mineure
+- **Observé** : une colonne retardée sans fréquence détectable (entièrement `NaN`, ou jeu d'une seule observation / vide)
+  fait échouer `get_period_start` : `ValueError: Frequency must be a string, got <class 'NoneType'>`, pour **toutes**
+  les colonnes. La docstring de la classe annonce « Warning generation for all-NaN columns ». (Situation réaliste par
+  entité : `climat_affaires` est absente pour l'Italie dans le panel du notebook 3.)
+- **Attendu** : avertissement nommant la colonne, colonne laissée telle quelle, autres colonnes traitées ; pour un jeu
+  sans fréquence détectable, `ValueError` explicite.
+- **Reproduction** : `PublicationDelayTransformer(delays={'GDP': 45.0, 'CPI': 20.0}, delay_unit='D',
+  reference_point='start').fit(X.assign(CPI=np.nan))`.
+- **Test** : `test_publication_delay_transformer_transform.py::TestRobustness::test_all_nan_delayed_column_is_left_as_is`
+- **Correctif** : une colonne retardée sans fréquence détectable est signalée (« Could not detect the frequency of the delayed columns [...] ... left unchanged ») et laissée telle quelle, les autres sont traitées ; si aucune colonne n'a de fréquence détectable alors que des colonnes sont retardées, `ValueError: Could not detect the frequency of any column of X ...`.
+- **Statut** : corrigée
+
+### ANO-DELAYS-041 — Docstrings de `PublicationDelayTransformer` et des fabriques ≠ code
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer`, `::create_delay_transformer_factory`,
+  `::prepare_entity_kwargs_from_delays`, `::_build_entity_params`, `::_extract_param_by_variable`, `::_resolve_strategy`
+- **Sévérité** : mineure
+- **Observé** :
+  - `PublicationDelayTransformer` : paramètre `default_delay` documenté (le vrai est `default_values`, clés non
+    décrites) ; attribut `column_transformers_` inexistant (les attributs réels sont `shift_params`, `mask_params`,
+    `auxiliary_transformers_`, posé par `transform`) ; `handle_missing_delays: 'ignore', 'ignore', or 'error'` ; format
+    attendu du DataFrame `delays` (`column`, `delay`, `unit`, `reference_point`, `frequency`) non décrit ; signe et
+    unité de `n_periods`, croissance de l'index par le décalage et aller-retour (dates ajoutées vides) non décrits ;
+    `fit` / `transform` annoncent `Series` (ANO-DELAYS-036) et l'enveloppe panel (ANO-DELAYS-030).
+  - Fabriques : arguments `panel_level` / `variable_level` documentés mais inexistants (niveaux repérés par position :
+    tous sauf le dernier = entité) ; `_build_entity_params` / `_extract_param_by_variable` documentent des arguments
+    inexistants (`panel_level_name`, `col`, `variable_level_name`) ; `_resolve_strategy` annonce un `str` mais renvoie
+    le dictionnaire par variable tel quel.
+- **Attendu** : docstrings alignées sur le code.
+- **Test** : sans `xfail` ([DOC]) ; comportement réel fixé par `test_factories.py` et
+  `test_publication_delay_transformer*.py`.
+- **Correctif** : docstrings de `PublicationDelayTransformer` (format de `delays`, calcul de `n_periods`, croissance de l'index et aller-retour, attributs réels, `Raises` / `Warns`, exemple exécuté), des fabriques et de leurs auxiliaires réécrites ; exemples exécutés par doctest (`test_factories.py::TestDocstringExamples`).
+- **Statut** : corrigée
+
 ### Arbitrages de l'auteur (2026-10-04) sur `compare_and_detect_delays`
 - **Fuseaux horaires** : une date sans fuseau est lue en UTC face à une date avec fuseau ; deux dates avec fuseaux sont
   comparées comme des instants ; la colonne `download_date` garde la date telle que fournie. (Auparavant : `TypeError`
@@ -2574,6 +2836,16 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   entre première publication et révision s'obtient par différence entre deux résultats. Test :
   `TestDetectionModes::test_all_changes_detects_revisions`.
 
+
+### Arbitrages de l'auteur (2026-10-08) sur `PublicationDelayTransformer`
+- **Index après décalage** : le décalage agrandit l'index (union des dates décalées des colonnes) et fait disparaître les
+  dates qu'aucune colonne n'occupe plus — conservé. **Aller-retour** : `inverse_transform` supprime les lignes ajoutées
+  par `transform` (dates hors de son entrée, entièrement vides une fois inversées), de sorte que
+  `inverse_transform(transform(X))` restitue `X` exactement ; une ligne vide de l'entrée, ou une ligne non vide hors de
+  l'entrée, est conservée. Tests : `test_publication_delay_transformer_transform.py::TestRoundTrip`.
+- **Tableau de délais avec la variable dans l'index** : accepté (ANO-DELAYS-038).
+- **Panel passé directement** : accepté avec un avertissement renvoyant vers la fabrique (ANO-DELAYS-030).
+- **`inverse_transform` sans `transform`** : refusé, `NotFittedError` (ANO-DELAYS-037).
 
 ## FREQ
 

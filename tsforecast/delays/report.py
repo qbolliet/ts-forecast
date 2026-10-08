@@ -317,6 +317,8 @@ class ColumnDelayRecord:
         reference_point_source: Origin of the reference point, same values.
         target_frequency_source: Origin of the target frequency, same values.
         moved_from_mask: True when the masking was impossible and the column was shifted.
+        delay_source: Origin of the delay: ``'explicit'`` (``delays`` specification) or
+            ``'default'`` (``default_values``).
     """
     # Instanciation des attributs
     column: Any
@@ -332,6 +334,7 @@ class ColumnDelayRecord:
     reference_point_source: Optional[str]
     target_frequency_source: Optional[str]
     moved_from_mask: bool
+    delay_source: Optional[str] = None
 
 
 # Rapport d'ajustement du transformateur de délais

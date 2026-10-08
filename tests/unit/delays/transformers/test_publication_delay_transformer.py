@@ -1,825 +1,932 @@
-"""Unit tests for ``PublicationDelayTransformer`` (``tsforecast.delays.transformers``).
+"""Unit tests for ``PublicationDelayTransformer`` (``tsforecast.delays.transformers``): parameters and ``fit``.
 
-Moved as-is from ``tests/unit/delays/test_transformers.py`` by prompt D3 (split of
-the module tests into one file per tested symbol, mirror rule of
-``tests_and_refactoring_prompts.md`` §3). Triage of the inherited failures and
-completion of the scenarios: prompt D4.
+Covers ``__init__`` (validation of ``strategy``, ``reference_point``,
+``handle_missing_delays`` and ``default_values``, warnings), the resolution done
+by ``fit`` (``prediction_date_``, ``inferred_params_``, ``detected_frequencies_``,
+``shift_params``, ``mask_params``, ``fit_report_``) through the private helpers
+``_infer_parameters_from_delays``, ``_build_parameter_dict``,
+``_build_target_frequency_dict``, ``_compute_shift_periods``,
+``_compute_mask_periods``, ``_parameter_source`` and ``_build_fit_report``
+(exercised through ``fit`` only), and the sklearn protocol. ``transform`` /
+``inverse_transform`` are tested in ``test_publication_delay_transformer_transform.py``,
+the per-entity factories in ``test_factories.py``.
+
+Gold values. Monthly series (``MS``) of 2023, prediction date 2023-12-15: 14
+days have elapsed since the start of the December period, and one month lasts
+30 days (convention of ``convert_duration``). A delay ``d`` counted from the
+period start gives ``n_periods = -ceil((d - 14) / 30)``; counted from the period
+end, ``n_periods = -ceil((d + 16) / 30)`` (14 - 30 days elapsed since the end).
+Each value is checked against the calendar: with 45 days from the start, the
+last period published on December 15 is October (October 1 + 45 days = November
+15; November 1 + 45 days = December 16), two months before December, hence -2.
+
+The tests were triaged and completed by prompt D4 (``tests_and_refactoring_prompts.md``);
+the anomalies found are registered in ``tests/ANOMALIES.md`` (``ANO-DELAYS-028`` to ``-041``, all fixed).
 """
-
-import pytest
-import pandas as pd
-import numpy as np
+# Modules de base
 import warnings
-from datetime import datetime, timedelta
-from sklearn.utils.validation import check_is_fitted, NotFittedError
+from datetime import datetime
 
-# Import du module à tester
+import numpy as np
+import pandas as pd
+import pytest
+from sklearn.base import clone
+from sklearn.exceptions import NotFittedError
+
+# Classe à tester et producteurs réels de tableaux de délais
+from tsforecast.delays.calculator import calculate_applicable_delay
+from tsforecast.delays.data_manager import compare_and_detect_delays
 from tsforecast.delays.transformers import PublicationDelayTransformer
 
-# ============================================================================
-# Fixtures de données de test
-# ============================================================================
+TS = pd.Timestamp
 
-@pytest.fixture
-def sample_time_series():
-    """Generate sample time series data for testing.
-    
+# Date de prédiction des valeurs d'or : 14 jours écoulés depuis le début de décembre 2023
+PREDICTION = '2023-12-15'
+
+
+# =============================================================================
+# Constructeurs locaux de petits jeux à valeurs d'or calculables
+# =============================================================================
+def _monthly(columns=('GDP', 'CPI'), periods: int = 12) -> pd.DataFrame:
+    """Build a monthly (``MS``) frame of 2023 whose column ``i`` holds ``(i + 1) * [0, 1, ...]``.
+
+    Args:
+        columns: Column names.
+        periods: Number of months from January 2023.
+
     Returns:
-        pd.DataFrame: Time series with monthly dates and multiple variables.
+        Deterministic float frame indexed by month starts.
     """
-    # Données mensuelles sur 2 ans
+    index = pd.date_range('2023-01-01', periods=periods, freq='MS')
+    return pd.DataFrame({col: np.arange(periods, dtype=float) * (i + 1) for i, col in enumerate(columns)}, index=index)
+
+
+def _daily(columns=('GDP',), periods: int = 90) -> pd.DataFrame:
+    """Build a daily frame from 2024-01-01 (January to March 30, 2024 for 90 days).
+
+    Args:
+        columns: Column names.
+        periods: Number of days.
+
+    Returns:
+        Deterministic float frame indexed by days.
+    """
+    index = pd.date_range('2024-01-01', periods=periods, freq='D')
+    return pd.DataFrame({col: np.arange(periods, dtype=float) for col in columns}, index=index)
+
+
+def _fit(X: pd.DataFrame, **kwargs) -> PublicationDelayTransformer:
+    """Fit a transformer at the gold prediction date, the warnings of ``fit`` being silenced.
+
+    Args:
+        X: Data to fit on.
+        **kwargs: Constructor arguments (``prediction_date`` defaults to 2023-12-15).
+
+    Returns:
+        The fitted transformer.
+    """
+    kwargs.setdefault('prediction_date', PREDICTION)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return PublicationDelayTransformer(**kwargs).fit(X)
+
+
+def _delays_frame(columns=('GDP', 'CPI'), delays=(45.0, 20.0), unit='D', reference_point='start',
+                  frequency='Q') -> pd.DataFrame:
+    """Build a flat delays table with the columns expected by the transformer.
+
+    Args:
+        columns: Variable names (column ``column``).
+        delays: Delay of each variable.
+        unit: Unit of every delay.
+        reference_point: Reference point of every delay.
+        frequency: Target frequency of every delay.
+
+    Returns:
+        Table with the columns ``column``, ``delay``, ``unit``, ``reference_point``, ``frequency``.
+    """
+    n = len(columns)
+    return pd.DataFrame({'column': list(columns), 'delay': list(delays), 'unit': [unit] * n,
+                         'reference_point': [reference_point] * n, 'frequency': [frequency] * n})
+
+
+# =============================================================================
+# Fixtures (déterministes)
+# =============================================================================
+@pytest.fixture
+def sample_time_series() -> pd.DataFrame:
+    """Monthly 2023-2024 series with three deterministic columns."""
     dates = pd.date_range('2023-01-01', '2024-12-31', freq='MS')
-    data = pd.DataFrame({
-        'GDP': np.random.randn(len(dates)) * 10 + 1000,
-        'inflation': np.random.randn(len(dates)) * 0.5 + 2.0,
-        'unemployment': np.random.randn(len(dates)) * 0.3 + 5.0
-    }, index=dates)
-    return data
+    steps = np.arange(len(dates), dtype=float)
+    return pd.DataFrame({'GDP': 1000 + steps, 'inflation': 2 + steps / 10, 'unemployment': 5 - steps / 100},
+                        index=dates)
 
 
 @pytest.fixture
-def sample_panel_data():
-    """Generate sample panel data for testing.
-    
-    Returns:
-        pd.DataFrame: Panel data with MultiIndex (country, date).
-    """
-    # Données mensuelles pour 3 pays sur 1 an
-    countries = ['France', 'Germany', 'Italy']
-    dates = pd.date_range('2023-01-01', '2023-12-31', freq='MS')
-    
-    data = []
-    for country in countries:
-        for date in dates:
-            data.append({
-                'country': country,
-                'date': date,
-                'GDP': np.random.randn() * 10 + 1000,
-                'inflation': np.random.randn() * 0.5 + 2.0
-            })
-    
-    df = pd.DataFrame(data)
-    df = df.set_index(['country', 'date'])
-    return df
+def delays_dict_simple() -> dict:
+    """Delays in days of the three variables of ``sample_time_series``."""
+    return {'GDP': 45.0, 'inflation': 30.0, 'unemployment': 15.0}
 
 
 @pytest.fixture
-def delays_dict_simple():
-    """Simple delays dictionary for testing.
-    
-    Returns:
-        dict: Mapping variable names to delay values in days.
-    """
-    return {
-        'GDP': 45.0,
-        'inflation': 30.0,
-        'unemployment': 15.0
-    }
-
-
-@pytest.fixture
-def delays_dataframe():
-    """Delays DataFrame with metadata for testing.
-    
-    Returns:
-        pd.DataFrame: Delays with unit, reference_point, and target_frequency.
-    """
+def delays_dataframe() -> pd.DataFrame:
+    """Flat delays table with the current column names (``column``, ``frequency``)."""
+    # Noms de colonnes actuels : 'variable' -> 'column' (aed46c5), 'target_frequency' -> 'frequency' (ae347b2)
     return pd.DataFrame({
-        'variable': ['GDP', 'inflation', 'unemployment'],
+        'column': ['GDP', 'inflation', 'unemployment'],
         'delay': [45.0, 30.0, 15.0],
         'unit': ['D', 'D', 'D'],
         'reference_point': ['end', 'end', 'end'],
-        'target_frequency': ['M', 'M', 'M']
+        'frequency': ['M', 'M', 'M'],
     })
 
 
-@pytest.fixture
-def delays_dataframe_panel():
-    """Panel delays DataFrame for testing.
-    
-    Returns:
-        pd.DataFrame: Delays with entity-level variation.
-    """
-    data = []
-    for country in ['France', 'Germany', 'Italy']:
-        for var in ['GDP', 'inflation']:
-            data.append({
-                'country': country,
-                'variable': var,
-                'delay': np.random.uniform(20, 60),
-                'unit': 'D',
-                'reference_point': 'end',
-                'target_frequency': 'M'
-            })
-    
-    df = pd.DataFrame(data)
-    df = df.set_index(['country', 'variable'])
-    return df
-
-
-# ============================================================================
-# Tests de la classe PublicationDelayTransformer - Initialisation
-# ============================================================================
-
+# =============================================================================
+# Initialisation et validation des paramètres
+# =============================================================================
 class TestPublicationDelayTransformerInit:
-    """Tests for PublicationDelayTransformer initialization."""
-    
+    """Constructor: parameters stored as given, invalid values rejected, warnings."""
+
     def test_init_with_dict(self, delays_dict_simple):
-        """Initialisation avec un dictionnaire de délais."""
-        transformer = PublicationDelayTransformer(
-            delays=delays_dict_simple,
-            strategy='shift',
-            prediction_date='2024-01-01'
-        )
-        
-        assert transformer.delays == delays_dict_simple
-        assert transformer.strategy == 'shift'
-        assert transformer.prediction_date == '2024-01-01'
-    
+        """Parameters are stored unchanged."""
+        transformer = PublicationDelayTransformer(delays=delays_dict_simple, strategy='shift',
+                                                  prediction_date='2024-01-01')
+        assert (transformer.delays, transformer.strategy, transformer.prediction_date) == (
+            delays_dict_simple, 'shift', '2024-01-01')
+
     def test_init_with_dataframe(self, delays_dataframe):
-        """Initialisation avec un DataFrame de délais."""
-        transformer = PublicationDelayTransformer(
-            delays=delays_dataframe,
-            strategy='mask',
-            prediction_date=datetime(2024, 6, 15)
-        )
-        
-        assert isinstance(transformer.delays, pd.DataFrame)
-        assert transformer.strategy == 'mask'
-        assert isinstance(transformer.prediction_date, datetime)
-    
+        """A delays table and a ``datetime`` prediction date are stored unchanged."""
+        transformer = PublicationDelayTransformer(delays=delays_dataframe, strategy='mask',
+                                                  prediction_date=datetime(2024, 6, 15))
+        assert transformer.delays is delays_dataframe and transformer.prediction_date == datetime(2024, 6, 15)
+
     def test_init_with_strategy_dict(self, delays_dict_simple):
-        """Initialisation avec un dictionnaire de stratégies."""
-        strategy_dict = {
-            'GDP': 'shift',
-            'inflation': 'mask',
-            'unemployment': 'shift'
-        }
-        
-        transformer = PublicationDelayTransformer(
-            delays=delays_dict_simple,
-            strategy=strategy_dict
-        )
-        
-        assert transformer.strategy == strategy_dict
-    
+        """A per-variable strategy dictionary is accepted at construction."""
+        strategy = {'GDP': 'shift', 'inflation': 'mask', 'unemployment': 'shift'}
+        assert PublicationDelayTransformer(delays=delays_dict_simple, strategy=strategy).strategy == strategy
+
     def test_init_default_values(self, delays_dict_simple):
-        """Initialisation avec des valeurs par défaut."""
-        default_vals = {
-            'delay': 30.0,
-            'unit': 'D',
-            'reference_point': 'end',
-            'target_frequency': 'M'
-        }
-        
-        transformer = PublicationDelayTransformer(
-            delays=delays_dict_simple,
-            strategy='mask',
-            default_values=default_vals
-        )
-        
-        assert transformer.default_values == default_vals
-    
+        """A complete ``default_values`` dictionary is stored."""
+        defaults = {'delay': 30.0, 'unit': 'D', 'reference_point': 'end', 'target_frequency': 'M'}
+        transformer = PublicationDelayTransformer(delays=delays_dict_simple, strategy='mask', default_values=defaults)
+        assert transformer.default_values == defaults
+
     def test_init_invalid_strategy_string(self, delays_dict_simple):
-        """Validation de la stratégie invalide (chaîne de caractères)."""
+        """An unknown strategy name is rejected."""
         with pytest.raises(ValueError, match="strategy must be 'shift' or 'mask'"):
-            PublicationDelayTransformer(
-                delays=delays_dict_simple,
-                strategy='invalid'
-            )
-    
+            PublicationDelayTransformer(delays=delays_dict_simple, strategy='invalid')
+
     def test_init_invalid_strategy_dict(self, delays_dict_simple):
-        """Validation de la stratégie invalide (dictionnaire)."""
-        with pytest.raises(ValueError, match="strategy must be 'shift' or 'mask'"):
-            PublicationDelayTransformer(
-                delays=delays_dict_simple,
-                strategy={'GDP': 'invalid_strategy'}
-            )
-    
+        """An unknown strategy inside a dictionary is rejected and the variable named."""
+        with pytest.raises(ValueError, match="for variable 'GDP'"):
+            PublicationDelayTransformer(delays=delays_dict_simple, strategy={'GDP': 'invalid_strategy'})
+
     def test_init_invalid_strategy_type(self, delays_dict_simple):
-        """Validation du type de stratégie invalide."""
+        """A strategy that is neither a string nor a dictionary is rejected."""
         with pytest.raises(TypeError, match="'strategy' should be a string"):
-            PublicationDelayTransformer(
-                delays=delays_dict_simple,
-                strategy=123  # Type invalide
-            )
-    
+            PublicationDelayTransformer(delays=delays_dict_simple, strategy=123)
+
     def test_init_invalid_reference_point(self, delays_dict_simple):
-        """Validation du point de référence invalide."""
+        """An unknown reference point is rejected."""
         with pytest.raises(ValueError, match="reference_point must be 'start' or 'end'"):
-            PublicationDelayTransformer(
-                delays=delays_dict_simple,
-                reference_point='middle'
-            )
-    
+            PublicationDelayTransformer(delays=delays_dict_simple, reference_point='middle')
+
     def test_init_invalid_handle_missing(self, delays_dict_simple):
-        """Validation de la gestion des délais manquants invalide."""
+        """An unknown ``handle_missing_delays`` is rejected."""
         with pytest.raises(ValueError, match="'handle_missing_delays' must be"):
-            PublicationDelayTransformer(
-                delays=delays_dict_simple,
-                handle_missing_delays='invalid'
-            )
-    
-    def test_init_default_values_missing_keys(self, delays_dict_simple):
-        """Validation des clés manquantes dans default_values."""
-        incomplete_defaults = {
-            'delay': 30.0,
-            'unit': 'D'
-            # Clés manquantes: reference_point, target_frequency
-        }
-        
-        with pytest.raises(ValueError, match="Expected a 'default_values' dictionnary"):
-            PublicationDelayTransformer(
-                delays=delays_dict_simple,
-                strategy='mask',
-                default_values=incomplete_defaults
-            )
-    
+            PublicationDelayTransformer(delays=delays_dict_simple, handle_missing_delays='invalid')
+
+    @pytest.mark.parametrize(
+        ('strategy', 'defaults', 'missing'),
+        [
+            pytest.param('mask', {'delay': 30.0, 'unit': 'D'}, 'reference_point', id='mask-without-reference-point'),
+            pytest.param('mask', {'delay': 30.0, 'unit': 'D', 'reference_point': 'end'}, 'target_frequency',
+                         id='mask-without-target-frequency'),
+            pytest.param('shift', {'delay': 30.0, 'reference_point': 'end'}, 'unit', id='shift-without-unit'),
+        ],
+    )
+    def test_init_default_values_missing_keys(self, delays_dict_simple, strategy, defaults, missing):
+        """``default_values`` must hold every key the strategy needs (``target_frequency`` for 'mask' only)."""
+        with pytest.raises(ValueError, match=missing):
+            PublicationDelayTransformer(delays=delays_dict_simple, strategy=strategy, default_values=defaults)
+
+    def test_init_shift_default_values_need_no_target_frequency(self, delays_dict_simple):
+        """For 'shift', ``default_values`` without ``target_frequency`` is complete."""
+        defaults = {'delay': 30.0, 'unit': 'D', 'reference_point': 'end'}
+        assert PublicationDelayTransformer(delays=delays_dict_simple, default_values=defaults).default_values == defaults
+
     def test_init_warning_strategy_dict_with_defaults(self, delays_dict_simple):
-        """Warning quand strategy est un dict et default_values est fourni."""
-        strategy_dict = {'GDP': 'shift', 'inflation': 'mask'}
-        default_vals = {
-            'delay': 30.0,
-            'unit': 'D',
-            'reference_point': 'end',
-            'target_frequency': 'M'
-        }
-        
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            PublicationDelayTransformer(
-                delays=delays_dict_simple,
-                strategy=strategy_dict,
-                default_values=default_vals
-            )
-            assert len(w) == 1
-            assert "default_values" in str(w[0].message)
-    
+        """``default_values`` with a strategy dictionary is announced as ignored."""
+        defaults = {'delay': 30.0, 'unit': 'D', 'reference_point': 'end', 'target_frequency': 'M'}
+        with pytest.warns(UserWarning, match="'default_values' is ignored"):
+            PublicationDelayTransformer(delays=delays_dict_simple, strategy={'GDP': 'shift', 'inflation': 'mask'},
+                                        default_values=defaults)
+
     def test_init_warning_target_frequency_with_shift(self, delays_dict_simple):
-        """Warning quand target_frequency est fourni avec strategy='shift'."""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            PublicationDelayTransformer(
-                delays=delays_dict_simple,
-                strategy='shift',
-                target_frequency='M'
-            )
-            assert len(w) == 1
-            assert "target_frequency" in str(w[0].message)
+        """``target_frequency`` with the 'shift' strategy is announced as ignored."""
+        with pytest.warns(UserWarning, match="'target_frequency' is ignored"):
+            PublicationDelayTransformer(delays=delays_dict_simple, strategy='shift', target_frequency='M')
 
 
-# ============================================================================
-# Tests de la classe PublicationDelayTransformer - Méthodes fit et transform
-# ============================================================================
+# =============================================================================
+# fit : attributs ajustés
+# =============================================================================
+class TestPublicationDelayTransformerFit:
+    """``fit`` returns the transformer and sets the fitted attributes.
 
-class TestPublicationDelayTransformerFitTransform:
-    """Tests for fit and transform methods."""
-    
+    Triage (prompt D4): the inherited tests passed a delays dictionary without
+    ``delay_unit`` nor ``reference_point`` and failed with ``KeyError: 'GDP'``. No
+    rename is involved (the signature is unchanged since ``d16b0b2``): nothing can
+    infer the unit of a bare dictionary, so the tests were wrong (c) and now give
+    both parameters. The raw ``KeyError`` itself is ``ANO-DELAYS-033``.
+    """
+
     def test_fit_basic(self, sample_time_series, delays_dict_simple):
-        """Méthode fit de base."""
-        transformer = PublicationDelayTransformer(
-            delays=delays_dict_simple,
-            strategy='shift',
-            prediction_date='2024-06-01'
-        )
-        
-        result = transformer.fit(sample_time_series)
-        
-        # Vérification que fit retourne self
-        assert result is transformer
-        
-        # Vérification des attributs créés
-        assert hasattr(transformer, 'prediction_date_')
-        assert hasattr(transformer, 'inferred_params_')
-        assert hasattr(transformer, 'detected_frequencies_')
-    
+        """``fit`` returns ``self`` and resolves the prediction date."""
+        transformer = PublicationDelayTransformer(delays=delays_dict_simple, delay_unit='D', reference_point='end',
+                                                  prediction_date='2024-06-01')
+        assert transformer.fit(sample_time_series) is transformer
+        assert transformer.prediction_date_ == datetime(2024, 6, 1)
+
+    def test_fit_sets_the_fitted_attributes(self, sample_time_series, delays_dict_simple):
+        """Frequencies are detected per column, nothing is inferred from a dictionary."""
+        transformer = _fit(sample_time_series, delays=delays_dict_simple, delay_unit='D', reference_point='end')
+        assert transformer.detected_frequencies_ == {'GDP': 'M', 'inflation': 'M', 'unemployment': 'M'}
+        assert transformer.inferred_params_ == {'delay_unit': {}, 'reference_point': {}, 'target_frequency': {}}
+
     def test_fit_creates_shift_params(self, sample_time_series, delays_dict_simple):
-        """Création des paramètres de shift après fit."""
-        transformer = PublicationDelayTransformer(
-            delays=delays_dict_simple,
-            strategy='shift'
-        )
-        
-        transformer.fit(sample_time_series)
-        
-        assert hasattr(transformer, 'shift_params')
-        assert 'GDP' in transformer.shift_params
-        assert 'n_periods' in transformer.shift_params['GDP']
-        assert 'frequency' in transformer.shift_params['GDP']
-    
-    def test_transform_basic(self, sample_time_series, delays_dict_simple):
-        """Transformation de base des données."""
-        transformer = PublicationDelayTransformer(
-            delays=delays_dict_simple,
-            strategy='shift'
-        )
-        
-        transformer.fit(sample_time_series)
-        result = transformer.transform(sample_time_series)
-        
-        # Vérification de la structure du résultat
-        assert isinstance(result, pd.DataFrame)
-        assert result.shape == sample_time_series.shape
-        assert list(result.columns) == list(sample_time_series.columns)
-    
-    def test_fit_transform(self, sample_time_series, delays_dict_simple):
-        """Méthode fit_transform."""
-        transformer = PublicationDelayTransformer(
-            delays=delays_dict_simple,
-            strategy='shift'
-        )
-        
-        result = transformer.fit_transform(sample_time_series)
-        
-        assert isinstance(result, pd.DataFrame)
-        assert result.shape == sample_time_series.shape
-    
-    def test_transform_without_fit_raises_error(self, sample_time_series, delays_dict_simple):
-        """Erreur si transform est appelé avant fit."""
-        transformer = PublicationDelayTransformer(
-            delays=delays_dict_simple,
-            strategy='shift'
-        )
-        
-        with pytest.raises(NotFittedError):
-            transformer.transform(sample_time_series)
+        """One shift per delayed column, in periods of its detected frequency.
+
+        Gold values (prediction 2023-12-15, from the period end): 45 days -> -ceil(61 / 30) = -3,
+        30 days -> -ceil(46 / 30) = -2, 15 days -> -ceil(31 / 30) = -2.
+        """
+        transformer = _fit(sample_time_series, delays=delays_dict_simple, delay_unit='D', reference_point='end')
+        assert transformer.shift_params == {
+            'GDP': {'n_periods': -3, 'frequency': 'M'},
+            'inflation': {'n_periods': -2, 'frequency': 'M'},
+            'unemployment': {'n_periods': -2, 'frequency': 'M'},
+        }
+
+    def test_fit_shift_leaves_no_mask(self, sample_time_series, delays_dict_simple):
+        """The 'shift' strategy builds no mask."""
+        transformer = _fit(sample_time_series, delays=delays_dict_simple, delay_unit='D', reference_point='end')
+        assert transformer.mask_params == {}
+
+    def test_prediction_date_today_by_default(self):
+        """Without ``prediction_date``, the date of the fit is used."""
+        before = pd.Timestamp.now()
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            transformer.fit(_monthly(('GDP',)))
+        assert before <= pd.Timestamp(transformer.prediction_date_) <= pd.Timestamp.now()
+
+    def test_refit_replaces_the_parameters(self):
+        """A second ``fit`` on other columns recomputes the parameters from scratch."""
+        transformer = _fit(_monthly(), delays={'GDP': 45.0, 'CPI': 20.0}, delay_unit='D', reference_point='start')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            transformer.fit(_monthly(('CPI',)))
+        assert transformer.shift_params == {'CPI': {'n_periods': -1, 'frequency': 'M'}}
 
 
-# ============================================================================
-# Tests de vérification des paramètres calculés (shift_params, mask_params)
-# ============================================================================
+# =============================================================================
+# Valeurs d'or du décalage
+# =============================================================================
+class TestShiftGoldValues:
+    """``n_periods = -ceil((delay - elapsed) / period)``, checked against the calendar."""
 
-class TestPublicationDelayTransformerParams:
-    """Tests de vérification des paramètres shift_params et mask_params."""
+    @pytest.mark.parametrize(
+        ('delay', 'reference_point', 'expected'),
+        [
+            # Valeur d'or : -ceil((45 - 14) / 30) = -2 ; octobre est la dernière période publiée au 15 décembre
+            pytest.param(45.0, 'start', -2, id='45d-start'),
+            # Valeur d'or : -ceil((45 + 16) / 30) = -3 ; septembre (fin le 1er oct. + 45 j = 15 nov.)
+            pytest.param(45.0, 'end', -3, id='45d-end'),
+            # Valeur d'or : -ceil((20 - 14) / 30) = -1 ; novembre (1er nov. + 20 j = 21 nov.)
+            pytest.param(20.0, 'start', -1, id='20d-start'),
+            # Valeur d'or : -ceil((20 + 16) / 30) = -2
+            pytest.param(20.0, 'end', -2, id='20d-end'),
+            # Valeur d'or : -ceil((0 - 14) / 30) = 0 ; décembre publié le 1er décembre
+            pytest.param(0.0, 'start', 0, id='0d-start'),
+            # Valeur d'or : -ceil((14 - 14) / 30) = 0 ; décembre publié le jour même de la prédiction
+            pytest.param(14.0, 'start', 0, id='14d-start-published-on-the-day'),
+            # Valeur d'or : -ceil((15 - 14) / 30) = -1 ; décembre publié le 16, un jour trop tard
+            pytest.param(15.0, 'start', -1, id='15d-start-one-day-late'),
+            # Valeur d'or : -ceil((400 - 14) / 30) = -13
+            pytest.param(400.0, 'start', -13, id='400d-start-longer-than-the-series'),
+        ],
+    )
+    def test_monthly_series(self, delay, reference_point, expected):
+        """Number of monthly periods to shift for a delay in days."""
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': delay}, delay_unit='D', reference_point=reference_point)
+        assert transformer.shift_params['GDP']['n_periods'] == expected
 
-    # -------------------------------------------------------------------------
-    # Tests des shift_params
-    # -------------------------------------------------------------------------
+    def test_quarterly_series(self):
+        """On a quarterly series, the elapsed time counts from the quarter start.
 
-    def test_shift_params_structure(self):
-        """Vérification de la structure des shift_params."""
-        # Données mensuelles simples
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({'GDP': range(12)}, index=dates)
-        
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 30.0},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='end'
-        )
-        
-        transformer.fit(data)
-        
-        # Vérification de la structure
-        assert 'GDP' in transformer.shift_params
-        assert 'n_periods' in transformer.shift_params['GDP']
-        assert 'frequency' in transformer.shift_params['GDP']
-        assert isinstance(transformer.shift_params['GDP']['n_periods'], int)
+        Gold value: 75 days from October 1 to December 15, a quarter lasts 91 days:
+        -ceil((45 - 75) / 91) = 0, the third quarter (July 1 + 45 days = August 15) is published.
+        """
+        quarterly = _monthly(('GDP',)).iloc[::3]
+        transformer = _fit(quarterly, delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
+        assert transformer.shift_params['GDP'] == {'n_periods': 0, 'frequency': 'Q'}
 
-    def test_shift_params_n_periods_is_integer(self):
-        """Vérification que n_periods est un entier."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({
-            'GDP': range(12),
-            'inflation': range(12)
-        }, index=dates)
-        
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 45.0, 'inflation': 30.0},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='end'
-        )
-        
-        transformer.fit(data)
-        
-        for col, params in transformer.shift_params.items():
-            assert isinstance(params['n_periods'], int), f"n_periods pour {col} n'est pas un entier"
+    def test_frequency_is_the_detected_one(self):
+        """The shift frequency of each column is its detected frequency."""
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': 30.0}, delay_unit='D', reference_point='end')
+        assert transformer.shift_params['GDP']['frequency'] == transformer.detected_frequencies_['GDP'] == 'M'
 
-    def test_shift_params_frequency_matches_detected(self):
-        """Vérification que la fréquence dans shift_params correspond à la fréquence détectée."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({'GDP': range(12)}, index=dates)
-        
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 30.0},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='end'
-        )
-        
-        transformer.fit(data)
-        
-        # La fréquence dans shift_params doit correspondre à la fréquence détectée
-        assert transformer.shift_params['GDP']['frequency'] == transformer.detected_frequencies_['GDP']
+    def test_ordered_delays_give_ordered_shifts(self):
+        """Increasing delays (10, 30, 60 days from the start) give shifts 0, -1, -2."""
+        # Valeurs d'or : -ceil(-4 / 30) = 0 ; -ceil(16 / 30) = -1 ; -ceil(46 / 30) = -2
+        transformer = _fit(_monthly(('fast', 'medium', 'slow')), delays={'fast': 10.0, 'medium': 30.0, 'slow': 60.0},
+                           delay_unit='D', reference_point='start')
+        assert {col: p['n_periods'] for col, p in transformer.shift_params.items()} == {
+            'fast': 0, 'medium': -1, 'slow': -2}
 
-    def test_shift_params_larger_delay_means_more_periods(self):
-        """Vérification qu'un délai plus grand implique plus de périodes à shifter."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({
-            'short_delay': range(12),
-            'long_delay': range(12)
-        }, index=dates)
-        
-        transformer = PublicationDelayTransformer(
-            delays={'short_delay': 15.0, 'long_delay': 60.0},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='end'
-        )
-        
-        transformer.fit(data)
-        
-        # Plus le délai est grand, plus le n_periods (en valeur absolue) est grand
-        # Note: n_periods est négatif (shift vers le passé)
-        short_n = transformer.shift_params['short_delay']['n_periods']
-        long_n = transformer.shift_params['long_delay']['n_periods']
-        
-        # En valeur absolue, long_delay doit avoir plus de périodes
-        assert abs(long_n) >= abs(short_n), \
-            f"Délai long ({long_n}) devrait avoir >= périodes que délai court ({short_n})"
 
-    def test_shift_params_reference_point_end_vs_start(self):
-        """Vérification de l'impact du reference_point sur n_periods."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({'GDP': range(12)}, index=dates)
-        
-        # Transformer avec reference_point='end'
-        transformer_end = PublicationDelayTransformer(
-            delays={'GDP': 45.0},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='end'
-        )
-        transformer_end.fit(data)
-        
-        # Transformer avec reference_point='start'
-        transformer_start = PublicationDelayTransformer(
-            delays={'GDP': 45.0},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='start'
-        )
-        transformer_start.fit(data)
-        
-        # Les n_periods doivent être différents (environ 1 période de différence)
-        n_end = transformer_end.shift_params['GDP']['n_periods']
-        n_start = transformer_start.shift_params['GDP']['n_periods']
-        
-        # Avec reference_point='end', le délai effectif est plus court
-        # donc on devrait shifter moins (ou la différence ~1 période)
-        assert n_end != n_start or abs(n_end - n_start) <= 1
+# =============================================================================
+# Point de référence
+# =============================================================================
+class TestReferencePoint:
+    """Origin of the delay: explicit, inferred from the delays table, or by default."""
 
-    def test_shift_params_zero_delay(self):
-        """Vérification du comportement avec un délai de 0."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({'GDP': range(12)}, index=dates)
-        
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 0.0},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='end'
-        )
-        
-        transformer.fit(data)
-        
-        # Avec un délai de 0, n_periods devrait être proche de 0 ou positif
-        # (dépend de la position dans la période)
-        n_periods = transformer.shift_params['GDP']['n_periods']
-        assert isinstance(n_periods, int)
+    def test_inferred_from_the_delays_table(self):
+        """The ``reference_point`` column of the table is used when nothing is given."""
+        delays = _delays_frame(columns=('GDP',), delays=(45.0,), reference_point='end')
+        transformer = _fit(_monthly(('GDP',)), delays=delays)
+        # Valeur d'or : 45 j depuis la fin -> -3
+        assert transformer.shift_params['GDP']['n_periods'] == -3
 
-    def test_shift_params_all_columns_present(self):
-        """Vérification que toutes les colonnes avec délai sont dans shift_params."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({
-            'GDP': range(12),
-            'inflation': range(12),
-            'unemployment': range(12)
-        }, index=dates)
-        
-        delays = {'GDP': 30.0, 'inflation': 45.0, 'unemployment': 15.0}
-        
-        transformer = PublicationDelayTransformer(
-            delays=delays,
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='end'
-        )
-        
-        transformer.fit(data)
-        
-        # Toutes les colonnes avec délai doivent être dans shift_params
-        for col in delays.keys():
-            assert col in transformer.shift_params, f"Colonne {col} absente de shift_params"
+    def test_explicit_value_overrides_the_table(self):
+        """An explicit reference point wins over the table."""
+        delays = _delays_frame(columns=('GDP',), delays=(45.0,), reference_point='end')
+        transformer = _fit(_monthly(('GDP',)), delays=delays, reference_point='start')
+        # Valeur d'or : 45 j depuis le début -> -2
+        assert transformer.shift_params['GDP']['n_periods'] == -2
 
-    def test_shift_params_different_delay_units(self):
-        """Vérification du calcul avec différentes unités de délai."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({'GDP': range(12)}, index=dates)
-        
-        # Même délai exprimé en jours et en heures
-        delay_days = 30.0
-        delay_hours = 30.0 * 24  # 720 heures = 30 jours
-        
-        transformer_days = PublicationDelayTransformer(
-            delays={'GDP': delay_days},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='end'
-        )
-        transformer_days.fit(data)
-        
-        transformer_hours = PublicationDelayTransformer(
-            delays={'GDP': delay_hours},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='h',
-            reference_point='end'
-        )
-        transformer_hours.fit(data)
-        
-        # Les n_periods devraient être identiques (même délai effectif)
-        assert transformer_days.shift_params['GDP']['n_periods'] == \
-               transformer_hours.shift_params['GDP']['n_periods']
-
-    # -------------------------------------------------------------------------
-    # Tests des mask_params
-    # -------------------------------------------------------------------------
-
-    def test_mask_params_structure(self):
-        """Vérification de la structure des mask_params."""
-        # Données journalières
-        dates = pd.date_range('2024-01-01', periods=90, freq='D')
-        data = pd.DataFrame({'GDP': range(90)}, index=dates)
-        
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 10.0},
-            strategy='mask',
-            prediction_date='2024-03-15',
-            delay_unit='D',
-            reference_point='end',
-            target_frequency='M'
-        )
-        
-        transformer.fit(data)
-        
-        # Vérification de la structure
-        # Note: si can_mask est False, la colonne sera dans shift_params
-        if 'GDP' in transformer.mask_params:
-            assert 'n_obs' in transformer.mask_params['GDP']
-            assert 'mask_frequency' in transformer.mask_params['GDP']
-            assert 'how' in transformer.mask_params['GDP']
-
-    def test_mask_params_n_obs_is_positive_integer(self):
-        """Vérification que n_obs est un entier positif."""
-        dates = pd.date_range('2024-01-01', periods=90, freq='D')
-        data = pd.DataFrame({'GDP': range(90)}, index=dates)
-        
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 5.0},
-            strategy='mask',
-            prediction_date='2024-03-15',
-            delay_unit='D',
-            reference_point='end',
-            target_frequency='M'
-        )
-        
-        transformer.fit(data)
-        
-        if 'GDP' in transformer.mask_params:
-            n_obs = transformer.mask_params['GDP']['n_obs']
-            assert isinstance(n_obs, int), "n_obs doit être un entier"
-            assert n_obs >= 0, "n_obs doit être positif ou nul"
-
-    def test_mask_params_how_is_last(self):
-        """Vérification que 'how' est toujours 'last' (comportement par défaut)."""
-        dates = pd.date_range('2024-01-01', periods=90, freq='D')
-        data = pd.DataFrame({'GDP': range(90)}, index=dates)
-        
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 5.0},
-            strategy='mask',
-            prediction_date='2024-03-15',
-            delay_unit='D',
-            reference_point='end',
-            target_frequency='M'
-        )
-        
-        transformer.fit(data)
-        
-        if 'GDP' in transformer.mask_params:
-            assert transformer.mask_params['GDP']['how'] == 'last'
-
-    def test_mask_params_larger_delay_means_more_obs(self):
-        """Vérification qu'un délai plus grand implique plus d'observations à masquer."""
-        dates = pd.date_range('2024-01-01', periods=90, freq='D')
-        data = pd.DataFrame({
-            'short_delay': range(90),
-            'long_delay': range(90)
-        }, index=dates)
-        
-        transformer = PublicationDelayTransformer(
-            delays={'short_delay': 5.0, 'long_delay': 15.0},
-            strategy='mask',
-            prediction_date='2024-03-15',
-            delay_unit='D',
-            reference_point='end',
-            target_frequency='M'
-        )
-        
-        transformer.fit(data)
-        
-        # Vérification si les colonnes sont dans mask_params
-        # (sinon elles ont été déplacées vers shift_params car can_mask=False)
-        if 'short_delay' in transformer.mask_params and 'long_delay' in transformer.mask_params:
-            short_n = transformer.mask_params['short_delay']['n_obs']
-            long_n = transformer.mask_params['long_delay']['n_obs']
-            
-            assert long_n >= short_n, \
-                f"Délai long ({long_n} obs) devrait masquer >= que délai court ({short_n} obs)"
-
-    def test_mask_params_target_frequency_used(self):
-        """Vérification que la target_frequency est utilisée dans mask_params."""
-        dates = pd.date_range('2024-01-01', periods=90, freq='D')
-        data = pd.DataFrame({'GDP': range(90)}, index=dates)
-        
-        target_freq = 'M'
-        
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 5.0},
-            strategy='mask',
-            prediction_date='2024-03-15',
-            delay_unit='D',
-            reference_point='end',
-            target_frequency=target_freq
-        )
-        
-        transformer.fit(data)
-        
-        if 'GDP' in transformer.mask_params:
-            # La mask_frequency doit correspondre à la target_frequency normalisée
-            assert 'mask_frequency' in transformer.mask_params['GDP']
-
-    def test_mask_fallback_to_shift_when_cannot_mask(self):
-        """Vérification du fallback vers shift quand le masquage n'est pas possible."""
-        # Données mensuelles avec un délai très long (impossible de masquer sans tout rendre NaN)
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({'GDP': range(12)}, index=dates)
-        
-        # Délai de 60 jours avec fréquence mensuelle = impossible de masquer
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 60.0},
-            strategy='mask',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='end',
-            target_frequency='M'
-        )
-        
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            transformer.fit(data)
-        
-        # La colonne doit être dans shift_params (fallback) ou mask_params selon le calcul
-        assert 'GDP' in transformer.shift_params or 'GDP' in transformer.mask_params
-
-    # -------------------------------------------------------------------------
-    # Tests de cohérence entre delays fournis et params calculés
-    # -------------------------------------------------------------------------
-
-    def test_shift_params_consistent_with_delays(self):
-        """Vérification de la cohérence entre les délais fournis et les paramètres calculés."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({
-            'fast': range(12),
-            'medium': range(12),
-            'slow': range(12)
-        }, index=dates)
-        
-        # Délais croissants
-        delays = {'fast': 10.0, 'medium': 30.0, 'slow': 60.0}
-        
-        transformer = PublicationDelayTransformer(
-            delays=delays,
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point='end'
-        )
-        
-        transformer.fit(data)
-        
-        # Vérification de l'ordre : plus le délai est grand, plus le shift est important
-        n_fast = abs(transformer.shift_params['fast']['n_periods'])
-        n_medium = abs(transformer.shift_params['medium']['n_periods'])
-        n_slow = abs(transformer.shift_params['slow']['n_periods'])
-        
-        assert n_fast <= n_medium <= n_slow, \
-            f"Ordre incohérent: fast={n_fast}, medium={n_medium}, slow={n_slow}"
-
-    def test_mask_params_consistent_with_delays(self):
-        """Vérification de la cohérence entre les délais fournis et les paramètres de masquage."""
-        dates = pd.date_range('2024-01-01', periods=90, freq='D')
-        data = pd.DataFrame({
-            'fast': range(90),
-            'medium': range(90),
-            'slow': range(90)
-        }, index=dates)
-        
-        # Délais croissants mais suffisamment petits pour permettre le masquage
-        delays = {'fast': 3.0, 'medium': 7.0, 'slow': 12.0}
-        
-        transformer = PublicationDelayTransformer(
-            delays=delays,
-            strategy='mask',
-            prediction_date='2024-03-15',
-            delay_unit='D',
-            reference_point='end',
-            target_frequency='M'
-        )
-        
-        transformer.fit(data)
-        
-        # Vérification de l'ordre pour les colonnes dans mask_params
-        mask_cols = [col for col in ['fast', 'medium', 'slow'] if col in transformer.mask_params]
-        
-        if len(mask_cols) >= 2:
-            for i in range(len(mask_cols) - 1):
-                col1, col2 = mask_cols[i], mask_cols[i + 1]
-                n1 = transformer.mask_params[col1]['n_obs']
-                n2 = transformer.mask_params[col2]['n_obs']
-                # Le délai plus grand devrait avoir plus d'observations à masquer
-                assert n1 <= n2, f"Ordre incohérent: {col1}={n1}, {col2}={n2}"
-
-    def test_params_with_dict_delay_unit(self):
-        """Vérification des paramètres avec delay_unit spécifié par variable."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({
-            'GDP': range(12),
-            'inflation': range(12)
-        }, index=dates)
-        
-        # Délais avec unités différentes mais équivalents
-        # 30 jours pour GDP, 4 semaines (~28 jours) pour inflation
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 30.0, 'inflation': 4.0},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit={'GDP': 'D', 'inflation': 'W'},
-            reference_point='end'
-        )
-        
-        transformer.fit(data)
-        
-        # Les deux devraient avoir des n_periods similaires (30 jours vs 28 jours)
-        n_gdp = abs(transformer.shift_params['GDP']['n_periods'])
-        n_inflation = abs(transformer.shift_params['inflation']['n_periods'])
-        
-        # Différence d'au plus 1 période attendue
-        assert abs(n_gdp - n_inflation) <= 1, \
-            f"Différence trop importante: GDP={n_gdp}, inflation={n_inflation}"
+    def test_default_value_is_imputed_with_a_warning(self):
+        """Without explicit nor inferred value, ``default_values['reference_point']`` is imputed and announced."""
+        delays = _delays_frame(columns=('GDP',), delays=(45.0,)).drop(columns='reference_point')
+        defaults = {'delay': 1.0, 'unit': 'D', 'reference_point': 'end'}
+        transformer = PublicationDelayTransformer(delays=delays, default_values=defaults, prediction_date=PREDICTION)
+        with pytest.warns(UserWarning, match="Imputed default reference_point value 'end' for column 'GDP'"):
+            transformer.fit(_monthly(('GDP',)))
+        assert transformer.shift_params['GDP']['n_periods'] == -3
 
     def test_params_with_dict_reference_point(self):
-        """Vérification des paramètres avec reference_point spécifié par variable."""
-        dates = pd.date_range('2024-01-01', periods=12, freq='MS')
-        data = pd.DataFrame({
-            'GDP': range(12),
-            'inflation': range(12)
-        }, index=dates)
-        
-        transformer = PublicationDelayTransformer(
-            delays={'GDP': 45.0, 'inflation': 45.0},
-            strategy='shift',
-            prediction_date='2024-06-15',
-            delay_unit='D',
-            reference_point={'GDP': 'end', 'inflation': 'start'}
-        )
-        
-        transformer.fit(data)
-        
-        # Les n_periods doivent différer d'environ 1 période
-        n_gdp = transformer.shift_params['GDP']['n_periods']
-        n_inflation = transformer.shift_params['inflation']['n_periods']
-        
-        # Avec start, le délai effectif est plus long, donc plus de périodes
-        assert n_gdp != n_inflation or abs(n_gdp - n_inflation) <= 1
+        """A per-variable reference point applies to each variable.
+
+        Triage (prompt D4): ``__init__`` rejected any non-string ``reference_point``
+        although its signature and the factories use a dictionary (b, ANO-DELAYS-028,
+        fixed). The former assertion (``a != b or |a - b| <= 1``) was always true; gold
+        values instead: 45 days from the end -> -3, from the start -> -2.
+        """
+        transformer = _fit(_monthly(), delays={'GDP': 45.0, 'CPI': 45.0}, delay_unit='D',
+                           reference_point={'GDP': 'end', 'CPI': 'start'})
+        assert {col: p['n_periods'] for col, p in transformer.shift_params.items()} == {'GDP': -3, 'CPI': -2}
+
+    def test_invalid_value_in_a_dict_is_rejected(self):
+        """Each value of a per-variable reference point is validated, the variable named."""
+        with pytest.raises(ValueError, match="for variable 'CPI' got 'middle'"):
+            PublicationDelayTransformer(delays={'GDP': 45.0}, reference_point={'GDP': 'end', 'CPI': 'middle'})
 
 
-# ============================================================================
+# =============================================================================
+# Unité des délais
+# =============================================================================
+class TestDelayUnit:
+    """Unit of the delays: explicit (scalar or per variable) or inferred."""
+
+    def test_days_and_hours_are_equivalent(self):
+        """30 days and 720 hours give the same shift (-ceil(16 / 30) = -1)."""
+        days = _fit(_monthly(('GDP',)), delays={'GDP': 30.0}, delay_unit='D', reference_point='start')
+        hours = _fit(_monthly(('GDP',)), delays={'GDP': 720.0}, delay_unit='h', reference_point='start')
+        assert days.shift_params == hours.shift_params == {'GDP': {'n_periods': -1, 'frequency': 'M'}}
+
+    @pytest.mark.parametrize(
+        ('weeks', 'expected'),
+        [
+            # Valeur d'or : 6 semaines = 42 j -> -ceil(28 / 30) = -1
+            pytest.param(6.0, -1, id='6W'),
+            # Valeur d'or : 7 semaines = 49 j -> -ceil(35 / 30) = -2
+            pytest.param(7.0, -2, id='7W'),
+        ],
+    )
+    def test_weeks(self, weeks, expected):
+        """A delay in weeks is compared with the elapsed time in weeks (2 weeks, 30 / 7 weeks per month)."""
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': weeks}, delay_unit='W', reference_point='start')
+        assert transformer.shift_params['GDP']['n_periods'] == expected
+
+    def test_unit_per_variable(self):
+        """A per-variable unit applies to each variable: 30 days -> -1, 7 weeks -> -2."""
+        transformer = _fit(_monthly(), delays={'GDP': 30.0, 'CPI': 7.0}, delay_unit={'GDP': 'D', 'CPI': 'W'},
+                           reference_point='start')
+        assert {col: p['n_periods'] for col, p in transformer.shift_params.items()} == {'GDP': -1, 'CPI': -2}
+
+    def test_literal_unit_of_the_delays_table(self):
+        """The literal unit returned by the delay detection (``'day'``) is understood."""
+        delays = _delays_frame(columns=('GDP',), delays=(45.0,), unit='day')
+        transformer = _fit(_monthly(('GDP',)), delays=delays)
+        assert transformer.shift_params['GDP']['n_periods'] == -2
+
+
+# =============================================================================
+# Paramètres de masquage
+# =============================================================================
+class TestMaskParams:
+    """Mask strategy: number of index observations hidden in each target period.
+
+    ``n_obs = ceil((delay - elapsed) / index period)``; masking is possible while
+    ``n_obs`` is below the number of column periods in a target period, otherwise
+    the column falls back to a shift.
+    """
+
+    @pytest.mark.parametrize(
+        ('delay', 'reference_point', 'expected'),
+        [
+            # Valeur d'or : index journalier, 0 j écoulé depuis le début du jour -> ceil(5 / 1) = 5
+            pytest.param(5.0, 'start', 5, id='5d-start'),
+            # Valeur d'or : depuis la fin du jour (écoulé -1) -> ceil(6 / 1) = 6
+            pytest.param(5.0, 'end', 6, id='5d-end'),
+            # Valeur d'or : ceil(16 / 1) = 16
+            pytest.param(15.0, 'end', 16, id='15d-end'),
+        ],
+    )
+    def test_daily_series_masked_by_month(self, delay, reference_point, expected):
+        """On a daily series, one day is masked per day of delay not yet elapsed."""
+        transformer = _fit(_daily(), delays={'GDP': delay}, strategy='mask', delay_unit='D',
+                           reference_point=reference_point, target_frequency='M', prediction_date='2024-03-15')
+        assert transformer.mask_params == {'GDP': {'n_obs': expected, 'mask_frequency': 'M', 'how': 'last'}}
+
+    @pytest.mark.parametrize(
+        'target_frequency',
+        [pytest.param('Q', id='str'), pytest.param({'GDP': 'Q'}, id='dict'), pytest.param('quarterly', id='literal')],
+    )
+    def test_target_frequency_forms(self, target_frequency):
+        """Scalar, per-variable and literal target frequencies give the normalized code.
+
+        Gold value: monthly series, 20 days from the start -> ceil(6 / 30) = 1 month masked per quarter.
+        """
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': 20.0}, strategy='mask', delay_unit='D',
+                           reference_point='start', target_frequency=target_frequency)
+        assert transformer.mask_params == {'GDP': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last'}}
+
+    def test_target_frequency_inferred_from_the_table(self):
+        """The ``frequency`` column of the delays table is the target frequency."""
+        transformer = _fit(_monthly(('GDP',)), delays=_delays_frame(columns=('GDP',), delays=(20.0,)), strategy='mask')
+        assert transformer.mask_params['GDP']['mask_frequency'] == 'Q'
+
+    def test_last_maskable_number_of_months(self):
+        """Up to two months of a quarter can be masked: 74 days -> ceil(60 / 30) = 2."""
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': 74.0}, strategy='mask', delay_unit='D',
+                           reference_point='start', target_frequency='Q')
+        assert transformer.mask_params['GDP']['n_obs'] == 2
+
+    def test_fallback_to_shift_when_the_whole_period_would_be_masked(self):
+        """75 days -> ceil(61 / 30) = 3 months, a whole quarter: the column is shifted, with a warning."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 75.0}, strategy='mask', delay_unit='D',
+                                                  reference_point='start', target_frequency='Q',
+                                                  prediction_date=PREDICTION)
+        with pytest.warns(UserWarning, match="Could not mask the column 'GDP'"):
+            transformer.fit(_monthly(('GDP',)))
+        assert (set(transformer.shift_params), transformer.mask_params) == ({'GDP'}, {})
+
+    def test_fallback_shift_moves_values_to_later_dates(self):
+        """The fallback shift is the one of the 'shift' strategy: 75 days from the start -> -ceil(61 / 30) = -3.
+
+        The fallback used to store the (positive) number of observations to mask as
+        ``n_periods``: the values moved three months **earlier**, before their
+        publication (ANO-DELAYS-031, fixed).
+        """
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': 75.0}, strategy='mask', delay_unit='D',
+                           reference_point='start', target_frequency='Q')
+        assert transformer.shift_params['GDP']['n_periods'] == -3
+
+
+# =============================================================================
+# Stratégie
+# =============================================================================
+class TestStrategy:
+    """Choice of the strategy per variable."""
+
+    def test_mask_strategy_masks_every_delayed_column(self):
+        """With 'mask', every column with a delay is masked, none shifted."""
+        transformer = _fit(_monthly(), delays={'GDP': 20.0, 'CPI': 50.0}, strategy='mask', delay_unit='D',
+                           reference_point='start', target_frequency='Q')
+        # Valeurs d'or : ceil(6 / 30) = 1 ; ceil(36 / 30) = 2
+        assert ({c: p['n_obs'] for c, p in transformer.mask_params.items()}, transformer.shift_params) == (
+            {'GDP': 1, 'CPI': 2}, {})
+
+    def test_strategy_per_variable(self):
+        """A per-variable strategy shifts some columns and masks the others."""
+        transformer = _fit(_monthly(), delays={'GDP': 45.0, 'CPI': 20.0}, strategy={'GDP': 'shift', 'CPI': 'mask'},
+                           delay_unit='D', reference_point='start', target_frequency={'CPI': 'Q'})
+        assert (set(transformer.shift_params), set(transformer.mask_params)) == ({'GDP'}, {'CPI'})
+
+    def test_strategy_per_variable_gold_values(self):
+        """Shift of ``GDP`` (45 days -> -2) and mask of ``CPI`` (20 days -> 1 month per quarter)."""
+        transformer = _fit(_monthly(), delays={'GDP': 45.0, 'CPI': 20.0}, strategy={'GDP': 'shift', 'CPI': 'mask'},
+                           delay_unit='D', reference_point='start', target_frequency={'CPI': 'Q'})
+        assert (transformer.shift_params, transformer.mask_params) == (
+            {'GDP': {'n_periods': -2, 'frequency': 'M'}},
+            {'CPI': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last'}})
+
+    def test_delayed_column_without_strategy_is_left_unchanged(self):
+        """A column with a delay but absent from the strategy dict is announced and left unchanged."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0, 'CPI': 20.0}, strategy={'GDP': 'shift'},
+                                                  delay_unit='D', reference_point='start', prediction_date=PREDICTION)
+        with pytest.warns(UserWarning, match=r"\['CPI'\] have a delay but no strategy"):
+            transformer.fit(_monthly())
+        assert (set(transformer.shift_params), transformer.fit_report_.columns_unaffected) == ({'GDP'}, ('CPI',))
+
+    def test_strategy_per_variable_ignores_default_values(self):
+        """As announced by ``__init__``, ``default_values`` is ignored with a strategy dict: nothing is imputed.
+
+        ``_build_parameter_dict`` used to impute the default reference point to the
+        columns *outside* the strategy dict (``Z`` here), which are never delayed.
+        """
+        defaults = {'delay': 30.0, 'unit': 'D', 'reference_point': 'end', 'target_frequency': 'Q'}
+        transformer = _fit(_monthly(('GDP', 'CPI', 'Z')), delays=_delays_frame(),
+                           strategy={'GDP': 'shift', 'CPI': 'shift'}, default_values=defaults)
+        assert transformer.fit_report_.defaults_imputed == ()
+
+    def test_masked_variable_needs_a_target_frequency(self):
+        """A masked variable without target frequency (defaults ignored with a dict) is rejected, named."""
+        defaults = {'delay': 30.0, 'unit': 'D', 'reference_point': 'start', 'target_frequency': 'Q'}
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0, 'CPI': 20.0},
+                                                  strategy={'GDP': 'shift', 'CPI': 'mask'}, delay_unit='D',
+                                                  reference_point='start', default_values=defaults,
+                                                  prediction_date=PREDICTION)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with pytest.raises(ValueError, match=r"No 'target_frequency' for the delayed columns \['CPI'\]"):
+                transformer.fit(_monthly())
+
+
+# =============================================================================
+# Formats du tableau des délais
+# =============================================================================
+class TestDelaysFormat:
+    """Accepted forms of ``delays``, including the real output of the delay detection."""
+
+    def test_dict_and_flat_table_are_equivalent(self):
+        """The same delays as a dictionary or as a flat table give the same parameters."""
+        from_dict = _fit(_monthly(), delays={'GDP': 45.0, 'CPI': 20.0}, delay_unit='D', reference_point='start')
+        from_table = _fit(_monthly(), delays=_delays_frame(delays=(45.0, 20.0)))
+        assert from_dict.shift_params == from_table.shift_params == {
+            'GDP': {'n_periods': -2, 'frequency': 'M'}, 'CPI': {'n_periods': -1, 'frequency': 'M'}}
+
+    def test_inferred_parameters_of_a_table(self):
+        """Unit, reference point and target frequency are read per variable from the table."""
+        transformer = _fit(_monthly(), delays=_delays_frame())
+        assert transformer.inferred_params_ == {
+            'delay_unit': {'GDP': 'D', 'CPI': 'D'},
+            'reference_point': {'GDP': 'start', 'CPI': 'start'},
+            'target_frequency': {'GDP': 'Q', 'CPI': 'Q'},
+        }
+
+    def test_table_without_frequency_column(self):
+        """Without ``frequency`` column, no target frequency is inferred; the shift does not need one."""
+        transformer = _fit(_monthly(('GDP',)), delays=_delays_frame(columns=('GDP',), delays=(45.0,)).drop(
+            columns='frequency'))
+        assert (transformer.inferred_params_['target_frequency'], transformer.shift_params['GDP']['n_periods']) == (
+            {}, -2)
+
+    @staticmethod
+    def _applicable_delays() -> pd.DataFrame:
+        """Detect and convert the delays of a monthly series downloaded on 2023-12-15.
+
+        First download: the last observation of each column is its last date
+        (``GDP`` stops in October, ``CPI`` in November), delays counted in days
+        from the start of the month.
+        """
+        X = _monthly()
+        X.loc['2023-11-01':, 'GDP'] = np.nan
+        X.loc['2023-12-01':, 'CPI'] = np.nan
+        detected = compare_and_detect_delays(X, None, PREDICTION, reference_point='start')
+        return calculate_applicable_delay(detected, 'start', 'M', unit='D')
+
+    def test_output_of_calculate_applicable_delay(self):
+        """The applicable delays, index reset, give the shifts of the data they come from.
+
+        Gold values: October 1 -> December 15 = 75 days, -ceil(61 / 30) = -3; November 1 ->
+        December 15 = 44 days, -ceil(30 / 30) = -1. The shift brings each last observation
+        back onto December, the period of the prediction date.
+        """
+        transformer = _fit(_monthly(), delays=self._applicable_delays().reset_index())
+        assert {col: p['n_periods'] for col, p in transformer.shift_params.items()} == {'GDP': -3, 'CPI': -1}
+
+    def test_raw_output_of_calculate_applicable_delay(self):
+        """The variable in the index (level ``'column'``) is read as is (ANO-DELAYS-038, decided: accepted)."""
+        raw = _fit(_monthly(), delays=self._applicable_delays())
+        flat = _fit(_monthly(), delays=self._applicable_delays().reset_index())
+        assert raw.shift_params == flat.shift_params
+
+    def test_variable_in_the_last_unnamed_level(self):
+        """Without ``column`` column nor level of that name, the variable is the last index level."""
+        delays = _delays_frame().set_index('column').rename_axis(None)
+        assert _fit(_monthly(), delays=delays).shift_params == _fit(_monthly(), delays=_delays_frame()).shift_params
+
+    def test_per_entity_table_is_rejected(self):
+        """A variable listed several times (per-entity delays) is rejected towards the factory."""
+        delays = pd.concat({'FR': _delays_frame().set_index('column'), 'DE': _delays_frame().set_index('column')},
+                           names=['country'])
+        transformer = PublicationDelayTransformer(delays=delays, prediction_date=PREDICTION)
+        with pytest.raises(ValueError, match='create_delay_transformer_factory'):
+            transformer.fit(_monthly())
+
+    def test_table_without_delay_column_is_rejected(self):
+        """A table without ``delay`` column is rejected."""
+        transformer = PublicationDelayTransformer(delays=_delays_frame().drop(columns='delay'),
+                                                  prediction_date=PREDICTION)
+        with pytest.raises(ValueError, match="'delay' column"):
+            transformer.fit(_monthly())
+
+
+# =============================================================================
+# Délais manquants
+# =============================================================================
+class TestMissingDelays:
+    """Columns without delay, delays without column, unresolved parameters."""
+
+    def test_column_without_delay_is_left_out(self):
+        """A column of ``X`` without delay is neither shifted nor masked and is reported as unaffected."""
+        transformer = _fit(_monthly(('GDP', 'Z')), delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
+        assert (set(transformer.shift_params), transformer.fit_report_.columns_unaffected) == ({'GDP'}, ('Z',))
+
+    def test_delay_of_an_absent_column_is_ignored(self):
+        """A delay for a column absent from ``X`` is reported as ignored, without error."""
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': 45.0, 'OLD': 5.0}, delay_unit='D',
+                           reference_point='start')
+        assert (set(transformer.shift_params), transformer.fit_report_.columns_ignored) == ({'GDP'}, ('OLD',))
+
+    def test_unresolved_unit_raises_a_clear_error(self):
+        """A delay whose unit cannot be resolved is reported by a ``ValueError`` naming the parameter."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, reference_point='start',
+                                                  prediction_date=PREDICTION)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with pytest.raises(ValueError, match='delay_unit'):
+                transformer.fit(_monthly(('GDP',)))
+
+    def test_column_without_delay_is_announced_by_default(self):
+        """With ``handle_missing_delays='warn'`` (default), the columns without delay are named."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
+                                                  prediction_date=PREDICTION)
+        with pytest.warns(UserWarning, match=r"No publication delay for the columns \['Z'\]"):
+            transformer.fit(_monthly(('GDP', 'Z')))
+
+    def test_handle_missing_delays_ignore(self):
+        """With ``handle_missing_delays='ignore'``, nothing is announced."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
+                                                  handle_missing_delays='ignore', prediction_date=PREDICTION)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            transformer.fit(_monthly(('GDP', 'Z')))
+        assert transformer.fit_report_.columns_unaffected == ('Z',)
+
+    def test_handle_missing_delays_error(self):
+        """``handle_missing_delays='error'`` rejects a column of ``X`` without delay."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
+                                                  handle_missing_delays='error', prediction_date=PREDICTION)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with pytest.raises(ValueError, match='Z'):
+                transformer.fit(_monthly(('GDP', 'Z')))
+
+    def test_unknown_delay_is_treated_as_missing(self):
+        """A ``NaN`` delay (couple whose delay is unknown) leaves its column unaffected."""
+        transformer = _fit(_monthly(), delays={'GDP': 45.0, 'CPI': np.nan}, delay_unit='D', reference_point='start')
+        assert (set(transformer.shift_params), transformer.fit_report_.columns_unaffected) == ({'GDP'}, ('CPI',))
+
+    def test_unknown_delay_of_a_table_gets_the_default(self):
+        """In a table, a ``NaN`` delay is missing: ``default_values['delay']`` replaces it (20 days -> -1)."""
+        delays = _delays_frame(delays=(45.0, np.nan))
+        defaults = {'delay': 20.0, 'unit': 'D', 'reference_point': 'start'}
+        transformer = _fit(_monthly(), delays=delays, default_values=defaults)
+        assert transformer.shift_params['CPI']['n_periods'] == -1
+
+
+# =============================================================================
+# Valeurs par défaut
+# =============================================================================
+class TestDefaultValues:
+    """``default_values`` completes the parameters of every column of ``X``."""
+
+    def test_default_delay_for_a_column_without_delay(self):
+        """A column without delay gets ``default_values['delay']``: 20 days from the start -> -1."""
+        defaults = {'delay': 20.0, 'unit': 'D', 'reference_point': 'start'}
+        transformer = _fit(_monthly(), delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
+                           default_values=defaults)
+        assert transformer.shift_params['CPI'] == {'n_periods': -1, 'frequency': 'M'}
+
+    def test_default_delay_is_reported(self):
+        """The default delay is listed among the defaults imputed, with its origin."""
+        defaults = {'delay': 20.0, 'unit': 'D', 'reference_point': 'start'}
+        report = _fit(_monthly(), delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
+                      default_values=defaults).fit_report_
+        records = {record.column: record for record in report.columns}
+        assert (report.defaults_imputed, records['GDP'].delay_source, records['CPI'].delay_source) == (
+            (('CPI', 'delay'),), 'explicit', 'default')
+
+    def test_default_unit(self):
+        """Without explicit nor inferred unit, ``default_values['unit']`` is used: 45 days from the start -> -2."""
+        defaults = {'delay': 20.0, 'unit': 'D', 'reference_point': 'start'}
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': 45.0}, default_values=defaults)
+        assert transformer.shift_params['GDP']['n_periods'] == -2
+
+    def test_default_target_frequency_for_the_mask(self):
+        """With 'mask', ``default_values['target_frequency']`` is imputed and announced."""
+        defaults = {'delay': 20.0, 'unit': 'D', 'reference_point': 'start', 'target_frequency': 'Q'}
+        transformer = PublicationDelayTransformer(delays={'GDP': 20.0}, strategy='mask', delay_unit='D',
+                                                  reference_point='start', default_values=defaults,
+                                                  prediction_date=PREDICTION)
+        with pytest.warns(UserWarning, match="Imputed default target_frequency value 'Q' for column 'GDP'"):
+            transformer.fit(_monthly(('GDP',)))
+        assert transformer.mask_params == {'GDP': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last'}}
+
+
+# =============================================================================
+# Avertissements
+# =============================================================================
+class TestWarnings:
+    """``fit`` warns only about what it could not resolve."""
+
+    def test_fully_resolved_fit_emits_no_warning(self):
+        """Explicit unit and reference point for every column: nothing to report."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
+                                                  prediction_date=PREDICTION)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            transformer.fit(_monthly(('GDP',)))
+
+    def test_parameters_of_undelayed_columns_are_not_required(self):
+        """A column without delay needs no unit: only its missing delay is announced."""
+        transformer = PublicationDelayTransformer(delays=_delays_frame(columns=('GDP',), delays=(45.0,)).drop(columns='unit'),
+                                                  delay_unit={'GDP': 'D'}, prediction_date=PREDICTION)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            transformer.fit(_monthly(('GDP', 'Z')))
+        assert [str(w.message) for w in caught] == ["No publication delay for the columns ['Z']: they are left unchanged"]
+
+
+# =============================================================================
+# Panel et types d'entrée
+# =============================================================================
+class TestInputTypes:
+    """Inputs other than a ``DataFrame`` indexed by dates."""
+
+    @staticmethod
+    def _panel(**frames) -> pd.DataFrame:
+        """Panel (country, date) of the given per-entity frames (``FR`` and ``DE`` monthly by default)."""
+        frames = frames or {'FR': _monthly(), 'DE': _monthly() + 100}
+        return pd.concat(frames, names=['country', 'date'])
+
+    def test_panel_gets_the_shift_of_each_column(self):
+        """A panel (entity, date) gets the same per-column shifts as each of its entities."""
+        transformer = _fit(self._panel(), delays={'GDP': 45.0, 'CPI': 20.0}, delay_unit='D', reference_point='start')
+        assert {col: p['n_periods'] for col, p in transformer.shift_params.items()} == {'GDP': -2, 'CPI': -1}
+
+    def test_panel_warns_that_every_entity_gets_the_same_delays(self):
+        """Fitting a panel directly is announced, pointing to the factory for per-entity delays."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0, 'CPI': 20.0}, delay_unit='D',
+                                                  reference_point='start', prediction_date=PREDICTION)
+        with pytest.warns(UserWarning, match='same publication delays are applied to every entity.*'
+                                             'create_delay_transformer_factory'):
+            transformer.fit(self._panel())
+
+    def test_panel_transform_and_round_trip(self):
+        """Each entity is shifted (last ``GDP`` value of December in February 2024), then restored exactly."""
+        panel = self._panel()
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0, 'CPI': 20.0}, delay_unit='D',
+                                                  reference_point='start', prediction_date=PREDICTION)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            shifted = transformer.fit_transform(panel)
+        last = {entity: shifted.loc[entity, 'GDP'].last_valid_index() for entity in ('FR', 'DE')}
+        assert last == {'FR': TS('2024-02-01'), 'DE': TS('2024-02-01')}
+        pd.testing.assert_frame_equal(transformer.inverse_transform(shifted), panel)
+
+    def test_panel_mask(self):
+        """A panel can be masked: one month per quarter in every entity (20 days, target quarter)."""
+        transformer = _fit(self._panel(), delays={'GDP': 20.0}, strategy='mask', delay_unit='D',
+                           reference_point='start', target_frequency='Q')
+        masked = transformer.transform(self._panel())
+        assert masked['GDP'].isna().groupby(level='country').sum().to_dict() == {'DE': 4, 'FR': 4}
+
+    def test_panel_column_with_different_frequencies_is_rejected(self):
+        """A delayed column monthly for one entity and quarterly for another needs per-entity delays."""
+        quarterly = _monthly()
+        quarterly.loc[~quarterly.index.month.isin([1, 4, 7, 10]), 'GDP'] = np.nan
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
+                                                  prediction_date=PREDICTION)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with pytest.raises(ValueError, match=r"\['GDP'\] have different frequencies across entities"):
+                transformer.fit(self._panel(FR=_monthly(), DE=quarterly))
+
+    def test_panel_column_empty_for_one_entity_takes_the_others_frequency(self):
+        """A column entirely empty for one entity gets the frequency the other entities share."""
+        empty_cpi = _monthly().assign(CPI=np.nan)
+        transformer = _fit(self._panel(FR=_monthly(), DE=empty_cpi), delays={'GDP': 45.0, 'CPI': 20.0},
+                           delay_unit='D', reference_point='start')
+        assert transformer.shift_params['CPI'] == {'n_periods': -1, 'frequency': 'M'}
+
+    def test_panel_mask_with_different_index_frequencies_is_rejected(self):
+        """Masking needs one index frequency: a monthly and a quarterly index need per-entity delays.
+
+        ``GDP`` is quarterly in both entities, stored on a monthly index for ``FR`` and on a
+        quarterly one for ``DE``.
+        """
+        on_monthly_index = _monthly(('GDP',))
+        on_monthly_index.loc[~on_monthly_index.index.month.isin([1, 4, 7, 10]), 'GDP'] = np.nan
+        on_quarterly_index = _monthly(('GDP',)).iloc[::3]
+        transformer = PublicationDelayTransformer(delays={'GDP': 20.0}, strategy='mask', delay_unit='D',
+                                                  reference_point='start', target_frequency='Y',
+                                                  prediction_date=PREDICTION)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with pytest.raises(ValueError, match='different index frequencies'):
+                transformer.fit(self._panel(FR=on_monthly_index, DE=on_quarterly_index))
+
+    def test_series_is_accepted(self):
+        """A named ``Series`` is handled like a one-column frame."""
+        transformer = _fit(_monthly(('GDP',))['GDP'], delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
+        assert transformer.shift_params == {'GDP': {'n_periods': -2, 'frequency': 'M'}}
+
+    def test_series_in_series_out(self):
+        """``transform`` and ``inverse_transform`` of a Series return a Series with its name."""
+        series = _monthly(('GDP',))['GDP']
+        transformer = _fit(series, delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
+        shifted = transformer.transform(series)
+        assert isinstance(shifted, pd.Series) and shifted.name == 'GDP'
+        pd.testing.assert_series_equal(transformer.inverse_transform(shifted), series, check_freq=False)
+
+    def test_other_input_types_are_rejected(self):
+        """A numpy array is rejected with a ``TypeError``."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
+        with pytest.raises(TypeError, match='pandas Series or DataFrame'):
+            transformer.fit(np.arange(12.0))
+
+
+# =============================================================================
+# Protocole sklearn
+# =============================================================================
+class TestSklearnProtocol:
+    """``get_params`` / ``set_params``, ``clone`` and the not-fitted errors."""
+
+    def test_get_params_returns_the_constructor_arguments(self):
+        """Every constructor argument is a parameter."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D')
+        assert set(transformer.get_params()) == {
+            'delays', 'prediction_date', 'strategy', 'target_frequency', 'delay_unit', 'reference_point',
+            'handle_missing_delays', 'default_values'}
+
+    def test_clone_keeps_the_parameters_and_drops_the_fit(self):
+        """A clone has the same parameters and no fitted attribute."""
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
+        cloned = clone(transformer)
+        assert cloned.get_params() == transformer.get_params() and not hasattr(cloned, 'shift_params')
+
+    def test_set_params_changes_the_fit(self):
+        """``set_params`` then ``fit`` uses the new value (45 days from the end -> -3)."""
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
+                                                  prediction_date=PREDICTION)
+        transformer.set_params(reference_point='end')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            transformer.fit(_monthly(('GDP',)))
+        assert transformer.shift_params['GDP']['n_periods'] == -3
+
+    @pytest.mark.parametrize('method', ['transform', 'inverse_transform'])
+    def test_not_fitted(self, method, delays_dict_simple, sample_time_series):
+        """``transform`` and ``inverse_transform`` require ``fit``."""
+        transformer = PublicationDelayTransformer(delays=delays_dict_simple, strategy='shift')
+        with pytest.raises(NotFittedError):
+            getattr(transformer, method)(sample_time_series)
+
+    def test_inverse_transform_before_transform(self):
+        """``inverse_transform`` reverses the last ``transform``: without one, ``NotFittedError`` (ANO-DELAYS-037)."""
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
+        with pytest.raises(NotFittedError, match='call transform before inverse_transform'):
+            transformer.inverse_transform(_monthly(('GDP',)))
+
+    def test_refit_forgets_the_previous_transform(self):
+        """After a new ``fit``, the helpers of the previous ``transform`` are no longer used."""
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
+        shifted = transformer.transform(_monthly(('GDP',)))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            transformer.fit(_monthly(('GDP',)))
+        with pytest.raises(NotFittedError):
+            transformer.inverse_transform(shifted)
+
+
+# =============================================================================
 # Rapport d'ajustement (fit_report_)
-# ============================================================================
-
+# =============================================================================
 class TestFitReport:
     """``fit_report_`` gathers what ``fit`` resolved, beyond the warnings it emits."""
 
@@ -928,16 +1035,14 @@ class TestFitReport:
         assert report.summary() in caplog.messages
 
     def test_clone_does_not_copy_the_report(self):
-        from sklearn.base import clone
         transformer = PublicationDelayTransformer(delays=self._delays(), prediction_date='2023-12-15')
         transformer.fit(self._monthly())
         assert not hasattr(clone(transformer), 'fit_report_')
 
 
-# ============================================================================
+# =============================================================================
 # Masques nuls ou négatifs (ajout D3 : contrat de MaskTransformer, n_obs >= 0)
-# ============================================================================
-
+# =============================================================================
 class TestZeroAndNegativeMasks:
     """A mask with nothing to mask leaves its column unchanged instead of building a ``MaskTransformer``.
 

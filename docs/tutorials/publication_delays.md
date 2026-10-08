@@ -481,14 +481,14 @@ transformer = PublicationDelayTransformer(
 
 | Argument | Type | Description |
 |----------|------|-------------|
-| `delays` | `Dict` ou `pd.DataFrame` | Délais par variable. Si DataFrame, doit contenir les colonnes `'column'` et `'applicable_delay'`. |
+| `delays` | `Dict` ou `pd.DataFrame` | Délais par variable. Si DataFrame : une ligne par variable, colonne `'delay'`, variable dans une colonne `'column'` ou dans l'index (niveau `'column'`, à défaut le dernier) — la sortie de `calculate_applicable_delay` convient telle quelle ; colonnes optionnelles `'unit'`, `'reference_point'`, `'frequency'`. Un délai `NaN` est inconnu. Une variable listée plusieurs fois (délais par entité) est refusée : voir §6.1 (fabrique). |
 | `prediction_date` | `str` ou `datetime` | Date de prédiction de référence. Accepte `'today'` pour la date courante. |
-| `strategy` | `str` ou `Dict` | Stratégie d'application : `'shift'` (décalage) ou `'mask'` (masquage). Peut être spécifié par variable. |
+| `strategy` | `str` ou `Dict` | Stratégie d'application : `'shift'` (décalage) ou `'mask'` (masquage). Peut être spécifié par variable ; une variable retardée absente du dictionnaire est laissée telle quelle (avertissement). |
 | `target_frequency` | `str`, `Dict` ou `None` | Fréquence cible pour la stratégie `'mask'`. Ignoré pour `'shift'`. |
-| `delay_unit` | `str`, `Dict` ou `None` | Unité des délais. Si `None`, inféré depuis le DataFrame. |
-| `reference_point` | `str`, `Dict` ou `None` | Point de référence des délais. Si `None`, inféré depuis le DataFrame. |
-| `handle_missing_delays` | `str` | Gestion des variables sans délai défini : `'ignore'`, `'warn'`, ou `'error'`. |
-| `default_values` | `Dict` ou `None` | Valeurs par défaut pour les variables sans délai spécifié. |
+| `delay_unit` | `str`, `Dict` ou `None` | Unité des délais, globale ou par variable. Si `None`, inférée depuis le DataFrame, puis `default_values`. Une colonne retardée sans unité lève une `ValueError`. |
+| `reference_point` | `str`, `Dict` ou `None` | Point de référence des délais (`'start'` / `'end'`), global ou par variable. Si `None`, inféré depuis le DataFrame, puis `default_values`. |
+| `handle_missing_delays` | `str` | Variables de `X` sans délai connu (laissées telles quelles) : `'warn'` (défaut) les signale, `'error'` lève une `ValueError`, `'ignore'` se tait. |
+| `default_values` | `Dict` ou `None` | Valeurs par défaut des colonnes de `X` qui en manquent : clés `'delay'`, `'unit'`, `'reference_point'` (et `'target_frequency'` pour `'mask'`). Avec lui, toutes les colonnes de `X` reçoivent un délai. Ignoré avec une stratégie par variable. |
 
 #### 4.3.2 Attributs après `fit`
 
@@ -498,7 +498,14 @@ transformer = PublicationDelayTransformer(
 | `detected_frequencies_` | Dictionnaire des fréquences détectées par colonne |
 | `shift_params` | Paramètres de décalage par colonne : `{'n_periods': int, 'frequency': str}` |
 | `mask_params` | Paramètres de masquage par colonne : `{'n_obs': int, 'mask_frequency': str, 'how': str}` |
-| `auxiliary_transformers_` | Transformeurs auxiliaires stockés pour `inverse_transform` |
+| `fit_report_` | `DelayFitReport` : paramétrage résolu de chaque colonne et son origine |
+| `auxiliary_transformers_` | Transformeurs auxiliaires du dernier `transform`, utilisés par `inverse_transform` (qui exige donc un `transform` préalable) |
+
+**Index, aller-retour et panel.** Le décalage déplace les dates sans perdre de valeur : l'index de sortie est
+l'union des dates décalées des colonnes (il s'allonge, et les dates qu'aucune colonne n'occupe plus disparaissent).
+`inverse_transform` supprime les lignes ajoutées par `transform`, si bien que `inverse_transform(transform(X))`
+restitue `X` à l'identique. Un panel peut être passé directement : les **mêmes délais** s'appliquent à toutes les
+entités (un avertissement le rappelle) ; pour des délais propres à chaque entité, voir la fabrique (§6.1).
 
 #### 4.3.3 Calcul du nombre de périodes à décaler (stratégie `'shift'`)
 
@@ -552,7 +559,7 @@ n_periods = -ceil((45 - (-16)) / 30) = -ceil(61 / 30) = -ceil(2.03) = -3
 | Fréquence | `period_duration` | `n_periods` calculé | Dernière observation disponible |
 |-----------|-------------------|---------------------|--------------------------------|
 | Mensuel (M) | 30 jours | -3 | Novembre 2023 |
-| Trimestriel (Q) | 90 jours | -1 | Q4 2023 |
+| Trimestriel (Q) | 91 jours | -1 | Q4 2023 |
 | Annuel (A) | 365 jours | -1 | 2023 |
 
 #### 4.3.4 Calcul du nombre d'observations à masquer (stratégie `'mask'`)
@@ -581,7 +588,7 @@ target_period_duration = convert_duration(1, target_frequency, series_frequency)
 can_mask = floor(target_period_duration) > n_periods
 ```
 
-Si `can_mask = False`, la colonne est automatiquement basculée vers la stratégie `'shift'` avec un avertissement.
+Si `can_mask = False`, la colonne est automatiquement basculée vers la stratégie `'shift'` avec un avertissement : elle reçoit alors le décalage calculé comme au §4.3.3 (périodes de la série, vers les dates postérieures).
 
 **Exemple :**
 
@@ -595,7 +602,7 @@ index_frequency = 'M'  # Index mensuel
 
 # Calcul
 index_period_duration = 30 jours
-n_periods = ceil(90 / 30) = 3 mois à masquer
+n_periods = ceil((45 - (-16)) / 30) = ceil(61 / 30) = 3 mois à masquer
 
 # Vérification can_mask
 target_period_duration = 3 mois (1 trimestre = 3 mois)
@@ -668,7 +675,7 @@ data_original = transformer_shift.inverse_transform(data_shifted)
 
 #### 4.3.6 Utilisation avec le DataFrame de délais
 
-Le transformeur peut également recevoir directement le DataFrame retourné par `calculate_applicable_delay`, ce qui permet l'inférence automatique des paramètres :
+Le transformeur peut également recevoir directement le DataFrame retourné par `calculate_applicable_delay` (variable dans l'index `column`, sans `reset_index`), ce qui permet l'inférence automatique des paramètres :
 
 ```python
 # Pipeline complet avec inférence des paramètres
@@ -680,8 +687,9 @@ df_delays = compare_and_detect_delays(
 
 df_applicable = calculate_applicable_delay(
     publication_delays=df_delays,
-    target_reference_point='end',
-    target_frequency='M',
+    reference_point='end',
+    frequency='M',
+    unit='D',
     aggregation_method='median'
 )
 
@@ -847,7 +855,7 @@ y_pred = pipeline.predict(X_test)
 
 ### 6.1 Délais variables par entité (données de panel)
 
-Pour les données de panel, chaque entité peut avoir des délais différents. On utilise `PanelwiseTransformer` alors avec les fonctions helper pour appliquer les délais adéquats à chaque entité grâce à un `PublicationDelayTransformer` différent :
+Pour les données de panel, chaque entité peut avoir des délais différents. Passé directement à un `PublicationDelayTransformer`, un panel reçoit les mêmes délais pour toutes les entités (avec un avertissement), et un tableau de délais par entité est refusé. On utilise alors `PanelwiseTransformer` avec les fonctions helper pour appliquer les délais adéquats à chaque entité grâce à un `PublicationDelayTransformer` différent (une entité absente du tableau lève une `KeyError` avec la fabrique, ou garde le transformeur de base avec `entity_kwargs`) :
 
 **Méthode 1 : Factory pattern avec `create_delay_transformer_factory`**
 
@@ -870,8 +878,9 @@ df_delays = compare_and_detect_delays(
 # 2. Calcul des délais applicables par entité
 df_applicable = calculate_applicable_delay(
     publication_delays=df_delays,
-    target_reference_point='end',
-    target_frequency='M',
+    reference_point='end',
+    frequency='M',
+    unit='D',
     aggregate_by_panel=True  # Agrège par entité
 )
 
