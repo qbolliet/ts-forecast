@@ -2976,4 +2976,73 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ## FREQ
 
-_Aucune entrée._
+### ANO-FREQ-001 — `mark_*` d'un `Timestamp` absent de la matrice ajoute silencieusement une ligne
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/provenance.py::ImputationProvenanceTracker.mark_imputed`
+  (et `mark_aggregated`, `mark_disaggregated`, `mark_interpolated`, `mark_model_imputed`)
+- **Sévérité** : mineure
+- **Observé** : `mark_imputed('a', pd.Timestamp('2030-01-01'), ...)` sur une date hors matrice agrandit la
+  matrice d'une ligne (`.loc[label, col] = ...` en mode « setting with enlargement »), les autres colonnes de
+  la ligne valant NaN. Un `DatetimeIndex` (même partiellement) hors matrice lève au contraire
+  `KeyError: "None of [DatetimeIndex([...])] are in the [index]"`.
+- **Attendu** : `KeyError` dans les deux cas. Le contrat de `extend_index` est que les lignes de la grille
+  densifiée sont ajoutées par lui seul, avant tout `mark_*` ; l'agrandissement implicite contourne la règle
+  « seuls les `extend_index` ajoutent des lignes » et ne trie pas la matrice.
+- **Reproduction** :
+  ```python
+  tracker = ImputationProvenanceTracker().initialize(
+      pd.DataFrame({'a': [1.0]}, index=pd.date_range('2023-01-01', periods=1)))
+  tracker.mark_interpolated('a', pd.Timestamp('2030-01-01'))
+  tracker.provenance_matrix_.shape   # (2, 1) au lieu d'un KeyError
+  ```
+- **Test** : `tests/unit/frequency/test_provenance.py::TestMarks::test_scalar_timestamp_outside_the_matrix_raises_key_error`
+- **Statut** : corrigé (2026-10-09)
+- **Correction** : `_check_labels_exist` (appelée par `mark_imputed` et `clear_provenance`) fait lever `KeyError` pour une étiquette scalaire ou une clé de `MultiIndex` absente ; plus de test `xfail` (`TestMarks`, `TestClearProvenance`).
+
+### ANO-FREQ-002 — `merge` : aucune erreur quand les étiquettes ne se recoupent pas
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/provenance.py::ImputationProvenanceTracker.merge`
+- **Sévérité** : à arbitrer
+- **Observé** : seule la *forme* des deux matrices est contrôlée ; l'appariement se fait par étiquettes
+  (`self.provenance_matrix_[mask] = other.provenance_matrix_[mask]`). Deux trackers de même forme mais de
+  colonnes (ou de dates) disjointes fusionnent sans erreur ni effet.
+- **Attendu** : indécidable — la docstring annonce une `ValueError` « si les matrices ont des formes
+  incompatibles », ce qui peut se lire comme « étiquettes incompatibles ». `merge` n'est appelé nulle part
+  dans `tsforecast/` : aucune source ne tranche. Comportement actuel épinglé.
+- **Reproduction** : `a.merge(b)` avec `a` de colonnes `['a', 'b']` et `b` de colonnes `['x', 'y']`, mêmes dates.
+- **Test** : `tests/unit/frequency/test_provenance.py::TestMerge::test_same_shape_but_disjoint_columns_is_a_silent_no_op`
+  et `::test_same_shape_but_disjoint_index_is_a_silent_no_op`
+- **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
+- **Correction** : `merge(other, overwrite=True)` s'appuie sur `DataFrame.update` (le paramètre `how` disparaît : `'update'` → `overwrite=True`, `'preserve'` → `overwrite=False`) ; il lève `ValueError('Incompatible labels')` si l'index (ordre compris) ou l'ensemble des colonnes diffèrent, et n'ajoute jamais de cellule. Tests : `TestMerge`.
+
+### ANO-FREQ-003 — `resolve_model_provenance` n'invalide pas ses arguments
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/provenance.py::resolve_model_provenance`
+- **Sévérité** : à arbitrer
+- **Observé** : `resolve_model_provenance('zz', 'zz')` renvoie `MODEL_ON_TRUE` ; une souillure inconnue (ou
+  une faute de frappe) est traitée comme « indemne », alors que `origin_to_taint` et `max_origin` lèvent
+  `KeyError` sur une origine inconnue.
+- **Attendu** : indécidable — la spec (§6.3) donne l'implémentation « telle quelle », sans validation, ce
+  qui fige ce comportement ; la cohérence avec les deux autres primitives plaiderait pour une erreur.
+  Comportement actuel épinglé.
+- **Reproduction** : `resolve_model_provenance('interpolate', 'none')` (faute de frappe pour `'interpolated'`)
+  renvoie `MODEL_ON_TRUE`.
+- **Test** : `tests/unit/frequency/test_provenance.py::TestResolveModelProvenance::test_unknown_taint_is_silently_treated_as_clean`
+- **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
+- **Correction** : `ValueError` nommant l'argument fautif (plutôt que `None`, qui serait écrit tel quel comme « non renseigné » dans la matrice par `mark_model_imputed`). Test : `TestResolveModelProvenance::test_unknown_taint_raises`.
+
+### ANO-FREQ-004 — Représentation d'une cellule « non renseignée » : `NaN` ou `None`
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/frequency/provenance.py::ImputationProvenanceTracker.initialize`
+- **Sévérité** : cosmétique
+- **Observé** : la docstring d'`initialize` (texte et exemple `[<ProvenanceType.ORIGINAL...>, None, ...]`) et
+  celle de `get_provenance` parlent de `None` pour une cellule non renseignée ; la matrice construite par
+  `initialize` porte en réalité `NaN` (colonne `object` créée vide), alors que `extend_index` et
+  `clear_provenance` écrivent bien `None`. Les lectures (`isna`, `isin`, `to_string_matrix`,
+  `compute_statistics`) traitent les deux de la même façon : aucun effet fonctionnel.
+- **Attendu** : le test suit le code (anomalie [DOC], pas de `xfail`) : les tests de lecture d'une cellule
+  issue d'`initialize` utilisent `pd.isna`.
+- **Reproduction** : `ImputationProvenanceTracker().initialize(df).get_provenance('a', ts_nan) is None` → `False`.
+- **Test** : `tests/unit/frequency/test_provenance.py::TestGetProvenance::test_unfilled_cell_is_none`
+- **Statut** : corrigé (2026-10-09)
+- **Correction** : docstrings d'`initialize`, `extend_index` et `clear_provenance` alignées sur le code (cellule non renseignée = nulle, à tester avec `pd.isna`) ; le code n'a pas changé.

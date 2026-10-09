@@ -101,6 +101,9 @@ class ProvenanceType(str, Enum):
 CellOrigin = Literal['observed', 'interpolated', 'model']
 Taint = Literal['none', 'interpolated', 'imputed']
 
+# Niveaux de souillure admis, pour "resolve_model_provenance"
+_TAINTS: Tuple[str, ...] = ('none', 'interpolated', 'imputed')
+
 # Ordre de souillure des origines, pour "max_origin"
 _ORIGIN_ORDER: Dict[str, int] = {'observed': 0, 'interpolated': 1, 'model': 2}
 
@@ -124,12 +127,21 @@ def resolve_model_provenance(covariate_taint: Taint, target_taint: Taint) -> Pro
     Returns:
         The MODEL_* provenance every cell produced by the step's model carries.
 
+    Raises:
+        ValueError: If a taint is not one of ``'none'``, ``'interpolated'``
+            or ``'imputed'``. Returning a provenance for a mistyped taint
+            would silently write a misleading mark in the provenance matrix.
+
     Examples:
         >>> resolve_model_provenance('none', 'none')
         <ProvenanceType.MODEL_ON_TRUE: 'model_on_true'>
         >>> resolve_model_provenance('imputed', 'imputed')
         <ProvenanceType.MODEL_ON_IMPUTED_BOTH: 'model_on_imputed_both'>
     """
+    # Validation des souillures : une faute de frappe ne doit pas être lue comme "indemne"
+    for name, taint in (('covariate_taint', covariate_taint), ('target_taint', target_taint)):
+        if taint not in _TAINTS:
+            raise ValueError(f"{name} must be one of {_TAINTS}, got {taint!r}")
     if target_taint == 'imputed':
         return (ProvenanceType.MODEL_ON_IMPUTED_BOTH if covariate_taint == 'imputed'
                 else ProvenanceType.MODEL_ON_IMPUTED_TARGET)
@@ -233,8 +245,8 @@ class ImputationProvenanceTracker:
         """Initialize the provenance matrix from input data.
 
         Creates a provenance matrix with the same shape as the input data,
-        marking all non-null values as ORIGINAL and null values as None
-        (to be filled during imputation).
+        marking all non-null values as ORIGINAL and leaving null values unfilled
+        (NaN, to be filled during imputation; test them with ``pd.isna``).
 
         Args:
             data: Input DataFrame with potential NaN values to be imputed.
@@ -258,8 +270,8 @@ class ImputationProvenanceTracker:
             >>> tracker = ImputationProvenanceTracker()
             >>> data = pd.DataFrame({'a': [1, np.nan, 3], 'b': [4, 5, np.nan]})
             >>> tracker.initialize(data)
-            >>> tracker.provenance_matrix_['a'].tolist()
-            [<ProvenanceType.ORIGINAL: 'original'>, None, <ProvenanceType.ORIGINAL: 'original'>]
+            >>> tracker.provenance_matrix_['a'].isna().tolist()
+            [False, True, False]
         """
         # Validation des entrées
         if not isinstance(data, pd.DataFrame):
@@ -292,7 +304,7 @@ class ImputationProvenanceTracker:
         for col in track_cols:
             mask_not_null = data[col].notna()
             self.provenance_matrix_.loc[mask_not_null, col] = ProvenanceType.ORIGINAL
-            # Les valeurs nulles restent à None (à remplir lors de l'imputation)
+            # Les valeurs nulles restent non renseignées (NaN, à remplir lors de l'imputation)
 
         return self
 
@@ -304,7 +316,7 @@ class ImputationProvenanceTracker:
         writes on a densified grid: on an irregular index (a few isolated
         annual observations before the start of the monthly grid, say), the
         grid carries dates the input never had. The added rows are "not
-        filled" (``None``), the value :meth:`initialize` gives to a NaN cell,
+        filled" (null, like the NaN cells :meth:`initialize` leaves unfilled),
         so that only the subsequent ``mark_*`` call decides their provenance.
 
         The existing rows keep their order; the matrix is re-sorted only when
@@ -345,6 +357,32 @@ class ImputationProvenanceTracker:
         extended.loc[missing] = None
         self.provenance_matrix_ = extended.sort_index() if was_sorted else extended
 
+    # Garde : une écriture ne crée jamais de ligne (réservé à extend_index)
+    def _check_labels_exist(self, index) -> None:
+        """Raise KeyError when a scalar label is absent from the matrix.
+
+        ``.loc`` setting enlarges the frame for an absent scalar label, while
+        it raises for an absent list-like one; rows are meant to be added by
+        :meth:`extend_index` only, so the scalar case is made to raise too.
+
+        Args:
+            index: Label(s) about to be written. Slices and list-likes are
+                left to pandas (a tuple is a scalar key on a MultiIndex).
+
+        Raises:
+            KeyError: If ``index`` is a scalar label (or MultiIndex key)
+                absent from the matrix.
+        """
+        # Extraction de l'index de la matrice
+        matrix_index = self.provenance_matrix_.index
+        is_scalar_key = not isinstance(index, slice) and (
+            not pd.api.types.is_list_like(index)
+            or (isinstance(index, tuple) and isinstance(matrix_index, pd.MultiIndex))
+        )
+        # get_loc lève KeyError pour une étiquette (ou clé partielle) absente
+        if is_scalar_key:
+            matrix_index.get_loc(index)
+
     # Méthode de marquage d'observartions comme "imputées"
     def mark_imputed(
         self,
@@ -365,6 +403,8 @@ class ImputationProvenanceTracker:
 
         Raises:
             ValueError: If provenance matrix not initialized or invalid inputs.
+            KeyError: If a label of ``index`` is absent from the matrix (rows
+                are added by :meth:`extend_index` only).
 
         Examples:
             >>> tracker.mark_imputed('var1', pd.Timestamp('2023-03-31'), ProvenanceType.MODEL_ON_TRUE)
@@ -383,6 +423,7 @@ class ImputationProvenanceTracker:
             raise ValueError(f"provenance must be a ProvenanceType, got {type(provenance).__name__}")
 
         # Marquage de la provenance
+        self._check_labels_exist(index)
         self.provenance_matrix_.loc[index, column] = provenance
 
     # Méthode de marquage de certaines observations comme "agrégées"
@@ -495,8 +536,8 @@ class ImputationProvenanceTracker:
         """Reset the provenance of specific cells to "not filled".
 
         Symmetric of :meth:`mark_imputed`: it removes a provenance instead of
-        setting one. The cells go back to ``None``, the value
-        :meth:`initialize` gives to a NaN cell, so that a cell emptied by the
+        setting one. The cells go back to "not filled" (null, like the NaN cells
+        :meth:`initialize` leaves unfilled), so that a cell emptied by the
         cascade stops being declared ORIGINAL while it no longer carries any
         value.
 
@@ -506,6 +547,7 @@ class ImputationProvenanceTracker:
 
         Raises:
             ValueError: If provenance matrix not initialized or column unknown.
+            KeyError: If a label of ``index`` is absent from the matrix.
 
         Examples:
             >>> tracker.clear_provenance('pib_trimestriel', anchor_dates)
@@ -521,6 +563,7 @@ class ImputationProvenanceTracker:
             raise ValueError(f"Column '{column}' not found in provenance matrix")
 
         # Remise à l'état "non renseigné" (convention de initialize pour un NaN)
+        self._check_labels_exist(index)
         self.provenance_matrix_.loc[index, column] = None
 
     # Méthode d'extraction de la provenance
@@ -712,26 +755,34 @@ class ImputationProvenanceTracker:
     def merge(
         self,
         other: 'ImputationProvenanceTracker',
-        how: Literal['update', 'preserve'] = 'update'
+        overwrite: bool = True
     ) -> 'ImputationProvenanceTracker':
         """Merge another tracker's provenance information into this one.
 
-        Useful for combining provenance from multiple imputation stages.
+        Useful for combining provenance from multiple imputation stages. The
+        merge relies on :meth:`pandas.DataFrame.update`: it is aligned on
+        labels and only updates cells ``self`` already carries, it never adds
+        a row or a column, and a null cell of ``other`` never erases anything.
+        Both matrices must therefore carry the same labels.
 
         Args:
             other: Another ImputationProvenanceTracker to merge.
-            how: Merge strategy:
-                - 'update': Values from other overwrite values in self
-                - 'preserve': Keep values from self, only fill None values from other
+            overwrite: Merge strategy:
+                - True: filled values of ``other`` overwrite those of ``self``
+                - False: values of ``self`` are kept, only its null cells are
+                  filled from ``other``
 
         Returns:
             self: The merged tracker.
 
         Raises:
-            ValueError: If matrices have incompatible shapes or one is not initialized.
+            ValueError: If one tracker is not initialized, or if the two
+                matrices do not carry the same index and columns (same
+                shape is not enough).
 
         Examples:
-            >>> tracker1.merge(tracker2, how='update')
+            >>> tracker1.merge(tracker2, overwrite=True)
+            >>> tracker1.merge(tracker3, overwrite=False)
         """
         # Validation
         if self.provenance_matrix_ is None:
@@ -744,18 +795,14 @@ class ImputationProvenanceTracker:
             raise ValueError(
                 f"Incompatible shapes: {self.provenance_matrix_.shape} vs {other.provenance_matrix_.shape}"
             )
+        # Même forme ne suffit pas : "update" apparie par étiquettes et ignorerait
+        # sans bruit des étiquettes qui ne se recoupent pas
+        if (not self.provenance_matrix_.index.equals(other.provenance_matrix_.index)
+                or set(self.provenance_matrix_.columns) != set(other.provenance_matrix_.columns)):
+            raise ValueError("Incompatible labels: both matrices must carry the same index and columns")
 
-        # Application de la stratégie de fusion
-        if how == 'update':
-            # Les valeurs non-None de other écrasent celles de self
-            mask_not_none = other.provenance_matrix_.notna()
-            self.provenance_matrix_[mask_not_none] = other.provenance_matrix_[mask_not_none]
-        elif how == 'preserve':
-            # On ne remplit que les valeurs None de self avec celles de other
-            mask_none = self.provenance_matrix_.isna()
-            self.provenance_matrix_[mask_none] = other.provenance_matrix_[mask_none]
-        else:
-            raise ValueError(f"Invalid merge strategy: {how}. Must be 'update' or 'preserve'")
+        # Fusion sur place : jamais d'ajout de ligne ni de colonne
+        self.provenance_matrix_.update(other.provenance_matrix_, overwrite=overwrite)
 
         # Invalidation des statistiques (doivent être recalculées)
         self.statistics_ = None
