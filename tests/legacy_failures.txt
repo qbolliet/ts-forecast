@@ -8,14 +8,6 @@
 # permanent : le prompt C2 exige qu'il ne reste plus, en fin de campagne, que le
 # groupe "# hors campagne".
 
-# prompt D5
-tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_last_observation_aligned_with_prediction_date
-tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_workflow_multi_frequency
-tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_workflow_panel_mono_frequency
-tests/integration/delays/test_integration.py::TestDelayDetectionWorkflow::test_workflow_time_series_mono_frequency
-tests/integration/delays/test_integration.py::TestDelayDetectionWorkflowPanel::test_panel_each_entity_has_delays
-tests/integration/delays/test_integration.py::TestDelayDetectionWorkflowPanel::test_panel_last_observation_per_entity
-
 # hors campagne
 tests/unit/panel/test_panelwise_transformer.py::TestErrorHandling::test_error_handling_raise
 tests/unit/panel/test_panelwise_transformer.py::TestErrorHandling::test_missing_panel_cols_error

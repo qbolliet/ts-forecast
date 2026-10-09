@@ -502,35 +502,25 @@ transformer = PublicationDelayTransformer(
 | `auxiliary_transformers_` | Transformeurs auxiliaires du dernier `transform`, utilisés par `inverse_transform` (qui exige donc un `transform` préalable) |
 
 **Index, aller-retour et panel.** Le décalage déplace les dates sans perdre de valeur : l'index de sortie est
-l'union des dates décalées des colonnes (il s'allonge, et les dates qu'aucune colonne n'occupe plus disparaissent).
+l'union des dates décalées des colonnes (il s'allonge, et les dates qu'aucune colonne n'occupe plus disparaissent),
+trié par date (pour un panel : par entité, dans l'ordre d'entrée, puis par date).
 `inverse_transform` supprime les lignes ajoutées par `transform`, si bien que `inverse_transform(transform(X))`
 restitue `X` à l'identique. Un panel peut être passé directement : les **mêmes délais** s'appliquent à toutes les
 entités (un avertissement le rappelle) ; pour des délais propres à chaque entité, voir la fabrique (§6.1).
 
+**Pipeline avec une cible.** Seul `X` est transformé : dans une `XYPipeline` suivie d'un estimateur, le décalage
+change les lignes de `X` sans toucher à `y`, et une étape ultérieure doit réaligner `y` sur le nouvel index. La
+stratégie `'mask'` (sans bascule vers le décalage) conserve l'index et s'enchaîne directement.
+
 #### 4.3.3 Calcul du nombre de périodes à décaler (stratégie `'shift'`)
 
-Le cœur de la stratégie `'shift'` est le calcul du nombre de périodes à décaler pour chaque série.
-
-![Calcul des périodes à décaler](../assets/compute_shift_periods.png)
-
-**Formule :**
-
-$$n\_periods = -\lceil \frac{delay - elapsed\_adj}{period\_duration} \rceil$$
-
-Où :
-- `delay` : délai de publication de la série
-- `elapsed_adj` : temps écoulé entre le début de la période courante et `prediction_date`, ajusté selon `reference_point`
-- `period_duration` : durée d'une période à la fréquence de la série
-
-**Ajustement selon `reference_point` :**
-
-```python
-# Si reference_point == 'end'
-elapsed_adj = elapsed_duration - period_duration
-
-# Si reference_point == 'start'
-elapsed_adj = elapsed_duration
-```
+Le cœur de la stratégie `'shift'` est le calcul du nombre de périodes à décaler pour chaque série. Il se fait
+**sur le calendrier** : l'observation de la période commençant en *s* est publiée en *s + délai* (point de
+référence `'start'`) ou à la fin (exclusive) de sa période + délai (`'end'`). `n_periods` vaut moins le nombre de
+périodes entre la période de `prediction_date` et la **dernière période publiée à `prediction_date`** (une
+période publiée le jour même compte comme publiée). La durée réelle des mois (28 à 31 jours) et les années
+bissextiles sont prises en compte ; le délai, lui, est une durée (un délai en mois compte 30 jours par mois,
+comme partout dans le paquet).
 
 **Exemple détaillé :**
 
@@ -540,76 +530,46 @@ prediction_date = '2024-02-15'
 delay = 45  # jours
 reference_point = 'end'
 
-# Pour une série mensuelle (period_duration = 30 jours)
-period_start = '2024-02-01'
-elapsed_duration = 14  # jours (15 fév - 1er fév)
-
-# Ajustement car reference_point = 'end'
-elapsed_adj = 14 - 30 = -16 jours
-
-# Calcul du nombre de périodes
-n_periods = -ceil((45 - (-16)) / 30) = -ceil(61 / 30) = -ceil(2.03) = -3
-
-# Interprétation : décaler de 3 périodes vers le passé
-# → La dernière observation disponible est celle de novembre 2023
+# Série mensuelle :
+# - janvier 2024 finit le 1er février, + 45 jours = 17 mars    -> non publié au 15 février
+# - décembre 2023 finit le 1er janvier, + 45 jours = 15 février -> publié le jour même
+# Dernière période publiée : décembre 2023, deux mois avant février -> n_periods = -2
 ```
 
 **Impact de la fréquence :**
 
-| Fréquence | `period_duration` | `n_periods` calculé | Dernière observation disponible |
-|-----------|-------------------|---------------------|--------------------------------|
-| Mensuel (M) | 30 jours | -3 | Novembre 2023 |
-| Trimestriel (Q) | 91 jours | -1 | Q4 2023 |
-| Annuel (A) | 365 jours | -1 | 2023 |
+| Fréquence | Dernière période publiée au 15 février 2024 | `n_periods` |
+|-----------|---------------------------------------------|-------------|
+| Mensuel (M) | Décembre 2023 (fin 1er janv. + 45 j = 15 févr.) | -2 |
+| Trimestriel (Q) | T4 2023 (fin 1er janv. + 45 j = 15 févr.) | -1 |
+| Annuel (Y) | 2023 (fin 1er janv. + 45 j = 15 févr.) | -1 |
+
+Une formule approchée (`-ceil((délai - écoulé) / durée)` avec un mois de 30 jours) se trompait d'une période
+près des frontières calendaires, dans les deux sens : une valeur publiée le jour de la prédiction était repoussée
+après elle, ou une valeur publiée le lendemain devenait visible (ANO-DELAYS-042, corrigée).
 
 #### 4.3.4 Calcul du nombre d'observations à masquer (stratégie `'mask'`)
 
-La stratégie `'mask'` utilise la **fréquence de l'index** (pas celle de la série) pour calculer le nombre d'observations à masquer.
+La stratégie `'mask'` compte de la même façon, sur le calendrier, les **périodes de l'index** (pas celles de la
+série) non encore publiées à `prediction_date` : c'est le nombre de dernières observations masquées dans chaque
+période cible. Avec `'end'`, le délai part de la fin de la période de la série contenant l'observation.
 
-![Calcul des périodes à masquer](../assets/compute_mask_periods.png)
+**Vérification de faisabilité (`can_mask`) :** le masquage doit laisser au moins une observation dans chaque
+période cible. Le nombre d'observations à masquer est comparé au plus petit nombre de périodes de l'index dans
+une période cible couverte par les données, compté sur le calendrier (`FrequencyConverter.count_subperiods_per_period` :
+28 jours en février 2023, 3 mois par trimestre). Si `can_mask = False`, la colonne est automatiquement basculée
+vers la stratégie `'shift'` avec un avertissement : elle reçoit alors le décalage calculé comme au §4.3.3.
 
-**Formule :**
-
-$$n\_periods = \lceil \frac{delay - elapsed\_adj}{index\_period\_duration} \rceil$$
-
-**Différence clé avec `'shift'` :**
-
-- `'shift'` utilise `period_duration` (fréquence de la série)
-- `'mask'` utilise `index_period_duration` (fréquence de l'index)
-
-Cette distinction est cruciale pour les données à fréquences mixtes où l'index peut être plus fin que certaines séries.
-
-**Vérification de faisabilité (`can_mask`) :**
-
-Avant d'appliquer le masquage, le transformeur vérifie que l'opération ne produira pas une série entièrement NaN sur la période cible :
+**Exemples :**
 
 ```python
-target_period_duration = convert_duration(1, target_frequency, series_frequency)
-can_mask = floor(target_period_duration) > n_periods
-```
+# Index mensuel, trimestre cible, 45 jours depuis la fin, prédiction au 15 février 2024
+# - février 2024 et janvier 2024 (publié le 17 mars) ne sont pas publiés, décembre 2023 l'est
+# -> 2 mois masqués par trimestre ; 2 < 3 mois par trimestre : masquage possible
 
-Si `can_mask = False`, la colonne est automatiquement basculée vers la stratégie `'shift'` avec un avertissement : elle reçoit alors le décalage calculé comme au §4.3.3 (périodes de la série, vers les dates postérieures).
-
-**Exemple :**
-
-```python
-# Configuration
-prediction_date = '2024-02-15'
-delay = 45  # jours
-reference_point = 'end'
-target_frequency = 'Q'  # Trimestriel
-index_frequency = 'M'  # Index mensuel
-
-# Calcul
-index_period_duration = 30 jours
-n_periods = ceil((45 - (-16)) / 30) = ceil(61 / 30) = 3 mois à masquer
-
-# Vérification can_mask
-target_period_duration = 3 mois (1 trimestre = 3 mois)
-can_mask = floor(3) > 3 = False
-
-# → Masquage impossible, toutes les observations du trimestre seraient NaN
-# → Bascule automatique vers 'shift'
+# Index mensuel, trimestre cible, 80 jours depuis le début, prédiction au 15 décembre 2023
+# - décembre, novembre et octobre (publié le 20 décembre) ne sont pas publiés
+# -> 3 mois à masquer = un trimestre entier : bascule vers 'shift' (n_periods = -3)
 ```
 
 #### 4.3.5 Exemple d'utilisation complète

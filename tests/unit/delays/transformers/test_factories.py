@@ -9,9 +9,11 @@ components read by ``ShiftTransformer`` / ``MaskTransformer``, moved here by
 prompt D3).
 
 Gold values: panel of two entities (``FR``, ``DE``) of monthly 2023 data,
-prediction date 2023-12-15 (14 days elapsed in December, 30 days per month).
-Delays in days from the period start: ``FR`` GDP 45 -> shift -2, ``FR`` CPI 20
--> -1, ``DE`` GDP 75 -> -ceil(61 / 30) = -3, ``DE`` CPI 20 -> -1.
+prediction date 2023-12-15. Delays in days from the period start, shifts counted
+on the calendar (last month published on December 15, moved onto December):
+``FR`` GDP 45 -> -2 (October 1 + 45 days = November 15), ``FR`` CPI 20 -> -1
+(November 21), ``DE`` GDP 80 -> -3 (September 1 + 80 days = November 20, October
+1 + 80 days = December 20 is too late), ``DE`` CPI 20 -> -1.
 
 Triage (prompt D4): the former tests of ``_extract_param_by_variable`` and
 ``_resolve_strategy`` called the private helpers directly although both are
@@ -66,7 +68,7 @@ def _entity_delays(rows=None, frequency='M', reference_point='start') -> pd.Data
         Table indexed by (country, column) with the columns ``delay``, ``unit``, ``frequency``,
         ``reference_point``.
     """
-    rows = rows or {('FR', 'GDP'): 45.0, ('FR', 'CPI'): 20.0, ('DE', 'GDP'): 75.0, ('DE', 'CPI'): 20.0}
+    rows = rows or {('FR', 'GDP'): 45.0, ('FR', 'CPI'): 20.0, ('DE', 'GDP'): 80.0, ('DE', 'CPI'): 20.0}
     index = pd.MultiIndex.from_tuples(list(rows), names=['country', 'column'])
 
     def per_column(value):
@@ -130,7 +132,7 @@ class TestCreateDelayTransformerFactory:
         params = transformer.get_params()
         assert {key: params[key] for key in ('delays', 'delay_unit', 'reference_point', 'target_frequency',
                                              'strategy', 'prediction_date')} == {
-            'delays': {'GDP': 75.0, 'CPI': 20.0}, 'delay_unit': 'day', 'reference_point': 'start',
+            'delays': {'GDP': 80.0, 'CPI': 20.0}, 'delay_unit': 'day', 'reference_point': 'start',
             'target_frequency': None, 'strategy': 'shift', 'prediction_date': PREDICTION}
 
     def test_mask_transformer_gets_the_target_frequency(self):
@@ -198,7 +200,7 @@ class TestCreateDelayTransformerFactory:
         """With two entity levels (region, country), entity keys are pairs."""
         delays = pd.concat({'EU': _entity_delays()}, names=['region'])
         factory = create_delay_transformer_factory(delays, prediction_date=PREDICTION)
-        assert factory(('EU', 'DE')).delays == {'GDP': 75.0, 'CPI': 20.0}
+        assert factory(('EU', 'DE')).delays == {'GDP': 80.0, 'CPI': 20.0}
 
     def test_reference_point_varying_by_variable(self):
         """A reference point varying by variable gives a per-variable dict accepted by the transformer."""
@@ -277,7 +279,7 @@ class TestPrepareEntityKwargs:
         assert prepare_entity_kwargs_from_delays(_entity_delays()) == {
             ('FR',): {'delays': {'GDP': 45.0, 'CPI': 20.0}, 'delay_unit': 'day', 'reference_point': 'start',
                       'target_frequency': None, 'strategy': 'shift'},
-            ('DE',): {'delays': {'GDP': 75.0, 'CPI': 20.0}, 'delay_unit': 'day', 'reference_point': 'start',
+            ('DE',): {'delays': {'GDP': 80.0, 'CPI': 20.0}, 'delay_unit': 'day', 'reference_point': 'start',
                       'target_frequency': None, 'strategy': 'shift'},
         }
 
@@ -343,7 +345,7 @@ class TestPanelwiseIntegration:
 
     def test_variable_absent_for_an_entity_is_untouched(self):
         """A variable without row for an entity is left as is for that entity only."""
-        rows = {('FR', 'GDP'): 45.0, ('FR', 'CPI'): 20.0, ('DE', 'GDP'): 75.0}
+        rows = {('FR', 'GDP'): 45.0, ('FR', 'CPI'): 20.0, ('DE', 'GDP'): 80.0}
         factory = create_delay_transformer_factory(_entity_delays(rows), prediction_date=PREDICTION)
         result = _fit_transform(_panelwise(factory), _panel())
         pd.testing.assert_series_equal(result.loc['DE', 'CPI'].dropna(), _panel().loc['DE', 'CPI'], check_freq=False)

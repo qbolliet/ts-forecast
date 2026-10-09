@@ -2823,6 +2823,133 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Correctif** : docstrings de `PublicationDelayTransformer` (format de `delays`, calcul de `n_periods`, croissance de l'index et aller-retour, attributs réels, `Raises` / `Warns`, exemple exécuté), des fabriques et de leurs auxiliaires réécrites ; exemples exécutés par doctest (`test_factories.py::TestDocstringExamples`).
 - **Statut** : corrigée
 
+### ANO-DELAYS-042 — Périodes de 30 / 91 / 365 jours : décalage ou masque faux d'une période près d'une frontière calendaire
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer._compute_shift_periods`,
+  `::_compute_mask_periods`
+- **Sévérité** : majeure
+- **Observé** : `n_periods = -ceil((délai - écoulé) / durée)`, la durée d'une période venant de `convert_duration`
+  (un mois = 30 jours, un trimestre = 91, une année = 365 ; convention documentée par la docstring de la classe).
+  Quand les mois qui séparent la période retardée de la date de prédiction ne font pas 30 jours chacun, le décalage
+  (et le nombre d'observations masquées) est faux d'une période, **dans les deux sens** :
+  - **fuite** : février + mars 2023 = 59 jours < 60 ; délai de 69 jours depuis le début, prédiction au 10 avril 2023 →
+    `n_periods = -ceil(55 / 30) = -2` : la valeur de février, publiée le 11 avril, est visible au 10 avril ;
+  - **perte** : juillet + août = 62 jours > 60 ; une valeur publiée **le jour même** de la prédiction est repoussée
+    après elle. C'est le cas du flux de base : deux téléchargements (le second le 15 sept. 2024) → délai détecté =
+    date de téléchargement - début de période (76 jours pour juillet) → prédiction à la date du second
+    téléchargement → `-ceil((76 - 14) / 30) = -3` au lieu de -2 : la valeur de juillet, publiée le 15 septembre,
+    n'est pas visible au 15 septembre (panel du notebook 3, inflation et chômage de la France et de l'Italie).
+  Même convention dans `_compute_mask_periods` (45 jours depuis le début, prédiction au 15 août : 2 mois masqués au
+  lieu d'un, juillet étant publié le 15 août).
+- **Attendu** : le nombre de périodes du calendrier : plus petit `k ≥ 0` tel que `début(période de la prédiction) -
+  k périodes (+ une période si le point de référence est la fin) + délai ≤ date de prédiction` (arithmétique
+  `pd.DateOffset`, comme le décalage calendaire d'ANO-DELAYS-021). Finalité de la classe : une valeur est visible à la
+  date de prédiction **si et seulement si** elle est publiée à cette date ; le sens « fuite » introduit un biais
+  d'anticipation (look-ahead) dans un backtest. La convention à 30 jours est documentée, d'où la sévérité « majeure »
+  plutôt que « bloquante » : à arbitrer entre calendrier exact et convention assumée (avec sa limite documentée).
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import PublicationDelayTransformer
+  X = pd.DataFrame({'a': np.arange(6.)}, index=pd.date_range('2023-01-01', periods=6, freq='MS'))
+  t = PublicationDelayTransformer(delays={'a': 69.0}, prediction_date='2023-04-10', delay_unit='D', reference_point='start')
+  t.fit_transform(X).loc['2023-04-01', 'a']   # 1.0 (février, publié le 11 avril) ; attendu 0.0 (janvier)
+  ```
+- **Test** : `tests/unit/delays/transformers/test_publication_delay_transformer.py::TestCalendarBoundaries`
+  (`test_value_published_after_the_prediction_date_is_hidden`, `test_value_published_on_the_prediction_date_is_visible`),
+  `::test_business_days_skip_the_weekend`, `::test_negative_delay_on_business_days`,
+  `::test_end_of_a_quarter_counts_from_the_next_quarter`,
+  `::TestMaskParams::test_whole_february_cannot_be_masked`, `::test_period_index_is_masked_like_its_month_starts`,
+  `::test_semi_monthly_target`,
+  `tests/integration/delays/test_workflow.py::TestTwoDownloadsOnHeterogeneousPanel::test_number_of_periods_follows_the_calendar`,
+  `::test_published_value_is_visible_at_the_prediction_date`
+- **Correctif** : décision de l'auteur (2026-10-09) : décompte calendaire. `_count_unpublished_periods` cherche le plus
+  petit `k` (négatif pour un délai négatif) tel que la période commençant `k` périodes avant celle de la date de
+  prédiction soit publiée à cette date, en parcourant les périodes avec `get_period_start` / `get_period_end`
+  (`tsforecast/utils/time`, bornes calendaires exactes déjà utilisées par le paquet ; jours ouvrés : `BDay`, un
+  week-end appartenant au vendredi). Le délai reste une durée (`_delay_to_timedelta`, longueurs de
+  `get_duration_nanoseconds` : un délai en mois compte 30 jours, comme dans `calculate_applicable_delay`).
+  `_compute_shift_periods` et `_compute_mask_periods` l'utilisent (périodes de la colonne pour le décalage, de l'index
+  pour le masque). La faisabilité du masque (`can_mask`) compare désormais le nombre d'observations à masquer au
+  plus petit nombre de périodes de l'index dans une période cible des données, compté par
+  `FrequencyConverter.count_subperiods_per_period` (février : 28 jours au lieu de 30). Valeurs d'or des tests D4
+  tombant sur une frontière (75 jours au 15 décembre, la publication d'octobre tombant le jour même) corrigées : -2
+  au lieu de -3 ; exemples de la docstring de la fabrique et du tutoriel (§4.3.3-4.3.4) corrigés.
+- **Statut** : corrigée
+
+### ANO-DELAYS-043 — Sortie panel de `PublicationDelayTransformer` non triée par date au sein des entités
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer._assemble` (via `transform` sur un panel)
+- **Sévérité** : mineure
+- **Observé** : sur un panel `MultiIndex` (entité, date), `_assemble` joint les colonnes décalées (index décalé) et les
+  colonnes non décalées par `pd.concat(axis=1, join='outer')` ; l'union de deux `MultiIndex` n'est pas triée : les
+  dates propres à l'un des index sont ajoutées **en fin de frame**. Sur `heterogeneous_coverage_panel`, les lignes de la
+  France commencent par 2015-04-01, 2016-04-01, ... et se terminent par 2015-01-01 ... 2018-03-01 ; sur un panel de
+  deux entités `FR` / `DE`, les lignes `(FR, 2024-01-01)` et `(DE, 2024-01-01)` arrivent après toutes les autres (les
+  entités ne sont même plus contiguës). Sur une série simple, l'union de `DatetimeIndex` est triée, la sortie aussi ;
+  `PanelwiseTransformer` + `ShiftTransformer` seuls rendent aussi une sortie triée par entité.
+  `inverse_transform` restitue bien l'entrée (aller-retour exact).
+- **Attendu** : lignes groupées par entité (ordre d'entrée), dates croissantes dans chaque entité — comme pour une
+  série simple et comme `PanelwiseTransformer` ; un panel désordonné en sortie casse les composants en aval qui
+  supposent des entités groupées et triées (`validate_entities_grouped`, `validate_sorted_within_groups`, splitters).
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays.transformers import PublicationDelayTransformer
+  X = pd.DataFrame({'a': np.arange(6.), 'b': np.arange(6.)}, index=pd.date_range('2024-01-01', periods=6, freq='MS'))
+  panel = pd.concat({'FR': X, 'DE': X}, names=['c', 'date'])
+  out = PublicationDelayTransformer(delays={'a': 40.0}, prediction_date='2024-06-15', delay_unit='D',
+                                    reference_point='start').fit_transform(panel)
+  out.index[-2:].tolist()   # [('FR', 2024-01-01), ('DE', 2024-01-01)]
+  ```
+- **Test** : `tests/integration/delays/test_workflow.py::TestTwoDownloadsOnHeterogeneousPanel::test_output_is_ordered_by_entity_then_date`,
+  `tests/unit/delays/transformers/test_publication_delay_transformer_transform.py::TestPanelOutputOrder`
+- **Correctif** : `_assemble` trie la sortie d'un panel par entité (ordre d'apparition dans `X`), puis par date ; la
+  sortie d'une série était déjà triée. L'aller-retour reste exact.
+- **Statut** : corrigée
+
+### ANO-DELAYS-044 — `PublicationDelayTransformer` dans un `XYPipeline` : `X` décalé n'est plus aligné sur `y`
+- **Type** : [CODE] comportement (arbitré : composition de pipeline, hors classe)
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer.transform` (stratégie `'shift'`, et
+  repli masque → décalage) dans `tsforecast/xy/pipeline.py::XYPipeline`
+- **Sévérité** : majeure
+- **Observé** : le décalage change les lignes de `X` (union des dates décalées, arbitrage du 2026-10-08) ;
+  `PublicationDelayTransformer` n'est pas un transformateur XY, `y` traverse le pipeline inchangé. L'estimateur final
+  reçoit donc `X` et `y` de longueurs différentes : `SpyEstimator` (sans contrôle) s'ajuste, un vrai estimateur
+  lèverait ; au score, `cross_validate` lève `ValueError: Found input variables with inconsistent numbers of samples:
+  [6, 8]` (pli de test de 6 mois de `irregular_index_timeseries`, 8 lignes après un décalage d'un et deux mois de
+  l'inflation et du chômage ; `[6, 7]` dans la reproduction ci-dessous, inflation seule). Même échec avec
+  `strategy='mask'` dès qu'une colonne bascule en décalage (« Could not mask the column 'pib_trimestriel' ... Moved
+  it to the shifted columns »). Avec un masque seul (index inchangé), la chaîne fonctionne.
+- **Attendu** : à trancher — utilisable avec `cross_validate` d'une manière documentée : soit `transform` restreint sa
+  sortie à l'index de son entrée (les dates ajoutées n'ont pas de cible), soit un mode XY qui réaligne `y` sur les
+  dates de `X`, soit une `ValueError` explicite / une mention dans la docstring orientant vers la stratégie `'mask'`.
+  La finalité (préparer les variables d'une prévision évaluée en validation croisée temporelle) suppose au moins l'un
+  des trois.
+- **Reproduction** :
+  ```python
+  from sklearn.model_selection import cross_validate
+  from tests.support.datasets import build_mixed_frequency_timeseries
+  from tests.support.estimators import SpyEstimator
+  from tsforecast.crossvals import TSOutOfSampleSplit
+  from tsforecast.delays.transformers import PublicationDelayTransformer
+  from tsforecast.xy import XYPipeline
+  data = build_mixed_frequency_timeseries(annual_start_date='2015-01-01')
+  X, y = data.drop(columns='production_industrielle'), data['production_industrielle']
+  pipe = XYPipeline([('delays', PublicationDelayTransformer(delays={'inflation_ipc': 20.0}, prediction_date='2024-08-15',
+                                                            delay_unit='D', reference_point='start')),
+                     ('model', SpyEstimator())])
+  cross_validate(pipe, X, y, cv=TSOutOfSampleSplit(n_splits=3, test_size=6), error_score='raise')  # ValueError
+  ```
+- **Test** : `tests/integration/delays/test_cross_validation.py::TestShiftedPipelineCrossValidation::test_scoring_without_a_realignment_step_fails`
+- **Correctif** : arbitrage de l'auteur (2026-10-09) : **pas un défaut de la classe**. `transform` /
+  `inverse_transform` respectent leur contrat (`X` en entrée, `X` en sortie, index agrandi par le décalage) et la
+  sortie n'est pas restreinte à l'index d'entrée. Le désalignement naît de la composition dans un pipeline avec une
+  cible : il sera traité par une étape ultérieure (transformateur XY réalignant `y` sur `X`), hors de
+  `PublicationDelayTransformer`. Docstring de la classe et tutoriel (« Pipeline avec une cible ») le mentionnent ; le
+  test épingle l'échec du score sans étape de réalignement.
+- **Statut** : corrigée (arbitrée : comportement conservé, réalignement hors classe)
+
 ### Arbitrages de l'auteur (2026-10-04) sur `compare_and_detect_delays`
 - **Fuseaux horaires** : une date sans fuseau est lue en UTC face à une date avec fuseau ; deux dates avec fuseaux sont
   comparées comme des instants ; la colonne `download_date` garde la date telle que fournie. (Auparavant : `TypeError`

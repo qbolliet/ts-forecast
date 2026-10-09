@@ -10,8 +10,7 @@ This module provides a modular architecture with:
 import pandas as pd
 import numpy as np
 from pandas.tseries.frequencies import to_offset
-from pandas.tseries.offsets import Tick
-import math
+from pandas.tseries.offsets import BDay, Tick
 from typing import Any, Callable, Dict, Optional, Union, List, Literal, Tuple
 from datetime import datetime
 import logging
@@ -24,13 +23,14 @@ from sklearn.utils.validation import check_is_fitted
 
 # Importation des modules du package
 from tsforecast.utils.frequency import (
+    FrequencyConverter,
     normalize_frequency,
     is_higher_frequency,
     detect_index_frequency,
     detect_frequency,
 )
-from tsforecast.utils.time import resolve_date, get_period_start, get_period_boundaries
-from tsforecast.utils.duration import convert_duration, normalize_duration, DurationConverter
+from tsforecast.utils.time import resolve_date, get_period_start, get_period_end, get_period_boundaries
+from tsforecast.utils.duration import get_duration_nanoseconds, DurationConverter
 from ..panel import PanelwiseTransformer, normalize_entity_key, is_panel_data, get_entity_levels
 from ..panel.utils import split_variable_key
 from tsforecast.utils.validation import validate_temporal_data
@@ -55,16 +55,26 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
     :class:`~tsforecast.panel.PanelwiseTransformer` for a panel) and
     ``inverse_transform`` reverses them.
 
-    The number of periods of a delay ``d`` is ``-ceil((d - e) / p)``, with ``e``
-    the time elapsed between the start of the period of the prediction date and
-    the prediction date (minus one period when the delay is counted from the
-    period end) and ``p`` the length of a period, both in the unit of the delay
-    (one month = 30 days, one quarter = 91 days, one year = 365 days).
+    The number of periods is counted on the calendar: the observation of the
+    period starting at ``s`` is published at ``s + d`` (or at the end of its period
+    plus ``d`` when the delay is counted from the period end), and ``n_periods`` is
+    minus the number of periods between the period of the prediction date and the
+    last period published at the prediction date (a period published on the
+    prediction date itself counts as published). Months of 28 to 31 days and leap
+    years are taken into account; the delay itself is a duration (a delay in
+    months counts 30 days per month, as everywhere in the package).
+
+    The prediction date only sets the point of the period at which the forecast is
+    made: the fitted numbers of periods apply as such to any data passed to
+    ``transform`` (for instance every fold of a cross-validation).
 
     The shift moves dates without losing values: the output index is the union
     of the shifted dates of the columns (it grows, and dates no column occupies
-    any more disappear). ``inverse_transform`` restores the dates and drops the
-    rows that ``transform`` added and that are empty once inverted.
+    any more disappear), sorted by date (for a panel, by entity in the input
+    order, then by date). ``inverse_transform`` restores the dates and drops the
+    rows that ``transform`` added and that are empty once inverted. Only ``X`` is
+    transformed: in a pipeline with a target, a later step must realign ``y`` on
+    the new index.
 
     Delays specification (``delays``):
 
@@ -87,7 +97,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
     Args:
         delays: Delays specification (see above).
         prediction_date: Prediction date (anything ``resolve_date`` accepts, 'today'
-            by default).
+            by default): sets the time elapsed in its period, from which the number
+            of unpublished periods of each column is derived.
         strategy: ``'shift'``, ``'mask'``, or a ``{column: strategy}`` dictionary.
             Columns with a delay but absent from the dictionary are left unchanged
             (with a warning), and ``default_values`` is ignored.
@@ -335,6 +346,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             result = self._compute_mask_periods(
                 col=col,
                 index_frequency=index_frequency,
+                index_dates=X.index.get_level_values(-1),
                 delays_dict=delays_dict,
                 delay_unit_dict=delay_unit_dict,
                 reference_point_dict=reference_point_dict,
@@ -804,7 +816,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             X: Input data.
 
         Returns:
-            The assembled frame (outer join on the index).
+            The assembled frame (outer join on the index), sorted by date; for a panel,
+            grouped by entity in the order of ``X``, then sorted by date.
         """
         # Jointure sur l'index des données transformées (aucune colonne transformée : index seul)
         assembled = pd.concat(parts, axis=1, join='outer') if parts else pd.DataFrame(index=X.index)
@@ -813,7 +826,19 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         if untouched:
             assembled = pd.concat([assembled, X[untouched]], axis=1, join='outer')
         # Restauration de l'ordre original des colonnes
-        return assembled[X.columns]
+        assembled = assembled[X.columns]
+
+        # Panel : l'union de deux MultiIndex n'est pas triée (dates propres à l'un des index ajoutées en fin).
+        # Tri par entité, dans leur ordre d'apparition dans X, puis par date
+        if isinstance(assembled.index, pd.MultiIndex):
+            entity_order = pd.Index(X.index.droplevel(-1).unique())
+            sort_keys = pd.DataFrame({
+                'entity': entity_order.get_indexer(assembled.index.droplevel(-1)),
+                'date': assembled.index.get_level_values(-1),
+            })
+            # Tri stable sur des positions (quel que soit le type des dates : fuseau, périodes)
+            return assembled.iloc[sort_keys.sort_values(['entity', 'date'], kind='mergesort').index]
+        return assembled
 
     # Méthode auxiliaire de calcul du nombre de périodes à shifter
     def _compute_shift_periods(
@@ -834,43 +859,23 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         Returns:
             Number of periods of the column frequency to shift (negative: later dates).
         """
-        # Normalisation de l'unité des délais
-        delay_unit = normalize_duration(delay_unit_dict[col])
-
-        # Calcul des bornes de la période associée à la date de prédiction
-        period_start = get_period_start(self.prediction_date_, self.detected_frequencies_[col])
-
-        # Calcul du temps écoulé, dans l'unité du délai, entre la date de prédiction et le début de la période
-        elapsed_duration = convert_duration(
-            value=pd.Timedelta(self.prediction_date_ - period_start).value,
-            from_duration='ns',
-            to_duration=delay_unit,
-            rounding=None
+        # Décompte calendaire des périodes de la colonne non encore publiées à la date de prédiction :
+        # la dernière période publiée est placée dans la période de la date de prédiction
+        frequency = self.detected_frequencies_[col]
+        return -_count_unpublished_periods(
+            prediction_date=self.prediction_date_,
+            step_frequency=frequency,
+            delay=_delay_to_timedelta(delays_dict[col], delay_unit_dict[col]),
+            reference_point=reference_point_dict[col],
+            reference_frequency=frequency
         )
-
-        # Conversion de la durée de la période dans l'unité du délai
-        period_duration = convert_duration(
-            value=1,
-            from_duration=self.detected_frequencies_[col],
-            to_duration=delay_unit,
-            rounding=None
-        )
-
-        # Si le point de référence de calcul du délai est la fin, on lui retranche la durée de la période
-        if reference_point_dict[col] == 'end':
-            elapsed_duration -= period_duration
-
-        # Calcul de l'arrondi à l'unité supérieure de la différence entre le délai et la date de prédiction,
-        # divisée par la longueur de la période associée à la fréquence de la série
-        n_periods = - math.ceil((delays_dict[col] - elapsed_duration) / period_duration)
-
-        return n_periods
 
     # Méthode auxiliaire de calcul du nombre de périodes à masquer
     def _compute_mask_periods(
         self,
         col: str,
         index_frequency: str,
+        index_dates: pd.Index,
         delays_dict: Dict[str, float],
         delay_unit_dict: Dict[str, str],
         reference_point_dict: Dict[str, str],
@@ -881,6 +886,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         Args:
             col: Column name to compute mask periods for.
             index_frequency: Frequency of the index of ``X``.
+            index_dates: Dates of ``X`` (last index level for a panel), whose target
+                periods bound the number of observations that can be masked.
             delays_dict: Dictionary mapping column names to delay values.
             delay_unit_dict: Dictionary mapping column names to delay units.
             reference_point_dict: Dictionary mapping column names to reference points.
@@ -890,60 +897,26 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             Dictionary with keys:
                 - 'n_periods': Number of index observations to mask.
                 - 'target_frequency': Normalized target frequency.
-                - 'can_mask': Whether masking leaves at least one observation per target period.
+                - 'can_mask': Whether masking leaves at least one index period in every target
+                  period covered by ``index_dates`` (calendar count: February holds 28 or 29 days).
         """
-        # Normalisation de l'unité des délais
-        delay_unit = normalize_duration(delay_unit_dict[col])
         # Normalisation de la fréquence cible
         target_frequency = normalize_frequency(target_frequency_dict[col])
 
-        # Calcul des bornes de la période associée à la date de prédiction
-        period_start = get_period_start(self.prediction_date_, self.detected_frequencies_[col])
-
-        # Calcul du temps écoulé, dans l'unité du délai, entre la date de prédiction et le début de la période
-        elapsed_duration = convert_duration(
-            value=pd.Timedelta(self.prediction_date_ - period_start).value,
-            from_duration='ns',
-            to_duration=delay_unit,
-            rounding=None
+        # Décompte calendaire des périodes de l'index non encore publiées à la date de prédiction :
+        # c'est le nombre de dernières observations à masquer dans chaque période cible. Le point de
+        # référence 'end' désigne la fin de la période de la colonne contenant l'observation
+        n_periods = _count_unpublished_periods(
+            prediction_date=self.prediction_date_,
+            step_frequency=index_frequency,
+            delay=_delay_to_timedelta(delays_dict[col], delay_unit_dict[col]),
+            reference_point=reference_point_dict[col],
+            reference_frequency=self.detected_frequencies_[col]
         )
 
-        # Conversion de la durée de la période dans l'unité du délai
-        period_duration = convert_duration(
-            value=1,
-            from_duration=self.detected_frequencies_[col],
-            to_duration=delay_unit,
-            rounding=None
-        )
-
-        # Conversion de la durée de la période de l'index dans l'unité du délai
-        index_period_duration = convert_duration(
-            value=1,
-            from_duration=index_frequency,
-            to_duration=delay_unit,
-            rounding=None
-        )
-
-        # Si le point de référence de calcul du délai est la fin, on lui retranche la durée de la période
-        if reference_point_dict[col] == 'end':
-            elapsed_duration -= period_duration
-
-        # Calcul de l'arrondi à l'unité supérieure de la différence entre le délai et la date de prédiction,
-        # divisée par la longueur de la période associée à la fréquence de l'index de la série.
-        # Cela donne le nombre de périodes qu'il faut masquer.
-        n_periods = math.ceil((delays_dict[col] - elapsed_duration) / index_period_duration)
-
-        # Calcul du nombre d'observations à la fréquence de la série qu'il y a dans la période à la fréquence cible
-        target_period_duration = convert_duration(
-            value=1,
-            from_duration=target_frequency,
-            to_duration=self.detected_frequencies_[col],
-            rounding=None
-        )
-
-        # Vérification que le nombre d'observations à masquer est bien strictement inférieur
-        # au nombre d'observations dans la période à la 'target_frequency'
-        can_mask = math.floor(target_period_duration) > n_periods
+        # Vérification que le nombre d'observations à masquer est strictement inférieur au plus petit
+        # nombre de périodes de l'index dans une période cible des données (décompte calendaire)
+        can_mask = _min_subperiods(index_dates, target_frequency, index_frequency) > n_periods
 
         return {
             'n_periods': n_periods,
@@ -1116,6 +1089,141 @@ def _active_params(params_dict: Dict[str, Dict], transformer_type: str) -> Dict[
     return {col: params for col, params in params_dict.items() if params['n_obs'] != 0}
 
 
+# Fonction de conversion d'un délai en durée exacte
+def _delay_to_timedelta(delay: float, unit: str) -> pd.Timedelta:
+    """Express a delay as a ``pd.Timedelta``.
+
+    A delay is a duration: its unit keeps the length given by
+    :func:`~tsforecast.utils.duration.get_duration_nanoseconds` (exact for days,
+    weeks and sub-daily units; 30 days for a month, as everywhere a delay is
+    converted in the package).
+
+    Args:
+        delay: Delay value (may be negative or fractional).
+        unit: Unit of the delay ('D', 'h', 'day', ...).
+
+    Returns:
+        The delay, rounded to the nanosecond.
+
+    Examples:
+        >>> _delay_to_timedelta(1.5, 'day')
+        Timedelta('1 days 12:00:00')
+    """
+    return pd.Timedelta(round(delay * get_duration_nanoseconds(unit)), unit='ns')
+
+
+# Fonction de décompte du nombre minimal de périodes de l'index dans une période cible
+def _min_subperiods(dates: pd.Index, target_frequency: str, index_frequency: str) -> float:
+    """Return the smallest number of index periods in a target period covered by ``dates``.
+
+    Counted on the calendar by
+    :meth:`~tsforecast.utils.frequency.FrequencyConverter.count_subperiods_per_period`
+    (28 days in February 2023, 3 months in a quarter, business days per month...).
+
+    Args:
+        dates: Dates of the data (``DatetimeIndex`` or ``PeriodIndex``).
+        target_frequency: Base frequency of the target periods ('Q', 'M', ...).
+        index_frequency: Base frequency of the index ('M', 'D', 'B', ...).
+
+    Returns:
+        The smallest count.
+
+    Examples:
+        >>> _min_subperiods(pd.date_range('2023-01-01', '2023-03-31', freq='D'), 'M', 'D')
+        28.0
+    """
+    # Dates sans valeur manquante, périodes représentées par leur début
+    if isinstance(dates, pd.PeriodIndex):
+        dates = dates.to_timestamp()
+    dates = pd.DatetimeIndex(dates).dropna()
+    # Une date par période cible couverte (décompte constant si la base n'est pas une Period pandas)
+    try:
+        target_index = dates.to_period(target_frequency).unique().to_timestamp()
+    except (ValueError, AttributeError):
+        target_index = dates[:1]
+    counts = FrequencyConverter().count_subperiods_per_period(target_index, target_frequency, index_frequency)
+    return float(np.min(counts))
+
+
+# Fonction de décompte calendaire des périodes non publiées à une date
+def _count_unpublished_periods(
+    prediction_date: Union[pd.Timestamp, datetime],
+    step_frequency: str,
+    delay: pd.Timedelta,
+    reference_point: str,
+    reference_frequency: str
+) -> int:
+    """Count the periods separating the period of a date from the last period published at that date.
+
+    The observation of the period starting at ``s`` is published at ``s + delay``
+    (``'start'``) or at the end (exclusive) of its period of ``reference_frequency``
+    plus ``delay`` (``'end'``). The result is the smallest integer ``k`` such that
+    the period starting ``k`` periods of ``step_frequency`` before the period
+    containing ``prediction_date`` is published by ``prediction_date``. Periods
+    are calendar periods (:func:`~tsforecast.utils.time.get_period_start`), business
+    days for ``'B'``: months of 28 to 31 days, leap years, etc.
+
+    ``k`` is negative when periods after the one of ``prediction_date`` are
+    already published (negative delay).
+
+    Args:
+        prediction_date: Date at which the publications are observed.
+        step_frequency: Base frequency of the counted periods ('M', 'D', 'B', ...).
+        delay: Publication delay.
+        reference_point: 'start' or 'end' of the period.
+        reference_frequency: Frequency of the period whose end is the origin of the
+            delay with ``'end'`` (the frequency of the column).
+
+    Returns:
+        The number of periods ``k``.
+
+    Examples:
+        >>> # July + 76 days = September 15: at September 15, July is the last published month
+        >>> _count_unpublished_periods(pd.Timestamp('2024-09-15'), 'M', pd.Timedelta(days=76), 'start', 'M')
+        2
+        >>> # February + 69 days = April 11 (2023): at April 10, January is the last published month
+        >>> _count_unpublished_periods(pd.Timestamp('2023-04-10'), 'M', pd.Timedelta(days=69), 'start', 'M')
+        3
+    """
+    # Date de prédiction en Timestamp (resolve_date renvoie un datetime)
+    prediction_date = pd.Timestamp(prediction_date)
+    # Pas d'une période vers le passé ou vers le futur (jours ouvrés : arithmétique pandas)
+    business_days = normalize_frequency(step_frequency) == 'B'
+
+    def previous_start(start: pd.Timestamp) -> pd.Timestamp:
+        """Return the start of the period preceding the one starting at ``start``."""
+        if business_days:
+            return start - BDay()
+        return get_period_start(start - pd.Timedelta(1, unit='ns'), step_frequency)
+
+    def next_start(start: pd.Timestamp) -> pd.Timestamp:
+        """Return the start of the period following the one starting at ``start``."""
+        if business_days:
+            return start + BDay()
+        return get_period_end(start, step_frequency)
+
+    def is_published(start: pd.Timestamp) -> bool:
+        """Tell whether the observation of the period starting at ``start`` is published by the prediction date."""
+        origin = start if reference_point == 'start' else get_period_end(start, reference_frequency)
+        return origin + delay <= prediction_date
+
+    # Période de la date de prédiction (jours ouvrés : dernier jour ouvré, un week-end appartient au vendredi)
+    start = (BDay().rollback(prediction_date.normalize()) if business_days
+             else get_period_start(prediction_date, step_frequency))
+
+    # Parcours période par période depuis celle de la date de prédiction : la date de publication
+    # croît avec la période, le parcours s'arrête à la dernière période publiée
+    k = 0
+    if is_published(start):
+        # Délai négatif ou nul : les périodes suivantes peuvent être déjà publiées
+        while is_published(next_start(start)):
+            start, k = next_start(start), k - 1
+    else:
+        while not is_published(start):
+            start, k = previous_start(start), k + 1
+    return k
+
+
 # Fonction de détection des composantes de la fréquence d'un index
 def _detect_index_components(index: pd.Index) -> Tuple[str, Optional[str], Optional[str]]:
     """Detect the base frequency, position and anchor of an index.
@@ -1214,11 +1322,11 @@ def create_delay_transformer_factory(
         >>> from tsforecast.panel import PanelwiseTransformer
         >>> index = pd.MultiIndex.from_tuples(
         ...     [('FR', 'GDP'), ('DE', 'GDP')], names=['country', 'column'])
-        >>> delays = pd.DataFrame({'delay': [45.0, 75.0], 'unit': 'D', 'frequency': 'M',
+        >>> delays = pd.DataFrame({'delay': [45.0, 80.0], 'unit': 'D', 'frequency': 'M',
         ...                        'reference_point': 'start'}, index=index)
         >>> factory = create_delay_transformer_factory(delays, prediction_date='2023-12-15')
         >>> factory('DE').delays
-        {'GDP': 75.0}
+        {'GDP': 80.0}
         >>> dates = pd.date_range('2023-01-01', periods=12, freq='MS')
         >>> X = pd.concat({'FR': pd.DataFrame({'GDP': range(12)}, index=dates, dtype=float),
         ...                'DE': pd.DataFrame({'GDP': range(12)}, index=dates, dtype=float)},

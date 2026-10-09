@@ -119,10 +119,11 @@ class TestTransformGoldValues:
         assert result.loc['2023-12-01', 'GDP'] == 9.0
 
     def test_mask_gold(self):
-        """'mask', target quarter: per quarter, the last ``ceil((delay - 14) / 30)`` months are hidden.
+        """'mask', target quarter: per quarter, the months not yet published on December 15 are hidden.
 
-        Gold values: ``GDP`` 45 days -> 2 months (February-March, May-June, ...), ``CPI`` 20 days -> 1 month
-        (March, June, September, December).
+        Gold values: ``GDP`` 45 days -> 2 months (November published on December 16, October on
+        November 15: February-March, May-June, ...), ``CPI`` 20 days -> 1 month (December published on
+        December 21: March, June, September, December).
         """
         transformer = _transformer(strategy='mask', target_frequency='Q')
         expected = _monthly()
@@ -237,6 +238,37 @@ class TestRoundTrip:
 # =============================================================================
 # Robustesse (cas limites de CLAUDE.md)
 # =============================================================================
+class TestPanelOutputOrder:
+    """A panel output is grouped by entity, in the input order, and sorted by date (ANO-DELAYS-043, fixed)."""
+
+    @staticmethod
+    def _panel() -> pd.DataFrame:
+        """Two entities in non-alphabetical order (FR before DE), first half of 2024."""
+        X = pd.DataFrame({'GDP': np.arange(6.0), 'CPI': np.arange(6.0)},
+                         index=pd.date_range('2024-01-01', periods=6, freq='MS', name='date'))
+        return pd.concat({'FR': X, 'DE': X}, names=['country', 'date'])
+
+    def _transformed(self) -> pd.DataFrame:
+        """Shift ``GDP`` (40 days, one month at 2024-06-15), leave ``CPI`` untouched."""
+        transformer = _transformer({'GDP': 40.0}, prediction_date='2024-06-15')
+        return _fit_transform(transformer, self._panel())
+
+    def test_entities_keep_the_input_order_and_dates_are_sorted(self):
+        """FR then DE, January to July 2024 each: the date added by the shift is not appended at the end."""
+        dates = list(pd.date_range('2024-01-01', periods=7, freq='MS'))
+        expected = [('FR', date) for date in dates] + [('DE', date) for date in dates]
+        assert self._transformed().index.tolist() == expected
+
+    def test_round_trip(self):
+        """``inverse_transform`` restores the panel exactly."""
+        transformer = _transformer({'GDP': 40.0}, prediction_date='2024-06-15')
+        transformed = _fit_transform(transformer, self._panel())
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            recovered = transformer.inverse_transform(transformed)
+        pd.testing.assert_frame_equal(recovered, self._panel())
+
+
 class TestRobustness:
     """Unsorted rows, special names, other index labels, degenerate inputs."""
 
