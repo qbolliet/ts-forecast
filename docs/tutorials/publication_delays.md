@@ -522,6 +522,8 @@ période publiée le jour même compte comme publiée). La durée réelle des mo
 bissextiles sont prises en compte ; le délai, lui, est une durée (un délai en mois compte 30 jours par mois,
 comme partout dans le paquet).
 
+![Calcul des périodes à décaler](../assets/compute_shift_periods.png)
+
 **Exemple détaillé :**
 
 ```python
@@ -554,22 +556,27 @@ La stratégie `'mask'` compte de la même façon, sur le calendrier, les **péri
 série) non encore publiées à `prediction_date` : c'est le nombre de dernières observations masquées dans chaque
 période cible. Avec `'end'`, le délai part de la fin de la période de la série contenant l'observation.
 
+![Calcul des observations à masquer](../assets/compute_mask_periods.png)
+
 **Vérification de faisabilité (`can_mask`) :** le masquage doit laisser au moins une observation dans chaque
 période cible. Le nombre d'observations à masquer est comparé au plus petit nombre de périodes de l'index dans
 une période cible couverte par les données, compté sur le calendrier (`FrequencyConverter.count_subperiods_per_period` :
 28 jours en février 2023, 3 mois par trimestre). Si `can_mask = False`, la colonne est automatiquement basculée
 vers la stratégie `'shift'` avec un avertissement : elle reçoit alors le décalage calculé comme au §4.3.3.
 
-**Exemples :**
+**Exemples** (index mensuel, colonne trimestrielle de cible `'Q'`, `'end'`, prédiction au 15 février 2024) :
 
 ```python
-# Index mensuel, trimestre cible, 45 jours depuis la fin, prédiction au 15 février 2024
-# - février 2024 et janvier 2024 (publié le 17 mars) ne sont pas publiés, décembre 2023 l'est
-# -> 2 mois masqués par trimestre ; 2 < 3 mois par trimestre : masquage possible
+# Cas 1 : délai de 45 jours
+# - décembre 2023 (T4, fin 1er janv. + 45 j = 15 févr.) est publié le jour même
+# - janvier et février 2024 (T1, fin 1er avr. + 45 j = 16 mai) ne sont pas publiés
+# -> n_periods = 2 ; can_mask = 3 mois par trimestre > 2 = True : masquage possible
+#    (dans chaque trimestre, seul le premier mois est conservé)
 
-# Index mensuel, trimestre cible, 80 jours depuis le début, prédiction au 15 décembre 2023
-# - décembre, novembre et octobre (publié le 20 décembre) ne sont pas publiés
-# -> 3 mois à masquer = un trimestre entier : bascule vers 'shift' (n_periods = -3)
+# Cas 2 : délai de 100 jours
+# - septembre 2023 (T3, fin 1er oct. + 100 j = 9 janv.) est publié
+# - d'octobre 2023 à février 2024 (T4 : 10 avr., T1 : 10 juil.) ne sont pas publiés
+# -> n_periods = 5 ; can_mask = 3 > 5 = False : bascule vers 'shift' (n_periods = -2, dernier trimestre publié : T3 2023)
 ```
 
 #### 4.3.5 Exemple d'utilisation complète
