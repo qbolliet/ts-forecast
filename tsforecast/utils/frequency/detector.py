@@ -43,6 +43,10 @@ def _check_return_format(return_format: str) -> None:
         )
 
 
+# Part minimale de dates en début (ou fin) de mois pour conserver la position malgré des valeurs aberrantes
+_MIN_ALIGNED_SHARE = 0.75
+
+
 # Fonction auxiliaire de vérification qu'un écart modal justifie un multiplicateur
 def _is_dominant(is_modal: pd.Series) -> bool:
     """Tell whether the modal spacing is evidenced enough to carry a multiplier.
@@ -107,7 +111,9 @@ class FrequencyDetector:
         spacing** between consecutive dates:
 
         - calendar grids (every date at a month start, at a month end, or on
-          the same day of the month) are read in months, which gives
+          the same day of the month; at least 75 % of the dates at month
+          starts, or at month ends, is enough: the others are outliers) are
+          read in months, which gives
           ``'MS'``, ``'QE-DEC'``, ``'YS-JUL'``, ``'2MS'`` (every two months),
           ``'2QS-JAN'`` (half-years), ...;
         - weekly grids keep their weekday anchor (``'W-MON'``, ``'2W-WED'``);
@@ -695,7 +701,9 @@ class FrequencyDetector:
         the modal spacing counted in months: a multiple of 12 is annual, a
         multiple of 3 quarterly, anything else monthly (``pd.infer_freq``
         reports half-years as ``'2QS'``). Start / end grids are anchored on
-        the month of their dates (canonical form for quarters).
+        the month of their dates (canonical form for quarters). When only
+        75 % or more of the dates sit at month starts (or ends), that
+        position is kept: the other dates are outliers.
 
         Args:
             time_index: Sorted datetime index without duplicates
@@ -705,13 +713,22 @@ class FrequencyDetector:
             'M' for a mid-month grid), or None if the dates are not a
             calendar grid or a multiplied step is not the majority
         """
-        # Position commune des dates dans le mois
-        if time_index.is_month_start.all():
+        # Position commune des dates dans le mois : toutes les dates, ou à défaut une
+        # part d'au moins _MIN_ALIGNED_SHARE (les dates hors motif sont alors des valeurs aberrantes
+        # qui ne doivent pas faire perdre la position à la grille dominante)
+        is_start = pd.Series(time_index.is_month_start)
+        is_end = pd.Series(time_index.is_month_end)
+        aligned = None
+        if is_start.all():
             position = 'S'
-        elif time_index.is_month_end.all():
+        elif is_end.all():
             position = 'E'
         elif (time_index.day == time_index.day[0]).all():
             position = None
+        elif is_start.mean() >= _MIN_ALIGNED_SHARE:
+            position, aligned = 'S', time_index[is_start.to_numpy()]
+        elif is_end.mean() >= _MIN_ALIGNED_SHARE:
+            position, aligned = 'E', time_index[is_end.to_numpy()]
         else:
             return None
 
@@ -736,7 +753,9 @@ class FrequencyDetector:
         # Ancre (mois des dates) pour les trimestres et les années positionnés
         anchor = None
         if base in ('Q', 'Y') and position is not None:
-            anchor = MONTH_ABBREVIATIONS[time_index[0].month - 1]
+            # Mois de la première date de la grille (hors valeurs aberrantes)
+            reference = time_index[0] if aligned is None else aligned[0]
+            anchor = MONTH_ABBREVIATIONS[reference.month - 1]
 
         return canonicalize_frequency(build_frequency_string(base, position, anchor, multiplier))
 

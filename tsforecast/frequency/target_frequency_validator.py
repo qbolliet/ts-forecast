@@ -17,6 +17,10 @@ from ..utils.frequency.utils import (
 from ..panel.utils import normalize_entity_key
 
 
+# Stratégies admises pour on_frequency_mismatch
+_MISMATCH_MODES = ('error', 'warn')
+
+
 # Classe de validation de la fréquence cible au regard des fréquences détectées
 class TargetFrequencyValidator:
     """Validate target frequencies against detected data frequencies.
@@ -67,10 +71,19 @@ class TargetFrequencyValidator:
             Validated (possibly adjusted) target frequency.
 
         Raises:
-            ValueError: If detected_frequencies is empty, if a mismatch is
-                found and on_frequency_mismatch='error', or if the keys have
-                an inconsistent format (mixed tuple/string keys).
+            ValueError: If ``on_frequency_mismatch`` is not ``'error'`` or
+                ``'warn'``, if detected_frequencies is empty, if a mismatch is
+                found and on_frequency_mismatch='error', if the keys have
+                an inconsistent format (mixed tuple/string keys), or if an
+                entity has no detected frequency at all.
         """
+        # Vérification de la stratégie de gestion des écarts
+        if on_frequency_mismatch not in _MISMATCH_MODES:
+            raise ValueError(
+                f"on_frequency_mismatch must be one of {list(_MISMATCH_MODES)}, "
+                f"got {on_frequency_mismatch!r}."
+            )
+
         # Inférence de la structure (panel ou séries temporelles) et des entités
         is_panel, entities = self._infer_structure(detected_frequencies)
 
@@ -206,8 +219,9 @@ class TargetFrequencyValidator:
             Validated (possibly adjusted) target frequency dict.
 
         Raises:
-            ValueError: If entities are missing from target_frequency dict
-                or frequency mismatch with on_frequency_mismatch='error'.
+            ValueError: If entities are missing from target_frequency dict,
+                if an entity has no detected frequency, or on a frequency
+                mismatch with on_frequency_mismatch='error'.
         """
         # Vérification que toutes les entités ont une fréquence cible
         if isinstance(target_frequency, dict):
@@ -241,26 +255,18 @@ class TargetFrequencyValidator:
             else:
                 target_freq = target_frequency
 
-            # Vérification que la fréquence cible n'est pas plus élevée que la fréquence la plus élevée pour l'entité
-            try:
-                # Extraction de la fréquence la plus élevée de l'entité
-                highest_freq = self._get_highest_frequency_entity(
-                    entity, detected_frequencies
-                )
+            # Extraction de la fréquence la plus élevée de l'entité (ValueError si aucune n'est détectée)
+            highest_freq = self._get_highest_frequency_entity(entity, detected_frequencies)
 
-                # Vérification que la fréquence cible n'est pas plus élevée que la fréquence la plus élevée pour l'entité
-                if is_higher_frequency(target_freq, highest_freq):
-                    # Ajout aux fréquences invalides
-                    invalid_entities.append((entity, target_freq, highest_freq))
-                    # Ajustement de la fréquence cible à la fréquence la plus élevée de l'entité
-                    adjusted_freqs[entity] = highest_freq
-                else:
-                    # Ajustement à l'identique
-                    adjusted_freqs[entity] = target_freq
-
-            except ValueError as e:
-                warnings.warn(f"Entity '{entity}': {e}", UserWarning)
-                continue
+            # Vérification que la fréquence cible n'est pas plus élevée que la plus élevée de l'entité
+            if is_higher_frequency(target_freq, highest_freq):
+                # Ajout aux fréquences invalides
+                invalid_entities.append((entity, target_freq, highest_freq))
+                # Ajustement de la fréquence cible à la fréquence la plus élevée de l'entité
+                adjusted_freqs[entity] = highest_freq
+            else:
+                # Ajustement à l'identique
+                adjusted_freqs[entity] = target_freq
 
         # Traitement des entités invalides
         if invalid_entities:

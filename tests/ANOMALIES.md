@@ -3046,3 +3046,82 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/frequency/test_provenance.py::TestGetProvenance::test_unfilled_cell_is_none`
 - **Statut** : corrigé (2026-10-09)
 - **Correction** : docstrings d'`initialize`, `extend_index` et `clear_provenance` alignées sur le code (cellule non renseignée = nulle, à tester avec `pd.isna`) ; le code n'a pas changé.
+
+### ANO-FREQ-005 — `regularize` (mode global) réécrit une entité sur la fréquence d'une autre
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/regularizer.py::IndexRegularizer.regularize` (`per_entity=False`)
+- **Sévérité** : à arbitrer
+- **Observé** : sur un panel dont l'entité A est mensuelle et l'entité B trimestrielle (chacune avec un trou),
+  `regularize(panel)` réindexe B sur la grille **mensuelle** : 5 trimestres deviennent 13 mois (`MS`), les
+  9 mois ajoutés étant NaN. Aucune observation n'est perdue (4 valeurs avant, 4 après), mais la fréquence de B
+  est modifiée. `per_entity=True` conserve `QS-OCT` pour B.
+- **Attendu** : indécidable — la docstring de `per_entity` annonce « a single global frequency is used for
+  every entity », ce qui décrit le comportement observé ; mais la finalité du composant (combler des trous) et
+  `is_regular(per_entity=True)` (A et B « régulières ») plaident pour ne pas changer la fréquence d'une entité
+  régulière. Comportement actuel épinglé.
+- **Reproduction** : `regularize(pd.concat({'A': mensuelle_a_trou, 'B': trimestrielle_a_trou}))`.
+- **Test** : `tests/unit/frequency/test_regularizer.py::TestRegularizeMixedPositionsAndFrequencies::test_global_mode_rewrites_the_quarterly_entity_on_the_monthly_grid`
+- **Statut** : clos (2026-10-09) — arbitrage de l'auteur : le mode global est un alignement sur une fréquence unique, le comportement est voulu.
+- **Correction** : docstrings de `regularize` précisées ; le test n'est plus une anomalie épinglée.
+
+### ANO-FREQ-006 — `regularize` ne restitue pas `panel_cols` en colonnes
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/regularizer.py::IndexRegularizer.regularize`
+- **Sévérité** : cosmétique
+- **Observé** : avec `time_col='date', panel_cols=['country']`, le résultat a `date` en colonne mais `country`
+  reste dans l'index (`reset_index(level=-1)` seulement) : la structure d'entrée (colonnes) n'est pas
+  restituée, contrairement à ce que laisse attendre « restored as a column afterwards ».
+- **Attendu** : indécidable — la docstring ne parle que de `time_col` ; l'entrée en colonnes et la sortie
+  en index sont asymétriques. Comportement actuel épinglé.
+- **Reproduction** : `regularize(df, time_col='date', panel_cols=['country']).index.names` → `['country']`.
+- **Test** : `tests/unit/frequency/test_regularizer.py::TestRegularizePanel::test_panel_cols_and_time_col_are_restored_as_columns`
+- **Statut** : corrigé (2026-10-09)
+- **Correction** : `regularize` restitue `panel_cols` (et `time_col`) en colonnes ; `panel_cols` sans `time_col` conserve le `DatetimeIndex` comme niveau temporel. Tests : `TestRegularizePanel::test_panel_cols_and_time_col_are_restored_as_columns`, `::test_panel_cols_alone_keep_the_datetime_index`.
+
+### ANO-FREQ-007 — `is_regular` : un index non trié mais complet est « irrégulier »
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/regularizer.py::IndexRegularizer.is_regular`
+- **Sévérité** : cosmétique
+- **Observé** : `is_regular(serie_melangee_sans_trou)` renvoie `False` (`pd.infer_freq` ne trie pas), alors que
+  `regularize` trie d'abord et restitue une série sans trou. Même constat par entité pour un panel mélangé.
+- **Attendu** : indécidable — la docstring définit la régularité par « no gaps » ; l'absence de tri ne
+  devrait pas compter comme un trou, mais le contrat « `pd.infer_freq` renvoie non-None » le fige.
+  Comportement actuel épinglé.
+- **Reproduction** : `is_regular(pd.Series(range(6), index=dates_mensuelles).iloc[[3, 0, 5, 1, 4, 2]])`.
+- **Test** : `tests/unit/frequency/test_regularizer.py::TestIsRegularTimeSeries::test_unsorted_but_complete_index_is_regular`
+- **Statut** : corrigé (2026-10-09)
+- **Correction** : l'index est trié avant `pd.infer_freq`. Tests : `TestIsRegularTimeSeries::test_unsorted_but_complete_index_is_regular`, `TestIsRegularPanel::test_unsorted_panel_is_regular_per_entity`.
+
+### ANO-FREQ-008 — `regularize` détruit les observations hors grille
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/regularizer.py::IndexRegularizer.regularize` (`_regularize_ts`)
+- **Sévérité** : majeure
+- **Observé** : la fréquence est lue sur l'espacement modal, puis les données sont `reindex`ées sur
+  `date_range(min, max, freq)`. Toute observation dont la date n'est pas sur cette grille est supprimée
+  sans erreur ni avertissement. Cas minimal : 6 observations mensuelles dont une datée le 15 avril →
+  la grille détectée est `ME` (fin de mois) et **les 6 observations disparaissent** (`count()` : 6 → 0).
+  En mode global sur un panel, une entité sans fréquence détectable (3 dates à espacements 2 et 48 jours)
+  est réindexée sur la grille mensuelle d'une autre entité et perd 1 observation sur 3 (la date non alignée)
+  tout en gagnant une ligne NaN.
+- **Attendu** : aucune observation non NaN ne disparaît silencieusement : soit l'entité / la série est rendue
+  telle quelle (comme lorsque la fréquence est indétectable), soit une erreur est levée.
+- **Reproduction** :
+  ```python
+  d = pd.to_datetime(['2020-01-01', '2020-02-01', '2020-03-01', '2020-04-15', '2020-05-01', '2020-06-01'])
+  s = pd.Series(range(6), index=d, dtype=float)
+  regularize(s).count()   # 0 au lieu de 6
+  ```
+- **Test** : `tests/unit/frequency/test_regularizer.py::TestOffGridObservations` et `::TestUndetectableFrequency`
+- **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
+- **Correction** : `regularize` lève `ValueError` quand aucune fréquence constante n'est détectable (série ou entité, y compris en mode global) ou quand aucune observation ne tombe sur la grille ; si seules certaines observations sont hors grille, elles sont écartées avec un `UserWarning` qui les liste. Les séries / entités à moins de deux dates sont rendues telles quelles. Tests : `TestOffGridObservations`, `TestUndetectableFrequency`.
+- **Note** : le détecteur (`_detect_calendar_frequency`) perdait la position (`'M'` sans `S` / `E`) dès qu'une seule date sortait du motif ; au moins 75 % des dates en début (ou fin) de mois suffit désormais à la conserver (`'MS'`, `'QS-JAN'`, `'YS-JAN'` avec ancre prise sur les dates alignées). Reste sans position le cas où aucune position ne domine : `regularize` lève alors une `ValueError`. Tests : `tests/unit/utils/frequency/detector/test_time_series.py::TestFallbackWithOutlierDates`, `TestOffGridObservations::test_mid_month_outlier_keeps_the_month_start_grid`.
+
+### ANO-FREQ-009 — `TargetFrequencyValidator.validate` : comportements permissifs
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/target_frequency_validator.py::TargetFrequencyValidator.validate`
+- **Sévérité** : cosmétique
+- **Observé** : (1) toute valeur de `on_frequency_mismatch` autre que `'error'` était traitée comme `'warn'` ; (2) une entité sans aucune fréquence détectée était écartée du dict renvoyé, avec un simple avertissement.
+- **Attendu** : (1) `ValueError` pour une valeur non supportée ; (2) `ValueError` nommant l'entité.
+- **Test** : `tests/unit/frequency/test_target_frequency_validator.py::TestOnFrequencyMismatchValues`, `::TestPanelEntityWithoutDetectedFrequency`
+- **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
+- **Correction** : validation du paramètre en tête de `validate` ; l'`except ValueError` qui convertissait l'erreur en avertissement est supprimé.

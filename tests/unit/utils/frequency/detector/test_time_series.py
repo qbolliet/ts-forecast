@@ -544,3 +544,55 @@ class TestDetectTimeSeriesFrequencyIndexTypes:
         """Periods are read at their first instant (ANO-UTILS-045, ANO-UTILS-029 decision)."""
         series = make_series(pd.period_range('2024-01', periods=4, freq=freq))
         assert FrequencyDetector().detect_time_series_frequency(series, 'full') == expected
+
+
+class TestFallbackWithOutlierDates:
+    """A 75 % of dates at month starts / ends keeps the position of the grid."""
+
+    @staticmethod
+    def _monthly_grid_with_outlier(freq: str, start: str, outlier: str) -> pd.DatetimeIndex:
+        """Build a ten-month grid whose sixth date is replaced by an off-grid ``outlier``."""
+        dates = list(pd.date_range(start, periods=10, freq=freq))
+        dates[5] = pd.Timestamp(outlier)
+        return pd.DatetimeIndex(dates)
+
+    @pytest.mark.parametrize(
+        'freq, start, outlier, expected',
+        [
+            pytest.param('MS', '2024-01-01', '2024-06-12', 'MS', id='month-start'),
+            pytest.param('ME', '2024-01-31', '2024-06-12', 'ME', id='month-end'),
+        ],
+    )
+    def test_outlier_does_not_hide_the_position(self, freq, start, outlier, expected):
+        """Nine dates on the grid and one stray date: the grid is read, with its position."""
+        dates = self._monthly_grid_with_outlier(freq, start, outlier)
+        assert FrequencyDetector().detect_time_series_frequency(make_series(dates), 'full') == expected
+
+    def test_quarterly_outlier_keeps_position_and_anchor(self):
+        """Quarter starts with a stray date: position 'S' and anchor of the aligned dates."""
+        dates = pd.DatetimeIndex(['2024-01-01', '2024-04-01', '2024-07-01', '2024-10-15', '2025-01-01'])
+        assert FrequencyDetector().detect_time_series_frequency(make_series(dates), 'full') == 'QS-JAN'
+
+    def test_annual_outlier_keeps_position_and_anchor(self):
+        """Year starts with a stray date: position 'S' and anchor January."""
+        dates = pd.DatetimeIndex(['2020-01-01', '2021-01-01', '2022-03-15', '2023-01-01', '2024-01-01'])
+        assert FrequencyDetector().detect_time_series_frequency(make_series(dates), 'full') == 'YS-JAN'
+
+    def test_components_expose_position_and_suffix(self):
+        """The rich ``components`` format carries the recovered position and anchor."""
+        dates = pd.DatetimeIndex(['2024-01-01', '2024-04-01', '2024-07-01', '2024-10-15', '2025-01-01'])
+        parsed = FrequencyDetector().detect_time_series_frequency(make_series(dates), 'components')
+        assert (parsed.freq, parsed.position, parsed.suffix) == ('Q', 'S', 'JAN')
+
+    @pytest.mark.parametrize(
+        'dates, expected',
+        [
+            pytest.param(['2024-01-01', '2024-02-01', '2024-03-10', '2024-04-20'], 'M', id='half'),
+            pytest.param(['2023-01-01', '2023-02-01', '2023-03-01', '2023-04-15', '2023-05-30'], None,
+                         id='three-fifths'),
+        ],
+    )
+    def test_fewer_than_three_quarters_aligned_keeps_no_position(self, dates, expected):
+        """Below 75 % of month starts the outliers are too many: no position is read."""
+        series = make_series(pd.DatetimeIndex(dates))
+        assert FrequencyDetector().detect_time_series_frequency(series, 'full') == expected
