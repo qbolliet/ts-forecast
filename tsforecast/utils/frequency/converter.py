@@ -6,9 +6,9 @@ different time frequencies using pandas built-in functionality (asfreq and resam
 FrequencyConverter is the generic conversion engine, consistent with the other
 converters of the package (DurationConverter, PeriodPositionConverter): the
 output index always carries the target frequency (or the union of the target
-indexes when converting columns to mixed frequencies). For building
-training/prediction datasets whose original index must be preserved or
-densified (as required by the HighFrequencyImputer), see
+indexes when converting columns to mixed frequencies). To convert selected
+variables of a dataset while keeping the other columns in place (original
+index preserved, or extended by the target dates), see
 :class:`tsforecast.frequency.frequency_aligner.FrequencyAligner`, which
 delegates the actual conversions to this class.
 """

@@ -88,7 +88,7 @@ recalage ne change jamais la provenance d'une cellule.
 | `VariableOrderer` | ordonne les variables (`'frequency'` ou `'cv'`), expose `scores_` |
 | `TrainingSetBuilder` | jeu d'entraînement mutualisé entre entités d'un panel |
 | `ImputationWindowCalculator` | fenêtres de prédiction / d'entraînement |
-| `FrequencyAligner` | agrégation / interpolation entre fréquences |
+| `FrequencyAligner` | outil autonome (non utilisé par l'imputeur) : agrégation / interpolation de variables choisies entre fréquences |
 | `TargetFrequencyValidator` | cohérence fréquence cible ↔ fréquences détectées |
 | `IndexRegularizer` | comble les trous d'un index irrégulier |
 

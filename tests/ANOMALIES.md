@@ -3125,3 +3125,92 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/frequency/test_target_frequency_validator.py::TestOnFrequencyMismatchValues`, `::TestPanelEntityWithoutDetectedFrequency`
 - **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
 - **Correction** : validation du paramètre en tête de `validate` ; l'`except ValueError` qui convertissait l'erreur en avertissement est supprimé.
+
+### ANO-FREQ-010 — Agrégation : les dates dupliquées sont sommées deux fois
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/frequency_aligner.py::FrequencyAligner.convert_to_target` (voie d'agrégation, `_aggregate_series`)
+- **Sévérité** : mineure
+- **Observé** : une série mensuelle dont janvier est dupliqué, agrégée en `'QS'`, donne T1 = 1+2+3+1 = **7** sans erreur ni
+  avertissement (`full_periods_only` est satisfait : 4 valeurs ≥ 3 attendues), et la ligne dupliquée reçoit aussi la valeur
+  agrégée. `_aggregate_series` appelle directement `FrequencyConverter.aggregate_to_lower_frequency`, qui ne contrôle pas les
+  doublons.
+- **Attendu** : `ValueError`, comme sur la voie d'interpolation du même `convert_to_target` (« Several observations fall in the
+  same 'MS' period ») et comme `FrequencyConverter.convert_frequency` (test
+  `tests/unit/utils/frequency/converter/test_conversion.py::TestSeriesEdgeCases::test_duplicated_dates_raise`) : un total gonflé en silence est
+  pire qu'une erreur.
+- **Reproduction** :
+  ```python
+  df = pd.DataFrame({'x': np.arange(1., 7.)}, index=pd.date_range('2023-01-01', periods=6, freq='MS'))
+  df = pd.concat([df, df.iloc[:1]])
+  FrequencyAligner().convert_to_target(df, ['x'], 'QS')['x'].iloc[0]   # 7.0
+  ```
+- **Test** : `tests/unit/frequency/test_frequency_aligner.py::TestAggregationContract::test_duplicated_dates_are_rejected`
+- **Statut** : corrigé (2026-10-10)
+- **Correction** : `_iter_variable_series` (voie commune à l'agrégation et à l'interpolation) lève `ValueError('Duplicate dates[ for entity …]: …')` dès qu'une entité portant une colonne à convertir a des dates dupliquées ; les entités sans clé ne sont pas contrôlées. Tests : `TestAggregationContract::test_duplicated_dates_are_rejected`, `::test_duplicated_dates_of_a_panel_entity_name_the_entity`, `::test_duplicates_of_an_entity_without_key_are_tolerated`, `TestConvertToTargetRouting::test_duplicated_dates_raise_on_interpolation`.
+
+### ANO-FREQ-011 — Panel : une clé « nom de colonne » simple est ignorée en silence
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/frequency_aligner.py::FrequencyAligner.convert_to_target`
+- **Sévérité** : à arbitrer
+- **Observé** : sur un panel, `convert_to_target(panel, ['x'], 'QS')` renvoie le panel inchangé, sans erreur ni avertissement.
+  `split_variable_key('x')` donne l'entité `()`, qu'aucun bloc d'entité du panel ne porte ; la clé est en outre orientée vers
+  l'agrégation faute de fréquence trouvée (`freq_map` est indexé par tuples sur un panel).
+- **Attendu** : à arbitrer entre (1) convertir la colonne pour **toutes** les entités et (2) lever une `ValueError` demandant des
+  clés `(entité, colonne)`. La docstring annonce « column names or (entity..., variable) tuples » sans réserver les noms de
+  colonnes aux séries temporelles ; le no-op silencieux n'est conforme à aucune des deux lectures. Le test `xfail` accepte
+  l'une ou l'autre résolution.
+- **Reproduction** : `convert_to_target(panel_mensuel_A_B, ['x'], 'QS').equals(panel_mensuel_A_B)` → `True`.
+- **Test** : `tests/unit/frequency/test_frequency_aligner.py::TestConvertToTargetRouting::test_plain_column_name_on_a_panel_converts_every_entity`
+- **Statut** : corrigé (2026-10-10) — arbitrage de l'auteur : conversion de toutes les entités, comme les autres fonctions du package
+- **Correction** : `_expand_keys` remplace un nom de colonne seul par une clé `(entité..., colonne)` par entité du panel (dédoublonnée avec les clés tuples), avant l'orientation agrégation / interpolation : chaque entité garde sa propre fréquence source. Tests : `TestConvertToTargetRouting::test_plain_column_name_on_a_panel_converts_every_entity`, `::test_plain_and_tuple_keys_are_equivalent`, `::test_several_plain_column_names_on_a_panel`, `::test_plain_and_tuple_keys_for_the_same_column_are_merged`.
+
+### ANO-FREQ-012 — `_interpolate_to_target` plante sur une colonne sans observation (garde morte)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/frequency_aligner.py::FrequencyAligner._interpolate_series` / `_interpolate_to_target`
+- **Sévérité** : cosmétique (inatteignable par l'API publique)
+- **Observé** : `_interpolate_series` renvoie `None` pour une série sans observation (annotation `-> pd.Series` pourtant) ;
+  `_interpolate_to_target` range ce `None` dans `interpolated`, puis `build_densified_index` lève
+  `AttributeError: 'NoneType' object has no attribute 'index'`. Avec une seule observation, `_interpolate_series` lève
+  `ValueError: Series has only 1 non-null observations` (appel non protégé à `detect_frequency`), alors que `_observed_series`
+  prévoit justement ce repli. `convert_to_target` oriente toujours ces colonnes vers l'agrégation : la garde n'est atteinte que par
+  appel direct de la méthode privée.
+- **Attendu** : colonne laissée telle quelle, comme `_aggregate_to_target` le fait pour une colonne vide (`continue` sur `None`) —
+  ou suppression de la garde morte. Par ailleurs, `_observed_series` est sans effet observable : le convertisseur restreint
+  lui-même aux lignes observées (`dropna(how='all')`) et reçoit la fréquence source explicitement.
+- **Reproduction** :
+  ```python
+  df = pd.DataFrame({'x': [np.nan] * 3}, index=pd.date_range('2023-01-01', periods=3, freq='QS'))
+  FrequencyAligner()._interpolate_to_target(df, ['x'], 'MS')   # AttributeError
+  ```
+- **Test** : `tests/unit/frequency/test_frequency_aligner.py::TestPrivateGuards::test_interpolating_a_column_without_frequency_leaves_it_unchanged`
+- **Statut** : corrigé (2026-10-10)
+- **Correction** : `_interpolate_series` renvoie `None` sous deux observations (annotation `Optional[pd.Series]`) et `_interpolate_to_target` laisse alors la colonne telle quelle ; `_observed_series`, sans effet observable, est supprimée (le convertisseur restreint lui-même aux lignes observées).
+
+### ANO-FREQ-013 — Documentation : `FrequencyAligner` présenté comme brique du `HighFrequencyImputer`
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/frequency/frequency_aligner.py` (docstring de module et de classe),
+  `tsforecast/utils/frequency/converter.py` (docstring de module)
+- **Sévérité** : cosmétique
+- **Observé** : la docstring du module annonce « FrequencyAligner builds homogeneous-frequency datasets for the
+  HighFrequencyImputer », celle de `converter.py` renvoie vers lui « as required by the HighFrequencyImputer » ; or
+  `HighFrequencyImputer` ne l'importe plus depuis `2e6e595` (suppression de HFI v1). Les exemples des docstrings (classe,
+  `_interpolate_to_target`) et la description du module documentent des méthodes **privées** (`_aggregate_to_target`,
+  `_interpolate_to_target`) plutôt que `convert_to_target`.
+- **Attendu** : outil autonome d'alignement, exemples sur `convert_to_target` / `build_densified_index`. Pas de `xfail`
+  (le code est juste).
+- **Test** : `tests/unit/frequency/test_frequency_aligner.py` (docstring de module)
+- **Statut** : corrigé (2026-10-10)
+- **Correction** : docstrings du module, de la classe et de `convert_to_target` réécrites (outil autonome, exemples sur `convert_to_target` / `build_densified_index`), docstring de module de `converter.py`, ligne du tableau de `docs/concepts/mixed_frequency_imputation.md` et `CLAUDE.md`. Restent périmés (non modifiés) : `notebooks/utils/frequency_aligner.ipynb` (appels privés avec l'argument `is_panel` supprimé en `6db1ca7`), textes de `notebooks/0 - QB - Utils.ipynb` et `notebooks/explore_frequency_converter.ipynb`.
+
+### Arbitrages de l'auteur (2026-10-10) sur `FrequencyAligner`
+- **Position de la cible** : une position explicite (`'QE'`, `'MS'`) est honorée ; une cible sans position (`'Q'`, `'M'`) prend
+  celle de l'index source (`_resolve_target_offset`). Quand la position explicite diffère de celle de la source, les dates cibles
+  absentes sont **ajoutées** à l'index (agrégation comprise) et la colonne convertie ne vit que sur la grille cible (NaN à ses
+  anciennes dates) ; les autres colonnes sont intactes. L'agrégation ne garantit plus « même index » qu'à position identique ;
+  les labels de périodes incomplètes (NaN) n'étendent jamais l'index. Tests : `TestPositionCoherence`.
+- **Méthode d'agrégation** : paramètre `agg_method` de `convert_to_target` (défaut `'sum'`), toutes les valeurs de
+  `AggregationMethod` ; `'all'` / `'any'` écrivent des booléens dans une colonne `object`. Tests : `TestAggregationMethods`.
+- **Bords de l'interpolation** : dépendent de `interp_method` — `'linear'`, `'time'`, `'index'`, `'values'` maintiennent la valeur
+  de bord (dans la limite), les méthodes scipy laissent NaN. Documenté, pas de changement. Tests : `TestInterpolationMethodEdges`.
+- **Axe temporel non daté** : `TypeError` explicite (piste `to_timestamp` pour un `PeriodIndex`). Tests :
+  `TestConvertToTargetRouting::test_non_datetime_time_series_index_raises` et suivants.

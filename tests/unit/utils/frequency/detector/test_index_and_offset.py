@@ -145,8 +145,8 @@ class TestTargetOffsetForIndex:
     """Target offset anchored like the source index (start / end position).
 
     ``target_offset_for_index`` factorise la logique utilisée par
-    ``FrequencyAligner.aggregate_to_target`` et
-    ``ImputationWindowCalculator._convert_mask_to_frequency`` : la position de
+    ``ImputationWindowCalculator._convert_mask_to_frequency`` (et par
+    ``FrequencyAligner`` pour une cible sans position) : la position de
     l'index source l'emporte sur celle de la cible.
     """
 
