@@ -1,13 +1,14 @@
 """Unit tests for ``tsforecast.panel.utils``.
 
-Only ``get_entity_levels`` is covered here; the other helpers are exercised
-through ``PanelwiseTransformer`` (``test_panelwise_transformer.py``).
+Only ``get_entity_levels`` and ``split_variable_key`` are covered here; the
+other helpers are exercised through ``PanelwiseTransformer``
+(``test_panelwise_transformer.py``).
 """
 import pandas as pd
 import pytest
 
 from tsforecast.panel import get_entity_levels, is_panel_data
-from tsforecast.panel.utils import iter_entity_blocks
+from tsforecast.panel.utils import iter_entity_blocks, split_variable_key
 
 DATES = pd.date_range('2023-01-01', periods=3, freq='MS')
 
@@ -38,3 +39,20 @@ class TestGetEntityLevels:
         data = pd.DataFrame({'x': range(12)}, index=index)
         for _, _, block in iter_entity_blocks(data):
             assert block.index.nlevels == data.index.nlevels - len(get_entity_levels(data))
+
+
+class TestSplitVariableKey:
+    """``split_variable_key`` always yields an entity tuple, ``()`` outside a panel."""
+
+    @pytest.mark.parametrize(
+        'key, expected',
+        [
+            pytest.param(('FR', 'gdp'), (('FR',), 'gdp'), id='one_entity_level'),
+            pytest.param(('FR', 'manufacturing', 'gdp'), (('FR', 'manufacturing'), 'gdp'),
+                         id='two_entity_levels'),
+            pytest.param('gdp', ((), 'gdp'), id='time_series_column'),
+        ],
+    )
+    def test_entity_part_is_always_a_tuple(self, key, expected):
+        """The entity part is a tuple at every level, the empty tuple for a plain column."""
+        assert split_variable_key(key) == expected

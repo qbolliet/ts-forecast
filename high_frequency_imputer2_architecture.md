@@ -1612,9 +1612,19 @@ training_scope: Optional[TrainingScope] = None        # None -> suit imputation_
 training_coverage_threshold: Optional[float] = None   # None -> suit coverage_threshold
 
 ImputationScope = Literal['strict', 'extended_backward', 'extended_forward',
+                          'extended_both']
+TrainingScope   = Literal['strict', 'extended_backward', 'extended_forward',
                           'extended_both', 'unrestricted']
-TrainingScope   = ImputationScope   # mêmes modalités
 ```
+
+`'unrestricted'` n'existe que pour la fenêtre d'**entraînement** : il lève toute restriction pour
+ajuster un modèle sur une plage plus large que celle qu'il impute. Une fenêtre de **prédiction**
+sans restriction reviendrait à imputer des dates sans aucune donnée, ce qui n'a pas de sens
+(arbitrage de l'auteur, 2026-10-11, ANO-FREQ-016).
+
+Le dénominateur de la couverture écarte les colonnes **structurellement absentes** (D39) et les
+colonnes observées de fréquence **indétectable** (D40), ces dernières étant aussi écartées de la
+grille.
 
 ### 7.1 — Les trois masques
 
@@ -2456,6 +2466,14 @@ l'auteur à la revue du lot (D32, D33). Chacune est mesurée par un invariant du
 | **D36** | le report d'échelle de `_predict_step` est **court-circuité** quand `scale_factor` et `fit_scale_factor` coïncident, au lieu de diviser puis multiplier | `_build_step` leur donne le même objet : le report vaut 1.0 par construction. Sous `scale_features='calendar'` ce facteur est une `Series` **figée sur la grille du fit** ; la grille du transform étant différente, la division la désalignait et rendait toute la prédiction NaN. Au fit, la seule différence est la disparition du bruit d'arrondi de `x/d*d` |
 | **D37** | la sortie d'une étape est la frame du matérialiseur **recouverte par le miroir**, cellule à cellule et seulement pour les cellules produites **à la fréquence de la ligne** | `stage_frame` ne lit le miroir que sous `covariate_strategy='model'` (précédence du §4.4) : sous les deux autres stratégies la sortie aurait été vide de toute imputation. Le filtre par fréquence de production interdit à une valeur produite à une étape plus grossière de se poser, à l'échelle d'une autre période, sur une grille plus fine. Les imputations priment sur l'ancre brute, conformément au §11.2 |
 | **D38** | la grille d'une frame d'étape est l'**index** du masque d'imputation — jamais ses seules lignes vraies — complétée, à l'étape finale, des lignes d'entrée qu'elle ne couvrirait pas ; et une entité que l'étape ne concerne pas y garde les lignes de son **dernier passage** | I7 : le `transform` ne détruit jamais une observation d'entrée. Et une liaison de fréquence partielle ferait échouer la lecture du masque, qui retomberait sans bruit sur tout l'index — donc sur des lignes à la mauvaise fréquence pour tout le panel |
+
+
+### 14.8 — Décisions arrêtées sur la fenêtre de couverture (`ImputationWindowCalculator`)
+
+| Code | Décision | Motif |
+|---|---|---|
+| **D39** | une colonne **sans aucune observation** — pour un panel, par entité — est écartée du **dénominateur** de la couverture ; elle est recensée par `structurally_absent_columns_` (tuple pour une série, dict par entité pour un panel) et signalée par un **unique** `UserWarning` agrégé ; sa couverture rendue (`column_coverage_`) reste `(None, None)`. Une entité sans fenêtre (`entities_without_window_`) porte un tuple vide : ses colonnes n'ont jamais été comparées entre elles. Commit `a3f5783` (2026-09-11) | une telle colonne ne dit rien de l'étendue temporelle de l'entité ; la garder au dénominateur plafonne la couverture à `(n-1)/n`, donc sous 1.0 sur toutes les dates : fenêtre stricte vide et entité où rien n'est jamais imputable — cas de `climat_affaires` pour l'Italie (§15.1). L'exclusion élargit la fenêtre, donc les imputations : elle n'est jamais silencieuse |
+| **D40** | une colonne **observée** mais de fréquence **indétectable** (trop peu d'observations, espacement irrégulier : `None` à la détection) est écartée de la **grille** et du **dénominateur** ; elle est recensée par `undetected_frequency_columns_` (même structure que D39) et signalée par son propre `UserWarning` agrégé ; sa couverture rendue est `(None, None)`. Arbitrage de l'auteur, 2026-10-11 (ANO-FREQ-015) | sans fréquence, la période couverte par une observation est inconnue : en deviner une (repli sur la fréquence de l'index) laisserait une valeur isolée opposer un veto à la fenêtre ou étirer la grille. L'exclusion est cohérente avec `_undetected_frequencies_` de l'imputeur, qui écarte déjà ces couples de la classification ; le `fit` plantait auparavant (`Frequency must be a string`) et l'imputeur poursuivait sans fenêtre, en silence |
 
 ---
 

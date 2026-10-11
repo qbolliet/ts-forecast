@@ -3214,3 +3214,151 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   de bord (dans la limite), les méthodes scipy laissent NaN. Documenté, pas de changement. Tests : `TestInterpolationMethodEdges`.
 - **Axe temporel non daté** : `TypeError` explicite (piste `to_timestamp` pour un `PeriodIndex`). Tests :
   `TestConvertToTargetRouting::test_non_datetime_time_series_index_raises` et suivants.
+
+### ANO-FREQ-014 — Grille ancrée en fin de période quand aucune colonne n'est à la fréquence de l'index
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._build_index_freq_grid`
+- **Sévérité** : majeure
+- **Observé** : la position (début / fin) de la grille de couverture est lue sur la première colonne dont la fréquence
+  détectée égale celle de l'index. Sans telle colonne — index mensuel `MS` ne portant que des séries trimestrielles et
+  annuelles, cas d'usage direct d'une imputation vers une grille plus fine —, la position retombe sur `'E'` : la grille
+  est `ME` alors que les données sont `MS`. Les bornes et le masque brut sont en fin de mois, et
+  `get_imputation_window_mask(data)` renvoie **False sur toutes les lignes** (0 / 24) alors que la fenêtre stricte couvre
+  tout le jeu. Même défaut pour `get_mask_at_frequency`, ancré sur l'index du masque.
+- **Attendu** : la position de la grille suit celle de l'index des données (ou, à défaut de colonne haute fréquence,
+  la position des colonnes observées) ; le masque aligné vaut True sur les 24 mois. Avec un index `ME`, le défaut
+  ne se voit pas (repli `'E'` coïncident).
+- **Reproduction** :
+  ```python
+  dates = pd.date_range('2020-01-01', periods=24, freq='MS')
+  df = pd.DataFrame({'q': np.nan, 'y': np.nan}, index=dates)
+  df.loc[dates.month.isin([1, 4, 7, 10]), 'q'] = 1.0
+  df.loc[dates.month == 1, 'y'] = 2.0
+  calc = ImputationWindowCalculator().fit(df)
+  calc.imputation_strict_window_start_          # Timestamp('2020-01-31')
+  calc.get_imputation_window_mask(df).sum()     # 0
+  ```
+- **Test** : `tests/unit/frequency/test_imputation_window.py::TestGridAnchoring::test_grid_follows_the_index_when_every_column_is_coarser`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : nouvelle méthode `_detect_grid_position` : la position est lue sur les dates observées des colonnes à la
+  fréquence de la grille, puis sur l'index de l'entité, puis sur les dates observées des autres colonnes de fréquence
+  détectée ; `'E'` ne reste qu'un dernier recours. Tests : `TestGridAnchoring::test_grid_follows_the_index_when_every_column_is_coarser`
+  (`MS` et `ME`), `::test_panel_entity_grid_follows_its_own_index`.
+
+### ANO-FREQ-015 — `fit` plante sur une colonne observée une seule fois
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._build_coverage_matrix`
+- **Sévérité** : majeure
+- **Observé** : depuis ANO-UTILS-042, une colonne (ou un couple (entité, colonne)) observée une seule fois a une fréquence
+  détectée `None`. `_build_index_freq_grid` se replie alors sur la fréquence de l'index (`col_freqs.get(col) or
+  index_freq`), mais `_build_coverage_matrix` lit `col_freqs[col]` sans repli et passe `None` à `get_period_start` :
+  `ValueError: Frequency must be a string, got <class 'NoneType'>`. Sur un panel, une seule entité dans ce cas fait
+  échouer le `fit` de tout le panel ; `HighFrequencyImputer._fit_imputation_window` rattrape la `ValueError` et
+  poursuit **sans fenêtre**, silencieusement.
+- **Attendu** : pas d'exception ; traitement cohérent entre la grille et la matrice — soit le même repli sur la
+  fréquence de l'index, soit (plus cohérent avec `_undetected_frequencies_` de l'imputeur et D39) une exclusion du
+  dénominateur, signalée. Le test `xfail` n'exige que l'absence d'exception.
+- **Reproduction** :
+  ```python
+  dates = pd.date_range('2020-01-01', periods=12, freq='MS')
+  df = pd.DataFrame({'a': np.arange(12.), 'b': np.arange(12.),
+                     'c': [np.nan] * 5 + [1.0] + [np.nan] * 6}, index=dates)
+  ImputationWindowCalculator().fit(df)   # ValueError: Frequency must be a string, got <class 'NoneType'>
+  ```
+- **Test** : `tests/unit/frequency/test_imputation_window.py::TestUndetectedFrequencyColumns`
+- **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : exclusion (décision D40, spec §14.8)
+- **Correction** : `_compute_window` recense les colonnes observées de fréquence `None` ; `_build_index_freq_grid` et
+  `_build_coverage_matrix` les ignorent (plus de repli sur la fréquence de l'index), le dénominateur les écarte. Nouvel
+  attribut ajusté `undetected_frequency_columns_` (même structure que `structurally_absent_columns_`), `UserWarning` agrégé
+  propre, couverture rendue `(None, None)`. La branche « toutes colonnes absentes » de la couverture, devenue morte, est
+  supprimée. Tests : `TestUndetectedFrequencyColumns` (8 tests : veto, rapport, avertissement unique, grille non étirée,
+  espacement irrégulier, panel par entité, `get_columns_with_coverage`, série sans aucune fréquence).
+
+### ANO-FREQ-016 — `imputation_scope='unrestricted'` : prévu par la spec, refusé par le code
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationScope`, `ImputationWindowCalculator.__init__`
+- **Sévérité** : à arbitrer
+- **Observé** : `ImputationScope` n'a que quatre valeurs ; `ImputationWindowCalculator(imputation_scope='unrestricted')`
+  lève `ValueError`. `'unrestricted'` n'existe que dans `TrainingScope` (commit `44f5266`, commentaire explicite :
+  « les quatre valeurs d'ImputationScope, plus 'unrestricted' »).
+- **Attendu** : la spec §7 écrit `ImputationScope = Literal[..., 'extended_both', 'unrestricted']` et
+  `TrainingScope = ImputationScope`. Une fenêtre de **prédiction** sans restriction (imputer des dates sans aucune
+  donnée) a peu de sens : la spec est probablement à corriger plutôt que le code. Comportement actuel épinglé,
+  sans `xfail`.
+- **Reproduction** : `ImputationWindowCalculator(imputation_scope='unrestricted')` → `ValueError`.
+- **Test** : `tests/unit/frequency/test_imputation_window.py::TestConstructorValidation::test_imputation_scope_rejects_unrestricted`
+- **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : `'unrestricted'` n'a d'intérêt que pour `TrainingScope`
+- **Correction** : la spec est corrigée (§7 : `ImputationScope` à quatre valeurs, `TrainingScope` explicite, paragraphe de
+  motif) ; le code, déjà conforme, est inchangé. Le test épingle désormais le contrat.
+
+### ANO-FREQ-017 — Entité sans aucune observation : `structurally_absent_columns_` vide
+- **Type** : [DOC] docstring ≠ code (ou [CODE], selon l'arbitrage)
+- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._fit_panel` /
+  `_compute_window`
+- **Sévérité** : à arbitrer
+- **Observé** : une entité d'index régulier dont toutes les colonnes sont NaN a une grille vide ; `_compute_window`
+  renvoie `absent_columns=()` avant de calculer la matrice. L'entité figure dans `entities_without_window_`, mais
+  `structurally_absent_columns_[entité] == ()`, sans avertissement. Même `()` pour une entité dont la fréquence
+  d'index est indéterminée (là, c'est défendable : rien n'a été examiné).
+- **Attendu** : la docstring réserve le tuple vide à « an entity without any such column » ; or toutes les colonnes de
+  l'entité sont sans observation. Soit lister toutes ses colonnes (cohérent avec la définition), soit préciser dans la
+  docstring que l'attribut ne couvre que les entités dotées d'une grille. Comportement actuel épinglé.
+- **Reproduction** :
+  ```python
+  dates = pd.date_range('2020-01-01', periods=12, freq='MS')
+  idx = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+  values = list(range(12)) + [np.nan] * 12
+  calc = ImputationWindowCalculator().fit(pd.DataFrame({'a': values, 'b': values}, index=idx, dtype=float))
+  calc.structurally_absent_columns_   # {('A',): (), ('B',): ()}
+  ```
+- **Test** : `tests/unit/frequency/test_imputation_window.py::TestEntitiesWithoutWindow::test_empty_entity_reports_no_excluded_column`
+- **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : docstring précisée, code inchangé
+- **Correction** : la docstring de `structurally_absent_columns_` (et de `undetected_frequency_columns_`) énonce la règle :
+  l'attribut n'a de sens que pour une entité dotée d'une grille ; une entité de `entities_without_window_` porte toujours un
+  tuple vide. Elle cesse aussi d'affirmer qu'une série temporelle porte toujours `()` (faux depuis ANO-UTILS-042). Règle
+  reprise dans D39 (spec §14.8).
+
+### ANO-FREQ-018 — `get_mask_at_frequency` : entités sans fenêtre traitées de deux façons
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator.get_mask_at_frequency`
+- **Sévérité** : mineure
+- **Observé** : une entité dont la fréquence d'index est indéterminée est **absente** du résultat ; une entité d'index
+  régulier sans aucune observation (grille vide) y figure **à False**. Or l'imputeur (`_window_mask_at`) et
+  `TrainingSetBuilder` lisent une entité absente comme **non restreinte** et une entité à False comme entièrement hors
+  fenêtre : deux entités sans fenêtre recevaient deux traitements opposés.
+- **Attendu** : une seule règle pour `entities_without_window_`. La docstring de la méthode (« Entities without a valid
+  fitted mask are simply absent ») et celle de l'imputeur (« An entity the calculator omits — one without a valid fitted
+  mask — is left unrestricted ») désignent l'absence.
+- **Reproduction** : panel `A` complet, `B` entièrement NaN sur un index mensuel régulier ;
+  `calc.get_mask_at_frequency('QS').loc['B']` → 4 × `False`.
+- **Test** : `tests/unit/frequency/test_imputation_window.py::TestEntitiesWithoutWindow::test_entity_without_window_is_absent_from_mask_at_frequency`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : la boucle par entité saute toute entité de `entities_without_window_` ; un `frequency` en dict n'a plus à
+  nommer ces entités (`::test_dict_target_need_not_name_an_entity_without_window`). Les masques ajustés gardent leurs lignes
+  à False (§7.2). Suites `frequency` et `tracking` inchangées (1 108 tests).
+
+### ANO-FREQ-019 — `get_imputation_window_mask(data)` : `FutureWarning` de pandas
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator.get_imputation_window_mask`
+- **Sévérité** : cosmétique
+- **Observé** : `source.reindex(data.index).fillna(False).astype(bool)` passe par un tableau `object` dès qu'une ligne de
+  `data` manque à la grille : `FutureWarning: Downcasting object dtype arrays on .fillna ... is deprecated`.
+- **Attendu** : aucun avertissement de dépréciation ; résultat booléen identique.
+- **Reproduction** : `calc.get_imputation_window_mask(pd.DataFrame(index=index_avec_une_date_hors_grille))`.
+- **Test** : `tests/unit/frequency/test_imputation_window.py::TestGetImputationWindowMask::test_alignment_emits_no_pandas_deprecation`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `source.reindex(data.index, fill_value=False).astype(bool)`.
+
+### ANO-FREQ-020 — Entité sans fenêtre écartée en silence
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._fit_panel`
+- **Sévérité** : mineure
+- **Observé** : une entité sans fenêtre (fréquence d'index indéterminée, ou aucune observation) voit toutes ses lignes à
+  False dans les trois masques sans aucun avertissement — alors que l'exclusion d'une simple colonne (D39) en émet un.
+- **Attendu** : un avertissement agrégé unique nommant ces entités (point de vigilance 5 du §17 de la spec : tout
+  avertissement est agrégé et unique).
+- **Reproduction** : panel `A` complet, `B` entièrement NaN ; `fit` ne produit aucun avertissement.
+- **Test** : `tests/unit/frequency/test_imputation_window.py::TestEntitiesWithoutWindow::test_entities_without_window_are_named_by_one_warning`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `_fit_panel` émet un `UserWarning` unique listant `entities_without_window_` ; un panel où toutes les
+  entités ont une fenêtre reste silencieux (`::test_no_warning_when_every_entity_has_a_window`).

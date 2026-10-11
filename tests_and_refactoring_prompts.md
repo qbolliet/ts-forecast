@@ -141,7 +141,7 @@ l'implémentation. Hiérarchie à appliquer :
 
 | Module | Source prioritaire | Puis | En dernier |
 |---|---|---|---|
-| `frequency` | `high_frequency_imputer2_architecture.md` (spec, §0-§17, décisions D1-D39, invariants I1-I21) | le code | docstrings, `docs/` |
+| `frequency` | `high_frequency_imputer2_architecture.md` (spec, §0-§17, décisions D1-D40, invariants I1-I21) | le code | docstrings, `docs/` |
 | `utils` | le code **et** l'historique git des changements délibérés (`git log -p -- <fichier>`) | `docs/concepts/temporal_utils.md`, notebooks `notebooks/utils/*.ipynb` (possiblement périmés : l'auteur y a relevé des problèmes, corrigés depuis dans le code) | docstrings |
 | `delays` | le code et l'historique git (renommages `4b3d3bc`, `f302664`, `ae347b2`) | `docs/concepts/publication_delays.md`, notebooks `1 - QB - Delays`, `11 - QB - Delays`, `Test Delays transformers` | docstrings |
 

@@ -64,6 +64,17 @@ class ImputationWindowCalculator:
     The exclusion is reported through ``structurally_absent_columns_`` and a
     ``UserWarning``.
 
+    Columns that are observed but whose frequency cannot be detected (too
+    few observations, or irregular spacing) are excluded as well, from the
+    grid and from the denominator: without a frequency, the period an
+    observation covers is unknown, and guessing one would let a single
+    stray value veto or stretch the window. They are reported through
+    ``undetected_frequency_columns_`` and a ``UserWarning`` of their own.
+
+    The grid is anchored (start or end of period) like the columns at the
+    grid frequency; failing those, like the entity's own index, then like
+    its other observed columns, so the masks always reindex onto the data.
+
     Three masks are derived from the same coverage computation, so that the
     range a model is fitted on can be set independently of the range it
     imputes:
@@ -113,7 +124,10 @@ class ImputationWindowCalculator:
     rebuilding a per-entity structure. An entity whose window could not be
     determined (index frequency not identified, or empty coverage grid)
     still contributes its rows, all ``False``; ``entities_without_window_``
-    lists those entities.
+    lists those entities and a single ``UserWarning`` names them.
+    :meth:`get_mask_at_frequency` leaves them out of its result instead, so
+    a consumer can tell "no window" (absent) from "outside the window"
+    (``False``).
 
     Methods taking an entity from the caller
     (:meth:`get_columns_with_coverage`, :meth:`get_mask_at_frequency`)
@@ -165,18 +179,27 @@ class ImputationWindowCalculator:
         structurally_absent_columns_: Columns with no observation at all,
             excluded from the coverage denominator so that they cannot cap
             coverage below 1.0 and veto the whole window of their entity.
-            Dict entity tuple -> tuple of column names for a panel, where an
-            entity without any such column carries an empty tuple; always the
-            empty tuple for a time series, where a fully empty column is
-            rejected by frequency detection before the window is ever
-            computed — the notion is a per-entity one, a column observed
-            elsewhere in the panel but never for that entity. Their entry in
-            ``column_coverage_`` stays ``(None, None)``: the exclusion bears
-            on the denominator, not on the reported coverage.
+            Tuple of column names for a time series. Dict entity tuple ->
+            tuple of column names for a panel — the notion is a per-entity
+            one, a column possibly observed elsewhere in the panel but never
+            for that entity. The attribute is only meaningful for an entity
+            that has a coverage grid: an entity listed in
+            ``entities_without_window_`` (index frequency not identified, or
+            no observation at all in any column) always carries an empty
+            tuple, its columns never having been weighed against one another.
+            Their entry in ``column_coverage_`` stays ``(None, None)``: the
+            exclusion bears on the denominator, not on the reported coverage.
+        undetected_frequency_columns_: Columns that are observed but whose
+            frequency cannot be detected (fewer observations than detection
+            requires, or irregular spacing), excluded from the grid and from
+            the coverage denominator. Same type and same per-entity rule as
+            ``structurally_absent_columns_``; their ``column_coverage_``
+            entry is ``(None, None)`` too.
         entities_without_window_: Tuple of entity key tuples whose imputation
             window could not be determined (index frequency not identified,
             or empty coverage grid). Their rows appear in the three masks as
-            ``False``. Empty tuple for time series data.
+            ``False`` and they are absent from :meth:`get_mask_at_frequency`.
+            Empty tuple for time series data.
         index_freq_: Detected highest frequency. str for time series,
             Dict[tuple, Optional[str]] for panel.
         column_coverage_: Dict mapping column names to (start, end)
@@ -299,6 +322,11 @@ class ImputationWindowCalculator:
         # couverture : tuple de noms pour une série temporelle, dict par entité
         # pour un panel (une entité sans colonne absente porte un tuple vide)
         self.structurally_absent_columns_: Union[
+            Tuple[str, ...], Dict[tuple, Tuple[str, ...]]
+        ] = ()
+        # Colonnes observées mais de fréquence indétectable, écartées de la
+        # grille et du dénominateur : même structure que la précédente
+        self.undetected_frequency_columns_: Union[
             Tuple[str, ...], Dict[tuple, Tuple[str, ...]]
         ] = ()
 
@@ -448,7 +476,10 @@ class ImputationWindowCalculator:
 
         # Colonnes écartées du dénominateur : jamais silencieux
         self.structurally_absent_columns_ = result['absent_columns']
-        self._warn_structurally_absent({(): result['absent_columns']})
+        self.undetected_frequency_columns_ = result['undetected_columns']
+        self._warn_excluded_columns(
+            {(): result['absent_columns']}, {(): result['undetected_columns']}
+        )
 
     # Méthode auxiliaire d'estimation de la fenêtre sur des données de panel
     def _fit_panel(self, data: pd.DataFrame) -> None:
@@ -487,6 +518,7 @@ class ImputationWindowCalculator:
         coverage_parts: List[pd.Series] = []
         entities_without_window: List[tuple] = []
         absent_by_entity: Dict[tuple, Tuple[str, ...]] = {}
+        undetected_by_entity: Dict[tuple, Tuple[str, ...]] = {}
 
         # Parcours des entités
         for entity in entities:
@@ -515,6 +547,7 @@ class ImputationWindowCalculator:
                 self._store_entity_without_window(entity_key)
                 entities_without_window.append(entity_key)
                 absent_by_entity[entity_key] = ()
+                undetected_by_entity[entity_key] = ()
                 # Série de booléens False
                 self._append_false_mask_parts(
                     entity_key, entity_frame_dates,
@@ -534,6 +567,7 @@ class ImputationWindowCalculator:
             self.imputation_strict_window_end_[entity_key] = result['imputation_strict_end']
             self.column_coverage_[entity_key] = result['column_coverage']
             absent_by_entity[entity_key] = result['absent_columns']
+            undetected_by_entity[entity_key] = result['undetected_columns']
 
             # Cas où la grille de couverture est vide : même traitement que la
             # fréquence non identifiée, l'entité n'a pas de masque exploitable
@@ -565,7 +599,19 @@ class ImputationWindowCalculator:
 
         # Colonnes écartées du dénominateur, par entité : jamais silencieux
         self.structurally_absent_columns_ = absent_by_entity
-        self._warn_structurally_absent(absent_by_entity)
+        self.undetected_frequency_columns_ = undetected_by_entity
+        self._warn_excluded_columns(absent_by_entity, undetected_by_entity)
+
+        # Entités sans fenêtre : leurs lignes sont à False dans les trois
+        # masques, ce qui retire silencieusement toute l'entité
+        if entities_without_window:
+            warnings.warn(
+                f"{len(entities_without_window)} entity(ies) without a determinable "
+                f"window (index frequency not identified, or no observation at all): "
+                f"{list(entities_without_window)}. Their rows are False in the three "
+                "masks; they are listed in entities_without_window_.",
+                UserWarning
+            )
 
         # Vérification qu'au moins une entité a une fenêtre valide. Une fenêtre
         # stricte absente partout reste rédhibitoire : l'extension ne peut jamais
@@ -585,24 +631,58 @@ class ImputationWindowCalculator:
             )
 
     # Méthode auxiliaire d'avertissement sur les colonnes écartées du dénominateur
-    @staticmethod
-    def _warn_structurally_absent(
+    @classmethod
+    def _warn_excluded_columns(
+        cls,
         absent_by_entity: Dict[tuple, Tuple[str, ...]],
+        undetected_by_entity: Dict[tuple, Tuple[str, ...]],
     ) -> None:
         """Warn about the columns dropped from the coverage denominator.
 
         A column with no observation at all says nothing about the temporal
         extent of its entity, so it is excluded rather than allowed to cap
-        coverage below 1.0 forever. That exclusion widens the window, hence
-        the imputations, so it is never silent.
+        coverage below 1.0 forever. A column observed without a detectable
+        frequency covers an unknown period, so it is excluded too. Both
+        exclusions widen the window, hence the imputations, so neither is
+        silent: one warning per kind of exclusion, aggregated over entities.
 
         Args:
             absent_by_entity: Structurally absent columns, keyed by entity
                 tuple; ``()`` is the degenerate key of a time series.
+            undetected_by_entity: Observed columns without a detectable
+                frequency, same keys.
+        """
+        cls._warn_excluded(
+            absent_by_entity,
+            "Columns without any observation are excluded from the coverage "
+            "denominator, which widens the imputation window",
+            "structurally_absent_columns_",
+        )
+        cls._warn_excluded(
+            undetected_by_entity,
+            "Columns whose frequency cannot be detected (too few observations or "
+            "irregular spacing) are excluded from the coverage grid and denominator",
+            "undetected_frequency_columns_",
+        )
+
+    # Méthode auxiliaire d'émission d'un avertissement agrégé d'exclusion
+    @staticmethod
+    def _warn_excluded(
+        columns_by_entity: Dict[tuple, Tuple[str, ...]],
+        reason: str,
+        attribute: str,
+    ) -> None:
+        """Emit one aggregated warning naming the excluded columns of every entity.
+
+        Args:
+            columns_by_entity: Excluded columns, keyed by entity tuple; ``()``
+                is the degenerate key of a time series.
+            reason: Leading sentence of the warning.
+            attribute: Fitted attribute listing those columns.
         """
         # Rendu par entité, restreint à celles qui ont effectivement perdu une colonne
         reported = {
-            entity: columns for entity, columns in absent_by_entity.items() if columns
+            entity: columns for entity, columns in columns_by_entity.items() if columns
         }
         if not reported:
             return
@@ -613,9 +693,7 @@ class ImputationWindowCalculator:
             for entity, columns in reported.items()
         )
         warnings.warn(
-            "Columns without any observation are excluded from the coverage "
-            f"denominator, which widens the imputation window ({details}). "
-            "They are listed in structurally_absent_columns_.",
+            f"{reason} ({details}). They are listed in {attribute}.",
             UserWarning
         )
 
@@ -767,6 +845,13 @@ class ImputationWindowCalculator:
                 - 'coverage': coverage pd.Series on the high-freq grid.
                 - 'column_coverage': Dict of per-column (start, end)
                   tuples.
+                - 'absent_columns': Tuple of the columns without any
+                  observation, excluded from the coverage denominator.
+                - 'undetected_columns': Tuple of the observed columns without
+                  a detectable frequency, excluded from the grid and from the
+                  coverage denominator.
+            Every value is None — the two tuples empty — when the grid is
+            empty (no observation in a column of detected frequency).
         """
         # Initialisation du dictionnaire résultat par défaut
         _none_result = {
@@ -782,7 +867,19 @@ class ImputationWindowCalculator:
             'coverage': None,
             'column_coverage': None,
             'absent_columns': (),
+            'undetected_columns': (),
         }
+
+        # Colonnes observées mais de fréquence indétectable (trop peu
+        # d'observations, espacement irrégulier) : sans fréquence, la période
+        # couverte par une observation est inconnue. Les garder obligerait à en
+        # deviner une — une valeur isolée pourrait alors opposer un veto à la
+        # fenêtre ou étirer la grille. Elles sont écartées de la grille comme
+        # du dénominateur, à l'image des "_undetected_frequencies_" de l'imputeur
+        undetected_columns = tuple(
+            col for col in df.columns
+            if col_freqs.get(col) is None and bool(df[col].notna().any())
+        )
 
         # Construction de la grille haute fréquence de référence
         grid = self._build_index_freq_grid(df, col_freqs, index_freq)
@@ -798,24 +895,23 @@ class ImputationWindowCalculator:
         # grille. Elles ne disent rien de l'étendue temporelle de l'entité, et
         # les garder au dénominateur reviendrait à leur laisser opposer un veto
         # permanent à toute la fenêtre — une colonne absente plafonnerait la
-        # couverture à (n-1)/n, donc sous 1.0, donc fenêtre stricte vide. Le
-        # reste du pipeline les traite déjà comme telles
-        # ("_undetected_frequencies_" côté imputeur) ; le dénominateur suit
+        # couverture à (n-1)/n, donc sous 1.0, donc fenêtre stricte vide. Les
+        # colonnes de fréquence indétectable, colonnes vides de la matrice, sont
+        # recensées à part
         absent_columns = tuple(
             col for col in coverage_matrix.columns
-            if not bool(coverage_matrix[col].any())
+            if col not in undetected_columns and not bool(coverage_matrix[col].any())
         )
         present_columns = [
-            col for col in coverage_matrix.columns if col not in absent_columns
+            col for col in coverage_matrix.columns
+            if col not in absent_columns and col not in undetected_columns
         ]
 
         # Calcul de la couverture (proportion de colonnes couvertes par date),
-        # sur les seules colonnes présentes. Toutes absentes : couverture nulle,
-        # comme auparavant — il n'y a alors rien à imputer ni sur quoi s'appuyer
-        if present_columns:
-            coverage = coverage_matrix[present_columns].mean(axis=1)
-        else:
-            coverage = pd.Series(0.0, index=grid)
+        # sur les seules colonnes présentes. Une grille non vide garantit au
+        # moins une colonne présente : elle n'est bâtie que sur les observations
+        # des colonnes de fréquence détectée
+        coverage = coverage_matrix[present_columns].mean(axis=1)
 
         # Extraction de la couverture par colonne (premier/dernier True dans la grille)
         column_coverage = {}
@@ -853,6 +949,7 @@ class ImputationWindowCalculator:
                 'coverage': coverage,
                 'column_coverage': column_coverage,
                 'absent_columns': absent_columns,
+                'undetected_columns': undetected_columns,
                 'imputation_strict_window_mask': imputation_strict_window_mask,
                 'imputation_window_mask': self._build_scope_mask(
                     coverage,
@@ -939,6 +1036,7 @@ class ImputationWindowCalculator:
             'coverage': coverage,
             'column_coverage': column_coverage,
             'absent_columns': absent_columns,
+            'undetected_columns': undetected_columns,
         }
 
     # Construction de la grille à l'indice de la fréquence pour le calcul de la couverture
@@ -951,9 +1049,12 @@ class ImputationWindowCalculator:
         """Build the reference high-frequency date grid for coverage computation.
 
         The grid spans from the earliest period start to the latest period
-        end across all non-NaN observations. Period boundaries are computed
-        using get_period_start/get_period_end, so a quarterly observation
-        expands the grid to cover all three constituent months.
+        end across all non-NaN observations of the columns whose frequency is
+        detected — an observation of unknown frequency covers an unknown
+        period and is left out. Period boundaries are computed using
+        get_period_start/get_period_end, so a quarterly observation expands
+        the grid to cover all three constituent months. The grid is anchored
+        per :meth:`_detect_grid_position`.
 
         Args:
             df: Entity sub-DataFrame with simple DatetimeIndex.
@@ -970,12 +1071,14 @@ class ImputationWindowCalculator:
 
         # Parcours des colonnes du jeu de données
         for col in df.columns:
-            # Extraction de la fréquence de la colonne (fallback sur la fréquence de l'index)
-            col_freq = col_freqs.get(col) or index_freq
-            # Extraction des observations valides (i.e. non nulles)
-            valid = df[col].dropna()
-            if len(valid) == 0:
+            # Extraction de la fréquence de la colonne ; une colonne de fréquence
+            # indétectable couvre une période inconnue et n'étend pas la grille
+            col_freq = col_freqs.get(col)
+            if col_freq is None:
                 continue
+            # Extraction des observations valides (i.e. non nulles) ; une
+            # fréquence détectée garantit au moins deux observations
+            valid = df[col].dropna()
             # Parcours des dates de l'index
             for d in valid.index:
                 # Extraction des débuts et fins de période
@@ -992,25 +1095,8 @@ class ImputationWindowCalculator:
         # Fin de la grille — get_period_end est exclusif (borne supérieure exclue)
         grid_end_exclusive = max(expanded_ends)
 
-        # Détection de la position (S/E) à partir des colonnes à la fréquence la plus élevée
-        # Extraction des colonnes à haute fréquence
-        hf_cols = [col for col in df.columns if col_freqs.get(col) == index_freq]
-        # Initialisation de la position
-        hf_pos = 'E'  # convention par défaut : fin de période
-        if hf_cols:
-            # Extraction des dates
-            hf_dates = df[hf_cols[0]].dropna().index
-            if len(hf_dates) >= 2:
-                # Détection de la position
-                try:
-                    pos = detect_index_frequency(
-                        cast(pd.DatetimeIndex, hf_dates),
-                        return_format='components'
-                    ).position
-                    if pos is not None:
-                        hf_pos = pos
-                except Exception:
-                    pass
+        # Détection de la position (S/E) de la grille
+        hf_pos = self._detect_grid_position(df, col_freqs, index_freq)
 
         # Construction de l'offset pandas complet (fréquence + position)
         try:
@@ -1038,6 +1124,58 @@ class ImputationWindowCalculator:
         # observation
         return grid[grid < grid_end_exclusive]
 
+    # Méthode auxiliaire de détection de la position (début / fin) de la grille
+    @staticmethod
+    def _detect_grid_position(
+        df: pd.DataFrame,
+        col_freqs: Dict[str, Optional[str]],
+        index_freq: str,
+    ) -> str:
+        """Detect the period position (start or end) the grid must be anchored on.
+
+        The masks are reindexed onto the caller's rows, so the grid must carry
+        the same anchoring as the data. Candidates are read in decreasing
+        order of reliability: the observed dates of the columns at the grid
+        frequency, then the entity's own index, then the observed dates of
+        the other columns of detected frequency. The first candidate whose
+        position is detected wins.
+
+        Args:
+            df: Entity sub-DataFrame with simple DatetimeIndex.
+            col_freqs: Dict mapping column names to frequencies.
+            index_freq: Grid frequency code.
+
+        Returns:
+            'S' or 'E'; 'E' when no candidate reveals a position.
+        """
+        # Colonnes de fréquence détectée, celles à la fréquence de la grille en tête
+        detected = [col for col in df.columns if col_freqs.get(col) is not None]
+        hf_cols = [col for col in detected if col_freqs[col] == index_freq]
+        other_cols = [col for col in detected if col_freqs[col] != index_freq]
+
+        # Candidats : dates observées des colonnes haute fréquence, index de
+        # l'entité, puis dates observées des autres colonnes. Sans colonne à la
+        # fréquence de la grille (index mensuel ne portant que des séries
+        # trimestrielles ou annuelles), seul l'index révèle l'ancrage des lignes
+        candidates = (
+            [df[col].dropna().index for col in hf_cols]
+            + [df.index]
+            + [df[col].dropna().index for col in other_cols]
+        )
+        for dates in candidates:
+            try:
+                position = detect_index_frequency(
+                    cast(pd.DatetimeIndex, pd.DatetimeIndex(dates).sort_values()),
+                    return_format='components',
+                ).position
+            except (ValueError, TypeError):
+                continue
+            if position is not None:
+                return position
+
+        # Convention par défaut : fin de période
+        return 'E'
+
     # Méthode auxiliaire de construction de la matrice de couverture
     def _build_coverage_matrix(
         self,
@@ -1049,7 +1187,8 @@ class ImputationWindowCalculator:
         """Build the boolean coverage matrix at the high-frequency grid.
 
         Each cell (date, column) is True if the column has a non-NaN
-        observation whose period contains that grid date.
+        observation whose period contains that grid date. A column of
+        undetected frequency stays all False: its period is unknown.
 
         Args:
             df: Entity sub-DataFrame with simple DatetimeIndex.
@@ -1065,12 +1204,14 @@ class ImputationWindowCalculator:
 
         # Parcours des colonnes
         for col in df.columns:
-            # Extraction de la fréquence de la colonne
+            # Extraction de la fréquence de la colonne ; fréquence indétectable :
+            # période couverte inconnue, colonne laissée à False
             col_freq = col_freqs[col]
-            # Extraction des observations non nulles
-            valid = df[col].dropna()
-            if len(valid) == 0:
+            if col_freq is None:
                 continue
+            # Extraction des observations non nulles ; une fréquence détectée
+            # garantit au moins deux observations
+            valid = df[col].dropna()
             # Initialisation du masque de la colonne
             col_mask = np.zeros(len(grid), dtype=bool)
             # Parcours des dates associées aux observations non nulles
@@ -1293,12 +1434,9 @@ class ImputationWindowCalculator:
 
         # Avec données : réindexation directe sur l'index de l'appelant. Les
         # paires (entity..., date) absentes de la grille ajustée tombent à False
-        return (
-            source
-            .reindex(data.index)
-            .fillna(False)
-            .astype(bool)
-        )
+        # La valeur de remplissage booléenne garde le dtype bool : pas de
+        # passage par object puis de fillna (déclassement déprécié par pandas)
+        return source.reindex(data.index, fill_value=False).astype(bool)
 
 
     # Méthode de conversion du masque d'imputation vers une fréquence inférieure
@@ -1341,8 +1479,10 @@ class ImputationWindowCalculator:
         Returns:
             Boolean Series at the target frequency: on a DatetimeIndex for
             time series, or on a MultiIndex
-            ``(entity..., date)`` for panel. Entities without a valid
-            fitted mask are simply absent from the panel result.
+            ``(entity..., date)`` for panel. Every entity listed in
+            ``entities_without_window_`` is absent from the panel result
+            ("no window", as opposed to ``False``, "outside the window"), so a
+            dict ``frequency`` need not name those entities.
 
         Raises:
             ValueError: If calculator not fitted, if kind is invalid, or if
@@ -1379,6 +1519,12 @@ class ImputationWindowCalculator:
         # et cible propres à chacune), puis réassemblage en une Series unique
         converted_parts: List[pd.Series] = []
         for entity in self.index_freq_:
+            # Entité sans fenêtre (fréquence d'index non identifiée ou aucune
+            # observation) : absente du résultat, quelle qu'en soit la cause.
+            # L'absence signifie "pas de fenêtre", distincte de "hors fenêtre"
+            # (False) ; les consommateurs la lisent comme "aucune restriction"
+            if entity in self.entities_without_window_:
+                continue
             entity_mask = self._entity_grid_series(source, entity)
             target = frequency[entity] if isinstance(frequency, dict) else frequency
             converted = self._convert_mask_to_frequency(
@@ -1386,9 +1532,6 @@ class ImputationWindowCalculator:
                 source_freq=self.index_freq_[entity],
                 target_freq=target,
             )
-            # Entité sans masque exploitable : simplement absente du résultat
-            if converted is None:
-                continue
             converted_parts.append(
                 self._entity_series_with_multiindex(converted, entity)
             )
