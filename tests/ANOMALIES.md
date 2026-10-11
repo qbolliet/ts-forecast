@@ -3513,3 +3513,188 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestSklearnProtocol::test_refit_purges_the_previous_rescaled_mask`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `fit` supprime `rescaled_mask_` s'il existe.
+
+### ANO-FREQ-028 — `'calendar'` : diviseur `1.0` au lieu d'un diviseur fractionnaire quand l'étape est plus grossière
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler._pair_divisor` (donc `target_divisor`,
+  `fit_scale_factor`, `feature_divisors`)
+- **Sévérité** : majeure
+- **Observé** : sous `'constant'`, un couple « étape plus grossière que la variable » donne bien `1/3` (M -> Q),
+  `1/4` (Q -> Y), `1/12` (M -> Y). Sous `'calendar'`, les mêmes couples rendent `1.0` sur chaque ligne :
+  `count_subperiods_per_period(dates, low_freq='M', high_freq='Q')` compte les trimestres qui *recouvrent* un mois
+  (toujours un), pas la fraction de trimestre qu'il représente.
+- **Attendu** : §5.8 R5 — diviseur « **> 1** pour un bloc plus grossier que l'étape et **< 1** pour un bloc plus
+  fin » ; §9.2 — la modalité s'applique à **tous** les diviseurs. Sur un jeu mutualisé en `'calendar'` (bloc `IT`
+  mensuel à l'étape `Q`), les valeurs mensuelles entrent sans être ramenées à l'échelle trimestrielle : 10 au lieu
+  de 30, le mélange d'échelles que la mutualisation devait supprimer (B29). Convention à arbitrer : `1/3` uniforme
+  ou part de jours (`31/91`) ; dans les deux cas les sous-périodes d'une période d'étape somment à 1 — c'est la
+  propriété testée.
+- **Reproduction** :
+  ```python
+  idx = pd.date_range('2024-01-31', periods=3, freq='ME')
+  StageScaler(scale_features='calendar').target_divisor('v', 'M', 'Q', index=idx).tolist()
+  # [1.0, 1.0, 1.0] ; 'constant' donne 1/3
+  ```
+- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestCalendarGoldenValues::test_fractional_divisor_under_calendar`,
+  `::test_fractional_feature_divisor_under_calendar`
+- **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : part de jours en `'calendar'`, fraction uniforme en `'constant'`
+- **Correction** : `_pair_divisor` détecte une période portée plus fine que l'étape (`is_higher_frequency(f_to, f_from)`) et, sous `'calendar'`, calcule la part de temps réelle de la période d'étape (`_calendar_share` : durée de la période fine / durée de la période d'étape, en nanosecondes ; repli sur le facteur constant pour une fréquence sans `Period` pandas, ex. `SM`). `'constant'` est inchangé (1/3, 1/4, 1/12). Tests : `tests/unit/frequency/test_stage_scaler.py::TestCalendarGoldenValues::test_calendar_share_of_days_gold`, `::test_calendar_share_on_a_mutualized_block`, `::test_fractional_divisor_under_calendar`.
+
+### ANO-FREQ-029 — `feature_divisors` : `grid_freq` par entité rend une `Series` quand les blocs coïncident
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.feature_divisors`
+- **Sévérité** : mineure
+- **Observé** : avec `grid_freq` en liaison par entité, le retour est une `DataFrame` par ligne si les diviseurs
+  diffèrent d'une entité à l'autre, mais une `Series` par colonne s'ils coïncident (blocs identiques, liaison à une
+  seule entrée, colonnes toutes en `'raw_anchors'`…). La forme dépend des **valeurs** calculées ;
+  `HighFrequencyImputer._feature_divisors_per_row` doit d'ailleurs traiter les deux formes.
+- **Attendu** : §9.2 — `feature_divisors` « reçoit `grid_freq` sous forme de liaison par entité … et retourne
+  **alors** une `DataFrame` de diviseurs par ligne » ; règle de forme de la campagne : la forme dépend de la
+  configuration, jamais des valeurs.
+- **Reproduction** :
+  ```python
+  idx = pd.MultiIndex.from_product([['DE', 'FR'], pd.date_range('2021-01-31', periods=3, freq='ME')])
+  type(StageScaler().feature_divisors(columns=['m1'], column_frequencies={'m1': 'M'}, ways={},
+       grid_freq={('DE',): 'Y', ('FR',): 'Y'}, stage_freq='M', index=idx))   # Series
+  ```
+- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestShapeRule::test_per_entity_grid_freq_always_gives_a_dataframe`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `feature_divisors` rend toujours une `DataFrame` par ligne pour un `grid_freq` par entité. Plus généralement, la forme ne dépend plus de la coïncidence des diviseurs : par ligne sous `'calendar'`, pour un `grid_freq` par entité, ou quand les fréquences effectivement lues (étape, colonnes en `'raw_anchors'`) se résolvent différemment d'une entité à l'autre ; compacte sinon. Tests : `tests/unit/frequency/test_stage_scaler.py::TestShapeRule`.
+
+### ANO-FREQ-030 — Liaison d'étape par entité homogène : forme compacte, contrairement à `source_freq`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.feature_divisors`,
+  `::StageScaler._stage_divisor` (`target_divisor`, `fit_scale_factor`)
+- **Sévérité** : à arbitrer
+- **Observé** : `pred_freq` / `stage_freq` = `{('DE',): 'M', ('FR',): 'M'}` rend un scalaire (`target_divisor`) et
+  une `Series` par colonne (`feature_divisors`) ; la même liaison avec des fréquences divergentes rend une `Series`
+  / `DataFrame` par ligne. À l'inverse, `source_freq` par entité rend **toujours** une `Series`, même homogène.
+  Comportement présent depuis `097012f` (test `test_homogeneous_panel_keeps_the_compact_form`).
+- **Attendu** : à arbitrer. La règle de forme du prompt F6 (« la forme dépend de la configuration, jamais des
+  valeurs ») plaide pour une forme fixée par la **forme** de la liaison (mapping -> par ligne), comme pour
+  `source_freq` ; la forme compacte actuelle évite en revanche des `Series` inutiles sur les panels homogènes.
+- **Reproduction** :
+  ```python
+  idx = pd.MultiIndex.from_product([['DE', 'FR'], pd.date_range('2021-01-31', periods=3, freq='ME')])
+  StageScaler().target_divisor('a1', 'Y', {('DE',): 'M', ('FR',): 'M'}, index=idx)        # 12.0
+  StageScaler().target_divisor('a1', {('DE',): 'Y', ('FR',): 'Y'}, 'M', index=idx)        # Series
+  ```
+- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestShapeRule::test_homogeneous_stage_binding_keeps_the_compact_form`
+  (épingle le comportement actuel)
+- **Statut** : arbitré (2026-10-11) — forme compacte conservée
+- **Correction** : règle retenue : une liaison d'étape (`stage_freq` / `pred_freq`) dont les entités s'accordent sur une fréquence (aux alias de position près, `'M'` = `'ME'`) reste compacte ; les liaisons `grid_freq` / `source_freq` décrivent un jeu mutualisé et sont toujours par ligne. Motif : `HighFrequencyImputer` passe une liaison par entité à toute étape de panel ; la forme par ligne figerait chaque `fit_scale_factor` en `Series` sur la grille du fit (report d'échelle exposé au désalignement NaN déjà signalé sous `'calendar'`, plan illisible : `'per-row'` au lieu de 12.0) sans bénéfice. Tests : `tests/unit/frequency/test_stage_scaler.py::TestShapeRule::test_homogeneous_stage_binding_keeps_the_compact_form`, `::test_disagreeing_stage_binding_is_per_row_even_with_equal_divisors`.
+
+### ANO-FREQ-031 — Entité de la grille absente de la liaison d'étape : diviseur `NaN` en silence
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.feature_divisors`,
+  `::StageScaler._stage_divisor`, `::StageScaler._spread_one`
+- **Sévérité** : mineure
+- **Observé** : quand seule la liaison d'étape (`stage_freq` / `pred_freq`) est par entité, les entités servies
+  sont celles **nommées par la liaison** (`_binding_entities`), pas celles de la grille ; une entité de la grille
+  non couverte garde le `NaN` d'initialisation de `_spread_one`. Diviser par `NaN` efface ensuite toutes ses
+  valeurs, sans erreur. Les chemins `grid_freq` / `source_freq` par entité, eux, lèvent (`_grid_entities` +
+  `_block_freq`).
+- **Attendu** : `ValueError` nommant l'entité, comme pour `grid_freq` / `source_freq` — « an entity of the grid
+  left uncovered must be reported, never silently skipped » (docstring de `_grid_entities`), « the scale of a
+  block is never guessed » (`_block_freq`). `HighFrequencyImputer` passe a priori des liaisons complètes.
+- **Reproduction** :
+  ```python
+  idx = pd.MultiIndex.from_product([['DE', 'FR', 'IT'], pd.date_range('2021-01-31', periods=3, freq='ME')])
+  StageScaler().target_divisor('a1', 'Y', {('FR',): 'M', ('DE',): 'Q'}, index=idx).loc['IT'].tolist()
+  # [nan, nan, nan]
+  ```
+- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestPerEntityFrequencies::test_grid_entity_uncovered_by_the_stage_binding_raises`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : la fréquence d'étape d'une entité est résolue par `_stage_freq_for` : entrée propre, liaison à une seule entrée, puis **liaison unanime** (toutes les entrées s'accordent : c'est la fréquence de l'étape, elle vaut pour tout le panel) ; seule une liaison **discordante** qui omet une entité de la grille lève un `ValueError` nommant l'entité. Les entités servies sont celles de la grille dès qu'une liaison par entité est lue (`feature_divisors`, `_stage_divisor`, chemin `produced_freq` de `target_divisor`). Une colonne d'ancres sans fréquence pour une entité retombe sur le diviseur par défaut, jamais sur NaN. Tests : `tests/unit/frequency/test_stage_scaler.py::TestPerEntityFrequencies`.
+- **Effet sur `HighFrequencyImputer`** : le cas se produisait réellement. Avec `target_frequency={FR: 'M', DE: 'Q', IT: 'M'}` et `impute_intermediate_frequencies=True` sur PANEL-F, l'étape `M` lie `{FR: M, IT: M}` alors que le jeu mutualisé contient le bloc trimestriel de DE (R2) : ses lignes recevaient un diviseur NaN puis étaient retirées par `usable = y_train.notna()` (côté features, le diviseur par défaut). `n_training_rows` de l'étape `M` / `v` passe de 48 à 60 : les 12 ancres de DE entrent désormais dans l'entraînement, ramenées à l'échelle mensuelle.
+
+### ANO-FREQ-032 — `set_params` contourne la validation de `scale_features`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.fit` (et `target_divisor`,
+  `fit_scale_factor`, `feature_divisors`, utilisables sans `fit`)
+- **Sévérité** : mineure
+- **Observé** : la validation n'a lieu qu'à `__init__`. `set_params(scale_features='exact')` est accepté ;
+  `resolve_mode` rend `'exact'`, que `_pair_divisor` traite comme `'constant'` (`mode != 'calendar'`).
+- **Attendu** : même arbitrage qu'ANO-FREQ-023 (`AggregationConstraint`, composants utilisables seuls,
+  `set_params` compris) : `fit` et les méthodes de diviseur revalident et lèvent le `ValueError` d'`__init__`.
+- **Reproduction** :
+  ```python
+  StageScaler().set_params(scale_features='exact').target_divisor('a1', 'Y', 'M')   # 12.0, aucune erreur
+  ```
+- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestValidationThroughSetParams::test_inadmissible_setting_raises_after_set_params`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `resolve_mode`, point de passage de `fit` et des trois méthodes de diviseur, revalide `scale_features` ; la validation d'`__init__` est conservée. Tests : `tests/unit/frequency/test_stage_scaler.py::TestValidationThroughSetParams`.
+
+### ANO-FREQ-033 — `transform` accepte d'autres colonnes que celles du `fit`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.transform` (et `inverse_transform`)
+- **Sévérité** : mineure
+- **Observé** : aucune comparaison avec `feature_names_in_`. Avec des diviseurs compacts, pandas aligne la `Series`
+  de diviseurs sur les colonnes : une colonne inconnue au `fit` sort en `NaN`, une colonne du `fit` absente de `X`
+  est **ajoutée**, entièrement `NaN`.
+- **Attendu** : convention sklearn, cohérente avec ANO-FREQ-026 (corrigée) : `ValueError` nommant les colonnes
+  manquantes et inattendues ; ordre des colonnes libre.
+- **Reproduction** :
+  ```python
+  X = pd.DataFrame({'m1': [1.0], 'a2': [12.0]}, index=pd.to_datetime(['2021-12-31']))
+  s = StageScaler(source_freq='Y', pred_freq='M', column_frequencies={'m1': 'M', 'a2': 'Y'}).fit(X)
+  s.transform(X.rename(columns={'a2': 'q1'})).columns.tolist()   # ['a2', 'm1', 'q1'], a2 et q1 NaN
+  ```
+- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestTransformSymmetry::test_transform_rejects_other_columns_than_fit`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `transform` / `inverse_transform` d'une `DataFrame` lèvent `ValueError('X has different columns than during fit: missing [...], unexpected [...]')` ; l'ordre des colonnes reste libre. Tests : `tests/unit/frequency/test_stage_scaler.py::TestTransformSymmetry::test_transform_rejects_other_columns_than_fit`, `::test_transform_accepts_reordered_columns`.
+
+### ANO-FREQ-034 — `0`, `0.0`, `np.False_` acceptés par la validation puis traités comme `'constant'`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler._validate_scale_features` /
+  `::StageScaler.resolve_mode`
+- **Sévérité** : mineure
+- **Observé** : la validation compare par égalité (`value in (False, 'constant', 'calendar')`, or `0 == False`),
+  la résolution par identité (`mode is False`). `StageScaler(scale_features=np.False_)` est donc accepté et divise
+  par 12 comme `'constant'` — l'inverse de ce que l'utilisateur a demandé. Même chose pour `0` et `0.0`, et pour les
+  valeurs de la forme dict. (`True` et `1` sont, eux, bien rejetés.)
+- **Attendu** : validation et résolution cohérentes : rejet de tout ce qui n'est pas `False` (le `Literal[False]`
+  du §9.1), ou bien traitement comme `False`.
+- **Reproduction** :
+  ```python
+  StageScaler(scale_features=np.False_).target_divisor('a1', 'Y', 'M')   # 12.0, attendu 1.0 ou ValueError
+  ```
+- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestValidation::test_values_equal_to_false_are_rejected_or_act_as_false`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `_is_admissible_setting` compare `False` par identité : `0`, `0.0`, `np.False_` sont rejetés, en forme scalaire comme en forme dict (validation partagée avec `HighFrequencyImputer.__init__`). Tests : `tests/unit/frequency/test_stage_scaler.py::TestValidation::test_values_merely_equal_to_false_are_rejected`.
+
+### ANO-FREQ-035 — `_feature_divisor` : ancienne règle B25 restée en code mort
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler._feature_divisor`
+- **Sévérité** : cosmétique
+- **Observé** : la méthode (normalisation vers `f_var`, règle B25) n'a plus aucun appelant depuis `35c36e1`, où
+  `feature_divisors` est passé à la règle de la période couverte. Elle reste définie (lignes non couvertes par
+  construction).
+- **Attendu** : §9.2 — « il n'existe **qu'une** méthode de diviseur de covariable » ; suppression du code mort, sans
+  changement de comportement.
+- **Reproduction** : `git grep -n "_feature_divisor(" -- tsforecast` ne trouve que la définition.
+- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestSingleCovariateDivisorMethod::test_no_residual_covariate_divisor_method`
+  (`internal`)
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `StageScaler._feature_divisor` supprimée ; `feature_divisors` est la seule méthode de diviseur de covariable.
+
+### ANO-FREQ-036 — `transform` / `inverse_transform` perdent le nom de `y` sous un diviseur par ligne
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.apply` / `::StageScaler.invert`
+- **Sévérité** : mineure
+- **Observé** : `values / divisor` entre deux `Series` de noms différents rend une `Series` sans nom ; les diviseurs
+  par ligne (`'calendar'`, `produced_freq`, `source_freq` par entité) ne sont pas nommés. `transform(y).name` vaut
+  donc `'v'` sous un diviseur scalaire et `None` sous un diviseur par ligne : la sortie dépend de la forme du
+  diviseur.
+- **Attendu** : le nom de `y` est conservé — c'est lui qui désigne la colonne imputée (§9.2, D15) ; un `fit` sur la
+  cible transformée retomberait sinon sur le réglage global.
+- **Reproduction** :
+  ```python
+  idx = pd.to_datetime(['2024-01-31', '2024-02-29'])
+  y = pd.Series([31.0, 29.0], index=idx, name='m1')
+  s = StageScaler(scale_features='calendar', source_freq='M', pred_freq='D').fit(y.to_frame(), y)
+  s.transform(y).name   # None
+  ```
+- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `apply` / `invert` redonnent au résultat le nom de la `Series` d'entrée (`_keep_name`). Tests : `tests/unit/frequency/test_stage_scaler.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`.
