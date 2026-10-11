@@ -1342,6 +1342,12 @@ tests/unit/frequency/high_frequency_imputer/ créé en F10. Aucun changement dan
    plus par entité — l'épingler ici, anomalie si confirmé.
 5. fit sur irregular_index_timeseries et heterogeneous_coverage_panel pour chaque covariate_strategy : pas d'exception, aucune
    cellule observée marquée imputée, avertissements agrégés (un par famille au plus).
+6. Constat de F5, à épingler en anomalie (xfail) puis à corriger : `HighFrequencyImputer` appelle
+   `AggregationConstraint.rescale` une fois par (étape, colonne) — et `CovariateMaterializer` une fois par covariable
+   interpolée —, chaque appel émettant ses propres avertissements « aggregate to zero » / « flipped the predicted
+   profile ». Le §12.5 de la spec exige au contraire un avertissement unique par famille, « jamais un par variable ×
+   étape : accumulation puis message agrégé en fin de phase ». Scénario : deux colonnes à signe inversé sur deux étapes
+   → un seul avertissement « flipped » attendu, nommant les colonnes et le nombre total de périodes.
 
 Critères §4.6 ; rapport §4.7.
 ```

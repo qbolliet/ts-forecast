@@ -90,12 +90,15 @@ def _period_membership(index: pd.Index, period_freq: str) -> pd.Series:
     Returns:
         ``Series`` indexed like ``index`` holding a ``pd.Period`` for a time
         series and an ``(entity_tuple, Period)`` pair for a panel — two
-        entities never share a rescaling block.
+        entities never share a rescaling block. A row dated ``NaT`` belongs
+        to no period and holds None: it never forms a block of its own.
 
     Examples:
         >>> idx = pd.date_range('2021-01-31', periods=2, freq='ME')
         >>> [str(period) for period in _period_membership(idx, 'Y')]
         ['2021', '2021']
+        >>> _period_membership(pd.DatetimeIndex(['2021-01-31', 'NaT']), 'Y').tolist()[1] is None
+        True
     """
     # Normalisation en base de fréquence
     base = normalize_frequency(period_freq, return_format='base')
@@ -103,14 +106,20 @@ def _period_membership(index: pd.Index, period_freq: str) -> pd.Series:
     # Cas des séries temporelles : la période suffit à identifier le bloc
     if not isinstance(index, pd.MultiIndex):
         periods = pd.DatetimeIndex(index).to_period(base)
-        return pd.Series(list(periods), index=index, dtype=object)
+        # Date absente : aucune période d'appartenance, donc aucun bloc
+        keys = [None if pd.isna(period) else period for period in periods]
+        return pd.Series(keys, index=index, dtype=object)
 
     # Cas des données de panel : l'entité fait partie de la clé de bloc
     periods = index.get_level_values(-1).to_period(base)
     # Normalisation en tuple : "droplevel" rend des scalaires pour un panel
     # à un seul niveau d'entité
     entity_tuples = [normalize_entity_key(key) for key in index.droplevel(-1)]
-    return pd.Series(list(zip(entity_tuples, periods)), index=index, dtype=object)
+    keys = [
+        None if pd.isna(period) else (entity, period)
+        for entity, period in zip(entity_tuples, periods)
+    ]
+    return pd.Series(keys, index=index, dtype=object)
 
 
 # Fonction auxiliaire de test d'une clé de bloc utilisable
@@ -122,7 +131,7 @@ def _is_usable_key(period_key: Any) -> bool:
 
     Returns:
         False for the ``None`` / NaN markers of a row outside the
-        disaggregation scope, True otherwise.
+        disaggregation scope (a row dated ``NaT``), True otherwise.
 
     Examples:
         >>> _is_usable_key(pd.Period('2021', 'Y-DEC'))
@@ -132,6 +141,115 @@ def _is_usable_key(period_key: Any) -> bool:
     """
     # Le dtype object porte les absences en None ou en float('nan')
     return period_key is not None and not isinstance(period_key, float)
+
+
+# Fonction auxiliaire de rejet des dates dupliquées
+def _check_unique_dates(index: pd.Index, what: str) -> None:
+    """Reject an index holding the same date (or entity-date pair) twice.
+
+    A duplicated anchor would be summed twice into its period total, and a
+    duplicated sub-period would count twice in the predicted aggregate: the
+    constraint would then impose an inflated total, silently. An error is
+    preferred, as in ``FrequencyAligner``.
+
+    Args:
+        index: Index to check — a ``DatetimeIndex`` or a ``MultiIndex``
+            ``(entity..., date)``.
+        what: Name of the checked object, quoted in the message.
+
+    Raises:
+        ValueError: If ``index`` holds duplicated labels, listing the first
+            five of them.
+
+    Examples:
+        >>> _check_unique_dates(pd.DatetimeIndex(['2021-12-31']), 'observations')
+        >>> _check_unique_dates(
+        ...     pd.DatetimeIndex(['2021-12-31', '2021-12-31']), 'observations'
+        ... )
+        Traceback (most recent call last):
+            ...
+        ValueError: Duplicate dates in observations: [Timestamp('2021-12-31 00:00:00')]
+    """
+    # Étiquettes répétées, chacune citée une fois
+    duplicated = index[index.duplicated()].unique()
+    if len(duplicated):
+        raise ValueError(f"Duplicate dates in {what}: {list(duplicated[:5])}")
+
+
+# Fonction auxiliaire de résolution de la fréquence de grille
+def _resolve_grid_freq(
+    grid_freq: Optional[GridFrequency],
+    index: pd.Index,
+) -> Optional[Union[str, Dict[EntityKey, str]]]:
+    """Normalize the grid frequency and check that it covers every entity.
+
+    The truncation guard only exists through ``grid_freq``: an unreadable
+    frequency, or an entity the per-entity mapping forgets, would switch it
+    off for the whole call or for that entity, and a truncated period would
+    then receive its whole total. Both are caller errors, raised once per
+    call rather than discovered period by period.
+
+    Args:
+        grid_freq: Frequency of the grid, scalar or ``{entity: frequency}``.
+            Entity keys are normalized, so ``'FR'`` and ``('FR',)`` are the
+            same entity. None disables the guard.
+        index: Index of the values — its entities must all be covered by a
+            mapping.
+
+    Returns:
+        None, the normalized base frequency, or a mapping from normalized
+        entity key to normalized base frequency.
+
+    Raises:
+        ValueError: If a frequency is not readable, or if the mapping does not
+            cover an entity of ``index``.
+
+    Examples:
+        >>> _resolve_grid_freq('ME', pd.DatetimeIndex(['2021-01-31']))
+        'M'
+        >>> idx = pd.MultiIndex.from_tuples(
+        ...     [('FR', pd.Timestamp('2021-01-31'))], names=['country', 'date']
+        ... )
+        >>> _resolve_grid_freq({'FR': 'MS'}, idx)
+        {('FR',): 'M'}
+    """
+    # Garde désactivée à la demande de l'appelant
+    if grid_freq is None:
+        return None
+
+    # Normalisation d'une fréquence, avec un message nommant le paramètre
+    def _normalize(freq: Any) -> str:
+        try:
+            return normalize_frequency(freq, return_format='base')
+        except (ValueError, TypeError) as error:
+            raise ValueError(
+                f"grid_freq must be a readable frequency, got {freq!r}: {error}"
+            ) from error
+
+    # Forme scalaire : une seule fréquence pour toute la grille
+    if not isinstance(grid_freq, Mapping):
+        return _normalize(grid_freq)
+
+    # Forme par entité : clés normalisées en tuples
+    resolved = {
+        normalize_entity_key(entity): _normalize(freq)
+        for entity, freq in grid_freq.items()
+    }
+
+    # Entités de la grille : "()" pour une série temporelle
+    if isinstance(index, pd.MultiIndex):
+        entities = {normalize_entity_key(key) for key in index.droplevel(-1).unique()}
+    else:
+        entities = {()} if len(index) else set()
+
+    # Couverture exhaustive exigée : une entité oubliée perdrait sa garde
+    missing = sorted(entities - set(resolved), key=str)
+    if missing:
+        raise ValueError(
+            f"grid_freq does not cover entities {missing}, got keys "
+            f"{sorted(resolved, key=str)}"
+        )
+    return resolved
 
 
 # Fonction de validation du paramètre public
@@ -283,15 +401,20 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
     the contract of the whole class — a non-additive column goes through ``additive_transformer``
     upstream, never through a relaxed constraint here.
 
-    Four guards:
+    Five guards:
 
     - a period only partly predicted (at least one NaN sub-period, typically a
       period straddling the edge of the grid) is left untouched, raw
       predictions kept;
+    - a period the bounds of the frame truncate (sub-periods absent from the
+      grid, not NaN) is left untouched — active only when ``rescale`` is told
+      the grid frequency (``grid_freq``);
     - a period holding no observation at all (delayed series end) is left
       untouched;
     - a period whose predicted aggregate is zero while its observed total is
-      not is left untouched, the ratio being undefined;
+      not is left untouched, the ratio being undefined. Zero is numerical: an
+      aggregate within the rounding bound of the summation
+      (``n · ε · Σ|x|``), such as ``0.1 + 0.2 - 0.3``, counts as zero;
     - a period whose predicted aggregate has the opposite sign of its observed
       total is rescaled — the constraint takes precedence — but every
       sub-period then flips sign, and a single aggregated ``UserWarning`` is
@@ -632,16 +755,17 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         truncate.
 
         Args:
-            period_key: Membership key of the period, as
+            period_key: Usable membership key of the period, as
                 :func:`_period_membership` builds it — a ``Period`` for a time
                 series, an ``(entity, Period)`` pair for a panel.
-            grid_freq: Frequency of the grid the values sit on, scalar or per
-                entity. None disables the count, hence the guard.
+            grid_freq: Frequency of the grid the values sit on, as
+                :func:`_resolve_grid_freq` returns it — scalar, or a mapping
+                covering every entity. None disables the count, hence the
+                guard.
 
         Returns:
-            The expected number of sub-periods, or None when it cannot be
-            computed — no grid frequency, an unusable key, or two frequencies
-            pandas cannot range over.
+            The expected number of sub-periods, or None when no grid frequency
+            is given.
 
         Examples:
             >>> AggregationConstraint._expected_subperiods(
@@ -660,26 +784,19 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             entity, period = period_key
         else:
             entity, period = (), period_key
-        if not isinstance(period, pd.Period):
-            return None
 
-        # Fréquence de grille de cette entité
+        # Fréquence de grille de cette entité, couverture garantie en amont
         if isinstance(grid_freq, Mapping):
-            freq = grid_freq.get(normalize_entity_key(entity))
+            freq = grid_freq[normalize_entity_key(entity)]
         else:
             freq = grid_freq
-        if freq is None:
-            return None
 
         # Décompte calendaire des sous-périodes contenues dans la période
-        try:
-            return len(pd.period_range(
-                period.start_time,
-                period.end_time,
-                freq=normalize_frequency(freq, return_format='base'),
-            ))
-        except (ValueError, TypeError):
-            return None
+        return len(pd.period_range(
+            period.start_time,
+            period.end_time,
+            freq=normalize_frequency(freq, return_format='base'),
+        ))
 
     # Méthode auxiliaire de recalage d'une colonne, sans avertissement
     def _rescale_one(
@@ -710,7 +827,18 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             the rescaled values, the boolean mask of the cells actually moved,
             the periods whose predicted aggregate was zero against a non-zero
             total, and the periods whose profile was flipped.
+
+        Raises:
+            ValueError: If ``values`` or the anchors of ``observations`` hold
+                duplicated dates, or if ``grid_freq`` is unreadable or does
+                not cover every entity of ``values``.
         """
+        # Rejet des doublons : un total ou une sous-période compté deux fois
+        _check_unique_dates(values.index, 'values')
+        _check_unique_dates(observations.dropna().index, 'observations')
+        # Fréquence de grille validée une fois pour tout l'appel
+        grid_freq = _resolve_grid_freq(grid_freq, values.index)
+
         # Totaux visés, période par période
         period_totals = self._observed_totals(observations, period_freq)
 
@@ -755,10 +883,20 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
                 continue
 
             # Agrégation des observations sur la période : toujours la somme
-            aggregate = float(np.sum(block.to_numpy(dtype=float)))
+            block_values = block.to_numpy(dtype=float)
+            aggregate = float(np.sum(block_values))
 
-            # Agrégat nul : le ratio est indéfini, prédictions brutes conservées
-            if aggregate == 0:
+            # Agrégat nul : le ratio est indéfini, prédictions brutes conservées.
+            # Le zéro est NUMÉRIQUE : une somme inférieure à la borne d'erreur
+            # d'arrondi de la sommation (n · ε · Σ|x|) ne se distingue pas de
+            # zéro — 0.1 + 0.2 - 0.3 vaut 5.55e-17, et un ratio de 2e17
+            # rendrait des sous-périodes absurdes dont la somme n'égale plus le
+            # total. La borne est relative : de petites prédictions de même
+            # signe gardent leur recalage
+            rounding_bound = (
+                len(block_values) * np.finfo(float).eps * float(np.abs(block_values).sum())
+            )
+            if abs(aggregate) <= rounding_bound:
                 if period_value != 0:
                     zero_periods.append(period_key)
                 continue
@@ -841,7 +979,7 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         ``column`` argument is optional and only selects the constraint under
         the dict form, so the protocol signature is honoured as is.
 
-        The four guards of the class docstring apply. A single aggregated
+        The five guards of the class docstring apply. A single aggregated
         ``UserWarning`` is emitted per degenerate case, never one per period.
 
         Args:
@@ -854,8 +992,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
                 dict form. None reads the global setting.
             grid_freq: Frequency of the grid ``values`` sit on, scalar or per
                 entity. When given, a period the grid holds only partially is
-                left un-rescaled — the guard on calendar truncation. None
-                disables it.
+                left un-rescaled — the guard on calendar truncation. A mapping
+                must cover every entity of ``values`` (keys normalized, ``'FR'``
+                is ``('FR',)``). None disables the guard.
 
         Returns:
             Tuple ``(rescaled, rescaled_mask)``: the rescaled values, and the
@@ -864,6 +1003,13 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             the ``MODEL_*`` or ``INTERPOLATED`` provenance it carried before
             the rescaling. Under a ``None`` constraint the values come back
             untouched and the mask is all-False.
+
+        Raises:
+            ValueError: If ``aggregation_constraint`` is not admissible (it is
+                validated again here: ``set_params`` bypasses ``__init__``); if
+                ``values`` or the anchors of ``observations`` hold duplicated
+                dates; if ``grid_freq`` is unreadable or does not cover every
+                entity of ``values``.
 
         Examples:
             >>> grid = pd.date_range('2021-01-31', periods=3, freq='ME')
@@ -889,6 +1035,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             >>> rescaled.tolist(), bool(mask.any())
             ([20.0, 30.0, 50.0], False)
         """
+        # Revalidation du réglage : "set_params" contourne "__init__"
+        self._validate_aggregation_constraint(self.aggregation_constraint)
+
         # Contrainte active ou non pour la colonne
         active = self.resolve_constraint(column) is not None
 
@@ -942,6 +1091,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             Boolean ``Series`` aligned on ``index`` for a Series input, boolean
             ``DataFrame`` indexed like ``index`` for a DataFrame input.
 
+        Raises:
+            ValueError: If ``observations`` holds duplicated dates.
+
         Examples:
             >>> grid = pd.date_range('2021-01-31', periods=3, freq='ME')
             >>> observations = pd.Series([np.nan, np.nan, 120.0], index=grid)
@@ -950,6 +1102,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             ... ).tolist()
             [False, False, True]
         """
+        # Rejet des doublons, avec le même message que le recalage
+        _check_unique_dates(observations.index, 'observations')
+
         # Même règle pour une Series et pour une trame : "reindex" ramène les
         # observations sur la grille d'étape, "notna" y désigne les ancres
         return observations.reindex(index).notna()
@@ -975,8 +1130,11 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             The fitted constraint.
 
         Raises:
-            ValueError: If ``observations`` or ``period_frequencies`` was not
-                configured, or does not cover a column of ``X``.
+            ValueError: If ``aggregation_constraint`` is not admissible
+                (validated again: ``set_params`` bypasses ``__init__``), names
+                unknown columns, or if ``observations`` or
+                ``period_frequencies`` was not configured, or does not cover a
+                column of ``X``.
 
         Examples:
             >>> grid = pd.date_range('2021-01-31', periods=3, freq='ME')
@@ -988,6 +1146,14 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             >>> constraint.anchor_mask_['a1'].tolist()
             [False, False, True]
         """
+        # Purge de l'état du transform précédent : un masque d'une autre
+        # grille ne doit pas survivre au nouvel ajustement
+        if hasattr(self, 'rescaled_mask_'):
+            del self.rescaled_mask_
+
+        # Revalidation du réglage : "set_params" contourne "__init__"
+        self._validate_aggregation_constraint(self.aggregation_constraint)
+
         # Extraction des colonnes
         columns = list(X.columns)
         # Contrôle des clés du dictionnaire contre les colonnes réelles
@@ -1028,6 +1194,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
 
         Raises:
             NotFittedError: If the constraint was not fitted.
+            ValueError: If ``aggregation_constraint`` is no longer admissible
+                (changed by ``set_params`` since the fit), or if the columns of
+                ``X`` differ from those seen at :meth:`fit`.
 
         Examples:
             >>> grid = pd.date_range('2021-01-31', periods=3, freq='ME')
@@ -1043,6 +1212,19 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         """
         # Vérification que le transformer est entraîné
         check_is_fitted(self)
+        # Revalidation du réglage : "set_params" contourne "__init__"
+        self._validate_aggregation_constraint(self.aggregation_constraint)
+
+        # Colonnes identiques à celles du fit : le masque des ancres et les
+        # métadonnées ont été contrôlés pour celles-là seulement
+        fitted = list(self.feature_names_in_)
+        missing = [column for column in fitted if column not in X.columns]
+        unexpected = [column for column in X.columns if column not in fitted]
+        if missing or unexpected:
+            raise ValueError(
+                f"X has different columns than during fit: missing {missing}, "
+                f"unexpected {unexpected}"
+            )
 
         # Initialisation du résultat et des recensements
         rescaled = X.copy()

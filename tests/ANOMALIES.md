@@ -3362,3 +3362,154 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `_fit_panel` émet un `UserWarning` unique listant `entities_without_window_` ; un panel où toutes les
   entités ont une fenêtre reste silencieux (`::test_no_warning_when_every_entity_has_a_window`).
+
+### ANO-FREQ-021 — Agrégat prédit quasi nul : le recalage explose et la somme n'égale plus le total
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint._rescale_one` (via `rescale` / `transform`)
+- **Sévérité** : mineure
+- **Observé** : la garde « agrégat prédit nul » (§11.1) teste l'égalité **exacte** `aggregate == 0`. Des prédictions
+  qui s'annulent mathématiquement mais pas en flottant passent la garde : `[0.1, 0.2, -0.3]` (agrégat `5.55e-17`) face à
+  un total trimestriel de 12 donnent un ratio de `2.2e17`, des sous-périodes de l'ordre de `6e16`, et une somme recalée de
+  **16** au lieu de 12 — l'invariant I4 (additivité, `1e-9`) est rompu sans avertissement. Mesures complémentaires
+  (12 mois de signes alternés, total 78) : agrégat `1e-6` → écart `6e-8` ; `1e-9` → écart `6e-5`. Sur 2 000 tirages
+  aléatoires sans compensation, l'écart maximal reste `2.3e-10`.
+- **Attendu** : soit la période reste brute avec l'avertissement « aggregate to zero » (agrégat **numériquement** nul,
+  p. ex. `|Σ| ≤ k·ε·Σ|x|`), soit sa somme est exacte à `1e-9`. Le seuil exact est à arbitrer par l'auteur ; une colonne
+  oscillant autour de zéro (une balance commerciale mensuelle) rend le cas plausible.
+- **Reproduction** :
+  ```python
+  grid = pd.date_range('2021-01-31', periods=3, freq='ME')
+  values = pd.Series([0.1, 0.2, -0.3], index=grid)
+  observations = pd.Series([np.nan, np.nan, 12.0], index=grid)
+  rescaled, mask = AggregationConstraint('sum').rescale(values, observations, 'Q', grid_freq='M')
+  rescaled.sum()   # 16.0, mask tout à True
+  ```
+- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestRescaleGuards::test_numerically_zero_aggregate_is_zero`
+- **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur
+- **Correction** : `_rescale_one` traite comme nul tout agrégat dont la valeur absolue est inférieure à la borne d'erreur
+  d'arrondi de la sommation, `n · ε · Σ|x|` (`np.finfo(float).eps`) : la période reste brute, avec l'avertissement agrégé
+  « aggregate to zero ». La borne est relative : douze prédictions de `1e-20` restent recalées. Tests :
+  `TestRescaleGuards::test_numerically_zero_aggregate_is_zero`, `::test_tiny_same_sign_predictions_are_still_rescaled`.
+  Limite résiduelle (précision double, non corrigeable par un seuil) : un agrégat petit mais non nul (`1e-6` face à un
+  total de 78) donne des sous-périodes de l'ordre de `1e8`, dont la somme ne peut être exacte qu'à `~n · ε · Σ|x_recalé|`
+  près (`6e-8` mesuré). À amender au §11.1 de la spec (prompt R9) : « agrégat prédit **numériquement** nul ».
+
+### ANO-FREQ-022 — Dates d'observation dupliquées : le total visé est compté deux fois
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint._observed_totals` (via `rescale` / `transform`)
+- **Sévérité** : mineure
+- **Observé** : une ancre dupliquée (deux lignes `2021-12-31` à 120) est sommée : la cible de 2021 devient **240** et
+  l'année est recalée dessus, sans erreur ni avertissement (la garde de troncature est satisfaite : 13 lignes ≥ 12
+  attendues). `anchor_cells_mask` lève au contraire `ValueError: cannot reindex on an axis with duplicate labels`.
+- **Attendu** : `ValueError` nommant les dates dupliquées, comme `FrequencyAligner` après ANO-FREQ-010 et
+  `FrequencyConverter.convert_frequency` : un total gonflé en silence est pire qu'une erreur. `HighFrequencyImputer`
+  n'est pas exposé (validation stricte en amont : `validate_temporal_data` lève sur un index dupliqué) ; seul l'usage
+  autonome du composant l'est.
+- **Reproduction** :
+  ```python
+  grid = pd.date_range('2021-01-31', periods=12, freq='ME')
+  dup = grid.append(grid[-1:])
+  values = pd.Series(np.arange(1.0, 14.0), index=dup)
+  observations = pd.Series(np.nan, index=dup); observations.iloc[-2:] = 120.0
+  AggregationConstraint('sum').rescale(values, observations, 'Y', grid_freq='M')[0].sum()   # 240.0
+  ```
+- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestRescaleGuards::test_duplicated_observation_dates_are_rejected`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `_check_unique_dates` lève `ValueError('Duplicate dates in observations|values: [...]')` dans
+  `_rescale_one` (ancres non nulles des observations, et grille des valeurs : une sous-période dupliquée compterait deux
+  fois dans l'agrégat) et dans `anchor_cells_mask` (même message que le recalage, au lieu de l'erreur de `reindex`).
+  Tests : `TestRescaleGuards::test_duplicated_observation_dates_are_rejected`, `::test_duplicated_grid_dates_are_rejected`,
+  `::test_duplicated_panel_pairs_are_rejected`, `TestAnchorCellsMask::test_duplicated_observation_dates_raise`.
+
+### ANO-FREQ-023 — `set_params` contourne la validation d'`aggregation_constraint` (D20)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint.fit`
+- **Sévérité** : mineure
+- **Observé** : la validation n'a lieu qu'à `__init__`. `set_params(aggregation_constraint='mean')` (chemin de
+  `GridSearchCV`, des pipelines) l'esquive ; `fit` ne revalide pas, et `transform` traite `'mean'` comme une contrainte
+  active, c'est-à-dire comme `'sum'` (`resolve_constraint(...) is not None`). Un agrégateur retiré de l'API par D20 est
+  donc accepté en silence et produit un résultat d'une autre nature que celle demandée.
+  `HighFrequencyImputer` n'est pas exposé : il reconstruit le composant à chaque `fit`, ce qui revalide.
+- **Attendu** : `fit` revalide le réglage (`validate_aggregation_constraint`) et lève le même `ValueError` qu'`__init__`
+  (B3 : la normalisation a lieu au `fit`).
+- **Reproduction** :
+  ```python
+  grid = pd.date_range('2021-01-31', periods=12, freq='ME')
+  X = pd.DataFrame({'a': np.arange(1.0, 13.0)}, index=grid)
+  obs = pd.DataFrame({'a': [np.nan] * 11 + [78.0]}, index=grid)
+  c = AggregationConstraint('sum', 'Y', obs).set_params(aggregation_constraint='mean')
+  c.fit(X).transform(X)['a'].sum()   # 78.0, aucune erreur
+  ```
+- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestValidationThroughSetParams`
+- **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur (composants utilisables seuls, `set_params` compris)
+- **Correction** : `fit`, `transform` et `rescale` (utilisable sans `fit`) revalident `aggregation_constraint` par
+  `validate_aggregation_constraint` ; la validation d'`__init__` est conservée (§13.1). Tests : `TestValidationThroughSetParams`.
+
+### ANO-FREQ-024 — Garde de troncature désactivée en silence
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint._expected_subperiods`
+- **Sévérité** : à arbitrer
+- **Observé** : la garde de troncature calendaire (§11.1) se désactive sans signal dans deux cas : (1) un `grid_freq`
+  illisible (`'zz'`) — le `ValueError` de `normalize_frequency` est absorbé par le `except (ValueError, TypeError)`
+  prévu pour les couples de fréquences sur lesquels pandas ne sait pas itérer ; (2) un `grid_freq` en dict qui ne nomme
+  pas une entité (y compris une clé `('FR',)` face à un index à trois niveaux, dont la clé d'entité est
+  `('Zone euro', 'FR')`). Dans les deux cas une période tronquée reçoit tout son total — la sur-attribution que la garde
+  devait empêcher.
+- **Attendu** : indécidable — la docstring annonce bien `None` « when it cannot be computed », mais la spec ne prévoit
+  la désactivation que pour un appelant qui ne passe **pas** `grid_freq`. Pistes : `ValueError` sur une fréquence
+  illisible, et sur une entité absente du dict. Comportement actuel épinglé.
+- **Reproduction** :
+  ```python
+  grid = pd.date_range('2021-10-31', periods=3, freq='ME')
+  values = pd.Series(1.0, index=grid)
+  observations = pd.Series([np.nan, np.nan, 120.0], index=grid)
+  AggregationConstraint('sum').rescale(values, observations, 'Y', grid_freq='zz')[1].all()   # True
+  ```
+- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestGridFrequencyValidation`
+- **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur
+- **Correction** : `_resolve_grid_freq`, appelée une fois par appel en tête de `_rescale_one`, normalise `grid_freq` et lève
+  `ValueError` sur une fréquence illisible (« grid_freq must be a readable frequency ») et sur un dictionnaire qui ne couvre
+  pas toutes les entités des valeurs (« grid_freq does not cover entities [...] » ; une série temporelle est l'entité `()`).
+  Les clés du dictionnaire sont normalisées (`'FR'` ≡ `('FR',)`) ; des clés d'entités absentes sont tolérées.
+  `_expected_subperiods` ne rattrape plus aucune exception. `None` désactive toujours la garde. Appelants internes non
+  concernés : `HighFrequencyImputer` et `CovariateMaterializer` passent une fréquence scalaire d'étape. Tests :
+  `TestGridFrequencyValidation`.
+
+### ANO-FREQ-025 — Une ligne datée `NaT` forme son propre bloc de recalage
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/aggregation_constraint.py::_period_membership`
+- **Sévérité** : cosmétique
+- **Observé** : `to_period` rend `NaT` pour une date absente, et `_is_usable_key(NaT)` vaut `True` : toutes les lignes `NaT`
+  forment une « période » commune, et une observation datée `NaT` y devient un total imposé. La garde `_is_usable_key` était
+  du code mort (aucune clé `None` / NaN n'était jamais produite).
+- **Attendu** : une ligne `NaT` n'appartient à aucune période, ni recalée ni source de total.
+- **Reproduction** : grille de 12 mois + une ligne `NaT` portant 7 et une observation à 5 → la ligne `NaT` était recalée à 5.
+- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestRescaleGuards::test_nat_rows_never_form_a_period`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `_period_membership` rend `None` pour une date `NaT` (série et panel) ; `_is_usable_key` écarte ces lignes
+  dans `_observed_totals` et `_rescale_one`.
+
+### ANO-FREQ-026 — `transform` accepte d'autres colonnes que celles du `fit`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint.transform`
+- **Sévérité** : mineure
+- **Observé** : aucune comparaison avec `feature_names_in_` ; une colonne inconnue au `fit` est recalée sans que ses clés de
+  dictionnaire ni ses métadonnées aient été contrôlées, une colonne manquante passe inaperçue.
+- **Attendu** : convention sklearn, `ValueError` nommant les colonnes manquantes et inattendues.
+- **Reproduction** : `AggregationConstraint('sum', 'Y', obs).fit(X).transform(X.assign(q1=1.0))` ne levait rien.
+- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestSklearnProtocol::test_transform_rejects_other_columns_than_fit`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `ValueError('X has different columns than during fit: missing [...], unexpected [...]')` ; l'ordre des
+  colonnes reste libre (`::test_transform_accepts_reordered_columns`).
+
+### ANO-FREQ-027 — `fit` ne purge pas `rescaled_mask_`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint.fit`
+- **Sévérité** : cosmétique
+- **Observé** : après `fit_transform(X)` puis `fit(X_autre)`, `rescaled_mask_` porte encore le masque du transform
+  précédent, sur une autre grille.
+- **Attendu** : principe B19 (§12.5) — l'état du `transform` est purgé en tête de `fit`.
+- **Reproduction** : `c.fit_transform(X); c.fit(X2); c.rescaled_mask_.index` → index de `X`.
+- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestSklearnProtocol::test_refit_purges_the_previous_rescaled_mask`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `fit` supprime `rescaled_mask_` s'il existe.
