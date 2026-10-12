@@ -4005,3 +4005,25 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `transform` et `TrainingSetBuilder.build` rejettent une entrée dont un niveau d'index (ou `panel_cols`, `time_col`)
   le porte, quelle que soit la configuration ; `inverse_transform` reconnaît une sortie empilée à sa **profondeur**
   (notée par `transform` au moment de l'empilement) et lit le niveau **par position** (l'avant-dernier).
+
+### ANO-FREQ-048 — Estimateur dont tous les plis échouent : `ValueError` au lieu du repli `-inf`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/variable_orderer.py::VariableOrderer._order_by_cv`
+- **Sévérité** : majeure
+- **Observé** : `cross_val_score(..., error_score=np.nan)` lève `ValueError: All the N fits failed` dès que
+  **tous** les plis échouent (sklearn ne renvoie des NaN que si au moins un pli réussit). La branche
+  `np.all(np.isnan(scores))` (sentinelle `-inf` + journal) est donc inatteignable avec un vrai estimateur ;
+  l'exception sort de `order()` et, sous `fit_predict_order='cv'`, interrompt `HighFrequencyImputer.fit`.
+- **Attendu** : §8.2 — « sentinelle `-np.inf` pour une variable dont **tous** les plis échouent » et journal
+  de ces variables ; la docstring de `order` (`log`) le promet aussi.
+- **Reproduction** :
+  ```python
+  orderer = VariableOrderer(fit_predict_order='cv', cv=2, cv_scoring='neg_mean_absolute_error',
+                            min_cv_train_size=2).fit()
+  orderer.order(specs, X=frame, estimator=FailingEstimator(), log=print)   # ValueError
+  ```
+- **Test** : `tests/unit/frequency/test_variable_orderer.py::TestFailingFolds::test_failing_estimator_scores_minus_inf_and_logs`
+- **Statut** : corrigé (2026-10-12)
+- **Correction** : `_order_by_cv` rattrape la `ValueError` de `cross_val_score` dont le message contient
+  `fits failed` et la traite comme des scores NaN (repli `-inf` + journal) ; toute autre `ValueError` est relancée
+  (`test_unrelated_value_error_is_propagated`).

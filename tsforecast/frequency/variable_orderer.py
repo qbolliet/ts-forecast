@@ -511,12 +511,23 @@ class VariableOrderer(BaseEstimator):
 
             # "cross_val_score" absorbe l'échec d'un pli isolé via
             # "error_score=np.nan"
-            scores = cross_val_score(
-                est, X_sub, y_sub,
-                cv=self.cv_,
-                scoring=scorer,
-                error_score=np.nan,
-            )
+            try:
+                scores = cross_val_score(
+                    est, X_sub, y_sub,
+                    cv=self.cv_,
+                    scoring=scorer,
+                    error_score=np.nan,
+                )
+            except ValueError as error:
+                # sklearn ne renvoie des NaN que si au moins un pli réussit :
+                # quand tous échouent, il lève "All the N fits failed". Ce cas
+                # (et lui seul) est ramené à des scores NaN pour obtenir le
+                # repli -inf journalisé ; toute autre ValueError (splitter
+                # incompatible avec les données, ...) est une erreur de
+                # configuration et reste propagée
+                if 'fits failed' not in str(error):
+                    raise
+                scores = np.array([np.nan])
             # Score -inf si tous les plis ont échoué, journalisé explicitement :
             # sans ce journal l'échec systématique resterait silencieux
             if np.all(np.isnan(scores)):
