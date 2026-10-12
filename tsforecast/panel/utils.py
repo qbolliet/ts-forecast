@@ -2,7 +2,7 @@
 # Modules de base
 import numpy as np
 import pandas as pd
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 # Fonction de détection de la structure de panel
 def is_panel_data(data: Union[pd.DataFrame, pd.Series]) -> bool:
@@ -121,6 +121,31 @@ def normalize_entity_key(key) -> tuple:
     if isinstance(key, tuple):
         return key
     return (key,)
+
+# Fonction de normalisation des clés d'une liaison par entité
+def normalize_entity_mapping(mapping: Mapping[Any, Any]) -> Dict[tuple, Any]:
+    """Re-key an entity -> value mapping on normalized entity keys.
+
+    A scalar key designates a single-level entity, exactly like an entity
+    argument passed to :func:`normalize_entity_key`: ``{'FR': 'Q'}`` and
+    ``{('FR',): 'Q'}`` are the same binding. The single crossing point for
+    the per-entity bindings read by the components of ``tsforecast.frequency``.
+
+    Args:
+        mapping: Mapping entity key -> value, keys scalar or tuple.
+
+    Returns:
+        A new dict holding the same values, keyed by tuples, in the order of
+        ``mapping``. When a scalar key and its tuple form are both present,
+        the one listed last wins.
+
+    Examples:
+        >>> normalize_entity_mapping({'FR': 'Q', ('DE',): 'M'})
+        {('FR',): 'Q', ('DE',): 'M'}
+        >>> normalize_entity_mapping({('Zone euro', 'IT'): 'Y'})
+        {('Zone euro', 'IT'): 'Y'}
+    """
+    return {normalize_entity_key(key): value for key, value in mapping.items()}
 
 # Fonction de décomposition d'une clé de variable en (entité, colonne)
 def split_variable_key(key: Union[str, Tuple]) -> Tuple[tuple, str]:

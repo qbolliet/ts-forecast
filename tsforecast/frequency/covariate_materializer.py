@@ -47,7 +47,7 @@ from .aggregation_constraint import (
     validate_aggregation_constraint,
 )
 # Utilitaires de panel : découpage et normalisation des clés d'entité
-from ..panel.utils import iter_entity_blocks, normalize_entity_key
+from ..panel.utils import iter_entity_blocks, normalize_entity_key, normalize_entity_mapping
 
 
 # Clé de repli des formes dictionnaire par feature.
@@ -55,8 +55,10 @@ from ..panel.utils import iter_entity_blocks, normalize_entity_key
 # pour ne pas coupler les deux modules.
 DEFAULT_MATERIALIZATION_KEY = '__default__'
 
-# Méthode d'interpolation par défaut
-DEFAULT_INTERPOLATION_METHOD = 'time'
+# Méthode d'interpolation par défaut, celle de "interpolation_method" :
+# elle sert aussi de repli à une forme dictionnaire sans '__default__',
+# l'imputeur transmettant son dictionnaire tel quel
+DEFAULT_INTERPOLATION_METHOD = 'linear'
 
 # Stratégies et modalités admises
 _COVARIATE_STRATEGIES: FrozenSet[str] = frozenset(
@@ -68,6 +70,9 @@ _COVARIATE_ELIGIBILITIES: FrozenSet[str] = frozenset(('any_entity', 'all_entitie
 # Voies réservées aux modèles
 _MODEL_WAYS: FrozenSet[str] = frozenset(('stage_model', 'carried_model'))
 
+# Voies servant une colonne plus basse que la grille, au rang 4
+_COARSER_WAYS: FrozenSet[str] = frozenset(('interpolate', 'raw_anchors'))
+
 # Degré de dégradation d'une voie, servant à réduire des verdicts par entité en
 # une voie unique par colonne.
 _WAY_RANK: Dict[str, int] = {
@@ -77,6 +82,19 @@ _WAY_RANK: Dict[str, int] = {
     'raw_anchors': 2,
     'stage_model': 3,
     'carried_model': 3,
+}
+
+# Départage des voies de même rang : la réduction d'une colonne ne dépend
+# jamais de l'ordre des entités de la grille. Les ancres brutes portent moins
+# de cellules que l'interpolation, le report d'une étape antérieure est moins
+# direct que la lecture de l'étape courante
+_WAY_TIE_BREAK: Dict[str, int] = {
+    'identity': 0,
+    'aggregate': 0,
+    'interpolate': 0,
+    'raw_anchors': 1,
+    'stage_model': 0,
+    'carried_model': 1,
 }
 
 # Origine des cellules produites par chaque voie
@@ -209,6 +227,27 @@ def _same_frequency(left: Optional[str], right: Optional[str]) -> bool:
         return False
 
 
+# Fonction auxiliaire de comparaison de fréquences à la position près
+def _frequency_key(freq: Any) -> Any:
+    """Return a comparison key equal for aliases of one base frequency.
+
+    Args:
+        freq: Frequency label ('M', 'ME', 'monthly'...).
+
+    Returns:
+        The normalized base frequency, or the label itself when it cannot be
+        normalized.
+
+    Examples:
+        >>> _frequency_key('ME') == _frequency_key('monthly')
+        True
+    """
+    try:
+        return normalize_frequency(freq)
+    except (ValueError, TypeError):
+        return freq
+
+
 # Composant de matérialisation des covariables
 class CovariateMaterializer:
     """Single producer of the feature frames of ``HighFrequencyImputer``.
@@ -223,10 +262,14 @@ class CovariateMaterializer:
 
     Every write goes through ``new.combine_first(existing)``: cells
     the new production does not cover are never destroyed, unlike a plain
-    assignment. Presence in :attr:`imputed_store` is therefore not a
-    model-imputation signal — observed and interpolated cells sit there too;
-    ranks 2 and 3 of the precedence must discriminate on
-    :attr:`origin_store` ``== 'model'``.
+    assignment. Presence in :attr:`imputed_store` is not a model-imputation
+    signal — observed and interpolated cells sit there too —, and ranks 2 and
+    3 of the precedence do not need one: they fire on the mere presence of
+    cells produced at a stage, whatever their origin, which
+    :attr:`origin_store` then reports as is (a stage served by the fallback is
+    read back ``'interpolated'``). What the stores hold is what was
+    produced — a covariate merely prepared as a feature is materialized under
+    ``record=False`` and written nowhere.
 
     The fallback materializes : a value produced by
     fallback feeds the three stores exactly like a model prediction. This is a
@@ -278,7 +321,8 @@ class CovariateMaterializer:
             as soon as one entity observes it, the empty entities' rows
             staying NaN; ``'all_entities'`` drops the column entirely.
         interpolation_method: Interpolation method, scalar or per-feature dict
-            with an optional ``'__default__'`` key. Admissible
+            with an optional ``'__default__'`` key, ``'linear'`` by default and
+            for the columns a dict leaves uncovered. Admissible
             values are those of
             :meth:`FrequencyConverter.interpolate_to_higher_frequency`.
         interpolation_anchor: Position, within its own period, at which an
@@ -295,7 +339,7 @@ class CovariateMaterializer:
             ``interpolation_method``. Validated by
             :func:`validate_aggregation_constraint`, shared with
             :class:`AggregationConstraint` so the two contracts cannot drift.
-            Governs the rescaling of the INTERPOLATED covariates only
+            Governs the rescaling of the interpolated covariates only
             — the rank-1 exact aggregation of a finer covariate
             always sums directly, and never consults this parameter.
 
@@ -313,7 +357,7 @@ class CovariateMaterializer:
     Examples:
         >>> materializer = CovariateMaterializer(covariate_strategy='interpolate')
         >>> materializer.resolve_method('a1')
-        'time'
+        'linear'
         >>> materializer.imputed_store
         {}
     """
@@ -794,9 +838,15 @@ class CovariateMaterializer:
     ) -> Optional[str]:
         """Read the detected frequency of one column, for one entity.
 
+        An entity absent from a per-entity mapping holding several entries
+        has no frequency: it never observes the column (the imputer leaves the
+        never-observed pairs out of its detected frequencies).
+
         Args:
             detected_frequencies: Mapping column -> frequency, or column ->
                 (entity -> frequency) for a panel whose entities disagree.
+                Entity keys may be tuples or, for a single-level panel,
+                scalars.
             column: Column name.
             entity: Entity key, ``()`` for a time series.
 
@@ -811,42 +861,107 @@ class CovariateMaterializer:
         # Forme scalaire : la même fréquence pour toutes les entités
         if not isinstance(entry, Mapping):
             return entry
-        # Forme par entité : clé brute puis clé normalisée
+        # Forme par entité, clés normalisées : 'FR' et ('FR',) désignent la
+        # même entité
+        by_entity = normalize_entity_mapping(entry)
         key = normalize_entity_key(entity)
-        if entity in entry:
-            return entry[entity]
-        if key in entry:
-            return entry[key]
+        if key in by_entity:
+            return by_entity[key]
         # Panel à une seule fréquence déclarée : elle vaut pour tout le monde
-        if len(entry) == 1:
-            return next(iter(entry.values()))
+        if len(by_entity) == 1:
+            return next(iter(by_entity.values()))
         return None
 
     # Méthode auxiliaire de lecture de la fréquence d'étape
     @staticmethod
     def _stage_frequency(stage_freq: StageFrequency, entity: EntityKey = ()) -> Optional[str]:
-        """Read the stage frequency for one entity.
+        """Read the stage frequency for one entity, never guessed.
+
+        Same resolution as ``StageScaler._stage_freq_for``, the two components
+        reading the same stage binding of the imputer: an own entry, then a
+        binding whose entries all agree — a single entry included —, which is
+        the frequency of the stage and stands for the whole panel. Only a
+        disagreeing binding leaves an entity it does not name without stage
+        frequency; the methods walking a grid reject that case
+        (:meth:`_check_stage_coverage`).
 
         Args:
-            stage_freq: Stage frequency, scalar or entity -> frequency.
+            stage_freq: Stage frequency, scalar or entity -> frequency, entity
+                keys tuples or, for a single-level panel, scalars.
             entity: Entity key, ``()`` for a time series.
 
         Returns:
-            The stage frequency of that entity, or None when the entity is
-            absent from the mapping.
+            The stage frequency of that entity, or None when a disagreeing
+            mapping does not cover it.
+
+        Examples:
+            >>> CovariateMaterializer._stage_frequency({('FR',): 'M', ('IT',): 'ME'}, ('DE',))
+            'M'
+            >>> CovariateMaterializer._stage_frequency({('FR',): 'M', ('DE',): 'Q'}, ('IT',)) is None
+            True
         """
         # Forme scalaire
         if not isinstance(stage_freq, Mapping):
             return stage_freq
-        # Forme par entité : clé brute puis clé normalisée
+        # Forme par entité, clés normalisées
+        by_entity = normalize_entity_mapping(stage_freq)
         key = normalize_entity_key(entity)
-        if entity in stage_freq:
-            return stage_freq[entity]
-        if key in stage_freq:
-            return stage_freq[key]
-        if len(stage_freq) == 1:
-            return next(iter(stage_freq.values()))
+        if key in by_entity:
+            return by_entity[key]
+        # Liaison unanime, une seule entrée comprise : la fréquence de l'étape
+        # vaut pour tout le panel, aux alias de position près ('M' = 'ME')
+        if len({_frequency_key(value) for value in by_entity.values()}) == 1:
+            return next(iter(by_entity.values()))
+        # Liaison discordante qui ne nomme pas l'entité : rien ne la départage
         return None
+
+    # Méthode auxiliaire de contrôle de la couverture de la grille par l'étape
+    def _check_stage_coverage(
+        self,
+        stage_freq: StageFrequency,
+        entities: Iterable[EntityKey],
+    ) -> None:
+        """Reject a stage binding leaving an entity of the grid without frequency.
+
+        Args:
+            stage_freq: Stage frequency, scalar or per entity.
+            entities: Normalized entity keys of the grid.
+
+        Raises:
+            ValueError: If a disagreeing per-entity binding leaves entities of
+                the grid unnamed, listing them: the scale and the
+                way of an entity are never guessed.
+        """
+        # Forme scalaire : toute entité est couverte
+        if not isinstance(stage_freq, Mapping):
+            return
+        uncovered = [
+            entity for entity in entities
+            if self._stage_frequency(stage_freq, entity) is None
+        ]
+        if uncovered:
+            raise ValueError(
+                f"stage_freq does not cover the grid entities {uncovered}: a "
+                f"per-entity stage binding whose frequencies disagree must name "
+                f"every entity of the grid, got keys {list(stage_freq)}"
+            )
+
+    # Méthode auxiliaire de recensement des entités d'une grille
+    @staticmethod
+    def _grid_entities(grid_index: pd.Index) -> List[EntityKey]:
+        """List the normalized entity keys of a grid, in grid order.
+
+        Args:
+            grid_index: Grid, ``DatetimeIndex`` or panel ``MultiIndex``.
+
+        Returns:
+            Entity keys; ``[()]`` for a time series, empty for an empty panel
+            grid.
+        """
+        return [
+            normalize_entity_key(entity)
+            for entity, _mask, _block in iter_entity_blocks(pd.DataFrame(index=grid_index))
+        ]
 
     # Méthode de classification d'une covariable face à une grille
     def classify(
@@ -963,12 +1078,14 @@ class CovariateMaterializer:
 
         The way is a property of the column, but
         a panel may carry the same column at different frequencies depending
-        on the entity, and may have imputed it for some entities only. An
-        entity that already observes the column at the stage frequency cannot
-        be interpolated onto that grid; it falls back on its own rank-1 way.
-        An entity whose mirror holds nothing at ``f`` cannot be served by rank
-        2; it falls back on rank 3, then on ``covariate_fallback``. The
-        invariant is therefore measured per entity.
+        on the entity, and may have imputed it for some entities only. Rank 1
+        always comes first: an entity observing the column at least as finely
+        as the grid reads it by identity or exact aggregation, whatever the
+        way of the column — ``'raw_anchors'`` included. A model
+        way is resolved by the entity's own precedence: rank 2 when its
+        mirror holds cells at ``f``, else rank 3, else ``covariate_fallback``
+        — whichever of ``'stage_model'`` / ``'carried_model'`` the column
+        retained. The invariant is therefore measured per entity.
 
         Args:
             way: Way retained for the column.
@@ -995,39 +1112,38 @@ class CovariateMaterializer:
             has_stage = block is not None and not self._stage_cells(block, f_stage).empty
             carry = None if block is None else self._carry_frequency(block, f_stage)
 
-            # Rang 2, puis rang 3, puis rang 4 ramené aux fréquences de l'entité
-            if way == 'stage_model' and has_stage:
+            # Précédence propre à l'entité, quelle que soit la voie de modèle
+            # retenue pour la colonne : rang 2, puis rang 3, puis rang 4
+            # ramené aux fréquences de l'entité. Les deux voies de modèle
+            # partagent un rang ; laisser la voie de colonne choisir entre
+            # elles ferait dépendre la valeur servie de l'ordre des entités
+            if has_stage:
                 return 'stage_model'
             if carry is not None:
                 return 'carried_model'
-            if has_stage:
-                return 'stage_model'
             return self._applicable_way(self._fallback_way, f_col, f_stage)
 
-        # Les ancres brutes s'appliquent à toute grille : la colonne y est lue
-        # telle quelle, sans conversion à valider
-        if way == 'raw_anchors':
-            return way
-
-        # Fréquences inconnues : aucune conversion n'est définissable
+        # Fréquences inconnues : aucune conversion n'est définissable, la
+        # colonne est lue telle quelle
         if f_col is None or f_stage is None:
             return 'raw_anchors'
 
         # Rang 1, seul applicable dès que la colonne est au moins aussi fine
-        # que la grille — que la voie imposée soit 'identity', 'aggregate' ou
-        # 'interpolate'. Une voie de rang 1 imposée sur une grille plus
-        # grossière doit devenir une agrégation : lue telle quelle, elle
-        # rendrait la valeur ponctuelle de la colonne à la date de grille, une
-        # quantité de sous-période là où la ligne en couvre une entière
+        # que la grille — que la voie imposée soit 'identity', 'aggregate',
+        # 'interpolate' ou 'raw_anchors'. Lue telle quelle sur une grille plus
+        # grossière, la colonne rendrait sa valeur ponctuelle à la date de
+        # grille, une quantité de sous-période là où la ligne en couvre une
+        # entière ; elle devient donc une agrégation exacte
         if _same_frequency(f_col, f_stage):
             return 'identity'
         if is_higher_frequency(f_col, f_stage):
             return 'aggregate'
 
-        # Colonne plus basse que la grille : seule l'interpolation la couvre,
-        # une voie de rang 1 imposée retombant sur l'approche secondaire
-        if way == 'interpolate':
-            return 'interpolate'
+        # Colonne plus basse que la grille : la voie de rang 4 imposée
+        # s'applique telle quelle, une voie de rang 1 imposée retombant sur
+        # l'approche secondaire
+        if way in _COARSER_WAYS:
+            return way
         return self._rank4_way
 
     # -------------------------------------------------------------------------
@@ -1154,10 +1270,15 @@ class CovariateMaterializer:
 
         Raises:
             KeyError: If ``column`` is absent from ``source_data``.
+            ValueError: If ``source_data`` holds duplicated dates, or if a
+                disagreeing per-entity ``stage_freq`` leaves an entity of the
+                grid without frequency.
         """
         # Vérification que la colonne à interpoler est présente dans le jeu de données
         if column not in source_data.columns:
             raise KeyError(f"Column {column!r} missing from source_data")
+        # Contrôle des dates de la source
+        self._check_source_data(source_data, [column])
 
         # Création du triplet d'interpolation à enregistrer
         values, origins, freqs = self._produce_column(
@@ -1188,6 +1309,39 @@ class CovariateMaterializer:
             for entity, _mask, block in iter_entity_blocks(source_data)
         }
 
+    # Méthode auxiliaire de contrôle des données sources
+    @staticmethod
+    def _check_source_data(source_data: pd.DataFrame, columns: Iterable[str]) -> None:
+        """Reject a source the materialization cannot read faithfully.
+
+        Shared by the three producing methods, so that every way fails
+        alike: an exact aggregation would otherwise sum a duplicated date
+        twice, silently, where identity and interpolation fail on it.
+
+        Args:
+            source_data: Input data, time series or panel.
+            columns: Columns about to be produced.
+
+        Raises:
+            KeyError: If a column is absent from ``source_data``, listing the
+                missing columns.
+            ValueError: If the index of ``source_data`` holds duplicated
+                entries — dates, or ``(entity..., date)`` pairs for a panel —,
+                listing them.
+        """
+        # Colonnes demandées absentes de la source : une coquille ne devient
+        # jamais une feature vide
+        missing = [column for column in columns if column not in source_data.columns]
+        if missing:
+            raise KeyError(f"Columns missing from source_data: {missing}")
+
+        # Dates dupliquées : un total compté deux fois est pire qu'une erreur
+        duplicated = source_data.index[source_data.index.duplicated()]
+        if len(duplicated):
+            raise ValueError(
+                f"Duplicate dates in source_data: {list(dict.fromkeys(duplicated.tolist()))}"
+            )
+
     # Méthode auxiliaire de production d'une colonne sur toute la grille
     def _produce_column(
         self,
@@ -1197,6 +1351,7 @@ class CovariateMaterializer:
         stage_freq: StageFrequency,
         detected_frequencies: DetectedFrequencies,
         source_data: pd.DataFrame,
+        cap_interpolation: bool = False,
     ) -> Tuple[pd.Series, pd.Series, pd.Series]:
         """Produce one column on the whole grid, entity block by entity block.
 
@@ -1207,6 +1362,10 @@ class CovariateMaterializer:
             stage_freq: Frequency of the grid, scalar or per entity.
             detected_frequencies: Detected frequency of each column.
             source_data: Input frame, never modified.
+            cap_interpolation: Whether an entity whose applicable way is
+                ``'interpolate'`` is served its raw anchors instead — the
+                per-entity cap of :meth:`stage_frame`, which fabricates no
+                interpolated value.
 
         Returns:
             Tuple ``(values, origins, production_freq)``, three Series indexed
@@ -1229,10 +1388,15 @@ class CovariateMaterializer:
         # retenue peut en avoir besoin
         mirrors = self._mirror_blocks(column) if way in _MODEL_WAYS else {}
 
-        # Parcours des blocs d'entité de la grille : c'est elle qui décide des
-        # lignes à produire, la source ne fournissant que les observations
-        grid_frame = pd.DataFrame(index=grid_index)
-        for entity, mask, grid_block in iter_entity_blocks(grid_frame):
+        # Blocs d'entité de la grille : c'est elle qui décide des lignes à
+        # produire, la source ne fournissant que les observations. Une
+        # liaison d'étape qui laisse une entité de la grille sans fréquence est
+        # refusée avant toute production
+        grid_blocks = list(iter_entity_blocks(pd.DataFrame(index=grid_index)))
+        self._check_stage_coverage(
+            stage_freq, [normalize_entity_key(entity) for entity, _mask, _block in grid_blocks]
+        )
+        for entity, mask, grid_block in grid_blocks:
             # Normalisation de l'entité
             key = normalize_entity_key(entity)
             # Extraction des dates
@@ -1250,6 +1414,11 @@ class CovariateMaterializer:
             mirror_block = mirrors.get(key)
             # Extraction de la méthode de transformation appliquée
             entity_way = self._applicable_way(way, f_col, f_stage, mirror_block)
+            # Plafonnement par entité : la vue d'étape ne fabrique aucune
+            # interpolation, une colonne plus basse que la grille y reste à ses
+            # ancres
+            if cap_interpolation and entity_way == 'interpolate':
+                entity_way = 'raw_anchors'
 
             # Création de la colonne transformée our l'entité
             produced, produced_origins = self._produce_block(
@@ -1435,19 +1604,19 @@ class CovariateMaterializer:
         detected_frequencies: DetectedFrequencies,
         source_data: pd.DataFrame,
         materialization: Optional[Mapping[str, MaterializationWay]] = None,
-        record: bool = True,
+        record: bool = False,
     ) -> Tuple[pd.DataFrame, Dict[str, MaterializationWay], Dict[str, CellOrigin]]:
         """Materialize covariates on one grid — the only producer of features.
 
-        Two modes, and the second one is what makes the uniqueness rule of
-        enforceable:
+        Two modes:
 
         - ``materialization=None``: the component chooses each column's way
           and returns it;
         - ``materialization`` given: the component replays the imposed ways
           without re-deciding anything. The caller chooses the way once, on
-          the training grid, then imposes it on the prediction grid, at fit as
-          well as at transform.
+          the PREDICTION grid (:meth:`decide_ways`), then imposes it on the
+          training grid, at fit as well as at transform: the
+          availability at predict commands, the training grid follows.
 
         No other public method returns a feature frame, and the replay mode is
         the only way to impose a way — under ``'model'`` included. That is
@@ -1471,21 +1640,22 @@ class CovariateMaterializer:
             materialization: Ways to replay, one entry per column of
                 ``columns``. None to let the component choose.
             record: Whether the production feeds the three stores. False
-                produces the features and writes nothing, which is what the
-                stages of ``HighFrequencyImputer`` use for their COVARIATES:
-                the registries hold what has been IMPUTED, never what was
-                merely prepared as a feature. Recording a covariate would
-                overwrite in the mirror the imputation its own model just
-                wrote, and would make the result depend on the processing
-                order. Only a step's own production — a prediction, or the
-                interpolation of :meth:`interpolate_column` — is recorded — the mode
+                (default) produces the features and writes nothing: the
+                registries hold what has been IMPUTED, never what was merely
+                prepared as a feature — the mode every stage of
+                ``HighFrequencyImputer`` and
                 :class:`~tsforecast.frequency.training_set_builder.TrainingSetBuilder`
-                uses, its mutualized grid carrying cells produced at the
-                frequency of the blocks rather than at that of any stage.
-                Recording those would pollute the mirror and let
+                use for their covariates. Recording a covariate would
+                overwrite in the mirror the imputation its own model just
+                wrote, make the result depend on the processing order, and —
+                on a mutualized grid carrying cells produced at the frequency
+                of the blocks rather than at that of any stage — let
                 ``_carry_frequency`` believe a rank-3 carry is available where
-                nothing was ever imputed. Reading the stores is unaffected:
-                ranks 2 and 3 keep working under ``record=False``.
+                nothing was ever imputed. A step's own production goes through
+                :meth:`record_production` or :meth:`interpolate_column`; True
+                is left for a caller deliberately recording a materialization.
+                Reading the stores is unaffected: ranks 2 and 3 work either
+                way.
 
         Returns:
             Tuple ``(features, ways, column_origins)``:
@@ -1500,8 +1670,12 @@ class CovariateMaterializer:
               produced nothing reports ``'observed'``.
 
         Raises:
+            KeyError: If a column of ``columns`` is absent from
+                ``source_data``.
             ValueError: If ``materialization`` does not cover exactly
-                ``columns``.
+                ``columns``, if ``source_data`` holds duplicated dates, or if
+                a disagreeing per-entity ``stage_freq`` leaves an entity of
+                the grid without frequency.
 
         Examples:
             >>> dates = pd.date_range('2021-01-31', periods=12, freq='ME')
@@ -1520,6 +1694,8 @@ class CovariateMaterializer:
         """
         # Extraction des colonnes
         columns = tuple(columns)
+        # Contrôle des colonnes et des dates de la source
+        self._check_source_data(source_data, columns)
 
         # Résolution des voies : choix, ou rejeu à l'identique
         ways = self._resolve_ways(
@@ -1574,19 +1750,19 @@ class CovariateMaterializer:
         The stage frame is the view PHASE 5 of ``HighFrequencyImputer`` opens
         each stage on: the input values, the EXACT aggregations of the finer
         columns onto the stage grid, and the mirror of what earlier stages
-        imputed. It deliberately fabricates no interpolated value — a column
-        whose precedence lands on rank 4 is left at its raw anchors — because
-        interpolation is the job of :meth:`materialize`, the single producer
-        of ``X_train`` and ``X_pred``. The frame serves the covariate
-        SELECTION (non-emptiness on both windows) and the diagnostics, never
-        the features handed to an estimator.
+        imputed. It deliberately fabricates no interpolated value: interpolation
+        is the job of :meth:`materialize`, the single producer of ``X_train``
+        and ``X_pred``. The frame serves the covariate selection (non-emptiness
+        on both windows), the diagnostics and the base of the stage output,
+        never the features handed to an estimator.
 
-        One documented exception to the "no interpolation" rule: under
-        ``covariate_strategy='model'``, a column whose column-level way is a
-        model way but whose mirror is empty FOR ONE ENTITY is degraded by
-        :meth:`_applicable_way` down to ``covariate_fallback``, exactly as the
-        precedence prescribes. Selecting on such a cell is harmless: an
-        interpolation covers no date a raw anchor would leave empty.
+        The cap is applied per entity, after the precedence: an entity whose
+        own way lands on the interpolation — rank 4 of the column, or a model
+        way degraded to ``covariate_fallback`` because its mirror is empty — is
+        left at its raw anchors, while an entity observing the column at least
+        as finely as the grid keeps its identity or exact aggregation, and an
+        entity served by the mirror (ranks 2 and 3, under
+        ``covariate_strategy='model'`` only) keeps it.
 
         Nothing is written to the three stores: the frame is a view.
 
@@ -1605,6 +1781,13 @@ class CovariateMaterializer:
             Frame indexed on ``grid_index``, one column per entry of
             ``columns``, NaN wherever nothing exact could be produced.
 
+        Raises:
+            KeyError: If a column of ``columns`` is absent from
+                ``source_data``.
+            ValueError: If ``source_data`` holds duplicated dates, or if a
+                disagreeing per-entity ``stage_freq`` leaves an entity of the
+                grid without frequency.
+
         Examples:
             >>> dates = pd.date_range('2021-01-31', periods=12, freq='ME')
             >>> data = pd.DataFrame({'m1': range(12), 'a1': np.nan}, index=dates)
@@ -1619,10 +1802,10 @@ class CovariateMaterializer:
         """
         # Colonnes traitées : celles de la source, dans leur ordre d'entrée
         wanted = tuple(source_data.columns) if columns is None else tuple(columns)
+        # Contrôle des colonnes et des dates de la source
+        self._check_source_data(source_data, wanted)
 
-        # Voies décidées par la précédence, puis plafonnées aux rangs exacts :
-        # seul le rang 4 'interpolate' est ramené aux ancres brutes, les rangs
-        # 1 (identité, agrégation) et 2-3 (miroir) étant tous exacts
+        # Voies décidées par la précédence
         ways = self.decide_ways(
             columns=wanted,
             grid_index=grid_index,
@@ -1630,12 +1813,16 @@ class CovariateMaterializer:
             detected_frequencies=detected_frequencies,
         )
 
-        # Production colonne par colonne, sans écriture de registre
+        # Production colonne par colonne, sans écriture de registre. Le
+        # plafonnement aux rangs exacts se fait entité par entité, APRÈS la
+        # précédence : seule une voie d'entité 'interpolate' est ramenée aux
+        # ancres brutes, les rangs 1 (identité, agrégation) et 2-3 (miroir)
+        # étant tous exacts
         frame_columns: Dict[str, pd.Series] = {}
         for column in wanted:
-            way = 'raw_anchors' if ways[column] == 'interpolate' else ways[column]
             values, _origins, _freqs = self._produce_column(
-                column, way, grid_index, stage_freq, detected_frequencies, source_data,
+                column, ways[column], grid_index, stage_freq, detected_frequencies,
+                source_data, cap_interpolation=True,
             )
             frame_columns[column] = values
 
@@ -1756,6 +1943,19 @@ class CovariateMaterializer:
         taking the most degraded one, and :meth:`_applicable_way` then brings
         it back to what each entity's own frequencies and mirror allow.
 
+        The reduction never depends on the order of the entities:
+
+        - an entity for which no conversion is definable — it never observes
+          the column, so no frequency is detected for it — casts no verdict:
+          its rows are served its (empty) raw anchors whatever the column's
+          way, and it must not strip the other entities of theirs. A column
+          no entity can convert is ``'raw_anchors'``;
+        - verdicts of equal :data:`_WAY_RANK` are broken by a fixed order
+          (:data:`_WAY_TIE_BREAK`), never by the first entity met.
+
+        A grid without any entity — an empty panel grid — decides like an
+        empty time series grid, for the degenerate entity ``()``.
+
         Args:
             columns: Columns to classify.
             grid_index: Target grid — a ``DatetimeIndex`` for a time series, a
@@ -1767,6 +1967,10 @@ class CovariateMaterializer:
         Returns:
             Mapping column -> way, one entry per column of ``columns``.
 
+        Raises:
+            ValueError: If a disagreeing per-entity ``stage_freq`` leaves an
+                entity of the grid without frequency.
+
         Examples:
             >>> dates = pd.date_range('2021-01-31', periods=12, freq='ME')
             >>> mat = CovariateMaterializer()
@@ -1777,24 +1981,34 @@ class CovariateMaterializer:
             ... )
             {'m1': 'identity', 'q1': 'interpolate', 'a1': 'interpolate'}
         """
-        # Entités de la grille : c'est elle qui décide des verdicts à réduire
-        grid_frame = pd.DataFrame(index=grid_index)
-        entities = [
-            normalize_entity_key(entity)
-            for entity, _mask, _block in iter_entity_blocks(grid_frame)
-        ]
+        # Entités de la grille : c'est elle qui décide des verdicts à réduire.
+        # Une liaison d'étape qui laisse l'une d'elles sans fréquence est
+        # refusée ; une grille de panel vide décide comme une série vide
+        entities = self._grid_entities(grid_index)
+        self._check_stage_coverage(stage_freq, entities)
+        entities = entities or [()]
 
         # Initalisation du dictionnaire résultat
         ways: Dict[str, MaterializationWay] = {}
         # Parcours des colonnes
         for column in columns:
-            # Création des options possibles de transformation de la données en comparant les fréquences source et cible
+            # Verdicts des seules entités pour lesquelles une conversion est
+            # définissable : une entité qui n'observe jamais la colonne n'a
+            # rien à en dire, et ses lignes restent à ses ancres (vides)
             candidates = [
                 self.classify(column, stage_freq, detected_frequencies, entity)
                 for entity in entities
+                if self._column_frequency(detected_frequencies, column, entity) is not None
+                and self._stage_frequency(stage_freq, entity) is not None
             ]
-            # Choix de la méthode la plus conservatrice
-            ways[column] = max(candidates, key=lambda way: _WAY_RANK[way])
+            # Choix de la méthode la plus conservatrice, les rangs égaux
+            # départagés par un ordre fixe ; aucune conversion définissable :
+            # les observations telles quelles
+            ways[column] = max(
+                candidates,
+                key=lambda way: (_WAY_RANK[way], _WAY_TIE_BREAK[way]),
+                default='raw_anchors',
+            )
         return ways
 
     # -------------------------------------------------------------------------

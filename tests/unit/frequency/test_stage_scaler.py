@@ -21,8 +21,10 @@ Contracts pinned here:
   follows the configuration — mode, form of ``grid_freq`` / ``source_freq``,
   frequencies resolved per entity, ``produced_freq`` — never the divisor
   values, divisors all equal to ``1.0`` included (defect B12);
-- the carried-period rule of §9.2 (``'raw_anchors'`` spans one period of the
-  column, every other way one period of the grid), the fallbacks
+- the carried-period rule of §9.2 (``'raw_anchors'`` spans one period of a
+  column coarser than the grid, every other way — and ``'raw_anchors'`` on a
+  column at least as fine as the grid, read by the materializer's rank 1,
+  ANO-FREQ-042 — one period of the grid), the fallbacks
   (incomparable frequency -> default divisor for a covariate, error for the
   target), the per-row target divisor of §5.4 and the dict form;
 - ``inverse_transform(transform(X)) == X`` to ``1e-12`` on features and
@@ -38,7 +40,8 @@ Contracts pinned here:
   ``NotFittedError``, ``fit_transform``, divisor methods usable without
   ``fit``.
 
-Corrections of ANO-FREQ-028 to ANO-FREQ-036 (``tests/ANOMALIES.md``).
+Corrections of ANO-FREQ-028 to ANO-FREQ-036, the ``'raw_anchors'`` side of
+ANO-FREQ-042 and the plain entity keys of ANO-FREQ-037 (``tests/ANOMALIES.md``).
 
 Covered symbols: ``StageScaler`` (``feature_divisors``, ``target_divisor``,
 ``fit_scale_factor``, ``apply``, ``invert``, ``resolve_mode``,
@@ -376,12 +379,17 @@ class TestConstantGoldenValues:
         ids=['Y-cell@M', 'Q-cell@M', 'Y-cell@Q', 'M-cell@Q', 'M-cell@M'],
     )
     def test_feature_divisor_gold(self, carried, stage, expected):
-        """A covariate divides by the stage sub-periods held by the period its cell spans."""
+        """A covariate divides by the stage sub-periods held by the period its cell spans.
+
+        La cellule couvre une période de sa grille (voie 'identity') : une
+        grille de bloc à la fréquence ``carried`` porte des cellules de cette
+        période, plus grossière ou plus fine que l'étape (§5.8 R5).
+        """
         divisors = StageScaler().feature_divisors(
             columns=['x'],
             column_frequencies={'x': carried},
-            ways={'x': 'raw_anchors'},
-            grid_freq=stage,
+            ways={'x': 'identity'},
+            grid_freq=carried,
             stage_freq=stage,
         )
         assert divisors['x'] == pytest.approx(expected, rel=_EXACT)
@@ -449,13 +457,17 @@ class TestCalendarGoldenValues:
         np.testing.assert_allclose(sums.to_numpy(), 1.0, rtol=0, atol=_EXACT)
 
     def test_fractional_feature_divisor_under_calendar(self):
-        """A monthly anchor read at a quarterly stage divides by its share of days: 31 / 29 / 31 of 91."""
+        """A monthly cell at a quarterly stage divides by its share of days: 31 / 29 / 31 of 91.
+
+        Grille de bloc mensuelle, étape trimestrielle : chaque cellule couvre
+        un mois (§5.8 R5).
+        """
         index = pd.date_range('2024-01-31', periods=3, freq='ME')
         divisors = StageScaler(scale_features='calendar').feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
-            ways={'m1': 'raw_anchors'},
-            grid_freq='Q',
+            ways={'m1': 'identity'},
+            grid_freq='M',
             stage_freq='Q',
             index=index,
         )
@@ -785,6 +797,46 @@ class TestCarriedPeriodRule:
             stage_freq='M',
         )
         assert divisors.to_dict() == {'q1': 3.0, 'a2': 12.0}
+
+    @pytest.mark.parametrize(
+        'column_freq, expected', [('M', 1.0), ('Q', 1.0), ('Y', 4.0)], ids=['finer', 'equal', 'coarser'],
+    )
+    def test_raw_anchors_of_a_column_at_least_as_fine_as_the_grid_span_the_grid(
+        self, column_freq, expected
+    ):
+        """Under 'raw_anchors', a column at least as fine as the grid spans one grid period.
+
+        Le matérialiseur ramène une telle colonne à l'identité ou à l'agrégation
+        exacte (rang 1, ANO-FREQ-042) : sur une grille trimestrielle à l'étape
+        Q, une colonne mensuelle ou trimestrielle divise par 1 ; seule la
+        colonne annuelle, lue à ses ancres, couvre sa propre période (4).
+        """
+        divisors = StageScaler().feature_divisors(
+            columns=['x'],
+            column_frequencies={'x': column_freq},
+            ways={'x': 'raw_anchors'},
+            grid_freq='Q',
+            stage_freq='Q',
+        )
+        assert divisors['x'] == pytest.approx(expected, rel=_EXACT)
+
+    def test_raw_anchors_per_entity_follow_each_entity_column(self):
+        """PANEL-F ``v`` at stage Q under 'raw_anchors': FR anchors 4, DE and IT one quarter.
+
+        Valeur d'or : FR annuelle (ancre, 4 trimestres), DE trimestrielle
+        (identité, 1), IT mensuelle (agrégation exacte, 1) — et non 1/3, la
+        valeur ponctuelle d'un mois n'étant plus jamais servie.
+        """
+        index = _panel_grid(('DE', 'FR', 'IT'), periods=4)
+        divisors = StageScaler().feature_divisors(
+            columns=['v'],
+            column_frequencies={'v': _PANEL_F_BLOCKS},
+            ways={'v': 'raw_anchors'},
+            grid_freq='Q',
+            stage_freq='Q',
+            index=index,
+        )
+        assert divisors['v'].tolist() == [1.0] * 4 + [4.0] * 4 + [1.0] * 4
 
     def test_training_and_prediction_grids_are_comparable(self):
         """I5 on TS at stage M: q1 aggregated yearly divides by 12, interpolated monthly by 1.
@@ -1265,6 +1317,47 @@ class TestPerEntityFrequencies:
             )
             values = divisors['m1'].to_numpy()
         np.testing.assert_array_equal(values, 12.0)
+
+    @pytest.mark.parametrize(
+        'parameter, expected',
+        [
+            # DE trimestrielle lue à ses ancres (3), FR mensuelle (1)
+            ('column_frequencies', [3.0] * 3 + [1.0] * 3),
+            # Blocs DE trimestriel (3) et FR annuel (12), étape M
+            ('source_freq', [3.0] * 3 + [12.0] * 3),
+            # Cible annuelle, étapes DE trimestrielle (4) et FR mensuelle (12)
+            ('pred_freq', [4.0] * 3 + [12.0] * 3),
+        ],
+    )
+    @pytest.mark.parametrize('form', ['plain', 'tuple'])
+    def test_plain_entity_keys_behave_like_tuple_keys(self, parameter, expected, form):
+        """``{'FR': ...}`` and ``{('FR',): ...}`` are the same binding, in every parameter.
+
+        Clés scalaires normalisées, comme dans ``CovariateMaterializer``
+        (ANO-FREQ-037) : les deux composants lisent les mêmes liaisons.
+        """
+        index = _panel_grid()
+        fr, de = ('FR', 'DE') if form == 'plain' else (('FR',), ('DE',))
+        scaler = StageScaler()
+        if parameter == 'column_frequencies':
+            divisors = _feature_rows(
+                scaler.feature_divisors(
+                    columns=['ip'], column_frequencies={'ip': {fr: 'M', de: 'Q'}},
+                    ways={'ip': 'raw_anchors'}, grid_freq='M', stage_freq='M', index=index,
+                ),
+                'ip', index,
+            )
+        elif parameter == 'source_freq':
+            divisors = scaler.target_divisor('v', {fr: 'Y', de: 'Q'}, 'M', index=index).to_numpy()
+        else:
+            divisors = scaler.target_divisor('v', 'Y', {fr: 'M', de: 'Q'}, index=index).to_numpy()
+        np.testing.assert_array_equal(divisors, expected)
+
+    def test_uncovered_entity_message_lists_normalized_keys(self):
+        """An entity a plain-key binding does not cover is named, the keys normalized."""
+        index = _panel_grid(('DE', 'FR', 'IT'))
+        with pytest.raises(ValueError, match=r"entity \('IT',\).*got keys \[\('DE',\), \('FR',\)\]"):
+            StageScaler().target_divisor('v', {'FR': 'Y', 'DE': 'Q'}, 'M', index=index)
 
     def test_grid_entity_uncovered_by_a_column_binding_takes_the_default(self):
         """An anchor column without frequency for one entity falls back on the default divisor, never NaN."""

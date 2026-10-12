@@ -38,7 +38,7 @@ from sklearn.utils.validation import check_is_fitted
 from ..utils.frequency.converter import FrequencyConverter
 from ..utils.frequency.utils import is_higher_frequency, normalize_frequency
 # Normalisation des clés d'entité du panel
-from ..panel.utils import normalize_entity_key
+from ..panel.utils import normalize_entity_key, normalize_entity_mapping
 
 
 # Modalités de mise à l'échelle
@@ -556,18 +556,50 @@ class StageScaler(BaseEstimator, TransformerMixin):
             )
         return pd.Series(counts, index=index, dtype=float)
 
+    # Méthode auxiliaire de comparaison d'une colonne à sa grille
+    @staticmethod
+    def _coarser_than(f_col: Optional[str], f_grid: Optional[str]) -> bool:
+        """Tell whether a column is read at its anchors on a grid.
+
+        Args:
+            f_col: Frequency of the column for one entity.
+            f_grid: Frequency of the grid for that entity.
+
+        Returns:
+            True when ``f_col`` is strictly coarser than ``f_grid``, and when
+            the two cannot be compared — the cell then keeps the period of the
+            column, and an unreadable one falls back on the default divisor.
+            False when the column is at least as fine as the grid.
+
+        Examples:
+            >>> StageScaler._coarser_than('Y', 'M'), StageScaler._coarser_than('M', 'Q')
+            (True, False)
+            >>> StageScaler._coarser_than('Q', 'QE')
+            False
+        """
+        # Fréquences absentes ou illisibles : la période de la colonne est
+        # conservée, le repli du diviseur s'en charge
+        if f_col is None or f_grid is None:
+            return True
+        try:
+            return is_higher_frequency(f_grid, f_col)
+        except (ValueError, TypeError):
+            return True
+
     # Méthode auxiliaire de résolution d'une fréquence pour une entité
     @staticmethod
     def _freq_for(binding: Optional[FrequencyBinding], entity: EntityKey) -> Optional[str]:
         """Resolve a frequency binding for one entity.
 
         The resolution cascade is the one of
-        ``CovariateMaterializer._column_frequency`` / ``_stage_frequency``:
-        raw key, then normalized key, then — for a mapping holding a single
-        entry — that entry, which stands for the whole panel.
+        ``CovariateMaterializer._column_frequency``: the entity's own entry —
+        the keys being normalized, ``'FR'`` and ``('FR',)`` designate the same
+        entity —, then, for a mapping holding a single entry, that entry,
+        which stands for the whole panel.
 
         Args:
-            binding: A frequency string, or an entity -> frequency mapping.
+            binding: A frequency string, or an entity -> frequency mapping,
+                entity keys tuples or, for a single-level panel, scalars.
             entity: Normalized entity key.
 
         Returns:
@@ -581,20 +613,22 @@ class StageScaler(BaseEstimator, TransformerMixin):
             'Y'
             >>> StageScaler._freq_for({('FR',): 'Y', ('DE',): 'Q'}, ('IT',)) is None
             True
+            >>> StageScaler._freq_for({'FR': 'Y', 'DE': 'Q'}, ('DE',))
+            'Q'
         """
         # Forme scalaire : la même fréquence pour toutes les entités
         if not isinstance(binding, Mapping):
             return binding
 
-        # Clé brute puis clé normalisée
+        # Entrée propre, clés normalisées : 'FR' et ('FR',) désignent la même
+        # entité, comme pour le matérialiseur
+        by_entity = normalize_entity_mapping(binding)
         key = normalize_entity_key(entity)
-        if entity in binding:
-            return binding[entity]
-        if key in binding:
-            return binding[key]
+        if key in by_entity:
+            return by_entity[key]
         # Liaison à une seule entrée : elle vaut pour tout le monde
-        if len(binding) == 1:
-            return next(iter(binding.values()))
+        if len(by_entity) == 1:
+            return next(iter(by_entity.values()))
         return None
 
     # Méthode auxiliaire de collecte des entités portées par une grille
@@ -668,10 +702,12 @@ class StageScaler(BaseEstimator, TransformerMixin):
         freq = self._freq_for(source_freq, entity)
         # Vérification que la fréquence est spécifiée
         if freq is None:
+            # Clés normalisées, triées par représentation
+            keys = sorted(normalize_entity_mapping(source_freq), key=repr)
             raise ValueError(
                 f"{parameter} does not cover entity {entity!r}: an entity of "
                 "the grid must either have its own entry or be covered by a "
-                f"single-entry mapping, got keys {sorted(source_freq)}"
+                f"single-entry mapping, got keys {keys}"
             )
         return freq
 
@@ -759,8 +795,12 @@ class StageScaler(BaseEstimator, TransformerMixin):
         materialized onto it by the imputation ways. Two cells of the same column
         may then span different periods, and only the way says which:
 
-        - ``'raw_anchors'`` reads the column where it is observed, so the cell
-          spans one period of the column, ``f_col``;
+        - ``'raw_anchors'`` reads a column coarser than the grid where it is
+          observed, so the cell spans one period of the column, ``f_col``. A
+          column at least as fine as the grid is never read at its anchors:
+          the materializer brings it back to identity or exact aggregation
+          (rank 1, entity by entity), and its cell spans one period of the
+          grid;
         - every other way — identity, exact aggregation, interpolation, mirror
           — produces a cell spanning one period of the grid, ``f_grid``.
 
@@ -876,9 +916,13 @@ class StageScaler(BaseEstimator, TransformerMixin):
                     continue
                 # Période couverte par la cellule : celle de la colonne quand
                 # ses ancres sont lues telles quelles, celle de la grille
-                # sinon
+                # sinon. Une colonne au moins aussi fine que la grille n'est
+                # jamais lue à ses ancres : le matérialiseur la ramène à
+                # l'identité ou à l'agrégation exacte,
+                # et sa cellule couvre alors une période de la grille
                 if column in read_columns:
-                    carried = self._freq_for(column_frequencies.get(column), entity)
+                    f_col = self._freq_for(column_frequencies.get(column), entity)
+                    carried = f_col if self._coarser_than(f_col, f_grid) else f_grid
                 else:
                     carried = f_grid
                 carried_by_column[column] = carried

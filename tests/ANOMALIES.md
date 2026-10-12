@@ -3698,3 +3698,227 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/frequency/test_stage_scaler.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `apply` / `invert` redonnent au résultat le nom de la `Series` d'entrée (`_keep_name`). Tests : `tests/unit/frequency/test_stage_scaler.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`.
+
+### ANO-FREQ-037 — Liaison d'étape unanime : une entité de la grille non nommée reste sans fréquence
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer._stage_frequency` (via `classify`,
+  `decide_ways`, `materialize`, `stage_frame`) ; même lecture des clés dans `::_column_frequency`
+- **Sévérité** : majeure
+- **Observé** : `stage_freq={('FR',): 'Q', ('DE',): 'Q'}` sur une grille FR / DE / IT : IT n'a pas d'entrée propre, la
+  liaison a deux entrées, `_stage_frequency` rend `None`, et `classify` rend `'raw_anchors'` pour IT. Ce verdict (rang 2
+  de `_WAY_RANK`) l'emporte sur l'agrégation de FR et DE (rang 1) : `ways == {'m1': 'raw_anchors'}`, et `m1` vaut
+  **102** (valeur ponctuelle de mars) au T1 2021 pour les trois entités, au lieu de **303** (D22). Par ailleurs, des clés
+  d'entité scalaires (`{'FR': 'Q'}`, `{'v': {'FR': 'Y'}}`) ne sont jamais reconnues : le commentaire « clé brute puis clé
+  normalisée » normalise l'entité cherchée — déjà un tuple, issu de `iter_entity_blocks` —, jamais les clés ; toutes les
+  entités tombent en `None`, sans erreur.
+- **Attendu** : la résolution de `StageScaler._stage_freq_for` (ANO-FREQ-031, arbitrée le 2026-10-11) : entrée propre,
+  liaison à une entrée, puis liaison **unanime** valant pour tout le panel ; une liaison **discordante** qui omet une
+  entité de la grille lève une `ValueError` nommant l'entité. Les deux composants lisent la même liaison d'étape de
+  l'imputeur et ne doivent pas en tirer deux fréquences différentes. Clés scalaires : à arbitrer entre normaliser
+  (précédent ANO-FREQ-011, « comme les autres fonctions du package ») et lever.
+- **Exposition** : l'étape 5a de `HighFrequencyImputer` appelle `stage_frame(grid_index=stage_mask.index,
+  stage_freq=stage_freq)` ; la grille couvre toutes les entités (D38), la liaison ne nomme que celles dont le groupe
+  traverse l'étape (D31) — cas réel relevé par ANO-FREQ-031 (`target_frequency={FR: 'M', DE: 'Q', IT: 'M'}`, étape `M`
+  liée à `{FR, IT}`). La frame d'étape étant la base de la sortie d'étape (D37), l'effet est à mesurer en F11 / F12.
+- **Reproduction** :
+  ```python
+  panel = build_panel_reference()[['m1']]
+  grid = pd.MultiIndex.from_product([['FR', 'DE', 'IT'], pd.date_range('2021-03-31', periods=12, freq='QE')])
+  features, ways, _ = CovariateMaterializer().materialize(
+      columns=['m1'], grid_index=grid, stage_freq={('FR',): 'Q', ('DE',): 'Q'},
+      detected_frequencies={'m1': 'M'}, source_data=panel)
+  ways, features['m1'].iloc[0]   # ({'m1': 'raw_anchors'}, 102.0)
+  ```
+- **Tests** : `tests/unit/frequency/covariate_materializer/test_classification.py::TestStageBindingResolution`
+  (liaison unanime ; liaison discordante, sous `'model'` ; clés scalaires normalisées), `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`
+- **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : clés scalaires normalisées
+- **Correction** : `_stage_frequency` résout comme `StageScaler._stage_freq_for` : entrée propre, puis liaison **unanime** — aux alias de position près, une seule entrée comprise — valant pour tout le panel, sinon `None`. `_check_stage_coverage` lève une `ValueError` nommant les entités de la grille qu'une liaison discordante ne nomme pas, dans `decide_ways` et `_produce_column` (donc `materialize`, `stage_frame`, `interpolate_column`), avant toute lecture des registres. `_normalized_keys` normalise les clés des liaisons par entité (`detected_frequencies`, `stage_freq`) : `'FR'` vaut `('FR',)`, comme l'argument `entity` des méthodes publiques. Corollaire : sous `record=True`, plus aucune cellule n'est enregistrée avec une fréquence de production `None` (entité non liée). Même normalisation dans `StageScaler._freq_for` (arbitrage de l'auteur, 2026-10-12), par la fonction partagée `tsforecast.panel.utils.normalize_entity_mapping`, que le matérialiseur utilise aussi. Tests : `tests/unit/frequency/covariate_materializer/test_classification.py::TestStageBindingResolution`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`, `tests/unit/frequency/test_stage_scaler.py::TestPerEntityFrequencies::test_plain_entity_keys_behave_like_tuple_keys`, `tests/unit/panel/test_utils.py::TestNormalizeEntityMapping`.
+
+### ANO-FREQ-038 — `decide_ways` : les égalités de rang sont départagées par l'ordre des entités
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer.decide_ways` (réduction
+  `max(candidates, key=_WAY_RANK)`), `::_applicable_way`
+- **Sévérité** : majeure
+- **Observé** : `_WAY_RANK` donne le même rang à `'interpolate'` et `'raw_anchors'` (2), et à `'stage_model'` et
+  `'carried_model'` (3) ; `max` garde le premier verdict rencontré, dans l'ordre des entités de la grille.
+  (a) `v` annuelle pour FR, trimestrielle pour DE, jamais observée par IT (`{'v': {('FR',): 'Y', ('DE',): 'Q'}}`), étape
+  M, `'interpolate'` : grille FR, DE, IT → `'interpolate'` ; grille IT, FR, DE → `'raw_anchors'`, et FR / DE passent de
+  36 cellules interpolées à leurs 3 et 12 ancres.
+  (b) Sous `'model'`, FR porte des cellules d'étape M (2022-2023) et des cellules Q (2021), DE des cellules Q seules. DE
+  en tête → voie `'carried_model'`, que `_applicable_way` applique à FR (le report y est testé avant le rang 2 dès que
+  la voie de colonne n'est pas `'stage_model'`) : FR reporte ses cellules de 2021, ignore celles de son étape, et
+  2022-2023 restent NaN. FR en tête → FR lit ses cellules d'étape.
+- **Attendu** : une voie indépendante de l'ordre des entités. §4.4 : la précédence « s'arrête au premier cas
+  applicable » — une entité qui porte des cellules à `f` est servie au rang 2, quelle que soit la voie de colonne ;
+  §4.3 : sous `'interpolate'`, les seuls NaN résiduels sont ceux d'une entité sans la colonne — le verdict d'une entité
+  sans conversion définissable (fréquence inconnue) ne doit pas dicter la voie des autres. Piste : écarter ces verdicts
+  de la réduction (`_applicable_way` sert déjà leurs lignes) et départager les rangs égaux par une règle fixe.
+- **Reproduction** :
+  ```python
+  panel = build_panel_reference()[['v']]
+  dates = pd.date_range('2021-01-31', periods=36, freq='ME')
+  freqs = {'v': {('FR',): 'Y', ('DE',): 'Q'}}
+  for order in (['FR', 'DE', 'IT'], ['IT', 'FR', 'DE']):
+      grid = pd.MultiIndex.from_product([order, dates])
+      print(CovariateMaterializer().decide_ways(columns=['v'], grid_index=grid, stage_freq='M',
+                                                detected_frequencies=freqs))
+  # {'v': 'interpolate'} puis {'v': 'raw_anchors'}
+  ```
+- **Tests** : `tests/unit/frequency/covariate_materializer/test_classification.py::TestReductionOrder::test_entity_without_frequency_never_dictates_the_column_way`,
+  `::TestReductionOrder::test_tied_model_verdicts_never_skip_rank_two`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `decide_ways` écarte de la réduction les verdicts des entités sans conversion définissable (fréquence de colonne ou d'étape inconnue : leurs lignes restent servies par `_applicable_way`) ; une colonne qu'aucune entité ne convertit vaut `'raw_anchors'`. Les rangs égaux sont départagés par un ordre fixe, `_WAY_TIE_BREAK` (`'raw_anchors'` après `'interpolate'`, `'carried_model'` après `'stage_model'`) ; `_WAY_RANK`, lu par `TrainingSetBuilder`, est inchangé. `_applicable_way` résout une voie de modèle par la précédence propre de l'entité — rang 2 si son miroir porte des cellules à `f`, sinon rang 3, sinon repli —, quelle que soit la voie de modèle retenue pour la colonne. Tests : `tests/unit/frequency/covariate_materializer/test_classification.py::TestReductionOrder`, `tests/unit/frequency/covariate_materializer/test_precedence.py::TestModelWaysPerEntity`.
+
+### ANO-FREQ-039 — Dates dupliquées dans `source_data` : l'agrégation exacte compte deux fois
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer._produce_block` (voie
+  `'aggregate'`, via `materialize` / `stage_frame`)
+- **Sévérité** : mineure
+- **Observé** : `TS` dont le 2023-12-31 est dupliqué, `m1` à l'étape Q : le T4 2023 vaut **537** (133 + 134 + 135 + 135)
+  au lieu de **402**, sans erreur ni avertissement. Sur le même jeu, les voies `'identity'` / `'raw_anchors'` lèvent
+  l'erreur brute de pandas (`cannot reindex on an axis with duplicate labels`) et `'interpolate'` celle du convertisseur
+  (`Several observations fall in the same 'ME' period`).
+- **Attendu** : `ValueError` nommant les dates dupliquées, uniforme sur les quatre voies, comme `FrequencyAligner`
+  (ANO-FREQ-010) et `AggregationConstraint` (ANO-FREQ-022). `HighFrequencyImputer` n'est pas exposé
+  (`validate_temporal_data` lève en amont sur un index dupliqué) : seul l'usage autonome du composant l'est.
+- **Reproduction** :
+  ```python
+  ts = build_panel_reference().loc['FR', ['m1']]
+  dup = pd.concat([ts, ts.iloc[-1:]])
+  grid = pd.date_range('2021-03-31', periods=12, freq='QE')
+  features, _, _ = CovariateMaterializer().materialize(
+      columns=['m1'], grid_index=grid, stage_freq='Q', detected_frequencies={'m1': 'M'}, source_data=dup)
+  features['m1'].iloc[-1]   # 537.0
+  ```
+- **Test** : `tests/unit/frequency/covariate_materializer/test_robustness.py::TestDuplicates::test_duplicated_source_dates_are_rejected_by_every_way`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `_check_source_data` lève `ValueError('Duplicate dates in source_data: [...]')` — couples `(entité, date)` pour un panel — dans `materialize`, `stage_frame` et `interpolate_column`, avant toute production : les quatre voies échouent de la même façon. Tests : `tests/unit/frequency/covariate_materializer/test_robustness.py::TestDuplicates::test_duplicated_source_dates_are_rejected_by_every_way`, `::TestDuplicates::test_duplicated_panel_pairs_name_the_entity`, `tests/unit/frequency/covariate_materializer/test_stores.py::TestInterpolateColumn::test_duplicated_source_dates_raise`.
+
+### ANO-FREQ-040 — Colonne absente de `source_data` : colonne NaN rendue en silence
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer.materialize`, `::stage_frame`
+  (garde `column not in source_block.columns` de `_produce_column`)
+- **Sévérité** : mineure
+- **Observé** : `materialize(columns=['m1', 'typo'], ...)` rend une colonne `typo` entièrement NaN, de voie
+  `'raw_anchors'` et d'origine `'observed'`, sans erreur ; de même `stage_frame(columns=[...])`.
+- **Attendu** : `KeyError` nommant la colonne, comme `interpolate_column` et `entities_without_column` du même
+  composant : une coquille deviendrait sinon une feature vide transmise à l'estimateur. `eligible_columns`, qui est une
+  sélection, l'écarte légitimement. `HighFrequencyImputer` ne passe que des colonnes de `X_work` : non exposé.
+- **Reproduction** :
+  ```python
+  ts = build_panel_reference().loc['FR', ['m1']]
+  features, ways, origins = CovariateMaterializer().materialize(
+      columns=['m1', 'typo'], grid_index=ts.index, stage_freq='M',
+      detected_frequencies={'m1': 'M'}, source_data=ts)
+  ways['typo'], int(features['typo'].notna().sum())   # ('raw_anchors', 0)
+  ```
+- **Test** : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestColumnAbsentFromSource::test_column_absent_from_the_source_raises`
+  (`materialize`, `stage_frame`)
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `_check_source_data` lève `KeyError('Columns missing from source_data: [...]')` dans `materialize` et `stage_frame`. Test : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestColumnAbsentFromSource::test_column_absent_from_the_source_raises`.
+
+### ANO-FREQ-041 — Docstrings de `CovariateMaterializer` en écart avec le code et la spec
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer` (docstring de classe),
+  `::materialize`, `::stage_frame`
+- **Sévérité** : cosmétique
+- **Observé** :
+  1. `materialize` : « The caller chooses the way once, on the training grid, then imposes it on the prediction grid »
+     — l'inverse de D21 / §4.6 (« la grille de prédiction décide, la grille d'entraînement subit »), qu'applique
+     l'imputeur (`decide_ways` sur `pred_grid`, puis rejeu). Même docstring : « the second one is what makes the
+     uniqueness rule of enforceable » (phrase tronquée).
+  2. Docstring de classe : « ranks 2 and 3 of the precedence must discriminate on `origin_store == 'model'` ». Le code,
+     la docstring de `classify` (« the trigger is the mere presence of cells produced at f, whatever their origin ») et
+     §4.4 (un rang 2 servi par repli porte l'origine `'interpolated'`) déclenchent les rangs 2 et 3 sur la seule
+     présence de cellules produites.
+  3. `stage_frame` : « an interpolation covers no date a raw anchor would leave empty » énonce l'inclusion inverse —
+     l'entité servie par repli reçoit 36 cellules interpolées contre 3 ancres. Le propos voulu est vraisemblablement
+     « an interpolation leaves empty no date a raw anchor would cover ».
+- **Attendu** : docstrings alignées sur le code et sur D21 / §4.4.
+- **Reproduction** : lecture des docstrings ; les tests ci-dessous suivent le code.
+- **Tests** : `tests/unit/frequency/covariate_materializer/test_precedence.py::TestPrecedenceRanks::test_rank_two_trigger_ignores_the_origin`,
+  `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFrameMirror::test_entity_with_an_empty_mirror_is_capped_to_its_raw_anchors`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : docstrings réécrites : `materialize` (voie choisie sur la grille de PRÉDICTION puis imposée à l'entraînement, D21 ; phrase complétée), docstring de classe (rangs 2 et 3 déclenchés par la seule présence de cellules produites, origine rapportée telle quelle ; registres limités à ce qui est produit, D24), `stage_frame` (plafonnement par entité : l'exception documentée disparaît avec ANO-FREQ-042). Tests : `tests/unit/frequency/covariate_materializer/test_precedence.py::TestPrecedenceRanks::test_rank_two_trigger_ignores_the_origin`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFrameMirror::test_entity_with_an_empty_mirror_is_capped_to_its_raw_anchors`.
+
+### ANO-FREQ-042 — Voie `'raw_anchors'` : une entité plus fine que la grille reçoit des valeurs ponctuelles
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer._applicable_way` (sortie
+  anticipée `if way == 'raw_anchors': return way`), via `materialize` et `stage_frame`
+- **Sévérité** : majeure
+- **Observé** : `_applicable_way` rend `'raw_anchors'` avant la normalisation de rang 1 par entité ; une entité qui
+  observe la colonne au moins aussi finement que la grille reçoit la valeur ponctuelle de la date de grille au lieu de
+  l'identité ou de l'agrégation exacte. PANEL-F, `v` à l'étape Q : sous `'tolerate_nan'` (et `'model'` + repli
+  `'tolerate_nan'`), IT (mensuelle) vaut **10 / 11 / 12,5** — le mois de fin de trimestre — au lieu des trimestres
+  **30 / 33 / 37,5** (§2.5) ; sous `'interpolate'`, la même étape rend bien 30 / 33 / 37,5. `stage_frame`, qui plafonne
+  toute voie `'interpolate'` à `'raw_anchors'`, le fait **sous toutes les stratégies**, contrairement à sa docstring
+  (« the EXACT aggregations of the finer columns »). Même mécanisme quand une entité sans fréquence impose
+  `'raw_anchors'` à la colonne (ANO-FREQ-037, -038) : colonne mensuelle pour DE, trimestrielle pour FR, absente pour
+  IT, étape Q → DE vaut 102 au lieu de 303.
+- **Attendu** : §4.1 classe « entité par entité » : une covariable de fréquence supérieure ou égale à la grille est
+  « toujours disponible, par agrégation exacte ou par identité », `covariate_strategy` ne gouvernant que les colonnes
+  strictement plus basses ; §4.6 / D22 : la voie de colonne est appliquée par entité, ramenée à ce que ses fréquences
+  autorisent. `'raw_anchors'` doit passer par la même normalisation (identité si `f_c == f`, agrégation si `f_c` est
+  plus fine).
+- **Échelle** : `StageScaler.feature_divisors` déduit la période couverte de la **voie de colonne** — `'raw_anchors'`
+  couvre une période de la colonne (§4.2, §9.2) — et divise donc la valeur de mars d'IT par 1/3 : après mise à
+  l'échelle, `X` est au bon niveau (10 × 3 = 30) mais ne porte qu'un mois sur trois. La correction doit être
+  coordonnée avec ce diviseur, sans quoi une somme exacte de 30 serait divisée par 1/3. La frame d'étape, elle, n'est
+  pas mise à l'échelle : elle porte bien 10 là où le niveau trimestriel attend 30, et elle est la base de la sortie
+  d'étape (D37) — effet à mesurer en F11 / F12 (`keep_lower_frequencies=True`).
+- **Reproduction** :
+  ```python
+  panel_f = build_panel_reference()[['m1', 'q1', 'v']]
+  grid = pd.MultiIndex.from_product([['FR', 'DE', 'IT'], pd.date_range('2021-03-31', periods=12, freq='QE')])
+  freqs = {'v': {('FR',): 'Y', ('DE',): 'Q', ('IT',): 'M'}}
+  frame = CovariateMaterializer().stage_frame(grid_index=grid, stage_freq='Q', detected_frequencies=freqs,
+                                              source_data=panel_f, columns=['v'])
+  frame.loc['IT', 'v'].iloc[:4].tolist()   # [10.0, 10.0, 10.0, 10.0] au lieu de [30.0] * 4
+  ```
+- **Tests** : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestRawAnchorsPerEntity` (trois tests),
+  `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_finer_entity_is_aggregated_exactly`
+- **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : correction conjointe du matérialiseur et de `StageScaler`, plafonnement de `stage_frame` par entité
+- **Correction** : `_applicable_way` ne court-circuite plus `'raw_anchors'` : identité si `f_c == f`, agrégation exacte si `f_c` est plus fine, ancres brutes si elle est plus grossière. `stage_frame` plafonne entité par entité, APRÈS la précédence (`_produce_column(cap_interpolation=True)`) : seule une voie d'entité `'interpolate'` est ramenée aux ancres — y compris celle d'une entité dégradée au repli sous `'model'`, qui reste à ses ancres sous les deux replis ; les rangs 1 à 3 sont conservés. `StageScaler.feature_divisors` : une cellule `'raw_anchors'` ne couvre la période de la colonne que si celle-ci est strictement plus grossière que la grille (`_coarser_than`), une période de grille sinon ; sous `fit` (grille = étape), seules les colonnes plus fines que l'étape changent de diviseur. Deux tests de `tests/unit/frequency/test_stage_scaler.py` passaient par une ancre plus fine que la grille pour obtenir une cellule mensuelle à l'étape Q (`TestConstantGoldenValues::test_feature_divisor_gold[M-cell@Q]`, `TestCalendarGoldenValues::test_fractional_feature_divisor_under_calendar`) : ils l'obtiennent désormais d'une grille de bloc mensuelle (voie `'identity'`), mêmes valeurs d'or. Tests : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestRawAnchorsPerEntity`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_finer_entity_is_aggregated_exactly`, `::TestStageFrameMirror::test_carried_mirror_is_not_capped`, `tests/unit/frequency/test_stage_scaler.py::TestCarriedPeriodRule` (`test_raw_anchors_of_a_column_at_least_as_fine_as_the_grid_span_the_grid`, `test_raw_anchors_per_entity_follow_each_entity_column`).
+
+### ANO-FREQ-043 — Grille de panel vide : `ValueError: max() iterable argument is empty`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer.decide_ways` (via
+  `materialize`, `stage_frame`)
+- **Sévérité** : mineure
+- **Observé** : une grille `MultiIndex` vide n'a aucune entité ; la réduction `max(candidates, ...)` reçoit une liste
+  vide et lève `ValueError: max() iterable argument is empty`, sans rapport avec la cause. Une grille de série vide,
+  elle, garde son entité dégénérée `()` : voies décidées, frame `(0, n)` rendue.
+- **Attendu** : le comportement d'une série : une voie par colonne, et une frame vide aux colonnes demandées. Exposition
+  de `HighFrequencyImputer` non établie.
+- **Reproduction** :
+  ```python
+  empty = pd.MultiIndex.from_tuples([], names=['country', 'date'])
+  CovariateMaterializer().decide_ways(columns=['m1'], grid_index=empty, stage_freq='M',
+                                      detected_frequencies={'m1': 'M'})
+  # ValueError: max() iterable argument is empty
+  ```
+- **Test** : `tests/unit/frequency/covariate_materializer/test_robustness.py::TestEmptyAndSingle::test_empty_panel_grid`
+  (`decide_ways`, `materialize`, `stage_frame`)
+- **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : une voie par colonne, comme pour une série
+- **Correction** : `decide_ways` décide, pour une grille sans entité, pour l'entité dégénérée `()` — exactement le cas d'une grille de série vide ; `materialize` et `stage_frame` rendent une frame `(0, n)`. Test : `tests/unit/frequency/covariate_materializer/test_robustness.py::TestEmptyAndSingle::test_empty_panel_grid`.
+
+### ANO-FREQ-044 — `interpolation_method` en dict sans `'__default__'` : repli `'time'` au lieu de `'linear'`
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/covariate_materializer.py::DEFAULT_INTERPOLATION_METHOD`,
+  `::CovariateMaterializer.resolve_method`
+- **Sévérité** : mineure
+- **Observé** : `DEFAULT_INTERPOLATION_METHOD = 'time'` (depuis `bad4412`, création du composant) sert de défaut du
+  composant et de repli d'une forme dict sans `'__default__'`. `HighFrequencyImputer` a pour défaut `'linear'` et
+  transmet son dict tel quel : `HighFrequencyImputer(interpolation_method={'a1': 'cubic'})` interpole donc toutes les
+  autres colonnes en `'time'`.
+- **Attendu** : §10.1 : `interpolation_method = 'linear'` par défaut, « forme dict par feature avec `'__default__'`,
+  mêmes règles de validation qu'au §9.1 » — et §9.1 : « features non couvertes et pas de `'__default__'` → défaut ».
+  Une colonne non couverte reçoit `'linear'`. (`'time'` et `'linear'` diffèrent dès que les pas sont inégaux : mois
+  de 28 à 31 jours.)
+- **Reproduction** :
+  ```python
+  CovariateMaterializer(interpolation_method={'a1': 'cubic'}).resolve_method('q1')   # 'time'
+  ```
+- **Test** : `tests/unit/frequency/covariate_materializer/test_configuration.py::TestPerFeatureResolution::test_uncovered_column_falls_back_to_the_parameter_default`
+- **Statut** : corrigé (2026-10-11)
+- **Correction** : `DEFAULT_INTERPOLATION_METHOD = 'linear'` : défaut du composant et repli d'une forme dict sans `'__default__'`. Effet hors imputeur : un `CovariateMaterializer()` autonome interpole désormais en `'linear'` (positionnel sans ancrage, `'time'` sous `anchor_fraction`, comme le prévoit le convertisseur). Test : `tests/unit/frequency/covariate_materializer/test_configuration.py::TestPerFeatureResolution::test_uncovered_column_falls_back_to_the_parameter_default`.
