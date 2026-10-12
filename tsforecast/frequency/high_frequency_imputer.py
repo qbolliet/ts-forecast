@@ -39,6 +39,7 @@ from ..panel.utils import (
     normalize_entity_key,
     split_variable_key,
 )
+from ..utils._constants import FREQUENCY_LEVEL_NAME
 from .aggregation_constraint import (
     AggregationConstraint,
     ConstraintSetting,
@@ -227,7 +228,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     to stack**: the output carries the target level and nothing else.
     The frequency level sits on the entity side of the index, the shape:
     ``(frequency, date)`` on a time series, ``(entity..., 'frequency',
-    'date')`` on a panel.
+    'date')`` on a panel. The name ``'frequency'``
+    (``tsforecast.utils._constants.FREQUENCY_LEVEL_NAME``) is **reserved**:
+    ``fit`` and ``transform`` reject an input whose index level, ``panel_cols``
+    entry or ``time_col`` already bears it, so the stacked index never holds
+    two levels of one name. ``inverse_transform`` recognizes a stacked frame
+    by its depth and reads the level by position, never by name.
 
     **The price of** ``impute_intermediate_frequencies=False``: on a time
     series, ``y_train`` of an annual variable observed at three anchors holds
@@ -1099,6 +1105,49 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             if split_variable_key(key)[1] == column
         }
 
+    # Méthode auxiliaire des fréquences remises au constructeur du jeu d'entraînement
+    def _training_frequencies(
+        self,
+        column: str,
+        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
+    ) -> Dict[str, Any]:
+        """Return the detected frequencies with the target column made explicit.
+
+        :meth:`_detected_frequencies_by_column` folds a column into its scalar
+        form when every DETECTED entity agrees, which lends that frequency to
+        an entity observing the column at an undetectable frequency (a single
+        observation). The training set must not borrow it: ``f_block(e)`` is
+        the entity's OWN frequency, and a lent one would scale its rows by
+        the wrong divisor. The target column is therefore handed over per
+        entity, each undetectable pair mapped to None explicitly — the
+        :class:`TrainingSetBuilder` then drops that block, whatever the other
+        entities do. Covariate entries are left untouched.
+
+        Args:
+            column: Column whose training set is composed.
+            freqs_by_column: Output of :meth:`_detected_frequencies_by_column`.
+
+        Returns:
+            ``freqs_by_column`` itself when no pair of ``column`` is
+            undetectable, otherwise a copy whose ``column`` entry is the
+            explicit per-entity mapping.
+        """
+        # Couples indétectables de la colonne : rien à expliciter sans eux
+        undetected = [
+            split_variable_key(key)[0]
+            for key in self._undetected_frequencies_
+            if split_variable_key(key)[1] == column
+        ]
+        if not self.is_panel_ or not undetected:
+            return freqs_by_column
+
+        # Liaison par entité : fréquences propres, None pour les indétectables
+        binding: Dict[EntityKey, Optional[str]] = dict(
+            self._column_frequencies_by_entity(column)
+        )
+        binding.update({entity: None for entity in undetected})
+        return {**freqs_by_column, column: binding}
+
     # Méthode auxiliaire de conversion des fréquences détectées à la forme des consommateurs
     def _detected_frequencies_by_column(
         self,
@@ -1655,16 +1704,23 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         Raises:
             ValueError: If no frequency can be detected, if a
-                ``target_frequency`` dict misses entities (B16), or if the
-                indices of X and y disagree (B14).
+                ``target_frequency`` dict misses entities (B16), if the
+                indices of X and y disagree (B14), or if an index level bears
+                the reserved name ``'frequency'``.
         """
         # =================================================================
         # PHASE 0 — Setup
         # =================================================================
         # Purge de l'état écrit par un précédent "transform"
-        for stale_attr in ('imputation_provenance_', '_original_X_', '_original_y_'):
+        for stale_attr in (
+            'imputation_provenance_', '_original_X_', '_original_y_',
+            '_stacked_index_nlevels',
+        ):
             if stale_attr in self.__dict__:
                 delattr(self, stale_attr)
+
+        # Nom de niveau réservé au niveau de fréquence
+        self._check_reserved_level_name(X)
 
         # Extraction des colonnes d'intérêt
         self.feature_columns_ = list(X.columns)
@@ -2705,13 +2761,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             self.aggregation_constraint, column
         ) is None
 
+        # Fréquences remises au constructeur : la colonne cible par entité,
+        # couples indétectables explicités, pour qu'aucun bloc n'emprunte la
+        # fréquence des autres entités
+        training_freqs = self._training_frequencies(column, freqs_by_column)
+
         # Jeu mutualisé, sonde sans covariable : elle ne matérialise rien et
         # rend déjà les blocs, la cible brute et la grille d'entraînement
         probe = builder.build(
             column=column,
             feature_cols=(),
             stage_freq=stage_freq,
-            detected_frequencies=freqs_by_column,
+            detected_frequencies=training_freqs,
             source_data=X_work,
             eligible_origins=eligible,
             keep_coincident_cells=keep_coincident,
@@ -2762,7 +2823,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             column=column,
             feature_cols=feature_cols,
             stage_freq=stage_freq,
-            detected_frequencies=freqs_by_column,
+            detected_frequencies=training_freqs,
             source_data=X_work,
             eligible_origins=eligible,
             materialization=ways,
@@ -4190,7 +4251,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         Raises:
             ValueError: If ``X`` is not a DataFrame, if it carries no usable
-                temporal index, or if a column of the fit is missing.
+                temporal index, if a column of the fit is missing, or if an
+                index level bears the reserved name ``'frequency'``.
 
         Examples:
             >>> imputed = imputer.fit(df).transform(df)      # doctest: +SKIP
@@ -4200,6 +4262,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         if not isinstance(X, pd.DataFrame):
             raise ValueError(f"X must be a pandas DataFrame, got {type(X).__name__}")
+        # Nom de niveau réservé au niveau de fréquence de la sortie
+        self._check_reserved_level_name(X)
 
         # Alignement de l'index de y sur celui de X, par la même fonction qu'au
         # fit : deux règles de nommage divergentes ont déjà fait perdre la cible
@@ -4301,6 +4365,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 6' — Sortie multi-fréquences et provenance
         # =================================================================
+        # Profondeur de l'index empilé, notée au moment de l'empilement : c'est
+        # elle, et non le nom d'un niveau, qui identifie à l'inversion une
+        # sortie multi-fréquences
+        self._stacked_index_nlevels: Optional[int] = None
         if not frames:
             # Progression sans étape : rien n'a été produit
             data_result = X_stage
@@ -4308,6 +4376,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         elif self.keep_lower_frequencies:
             data_result = self._build_multifreq_output(frames)
             self.imputation_provenance_ = self._build_multifreq_output(provenances)
+            self._stacked_index_nlevels = data_result.index.nlevels
         else:
             final_label = list(frames)[-1]
             data_result = frames[final_label]
@@ -4375,35 +4444,75 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 [*entity_arrays, freq_values, combined.index.get_level_values(-1)],
                 names=[
                     *entity_names,
-                    'frequency',
+                    FREQUENCY_LEVEL_NAME,
                     combined.index.names[-1] or 'date',
                 ],
             )
         else:
             new_index = pd.MultiIndex.from_arrays(
                 [freq_values, combined.index],
-                names=['frequency', combined.index.name or 'date'],
+                names=[FREQUENCY_LEVEL_NAME, combined.index.name or 'date'],
             )
 
         return combined.set_axis(new_index)
+
+    # Méthode auxiliaire de contrôle du nom de niveau réservé
+    def _check_reserved_level_name(self, X: pd.DataFrame) -> None:
+        """Reject an input whose index would carry the reserved level name.
+
+        :data:`FREQUENCY_LEVEL_NAME` names the frequency level of the
+        multi-frequency output and of the training grid. An input level of the
+        same name would give the stacked index two levels of one name — an
+        ambiguity for anyone addressing the level by name. The check does not
+        depend on the configuration, so a ``set_params`` between two calls
+        never turns an accepted input into an ambiguous output.
+
+        Args:
+            X: Input of ``fit`` or ``transform``, before any index setting.
+
+        Raises:
+            ValueError: If an index level, a ``panel_cols`` entry or
+                ``time_col`` is named :data:`FREQUENCY_LEVEL_NAME`.
+        """
+        # Noms des niveaux d'index, présents ou à venir (colonnes de panel et
+        # colonne temporelle passées en index)
+        names = [name for name in X.index.names if name is not None]
+        panel_cols = self.panel_cols or []
+        names += [panel_cols] if isinstance(panel_cols, str) else list(panel_cols)
+        if self.time_col:
+            names.append(self.time_col)
+        if FREQUENCY_LEVEL_NAME in names:
+            raise ValueError(
+                f"The index level name {FREQUENCY_LEVEL_NAME!r} is reserved for "
+                f"the frequency level of the multi-frequency output; rename that "
+                f"level (or column) of X before calling fit / transform."
+            )
 
     # -------------------------------------------------------------------------
     # Transformation inverse
     # -------------------------------------------------------------------------
     # Méthode auxiliaire de présence du niveau de fréquence
-    @staticmethod
-    def _has_frequency_level(frame: pd.DataFrame) -> bool:
-        """Tell whether a frame carries the multi-frequency ``frequency`` level.
+    def _has_frequency_level(self, frame: pd.DataFrame) -> bool:
+        """Tell whether a frame is a stacked multi-frequency frame.
+
+        Read on the STRUCTURE, never on the level names: a stacked frame is
+        a MultiIndex as deep as the output the last transform stacked, its
+        frequency level sitting just before the date. Renaming the levels of
+        the output, or an index level named like the frequency level, cannot
+        fool the test.
 
         Args:
             frame: Frame to inspect.
 
         Returns:
-            True if its index is a MultiIndex holding a ``'frequency'`` level.
+            True if the last transform stacked its output and ``frame`` has
+            that output's depth.
         """
+        depth = getattr(self, '_stacked_index_nlevels', None)
         return (
-            isinstance(frame.index, pd.MultiIndex)
-            and 'frequency' in (frame.index.names or [])
+            depth is not None
+            and isinstance(frame.index, pd.MultiIndex)
+            and frame.index.nlevels == depth
         )
 
     # Méthode auxiliaire de sélection du niveau de fréquence à inverser
@@ -4433,8 +4542,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         available: List[str] = []
         for frame in (data, provenance):
             if self._has_frequency_level(frame):
+                # Niveau de fréquence lu par position : l'avant-dernier
                 available.extend(
-                    frame.index.get_level_values('frequency').unique().tolist()
+                    frame.index.get_level_values(-2).unique().tolist()
                 )
         if not available:
             return None
@@ -4467,8 +4577,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """Reduce a stacked frame to one frequency level and restore its index.
 
         Panel and time series are handled alike: the level is addressed by
-        name, never by position, and the names of the remaining levels are
-        restored from the last transform input.
+        position — the one before the date —, never by name, and the names of
+        the remaining levels are restored from the last transform input.
 
         Args:
             frame: Frame to reduce, stacked or not.
@@ -4481,10 +4591,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if label is None or not self._has_frequency_level(frame):
             return frame
 
+        # Niveau de fréquence : l'avant-dernier, par position
+        level = frame.index.nlevels - 2
         # Niveau absent du frame : rien à extraire
-        if label not in frame.index.get_level_values('frequency'):
+        if label not in frame.index.get_level_values(level):
             return frame
-        reduced = frame.xs(label, level='frequency')
+        reduced = frame.xs(label, level=level)
 
         # Restauration des noms de niveaux de l'index source
         source = getattr(self, '_original_X_', None)

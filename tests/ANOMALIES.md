@@ -3922,3 +3922,86 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/frequency/covariate_materializer/test_configuration.py::TestPerFeatureResolution::test_uncovered_column_falls_back_to_the_parameter_default`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `DEFAULT_INTERPOLATION_METHOD = 'linear'` : défaut du composant et repli d'une forme dict sans `'__default__'`. Effet hors imputeur : un `CovariateMaterializer()` autonome interpole désormais en `'linear'` (positionnel sans ancrage, `'time'` sous `anchor_fraction`, comme le prévoit le convertisseur). Test : `tests/unit/frequency/covariate_materializer/test_configuration.py::TestPerFeatureResolution::test_uncovered_column_falls_back_to_the_parameter_default`.
+
+### ANO-FREQ-045 — Cellule coïncidente écartée au profit d'une ancre que la fenêtre exclut
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/training_set_builder.py::TrainingSetBuilder.build` (`_candidate_rows`)
+- **Sévérité** : mineure
+- **Observé** : sous `keep_coincident_cells=False` (traduction de `aggregation_constraint='sum'`), la cellule produite
+  qui partage sa date avec une observation était écartée **avant** la fenêtre `'training'` et le filtre d'origine. Or
+  `get_mask_at_frequency` ne garde une période basse fréquence que si **toutes** ses sous-périodes sont dans la fenêtre :
+  une fenêtre qui commence en cours d'année exclut l'ancre annuelle mais garde le T4. Les deux lignes de la période
+  étaient alors perdues. Atteignable par `HighFrequencyImputer` : sur `TS` dont `m1` est vide au premier semestre 2021,
+  sous `impute_intermediate_frequencies=True` et `'sum'`, `a1` s'entraîne à l'étape `M` sur 9 lignes, le T4 2021 absent.
+- **Attendu** : §5.5 / §5.9 — « l'observation gagne » parce que, recalées sur elle, les sous-périodes en font une
+  combinaison linéaire exacte. Une imputation n'est redondante qu'avec une observation **retenue** : si la fenêtre exclut
+  l'ancre, le T4 n'est redondant avec rien et doit rester (10 lignes).
+- **Reproduction** :
+  ```python
+  data = reference_timeseries.copy(); data.index.freq = None
+  data.loc[:'2021-06-30', 'm1'] = np.nan
+  HighFrequencyImputer(estimator=LinearRegression(), target_frequency='M',
+                       impute_intermediate_frequencies=True, aggregation_constraint='sum').fit(data)
+  # jeu de 'a1' à l'étape M : 9 lignes, aucune au 2021-12-31
+  ```
+- **Tests** : `tests/unit/frequency/training_set_builder/test_coincident_cells.py::TestCoincidentCells::test_produced_cell_kept_when_its_anchor_is_outside_the_window`,
+  `::test_imputer_keeps_the_quarter_of_an_excluded_year`
+- **Statut** : corrigé (2026-10-12) — accord de l'auteur sur le principe (le constat initial « sans effet pour
+  l'imputeur » était faux)
+- **Correction** : `_candidate_rows` garde toutes les cellules produites ; le départage est fait par
+  `_drop_coincident_cells` **après** la fenêtre et le filtre d'origine, contre les seules observations retenues.
+  Docstring de `build` (`keep_coincident_cells`) mise à jour. La spec (§5.5, §5.9) reste à amender au prompt R9.
+
+### ANO-FREQ-046 — Entité à fréquence indétectable : elle emprunte la fréquence des autres quand elles s'accordent
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._detected_frequencies_by_column`
+  (repli sur la forme scalaire), lu par `TrainingSetBuilder.blocks_of`
+- **Sévérité** : mineure
+- **Observé** : une entité qui observe la variable une seule fois a une fréquence indétectable
+  (`_undetected_frequencies_`). Si les entités détectées sont en désaccord, la liaison reste par entité et le bloc de
+  l'entité est écarté (journalisé). Si elles s'accordent, la colonne est repliée sur la forme scalaire, et l'entité en
+  hérite. Sur `PANEL-F` avec `v` annuelle pour FR et DE et une seule valeur mensuelle pour IT, le bloc IT vaut `'Y'` :
+  sa valeur 10.0 serait prise pour un total annuel et divisée par 12. Le sort de l'entité dépend donc des AUTRES
+  entités. (La fenêtre `'training'` par défaut écarte ici la ligne, mais pas par principe.)
+- **Attendu** : §5.8 R2 — `f_block(e) = f_var(e, v)`, la fréquence **propre** de l'entité. Sans fréquence propre, pas
+  de diviseur : le bloc est écarté, quelles que soient les autres entités (cohérent avec D40 et la classification,
+  qui laisse ces couples de côté).
+- **Reproduction** :
+  ```python
+  data = mixed_freq_panel_multifrequency.copy()
+  data.loc['IT', 'v'] = np.nan; data.loc[('IT', pd.Timestamp('2021-01-31')), 'v'] = 10.0
+  data.loc['DE', 'v'] = np.nan   # puis DE annuelle : 120 / 132 / 150 aux fins d'année
+  # HighFrequencyImputer(...).fit(data) : blocs de 'v' = {DE: Y, FR: Y, IT: Y}
+  ```
+- **Test** : `tests/unit/frequency/training_set_builder/test_blocks_and_rows.py::TestScopeOfContributors::test_imputer_never_lends_a_frequency_to_an_undetectable_entity`
+- **Statut** : corrigé (2026-10-12) — arbitrage de l'auteur : écarter toujours
+- **Correction** : `HighFrequencyImputer._training_frequencies` remet au constructeur la colonne cible sous forme par
+  entité, chaque couple indétectable explicitement à `None` ; `blocks_of` écarte alors le bloc (journalisé). Les
+  entrées des covariables ne changent pas. Docstring de `blocks_of` : forme `None` explicite documentée.
+
+### ANO-FREQ-047 — Niveau de fréquence repéré par son nom
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._has_frequency_level`,
+  `::_select_inverse_frequency_level`, `::_drop_frequency_level` ; `tsforecast/frequency/training_set_builder.py::TrainingSetBuilder.build`
+- **Sévérité** : mineure
+- **Observé** : `inverse_transform` reconnaissait une sortie multi-fréquences au nom `'frequency'` d'un de ses niveaux
+  et l'adressait par ce nom (`xs(label, level='frequency')`). Une sortie dont l'utilisateur a renommé les niveaux
+  n'était pas reconnue (le niveau de fréquence restait dans le résultat) ; un panel dont un niveau d'entité s'appelle
+  déjà `'frequency'` produisait un index empilé à deux niveaux du même nom, ambigu à l'adressage par nom — de même pour
+  la grille estampillée du constructeur.
+- **Attendu** : §5.9 — la forme de la grille est « portée par le jeu lui-même, jamais reniflée des noms de niveaux » ;
+  même principe pour la sortie empilée (§12.4), qui partage la même clé.
+- **Reproduction** :
+  ```python
+  imputer = HighFrequencyImputer(estimator=LinearRegression(), target_frequency='M')
+  out = imputer.fit_transform(reference_timeseries)
+  imputer.inverse_transform(out.rename_axis(['pas', 'jour']))   # niveau de fréquence non retiré
+  ```
+- **Tests** : `tests/unit/frequency/test_high_frequency_imputer.py::TestReservedFrequencyLevel`,
+  `tests/unit/frequency/training_set_builder/test_robustness.py::TestIndexRobustness::test_reserved_level_name_is_rejected`
+- **Statut** : corrigé (2026-10-12) — arbitrage de l'auteur : l'option la plus robuste, appliquée partout
+- **Correction** : nom unique `FREQUENCY_LEVEL_NAME` dans `tsforecast/utils/_constants.py` (valeur `'frequency'`
+  conservée : nom public de la sortie, utilisé par la documentation et le notebook 2) ; nom **réservé** — `fit`,
+  `transform` et `TrainingSetBuilder.build` rejettent une entrée dont un niveau d'index (ou `panel_cols`, `time_col`)
+  le porte, quelle que soit la configuration ; `inverse_transform` reconnaît une sortie empilée à sa **profondeur**
+  (notée par `transform` au moment de l'empilement) et lit le niveau **par position** (l'avant-dernier).

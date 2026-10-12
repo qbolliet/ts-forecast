@@ -99,6 +99,13 @@ Le résultat empile les niveaux de fréquence sur le côté « entité » de l'i
 panel. `keep_lower_frequencies=False` ne conserve que le niveau cible (paramètre
 purement d'affichage, sans effet sur les valeurs).
 
+Le nom `'frequency'` est **réservé** : `fit` et `transform` refusent une entrée
+dont un niveau d'index (ou une colonne de `panel_cols`, ou `time_col`) le porte
+déjà, pour que l'index empilé n'ait jamais deux niveaux du même nom.
+`inverse_transform` reconnaît une sortie empilée à sa profondeur et lit le niveau
+de fréquence par position : renommer les niveaux de la sortie ne l'empêche pas
+de l'inverser.
+
 ## Pour aller plus loin
 
 - Tutoriel : [Imputation multi-fréquences](../tutorials/mixed_frequency_imputation.md)

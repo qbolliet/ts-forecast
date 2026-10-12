@@ -36,6 +36,8 @@ from .imputation_plan import MaterializationWay
 from .provenance import CellOrigin, max_origin
 # Normalisation des fréquences détectées
 from ..utils.frequency.utils import normalize_frequency
+# Nom réservé du niveau de fréquence, partagé avec la sortie de l'imputeur
+from ..utils._constants import FREQUENCY_LEVEL_NAME
 # Utilitaires de panel : découpage et normalisation des clés d'entité
 from ..panel.utils import iter_entity_blocks, normalize_entity_key
 
@@ -54,8 +56,9 @@ LogCallback = Callable[[str], None]
 # Colonnes du tableau intermédiaire d'une ligne candidate
 _ROW_COLUMNS: Tuple[str, ...] = ('value', 'freq', 'origin')
 
-# Nom du niveau de fréquence ajouté à l'index du jeu d'entraînement
-FREQUENCY_LEVEL_NAME: str = 'frequency'
+# Marqueur interne d'une ligne candidate issue du miroir (cellule produite par
+# une étape antérieure), par opposition à une cellule observée de la source
+_PRODUCED_COLUMN: str = 'produced'
 
 
 # Fonction de décomposition d'un index de jeu d'entraînement
@@ -70,7 +73,9 @@ def split_training_index(
     frequency level placed on the entity side — ``(entity..., freq, date)`` —
     so the entity of a row is ``key[:-2]`` and no longer ``key[:-1]``. This is
     the single decomposition every consumer goes through, so the two shapes
-    are read in exactly one place.
+    are read in exactly one place. The level is read by POSITION, never by
+    name: a level named :data:`FREQUENCY_LEVEL_NAME` without the flag is an
+    entity level like any other.
 
     Args:
         index: Training grid, stamped or not.
@@ -303,17 +308,30 @@ class TrainingSetBuilder:
         the stage frequency ever takes part in the decision, so the blocks are
         stage-independent.
 
+        An entity observing the column without a frequency of its own — absent
+        from a per-entity mapping of several entries, or mapped to None
+        explicitly, the form under which ``HighFrequencyImputer`` hands over an
+        observed but undetectable pair (a single observation) — gets no block:
+        its period is unknown, so no divisor can bring its rows to the stage
+        scale, and lending it the frequency of the other entities would be a
+        guess (``f_block(e)`` is the entity's own frequency). A per-entity
+        mapping of a single entry, like the scalar form, stands for every
+        entity it does not name.
+
         Args:
             column: Column whose training set is being composed.
             detected_frequencies: Detected frequency of each column, scalar or
                 per entity — a detected frequency is a property of the
-                (entity, column) pair, never of the column alone.
+                (entity, column) pair, never of the column alone. A None value
+                marks an entity observing the column at an undetectable
+                frequency.
             source_data: Input data, time series or panel. Never modified.
 
         Returns:
             Mapping entity key -> normalized block frequency, in the entity
             order of the data. Entities observing the column at no date at
-            all, and entities whose frequency is unknown, are absent.
+            all, and entities whose frequency is unknown, are absent — the
+            latter logged.
 
         Raises:
             KeyError: If ``column`` is absent from ``source_data``.
@@ -368,7 +386,6 @@ class TrainingSetBuilder:
         block: pd.DataFrame,
         f_block: str,
         mirror_block: Optional[pd.DataFrame],
-        keep_coincident_cells: bool = False,
     ) -> pd.DataFrame:
         """Compose the candidate rows of one block, before any filtering.
 
@@ -376,13 +393,10 @@ class TrainingSetBuilder:
         entity, at ``f_block(e)``. No aggregation, hence no aggregation
         constraint and no ``full_periods_only`` effect. The cells produced by
         an earlier stage are added from the mirror, carrying their own
-        production frequency and origin.
-
-        Two cells of one entity may share a date without describing the same
-        period — the 31st of December is both a year end and a quarter end.
-        ``keep_coincident_cells`` decides between them: False (the historical
-        behaviour) keeps the observed one alone, True keeps both, which the
-        caller then distinguishes by the frequency level of the grid.
+        production frequency and origin — all of them, those sharing a date
+        with an observation included: the coincident-cell rule is applied by
+        :meth:`_drop_coincident_cells`, once the window and the origin filter
+        have said which observations are actually retained.
 
         Args:
             column: Column being composed.
@@ -391,15 +405,12 @@ class TrainingSetBuilder:
             mirror_block: This entity's mirror block — a frame with columns
                 ``value`` / ``freq`` / ``origin`` — or None when the column
                 produced nothing for that entity yet.
-            keep_coincident_cells: Whether a produced cell falling on a date
-                already carrying an observation is kept. The component never
-                learns WHY it is asked to: the decision belongs to the caller,
-                exactly like ``eligible_origins``.
 
         Returns:
-            Date-indexed frame with columns ``value``, ``freq`` and
-            ``origin``, sorted by date. The sort is stable, so an observed
-            cell always precedes the finer produced cell it coincides with.
+            Date-indexed frame with columns ``value``, ``freq``, ``origin``
+            and the internal ``produced`` marker, sorted by date. The sort is
+            stable, so an observed cell always precedes the finer produced
+            cell it coincides with.
         """
         # Cellules observées : leur fréquence est celle du bloc, leur origine
         # est 'observed' par construction
@@ -409,29 +420,54 @@ class TrainingSetBuilder:
                 'value': observed.astype(float),
                 'freq': f_block,
                 'origin': 'observed',
+                _PRODUCED_COLUMN: False,
             },
             index=observed.index,
-            columns=list(_ROW_COLUMNS),
+            columns=[*_ROW_COLUMNS, _PRODUCED_COLUMN],
         )
 
         # Cellules produites par une étape antérieure : fréquence et origine
-        # lues dans les registres
+        # lues dans les registres, cellules sans valeur écartées
         if mirror_block is not None and not mirror_block.empty:
-            # Départage des cellules coïncidentes: une période que
-            # non recalée n'est pas colinéaire non
-            # plus, mais une règle dépendant des valeurs serait irreproductible
-            # entre le fit et le transform.
-            coincident = mirror_block.index.isin(rows.index)
-            extra = mirror_block.loc[
-                slice(None) if keep_coincident_cells else ~coincident,
-                list(_ROW_COLUMNS),
-            ]
-            extra = extra[extra['value'].notna()]
+            extra = mirror_block.loc[mirror_block['value'].notna(), list(_ROW_COLUMNS)]
             if not extra.empty:
-                rows = pd.concat([rows, extra])
+                rows = pd.concat([rows, extra.assign(**{_PRODUCED_COLUMN: True})])
 
         # Tri stable : à date égale, l'observation précède la cellule produite
         return rows.sort_index(kind='stable')
+
+    # Méthode auxiliaire de départage des cellules coïncidentes
+    @staticmethod
+    def _drop_coincident_cells(rows: pd.DataFrame) -> pd.DataFrame:
+        """Drop the produced cells sharing a date with a retained observation.
+
+        Two cells of one entity may share a date without describing the same
+        period — the 31st of December is both a year end and a quarter end.
+        When the caller does not keep both (``keep_coincident_cells=False``,
+        the translation of ``aggregation_constraint='sum'``), the observation
+        wins: rescaled to it, the produced sub-periods make it an exact linear
+        combination of themselves, so keeping both would count the period
+        twice. The rule reads the rows left by the window and the origin
+        filter: a produced cell whose observation fell outside the window is
+        no longer redundant with anything, and is kept. It reads the grid
+        structure, never the values: a period the constraint left unrescaled
+        (partial, truncated) is not collinear either, yet its produced cell is
+        dropped — a value-dependent rule would not be reproducible.
+
+        Args:
+            rows: Filtered candidate rows of one entity, carrying the
+                ``produced`` marker.
+
+        Returns:
+            The rows without the produced cells coinciding with an observed
+            one.
+        """
+        # Dates portant une observation retenue
+        produced = rows[_PRODUCED_COLUMN].to_numpy(dtype=bool)
+        observed_dates = rows.index[~produced]
+        # Une cellule produite à une date observée est redondante
+        redundant = produced & rows.index.isin(observed_dates)
+        return rows[~redundant]
 
     # Méthode auxiliaire de découpage des lignes en couches homogènes
     @staticmethod
@@ -702,12 +738,16 @@ class TrainingSetBuilder:
                 the fourth quarterly imputation of that year — are BOTH kept.
                 False (default) keeps the observed one alone and the index
                 stays ``(entity..., date)``; True keeps both and the index
-                gains a ``'frequency'`` level on the entity side — but only
-                where a coincidence actually survives the origin filter, so
-                a set holding anchors alone keeps the historical shape and
-                the parameter is inert on it. Like
-                ``eligible_origins``, the reason belongs to the caller: this
-                class never reads ``aggregation_constraint``.
+                gains a :data:`FREQUENCY_LEVEL_NAME` level on the entity side
+                — but only where a coincidence actually survives the window
+                and the origin filter, so a set holding anchors alone keeps
+                the historical shape and the parameter is inert on it. Under
+                False, the decision is likewise taken AFTER both filters: a
+                produced cell is dropped only when the observation it
+                coincides with is itself retained, never in favour of an
+                anchor the window excludes. Like ``eligible_origins``, the
+                reason belongs to the caller: this class never reads
+                ``aggregation_constraint``.
 
         Returns:
             The :class:`TrainingSet`. Empty — with empty ``blocks`` and
@@ -715,6 +755,9 @@ class TrainingSetBuilder:
 
         Raises:
             KeyError: If ``column`` is absent from ``source_data``.
+            ValueError: If a level of the ``source_data`` index is named
+                :data:`FREQUENCY_LEVEL_NAME`, a name reserved for the
+                frequency level of the grid.
 
         Examples:
             >>> dates = pd.date_range('2021-01-31', periods=12, freq='ME')
@@ -731,6 +774,15 @@ class TrainingSetBuilder:
             >>> len(training), training.ways
             (2, {'m1': 'aggregate'})
         """
+        # Nom de niveau réservé : la grille estampillée ne doit jamais porter
+        # deux niveaux du même nom, quelle que soit la configuration
+        if FREQUENCY_LEVEL_NAME in list(source_data.index.names):
+            raise ValueError(
+                f"The index level name {FREQUENCY_LEVEL_NAME!r} is reserved for "
+                f"the frequency level of the training grid; rename that level "
+                f"of source_data (index names: {list(source_data.index.names)})"
+            )
+
         # Normalisation des paramètres d'appel
         columns = tuple(feature_cols)
         admissible: Set[CellOrigin] = set(eligible_origins)
@@ -752,20 +804,27 @@ class TrainingSetBuilder:
                 source_blocks[entity],
                 f_block,
                 mirror_blocks.get(entity),
-                keep_coincident_cells=keep_coincident_cells,
             )
             for entity, f_block in blocks.items()
         }
 
-        # Restriction par la fenêtre 'training', lue à la fréquence du bloc
+        # Restriction par la fenêtre 'training', lue à la fréquence de chaque
+        # couche
         candidates = self._restrict_to_window(candidates, blocks)
 
-        # Filtre d'origine, appliqué à l'identique dans chaque bloc,
-        # puis abandon des blocs devenus vides
+        # Filtre d'origine, appliqué à l'identique dans chaque bloc
         rows_per_entity = {
             entity: rows[rows['origin'].isin(admissible).to_numpy()]
             for entity, rows in candidates.items()
         }
+        # Départage des cellules coïncidentes APRÈS les deux filtres : une
+        # cellule produite n'est redondante qu'avec une observation retenue
+        if not keep_coincident_cells:
+            rows_per_entity = {
+                entity: self._drop_coincident_cells(rows)
+                for entity, rows in rows_per_entity.items()
+            }
+        # Abandon des blocs devenus vides
         rows_per_entity = {
             entity: rows for entity, rows in rows_per_entity.items() if not rows.empty
         }

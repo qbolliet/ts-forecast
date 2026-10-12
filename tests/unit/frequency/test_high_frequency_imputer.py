@@ -3238,3 +3238,64 @@ class TestSklearnConformance:
             'interpolate', 'model'
         )
         assert np.isfinite(search.best_score_)
+
+
+# =============================================================================
+# Nom réservé du niveau de fréquence et lecture positionnelle (§5.9, §12.4)
+# =============================================================================
+class TestReservedFrequencyLevel:
+    """The ``'frequency'`` level name is reserved, the level read by position."""
+
+    @pytest.mark.parametrize(
+        'names', [['frequency', 'date'], ['country', 'frequency']],
+        ids=['entity_level', 'date_level'],
+    )
+    def test_fit_rejects_an_index_level_named_frequency(
+        self, mixed_freq_panel_multifrequency, names
+    ):
+        """A stacked output would hold two levels of one name: ``fit`` refuses."""
+        data = mixed_freq_panel_multifrequency.rename_axis(names)
+
+        with pytest.raises(ValueError, match="'frequency' is reserved"):
+            _make_imputer().fit(data)
+
+    def test_transform_rejects_an_index_level_named_frequency(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Same guard at ``transform``, on data the fit never saw."""
+        imputer = _fit_quietly(_make_imputer(), mixed_freq_panel_multifrequency)
+        data = mixed_freq_panel_multifrequency.rename_axis(['frequency', 'date'])
+
+        with pytest.raises(ValueError, match="'frequency' is reserved"):
+            imputer.transform(data)
+
+    def test_guard_does_not_depend_on_the_configuration(self, reference_timeseries):
+        """``keep_lower_frequencies=False`` stacks nothing, yet the name stays reserved."""
+        data = reference_timeseries.rename_axis('frequency')
+
+        with pytest.raises(ValueError, match="'frequency' is reserved"):
+            _make_imputer(keep_lower_frequencies=False).fit(data)
+
+    def test_inverse_reads_the_level_by_position(self, reference_timeseries):
+        """Renamed output levels invert exactly like the original names."""
+        imputer = _make_imputer(
+            impute_intermediate_frequencies=True, restore_original_values=True
+        )
+        transformed = _fit_transform_quietly(imputer, reference_timeseries)
+        reference = imputer.inverse_transform(transformed)
+
+        # Renommage des niveaux de la sortie : une lecture par nom échouerait
+        renamed = transformed.rename_axis(['pas', 'jour'])
+        restored = imputer.inverse_transform(renamed)
+
+        pd.testing.assert_frame_equal(restored, reference)
+        assert restored.index.equals(reference_timeseries.index)
+
+    def test_unstacked_output_is_left_as_is(self, reference_timeseries):
+        """Under ``keep_lower_frequencies=False`` no level is ever dropped."""
+        imputer = _make_imputer(keep_lower_frequencies=False)
+        transformed = _fit_transform_quietly(imputer, reference_timeseries)
+
+        restored = imputer.inverse_transform(transformed)
+
+        assert restored.index.equals(transformed.index)

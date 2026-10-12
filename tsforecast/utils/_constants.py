@@ -98,3 +98,13 @@ POSITION_AWARE_FREQUENCIES: FrozenSet[str] = frozenset(MONTH_BASED_FREQUENCIES) 
 # infra-journalières : un horodatage y marque le DÉBUT de sa période (ou de son
 # bloc de n périodes), comme les étiquettes de pandas.resample
 BLOCK_START_FREQUENCIES: FrozenSet[str] = frozenset({'D', 'B'}) | frozenset(SUBDAILY_NS)
+
+# ---------------------------------------------------------------------------
+# Structure des jeux multi-fréquences
+# ---------------------------------------------------------------------------
+
+# Nom réservé du niveau de fréquence inséré avant la date dans un index empilé
+# (grille d'entraînement sous cellules coïncidentes, sortie multi-fréquences de
+# HighFrequencyImputer). Les consommateurs le lisent par position, jamais par
+# nom ; une donnée d'entrée dont un niveau porte déjà ce nom est rejetée
+FREQUENCY_LEVEL_NAME: str = 'frequency'
