@@ -399,6 +399,40 @@ class ImputationStep:
             self.interpolation_anchor,
         ))
 
+    # Sérialisation : les vues figées ne sont pas sérialisables par pickle
+    def __getstate__(self) -> Dict[str, Any]:
+        """Return the state with the frozen mappings as plain dicts.
+
+        ``types.MappingProxyType`` cannot be pickled: without this hook a
+        fitted ``HighFrequencyImputer`` could be neither pickled nor
+        deep-copied. :meth:`__setstate__` freezes the mappings again.
+
+        Returns:
+            The instance dictionary, ``materialization`` and
+            ``training_blocks`` turned into ``dict``.
+        """
+        state = dict(self.__dict__)
+        for name in _FROZEN_MAPPINGS:
+            state[name] = dict(state[name])
+        return state
+
+    # Désérialisation : restauration de l'état puis nouveau gel des vues
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Restore the state and freeze the mappings again.
+
+        Args:
+            state: State produced by :meth:`__getstate__`.
+        """
+        # Écriture directe du dictionnaire d'instance : la classe est figée,
+        # "__setattr__" lèverait
+        self.__dict__.update(state)
+        for name in _FROZEN_MAPPINGS:
+            object.__setattr__(self, name, MappingProxyType(dict(state[name])))
+
+
+# Champs figés en vue en lecture seule par "ImputationStep.__post_init__"
+_FROZEN_MAPPINGS = ('materialization', 'training_blocks')
+
 
 # Conteneur immuable du plan complet
 @dataclass(frozen=True)

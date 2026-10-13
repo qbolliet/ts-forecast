@@ -1,12 +1,12 @@
 """Fake sklearn estimators shared by the ``tsforecast`` tests.
 
-Extracted from ``tests/unit/frequency/test_high_frequency_imputer.py``
+Extracted from the former ``tests/unit/frequency/test_high_frequency_imputer.py``
 (formerly ``_SpyEstimator`` / ``_FailingEstimator``, private to that
 module), renamed without prefix for cross-cutting use.
 """
 # Modules de base
 import numpy as np
-from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.base import BaseEstimator, RegressorMixin, clone
 
 
 class SpyEstimator(BaseEstimator, RegressorMixin):
@@ -80,3 +80,46 @@ class ConstantEstimator(BaseEstimator, RegressorMixin):
     def predict(self, X):
         """Return ``constant``, repeated for each row of ``X``."""
         return np.full(len(X), self.constant)
+
+
+class RecordingEstimator(BaseEstimator, RegressorMixin):
+    """Wrapper delegating to a real estimator while recording what it sees.
+
+    Where :class:`SpyEstimator` predicts a constant, this double keeps the
+    predictions of a real model - needed when a later stage reads them - and
+    still exposes ``fit_X_`` / ``fit_y_`` and the list ``predict_X_``, so a
+    test reads the exact training set through the public plan
+    (``step.model``) rather than through a private hook.
+
+    Args:
+        estimator: Estimator the calls are delegated to. Cloned at ``fit``,
+            the parameter itself is never fitted.
+
+    Examples:
+        >>> from sklearn.linear_model import LinearRegression
+        >>> import pandas as pd
+        >>> X = pd.DataFrame({'x': [1.0, 2.0, 3.0]})
+        >>> model = RecordingEstimator(LinearRegression()).fit(X, X['x'] * 2)
+        >>> model.fit_y_.tolist()
+        [2.0, 4.0, 6.0]
+        >>> [round(float(value), 6) for value in model.predict(X)]
+        [2.0, 4.0, 6.0]
+    """
+
+    def __init__(self, estimator=None):
+        self.estimator = estimator
+
+    def fit(self, X, y):
+        """Record the training set, then fit a clone of the wrapped estimator."""
+        self.fit_X_ = X.copy()
+        self.fit_y_ = y.copy()
+        self.predict_X_ = []
+        self.estimator_ = clone(self.estimator).fit(X, y)
+        return self
+
+    def predict(self, X):
+        """Record the prediction frame and delegate the prediction."""
+        if not hasattr(self, 'predict_X_'):
+            self.predict_X_ = []
+        self.predict_X_.append(X.copy())
+        return self.estimator_.predict(X)

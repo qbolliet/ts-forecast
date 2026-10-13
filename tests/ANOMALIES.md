@@ -3997,7 +3997,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   out = imputer.fit_transform(reference_timeseries)
   imputer.inverse_transform(out.rename_axis(['pas', 'jour']))   # niveau de fréquence non retiré
   ```
-- **Tests** : `tests/unit/frequency/test_high_frequency_imputer.py::TestReservedFrequencyLevel`,
+- **Tests** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestReservedFrequencyLevel`,
   `tests/unit/frequency/training_set_builder/test_robustness.py::TestIndexRobustness::test_reserved_level_name_is_rejected`
 - **Statut** : corrigé (2026-10-12) — arbitrage de l'auteur : l'option la plus robuste, appliquée partout
 - **Correction** : nom unique `FREQUENCY_LEVEL_NAME` dans `tsforecast/utils/_constants.py` (valeur `'frequency'`
@@ -4027,3 +4027,224 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Correction** : `_order_by_cv` rattrape la `ValueError` de `cross_val_score` dont le message contient
   `fits failed` et la traite comme des scores NaN (repli `-inf` + journal) ; toute autre `ValueError` est relancée
   (`test_unrelated_value_error_is_propagated`).
+
+### ANO-FREQ-049 — Un imputeur ajusté ne se sérialise pas (`pickle`, `copy.deepcopy`)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/imputation_plan.py::ImputationStep` (champs `materialization`,
+  `training_blocks`), donc `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer` ajusté
+- **Sévérité** : majeure
+- **Observé** : `pickle.dumps(imputeur_ajusté)` et `copy.deepcopy(imputeur_ajusté)` lèvent
+  `TypeError: cannot pickle 'mappingproxy' object`. `ImputationStep.__post_init__` fige `materialization` et
+  `training_blocks` en `types.MappingProxyType`, que `pickle` ne sait pas sérialiser ; les attributs
+  `imputation_plan_` et `_training_set_builder` échouent tous deux. Un imputeur NON ajusté se sérialise.
+- **Attendu** : un estimateur sklearn ajusté se persiste (`pickle`, `joblib.dump`) et se copie, et le
+  rejeu après aller-retour est identique (§12.5, conformité sklearn ; `check_estimators_pickle`). Le gel
+  peut être conservé avec une forme sérialisable (p. ex. `__reduce__` / `__getstate__` de l'étape, ou un
+  mapping immuable picklable).
+- **Reproduction** :
+  ```python
+  import pickle
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(reference_timeseries)
+  pickle.dumps(imputer)            # TypeError: cannot pickle 'mappingproxy' object
+  copy.deepcopy(imputer)           # même erreur
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_sklearn.py::TestPersistence::test_pickle_round_trip_replays_identically`,
+  `::test_deepcopy_of_a_fitted_imputer_replays_identically`
+- **Statut** : corrigé (2026-10-12)
+- **Correction** : `ImputationStep.__getstate__` rend `materialization` et `training_blocks` en `dict`, `__setstate__` les fige de nouveau en `MappingProxyType` : le gel est conservé, l'étape — donc le plan et l'imputeur ajusté — passe `pickle` et `copy.deepcopy`, et le rejeu après aller-retour est identique. Tests : `test_sklearn.py::TestPersistence` (plus de `xfail`), `tests/unit/frequency/test_imputation_plan.py::TestImputationStepSerialization`.
+
+### ANO-FREQ-050 — `transform` marque `ORIGINAL` les cellules NaN jamais imputées
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._transform`
+  (matrice `imputation_provenance_` du rejeu)
+- **Sévérité** : mineure
+- **Observé** : après `fit`, une cellule NaN qu'aucune étape n'impute est **non marquée** (`isna()`) ; après
+  `transform` des mêmes données, la même cellule porte `ORIGINAL`. Sur `TS` dont `q1`, `a1`, `a2` s'arrêtent
+  en 2022, les 36 cellules de 2023 diffèrent entre la matrice du fit et celle du transform. Même constat sur
+  `PANEL-F` sans `v` pour `IT` (36 cellules d'`IT`).
+- **Attendu** : §5.10 (« précision de vocabulaire, mesurée ») et §6.4 : le tracker ne pose `ORIGINAL` que
+  sur les cellules **non nulles en entrée** ; une cellule NaN jamais imputée est non marquée, au fit comme au
+  transform. I1 exige en outre l'égalité des provenances entre l'ajustement et son rejeu. Effet :
+  `provenance_statistics_` compte ces cellules comme originales après un transform.
+- **Reproduction** :
+  ```python
+  data = reference_timeseries.copy(); data.loc['2023', ['q1', 'a1', 'a2']] = np.nan
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                 keep_lower_frequencies=False).fit(data)
+  imputer.imputation_provenance_.loc['2023', 'a1'].isna().all()   # True
+  imputer.transform(data)
+  imputer.imputation_provenance_.loc['2023', 'a1'].unique()        # ['original']
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestTransformState::test_never_imputed_cells_stay_unmarked_after_transform`
+- **Statut** : corrigé (2026-10-12)
+- **Correction** : `_replay_plan` ne pose `ORIGINAL` que sur les cellules de la grille absentes du tracker **et** porteuses d'une valeur (agrégations exactes) ; une cellule restée NaN est non marquée, au rejeu comme au fit. Le message de l'avertissement agrégé et les docstrings disent désormais « NaN and unmarked » au lieu de « NaN and ORIGINAL ». Tests : `test_transform.py::TestTransformState::test_never_imputed_cells_stay_unmarked_after_transform` (plus de `xfail`), `::test_fit_and_replay_provenances_agree_on_a_panel` (I1 sur `PANEL-F` sans `v` d'`IT`).
+
+### ANO-FREQ-051 — `inverse_transform(restore_original_values=True)` juste après un `fit` : `AttributeError`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._restore_original_values`
+- **Sévérité** : mineure
+- **Observé** : `AttributeError: 'HighFrequencyImputer' object has no attribute '_original_X_'`.
+  `_restore_original_values` lit `self._original_X_` sans garde ; seul `transform` écrit cet instantané, et
+  `fit` le purge (B19). `_drop_frequency_level`, lui, le lit par `getattr(..., None)`.
+- **Attendu** : l'inversion juste après un `fit` est déclarée licite (le `fit` écrit sa propre matrice,
+  `test_inverse_right_after_a_fit_reads_the_fit_provenance`) ; sous `restore_original_values=True` elle doit
+  restaurer les valeurs observées — celles des données passées, ou celles du fit — plutôt que lever.
+- **Reproduction** :
+  ```python
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                 restore_original_values=True).fit(reference_timeseries)
+  imputer.inverse_transform(reference_timeseries)   # AttributeError
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_inverse_transform.py::TestInverseTransform::test_restoring_inverse_right_after_a_fit`
+- **Statut** : corrigé (2026-10-12)
+- **Correction** : le `fit` écrit en phase 6 l'instantané de sa propre entrée (`_original_X_`, `_original_y_`), comme il écrit sa propre matrice de provenance : B19 purge l'état du transform en tête de `fit`, puis le `fit` décrit la dernière passe. Les deux tests B19 deviennent publics (`test_fit_phases.py::TestFitPhases::test_fit_purges_stale_transform_state`, `test_transform.py::TestTransformState::test_transform_state_purged_at_fit` : l'inversion exacte restitue les valeurs du dernier passage) et perdent `@pytest.mark.internal`.
+
+### ANO-FREQ-052 — `set_params` contourne la validation de cinq paramètres de l'imputeur
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 0)
+- **Sévérité** : mineure
+- **Observé** : la validation de l'imputeur n'a lieu qu'à `__init__`. Après `set_params` (chemin de
+  `GridSearchCV`), la plupart des valeurs refusées le restent au `fit`, parce que les composants reconstruits
+  au `fit` revalident les leurs. Ne sont **pas** revalidés :
+  - les quatre booléens (`keep_lower_frequencies`, `restore_original_values`, `verbose`,
+    `impute_unobserved_entities`) : `'yes'` est accepté en silence et traité comme vrai ;
+  - `impute_intermediate_frequencies='yes'` : `KeyError: 'yes'` (lecture d'`ELIGIBLE_ORIGINS`) au lieu du
+    `ValueError` d'`__init__` ;
+  - `estimator` / `additive_transformer` sans méthode requise : `TypeError` de `sklearn.clone`
+    (« Cannot clone object… »), sans le message d'`__init__`.
+- **Attendu** : même arbitrage que pour ANO-FREQ-023 / 032 (composants utilisables seuls, `set_params`
+  compris) et B3 (« toute normalisation a lieu au `fit` ») : le `fit` revalide et lève l'erreur d'`__init__`.
+- **Reproduction** :
+  ```python
+  HighFrequencyImputer(target_frequency='M').set_params(verbose='yes').fit(reference_timeseries)   # aucune erreur
+  HighFrequencyImputer(target_frequency='M').set_params(
+      impute_intermediate_frequencies='yes').fit(reference_timeseries)                              # KeyError
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_sklearn.py::TestValidationThroughSetParams::test_fit_raises_the_message_of_init`
+- **Statut** : corrigé (2026-10-12)
+- **Correction** : la validation d'`__init__` est regroupée dans `_validate_params()`, appelée par `__init__` (après le stockage tel quel) et rejouée en tête de la phase 0 du `fit` : toute valeur refusée à `__init__` l'est au `fit` avec la même exception et le même message. Test : `test_sklearn.py::TestValidationThroughSetParams::test_fit_raises_the_message_of_init` (24 paramètres).
+
+### ANO-FREQ-053 — Clés inconnues des dictionnaires par feature ignorées au `fit`
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (transmission de
+  `scale_features`, `interpolation_method`, `interpolation_anchor`, `aggregation_constraint` aux composants)
+- **Sévérité** : majeure
+- **Observé** : `scale_features={'zz': 'calendar'}`, `interpolation_method={'zz': 'linear'}`,
+  `interpolation_anchor={'zz': 0.5}`, `aggregation_constraint={'zz': None}` ajustent sans erreur ni
+  avertissement sur un jeu sans colonne `zz` ; une clé `(entité, colonne)` (`{('FR', 'v'): ...}`) est acceptée
+  à `__init__` et ignorée au `fit`. Les composants disposent pourtant d'une vérification des clés (« names
+  unknown columns ») que l'imputeur n'atteint pas. Une faute de frappe dans un nom de colonne applique donc le
+  défaut en silence.
+- **Attendu** : §9.1 (« clés inconnues au `fit` → `ValueError` listant les colonnes fautives »), §10.1
+  (« mêmes règles de validation qu'au §9.1 »), §13.1 (« clés vérifiées au `fit` » pour `interpolation_method`
+  et `aggregation_constraint`), D10 (clés = noms de colonne, jamais des couples). **À arbitrer** : `estimator`
+  en dict, pour lequel la spec ne fixe que la clé `'__default__'` ; comportement actuel épinglé (clé inconnue
+  ignorée).
+- **Reproduction** :
+  ```python
+  HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                       scale_features={'zz': 'calendar'}).fit(reference_timeseries)   # aucune erreur
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_parameters.py::TestPerFeatureDictUnknownColumn`
+- **Statut** : arbitré et corrigé (2026-10-12)
+- **Correction** : **arbitrage de l'auteur** — une clé inconnue est **ignorée avec un avertissement**, et non refusée : un dict par feature doit pouvoir servir à des jeux dont les colonnes diffèrent (sélection de variables en amont, recherche sur des sous-ensembles), et l'avertissement suffit à révéler une faute de frappe. `_warn_unknown_feature_keys` émet en phase 0 du `fit` un **unique** `UserWarning` listant, paramètre par paramètre, les clés absentes des colonnes de travail (cible comprise) ; `estimator` suit la même règle. Une clé `(entité, colonne)` est traitée de même, le message rappelant que les clés sont des noms de colonne (D10). La colonne concernée retombe sur `'__default__'` ou sur le défaut. Les composants utilisés seuls gardent leur `validate_columns` strict. Spec alignée (§9.1, §10.1, §13.1). Tests : `test_parameters.py::TestPerFeatureDictUnknownColumn` (plus de `xfail`).
+
+### ANO-FREQ-054 — Avertissement sur `min_cv_train_size` hors `covariate_strategy='model'`
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (appel de
+  `VariableOrderer.fit` sous `fit_predict_order='cv'`, quelle que soit la stratégie)
+- **Sévérité** : mineure
+- **Observé** : sous `covariate_strategy='interpolate'`, `fit_predict_order='cv', cv=3, min_cv_train_size=2`
+  émet « min_cv_train_size (2) < the effective number of CV splits (3): cross-validation… », alors que l'ordre
+  et ses paramètres sont inertes hors `'model'` (aucune validation croisée n'est lancée, sortie identique).
+- **Attendu** : D9 et §5.6 : une combinaison inerte est documentée, jamais signalée. La résolution du
+  splitter (`cv_`, §13.2) peut rester ; l'avertissement n'a d'objet que sous `'model'`.
+- **Reproduction** :
+  ```python
+  HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(), fit_predict_order='cv',
+                       cv=3, min_cv_train_size=2).fit(reference_timeseries)   # UserWarning
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_parameters.py::TestInertCombinations::test_inert_combination_is_silent[cv_parameters]`
+- **Statut** : corrigé (2026-10-12)
+- **Correction** : hors `covariate_strategy='model'`, l'imputeur résout toujours `cv_` mais étouffe l'avertissement croisé de `VariableOrderer.fit` ; il reste émis sous `'model'`. Tests : `test_parameters.py::TestInertCombinations::test_inert_combination_is_silent[cv_parameters]` (plus de `xfail`), `::test_cv_warning_is_kept_under_model`.
+
+### ANO-FREQ-055 — Avertissement `estimator=None` : `__init__` (spec) ou `fit` (code)
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._validate_estimator`
+- **Sévérité** : à arbitrer
+- **Observé** : `__init__` n'émet rien sous `estimator=None` ; l'avertissement unique est émis au `fit`. Le
+  code le justifie (« pour ne pas se répéter à chaque clone ») et la docstring le dit (« a single warning at
+  `fit` »).
+- **Attendu** : le tableau §13.1 (« Validations à `__init__` ») range « avertissement **unique** si `None` »
+  parmi les contrôles d'`__init__`. L'emplacement du code paraît le meilleur (B3 : `__init__` sans effet ;
+  `clone` reconstruit l'objet) : la spec serait à aligner au prompt R9.
+- **Reproduction** : `HighFrequencyImputer(target_frequency='M')` → aucun avertissement ; `.fit(X)` → un.
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_parameters.py::TestInitDoesNotTransform::test_init_emits_no_warning`
+  (comportement actuel épinglé), `test_fit_phases.py::TestFitPhases::test_estimator_none_warns_once`
+- **Statut** : arbitré (2026-10-12) — spec alignée sur le code
+- **Correction** : **arbitrage de l'auteur** — l'avertissement reste au `fit`, émis en phase 0 avant tout entraînement : à `__init__` il se répéterait à chaque `clone` (une fois par pli et par candidat d'une recherche d'hyperparamètres) et manquerait `set_params(estimator=None)`, le chemin même de `GridSearchCV`. Un avertissement n'interrompt de toute façon pas l'entraînement. Le tableau §13.1 de la spec est corrigé ; aucun changement de code.
+
+### ANO-FREQ-056 — Docstring de `HighFrequencyImputer` incomplète face au §13
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer` (docstring de classe)
+- **Sévérité** : cosmétique
+- **Observé** : les entrées `scale_features`, `interpolation_method` et `interpolation_anchor` ne mentionnent
+  ni la clé `'__default__'` (admise par le code, testée) ni le repli d'une colonne non couverte ;
+  l'attribut ajusté `additive_transformer_` (clone ajusté du paramètre, `None` sinon) n'est pas documenté.
+- **Attendu** : §9.1 / §10.1 / §10.2 (forme dict avec `'__default__'`, défaut pour une colonne non
+  couverte) ; section `Attributes:` complète.
+- **Reproduction** : lecture de `HighFrequencyImputer.__doc__`.
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_parameters.py::TestAdmittedValues` (formes
+  `'__default__'` admises), `::TestAdmittedValuesTakeEffect::test_additive_transformer_is_cloned_not_fitted`
+- **Statut** : corrigé (2026-10-12)
+- **Correction** : docstring de classe complétée — clé `'__default__'` et repli d'une colonne non couverte pour les cinq dicts par feature, règle des clés inconnues (ANO-FREQ-053), attribut `additive_transformer_`.
+
+### ANO-FREQ-057 — Scalaires numpy refusés par la validation de l'imputeur
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._validate_params`,
+  `tsforecast/frequency/variable_orderer.py::VariableOrderer._validate_cv`
+- **Sévérité** : mineure
+- **Observé** : un `np.bool_` passé à l'un des quatre booléens était refusé avec le message trompeur
+  « must be a bool, got bool » ; `np.int64` était refusé pour `min_cv_train_size` (`TypeError`) et pour `cv`
+  (ni entier, ni splitter) ; `np.float32` pour les seuils de couverture. Une grille construite par `np.arange`
+  ou `np.linspace` échouait donc dans `GridSearchCV`.
+- **Attendu** : la convention de sklearn (`Interval(Integral)`, `"boolean"`) admet les scalaires numpy ; les
+  booléens restent exclus des entiers, et `impute_intermediate_frequencies` reste comparé par identité (I13).
+- **Reproduction** :
+  ```python
+  HighFrequencyImputer(target_frequency='M', verbose=np.False_)          # TypeError: got bool
+  HighFrequencyImputer(target_frequency='M', min_cv_train_size=np.int64(3))  # TypeError
+  ```
+- **Test** : `tests/unit/frequency/test_variable_orderer.py::TestCVResolution::test_numpy_int_cv_is_an_int`,
+  `tests/unit/frequency/high_frequency_imputer/test_parameters.py::TestRejectedValues::test_numpy_booleans_take_effect`,
+  `::test_numpy_integers_from_a_grid_are_admitted`, `::test_numpy_scalars_outside_the_domain_are_refused`,
+  `::TestAdmittedValues` (formes numpy)
+- **Statut** : corrigé (2026-10-12)
+- **Correction** : `_is_integer` (`numbers.Integral`, booléens Python et numpy exclus) pour `min_cv_train_size`
+  et `cv` ; `numbers.Real` pour les seuils ; `(bool, np.bool_)` pour les quatre booléens ; `VariableOrderer`
+  admet un `cv` entier numpy.
+
+### ANO-FREQ-058 — `n_features_in_` / `feature_names_in_` absents des transformateurs du paquet
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer.fit`
+- **Sévérité** : mineure
+- **Observé** : la classe de base n'écrit que `n_features_` / `feature_names_` ; `Pipeline.n_features_in_`
+  d'un pipeline commençant par `HighFrequencyImputer` lève `AttributeError`.
+- **Attendu** : convention sklearn — `n_features_in_` (entier) et `feature_names_in_` (tableau `object`) écrits
+  par `fit`.
+- **Reproduction** :
+  ```python
+  Pipeline([('impute', HighFrequencyImputer(target_frequency='M'))]).fit(X).n_features_in_   # AttributeError
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_sklearn.py::TestFeaturesSeenAtFit`
+- **Statut** : corrigé (2026-10-12)
+- **Correction** : `PanelTimeSeriesTransformer.fit` écrit `n_features_in_` et `feature_names_in_` (colonnes
+  après passage des colonnes de temps et de panel dans l'index) ; les anciens `n_features_` / `feature_names_`
+  sont **supprimés**, sans alias (arbitrage de l'auteur, 2026-10-12).
+
+### Arbitrages de l'auteur (2026-10-12) sur `HighFrequencyImputer`
+- **Clés inconnues des dicts par feature** (ANO-FREQ-053) : ignorées avec un `UserWarning` unique au `fit`,
+  `estimator` compris ; jamais d'erreur.
+- **Avertissement `estimator=None`** (ANO-FREQ-055) : au `fit`, en phase 0, avant tout entraînement.
+- **Inversion juste après un `fit`** (ANO-FREQ-051) : licite, `restore_original_values=True` compris ; le `fit`
+  est une passe au même titre qu'un `transform`.

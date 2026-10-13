@@ -586,6 +586,11 @@ class TestCVResolution:
         cv_ = VariableOrderer(cv=7, min_cv_train_size=7).fit().cv_
         assert (cv_.n_splits, cv_.shuffle, cv_.random_state) == (7, True, 42)
 
+    def test_numpy_int_cv_is_an_int(self):
+        """A numpy integer (grid built by np.arange) resolves like an int (ANO-FREQ-057)."""
+        cv_ = VariableOrderer(cv=np.int64(4), min_cv_train_size=4).fit().cv_
+        assert (cv_.n_splits, cv_.shuffle, cv_.random_state) == (4, True, 42)
+
     def test_iterable_of_splits_is_wrapped(self):
         """An iterable of splits is wrapped by check_cv and yields exactly those splits."""
         splits = [

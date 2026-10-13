@@ -8,7 +8,9 @@ plan immuable, vues (by_stage, models), sérialisation de diagnostic,
 append_step, to_entity_tuple, INTERPOLATE_FALLBACK et MaterializationWay.
 """
 # Modules de base
+import copy
 import dataclasses
+import pickle
 import typing
 
 import pandas as pd
@@ -376,6 +378,42 @@ class TestImputationStepFields:
 # =============================================================================
 # ImputationStep — égalité et hachage
 # =============================================================================
+class TestImputationStepSerialization:
+    """A step — and therefore a plan — survives ``pickle`` and ``deepcopy`` (ANO-FREQ-049)."""
+
+    @pytest.mark.parametrize('copier', [
+        lambda step: pickle.loads(pickle.dumps(step)),
+        copy.deepcopy,
+    ], ids=['pickle', 'deepcopy'])
+    def test_round_trip_keeps_the_fields_and_the_freeze(self, copier):
+        """Every field comes back equal, the two mappings frozen again."""
+        step = _make_step(
+            training_blocks={('FR',): 'M', ('DE',): 'Q'},
+            scale_factor=pd.Series([3.0, 1.0], index=['a', 'b']),
+        )
+        restored = copier(step)
+
+        assert dict(restored.materialization) == dict(step.materialization)
+        assert dict(restored.training_blocks) == dict(step.training_blocks)
+        assert restored.scale_factor.equals(step.scale_factor)
+        assert restored.feature_cols == step.feature_cols
+        assert restored.emitted_provenance is step.emitted_provenance
+        with pytest.raises(TypeError):
+            restored.materialization['m1'] = 'aggregate'
+        with pytest.raises(TypeError):
+            restored.training_blocks[('IT',)] = 'A'
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            restored.var_name = 'other'
+
+    def test_plan_round_trip(self):
+        """A plan of steps pickles, in order."""
+        plan = append_step(ImputationPlan(), _make_step())
+        plan = append_step(plan, _make_step(var_name='x', var_key='x'))
+        restored = pickle.loads(pickle.dumps(plan))
+        assert [step.var_name for step in restored] == ['gdp', 'x']
+        assert restored.to_diagnostic_frame().equals(plan.to_diagnostic_frame())
+
+
 class TestImputationStepEquality:
     """Field-by-field, Series-safe equality and hashing."""
 

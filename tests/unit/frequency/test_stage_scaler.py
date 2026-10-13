@@ -978,6 +978,20 @@ class TestPerRowTargetDivisor:
             scaler.apply(y_train, divisors).to_numpy(), [10.0, 28.0 / 3.0, 10.0], rtol=_EXACT
         )
 
+    def test_unit_per_row_divisors_are_not_short_circuited(self):
+        """B12: under 'constant', per-row divisors all equal to 1.0 stay a Series.
+
+        Moved from the ``HighFrequencyImputer`` test package (prompt F10): a
+        pure ``StageScaler`` case.
+        """
+        index = pd.to_datetime(['2021-01-31', '2021-02-28'])
+        divisors = StageScaler(scale_features='constant').target_divisor(
+            'a1', source_freq='M', pred_freq='M', index=index,
+            produced_freq=pd.Series(['M', 'M'], index=index),
+        )
+        assert isinstance(divisors, pd.Series)
+        assert divisors.tolist() == [1.0, 1.0]
+
     def test_per_row_divisor_under_calendar_mode(self):
         """Under 'calendar' the per-row divisor follows the real count of the period."""
         index = pd.to_datetime(['2021-02-28', '2024-02-29'])

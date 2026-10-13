@@ -5,6 +5,7 @@ sklearn-compatible time series transformers.
 """
 # Importation des modules
 # Modules de base
+import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, List, Union
@@ -134,6 +135,14 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             and time columns. Default is False.
         convert_cols_to_index (bool): If True, converts time_col and panel_cols
             to index and stores metadata for restoration. Default is False.
+
+    Attributes:
+        is_panel_ (bool): Whether the data seen at ``fit`` is a panel.
+        n_features_in_ (int): Number of feature columns seen at ``fit``, the
+            time and panel columns excluded once moved into the index (sklearn
+            convention, read by ``Pipeline.n_features_in_``).
+        feature_names_in_ (np.ndarray): Names of those columns, as an object
+            array (sklearn convention).
 
     Examples:
         >>> import pandas as pd
@@ -364,7 +373,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             MyTransformer(...)
             >>> transformer.is_panel_
             False
-            >>> transformer.n_features_
+            >>> transformer.n_features_in_
             3
         """
         # Validation des données si demandée
@@ -386,9 +395,9 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         else:
             self._panel_level_names = None
 
-        # Stockage des métadonnées
-        self.n_features_ = X.shape[1]
-        self.feature_names_ = X.columns.tolist()
+        # Stockage des métadonnées, sous les noms de la convention sklearn
+        self.n_features_in_ = X.shape[1]
+        self.feature_names_in_ = np.asarray(X.columns, dtype=object)
 
         # Vérification de la cohérence des individus du panel
         if self.is_panel_:

@@ -1,6 +1,7 @@
 """Mixed-frequency imputer """
 # Importation des modules
 # Modules de base
+import numbers
 import warnings
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -46,7 +47,10 @@ from .aggregation_constraint import (
     resolve_aggregation_constraint,
     validate_aggregation_constraint,
 )
-from .covariate_materializer import CovariateMaterializer
+from .covariate_materializer import (
+    DEFAULT_MATERIALIZATION_KEY as DEFAULT_FEATURE_KEY,
+    CovariateMaterializer,
+)
 from .imputation_plan import (
     INTERPOLATE_FALLBACK,
     ImputationPlan,
@@ -93,6 +97,15 @@ _FIT_PREDICT_ORDERS: Tuple[str, ...] = ('frequency', 'cv')
 _FREQUENCY_MISMATCH_POLICIES: Tuple[str, ...] = ('error', 'warn')
 _INTERMEDIATE_MODALITIES: Tuple[Any, ...] = (False, 'covariates_only', True)
 
+# Paramètres admettant la forme dictionnaire par colonne
+_PER_FEATURE_PARAMS: Tuple[str, ...] = (
+    'estimator',
+    'scale_features',
+    'interpolation_method',
+    'interpolation_anchor',
+    'aggregation_constraint',
+)
+
 # Attributs lus par "check_is_fitted"
 _FITTED_ATTRIBUTES: Tuple[str, ...] = (
     'effective_target_frequency_',
@@ -111,6 +124,26 @@ ELIGIBLE_ORIGINS: Dict[Any, Tuple[CellOrigin, ...]] = {
     'covariates_only': ('observed',),
     True: ('observed', 'interpolated', 'model'),
 }
+
+
+# Prédicat d'entier strict, booléens exclus
+def _is_integer(value: Any) -> bool:
+    """Tell whether a value is an integer, numpy integers included.
+
+    Python and numpy booleans are excluded: ``True`` is an ``int`` for
+    Python, never a sensible count.
+
+    Args:
+        value: Value to test.
+
+    Returns:
+        True for ``int`` and ``numpy`` integers, False otherwise.
+
+    Examples:
+        >>> _is_integer(3), _is_integer(np.int64(3)), _is_integer(True)
+        (True, True, False)
+    """
+    return isinstance(value, numbers.Integral) and not isinstance(value, (bool, np.bool_))
 
 
 # Contexte d'ajustement d'une variable à une étape
@@ -263,7 +296,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     each entity, and every reasoning about it is per entity. Per-feature
     hyperparameter dicts (``scale_features``, ``interpolation_method``,
     ``interpolation_anchor``, ``estimator``, ``aggregation_constraint``) stay
-    keyed by **column name**, never by ``(entity, column)``.
+    keyed by **column name**, never by ``(entity, column)``. Each admits a
+    ``'__default__'`` key covering the columns it does not name; a column
+    covered by neither takes the parameter's default. A key naming no column
+    of the data is ignored, with a **single** ``UserWarning`` at ``fit``
+    listing every such key: a dict may thus be shared by datasets whose
+    columns differ, and a typo still shows.
 
     Args:
         target_frequency: Target frequency, as a string applying to every
@@ -289,9 +327,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             over the entities of a panel. ``'any_entity'`` (default) keeps a
             column observed by at least one entity; ``'all_entities'`` is the
             conservative choice for estimators that do not tolerate NaN.
-        interpolation_method: Interpolation method, global or per column.
+        interpolation_method: Interpolation method, global or as a dict
+            ``{column: method}`` with an optional ``'__default__'`` key; a
+            column covered by neither is interpolated ``'linear'``.
         interpolation_anchor: Position of a value inside its period, in
-            ``[0, 1]``, global or per column. ``None`` keeps the detected
+            ``[0, 1]``, global or as a dict ``{column: anchor}`` with an
+            optional ``'__default__'`` key. ``None`` — the default, and the
+            value of a column covered by neither — keeps the detected
             anchoring.
         impute_intermediate_frequencies: Axis 2. ``False`` (default) goes
             straight to the target frequency; ``'covariates_only'`` walks the
@@ -321,8 +363,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             imputable column may receive a complete imputation of it, learned
             on the other entities of the panel. ``False`` (default) leaves
             such a pair out of every prediction grid: its cells stay NaN and
-            ``ORIGINAL``. ``True`` makes the pair imputable at **every
-            stage of its entity's progression**, through one dedicated plan
+            unmarked (``None`` in ``imputation_provenance_``). ``True`` makes
+            the pair imputable at **every stage of its entity's
+            progression**, through one dedicated plan
             step per stage whose ``source_frequency`` is ``None``. It is the
             target-side counterpart of ``covariate_eligibility``, and it is
             **independent of axis 2**: one single rule, whose consequences
@@ -348,7 +391,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             entity contributes nothing to the training set either : it has no true value to bring. Its only
             failure path is the absence of usable covariates on the target
             grid: interpolation cannot be the fallback of an entity with
-            nothing to interpolate, so the cells stay NaN and ``ORIGINAL``
+            nothing to interpolate, so the cells stay NaN and unmarked
             and a single aggregated warning names the pairs at the end of
             ``fit``.
         fit_predict_order: Order in which variables are imputed,
@@ -378,7 +421,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             extensions. ``None`` follows ``coverage_threshold``. Inert
             without ``training_scope``.
         scale_features: ``False``, ``'constant'`` (default), ``'calendar'``,
-            or a dict of these values keyed by column.
+            or a dict of these values keyed by column with an optional
+            ``'__default__'`` key; a column covered by neither is scaled
+            ``'constant'``.
         aggregation_constraint: ``'sum'`` (default), ``None``, or a dict of
             these two values keyed by column with an optional
             ``'__default__'`` key. Beyond the rescaling of the predictions, it
@@ -436,6 +481,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             the last pass, kept so it need not be rebuilt. Exposed for
             tracking (see :func:`tsforecast.tracking.imputation_metrics`).
         imputation_plan_: :class:`ImputationPlan` — the complete fitted state.
+        additive_transformer_: Fitted clone of ``additive_transformer``, the
+            parameter itself staying unfitted; None without one.
         imputation_models_: Read-only view ``{(stage, variable): estimator}``
             over the plan.
         imputation_window_mask_: Boolean ``pd.Series`` of the prediction
@@ -537,85 +584,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             auto_sort=False, convert_cols_to_index=True
         )
 
-        # Validation des paramètres
-        self._validate_target_frequency_format(target_frequency)
-        self._validate_estimator(estimator)
-        if additive_transformer is not None:
-            self._validate_additive_transformer(additive_transformer)
-
-        # Validation des littéraux : message listant les valeurs admises
-        self._validate_literal(
-            'covariate_strategy', covariate_strategy, _COVARIATE_STRATEGIES
-        )
-        self._validate_literal(
-            'covariate_fallback', covariate_fallback, _COVARIATE_FALLBACKS
-        )
-        self._validate_literal(
-            'covariate_eligibility', covariate_eligibility, _COVARIATE_ELIGIBILITIES
-        )
-        self._validate_literal(
-            'fit_predict_order', fit_predict_order, _FIT_PREDICT_ORDERS
-        )
-        self._validate_literal(
-            'on_frequency_mismatch', on_frequency_mismatch,
-            _FREQUENCY_MISMATCH_POLICIES
-        )
-        self._validate_literal(
-            'imputation_scope', imputation_scope, _IMPUTATION_SCOPES
-        )
-        if training_scope is not None:
-            self._validate_literal(
-                'training_scope', training_scope, _TRAINING_SCOPES
-            )
-
-        # Validation des paramètres d'imputation des fréquences intermédiaires
-        self._validate_intermediate_frequencies(impute_intermediate_frequencies)
-
-        # Validation des formes par feature, déléguée aux validateurs
-        # statiques des composants consommateurs : une seule implémentation,
-        # donc aucune dérive possible entre ce que la classe accepte et ce que
-        # le composant accepte
-        CovariateMaterializer._validate_interpolation_method(interpolation_method)
-        CovariateMaterializer._validate_interpolation_anchor(interpolation_anchor)
-        StageScaler._validate_scale_features(scale_features)
-        validate_aggregation_constraint(aggregation_constraint)
-
-        # Validation de la stratégie de validation croisée. "check_cv" n'est
-        # appelé qu'au fit.
-        self._validate_cv(cv)
-        self._validate_cv_scoring(cv_scoring)
-
-        # Validation des bornes numériques
-        if not isinstance(min_cv_train_size, int) or isinstance(min_cv_train_size, bool):
-            raise TypeError(
-                f"min_cv_train_size must be an int, "
-                f"got {type(min_cv_train_size).__name__}"
-            )
-        if min_cv_train_size < 1:
-            raise ValueError(
-                f"min_cv_train_size must be >= 1, got {min_cv_train_size}"
-            )
-        self._validate_unit_interval('coverage_threshold', coverage_threshold)
-        if training_coverage_threshold is not None:
-            self._validate_unit_interval(
-                'training_coverage_threshold', training_coverage_threshold
-            )
-
-        # Validation groupée des booléens : un 'frequency'/1/None passé par
-        # erreur se propagerait sinon silencieusement jusqu'à un "if" qui
-        # l'évalue
-        boolean_params = {
-            'keep_lower_frequencies': keep_lower_frequencies,
-            'restore_original_values': restore_original_values,
-            'verbose': verbose,
-            'impute_unobserved_entities': impute_unobserved_entities,
-        }
-        for param_name, param_value in boolean_params.items():
-            if not isinstance(param_value, bool):
-                raise TypeError(
-                    f"{param_name} must be a bool, got {type(param_value).__name__}"
-                )
-
         # Instanciation des attributs
         self.target_frequency = target_frequency
         self.estimator = estimator
@@ -642,6 +610,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.restore_original_values = restore_original_values
         self.verbose = verbose
 
+        # Validation des paramètres, rejouée en tête du fit : "set_params"
+        # écrit les attributs sans repasser par "__init__"
+        self._validate_params()
+
     # -------------------------------------------------------------------------
     # Journalisation
     # -------------------------------------------------------------------------
@@ -659,6 +631,102 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Validation des paramètres d'entrée
     # -------------------------------------------------------------------------
+    # Validation de l'ensemble des paramètres publics
+    def _validate_params(self) -> None:
+        """Validate every public parameter, as stored on the instance.
+
+        Called by ``__init__`` and again at the head of ``fit``:
+        ``set_params`` — the path of ``GridSearchCV`` — writes the attributes
+        without going through ``__init__``, so ``fit`` must refuse what
+        ``__init__`` refuses, with the same message. Nothing is normalized
+        nor stored here.
+
+        Raises:
+            ValueError: If a parameter is not admissible. The message always
+                names the parameter and lists the admissible values or forms.
+            TypeError: If a parameter has the wrong type.
+        """
+        # Validation de la fréquence cible, de l'estimateur et du transformer
+        self._validate_target_frequency_format(self.target_frequency)
+        self._validate_estimator(self.estimator)
+        if self.additive_transformer is not None:
+            self._validate_additive_transformer(self.additive_transformer)
+
+        # Validation des littéraux : message listant les valeurs admises
+        self._validate_literal(
+            'covariate_strategy', self.covariate_strategy, _COVARIATE_STRATEGIES
+        )
+        self._validate_literal(
+            'covariate_fallback', self.covariate_fallback, _COVARIATE_FALLBACKS
+        )
+        self._validate_literal(
+            'covariate_eligibility', self.covariate_eligibility,
+            _COVARIATE_ELIGIBILITIES
+        )
+        self._validate_literal(
+            'fit_predict_order', self.fit_predict_order, _FIT_PREDICT_ORDERS
+        )
+        self._validate_literal(
+            'on_frequency_mismatch', self.on_frequency_mismatch,
+            _FREQUENCY_MISMATCH_POLICIES
+        )
+        self._validate_literal(
+            'imputation_scope', self.imputation_scope, _IMPUTATION_SCOPES
+        )
+        if self.training_scope is not None:
+            self._validate_literal(
+                'training_scope', self.training_scope, _TRAINING_SCOPES
+            )
+
+        # Validation des paramètres d'imputation des fréquences intermédiaires
+        self._validate_intermediate_frequencies(self.impute_intermediate_frequencies)
+
+        # Validation des formes par feature, déléguée aux validateurs
+        # statiques des composants consommateurs : une seule implémentation,
+        # donc aucune dérive possible entre ce que la classe accepte et ce que
+        # le composant accepte
+        CovariateMaterializer._validate_interpolation_method(self.interpolation_method)
+        CovariateMaterializer._validate_interpolation_anchor(self.interpolation_anchor)
+        StageScaler._validate_scale_features(self.scale_features)
+        validate_aggregation_constraint(self.aggregation_constraint)
+
+        # Validation de la stratégie de validation croisée. "check_cv" n'est
+        # appelé qu'au fit.
+        self._validate_cv(self.cv)
+        self._validate_cv_scoring(self.cv_scoring)
+
+        # Validation des bornes numériques. Les entiers numpy sont admis
+        # (grille construite par "np.arange"), les booléens jamais
+        if not _is_integer(self.min_cv_train_size):
+            raise TypeError(
+                f"min_cv_train_size must be an int, "
+                f"got {type(self.min_cv_train_size).__name__}"
+            )
+        if self.min_cv_train_size < 1:
+            raise ValueError(
+                f"min_cv_train_size must be >= 1, got {self.min_cv_train_size}"
+            )
+        self._validate_unit_interval('coverage_threshold', self.coverage_threshold)
+        if self.training_coverage_threshold is not None:
+            self._validate_unit_interval(
+                'training_coverage_threshold', self.training_coverage_threshold
+            )
+
+        # Validation groupée des booléens : un 'frequency'/1/None passé par
+        # erreur se propagerait sinon silencieusement jusqu'à un "if" qui
+        # l'évalue. Le booléen numpy est admis, au même titre que par sklearn
+        boolean_params = {
+            'keep_lower_frequencies': self.keep_lower_frequencies,
+            'restore_original_values': self.restore_original_values,
+            'verbose': self.verbose,
+            'impute_unobserved_entities': self.impute_unobserved_entities,
+        }
+        for param_name, param_value in boolean_params.items():
+            if not isinstance(param_value, (bool, np.bool_)):
+                raise TypeError(
+                    f"{param_name} must be a bool, got {type(param_value).__name__}"
+                )
+
     # Méthode auxiliaire de validation d'un littéral
     @staticmethod
     def _validate_literal(
@@ -721,7 +789,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             ValueError: If the value falls outside ``[0, 1]``.
         """
         # Exclusion explicite des booléens, que Python range parmi les entiers
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Real):
             raise TypeError(
                 f"{name} must be a float, got {type(value).__name__}"
             )
@@ -750,7 +818,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if cv is None:
             return
         # Forme entière : nombre de plis
-        if isinstance(cv, int) and not isinstance(cv, bool):
+        if _is_integer(cv):
             if cv < 2:
                 raise ValueError(f"cv must be an int >= 2, got {cv}")
             return
@@ -954,6 +1022,60 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 f"Got {type(transformer).__name__}"
             )
 
+    # Méthode auxiliaire de contrôle des clés des dictionnaires par feature
+    def _warn_unknown_feature_keys(self, columns: Iterable[Any]) -> None:
+        """Warn once about per-feature dict keys naming no column of the data.
+
+        The per-feature dicts (``estimator``, ``scale_features``,
+        ``interpolation_method``, ``interpolation_anchor``,
+        ``aggregation_constraint``) are keyed by column name. A key naming
+        no column of the data is ignored — the column falls back to the
+        ``'__default__'`` entry or to the default — with a **single**
+        ``UserWarning`` listing every offending key per parameter: an error
+        would break a dict shared by datasets whose columns differ (feature
+        selection upstream, search over feature subsets), silence would hide
+        a typo. An ``(entity, column)`` key is never a column name: settings
+        are per column, never per entity (D10).
+
+        Args:
+            columns: Columns of the working frame, the target included.
+        """
+        # Ensemble des colonnes connues
+        known = set(columns)
+        # Recensement des clés inconnues, paramètre par paramètre
+        unknown_by_param: Dict[str, List[Any]] = {}
+        for name in _PER_FEATURE_PARAMS:
+            setting = getattr(self, name)
+            if not isinstance(setting, dict):
+                continue
+            unknown = [
+                key for key in setting
+                if key != DEFAULT_FEATURE_KEY and key not in known
+            ]
+            if unknown:
+                unknown_by_param[name] = sorted(unknown, key=repr)
+        if not unknown_by_param:
+            return
+
+        # Avertissement unique, listant toutes les clés ignorées
+        details = '; '.join(
+            f"{name}: {keys}" for name, keys in unknown_by_param.items()
+        )
+        message = (
+            f"Per-feature settings name columns absent from the data and are "
+            f"ignored ({details}); these columns fall back to the "
+            f"'{DEFAULT_FEATURE_KEY}' entry or to the default."
+        )
+        if any(
+            isinstance(key, tuple)
+            for keys in unknown_by_param.values() for key in keys
+        ):
+            message += (
+                " Keys are column names, never (entity, column) pairs: fit "
+                "one imputer per entity for per-entity settings."
+            )
+        warnings.warn(message, UserWarning)
+
     # -------------------------------------------------------------------------
     # Conformité sklearn
     # -------------------------------------------------------------------------
@@ -968,8 +1090,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         The attribute list is explicit. The default sklearn convention
         — any attribute ending in ``_`` — would be satisfied by the parent
-        class, which sets ``is_panel_``, ``n_features_`` and
-        ``feature_names_`` before ``_fit`` runs: an interrupted fit would then
+        class, which sets ``is_panel_``, ``n_features_in_`` and
+        ``feature_names_in_`` before ``_fit`` runs: an interrupted fit would then
         look fitted.
 
         Returns:
@@ -1711,6 +1833,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 0 — Setup
         # =================================================================
+        # Revalidation des paramètres : "set_params" contourne "__init__"
+        self._validate_params()
+
         # Purge de l'état écrit par un précédent "transform"
         for stale_attr in (
             'imputation_provenance_', '_original_X_', '_original_y_',
@@ -1763,6 +1888,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 "will fall back to linear interpolation.",
                 UserWarning
             )
+
+        # Clés des dictionnaires par feature absentes des données
+        self._warn_unknown_feature_keys(X_work.columns)
 
         # Normalisation de target_frequency (la fréquence de prédiction)
         normalized_target_frequency = self._validate_target_frequency_format(
@@ -1830,7 +1958,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 cv=self.cv,
                 cv_scoring=self.cv_scoring,
                 min_cv_train_size=self.min_cv_train_size,
-            ).fit()
+            )
+            # Hors covariate_strategy='model', l'ordre et ses paramètres sont
+            # inertes : l'avertissement croisé de l'ordonnanceur sur
+            # "min_cv_train_size" n'y a pas d'objet et est étouffé
+            with warnings.catch_warnings():
+                if self.covariate_strategy != 'model':
+                    warnings.simplefilter('ignore', UserWarning)
+                self._variable_orderer.fit()
             self.cv_ = self._variable_orderer.cv_
         else:
             self._variable_orderer = VariableOrderer(
@@ -2035,7 +2170,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             warnings.warn(
                 f"{len(named)} unobserved (entity, column) pair(s) could not be "
                 f"imputed for lack of usable covariates on the target grid; "
-                f"their cells stay NaN and ORIGINAL: {named}",
+                f"their cells stay NaN and unmarked: {named}",
                 UserWarning,
             )
 
@@ -2056,6 +2191,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Couples imputés sans ancre : toujours écrit, vide compris, ce qui
         # autorise sa lecture par "check_is_fitted"
         self.unanchored_pairs_ = tuple(sorted(self._unanchored_written, key=repr))
+
+        # Instantané de l'entrée du fit : comme "imputation_provenance_", il
+        # décrit la dernière passe, que "inverse_transform" défait — y compris
+        # sous restore_original_values=True juste après un fit
+        self._original_X_ = X.copy()
+        self._original_y_ = y.copy() if y is not None else None
 
     # -------------------------------------------------------------------------
     # PHASE 5 — Exécution des étapes
@@ -3232,7 +3373,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         total, its cells carry ``MODEL_UNANCHORED``, and it has no
         interpolation fallback — there is nothing to interpolate for an
         entity that never observes the column, so a failure leaves its cells
-        NaN and ``ORIGINAL`` and is reported by the aggregated warning of the
+        NaN and unmarked and is reported by the aggregated warning of the
         end of the fit.
 
         Args:
@@ -4106,9 +4247,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # grille de l'étape : la matrice partage ainsi l'index de la sortie,
             # que "_inverse_transform" lit ensuite masque contre masque
             snapshot = self._provenance_tracker.get_provenance_matrix()
+            provenance = snapshot.reindex(index=grid, columns=frame.columns)
+            # Cellules de grille absentes du tracker (agrégations exactes) :
+            # ORIGINAL si elles portent une valeur. Une cellule restée NaN
+            # n'est jamais marquée, au rejeu comme au fit
+            unmarked_with_value = pd.DataFrame(
+                provenance.isna().to_numpy()
+                & frames[stage_label].notna().to_numpy(),
+                index=provenance.index, columns=provenance.columns,
+            )
             provenances[stage_label] = (
-                snapshot.reindex(index=grid, columns=frame.columns)
-                .fillna(ProvenanceType.ORIGINAL)
+                provenance.mask(unmarked_with_value, ProvenanceType.ORIGINAL)
                 .rename_axis(frame.index.names)
             )
 
@@ -4238,7 +4387,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             This method is stateful: it snapshots its input in ``_original_X_``
             / ``_original_y_`` and overwrites ``imputation_provenance_`` at
             each call. :meth:`_inverse_transform` reads them back and therefore
-            always inverts the last transform. ``fit`` purges the three.
+            always inverts the last pass. ``fit`` purges the three, then
+            writes its own matrix and the snapshot of its own input.
 
         Args:
             X: Features to transform.
@@ -4351,7 +4501,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             warnings.warn(
                 f"{len(unanchored_failures)} unobserved (entity, column) "
                 f"pair(s) could not be imputed for lack of usable covariates "
-                f"on the target grid; their cells stay NaN and ORIGINAL: "
+                f"on the target grid; their cells stay NaN and unmarked: "
                 f"{unanchored_failures}",
                 UserWarning,
             )
@@ -4613,7 +4763,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         data_result: pd.DataFrame,
         y_col_name: Optional[str],
     ) -> pd.DataFrame:
-        """Refill the cells observed in the last transform input.
+        """Refill the cells observed in the input of the last pass.
+
+        The last pass is the last ``transform``, or the ``fit`` when no
+        ``transform`` has followed it: both snapshot their input.
 
         Backs ``restore_original_values=True``: the ``ORIGINAL`` mask alone
         drops the anchor dates of a lower-frequency variable, which the target
@@ -4629,7 +4782,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             The frame with every cell observed in the snapshot set back to its
             original value.
         """
-        # Reconstruction de l'instantané de l'entrée du dernier transform
+        # Reconstruction de l'instantané de l'entrée de la dernière passe
         snapshot = self._original_X_
         if self._original_y_ is not None and y_col_name is not None:
             snapshot = pd.concat(

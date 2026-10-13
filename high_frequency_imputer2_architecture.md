@@ -1855,7 +1855,9 @@ scale_features: Union[Literal[False], ScaleMode,
 code**, avec le correctif du court-circuit B12.
 
 **Forme dict** : `{feature: modalité}` avec clé `'__default__'` optionnelle (même convention que
-`estimator`). Clés inconnues au `fit` → `ValueError` listant les colonnes fautives. Features non
+`estimator`). Clés inconnues au `fit` → ignorées, avec un `UserWarning` **unique** listant les clés
+fautives de tous les dicts par feature (arbitrage ANO-FREQ-053 : un dict doit pouvoir servir à des
+jeux dont les colonnes diffèrent ; l'avertissement révèle une faute de frappe). Features non
 couvertes et pas de `'__default__'` → défaut `'constant'`. Les clés sont des **noms de colonne**,
 jamais des couples `(entité, colonne)` (D10).
 
@@ -2336,21 +2338,26 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
 
 ### 13.1 — Validations à `__init__` (sans transformation, B3)
 
+Les contrôles ci-dessous sont **rejoués en tête de `fit`**, avec les mêmes exceptions et les mêmes
+messages : `set_params` écrit les attributs sans repasser par `__init__` (ANO-FREQ-052). Les scalaires
+numpy sont admis comme leurs équivalents Python (`np.int64`, `np.bool_`, `np.float32`), les booléens
+restant exclus des entiers (ANO-FREQ-057).
+
 | Paramètre | Contrôle |
 |---|---|
 | `target_frequency` | str non vide normalisable, ou dict non vide `{entité: str}` (contenu vérifié au `fit` contre les entités réelles) |
-| `estimator` | `None`, objet exposant `fit`/`predict`, ou dict `{colonne: estimateur}` (clé `'__default__'` admise) ; avertissement **unique** si `None` |
+| `estimator` | `None`, objet exposant `fit`/`predict`, ou dict `{colonne: estimateur}` (clé `'__default__'` admise, clés vérifiées au `fit` comme au §9.1) ; si `None`, avertissement **unique** émis en tête de `fit`, avant tout entraînement — jamais à `__init__`, que `clone` rappelle et que `set_params` contourne (ANO-FREQ-055) |
 | `additive_transformer` | `None` ou objet exposant `fit_transform` **et** `inverse_transform` |
 | `covariate_strategy`, `covariate_fallback`, `covariate_eligibility`, `fit_predict_order`, `on_frequency_mismatch`, `imputation_scope`, `training_scope` | appartenance au `Literal` (message listant les valeurs admises) |
 | `impute_intermediate_frequencies` | `is False`, `== 'covariates_only'`, ou `is True` — **jamais** un test de vérité booléenne : `'covariates_only'` est *truthy*, un `if self.impute_intermediate_frequencies:` serait un bug silencieux |
-| `interpolation_method` | str, ou dict `{str: str}` (clés vérifiées au `fit`) |
+| `interpolation_method` | str, ou dict `{str: str}` (clés vérifiées au `fit` comme au §9.1 : inconnues → avertissement unique) |
 | `interpolation_anchor` | `None`, float dans `[0, 1]`, ou dict de ces valeurs |
 | `cv` | `None`, `int ≥ 2`, objet à `split`/`get_n_splits`, ou itérable (`check_cv` au `fit` seulement) |
 | `cv_scoring` | str ou callable |
 | `min_cv_train_size` | `int ≥ 1` |
 | `coverage_threshold`, `training_coverage_threshold` | float dans `[0, 1]` (ou `None` pour le second) |
 | `scale_features` | `False`, `'constant'`, `'calendar'`, ou dict de ces valeurs |
-| `aggregation_constraint` | `'sum'`, `None`, ou dict de ces deux valeurs (clé `'__default__'` admise, clés vérifiées au `fit`) ; message listant les formes admises et **nommant `additive_transformer`** comme réponse à une colonne non additive (§11.1, D20) |
+| `aggregation_constraint` | `'sum'`, `None`, ou dict de ces deux valeurs (clé `'__default__'` admise, clés vérifiées au `fit` comme au §9.1) ; message listant les formes admises et **nommant `additive_transformer`** comme réponse à une colonne non additive (§11.1, D20) |
 | booléens (`keep_lower_frequencies`, `restore_original_values`, `verbose`, `impute_unobserved_entities`) | validation groupée, comme dans `hfi` |
 
 Combinaisons **inertes** documentées mais **non signalées** (D9) : cf. §5.6.
@@ -2561,7 +2568,7 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 | **I18** | les couches (§5.4bis, D30) | (a) sous `False` et `'covariates_only'`, `materialize` est appelé **une seule fois** par (étape, variable) et le masque `'training'` demandé **une seule fois**, à la liaison `{e: f_block(e)}` — le comptage d'appels du lot L8d reste vrai à l'identique ; (b) sous `True`, à l'étape `M` de `a1` sur `TS`, `y_train` porte des lignes de fréquence `Y` **et** `Q`, `target_taint` vaut `'imputed'`, et `X_train` est **plein** sur les lignes trimestrielles (`m1` y vaut la somme du trimestre, jamais celle de l'année, jamais NaN) ; (c) sur `PANEL-F` sous `True`, les couches de `v` à l'étape `M` sont exactement `[{FR: 'Y', DE: 'Q', IT: 'M'}, {FR: 'Q'}]` |
 | **I19** | fusion des progressions de panel (D31) | sur `PANEL-F` avec `target_frequency={FR: 'M', DE: 'Q', IT: 'M'}` et `impute_intermediate_frequencies=True`, `frequency_progression_` vaut `[{FR: 'Q', DE: 'Q', IT: 'Q'}, {FR: 'M', IT: 'M'}]` ; **aucune** étape mensuelle ne porte `DE` dans ses entités, **aucune** cellule de `DE` n'est écrite à la fréquence `M`, et `DE` contribue pourtant au `y_train` de l'étape `M` (R1) |
 | **I20** | cellules coïncidentes (§5.9, D32) | sur `TS` sous `True`, à l'étape `M` : `len(y_train)` de `a1` vaut **12** sous `aggregation_constraint='sum'` et **15** sous `None` ; sous `'sum'` la somme des 4 imputations trimestrielles de chaque année **égale** l'ancre (à `1e-9`), sous `None` elle en **diffère** ; sous `None` l'index du jeu d'entraînement porte un niveau de fréquence et les deux cellules du `2021-12-31` (`('Y', …)` et `('Q', …)`) coexistent, avec des diviseurs `12` et `3` ; sous `'sum'` l'index est **inchangé** par rapport à aujourd'hui. Sous `False` et `'covariates_only'`, `aggregation_constraint` n'a **aucun** effet sur `y_train` |
-| **I21** | entités sans ancre (§5.10, D33) | sur `PANEL-F` dont `v` est effacée pour `IT` : sous `impute_unobserved_entities=False`, les 36 cellules d'`IT` restent NaN, `ORIGINAL`, et aucune étape de plan ne porte `IT` ; sous `True`, les 36 sont renseignées, portent **toutes** `MODEL_UNANCHORED`, l'étape de plan correspondante a `source_frequency is None` et `scale_factor == 1.0`, elle **partage l'objet modèle** (`is`) des étapes `(v, Y)` et `(v, Q)` de la même étape de fréquence, `IT` ne contribue **aucune** ligne à `y_train` (R1 inchangée), et **aucun** total annuel n'est imposé à `IT`. La progression est **identique** dans les deux cas : un couple sans fréquence détectée n'entre pas dans `F` |
+| **I21** | entités sans ancre (§5.10, D33) | sur `PANEL-F` dont `v` est effacée pour `IT` : sous `impute_unobserved_entities=False`, les 36 cellules d'`IT` restent NaN et **non marquées** (§5.10), et aucune étape de plan ne porte `IT` ; sous `True`, les 36 sont renseignées, portent **toutes** `MODEL_UNANCHORED`, l'étape de plan correspondante a `source_frequency is None` et `scale_factor == 1.0`, elle **partage l'objet modèle** (`is`) des étapes `(v, Y)` et `(v, Q)` de la même étape de fréquence, `IT` ne contribue **aucune** ligne à `y_train` (R1 inchangée), et **aucun** total annuel n'est imposé à `IT`. La progression est **identique** dans les deux cas : un couple sans fréquence détectée n'entre pas dans `F` |
 
 **État au lot L12** : les vingt et un invariants sont couverts par
 `tests/frequency/test_high_frequency_imputer2.py`. I1 (`TestTransformSymmetry`), I7

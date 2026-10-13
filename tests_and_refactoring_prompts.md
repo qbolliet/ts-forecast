@@ -1348,6 +1348,8 @@ tests/unit/frequency/high_frequency_imputer/ créé en F10. Aucun changement dan
    profile ». Le §12.5 de la spec exige au contraire un avertissement unique par famille, « jamais un par variable ×
    étape : accumulation puis message agrégé en fin de phase ». Scénario : deux colonnes à signe inversé sur deux étapes
    → un seul avertissement « flipped » attendu, nommant les colonnes et le nombre total de périodes.
+7. Traçabilité : tout test qui mesure un invariant I1-I21 est ajouté à la table de la docstring de
+   test_invariants.py (F10 l'y a placée, chaque invariant mesuré sur TS ET panel).
 
 Critères §4.6 ; rapport §4.7.
 ```
@@ -1368,7 +1370,9 @@ changement dans tsforecast/.
    - fit_transform(X) == fit(X).transform(X) pour chaque (covariate_strategy ×
      impute_intermediate_frequencies) sur PANEL-X ;
    - transform ne ré-entraîne jamais (TrainingSetBuilder patché en AssertionError) et ne mute pas
-     l'état ajusté (deepcopy des attributs publics _ avant / après) ;
+     l'état ajusté (deepcopy des attributs publics _ avant / après — l'imputeur ajusté se copie
+     depuis ANO-FREQ-049) ; ce test public écrit, retirer le test internal
+     TestTransformState::test_fit_state_is_restored_after_a_transform qu'il remplace ;
    - transform sur des dates postérieures au fit : nouvelles périodes imputées, valeurs du fit
      inchangées ;
    - fréquences divergentes au transform : warning + fréquences du fit ; colonne du fit
@@ -1379,6 +1383,7 @@ changement dans tsforecast/.
    - keep_lower_frequencies et sortie multi-fréquences selon D35.
 3. heterogeneous_coverage_panel : fit jusqu'à 2023-12, transform sur l'ensemble ; DE (fin 2024-04) n'est pas
    prolongée au-delà de sa couverture sans provenance adéquate.
+4. Traçabilité : table I1-I21 de la docstring de test_invariants.py tenue à jour (cf. F11 point 7).
 
 Critères §4.6 ; objectif final high_frequency_imputer.py ≥ 95 %. Rapport §4.7.
 ```

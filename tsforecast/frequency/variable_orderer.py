@@ -1,6 +1,7 @@
 """Variable ordering for the ``model`` covariate strategy of ``HighFrequencyImputer``."""
 # Importation des modules
 # Modules de base
+import numbers
 import warnings
 from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass
@@ -209,8 +210,8 @@ class VariableOrderer(BaseEstimator):
             # bool est un sous-type de int en Python ; jamais une valeur de
             # "cv" sensée
             raise TypeError(f"cv must not be a bool, got {cv!r}")
-        # Cas d'un entier
-        if isinstance(cv, int):
+        # Cas d'un entier, entiers numpy compris
+        if isinstance(cv, numbers.Integral):
             if cv < 2:
                 raise ValueError(f"cv must be >= 2 when given as an int, got {cv}")
             return
@@ -247,7 +248,7 @@ class VariableOrderer(BaseEstimator):
         # mélangé, donc ces deux cas sont résolus avant de lui être délégués
         if self.cv is None:
             self.cv_ = KFold(n_splits=5, shuffle=True, random_state=42)
-        elif isinstance(self.cv, int):
+        elif isinstance(self.cv, numbers.Integral):
             self.cv_ = KFold(n_splits=self.cv, shuffle=True, random_state=42)
         else:
             # Splitter déjà construit, ou itérable de splits : utilisé tel
