@@ -13,6 +13,7 @@ from typing import (
     Iterable,
     List,
     Literal,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -73,7 +74,7 @@ from .provenance import (
     max_origin,
     origin_to_taint,
 )
-from .stage_scaler import ScaleMode, StageScaler
+from .stage_scaler import ScaleFeatures, StageScaler
 from .target_frequency_validator import TargetFrequencyValidator
 from .training_set_builder import (
     TrainingSet,
@@ -285,7 +286,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
       entities. A country ten times bigger pulls the target, and
       ``scale_features`` corrects the **frequency** scale only, never the
       entity one. The escape hatch needs no parameter: fit one imputer per
-      entity.
+      entity. ``scale_features`` alone may differ per entity within the
+      mutualized set (see below): it makes the **scales** of the entities
+      comparable, never their seasonal profiles — a variable seasonally
+      adjusted by one entity and raw for another still teaches one model two
+      behaviours.
     - **Provenance is contagious across entities**: an entity contributing
       ``'interpolated'`` or ``'model'`` cells degrades ``target_taint``,
       hence the provenance of **every** cell the stage produces — including
@@ -302,6 +307,25 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     of the data is ignored, with a **single** ``UserWarning`` at ``fit``
     listing every such key: a dict may thus be shared by datasets whose
     columns differ, and a typo still shows.
+
+    ``scale_features`` alone admits **per-entity modes**, as a nested dict
+    whose top-level keys remain column names — a variable published
+    seasonally adjusted by one country and raw by another::
+
+        scale_features={
+            'pib': {'DE': 'calendar', '__default__': 'constant'},
+            '__default__': 'constant',
+        }
+
+    The nested dict is **closed on itself**: an entity it does not name takes
+    the nested ``'__default__'``, else ``'constant'``, never the top-level
+    ``'__default__'``. It admits ``'constant'`` and ``'calendar'`` only:
+    ``False`` applies to a whole column, never to some of its entities. Its
+    keys name **full** entities, as the index carries them — ``'FR'`` or
+    ``('FR',)`` on a single-level panel, ``('Zone euro', 'DE')`` on a
+    two-level one. A partial key such as ``'Zone euro'`` matches **no**
+    entity; it is reported by the same warning, and the entities it was
+    meant for fall back on the nested ``'__default__'``.
 
     Args:
         target_frequency: Target frequency, as a string applying to every
@@ -423,7 +447,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         scale_features: ``False``, ``'constant'`` (default), ``'calendar'``,
             or a dict of these values keyed by column with an optional
             ``'__default__'`` key; a column covered by neither is scaled
-            ``'constant'``.
+            ``'constant'``. A value of the dict may itself be a per-entity
+            dict ``{entity: 'constant' | 'calendar'}`` with an optional
+            nested ``'__default__'``: closed on itself, without ``False``,
+            keyed by full entities (see the class docstring).
         aggregation_constraint: ``'sum'`` (default), ``None``, or a dict of
             these two values keyed by column with an optional
             ``'__default__'`` key. Beyond the rescaling of the predictions, it
@@ -554,8 +581,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         training_scope: Optional[TrainingScope] = None,
         training_coverage_threshold: Optional[float] = None,
         # --- Échelle et contraintes  ---
-        scale_features: Union[Literal[False], ScaleMode,
-                              Dict[str, Union[Literal[False], ScaleMode]]] = 'constant',
+        scale_features: ScaleFeatures = 'constant',
         aggregation_constraint: Union[ConstraintSetting,
                                       Dict[str, ConstraintSetting]] = 'sum',
         # --- Sortie et divers ---
@@ -1023,8 +1049,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
 
     # Méthode auxiliaire de contrôle des clés des dictionnaires par feature
-    def _warn_unknown_feature_keys(self, columns: Iterable[Any]) -> None:
-        """Warn once about per-feature dict keys naming no column of the data.
+    def _warn_unknown_feature_keys(
+        self,
+        columns: Iterable[Any],
+        entities: Optional[Sequence[EntityKey]] = None,
+    ) -> None:
+        """Warn once about per-feature dict keys naming nothing in the data.
 
         The per-feature dicts (``estimator``, ``scale_features``,
         ``interpolation_method``, ``interpolation_anchor``,
@@ -1035,10 +1065,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         would break a dict shared by datasets whose columns differ (feature
         selection upstream, search over feature subsets), silence would hide
         a typo. An ``(entity, column)`` key is never a column name: settings
-        are per column, never per entity (D10).
+        are per column.
+
+        ``scale_features`` alone admits per-entity modes, as a nested dict
+        ``{column: {entity: mode}}``. A nested key naming no entity of
+        the data — a partial key of a multi-level panel included, or any
+        entity key on a time series — is reported in the same warning, and
+        that entity falls back on the nested ``'__default__'``.
 
         Args:
             columns: Columns of the working frame, the target included.
+            entities: Normalized entities of the panel, None on a time series.
         """
         # Ensemble des colonnes connues
         known = set(columns)
@@ -1054,27 +1091,59 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             ]
             if unknown:
                 unknown_by_param[name] = sorted(unknown, key=repr)
-        if not unknown_by_param:
+
+        # Entités inconnues des modalités par entité de "scale_features",
+        # comparées sous forme normalisée : 'FR' et ('FR',) sont une entité
+        known_entities = set(entities or ())
+        unknown_entities: Dict[Any, List[Any]] = {}
+        if isinstance(self.scale_features, dict):
+            for column, modes in self.scale_features.items():
+                if not isinstance(modes, Mapping):
+                    continue
+                unknown = [
+                    key for key in modes
+                    if key != DEFAULT_FEATURE_KEY
+                    and normalize_entity_key(key) not in known_entities
+                ]
+                if unknown:
+                    unknown_entities[column] = sorted(unknown, key=repr)
+
+        if not unknown_by_param and not unknown_entities:
             return
 
         # Avertissement unique, listant toutes les clés ignorées
-        details = '; '.join(
-            f"{name}: {keys}" for name, keys in unknown_by_param.items()
-        )
-        message = (
-            f"Per-feature settings name columns absent from the data and are "
-            f"ignored ({details}); these columns fall back to the "
-            f"'{DEFAULT_FEATURE_KEY}' entry or to the default."
-        )
+        parts: List[str] = []
+        if unknown_by_param:
+            details = '; '.join(
+                f"{name}: {keys}" for name, keys in unknown_by_param.items()
+            )
+            parts.append(
+                f"Per-feature settings name columns absent from the data and are "
+                f"ignored ({details}); these columns fall back to the "
+                f"'{DEFAULT_FEATURE_KEY}' entry or to the default."
+            )
+        if unknown_entities:
+            details = '; '.join(
+                f"{column!r}: {keys}" for column, keys in unknown_entities.items()
+            )
+            parts.append(
+                f"scale_features names entities absent from the data and they "
+                f"are ignored ({details}); these entities fall back to the nested "
+                f"'{DEFAULT_FEATURE_KEY}' entry or to 'constant'. Entity keys "
+                "name full entities: a partial key of a multi-level panel "
+                "matches none."
+            )
         if any(
             isinstance(key, tuple)
             for keys in unknown_by_param.values() for key in keys
         ):
-            message += (
-                " Keys are column names, never (entity, column) pairs: fit "
-                "one imputer per entity for per-entity settings."
+            parts.append(
+                "Keys are column names, never (entity, column) pairs: "
+                "scale_features takes per-entity modes as a nested dict "
+                "{column: {entity: mode}}; fit one imputer per entity for the "
+                "other per-entity settings."
             )
-        warnings.warn(message, UserWarning)
+        warnings.warn(' '.join(parts), UserWarning)
 
     # -------------------------------------------------------------------------
     # Conformité sklearn
@@ -1890,7 +1959,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
 
         # Clés des dictionnaires par feature absentes des données
-        self._warn_unknown_feature_keys(X_work.columns)
+        self._warn_unknown_feature_keys(X_work.columns, self.entities_)
 
         # Normalisation de target_frequency (la fréquence de prédiction)
         normalized_target_frequency = self._validate_target_frequency_format(

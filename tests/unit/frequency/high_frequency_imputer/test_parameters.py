@@ -714,6 +714,8 @@ class TestPerFeatureDictUnknownColumn:
         assert len(messages) == 1
         assert "('FR', 'v')" in messages[0]
         assert 'never (entity, column) pairs' in messages[0]
+        # Orientation vers la forme imbriquée de scale_features (D41)
+        assert '{column: {entity: mode}}' in messages[0]
 
     def test_estimator_dict_unknown_column_falls_back_to_the_default(
         self, reference_timeseries
@@ -726,6 +728,168 @@ class TestPerFeatureDictUnknownColumn:
         assert all(
             isinstance(step.model, LinearRegression) for step in imputer.imputation_plan_
         )
+
+
+# =============================================================================
+# Modalités d'échelle par entité (D41)
+# =============================================================================
+# Panel journalier : 'v' mensuelle (300 en fin de mois), 'd1' journalière
+def _daily_panel(entities=('DE', 'FR')) -> pd.DataFrame:
+    """Build a daily panel whose monthly column is imputed at a daily stage.
+
+    Args:
+        entities: Entity names, single index level ``country``.
+
+    Returns:
+        ``MultiIndex`` (``country``, ``date``) frame over the first half of
+        2024 (leap February): ``d1`` daily and dense, ``v`` equal to 300.0 on
+        month ends and NaN elsewhere.
+    """
+    dates = pd.date_range('2024-01-01', '2024-06-30', freq='D', name='date')
+    frames = []
+    for entity in entities:
+        frame = pd.DataFrame({'d1': np.arange(len(dates), dtype=float)}, index=dates)
+        frame['v'] = np.where(dates.is_month_end, 300.0, np.nan)
+        frames.append(pd.concat({entity: frame}, names=['country']))
+    return pd.concat(frames)
+
+
+class TestPerEntityScaleFeatures:
+    """``scale_features={column: {entity: mode}}`` through the imputer (D41).
+
+    Golden values of ``y_train`` at the daily stage: 300 divided by the real
+    days of each month of 2024 under ``'calendar'`` (31, 29, 31, 30, 31, 30),
+    by 30 under ``'constant'``.
+    """
+
+    _DAYS_2024 = [31.0, 29.0, 31.0, 30.0, 31.0, 30.0]
+
+    def _y_train(self, scale_features) -> pd.Series:
+        """Fit on the daily panel and return the target the spy model saw."""
+        imputer = fit_with_spy(
+            _daily_panel(), target_frequency='D', scale_features=scale_features
+        )
+        (step,) = imputer.imputation_plan_
+        return step.model.fit_y_
+
+    def test_y_train_is_scaled_per_entity(self):
+        """DE raw (real days), FR seasonally adjusted (30), in one mutualized model."""
+        y_train = self._y_train({'v': {'DE': 'calendar'}})
+        np.testing.assert_allclose(
+            y_train.loc['DE'].to_numpy(), [300.0 / days for days in self._DAYS_2024]
+        )
+        np.testing.assert_allclose(y_train.loc['FR'].to_numpy(), [10.0] * 6)
+
+    @pytest.mark.parametrize(
+        'nested, scalar',
+        [
+            ({'v': {'DE': 'calendar', 'FR': 'calendar'}}, 'calendar'),
+            ({'v': {'__default__': 'constant'}}, 'constant'),
+            ({'v': {'IT': 'calendar'}}, 'constant'),
+        ],
+        ids=['every-entity-calendar', 'nested-default-only', 'absent-entity'],
+    )
+    def test_unanimous_nested_setting_equals_the_scalar_one(self, nested, scalar):
+        """A nested dict resolving to one mode behaves exactly like that mode."""
+        pd.testing.assert_series_equal(self._y_train(nested), self._y_train(scalar))
+
+    def test_nested_dict_is_closed_on_itself(self):
+        """FR, unnamed, takes 'constant' — never the top-level 'calendar' default."""
+        y_train = self._y_train({'v': {'DE': 'calendar'}, '__default__': 'calendar'})
+        np.testing.assert_allclose(y_train.loc['FR'].to_numpy(), [10.0] * 6)
+
+    def test_per_entity_scaled_output_keeps_the_totals(self):
+        """The aggregation constraint brings each entity's month back to its total."""
+        output = fit_transform_quietly(
+            make_imputer(target_frequency='D', scale_features={'v': {'DE': 'calendar'}}),
+            _daily_panel(),
+        )
+        totals = output['v'].groupby(
+            [output.index.get_level_values('country'),
+             output.index.get_level_values('date').to_period('M')]
+        ).sum()
+        np.testing.assert_allclose(totals.to_numpy(), 300.0, rtol=1e-9)
+
+    @pytest.mark.parametrize(
+        'setting',
+        [{'v': {'DE': False}}, {'v': {'DE': 'calendar', '__default__': False}}],
+        ids=['entity', 'nested-default'],
+    )
+    def test_false_within_a_nested_dict_raises_at_init(self, setting):
+        """False applies to a whole column, never to some of its entities."""
+        with pytest.raises(ValueError, match='never to some of its entities'):
+            make_imputer(scale_features=setting)
+
+    def test_false_within_a_nested_dict_raises_at_fit_after_set_params(self):
+        """set_params bypasses __init__: the check is replayed at fit (ANO-FREQ-052)."""
+        imputer = make_imputer(target_frequency='D').set_params(
+            scale_features={'v': {'DE': False}}
+        )
+        with pytest.raises(ValueError, match='never to some of its entities'):
+            fit_quietly(imputer, _daily_panel())
+
+    # --- Entités inconnues : avertissement unique -----------------------------
+    @staticmethod
+    def _warnings_of(imputer, data):
+        """Fit and return the messages of the warnings about unknown keys."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.fit(data)
+        return [
+            str(item.message) for item in caught
+            if 'absent from the data' in str(item.message)
+        ]
+
+    def test_unknown_entity_warns_once(self):
+        """An entity key naming no entity is ignored, with one warning naming it."""
+        imputer = make_imputer(
+            target_frequency='D', scale_features={'v': {'IT': 'calendar', 'DE': 'calendar'}}
+        )
+        messages = self._warnings_of(imputer, _daily_panel())
+        assert len(messages) == 1
+        assert "'v': ['IT']" in messages[0]
+
+    def test_known_entities_are_silent(self):
+        """Plain and tuple keys of real entities, and the nested default, warn about nothing."""
+        imputer = make_imputer(
+            target_frequency='D',
+            scale_features={'v': {'DE': 'calendar', ('FR',): 'constant', '__default__': 'constant'}},
+        )
+        assert self._warnings_of(imputer, _daily_panel()) == []
+
+    def test_unknown_column_and_unknown_entity_share_one_warning(self):
+        """Both kinds of unknown keys are listed by the same single warning."""
+        imputer = make_imputer(
+            target_frequency='D',
+            scale_features={'zz': 'calendar', 'v': {'IT': 'calendar'}},
+        )
+        messages = self._warnings_of(imputer, _daily_panel())
+        assert len(messages) == 1
+        assert "scale_features: ['zz']" in messages[0] and "'v': ['IT']" in messages[0]
+
+    def test_partial_key_on_a_two_level_panel_warns(self, panel_two_level_dataset):
+        """'France' names no entity of a (country, sector) panel: reported, not expanded."""
+        imputer = make_imputer(
+            scale_features={'indicateur_trimestriel': {'France': 'calendar'}}
+        )
+        messages = self._warnings_of(imputer, panel_two_level_dataset)
+        assert len(messages) == 1
+        assert "['France']" in messages[0]
+        assert 'partial key' in messages[0]
+
+    def test_full_key_on_a_two_level_panel_is_silent(self, panel_two_level_dataset):
+        """('France', 'Industrie') names a real entity of the two-level panel."""
+        imputer = make_imputer(
+            scale_features={'indicateur_trimestriel': {('France', 'Industrie'): 'calendar'}}
+        )
+        assert self._warnings_of(imputer, panel_two_level_dataset) == []
+
+    def test_entity_keys_on_a_time_series_warn(self, reference_timeseries):
+        """A time series has no entity: every nested key is ignored and reported."""
+        imputer = make_imputer(scale_features={'a1': {'FR': 'calendar'}})
+        messages = self._warnings_of(imputer, reference_timeseries)
+        assert len(messages) == 1
+        assert "'a1': ['FR']" in messages[0]
 
 
 # =============================================================================

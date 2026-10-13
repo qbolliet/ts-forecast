@@ -99,7 +99,8 @@ appliqué à l'identique aux deux grilles.
 6. **Le mode « un seul fit réutilisé »** (`cascade_refitting=False`) est **abandonné** (D2).
 7. **Paramètres inertes : silence + docstring**, jamais d'avertissement (D9).
 8. **Les dictionnaires par feature sont indexés par nom de colonne**, jamais par
-   `(entité, colonne)` (D10). **`transform` face à des fréquences divergentes** : avertissement
+   `(entité, colonne)` (D10) — **amendée par D41** : `scale_features` seul admet, comme
+   **valeur** d'une colonne, un dict `{entité: modalité}` clos sur lui-même et sans `False`. **`transform` face à des fréquences divergentes** : avertissement
    et poursuite avec les fréquences du fit, erreur si une colonne du fit manque (D11).
 9. **Le jeu d'entraînement est mutualisé entre entités** : une colonne peut porter une fréquence
    différente selon l'entité, et toutes les entités qui l'observent entraînent le même modèle,
@@ -1861,6 +1862,37 @@ jeux dont les colonnes diffèrent ; l'avertissement révèle une faute de frappe
 couvertes et pas de `'__default__'` → défaut `'constant'`. Les clés sont des **noms de colonne**,
 jamais des couples `(entité, colonne)` (D10).
 
+**Forme par entité (D41)** : la **valeur** d'une colonne — `'__default__'` compris — peut être un
+dict `{entité: modalité}`, avec un `'__default__'` imbriqué optionnel. Cas d'usage : une variable
+publiée CVS-CJO par un pays (`'constant'`) et brute par un autre (`'calendar'`), mutualisée dans
+un même modèle (§5.8).
+
+```python
+scale_features = {
+    'pib': {'DE': 'calendar', '__default__': 'constant'},
+    '__default__': {'IT': 'calendar', '__default__': 'constant'},  # colonnes sans entrée propre
+}
+```
+
+Deux règles, **structurelles** — vérifiées à `__init__` et rejouées en tête de `fit`, sans
+dépendre des données :
+
+1. **le dict imbriqué est clos sur lui-même** : une entité qu'il ne nomme pas prend le
+   `'__default__'` imbriqué, sinon `'constant'` — **jamais** le `'__default__'` de premier
+   niveau, qui ne couvre que les colonnes sans entrée propre ;
+2. **`False` y est interdit** (`ValueError`) : `False` vaut pour une colonne entière ou pour
+   aucune de ses entités. Sans quoi une même colonne de `y_train` ou de `X_train` mutualisé
+   mêlerait deux unités. Avec la règle 1, une colonne est entièrement en `False` ou entièrement
+   divisée, quel que soit le jeu.
+
+Les clés imbriquées désignent des entités **complètes**, normalisées comme toute liaison par
+entité (`'FR'` ≡ `('FR',)`) : `('Zone euro', 'DE')` sur un panel à deux niveaux. Une clé
+**partielle** (`'Zone euro'`) ne désigne **aucune** entité — elle ne vaut pas pour toutes les
+`('Zone euro', *)` — et tombe, avec toute clé d'entité absente des données (série temporelle
+comprise), dans l'avertissement unique des clés inconnues (ANO-FREQ-053). La modalité par entité
+corrige l'échelle **de fréquence**, jamais le profil saisonnier : la mutualisation d'une série
+CVS et d'une série brute reste un choix de modélisation assumé (D17).
+
 ### 9.2 — Ce que la modalité gouverne exactement
 
 La modalité s'applique à **tous les diviseurs** relatifs à la feature :
@@ -2410,7 +2442,7 @@ sont ceux de la version 1, conservés pour la traçabilité.
 | **D7** | **pas** de `disaggregate_anchors` : une variable est imputée sur toute sa période, ancres comprises, comportement **non paramétrable** | §11.2 |
 | **D8** | `aggregation_constraint` remplace `enforce_period_totals` : `'sum'` (défaut), `None`, ou dict par colonne avec `'__default__'` — **amendée le 2026-09-04 par D20**, qui en retire `'mean'` et `'last'` | §11.1 |
 | **D9** | paramètres inertes : **silence + docstring**, jamais d'avertissement | §5.6, §8.1 |
-| **D10** | dictionnaires par feature indexés par **nom de colonne**, jamais par `(entité, colonne)` | §9.1, §10 |
+| **D10** | dictionnaires par feature indexés par **nom de colonne**, jamais par `(entité, colonne)` — **amendée par D41** pour `scale_features` | §9.1, §10 |
 | **D11** | `transform` face à des fréquences divergentes : **avertissement + poursuite** avec les fréquences du fit ; **`ValueError`** si une colonne du fit manque | §12.1 |
 
 ### 14.3 — Décision dérivée, introduite par cette révision
@@ -2481,6 +2513,12 @@ l'auteur à la revue du lot (D32, D33). Chacune est mesurée par un invariant du
 |---|---|---|
 | **D39** | une colonne **sans aucune observation** — pour un panel, par entité — est écartée du **dénominateur** de la couverture ; elle est recensée par `structurally_absent_columns_` (tuple pour une série, dict par entité pour un panel) et signalée par un **unique** `UserWarning` agrégé ; sa couverture rendue (`column_coverage_`) reste `(None, None)`. Une entité sans fenêtre (`entities_without_window_`) porte un tuple vide : ses colonnes n'ont jamais été comparées entre elles. Commit `a3f5783` (2026-09-11) | une telle colonne ne dit rien de l'étendue temporelle de l'entité ; la garder au dénominateur plafonne la couverture à `(n-1)/n`, donc sous 1.0 sur toutes les dates : fenêtre stricte vide et entité où rien n'est jamais imputable — cas de `climat_affaires` pour l'Italie (§15.1). L'exclusion élargit la fenêtre, donc les imputations : elle n'est jamais silencieuse |
 | **D40** | une colonne **observée** mais de fréquence **indétectable** (trop peu d'observations, espacement irrégulier : `None` à la détection) est écartée de la **grille** et du **dénominateur** ; elle est recensée par `undetected_frequency_columns_` (même structure que D39) et signalée par son propre `UserWarning` agrégé ; sa couverture rendue est `(None, None)`. Arbitrage de l'auteur, 2026-10-11 (ANO-FREQ-015) | sans fréquence, la période couverte par une observation est inconnue : en deviner une (repli sur la fréquence de l'index) laisserait une valeur isolée opposer un veto à la fenêtre ou étirer la grille. L'exclusion est cohérente avec `_undetected_frequencies_` de l'imputeur, qui écarte déjà ces couples de la classification ; le `fit` plantait auparavant (`Frequency must be a string`) et l'imputeur poursuivait sans fenêtre, en silence |
+
+### 14.9 — Décision arrêtée sur l'échelle par entité (2026-10-13)
+
+| Code | Décision | Motif |
+|---|---|---|
+| **D41** | `scale_features` admet, comme **valeur** d'une colonne (`'__default__'` compris), un dict `{entité: 'constant' \| 'calendar'}` avec `'__default__'` imbriqué optionnel. Le dict imbriqué est **clos sur lui-même** (repli : `'__default__'` imbriqué, sinon `'constant'`, jamais le `'__default__'` de premier niveau) et **refuse `False`**. Clés d'entité **complètes**, normalisées (`'FR'` ≡ `('FR',)`) ; une clé partielle d'un panel multi-niveaux ne désigne aucune entité et est signalée par l'avertissement unique des clés inconnues. Les autres dictionnaires par feature restent indexés par colonne seule (D10) | une même variable peut être publiée CVS-CJO par une entité et brute par une autre : sous D17, l'échappatoire « un imputeur par entité » de D10 sacrifie la mutualisation que D17 a rendue non paramétrable. Les clés de premier niveau restent des noms de colonne — la lettre de D10 tient, seule la valeur s'enrichit, et toute valeur admise auparavant garde sa sémantique. L'imbrication évite l'ambiguïté de clés `(entité..., colonne)` à plat avec des colonnes nommées par des tuples. Les deux règles rendent le mélange `False` / diviseur **impossible par construction** : sans la clôture, `{'pib': {'DE': 'calendar'}, '__default__': False}` mêlerait `False` (FR) et `'calendar'` (DE) sur `pib`. Mise en œuvre : `StageScaler.resolve_mode(column, entity)` ; `feature_divisors` résout la modalité dans sa boucle par entité et l'inscrit dans la signature de forme ; `target_divisor` et `fit_scale_factor` calculent une fois par modalité distincte puis ventilent par entité (`_by_entity_mode`). Des modalités divergentes sans grille lèvent, plutôt que de retenir silencieusement le repli imbriqué. `interpolation_method`, `interpolation_anchor`, `aggregation_constraint` et `estimator` ne sont **pas** concernés : `estimator` par entité contredirait D17 / D19 |
 
 ---
 

@@ -22,7 +22,9 @@ single instance can serve every stage of a cascade.
 """
 # Importation des modules
 # Modules de base
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple, Union,
+)
 
 # Calcul numérique
 import numpy as np
@@ -45,8 +47,12 @@ from ..panel.utils import normalize_entity_key, normalize_entity_mapping
 ScaleMode = Literal['constant', 'calendar']
 # Réglage effectif d'une colonne, cible comprise : "False" ne divise rien
 ScaleSetting = Union[Literal[False], ScaleMode]
+# Modalités par entité d'une colonne : "False" n'y est jamais admis
+EntityScaleModes = Mapping[Any, ScaleMode]
+# Entrée d'une colonne : réglage unique, ou modalités par entité
+ColumnScaleSetting = Union[ScaleSetting, EntityScaleModes]
 # Forme complète du paramètre public
-ScaleFeatures = Union[Literal[False], ScaleMode, Dict[str, ScaleSetting]]
+ScaleFeatures = Union[Literal[False], ScaleMode, Dict[str, ColumnScaleSetting]]
 
 # Un diviseur est un scalaire d'étape ou une valeur par ligne
 Divisor = Union[float, pd.Series]
@@ -248,6 +254,26 @@ class StageScaler(BaseEstimator, TransformerMixin):
     frozen :attr:`fit_scale_factor_` is ``1.0``, so the scale carry-over of
     the predictions is a no-op.
 
+    A column may take a different mode per entity — a variable published
+    seasonally adjusted by one country (``'constant'``) and raw by another
+    (``'calendar'``) — through a nested dict ``{column: {entity: mode}}``,
+    with an optional nested ``'__default__'``. Two rules govern that form:
+
+    - **the nested dict is closed on itself**: an entity it does not name
+      takes the nested ``'__default__'``, else ``'constant'`` — never the
+      top-level ``'__default__'``, which only covers the columns without an
+      entry of their own;
+    - **only** ``'constant'`` **and** ``'calendar'`` are admitted there:
+      ``False`` applies to a whole column, never to some of its entities, as
+      a mutualized training set would otherwise mix two units within one
+      column.
+
+    Entity keys name **full** entities, exactly as the index carries them:
+    ``'FR'`` or ``('FR',)`` on a single-level panel, ``('Zone euro', 'DE')``
+    on a two-level one. A partial key such as ``'Zone euro'`` matches **no**
+    entity — it does not stand for every ``('Zone euro', *)`` entity — and
+    those entities fall back on the nested ``'__default__'``.
+
     The transformer protocol is a thin layer over the divisor methods:
     :meth:`fit` stores the three divisors of one stage, :meth:`transform`
     divides, :meth:`inverse_transform` multiplies back. The divisor methods
@@ -275,7 +301,10 @@ class StageScaler(BaseEstimator, TransformerMixin):
             ``'constant'`` / ``'calendar'``, or a dict ``{column: mode}`` with
             an optional ``'__default__'`` key (same convention as
             ``estimator``). Dict keys are column names. Columns neither covered
-            nor defaulted fall back on ``'constant'``.
+            nor defaulted fall back on ``'constant'``. A value of the dict
+            (``'__default__'`` included) may itself be a per-entity dict
+            ``{entity: 'constant' | 'calendar'}``, closed on itself and keyed
+            by full entities (see above).
         source_freq: Detected frequency of the variable being imputed
             (``f_var``), for :meth:`fit`: a string, or an entity -> block
             frequency mapping ``{e: f_block(e)}`` on a mutualized panel
@@ -293,7 +322,8 @@ class StageScaler(BaseEstimator, TransformerMixin):
 
     Raises:
         ValueError: If ``scale_features`` is not an admissible setting, or is
-            an empty dict, or a dict holding an inadmissible value.
+            an empty dict, or a dict holding an inadmissible value — ``False``
+            within a per-entity dict included.
 
     Examples:
         >>> scaler = StageScaler()
@@ -363,18 +393,24 @@ class StageScaler(BaseEstimator, TransformerMixin):
         Raises:
             ValueError: If the value, or one of the values of the dict form,
                 is not ``False`` (compared by identity: ``0`` or
-                ``np.False_`` are rejected), ``'constant'`` or ``'calendar'``;
-                or if the dict is empty.
+                ``np.False_`` are rejected), ``'constant'``, ``'calendar'`` or
+                a per-entity dict; if a per-entity dict is empty or holds
+                anything but ``'constant'`` and ``'calendar'`` — ``False``
+                included; or if the dict is empty.
         """
         # Forme dictionnaire : chaque valeur doit être admissible
         if isinstance(scale_features, dict):
             if not scale_features:
                 raise ValueError("scale_features dict cannot be empty")
+            # Modalités par entité : contrôle propre, plus strict
+            for key, value in scale_features.items():
+                if isinstance(value, Mapping):
+                    StageScaler._validate_entity_modes(key, value)
             # Enumération des valeurs non-valides
             invalid = {
                 key: value
                 for key, value in scale_features.items()
-                if not _is_admissible_setting(value)
+                if not isinstance(value, Mapping) and not _is_admissible_setting(value)
             }
             if invalid:
                 raise ValueError(
@@ -389,6 +425,55 @@ class StageScaler(BaseEstimator, TransformerMixin):
                 f"scale_features must be one of {_SCALE_SETTINGS} or a dict "
                 f"of these values, got {scale_features!r}"
             )
+
+    # Méthode auxiliaire de validation des modalités par entité d'une colonne
+    @staticmethod
+    def _validate_entity_modes(column: Any, modes: Mapping[Any, Any]) -> None:
+        """Check the per-entity form of one column's entry.
+
+        ``False`` is refused there: it applies to a whole column or to none of
+        it. A column divided for some entities and not for others would mix
+        two units within one mutualized training set — in ``y_train`` as in a
+        covariate of ``X_train``.
+
+        Args:
+            column: Key of the entry, for the messages.
+            modes: Entity -> mode mapping, with an optional ``'__default__'``
+                key.
+
+        Raises:
+            ValueError: If ``modes`` is empty, or holds a value other than
+                ``'constant'`` and ``'calendar'``.
+
+        Examples:
+            >>> StageScaler._validate_entity_modes('pib', {'DE': 'calendar'})
+            >>> StageScaler._validate_entity_modes('pib', {'DE': False})
+            Traceback (most recent call last):
+                ...
+            ValueError: scale_features['pib'] maps entities to scaling modes and only admits ('constant', 'calendar'), got {'DE': False}: False applies to a whole column, never to some of its entities
+        """
+        # Dictionnaire vide : aucune entité, aucun repli, rien à résoudre
+        if not modes:
+            raise ValueError(
+                f"scale_features[{column!r}] per-entity dict cannot be empty"
+            )
+        # Valeurs hors des deux modalités nommées, "False" compris
+        invalid = {
+            key: value
+            for key, value in modes.items()
+            if not (isinstance(value, str) and value in _SCALE_MODES)
+        }
+        if invalid:
+            message = (
+                f"scale_features[{column!r}] maps entities to scaling modes and "
+                f"only admits {_SCALE_MODES}, got {invalid}"
+            )
+            if any(value is False for value in invalid.values()):
+                message += (
+                    ": False applies to a whole column, never to some of its "
+                    "entities"
+                )
+            raise ValueError(message)
 
     # Méthode de validation des clés du dictionnaire contre les colonnes réelles
     def validate_columns(self, columns: Iterable[str]) -> None:
@@ -432,19 +517,34 @@ class StageScaler(BaseEstimator, TransformerMixin):
     # Résolution de la modalité
     # -------------------------------------------------------------------------
     # Méthode de résolution de la modalité effective d'une colonne
-    def resolve_mode(self, column: Optional[str] = None) -> ScaleSetting:
+    def resolve_mode(
+        self,
+        column: Optional[str] = None,
+        entity: Any = None,
+    ) -> ScaleSetting:
         """Return the scaling mode effectively applied to one column.
-
-        Args:
-            column: Column name, or None for the global setting.
 
         The setting is validated again on every call: ``set_params``
         (``GridSearchCV``, pipelines) bypasses ``__init__``, and every divisor
         method, ``fit`` included, goes through this resolution.
 
+        The column's entry is found first — its own key, else
+        ``'__default__'``, else ``'constant'``. When that entry is a
+        per-entity dict, the entity is resolved **within it and only within
+        it**: its own key, else the nested ``'__default__'``, else
+        ``'constant'``, never the top-level ``'__default__'``. The entity key
+        must name the full entity — ``('Zone euro', 'DE')`` on a two-level
+        panel — and a partial key such as ``'Zone euro'`` matches no entity.
+
+        Args:
+            column: Column name, or None for the global setting.
+            entity: Entity the mode is resolved for — a scalar or a tuple,
+                ``'FR'`` and ``('FR',)`` designating the same entity. None
+                (time series, or no entity at hand) reads the nested
+                ``'__default__'`` of a per-entity entry.
+
         Returns:
-            ``False``, ``'constant'`` or ``'calendar'``: the column's own
-            entry, else the ``'__default__'`` entry, else ``'constant'``.
+            ``False``, ``'constant'`` or ``'calendar'``.
 
         Raises:
             ValueError: If ``scale_features`` is not admissible (typically
@@ -458,6 +558,48 @@ class StageScaler(BaseEstimator, TransformerMixin):
             'calendar'
             >>> scaler.resolve_mode('q1')
             'constant'
+
+            A per-entity entry, closed on itself:
+
+            >>> scaler = StageScaler(scale_features={
+            ...     'pib': {('Zone euro', 'DE'): 'calendar'},
+            ...     '__default__': 'calendar',
+            ... })
+            >>> scaler.resolve_mode('pib', ('Zone euro', 'DE'))
+            'calendar'
+            >>> scaler.resolve_mode('pib', ('Zone euro', 'FR'))
+            'constant'
+            >>> scaler.resolve_mode('pib', 'Zone euro')
+            'constant'
+        """
+        setting = self._column_setting(column)
+
+        # Réglage unique : la même modalité pour toutes les entités
+        if not isinstance(setting, Mapping):
+            return setting
+
+        # Modalités par entité, closes sur elles-mêmes : jamais de remontée
+        # au "__default__" de premier niveau, qui pourrait valoir False
+        if entity is not None:
+            key = normalize_entity_key(entity)
+            for candidate, mode in setting.items():
+                if candidate != DEFAULT_SCALE_KEY and normalize_entity_key(candidate) == key:
+                    return mode
+        return setting.get(DEFAULT_SCALE_KEY, DEFAULT_SCALE_MODE)
+
+    # Méthode auxiliaire de lecture de l'entrée d'une colonne
+    def _column_setting(self, column: Optional[str]) -> ColumnScaleSetting:
+        """Return the entry governing one column, before any entity is read.
+
+        Args:
+            column: Column name, or None for the global setting.
+
+        Returns:
+            The column's own entry, else the ``'__default__'`` entry, else
+            ``'constant'``: a single setting, or a per-entity dict.
+
+        Raises:
+            ValueError: If ``scale_features`` is not admissible.
         """
         setting = self.scale_features
         # Revalidation : "set_params" contourne la validation d'__init__
@@ -475,6 +617,88 @@ class StageScaler(BaseEstimator, TransformerMixin):
             return setting[DEFAULT_SCALE_KEY]
         # Défaut du document
         return DEFAULT_SCALE_MODE
+
+    # Méthode auxiliaire des modalités possibles d'une colonne par entité
+    def _entity_modes(self, column: Optional[str]) -> Optional[Set[str]]:
+        """List the modes a per-entity entry can resolve to, when they differ.
+
+        Args:
+            column: Column name.
+
+        Returns:
+            The set of distinct modes — named entities and nested default,
+            explicit or not — when the column's entry is a per-entity dict
+            whose entities do not all agree; None otherwise, the column then
+            resolving to one mode whatever the entity.
+        """
+        setting = self._column_setting(column)
+        if not isinstance(setting, Mapping):
+            return None
+        modes = set(setting.values()) | {setting.get(DEFAULT_SCALE_KEY, DEFAULT_SCALE_MODE)}
+        return modes if len(modes) > 1 else None
+
+    # Méthode auxiliaire d'application d'un calcul par modalité d'entité
+    def _by_entity_mode(
+        self,
+        column: Optional[str],
+        index: Optional[pd.Index],
+        compute: Callable[[ScaleMode], Divisor],
+    ) -> Divisor:
+        """Compute one divisor under the mode of each row's entity.
+
+        The target divisors are written for a single mode. Under a per-entity
+        entry whose entities disagree, the computation runs once per distinct
+        mode on the whole grid, and each row keeps the value of its own
+        entity's mode: the frequency arithmetic stays in one place, whatever
+        the number of modes.
+
+        Args:
+            column: Column whose mode is resolved — the imputed one.
+            index: Grid of the rows the divisor applies to.
+            compute: Divisor of the whole grid under one mode, scalar or
+                aligned on ``index``.
+
+        Returns:
+            ``compute(mode)`` when every row shares one mode; otherwise a
+            ``Series`` aligned on ``index``.
+
+        Raises:
+            ValueError: If the entities disagree and ``index`` is None.
+        """
+        # Modalité unique : le calcul tel quel
+        if self._entity_modes(column) is None:
+            return compute(self.resolve_mode(column))
+        # Modalités divergentes sans grille : la ventilation est impossible,
+        # et retenir le repli interne serait silencieusement faux sur un panel
+        if index is None:
+            raise ValueError(
+                f"scale_features gives column {column!r} per-entity modes that "
+                "differ: an index is required to spread them over the rows"
+            )
+        entities_per_row = _entities_of(index)
+        # Série temporelle : aucune entité, le repli interne s'applique
+        if entities_per_row is None:
+            return compute(self.resolve_mode(column))
+
+        # Modalité de chaque ligne, résolue une fois par entité
+        by_entity = {
+            entity: self.resolve_mode(column, entity) for entity in set(entities_per_row)
+        }
+        row_modes = np.array([by_entity[entity] for entity in entities_per_row], dtype=object)
+        distinct = sorted(set(by_entity.values()))
+        if len(distinct) == 1:
+            return compute(distinct[0])
+
+        # Un calcul par modalité, écrit positionnellement sur ses lignes
+        result = pd.Series(np.nan, index=index, dtype=float)
+        for mode in distinct:
+            divisor = compute(mode)
+            mask = row_modes == mode
+            result.iloc[np.flatnonzero(mask)] = (
+                float(divisor) if np.isscalar(divisor)
+                else np.asarray(divisor, dtype=float)[mask]
+            )
+        return result
 
     # -------------------------------------------------------------------------
     # Arithmétique des diviseurs
@@ -833,8 +1057,8 @@ class StageScaler(BaseEstimator, TransformerMixin):
             ``DataFrame`` indexed like ``index`` and columned like
             ``columns`` as soon as one column is in ``'calendar'`` mode,
             ``grid_freq`` is a per-entity mapping (a mutualized training
-            set), or the frequencies the divisors read resolve
-            differently from one entity to another; ``Series`` of floats
+            set), or the frequencies or the modes the divisors read
+            resolve differently from one entity to another; ``Series`` of floats
             indexed by column name otherwise (time series, homogeneous
             panels) — even when the divisors of two entities happen to
             coincide, or are all ``1.0``.
@@ -843,7 +1067,8 @@ class StageScaler(BaseEstimator, TransformerMixin):
             ValueError: If per-row divisors are needed and ``index`` is None
                 or carries no entity level, or if an entity of the grid is
                 not covered by a per-entity ``grid_freq``, or by a
-                disagreeing per-entity ``stage_freq``.
+                disagreeing per-entity ``stage_freq``, or if a column carries
+                per-entity modes that differ and ``index`` is None.
 
         Examples:
             >>> scaler = StageScaler()
@@ -870,31 +1095,47 @@ class StageScaler(BaseEstimator, TransformerMixin):
         # Diviseur de repli
         fallback = self.default_divisor if default is None else default
 
-        # Modalité par colonne, et liaisons de fréquence réellement lues : la
-        # fréquence d'une colonne n'est lue que pour ses ancres brutes
-        modes = {column: self.resolve_mode(column) for column in columns}
-        calendar_used = any(mode == 'calendar' for mode in modes.values())
+        # Colonnes divisées, et liaisons de fréquence réellement lues : la
+        # fréquence d'une colonne n'est lue que pour ses ancres brutes.
+        # "False" vaut pour toute la colonne, jamais pour une partie de ses
+        # entités : la colonne suffit à le lire
+        scaled = {column: self.resolve_mode(column) is not False for column in columns}
         read_columns = [
             column for column in columns
-            if modes[column] is not False and ways.get(column) == 'raw_anchors'
+            if scaled[column] and ways.get(column) == 'raw_anchors'
         ]
         bindings = [stage_freq, *(column_frequencies.get(col) for col in read_columns)]
 
-        # Entités à servir : celles de la grille dès qu'une liaison est par
-        # entité et que la grille porte un niveau d'entité, une entité non
-        # couverte étant alors une erreur, jamais un NaN
+        # Colonnes dont les entités divergent sur la modalité
+        entity_wise = [
+            column for column in columns
+            if scaled[column] and self._entity_modes(column) is not None
+        ]
+        if entity_wise and index is None:
+            raise ValueError(
+                f"scale_features gives columns {entity_wise} per-entity modes "
+                "that differ: an index is required to spread them over the rows"
+            )
+
+        # Entités à servir : celles de la grille dès qu'une liaison ou une
+        # modalité est par entité et que la grille porte un niveau d'entité,
+        # une entité non couverte étant alors une erreur, jamais un NaN
         if isinstance(grid_freq, Mapping):
             entities = self._grid_entities(index, 'grid_freq')
         elif any(isinstance(binding, Mapping) for binding in bindings) and isinstance(
             index, pd.MultiIndex
         ):
             entities = self._grid_entities(index, 'stage_freq')
+        elif entity_wise and isinstance(index, pd.MultiIndex):
+            entities = self._grid_entities(index, 'scale_features')
         else:
             entities = self._binding_entities(bindings)
 
-        # Diviseurs par (entité, colonne), et signature des fréquences lues
+        # Diviseurs par (entité, colonne), et signature des fréquences et des
+        # modalités lues
         per_entity: Dict[EntityKey, Dict[str, Divisor]] = {}
         signatures = set()
+        calendar_used = False
         # Parcours des entités
         for entity in entities:
             # Fréquence de l'étape
@@ -908,12 +1149,17 @@ class StageScaler(BaseEstimator, TransformerMixin):
             # Dictionnaire des diviseurs
             row: Dict[str, Divisor] = {}
             carried_by_column: Dict[str, Optional[str]] = {}
+            modes: Dict[str, ScaleSetting] = {}
             # Parcours des colonnes
             for column in columns:
                 # Modalité désactivée : la colonne n'est jamais divisée
-                if modes[column] is False:
+                if not scaled[column]:
                     row[column] = 1.0
                     continue
+                # Modalité de la colonne pour cette entité ; la pseudo-entité
+                # "()" d'une grille sans entité lit le repli interne
+                modes[column] = self.resolve_mode(column, entity)
+                calendar_used = calendar_used or modes[column] == 'calendar'
                 # Période couverte par la cellule : celle de la colonne quand
                 # ses ancres sont lues telles quelles, celle de la grille
                 # sinon. Une colonne au moins aussi fine que la grille n'est
@@ -937,12 +1183,13 @@ class StageScaler(BaseEstimator, TransformerMixin):
             signatures.add((
                 _frequency_key(f_stage),
                 tuple(_frequency_key(carried_by_column[c]) for c in columns if c in carried_by_column),
+                tuple(modes[c] for c in columns if c in modes),
             ))
 
         # Forme dictée par la configuration seule : par ligne sous 'calendar',
-        # sur un jeu mutualisé, ou quand les fréquences lues varient d'une
-        # entité à l'autre ; compacte sinon, les diviseurs étant alors
-        # identiques par construction
+        # sur un jeu mutualisé, ou quand les fréquences ou les modalités lues
+        # varient d'une entité à l'autre ; compacte sinon, les diviseurs étant
+        # alors identiques par construction
         per_row = calendar_used or isinstance(grid_freq, Mapping) or len(signatures) > 1
         if not per_row:
             return pd.Series(next(iter(per_entity.values())), index=list(columns), dtype=float)
@@ -1190,8 +1437,9 @@ class StageScaler(BaseEstimator, TransformerMixin):
 
         Raises:
             ValueError: If per-row divisors are needed and no index is
-                available, or if an entity of the grid is absent from a
-                per-entity ``source_freq``.
+                available — per-entity modes that differ included —, or if an
+                entity of the grid is absent from a per-entity
+                ``source_freq``.
 
         Examples:
             Stage ``M``, variable ``a1``, mode ``'constant'``:
@@ -1210,20 +1458,52 @@ class StageScaler(BaseEstimator, TransformerMixin):
             >>> [round(value, 2) for value in scaler.apply(y, divisors)]
             [10.0, 9.33, 10.0]
         """
-        # Extraction du mode de mise à l'échelle de la cible
-        mode = self.resolve_mode(column)
-
-        # Cible dispensée d'échelle : aucun diviseur, y compris par ligne
-        if mode is False:
+        # Cible dispensée d'échelle : aucun diviseur, y compris par ligne.
+        # "False" vaut pour toute la colonne, jamais pour une partie de ses
+        # entités : la colonne suffit à le lire
+        if self.resolve_mode(column) is False:
             return 1.0
 
         # Toutes les lignes produites à la fréquence de la variable : scalaire
-        # d'étape, ou Series calendaire
+        # d'étape, ou Series calendaire, sous la modalité de chaque entité
         if produced_freq is None:
-            return self._stage_divisor(source_freq, pred_freq, mode, index)
+            return self._by_entity_mode(
+                column,
+                index,
+                lambda mode: self._stage_divisor(source_freq, pred_freq, mode, index),
+            )
 
         # Échelle par ligne : la fréquence de production remplace source_freq
+        return self._by_entity_mode(
+            column,
+            produced_freq.index,
+            lambda mode: self._produced_divisor(pred_freq, produced_freq, mode),
+        )
+
+    # Méthode auxiliaire du diviseur de cible par fréquence de production
+    def _produced_divisor(
+        self,
+        pred_freq: FrequencyBinding,
+        produced_freq: pd.Series,
+        mode: ScaleMode,
+    ) -> pd.Series:
+        """Divide each row of ``y`` by the divisor of its production frequency.
+
+        Args:
+            pred_freq: Prediction frequency of the stage.
+            produced_freq: Frequency at which each row of ``y`` was produced.
+            mode: Scaling mode applied to every row.
+
+        Returns:
+            A ``Series`` of per-row divisors indexed like ``produced_freq``.
+
+        Raises:
+            ValueError: If ``pred_freq`` is a mapping and the rows carry no
+                entity level.
+        """
+        # Extraction de l'index
         rows = produced_freq.index
+        # Initialisation de la série résultat avec le même index
         result = pd.Series(np.nan, index=rows, dtype=float)
 
         # Fréquence d'étape de chaque ligne : constante, ou lue par entité
@@ -1268,16 +1548,18 @@ class StageScaler(BaseEstimator, TransformerMixin):
         and is exposed separately because its LIFETIME differs: the target
         divisor describes one training set, this one describes the model.
 
-        Under ``'calendar'`` the factor is a ``Series`` frozen on the fit
-        grid: a carry-over computed on another grid must realign it. Under
-        ``False`` it is ``1.0``, the target having been left at its own scale.
+        Under ``'calendar'``, or per-entity modes that differ, the factor is a
+        ``Series`` frozen on the fit grid: a carry-over computed on another
+        grid must realign it. Under ``False`` it is ``1.0``, the target having
+        been left at its own scale.
 
         Args:
             column: Name of the imputed column, for mode resolution.
             source_freq: Detected frequency of the variable.
             pred_freq: Prediction frequency of the stage.
-            index: Prediction grid of the fit, required under ``'calendar'``
-                or when the entities disagree.
+            index: Prediction grid of the fit, required under ``'calendar'``,
+                when the entities disagree on a frequency, or when they
+                disagree on the mode.
 
         Returns:
             A float, or a ``Series`` aligned on ``index``.
@@ -1290,11 +1572,14 @@ class StageScaler(BaseEstimator, TransformerMixin):
             12.0
         """
         # Cible dispensée d'échelle : rien n'est cuit dans le modèle
-        mode = self.resolve_mode(column)
-        if mode is False:
+        if self.resolve_mode(column) is False:
             return 1.0
 
-        return self._stage_divisor(source_freq, pred_freq, mode, index)
+        return self._by_entity_mode(
+            column,
+            index,
+            lambda mode: self._stage_divisor(source_freq, pred_freq, mode, index),
+        )
 
     # -------------------------------------------------------------------------
     # Application et inversion de l'échelle
