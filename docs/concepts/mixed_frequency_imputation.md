@@ -59,8 +59,12 @@ Chaque cellule du résultat porte une étiquette `ProvenanceType` :
 
 La provenance est **contagieuse** : sur un panel, une entité qui contribue des
 cellules interpolées ou modélisées dégrade la provenance de toutes les cellules
-que l'étape produit. La matrice complète est exposée après `fit` dans
-`imputation_provenance_`, et son résumé chiffré dans `provenance_statistics_`.
+que l'étape produit. La matrice complète de la **dernière passe** (`fit`, puis
+chaque `transform`) est exposée dans `imputation_provenance_`, et son résumé
+chiffré dans `provenance_statistics_`, compté sur le niveau cible. La matrice
+d'un `transform` décrit les cellules de **sa sortie** : une colonne plus fine
+que la ligne y porte l'agrégation exacte de la période (`AGGREGATED`), et une
+cellule vide n'est jamais marquée.
 
 ## Le plan, source de vérité unique
 
@@ -76,7 +80,10 @@ Laissées libres, les sous-périodes prédites n'ont aucune raison de sommer à
 l'observation qu'elles décrivent. `aggregation_constraint='sum'` (défaut) recale
 les sous-périodes d'une période pour que leur agrégat égale le total observé :
 une prédiction libre devient une vraie **désagrégation** de l'observation. Le
-recalage ne change jamais la provenance d'une cellule.
+recalage ne change jamais la provenance d'une cellule. Une période que les
+bornes des données (ou de la fenêtre) tronquent n'est pas recalée : un total
+annuel ne s'impose pas à dix mois sur douze. Son total observé n'est alors plus
+déductible de la sortie, ce qu'un avertissement unique par passe signale.
 
 ## Composants auxiliaires
 
@@ -105,6 +112,23 @@ déjà, pour que l'index empilé n'ait jamais deux niveaux du même nom.
 `inverse_transform` reconnaît une sortie empilée à sa profondeur et lit le niveau
 de fréquence par position : renommer les niveaux de la sortie ne l'empêche pas
 de l'inverser.
+
+La sortie suit l'ordre de l'entrée. Elle porte les lignes de la grille cible :
+une grille densifiée (index irrégulier) en ajoute, une cible plus grossière que
+l'index en retire — la valeur d'une ligne retirée est agrégée sur la ligne de
+sa période. `inverse_transform` défait la dernière passe et rend **l'index de
+son entrée**, dans son ordre : sans `restore_original_values`, seules les
+cellules `ORIGINAL` y reviennent ; avec, toutes les valeurs observées.
+
+## Entités et couples inconnus du `fit`
+
+Au `transform`, `impute_unobserved_entities` gouverne aussi les couples
+(entité, colonne) que le `fit` n'a jamais observés : les colonnes d'une entité
+absente du `fit`, ou une colonne qu'une entité connue laissait vide. Sous
+`False` (défaut) ils restent tels quels. Sous `True`, chacun est imputé comme
+s'il avait été présent au `fit`, par le modèle figé de sa colonne : **ancré**
+sur ses propres observations quand le `transform` l'observe, sans ancre
+(`MODEL_UNANCHORED`) sinon.
 
 ## Pour aller plus loin
 

@@ -124,6 +124,26 @@ def test_imputation_metrics_unfitted_raises():
         imputation_metrics(HighFrequencyImputer(target_frequency="M"))
 
 
+def test_imputation_metrics_describe_the_last_pass(mixed_frequency_ts):
+    """Les métriques suivent la dernière passe : après un transform, sa sortie (D45)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        imputer = HighFrequencyImputer(
+            target_frequency="M", estimator=LinearRegression()
+        ).fit(mixed_frequency_ts)
+        after_fit = imputation_metrics(imputer)
+        imputer.transform(mixed_frequency_ts.loc["2021"])
+    after_transform = imputation_metrics(imputer)
+
+    # Comptes par type, cellules non marquées comprises : toute la matrice
+    counts = [
+        key for key in after_transform
+        if key.startswith("provenance.") and not key.endswith("_pct")
+    ]
+    assert sum(after_fit[key] for key in counts) == 48 * 3
+    assert sum(after_transform[key] for key in counts) == 12 * 3
+
+
 # --------------------------------------------------------------------------- #
 # delay_metrics
 # --------------------------------------------------------------------------- #

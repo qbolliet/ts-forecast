@@ -5,7 +5,7 @@ scale) and its table of §6.3.
 
 Covered symbols: ``ProvenanceType`` (members, ``str`` serialization),
 ``resolve_model_provenance`` (full 3 x 3 truth table), ``origin_to_taint``,
-``max_origin`` and ``ImputationProvenanceTracker`` (``initialize``,
+``max_origin``, ``provenance_statistics`` and ``ImputationProvenanceTracker`` (``initialize``,
 ``extend_index``, every ``mark_*``, ``clear_provenance``, ``get_provenance``,
 ``get_mask``, ``compute_statistics``, ``get_provenance_matrix``,
 ``to_string_matrix``, ``merge``, ``__repr__``), including its behavior on a
@@ -25,6 +25,7 @@ from tsforecast.frequency.provenance import (
     ProvenanceType,
     max_origin,
     origin_to_taint,
+    provenance_statistics,
     resolve_model_provenance,
 )
 
@@ -931,6 +932,32 @@ class TestComputeStatistics:
         """Statistics before ``initialize`` raise ValueError."""
         with pytest.raises(ValueError, match='not initialized'):
             ImputationProvenanceTracker().compute_statistics()
+
+    def test_module_function_matches_the_tracker(self):
+        """``provenance_statistics`` on the tracker's matrix gives the very same census.
+
+        The function serves the matrices ``HighFrequencyImputer.transform``
+        assembles stage by stage, which no tracker holds (D45).
+        """
+        tracker = self._all_types_tracker()
+        expected = tracker.compute_statistics()
+
+        actual = provenance_statistics(tracker.get_provenance_matrix())
+
+        assert actual == expected
+
+    def test_module_function_on_a_frame_without_a_tracker(self):
+        """A plain frame of marks and missing values is counted like a tracker's matrix."""
+        matrix = pd.DataFrame({
+            'm1': [P.AGGREGATED, P.AGGREGATED, None],
+            'a1': [P.MODEL_ON_TRUE, None, None],
+        })
+
+        stats = provenance_statistics(matrix)
+
+        assert stats['m1']['aggregated'] == 2
+        assert stats['a1']['not_imputed_pct'] == pytest.approx(200 / 3)
+        assert stats['overall']['not_imputed'] == 3
 
 
 # =============================================================================

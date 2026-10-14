@@ -5,7 +5,8 @@ of each value in an imputed dataset, distinguishing original values, exact
 aggregations, disaggregated sub-periods, interpolated values, and the five
 levels of model-imputation taint (see ProvenanceType). It also exposes the
 taint primitives shared by the imputation plan: the CellOrigin / Taint aliases
-and the functions resolve_model_provenance, origin_to_taint and max_origin.
+and the functions resolve_model_provenance, origin_to_taint and max_origin, plus
+provenance_statistics, the per-type census of a provenance matrix.
 """
 # Importation des modules
 # Modules de base
@@ -197,6 +198,56 @@ def max_origin(origins: Iterable[CellOrigin]) -> CellOrigin:
         if _ORIGIN_ORDER[origin] > _ORIGIN_ORDER[best]:
             best = origin
     return best
+
+
+# Statistiques de répartition d'une matrice de provenance
+def provenance_statistics(
+    matrix: pd.DataFrame,
+) -> Dict[str, Dict[str, Union[int, float]]]:
+    """Count the cells of a provenance matrix per provenance type.
+
+    Shared by :meth:`ImputationProvenanceTracker.compute_statistics` and by
+    the matrices ``HighFrequencyImputer.transform`` assembles stage by stage,
+    which no tracker holds.
+
+    Args:
+        matrix: Provenance matrix, one ``ProvenanceType`` (or a missing value
+            for a cell never marked) per cell.
+
+    Returns:
+        ``{'overall': {...}, column: {...}}``. Each block holds, for every
+        ``ProvenanceType``, the count under its value and the percentage
+        under ``<value>_pct``, plus ``not_imputed`` / ``not_imputed_pct`` for
+        the unmarked cells. Percentages are 0.0 on an empty matrix.
+
+    Examples:
+        >>> matrix = pd.DataFrame({'a1': [ProvenanceType.ORIGINAL, None]})
+        >>> stats = provenance_statistics(matrix)
+        >>> int(stats['a1']['original']), float(stats['overall']['not_imputed_pct'])
+        (1, 50.0)
+    """
+    # Bloc de statistiques d'un ensemble de cellules
+    def _block(cells: pd.DataFrame) -> Dict[str, Union[int, float]]:
+        # Extraction des dimensions
+        total = cells.size
+        # Initialisation des blocs de statistiques pour chaque provenance
+        block: Dict[str, Union[int, float]] = {}
+        # Parcours des types de provenance
+        for prov_type in ProvenanceType:
+            count = (cells == prov_type).to_numpy().sum()
+            block[prov_type.value] = count
+            block[f'{prov_type.value}_pct'] = (count / total * 100) if total > 0 else 0.0
+        # Cellules jamais marquées : None dans la matrice
+        null_count = cells.isna().to_numpy().sum()
+        block['not_imputed'] = null_count
+        block['not_imputed_pct'] = (null_count / total * 100) if total > 0 else 0.0
+        return block
+
+    # Bloc global, puis un bloc par colonne
+    statistics: Dict[str, Dict[str, Union[int, float]]] = {'overall': _block(matrix)}
+    for column in matrix.columns:
+        statistics[column] = _block(matrix[[column]])
+    return statistics
 
 
 # Classe de suivi de la provenance des valeurs imputées
@@ -668,44 +719,8 @@ class ImputationProvenanceTracker:
         if self.provenance_matrix_ is None:
             raise ValueError("Provenance matrix not initialized. Call initialize() first.")
 
-        # Initialisation du dictionnaire de statistiques
-        self.statistics_ = {}
-
-        # Calcul des statistiques globales
-        total_values = self.provenance_matrix_.size
-        overall_stats = {}
-
-        for prov_type in ProvenanceType:
-            mask = self.provenance_matrix_ == prov_type
-            count = mask.sum().sum()
-            overall_stats[prov_type.value] = count
-            overall_stats[f'{prov_type.value}_pct'] = (count / total_values * 100) if total_values > 0 else 0.0
-
-        # Comptage des valeurs non-imputées (None dans la matrice)
-        null_count = self.provenance_matrix_.isna().sum().sum()
-        overall_stats['not_imputed'] = null_count
-        overall_stats['not_imputed_pct'] = (null_count / total_values * 100) if total_values > 0 else 0.0
-
-        self.statistics_['overall'] = overall_stats
-
-        # Calcul des statistiques par colonne
-        for col in self.provenance_matrix_.columns:
-            col_stats = {}
-            col_values = len(self.provenance_matrix_[col])
-
-            for prov_type in ProvenanceType:
-                mask = self.provenance_matrix_[col] == prov_type
-                count = mask.sum()
-                col_stats[prov_type.value] = count
-                col_stats[f'{prov_type.value}_pct'] = (count / col_values * 100) if col_values > 0 else 0.0
-
-            # Comptage des valeurs non-imputées
-            null_count = self.provenance_matrix_[col].isna().sum()
-            col_stats['not_imputed'] = null_count
-            col_stats['not_imputed_pct'] = (null_count / col_values * 100) if col_values > 0 else 0.0
-
-            self.statistics_[col] = col_stats
-
+        # Calcul des statistiques de provenance
+        self.statistics_ = provenance_statistics(self.provenance_matrix_)
         return self.statistics_
 
     # Méthode d'extraction de la matrice de provenance

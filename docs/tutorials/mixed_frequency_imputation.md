@@ -68,7 +68,9 @@ des ancres) : ses cellules portent toutes `MODEL_ON_TRUE`. Le niveau annuel
 d'origine, lui, reste `ORIGINAL`.
 
 `provenance_statistics_` est le résumé chiffré (comptes + pourcentages par
-`ProvenanceType`), au global et par colonne.
+`ProvenanceType`), au global et par colonne. Comme `imputation_provenance_`, il
+décrit la **dernière passe** : chaque `transform` le réécrit, sur le niveau
+cible de sa sortie.
 
 ## 4. Contrainte d'agrégation
 

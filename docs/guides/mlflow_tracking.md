@@ -112,7 +112,9 @@ Résumé d'un `HighFrequencyImputer` ajusté :
 
 - `provenance.<type>` et `provenance.<type>_pct` pour chaque `ProvenanceType`
   (ex. `provenance.original_pct`, `provenance.model_on_true_pct`,
-  `provenance.interpolated_pct`) ;
+  `provenance.interpolated_pct`), lus dans `provenance_statistics_` : ils
+  décrivent la **dernière passe** — le `fit`, puis chaque `transform`. Loguez-les
+  juste après la passe qu'ils doivent décrire ;
 - `n_stages`, `n_unanchored_pairs` ;
 - `cv_score.{min,max,mean,n}` — les scores de validation croisée qui ont décidé
   l'ordre d'imputation (présents seulement sous `covariate_strategy='model'` +

@@ -22,6 +22,7 @@ from .provenance import (
     resolve_model_provenance,
     origin_to_taint,
     max_origin,
+    provenance_statistics,
 )
 from .covariate_materializer import (
     CovariateMaterializer,
@@ -66,6 +67,7 @@ __all__ = [
     'resolve_model_provenance',
     'origin_to_taint',
     'max_origin',
+    'provenance_statistics',
     # Matérialisation des covariables
     'CovariateMaterializer',
     'AggregationConstraintApplier',

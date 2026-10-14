@@ -727,9 +727,11 @@ class TestRescaleGuards:
         anchor_dates = pd.date_range('2020-01-01', periods=3, freq=_GRID_ALIASES[('Y', position)])
         observations = pd.Series([100.0, 120.0, 140.0], index=anchor_dates)
 
-        rescaled, mask = AggregationConstraint('sum').rescale(
-            values, observations, 'Y', grid_freq=alias
-        )
+        # Les deux années tronquées sont nommées par un avertissement unique (D46)
+        with pytest.warns(UserWarning, match=r'not enforced.*2 observed period\(s\)'):
+            rescaled, mask = AggregationConstraint('sum').rescale(
+                values, observations, 'Y', grid_freq=alias
+            )
 
         # Valeur d'or : 2021 → 120 / 12 = 10 par mois ; 2020 et 2022 intactes
         expected = pd.Series(1.0, index=grid)
@@ -758,9 +760,10 @@ class TestRescaleGuards:
         values = pd.Series([5.0, 5.0], index=grid, name='q1')
         observations = pd.Series([np.nan, 10.0], index=grid, name='q1')
 
-        rescaled, mask = AggregationConstraint('sum').rescale(
-            values, observations, 'Q', grid_freq='M'
-        )
+        with pytest.warns(UserWarning, match='not enforced'):
+            rescaled, mask = AggregationConstraint('sum').rescale(
+                values, observations, 'Q', grid_freq='M'
+            )
 
         pd.testing.assert_series_equal(rescaled, values)
         assert not mask.any()
@@ -967,9 +970,10 @@ class TestRescaleGuards:
         values = pd.Series([3.0], index=grid)
         observations = pd.Series([120.0], index=grid)
 
-        rescaled, mask = AggregationConstraint('sum').rescale(
-            values, observations, 'Y', grid_freq='M'
-        )
+        with pytest.warns(UserWarning, match='not enforced'):
+            rescaled, mask = AggregationConstraint('sum').rescale(
+                values, observations, 'Y', grid_freq='M'
+            )
 
         assert rescaled.tolist() == [3.0] and not mask.any()
 
@@ -1147,9 +1151,10 @@ class TestRescalePanel:
         observations.loc[('FR', months[-1])] = 120.0
         observations.loc[('DE', quarters[-1])] = 120.0
 
-        rescaled, mask = AggregationConstraint('sum').rescale(
-            values, observations, 'Y', grid_freq={('FR',): 'M', ('DE',): 'Q'}
-        )
+        with pytest.warns(UserWarning, match=r'not enforced.*1 observed period\(s\)'):
+            rescaled, mask = AggregationConstraint('sum').rescale(
+                values, observations, 'Y', grid_freq={('FR',): 'M', ('DE',): 'Q'}
+            )
 
         assert mask.loc['FR'].all() and not mask.loc['DE'].any()
         assert rescaled.loc['DE'].tolist() == [30.0, 30.0]
@@ -1247,7 +1252,12 @@ class TestRescaleRealisticDatasets:
     def test_trade_balance_warns_once_for_all_flipped_years(
         self, irregular_index_timeseries, sign, expected_warnings
     ):
-        """Six flipped years produce ONE warning; same-sign predictions none."""
+        """Six flipped years produce ONE warning; same-sign predictions none.
+
+        The years the grid holds in part — the isolated anchors before the
+        monthly history, the last one after it — are named by their own
+        single warning (D46), whatever the sign.
+        """
         values, observations = self._balance_case(irregular_index_timeseries, sign)
 
         _result, messages = _record_warnings(
@@ -1255,9 +1265,12 @@ class TestRescaleRealisticDatasets:
             values, observations, 'Y', grid_freq='MS',
         )
 
-        assert len(messages) == expected_warnings
+        flipped = [m for m in messages if 'flipped the predicted profile' in m]
+        assert len(flipped) == expected_warnings
         if expected_warnings:
-            assert '6 period(s)' in messages[0]
+            assert '6 period(s)' in flipped[0]
+        truncated = [m for m in messages if m.startswith('Aggregation constraint not enforced')]
+        assert len(truncated) == 1 and len(messages) == len(flipped) + 1
 
     def test_per_entity_source_frequency_on_the_heterogeneous_panel(
         self, heterogeneous_coverage_panel
@@ -1677,6 +1690,39 @@ class TestWarnings:
 
         kinds = sorted('zero' if 'aggregate to zero' in m else 'flipped' for m in messages)
         assert kinds == ['flipped', 'zero']
+
+    def test_truncated_periods_are_named_once(self):
+        """D46 — observed totals the grid holds in part: ONE warning, their count, the column.
+
+        Grid March 2020 - October 2022: 2020 and 2022 hold ten months each and
+        stay raw (D25); their totals are lost in the values, which the warning
+        says. The whole year 2021 is rescaled and counts for nothing.
+        """
+        grid = pd.date_range('2020-03-31', '2022-10-31', freq='ME')
+        values = pd.Series(1.0, index=grid, name='a1')
+        observations = pd.Series(
+            [100.0, 120.0, 140.0], index=pd.date_range('2020-12-31', periods=3, freq='YE')
+        )
+
+        _result, messages = _record_warnings(
+            AggregationConstraint('sum').rescale, values, observations, 'Y', grid_freq='M'
+        )
+
+        assert len(messages) == 1
+        assert messages[0].startswith('Aggregation constraint not enforced')
+        assert "2 observed period(s)" in messages[0] and "['a1']" in messages[0]
+
+    def test_truncation_is_not_reported_without_a_grid_frequency(self):
+        """Without ``grid_freq`` no truncation can be seen, hence none is reported."""
+        grid = pd.date_range('2021-03-31', periods=10, freq='ME')
+        values = pd.Series(1.0, index=grid, name='a1')
+        observations = pd.Series(120.0, index=[grid[-1]])
+
+        _result, messages = _record_warnings(
+            AggregationConstraint('sum').rescale, values, observations, 'Y'
+        )
+
+        assert messages == []
 
     def test_transform_warns_once_for_every_column(self):
         """Two flipped columns: one warning naming both, with the total count."""

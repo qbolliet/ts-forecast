@@ -416,7 +416,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
       predictions kept;
     - a period the bounds of the frame truncate (sub-periods absent from the
       grid, not NaN) is left untouched — active only when ``rescale`` is told
-      the grid frequency (``grid_freq``);
+      the grid frequency (``grid_freq``). Its observed total is then lost in
+      the values, so a single aggregated ``UserWarning`` names the columns
+      and the number of periods concerned;
     - a period holding no observation at all (delayed series end) is left
       untouched;
     - a period whose predicted aggregate is zero while its observed total is
@@ -832,10 +834,11 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
                 un-rescaled. None disables that guard.
 
         Returns:
-            Tuple ``(rescaled, rescaled_mask, zero_periods, flipped_periods)``:
-            the rescaled values, the boolean mask of the cells actually moved,
-            the periods whose predicted aggregate was zero against a non-zero
-            total, and the periods whose profile was flipped.
+            Tuple ``(rescaled, rescaled_mask, zero_periods, flipped_periods,
+            truncated_periods)``: the rescaled values, the boolean mask of the
+            cells actually moved, the periods whose predicted aggregate was
+            zero against a non-zero total, the periods whose profile was
+            flipped, and the observed periods the grid holds only in part.
 
         Raises:
             ValueError: If ``values`` or the anchors of ``observations`` hold
@@ -866,6 +869,7 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         # Recensement des cas dégénérés pour un avertissement agrégé
         zero_periods: List[Any] = []
         flipped_periods: List[Any] = []
+        truncated_periods: List[Any] = []
 
         # Recalage : les prédictions de chaque période basse fréquence sont
         # ajustées pour que leur agrégat égale la valeur observée. La boucle
@@ -879,9 +883,11 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             # Périodes calendairement incomplètes : les sous-périodes que
             # les bornes du jeu retranchent ne sont pas des NaN, la garde
             # suivante ne peut donc pas les voir. Imposer le total d'une année
-            # entière aux dix mois présentsfausserait la répartition
+            # entière aux dix mois présents fausserait la répartition ;
+            # le total observé est alors perdu, ce que dit l'avertissement
             expected = self._expected_subperiods(period_key, grid_freq)
             if expected is not None and len(positions) < expected:
+                truncated_periods.append(period_key)
                 continue
 
             # Extraction des observations associées à ces positions
@@ -918,24 +924,27 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             if period_value != 0 and np.sign(aggregate) != np.sign(period_value):
                 flipped_periods.append(period_key)
 
-        return rescaled, rescaled_mask, zero_periods, flipped_periods
+        return rescaled, rescaled_mask, zero_periods, flipped_periods, truncated_periods
 
     # Méthode auxiliaire d'émission des avertissements agrégés
     def _emit_warnings(
         self,
         zero_periods: Mapping[str, List[Any]],
         flipped_periods: Mapping[str, List[Any]],
+        truncated_periods: Optional[Mapping[str, List[Any]]] = None,
     ) -> None:
         """Emit at most one warning per degenerate case, for the whole operation.
 
         A period-by-period warning would drown the caller under one message per
-        year of the panel: the two messages below name the columns and the
+        year of the panel: the three messages below name the columns and the
         number of periods concerned, and are emitted once.
 
         Args:
             zero_periods: Periods whose predicted aggregate was zero against a
                 non-zero observed total, per column.
             flipped_periods: Periods whose profile was flipped, per column.
+            truncated_periods: Observed periods the grid holds only in part,
+                left un-rescaled, per column.
         """
         # Suffixe de contexte,
         suffix = f" for {self.context}" if self.context else ""
@@ -971,12 +980,33 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
                 f"sub-period changed sign.",
                 UserWarning
             )
+        # Warning sur les périodes tronquées
+        truncated_periods = truncated_periods or {}
+        truncated_columns = sorted(
+            str(column) for column, periods in truncated_periods.items() if periods
+        )
+        if truncated_columns:
+            count = sum(len(periods) for periods in truncated_periods.values())
+            example = next(
+                periods[0] for periods in truncated_periods.values() if periods
+            )
+            warnings.warn(
+                f"Aggregation constraint not enforced{suffix} for {count} "
+                f"observed period(s) the grid holds only in part — the bounds "
+                f"of the data or of the imputation window cut them —, in "
+                f"column(s) {truncated_columns} (e.g. {example}). A period "
+                f"total cannot be imposed on some of its sub-periods only: "
+                f"their predictions are kept as they are and do not add up to "
+                f"the observation.",
+                UserWarning
+            )
 
     # Méthode auxiliaire de signalement des périodes dégénérées
     def _report(
         self,
         zero_periods: Mapping[str, List[Any]],
         flipped_periods: Mapping[str, List[Any]],
+        truncated_periods: Optional[Mapping[str, List[Any]]] = None,
     ) -> None:
         """Warn about the degenerate periods of one operation, or set them aside.
 
@@ -990,16 +1020,22 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             zero_periods: Periods whose predicted aggregate was zero against a
                 non-zero observed total, per column.
             flipped_periods: Periods whose profile was flipped, per column.
+            truncated_periods: Observed periods the grid holds only in part,
+                per column.
         """
+        # Initialisation des périodes tronquées
+        truncated_periods = truncated_periods or {}
         # Hors bloc différé : émission immédiate, comportement d'origine
         census = getattr(self, '_deferred_census', None)
         if census is None:
-            self._emit_warnings(zero_periods, flipped_periods)
+            self._emit_warnings(zero_periods, flipped_periods, truncated_periods)
             return
 
         # Bloc différé : recensement dédoublonné par colonne, ordre de première
         # rencontre conservé pour l'exemple cité par le message
-        for store, reported in zip(census, (zero_periods, flipped_periods)):
+        for store, reported in zip(
+            census, (zero_periods, flipped_periods, truncated_periods)
+        ):
             for column, periods in reported.items():
                 if periods:
                     store.setdefault(column, {}).update(dict.fromkeys(periods))
@@ -1046,13 +1082,11 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             yield self
             return
 
-        # Recensement du bloc : périodes nulles puis périodes inversées
-        self._deferred_census: Tuple[Dict[str, Dict[Any, None]], Dict[str, Dict[Any, None]]] = (
-            {}, {}
-        )
+        # Recensement du bloc : périodes nulles, inversées, puis tronquées
+        self._deferred_census: Tuple[Dict[str, Dict[Any, None]], ...] = ({}, {}, {})
         try:
             yield self
-            zero_periods, flipped_periods = self._deferred_census
+            zero_periods, flipped_periods, truncated_periods = self._deferred_census
         finally:
             # Aucun état ne survit au bloc : ni clone, ni sérialisation, ni
             # appel ultérieur hors bloc ne le voient
@@ -1062,6 +1096,7 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         self._emit_warnings(
             {column: list(periods) for column, periods in zero_periods.items()},
             {column: list(periods) for column, periods in flipped_periods.items()},
+            {column: list(periods) for column, periods in truncated_periods.items()},
         )
 
     # Méthode de recalage d'une colonne
@@ -1150,14 +1185,17 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         if not active:
             return values, pd.Series(False, index=values.index)
 
-        rescaled, mask, zero_periods, flipped_periods = self._rescale_one(
-            values, observations, period_freq, grid_freq
+        # Remise à l'échelle
+        rescaled, mask, zero_periods, flipped_periods, truncated_periods = (
+            self._rescale_one(values, observations, period_freq, grid_freq)
         )
 
         # Avertissements agrégés sur l'unique colonne traitée, différés dans un
         # bloc "deferred_warnings"
         label = column if column is not None else values.name
-        self._report({label: zero_periods}, {label: flipped_periods})
+        self._report(
+            {label: zero_periods}, {label: flipped_periods}, {label: truncated_periods}
+        )
 
         return rescaled, mask
 
@@ -1346,8 +1384,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
                 masks[column] = pd.Series(False, index=X.index)
                 continue
 
-            # Recalage de la colonne
-            column_values, mask, zeros, flipped = self._rescale_one(
+            # Recalage de la colonne, sans grille déclarée : aucune troncature
+            # ne peut y être constatée
+            column_values, mask, zeros, flipped, _truncated = self._rescale_one(
                 X[column],
                 self._observations_for(column),
                 self._period_freq_for(column),

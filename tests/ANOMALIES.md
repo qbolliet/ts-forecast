@@ -4594,3 +4594,259 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   entité entièrement NaN). Le repli « Using all available data » du `fit` (masques tout-vrais sur échec du
   calculateur), devenu inatteignable, est supprimé à la demande de l'auteur : un échec du calcul de fenêtre au `fit`
   lève désormais. Son pendant au `transform` reste — une seule ligne à transformer ne porte aucune fenêtre.
+
+
+### ANO-FREQ-073 — Entité née au `transform` : ses colonnes observées sont servies sans ancre, ses observations écrasées
+- **Type** : [SPEC] code ≠ spec (D34 appliqué à la lettre, contraire à I4 et I7)
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._new_entity_steps`
+  (et `_execute_step` pour les étapes `unanchored=True`)
+- **Sévérité** : majeure
+- **Observé** : sous `impute_unobserved_entities=True`, une entité absente du `fit` reçoit, pour **chaque** colonne
+  imputée de l'étape, une étape dérivée `unanchored=True` (`source_frequency=None`, facteurs à 1.0), qu'elle observe
+  la colonne ou non dans les données du `transform`. Sur `PANEL-F` augmenté d'`ES`, copie de `DE` (donc `v` et `q1`
+  observées chaque trimestre) : les 36 cellules mensuelles de `v` d'`ES` sont des prédictions libres marquées
+  `MODEL_UNANCHORED`, jamais recalées — à la date d'observation `2021-03-31`, 9.66 au lieu d'une désagrégation de 28.0,
+  et la somme du trimestre vaut 28.74 au lieu de 28.0 (12 trimestres sur 12 faux). Quand la prédiction d'une telle
+  étape échoue (`q1` d'`ES`, dont la covariable `v` est vide quand `ES` copie `IT`), l'avertissement agrégé nomme le
+  couple comme **non observé** — « 1 unobserved (entity, column) pair(s) could not be imputed … [('ES', 'q1')] » —
+  alors qu'`ES` observe `q1` douze fois ; la même entité présente au `fit` aurait vu `q1` imputée normalement.
+- **Attendu** : I7 — le `transform` ne détruit jamais une observation d'entrée — et I4 — chaque période complète
+  observée garde son total. D34 motive l'étape sans ancre par « une entité sans historique est, par construction, une
+  entité sans ancre », mais énonce aussi que sa fréquence « ne peut venir que des données du transform » : la
+  prémisse ne tient que pour les couples que le `transform` n'observe pas. Deux corrections possibles, à arbitrer par
+  l'auteur : (a) dériver, pour un couple observé, une étape **ancrée** (`source_frequency` = fréquence détectée au
+  `transform`, recalage, provenance `MODEL_*`) ; (b) laisser intact un couple observé et ne servir sans ancre que les
+  couples jamais observés. Le test ne tranche pas : il exige que chaque trimestre observé somme à son observation,
+  vrai sous (a) comme sous (b).
+- **Reproduction** :
+  ```python
+  added = panel_f.xs('DE', level=0, drop_level=False).copy()
+  added.index = pd.MultiIndex.from_arrays([['ES'] * 36, added.index.get_level_values(-1)],
+                                          names=panel_f.index.names)
+  extended = pd.concat([panel_f, added]).sort_index()
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                 impute_unobserved_entities=True, keep_lower_frequencies=False).fit(panel_f)
+  out = imputer.transform(extended).loc['ES', 'v']
+  out.groupby(out.index.to_period('Q')).sum().head(2)   # 28.74, 29.61 ; observé : 28.0, 30.0
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestNewEntityAtTransform::test_observations_of_a_new_entity_are_never_overwritten`,
+  `::test_new_entity_copy_is_imputed_like_its_model`, `::test_column_empty_at_fit_and_observed_at_transform_is_anchored`,
+  `::test_pairs_unknown_to_the_fit_stay_as_given_by_default`
+- **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : option (a), D34 inchangée sous `False`
+- **Correction** : D42 (§14.10, §5.10 « Au `transform` »). `_new_entity_steps` devient `_replay_steps` : sous
+  `impute_unobserved_entities=True`, un couple que le fit n'a jamais observé — colonne d'une entité nouvelle, **ou**
+  colonne qu'une entité connue laissait vide au fit (même défaut : son étape sans ancre du plan écrasait ses
+  observations) — est servi comme s'il avait été présent au fit. Observé par le `transform` (fréquence détectée sur
+  ses données, `_check_transform_frequencies`), il rejoint une étape **ancrée** dérivée de l'étape de sa colonne
+  (même modèle `is`, mêmes `feature_cols` et voies, `source_frequency` détectée, facteur de groupe, recalage,
+  `MODEL_*`), à toute étape où sa fréquence est plus grossière que celle de l'étape ; jamais observé, il garde
+  l'étape sans ancre de D34. Une entité connue quitte l'étape sans ancre du plan pour l'étape ancrée. Les étapes
+  dérivées suivent celles de leur colonne (ordre des colonnes du plan conservé). Un couple observé hors des bornes
+  calendaires de sa fréquence est écarté comme au fit (`_misaligned_anchor_pairs`, note agrégée). Sous `False`,
+  rien ne change : l'entité nouvelle reste telle quelle. Mesuré : `ES` copie de `DE` reçoit exactement les valeurs
+  et provenances de `DE` ; l'avertissement « unobserved pair » ne nomme plus un couple observé.
+
+### ANO-FREQ-074 — Colonne sans aucune observation dans les données du `transform` : prédite sans ancre, marquée `MODEL_ON_*`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._transform` (rejeu des
+  fréquences du `fit` pour un couple que les données du `transform` n'observent pas), en interaction avec la fenêtre
+  recalculée (`ImputationWindowCalculator`, D39)
+- **Sévérité** : majeure
+- **Observé** : `a1` non publiée pour 2023. `transform(TS)` entier : les lignes 2023 sortent de la fenêtre recalculée,
+  `a1` y reste NaN et non marquée. `transform(TS.loc['2023'])` — les **mêmes** lignes, sans l'historique : `a1` n'a
+  plus aucune observation, elle quitte le dénominateur de la couverture (D39, avertissement « Columns without any
+  observation … »), la fenêtre couvre toute l'année et le modèle figé prédit les douze mois (11.90 … 12.99) sans
+  ancre ni recalage, marqués `MODEL_ON_INTERPOLATED`. Même comportement sur un panel pour une entité connue du `fit`
+  dont la colonne est vide au `transform` (`PANEL-X[['m1', 'q1', 'a1', 'a2']]`, `a1` de `FR` effacée : 36 cellules
+  écrites), sous `impute_unobserved_entities=False`.
+- **Attendu** : §5.10 / D33 — un couple sans aucune observation n'a rien à désagréger : sous
+  `impute_unobserved_entities=False` (défaut) ses cellules restent NaN et non marquées ; sous `True` elles portent
+  `MODEL_UNANCHORED`, la provenance qui annonce l'absence d'ancre, de recalage et de diviseur. Une famille `MODEL_ON_*`
+  sur ces cellules annonce une désagrégation qui n'a pas eu lieu. Le résultat d'une ligne ne doit pas dépendre de la
+  présence de l'historique dans l'appel. Au `fit`, un tel couple est déjà écarté (fréquence indétectable) ; au
+  `transform`, la fréquence rejouée depuis le `fit` le rend imputable.
+- **Reproduction** :
+  ```python
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                 keep_lower_frequencies=False).fit(ts)
+  data = ts.copy(); data.loc['2023', 'a1'] = np.nan
+  imputer.transform(data).loc['2023', 'a1'].notna().sum()        # 0
+  imputer.transform(data.loc['2023'])['a1'].notna().sum()        # 12
+  imputer.imputation_provenance_['a1'].unique()                  # [MODEL_ON_INTERPOLATED]
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestColumnWithoutAnchorAtTransform::test_unpublished_year_alone_is_predicted_by_its_replayed_step`,
+  `::test_extended_window_predicts_it_with_its_history`, `::test_unpublished_year_stays_empty_with_its_history`
+- **Statut** : clos (2026-10-14) — arbitrage de l'auteur : le comportement est voulu
+- **Correction** : aucun changement de code. Le couple est **observé au fit** : §12.1 rejoue sa classification, et
+  son étape reste ancrée. Si le fit a entraîné un modèle pour la colonne, il l'impute au `transform` même quand
+  l'appel ne la publie pas. Les périodes sans observation sont prédites sans recalage et marquées `MODEL_*`, comme
+  dans la fenêtre de prédiction étendue du §7.3 (pseudo temps réel). Sous `extended_forward`, la même année 2023 est
+  imputée avec l'historique (11.84…) comme sans lui (11.90…). L'attente « reste NaN sauf sous
+  `impute_unobserved_entities=True` » appliquait §5.10, qui ne concerne que les couples jamais observés au fit. La
+  différence entre les deux appels tient à la fenêtre recalculée, qui coupe aussi `q1` sous `strict` : D39 élargit
+  la fenêtre quand l'appel n'observe pas la colonne, et l'avertit. Le test `xfail` est réécrit sur ce contrat ; la
+  spec le dit au §5.10.
+
+### ANO-FREQ-075 — Lignes d'entrée ajoutées à l'étape finale (D38) : sortie non triée, entités non contiguës
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
+  (`grid = grid.append(absent)` à l'étape finale)
+- **Sévérité** : majeure
+- **Observé** : la grille de l'étape finale est complétée des lignes d'entrée qu'elle ne couvre pas (D38) par un
+  `append` **en fin d'index**. Dès qu'une entité a une fréquence cible plus grossière que l'index — `PANEL-F` sous
+  `target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'}`, avec ou sans axe 2, empilé ou non — ses 24 mois hors fin de
+  trimestre sont rejetés après `IT` : la sortie n'est pas triée (`is_monotonic_increasing` faux), les blocs d'entité
+  ne sont plus contigus, `inverse_transform` rend les lignes de X dans un autre ordre, et cette inversion, repassée à
+  un `HighFrequencyImputer`, lève « Panel entities are not contiguous in MultiIndex ». Même cas sur une série
+  temporelle mensuelle sous `target_frequency='Q'` (fins de trimestre d'abord, autres mois ensuite).
+- **Attendu** : la sortie garde l'ordre de l'entrée — §12.5 refuse un index non trié plutôt que de le trier en
+  silence ; un composant ne peut pas produire ce qu'il refuse. I8 : l'inversion restitue l'index de X, ordre compris.
+  Compléter la grille puis la trier (ou réindexer sur l'union ordonnée) suffit.
+- **Reproduction** :
+  ```python
+  imputer = HighFrequencyImputer(target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'},
+                                 estimator=LinearRegression(), restore_original_values=True)
+  out = imputer.fit_transform(panel_f)
+  out.index.is_monotonic_increasing                             # False
+  imputer.inverse_transform(out).index.equals(panel_f.index)    # False (même ensemble, autre ordre)
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestKeepLowerFrequencies::test_output_index_stays_sorted`,
+  `tests/unit/frequency/high_frequency_imputer/test_inverse_transform.py::TestRoundTripRestoresObservations::test_inverse_restores_the_row_order`
+- **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : la complétion est retirée
+- **Correction** : D43 (§14.10, D38 amendée). La complétion de la grille finale par `grid.append(absent)` est
+  supprimée : sur huit jeux mesurés, les lignes ajoutées ne portaient jamais de valeur. Elles n'apparaissent qu'avec
+  une cible plus grossière que l'index, où leur valeur est agrégée sur la ligne de sa période. Chaque grille d'étape
+  passe par `_in_input_order` : entités dans leur ordre d'apparition en entrée, dates triées. Cela couvre aussi
+  l'entité omise par le calculateur, que `_stage_mask` rattachait en fin de masque. L'inversion se réindexe sur
+  l'entrée de la dernière passe (ANO-FREQ-076) : elle rend les lignes de `X` dans leur ordre, y compris les mois de
+  `DE` absents de la sortie.
+
+### ANO-FREQ-076 — Index irrégulier : `inverse_transform` rend les lignes que la grille cible a ajoutées
+- **Type** : [SPEC] code ≠ spec (I8 : « restitue l'index »)
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._inverse_transform`
+- **Sévérité** : mineure
+- **Observé** : sur un index irrégulier (ancres annuelles antérieures à la grille mensuelle), la grille cible densifie
+  la période (comportement voulu, `TestIrregularIndexExtendedWindow`) ; l'inversion la garde telle quelle.
+  `irregular_index_timeseries` : 82 lignes en entrée, 115 rendues (33 mois de 2015-2017 ajoutés, entièrement NaN après
+  inversion, sous `restore_original_values=True` comme `False`). `heterogeneous_coverage_panel` : 225 → 318 lignes.
+  Aucune ligne d'entrée ne manque et aucune valeur n'est fausse ; seul l'index n'est pas celui de X. Le test existant
+  `TestInverseTransform::test_inverse_transform_preserves_multilevel_entity_names` tolère déjà, par un `isin`, la même
+  ligne supplémentaire sur `panel_two_level_dataset` (« ne relève pas de l'inversion »).
+- **Attendu** : I8 — `inverse_transform(transform(X))` restitue l'index de X. L'inversion défait la dernière passe,
+  dont elle garde l'instantané d'entrée (`_original_X_`) : se réindexer sur son index rend X sans perte, les lignes
+  ajoutées ne portant plus rien après la remise à NaN. À arbitrer si l'auteur préfère garder la grille densifiée
+  (l'invariant serait alors à reformuler en « contient l'index de X »).
+- **Reproduction** :
+  ```python
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                 restore_original_values=True)
+  restored = imputer.inverse_transform(imputer.fit_transform(irregular_ts))
+  len(irregular_ts), len(restored)                                   # 82, 115
+  restored.loc[restored.index.difference(irregular_ts.index)].isna().all().all()   # True
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_inverse_transform.py::TestRoundTripRestoresObservations::test_inverse_drops_the_rows_the_grid_added`,
+  `::TestInverseTransform::test_inverse_transform_preserves_multilevel_entity_names` (resserré : égalité d'index),
+  `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestTargetCoarserThanTheIndex::test_inverse_gives_back_the_monthly_index`
+- **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : réindexer sur l'index d'entrée
+- **Correction** : D43 (§12.4, §14.10). `_inverse_transform` réindexe, après la remise à NaN, sur l'index de
+  l'instantané d'entrée de la dernière passe (`_original_X_`), dans son ordre. Les lignes que la grille a ajoutées
+  disparaissent, et celles qu'elle ne porte pas (cible plus grossière que l'index) reviennent, vides ou restaurées
+  sous `restore_original_values=True`. I8 tient tel qu'écrit, ordre compris.
+
+### ANO-FREQ-077 — `provenance_statistics_` décrit le `fit`, ses docstrings « la dernière passe »
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer` (section `Attributes`),
+  `tsforecast/tracking/metrics.py::imputation_metrics`
+- **Sévérité** : mineure
+- **Observé** : `provenance_statistics_` n'est écrit qu'au `fit` (phase 6) ; un `transform` le laisse intact, alors
+  qu'il réécrit `imputation_provenance_`. La docstring de la classe l'annonce « computed on the last pass » ; celle
+  d'`imputation_metrics` lit « `provenance_statistics_` when present (the last ``transform``), otherwise
+  `provenance_statistics_fit_` (the ``fit``) » — conception de la v1, supprimée au commit `2e6e595` (L13-0) :
+  `provenance_statistics_fit_` n'existe plus et la branche de repli d'`imputation_metrics` est morte.
+- **Attendu** : le code est cohérent avec §12.1 (le `transform` ne mute pas l'état ajusté) ; les docstrings doivent
+  dire que les statistiques décrivent le `fit`, et `imputation_metrics` ne plus mentionner l'attribut disparu. Si
+  l'auteur veut au contraire des statistiques du dernier `transform`, c'est un changement de code (et une exception de
+  plus à la liste des attributs réécrits par passe).
+- **Reproduction** :
+  ```python
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(ts)
+  stats = imputer.provenance_statistics_
+  imputer.transform(ts.loc['2021'])
+  imputer.provenance_statistics_ is stats, hasattr(imputer, 'provenance_statistics_fit_')   # True, False
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestTransformState::test_provenance_statistics_describe_the_last_pass`,
+  `tests/unit/tracking/test_metrics.py::test_imputation_metrics_describe_the_last_pass`,
+  `tests/unit/frequency/test_provenance.py::TestComputeStatistics::test_module_function_matches_the_tracker`
+- **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : changement de code, les statistiques suivent la
+  dernière passe
+- **Correction** : D45 (§13.2, §14.10). Le calcul de `ImputationProvenanceTracker.compute_statistics` est extrait
+  dans la fonction de module `provenance_statistics(matrix)`, exportée par `tsforecast.frequency`. `_transform`
+  réécrit `provenance_statistics_` sur le niveau cible de sa sortie, quel que soit `keep_lower_frequencies`, qui
+  n'est qu'un affichage. `fit` le purge en phase 0 avec l'état de transform. Les docstrings de la classe disent
+  « dernière passe » à bon droit. `tracking.imputation_metrics` ne lit plus que `provenance_statistics_` : le repli
+  mort sur `provenance_statistics_fit_` est supprimé, et la docstring invite à loguer juste après la passe décrite.
+  `PER_PASS_ATTRIBUTES` des tests compte désormais les deux attributs.
+
+### ANO-FREQ-078 — Un `transform` qui lève a déjà écrasé l'instantané lu par l'inversion
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._transform` (phase 0' :
+  `_original_X_` / `_original_y_` écrits avant `_check_transform_frequencies`)
+- **Sévérité** : majeure
+- **Observé** : `_transform` copie son entrée dans `_original_X_` **avant** le contrôle des colonnes (D11). Un appel
+  refusé (`ValueError` « transform is missing 1 column(s) seen at fit time ») laisse donc l'instantané de l'entrée
+  refusée face à la matrice de provenance de la passe précédente. `inverse_transform(sortie_précédente)` sous
+  `restore_original_values=True` restaure alors les valeurs de l'appel refusé : ancres de `a1` rendues 240 / 264 / 300
+  au lieu de 120 / 132 / 150, et `q1` (absente de l'entrée refusée) plus restaurée du tout (0 cellule sur 12).
+- **Attendu** : un appel qui lève n'est pas une passe : il laisse l'imputeur tel qu'il l'a trouvé. Les contrôles
+  (colonnes, nom de niveau réservé, alignement de `y`) doivent précéder l'instantané.
+- **Reproduction** :
+  ```python
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                 restore_original_values=True)
+  out = imputer.fit_transform(ts)
+  try: imputer.transform(ts.drop(columns=['q1']).assign(a1=ts['a1'] * 2))
+  except ValueError: pass
+  imputer.inverse_transform(out)['a1'].dropna().tolist()   # [240.0, 264.0, 300.0]
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestTransformFrequencyControl::test_failed_transform_leaves_the_last_pass_intact`
+- **Statut** : corrigé (2026-10-14)
+- **Correction** : D45. `_transform` copie son entrée dans des variables locales et ne publie l'état de la passe
+  (`_original_X_`, `_original_y_`, `_stacked_index_nlevels`, `imputation_provenance_`, `provenance_statistics_`)
+  qu'en phase 6', d'un seul tenant, quand plus rien ne peut lever. Le test vérifie aussi que la matrice et les
+  statistiques de la passe précédente sont intactes après l'appel refusé.
+
+### ANO-FREQ-079 — Lignes complétant l'étape finale (D38) : vides en sortie, marquées `ORIGINAL`
+- **Type** : [CODE] comportement (et question de spec à arbitrer sur le contenu de ces lignes)
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
+  (instantané de provenance réindexé sur la grille complétée)
+- **Sévérité** : mineure
+- **Observé** : sous `target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'}` sur `PANEL-F`, les 24 mois de `DE` hors fin
+  de trimestre sont ajoutés à la frame finale (D38), mais la frame d'étape, construite à la liaison `DE: 'Q'`, n'y
+  porte rien : ces lignes sont **vides** en sortie (`m1` compris, pourtant observée chaque mois). La matrice de
+  provenance, elle, reprend l'instantané du traceur initialisé sur l'entrée, et marque `ORIGINAL` les 24 cellules de
+  `m1` — 24 cellules `ORIGINAL` vides, empilé ou non. La règle que le rejeu énonce lui-même (« une cellule restée NaN
+  n'est jamais marquée, au rejeu comme au fit », cf. ANO-FREQ-050) n'y tient pas. Sans `restore_original_values`,
+  l'inversion rend ces 24 cellules vides ; avec, elle les restaure depuis l'instantané.
+- **Attendu** : la matrice décrit la sortie : aucune cellule `ORIGINAL` vide. Question ouverte pour l'auteur sur le
+  **contenu** des lignes complétées : D38 les ajoute au nom d'I7 (« ne détruit jamais une observation d'entrée »), ce
+  qui plaide pour y porter les valeurs d'entrée ; mais `m1` y côtoierait alors, à la même fréquence de sortie, les
+  sommes trimestrielles des fins de trimestre (100, 101, 303…), mélange d'échelles que D37 interdit ailleurs. Le test
+  n'exige que la cohérence provenance ↔ valeurs, vraie dans les deux options (valeurs portées et `ORIGINAL`, ou lignes
+  vides et non marquées).
+- **Reproduction** :
+  ```python
+  imputer = HighFrequencyImputer(target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'},
+                                 estimator=LinearRegression(), keep_lower_frequencies=False)
+  out = imputer.fit_transform(panel_f)
+  out.loc[('DE', '2021-01-31')].tolist()                           # [nan, nan, nan]
+  imputer.imputation_provenance_.loc[('DE', '2021-01-31'), 'm1']   # ProvenanceType.ORIGINAL
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestKeepLowerFrequencies::test_no_empty_cell_of_the_output_is_marked`
+  (renommé et élargi : aucune cellule vide marquée, quelle que soit la marque)
+- **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : pas de mélange d'échelles ; les lignes ne sont plus
+  ajoutées
+- **Correction** : D43 retire les lignes complétées (cf. ANO-FREQ-075). D44 fait décrire à la matrice les cellules
+  de la sortie : `_stage_provenance` ne marque jamais une cellule vide, et marque `AGGREGATED` l'agrégation exacte
+  d'une colonne plus fine que la ligne. Celle-ci portait auparavant l'`ORIGINAL` de la cellule d'entrée de même
+  date : une somme trimestrielle de `m1` (303) que l'inversion sans restauration rendait pour l'observation
+  mensuelle (102). Le §6.4 prescrivait déjà `AGGREGATED`.

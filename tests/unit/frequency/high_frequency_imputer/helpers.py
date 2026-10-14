@@ -2,7 +2,8 @@
 
 Entity keys of ``PANEL-F``, a factory of valid imputers, quiet ``fit`` /
 ``transform`` wrappers, the spy-estimator fit, index helpers grouping dates by
-entity, the six significant combinations of the two axes, and the PUBLIC
+entity, the six significant combinations of the two axes, a snapshot and a
+structural comparison of the public fitted state, and the PUBLIC
 readers the suite uses instead of the imputer's private members: the fitting
 context of each (stage, variable) caught on ``TrainingSetBuilder.build`` and
 the plan models, the imputable groups read on the plan, and the imputed values
@@ -10,11 +11,15 @@ read on the ``transform`` output — this package is the safety net of the
 refactoring, so it must not hold on to what the refactoring will move.
 """
 # Modules de base
+import dataclasses
+import enum
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Set, Tuple, Union
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 
@@ -379,3 +384,107 @@ def has_frequency_level_in_output(frame: pd.DataFrame) -> bool:
         isinstance(frame.index, pd.MultiIndex)
         and 'frequency' in (frame.index.names or [])
     )
+
+
+# Attributs publics que chaque passe réécrit par contrat (§13.2, D45) : la
+# matrice de provenance et ses statistiques décrivent toujours la DERNIÈRE
+# passe, fit ou transform
+PER_PASS_ATTRIBUTES: Tuple[str, ...] = ('imputation_provenance_', 'provenance_statistics_')
+
+
+# Instantané de l'état ajusté public
+def public_fitted_state(imputer: HighFrequencyImputer) -> Dict[str, Any]:
+    """Return the public fitted attributes of an imputer, by name.
+
+    Public fitted attributes are the instance attributes ending with ``_`` and
+    not starting with one — the sklearn convention. The attributes every pass
+    rewrites by contract (:data:`PER_PASS_ATTRIBUTES`) are left out: they are
+    not fitted state.
+
+    Args:
+        imputer: Fitted imputer.
+
+    Returns:
+        ``{name: value}``, the values being the live objects (deep-copy them
+        to freeze a snapshot).
+
+    Examples:
+        >>> public_fitted_state(make_imputer())
+        {}
+    """
+    return {
+        name: value
+        for name, value in vars(imputer).items()
+        if name.endswith('_')
+        and not name.startswith('_')
+        and name not in PER_PASS_ATTRIBUTES
+    }
+
+
+# Comparaison structurelle de deux états ajustés
+def assert_same_state(expected: Any, actual: Any, path: str = 'state') -> None:
+    """Assert two fitted states are structurally equal, naming the first gap.
+
+    The comparison walks the containers (mappings, sequences, dataclasses,
+    objects with a ``__dict__`` such as estimators and plans) and compares
+    the leaves by value: pandas and numpy objects with their own testing
+    functions, NaN equal to NaN. Object identity is never required, so a
+    ``copy.deepcopy`` snapshot compares equal to the live state it was taken
+    from as long as nothing has been mutated since.
+
+    Args:
+        expected: Reference state, typically a deep copy taken earlier.
+        actual: State to check.
+        path: Readable path of the compared object, used in the messages.
+
+    Raises:
+        AssertionError: At the first difference, naming its path.
+
+    Examples:
+        >>> assert_same_state({'a': [1.0, float('nan')]}, {'a': [1.0, float('nan')]})
+        >>> assert_same_state({'a': 1}, {'a': 2})
+        Traceback (most recent call last):
+        ...
+        AssertionError: state['a']: 1 != 2
+    """
+    # Objets pandas et numpy : fonctions de comparaison dédiées
+    if isinstance(expected, pd.DataFrame):
+        pd.testing.assert_frame_equal(actual, expected, obj=path)
+    elif isinstance(expected, pd.Series):
+        pd.testing.assert_series_equal(actual, expected, obj=path)
+    elif isinstance(expected, pd.Index):
+        pd.testing.assert_index_equal(actual, expected, obj=path)
+    elif isinstance(expected, np.ndarray):
+        np.testing.assert_array_equal(actual, expected, err_msg=path)
+    # Conteneurs : comparaison clé par clé, rang par rang, champ par champ
+    elif isinstance(expected, Mapping):
+        assert isinstance(actual, Mapping), f"{path}: mapping became {type(actual).__name__}"
+        assert set(actual) == set(expected), f"{path}: keys {set(expected)} != {set(actual)}"
+        for key in expected:
+            assert_same_state(expected[key], actual[key], f"{path}[{key!r}]")
+    elif isinstance(expected, (list, tuple)):
+        assert type(actual) is type(expected), f"{path}: {type(expected)} != {type(actual)}"
+        assert len(actual) == len(expected), f"{path}: length {len(expected)} != {len(actual)}"
+        for position, (left, right) in enumerate(zip(expected, actual)):
+            assert_same_state(left, right, f"{path}[{position}]")
+    elif dataclasses.is_dataclass(expected) and not isinstance(expected, type):
+        assert type(actual) is type(expected), f"{path}: {type(expected)} != {type(actual)}"
+        for field in dataclasses.fields(expected):
+            assert_same_state(
+                getattr(expected, field.name), getattr(actual, field.name),
+                f"{path}.{field.name}",
+            )
+    # Objets à dictionnaire d'instance (estimateurs, splitters...) ; classes,
+    # énumérations et fonctions comparées par valeur, plus bas
+    elif (
+        hasattr(expected, '__dict__')
+        and not isinstance(expected, (type, enum.Enum))
+        and not callable(expected)
+    ):
+        assert type(actual) is type(expected), f"{path}: {type(expected)} != {type(actual)}"
+        assert_same_state(vars(expected), vars(actual), f"{path}.__dict__")
+    # Feuilles : égalité de valeur, NaN égal à NaN
+    elif pd.api.types.is_scalar(expected) and pd.isna(expected):
+        assert pd.api.types.is_scalar(actual) and pd.isna(actual), f"{path}: {expected!r} != {actual!r}"
+    else:
+        assert expected == actual, f"{path}: {expected!r} != {actual!r}"

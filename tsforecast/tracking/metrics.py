@@ -62,13 +62,13 @@ def imputation_metrics(
     """Summarize a fitted mixed-frequency imputer as flat tracking metrics.
 
     Works with a fitted :class:`~tsforecast.frequency.HighFrequencyImputer`.
-    The provenance
-    statistics are read from ``provenance_statistics_`` when present (the last
-    ``transform``), otherwise from ``provenance_statistics_fit_`` (the ``fit``).
+    The provenance statistics are read from ``provenance_statistics_``, which
+    describes the **last pass**: the ``fit``, then each ``transform`` — on the
+    target level of its output, whatever ``keep_lower_frequencies`` stacks.
+    Log the metrics right after the pass they should describe.
 
     Args:
-        imputer: A fitted imputer exposing ``provenance_statistics_`` or
-            ``provenance_statistics_fit_``.
+        imputer: A fitted imputer exposing ``provenance_statistics_``.
         per_column: When ``True``, also emit ``<column>.provenance.<key>`` for
             every column of the provenance breakdown, not only the overall
             block.
@@ -83,23 +83,20 @@ def imputation_metrics(
         ``<column>.provenance.<key>`` per column when ``per_column=True``.
 
     Raises:
-        AttributeError: If ``imputer`` exposes neither ``provenance_statistics_``
-            nor ``provenance_statistics_fit_`` (i.e. it is not fitted, or not an
-            imputer).
+        AttributeError: If ``imputer`` exposes no ``provenance_statistics_``
+            (i.e. it is not fitted, or not an imputer).
 
     Examples:
         >>> metrics = imputation_metrics(fitted_imputer)   # doctest: +SKIP
         >>> import mlflow                                   # doctest: +SKIP
         >>> mlflow.log_metrics(metrics)                     # doctest: +SKIP
     """
-    # Résolution du bloc de statistiques : transform prioritaire, puis fit
+    # Statistiques de la dernière passe : le fit, puis chaque transform
     statistics = getattr(imputer, "provenance_statistics_", None)
     if statistics is None:
-        statistics = getattr(imputer, "provenance_statistics_fit_", None)
-    if statistics is None:
         raise AttributeError(
-            "imputer exposes neither 'provenance_statistics_' nor "
-            "'provenance_statistics_fit_'; pass a fitted HighFrequencyImputer."
+            "imputer exposes no 'provenance_statistics_'; pass a fitted "
+            "HighFrequencyImputer."
         )
 
     metrics: Dict[str, float] = {}

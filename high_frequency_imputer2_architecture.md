@@ -1389,6 +1389,25 @@ recalées. Ses 36 cellules mensuelles sont **inchangées** — mesuré : moᵇye
 flottant près avec et sans la passe intermédiaire — et rien n'impose que les trois mois d'un
 trimestre somment à la cellule trimestrielle de ce trimestre, pas plus que pour `FR`.
 
+#### Au `transform` : les couples que le fit n'a jamais observés (D34, D42)
+
+Le paramètre gouverne aussi, au `transform`, les couples que le fit n'a **jamais observés** :
+toutes les colonnes d'une entité absente du fit (D34), et une colonne qu'une entité connue
+laissait vide au fit. Sous `False`, ils restent tels quels. Sous `True`, chacun est servi **comme
+s'il avait été présent au fit** avec les données du `transform`, par une étape dérivée d'une étape
+de la même (étape, variable) — même objet modèle, mêmes `feature_cols`, mêmes voies :
+
+- **observé** par le `transform` (fréquence détectable sur ses données, bornes calendaires
+  respectées) : étape **ancrée**, `source_frequency` = la fréquence détectée, recalage sur ses
+  propres observations, provenance `MODEL_*` de l'étape — imputée à une étape seulement si sa
+  fréquence y est plus grossière que celle de l'étape, comme la classification du fit ;
+- **jamais observé** par le `transform` : étape **sans ancre**, comme ci-dessus.
+
+Un couple **observé au fit** n'est jamais concerné : sa classification est rejouée (§12.1), ses
+étapes restent ancrées, et les périodes que l'appel ne publie pas sont prédites sans recalage et
+marquées `MODEL_*`, exactement comme la fenêtre de prédiction étendue du §7.3. Qu'un appel les
+impute ou non dépend de la fenêtre recalculée, non de ce paramètre (ANO-FREQ-074, D39).
+
 ---
 
 ## 6 — Provenance
@@ -1520,6 +1539,10 @@ def resolve_model_provenance(covariate_taint: Taint, target_taint: Taint) -> Pro
 | cellule d'une période **recalée** pour sommer au total observé (§11) | **inchangée** : celle que la valeur portait avant recalage (`MODEL_*` ou `INTERPOLATED`) | inchangée : `'model'` si la prédiction venait d'un modèle, `'interpolated'` si elle venait d'une interpolation |
 | **date-ancre** ré-exprimée à la fréquence d'étape, que le recalage ait eu lieu ou non | celle de la valeur qui y est **écrite** (`MODEL_*` ou `INTERPOLATED`) — jamais `ORIGINAL`, la cellule ne portant plus l'observation | idem |
 | cellule produite par interpolation (stratégie `'interpolate'`, `covariate_fallback`, ou **repli d'échec** d'un modèle) | `INTERPOLATED` | `'interpolated'` |
+
+La matrice d'un `transform` applique cette table aux cellules de **sa sortie** (D44) : la ligne
+agrégée d'une colonne plus fine porte `AGGREGATED` — et non l'`ORIGINAL` de la cellule d'entrée de
+même date, qui portait une autre valeur —, et une cellule vide n'est jamais marquée.
 
 Deux règles :
 
@@ -2281,7 +2304,18 @@ réellement été fait.
 - **`inverse_transform`** : reprise du chemin actuel (sélection du niveau de fréquence source,
   inversion du transformateur additif, restitution par masque `ORIGINAL`,
   `restore_original_values`), avec les invariants B4 (panels à n > 2 niveaux d'entité, noms
-  d'index préservés) et B19.
+  d'index préservés) et B19. Le résultat est **réindexé sur l'entrée de la dernière passe**, dans
+  son ordre (D43) : les lignes que la grille cible a ajoutées disparaissent, celles qu'elle ne
+  porte pas reviennent vides — ou observées sous `restore_original_values=True`. Le niveau inversé
+  est lu sur les données quand elles sont empilées ; un niveau que la dernière passe n'a pas
+  produit lève une `ValueError`.
+- **Sortie et provenance du `transform`** : la sortie est la grille de l'étape, dans l'ordre de
+  l'entrée (entités dans leur ordre d'apparition, dates triées) ; sa matrice de provenance décrit
+  **ses** cellules, non celles de l'entrée (D44) : une colonne observée plus finement que la ligne
+  y porte l'agrégation exacte de la période, marquée `AGGREGATED`, et une cellule vide n'est
+  jamais marquée. `imputation_provenance_`, `provenance_statistics_` (comptés sur le niveau cible)
+  et l'instantané d'entrée lu par l'inversion sont publiés **ensemble, en fin de passe** : un
+  appel qui lève n'est pas une passe (D45).
 - **`keep_lower_frequencies`** : conservé (nom compris), documenté comme **paramètre d'affichage
   pur** — il gouverne l'empilage multi-fréquences de la sortie, jamais la logique ; les valeurs du
   niveau cible sont les mêmes sous `True` et sous `False`. Les niveaux empilés sont les **étapes de
@@ -2410,6 +2444,7 @@ Combinaisons **inertes** documentées mais **non signalées** (D9) : cf. §5.6.
 | `imputation_window_mask_`, `training_window_mask_`, `strict_window_mask_` | `pd.Series` booléennes (MultiIndex sur panel, §7.2). `strict_window_mask_` est un attribut de **diagnostic** : aucun consommateur dans le `fit` (D27) |
 | `imputation_window_`, `training_window_` | bornes `(début, fin)` lisibles |
 | `imputation_provenance_` | matrice de provenance après `fit` puis après `transform` |
+| `provenance_statistics_` | comptes et pourcentages par `ProvenanceType` de la **dernière passe**, comme `imputation_provenance_` : écrits au `fit`, réécrits par chaque `transform` sur le niveau cible de sa sortie (D45) ; lus par `tsforecast.tracking.imputation_metrics` |
 | `feature_columns_`, `target_column_`, `entities_`, `is_panel_` | contrat d'entrée |
 | `cv_` | splitter résolu par `check_cv` (présent seulement sous `fit_predict_order='cv'`) |
 
@@ -2469,7 +2504,7 @@ l'écriture de la PHASE 5 a tranchés. Chacun est mesuré par un invariant du §
 | **D21** | la voie de matérialisation est décidée sur la **grille de prédiction**, puis imposée à la grille d'entraînement — et non l'inverse | c'est le sens qu'énonce déjà le §4.6 (« servie par le repli au predict → même chemin au fit ») et celui que déroulent les tableaux du §4.7 et du §5.5. Le sens inverse est en outre impraticable : une voie `'aggregate'` choisie sur une grille annuelle et rejouée sur la grille mensuelle demanderait d'agréger une colonne trimestrielle vers le mois, et ne produit que des NaN (§4.6) |
 | **D22** | une voie de **rang 1** imposée sur une grille plus grossière que la colonne devient une **agrégation** ; imposée sur une grille plus fine, elle retombe sur le rang 4 | sans cette normalisation, `_applicable_way` rendait la valeur **ponctuelle** de la colonne à la date de grille — une quantité de sous-période là où la ligne en couvre une entière. C'est ce qui rend le jeu mutualisé homogène : une même covariable y est agrégée, lue ou interpolée selon le bloc, pour un seul niveau (§4.6, §5.8 R4) |
 | **D23** | le diviseur d'une covariable part de la **période que sa cellule couvre** sur sa grille, désignée par la voie ; la règle **B25** (normalisation vers `f_var`) est retirée, et `feature_divisors` est l'**unique** méthode de diviseur de covariable | B25 décrivait la convention de `hfi`, où les covariables d'entraînement étaient agrégées sur la grille de `f_var`. La grille d'entraînement de `hfi2` est celle des **blocs** : deux cellules d'une même colonne y couvrent des périodes différentes, ce que `f_var` ne peut pas exprimer. Mesuré : sous B25, les moyennes de `X_train` et de `X_pred` divergeaient d'un facteur 12 sur le jeu `TS` ; sous D23 elles sont **égales** (I5, §9.2) |
-| **D25** | une période que les **bornes du jeu** tronquent n'est **pas recalée** : le décompte calendaire de ses sous-périodes est comparé à ce que la grille en porte, et la garde est armée par le paramètre `grid_freq` de `rescale` | la garde « période partiellement prédite » ne voit que des NaN, et une sous-période retranchée par les bornes du jeu n'en est pas un. Imposer un total annuel à dix mois sur douze sur-attribue 20 % à chacun, silencieusement, à chaque début et chaque fin de série — le défaut est systématique, pas marginal (§11.1) |
+| **D25** | une période que les **bornes du jeu** tronquent n'est **pas recalée** : le décompte calendaire de ses sous-périodes est comparé à ce que la grille en porte, et la garde est armée par le paramètre `grid_freq` de `rescale`. **Complétée par D46** : un avertissement agrégé unique par passe recense ces périodes | la garde « période partiellement prédite » ne voit que des NaN, et une sous-période retranchée par les bornes du jeu n'en est pas un. Imposer un total annuel à dix mois sur douze sur-attribue 20 % à chacun, silencieusement, à chaque début et chaque fin de série — le défaut est systématique, pas marginal (§11.1) |
 | **D24** | les trois registres ne portent **que ce qui a été imputé** : la matérialisation des covariables d'une étape tourne sous `record=False` | une covariable enregistrée écrase dans le miroir l'imputation que son propre modèle vient d'y écrire — toute écriture étant un `combine_first` où le nouveau l'emporte —, ce qui rend le résultat dépendant de l'ordre de traitement et met I10 en échec. Corollaire heureux : le rang 2 de la précédence ne se déclenche que sur une covariable réellement **imputée**, et le plan de référence du §5.5 tombe juste tel qu'il est écrit (§6.2) |
 
 ### 14.5 — Décisions arrêtées à l'implémentation (lot L10b, 2026-09-06)
@@ -2500,11 +2535,11 @@ l'auteur à la revue du lot (D32, D33). Chacune est mesurée par un invariant du
 
 | Code | Décision | Motif |
 |---|---|---|
-| **D34** | une entité **absente du fit** rencontrée au `transform` est imputée sous `impute_unobserved_entities=True`, et laissée intacte sous `False`. Elle est liée à une étape dont les entités s'accordent sur **une seule** fréquence — sans quoi rien ne la départage, et un avertissement agrégé la nomme — puis servie par une étape de plan **dérivée** d'une étape de la même (étape, variable) : même objet modèle, mêmes `feature_cols`, mêmes voies, `source_frequency=None`, `unanchored=True`, facteurs à 1.0. Ces étapes dérivées n'entrent **jamais** dans `imputation_plan_` | une entité sans historique est, par construction, une entité sans ancre : c'est le mécanisme du §5.10, sous le même paramètre, et non un second. Rien n'est redécidé — ni voie, ni feature, ni modèle — seul le périmètre d'entités change, comme il change déjà d'un groupe de fréquence source à l'autre (§5.8 R6). Sa fréquence détectée, elle, ne peut venir que des données du transform : aucun fit ne la porte |
+| **D34** | une entité **absente du fit** rencontrée au `transform` est imputée sous `impute_unobserved_entities=True`, et laissée intacte sous `False`. Elle est liée à une étape dont les entités s'accordent sur **une seule** fréquence — sans quoi rien ne la départage, et un avertissement agrégé la nomme — puis servie par une étape de plan **dérivée** d'une étape de la même (étape, variable) : même objet modèle, mêmes `feature_cols`, mêmes voies, `source_frequency=None`, `unanchored=True`, facteurs à 1.0. Ces étapes dérivées n'entrent **jamais** dans `imputation_plan_`. **Amendée par D42** : l'étape dérivée n'est sans ancre que pour les colonnes que l'entité n'observe pas | une entité sans historique est, par construction, une entité sans ancre : c'est le mécanisme du §5.10, sous le même paramètre, et non un second. Rien n'est redécidé — ni voie, ni feature, ni modèle — seul le périmètre d'entités change, comme il change déjà d'un groupe de fréquence source à l'autre (§5.8 R6). Sa fréquence détectée, elle, ne peut venir que des données du transform : aucun fit ne la porte |
 | **D35** | sous `impute_intermediate_frequencies=False`, la sortie porte le **seul niveau cible** ; aucun niveau « source » n'est amorcé | les niveaux empilés sont les étapes de la progression, et sous `False` elle n'en a qu'une. Amorcer un niveau « source » aurait fabriqué un niveau qui n'est l'image d'aucune étape, et qui coïncide de toute façon avec le niveau cible dans le cas courant (index mensuel, cible `M`) |
 | **D36** | le report d'échelle de `_predict_step` est **court-circuité** quand `scale_factor` et `fit_scale_factor` coïncident, au lieu de diviser puis multiplier | `_build_step` leur donne le même objet : le report vaut 1.0 par construction. Sous `scale_features='calendar'` ce facteur est une `Series` **figée sur la grille du fit** ; la grille du transform étant différente, la division la désalignait et rendait toute la prédiction NaN. Au fit, la seule différence est la disparition du bruit d'arrondi de `x/d*d` |
 | **D37** | la sortie d'une étape est la frame du matérialiseur **recouverte par le miroir**, cellule à cellule et seulement pour les cellules produites **à la fréquence de la ligne** | `stage_frame` ne lit le miroir que sous `covariate_strategy='model'` (précédence du §4.4) : sous les deux autres stratégies la sortie aurait été vide de toute imputation. Le filtre par fréquence de production interdit à une valeur produite à une étape plus grossière de se poser, à l'échelle d'une autre période, sur une grille plus fine. Les imputations priment sur l'ancre brute, conformément au §11.2 |
-| **D38** | la grille d'une frame d'étape est l'**index** du masque d'imputation — jamais ses seules lignes vraies — complétée, à l'étape finale, des lignes d'entrée qu'elle ne couvrirait pas ; et une entité que l'étape ne concerne pas y garde les lignes de son **dernier passage** | I7 : le `transform` ne détruit jamais une observation d'entrée. Et une liaison de fréquence partielle ferait échouer la lecture du masque, qui retomberait sans bruit sur tout l'index — donc sur des lignes à la mauvaise fréquence pour tout le panel |
+| **D38** | la grille d'une frame d'étape est l'**index** du masque d'imputation — jamais ses seules lignes vraies — ~~complétée, à l'étape finale, des lignes d'entrée qu'elle ne couvrirait pas~~ ; et une entité que l'étape ne concerne pas y garde les lignes de son **dernier passage**. **Amendée par D43** : la complétion de l'étape finale est retirée | I7 : le `transform` ne détruit jamais une observation d'entrée. Et une liaison de fréquence partielle ferait échouer la lecture du masque, qui retomberait sans bruit sur tout l'index — donc sur des lignes à la mauvaise fréquence pour tout le panel |
 
 
 ### 14.8 — Décisions arrêtées sur la fenêtre de couverture (`ImputationWindowCalculator`)
@@ -2519,6 +2554,19 @@ l'auteur à la revue du lot (D32, D33). Chacune est mesurée par un invariant du
 | Code | Décision | Motif |
 |---|---|---|
 | **D41** | `scale_features` admet, comme **valeur** d'une colonne (`'__default__'` compris), un dict `{entité: 'constant' \| 'calendar'}` avec `'__default__'` imbriqué optionnel. Le dict imbriqué est **clos sur lui-même** (repli : `'__default__'` imbriqué, sinon `'constant'`, jamais le `'__default__'` de premier niveau) et **refuse `False`**. Clés d'entité **complètes**, normalisées (`'FR'` ≡ `('FR',)`) ; une clé partielle d'un panel multi-niveaux ne désigne aucune entité et est signalée par l'avertissement unique des clés inconnues. Les autres dictionnaires par feature restent indexés par colonne seule (D10) | une même variable peut être publiée CVS-CJO par une entité et brute par une autre : sous D17, l'échappatoire « un imputeur par entité » de D10 sacrifie la mutualisation que D17 a rendue non paramétrable. Les clés de premier niveau restent des noms de colonne — la lettre de D10 tient, seule la valeur s'enrichit, et toute valeur admise auparavant garde sa sémantique. L'imbrication évite l'ambiguïté de clés `(entité..., colonne)` à plat avec des colonnes nommées par des tuples. Les deux règles rendent le mélange `False` / diviseur **impossible par construction** : sans la clôture, `{'pib': {'DE': 'calendar'}, '__default__': False}` mêlerait `False` (FR) et `'calendar'` (DE) sur `pib`. Mise en œuvre : `StageScaler.resolve_mode(column, entity)` ; `feature_divisors` résout la modalité dans sa boucle par entité et l'inscrit dans la signature de forme ; `target_divisor` et `fit_scale_factor` calculent une fois par modalité distincte puis ventilent par entité (`_by_entity_mode`). Des modalités divergentes sans grille lèvent, plutôt que de retenir silencieusement le repli imbriqué. `interpolation_method`, `interpolation_anchor`, `aggregation_constraint` et `estimator` ne sont **pas** concernés : `estimator` par entité contredirait D17 / D19 |
+
+### 14.10 — Décisions arrêtées sur le `transform` et l'inversion (2026-10-14, anomalies 073-079)
+
+Arbitrages de l'auteur sur les anomalies relevées par la campagne de tests du `transform`
+(prompt F12). Chacune est mesurée par un test de `tests/unit/frequency/high_frequency_imputer/`.
+
+| Code | Décision | Motif |
+|---|---|---|
+| **D42** | sous `impute_unobserved_entities=True`, un couple que le fit n'a **jamais observé** — colonne d'une entité absente du fit, ou colonne qu'une entité connue laissait vide — est servi au `transform` **comme s'il avait été présent au fit** : par une étape **ancrée** (fréquence détectée sur les données du `transform`, recalage sur ses propres observations, `MODEL_*`) quand le `transform` l'observe, sans ancre sinon. Un couple observé hors des bornes calendaires de sa fréquence est écarté, comme au fit. Sous `False`, ces couples restent tels quels (D34) | servir sans ancre un couple observé écrasait ses observations (I7) et perdait ses totaux (I4) — ANO-FREQ-073 : une copie de `DE` sommait à 28.74 au lieu de 28.0. La prémisse de D34, « une entité sans historique est sans ancre », ne vaut que pour les couples que le `transform` n'observe pas. Le coût est celui d'une étape de plus : même modèle, aucun réajustement |
+| **D43** | la sortie d'un `transform` est la grille de l'étape, **dans l'ordre de l'entrée** ; la complétion de l'étape finale par les lignes d'entrée hors grille (D38) est **retirée**, et `inverse_transform` se **réindexe sur l'entrée de la dernière passe** | mesuré sur huit jeux, les lignes complétées ne portaient **jamais** de valeur : elles n'apparaissent qu'avec une cible plus grossière que l'index, où leur valeur est agrégée sur la ligne de sa période, et y porter la valeur d'entrée mêlerait deux échelles (D37). Elles rendaient une sortie non triée (ANO-FREQ-075) et marquée `ORIGINAL` sur des cellules vides (ANO-FREQ-079). I8 est tenu par l'inversion, qui rend l'index de `X` — lignes ajoutées par une grille densifiée comprises (ANO-FREQ-076) |
+| **D44** | la provenance d'un `transform` décrit les cellules de **sa sortie** : `AGGREGATED` pour l'agrégation exacte d'une colonne plus fine que la ligne, jamais de marque sur une cellule vide | la matrice reprenait la marque de la cellule d'entrée de même date : une somme trimestrielle de `m1` y était `ORIGINAL`, et l'inversion sans `restore_original_values` rendait 303 là où l'entrée valait 102 |
+| **D45** | `provenance_statistics_` est un attribut **par passe**, comme `imputation_provenance_` : réécrit par chaque `transform`, sur le niveau cible de sa sortie ; l'état d'une passe (matrice, statistiques, instantané d'entrée) est publié **d'un seul tenant, en fin de passe** | les statistiques décrivaient le `fit` alors que la docstring et `tracking.imputation_metrics` annonçaient la dernière passe (ANO-FREQ-077) ; et un `transform` refusé avait déjà écrasé l'instantané lu par l'inversion de la passe précédente (ANO-FREQ-078) |
+| **D46** | une période observée que la grille ne porte qu'en partie (D25) reste non recalée, et un **avertissement agrégé unique** par passe recense ces périodes, colonne par colonne | son total observé n'est plus déductible de la sortie — au plus fort, un `transform` d'une seule ligne rend 6.67 là où `q1` valait 20 — et cette perte était silencieuse |
 
 ---
 
@@ -2592,8 +2640,8 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 | **I4** | additivité | sous `aggregation_constraint='sum'`, chaque colonne imputée somme au total observé de chaque période **complète** — imputations, interpolations et covariables portées comprises ; et la ligne d'ancre ne porte plus le total (§11.2) |
 | **I5** | échelle train/test | pour chaque étape, moyennes des features de `X_train` et de `X_pred` comparables (tolérance dépendant de la modalité) ; inclut le cas mixte « feature `'calendar'`, `y` `'constant'` » et le cas « features divisées, `y` en `False` » (D15) |
 | **I6** | provenance | les cinq familles `MODEL_*` sont émises exactement dans les cas du §6.3 et aucun autre ; `MODEL_ON_IMPUTED*` seulement sous `'model'` ; `*_TARGET`/`*_BOTH` seulement sous `impute_intermediate_frequencies=True` ; les cellules de repli portent `INTERPOLATED` ; `MODEL_ON_MIXED` n'existe plus |
-| **I7** | `transform` hors fenêtre de fit | impute au lieu de vider, ne détruit jamais une observation d'entrée, avertit **une fois** sur les lignes inimputables |
-| **I8** | aller-retour | `inverse_transform(transform(X))` restitue l'index, les noms (panels multi-niveaux compris) et, sous `restore_original_values=True`, les valeurs d'origine |
+| **I7** | `transform` hors fenêtre de fit | impute au lieu de vider, ne détruit jamais une observation d'entrée — portée telle quelle, ré-exprimée sous son total (§11.2) ou agrégée sur la ligne de sa période —, avertit **une fois** sur les lignes inimputables et sur les totaux de période tronquée qu'il ne peut imposer (D46) |
+| **I8** | aller-retour | `inverse_transform(transform(X))` restitue l'index **dans son ordre** (D43), les noms (panels multi-niveaux compris) et, sous `restore_original_values=True`, les valeurs d'origine |
 | **I9** | conformité sklearn | `clone`, `get_params`/`set_params`, `Pipeline`, `GridSearchCV` sur panel avec `target_frequency` dict ; `NotFittedError` avant `fit` |
 | **I10** | indifférence de l'ordre hors `'model'` | sous `'tolerate_nan'` et `'interpolate'`, forcer deux ordres de traitement différents produit des sorties identiques |
 | **I11** | unicité de la voie de matérialisation | pour chaque (étape, variable, covariable), `materialization` est identique au fit et au transform, et la nature des valeurs produites l'est aussi (§4.6) |
