@@ -1,9 +1,14 @@
-"""Phases 0 to 5 of ``HighFrequencyImputer.fit``.
+"""Phases 0 to 6 of ``HighFrequencyImputer.fit``.
 
 Covers the fitted attributes of §13.2, the input contract (B14, B15, B16,
 B19), the per-(entity, column) frequencies and classification (§2.5), the
-wiring of the §12.2 components, the interpolation fallback (D6) and the
-edge cases of step execution.
+wiring of the §12.2 components, the interpolation fallback (D6), the edge
+cases of step execution, the public scenarios reaching the branches of the
+fit that the rest of the package leaves uncovered (prompt F11: window that
+cannot be computed or holds no anchor, composite stage label, additive
+transformer returning a pair, target on the pre-conversion index, refit
+purging ``cv_``) and the aggregated warnings of phase 5 (§12.5,
+ANO-FREQ-059).
 """
 
 # Modules de base
@@ -13,6 +18,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.linear_model import LinearRegression
 
 # Objets testés
@@ -22,8 +28,8 @@ from tsforecast.frequency.training_set_builder import TrainingSetBuilder
 
 # Outils de test partagés
 from tests.support.estimators import (
+    ConstantEstimator,
     FailingEstimator,
-    SpyEstimator,
 )
 from tests.unit.frequency.high_frequency_imputer.helpers import (
     FR,
@@ -38,6 +44,90 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
     stage_label,
     transform_quietly,
 )
+
+
+# Doublure : transformateur additif de type XY, identité rendant (X, y)
+class _PairReturningIdentity(BaseEstimator, TransformerMixin):
+    """Identity additive transformer returning the ``(X, y)`` pair of an XY transformer."""
+
+    def fit(self, X, y=None):
+        """Learn nothing.
+
+        Args:
+            X: Data.
+            y: Ignored.
+
+        Returns:
+            self.
+        """
+        return self
+
+    def transform(self, X, y=None):
+        """Return a copy of X paired with y.
+
+        Args:
+            X: Data.
+            y: Optional target.
+
+        Returns:
+            Tuple ``(X copy, y)``.
+        """
+        return X.copy(), y
+
+    def fit_transform(self, X, y=None, **fit_params):
+        """Fit, then return the pair.
+
+        Args:
+            X: Data.
+            y: Optional target.
+            **fit_params: Ignored.
+
+        Returns:
+            Tuple ``(X copy, y)``.
+        """
+        return self.fit(X, y).transform(X, y)
+
+    def inverse_transform(self, X, y=None):
+        """Return X untouched.
+
+        Args:
+            X: Data.
+            y: Ignored.
+
+        Returns:
+            X.
+        """
+        return X
+
+
+# Doublure : estimateur qui ne prédit NaN qu'une ligne sur deux
+class _EveryOtherNaNEstimator(BaseEstimator):
+    """Estimator predicting 1.0 on even rows and NaN on odd rows."""
+
+    def fit(self, X, y):
+        """Learn nothing.
+
+        Args:
+            X: Features.
+            y: Target.
+
+        Returns:
+            self.
+        """
+        return self
+
+    def predict(self, X):
+        """Return 1.0 and NaN alternately.
+
+        Args:
+            X: Features.
+
+        Returns:
+            Array of ``len(X)`` values.
+        """
+        values = np.ones(len(X))
+        values[1::2] = np.nan
+        return values
 
 
 # =============================================================================
@@ -242,6 +332,74 @@ class TestFitPhases:
             check_freq=False,
         )
 
+    def test_target_on_the_pre_conversion_index_is_repositioned(
+        self, mixed_freq_panel_heterogeneous
+    ):
+        """y indexé comme le frame plat est replacé sur l'index converti (B14, B15).
+
+        ``panel_cols`` et ``time_col`` font passer les colonnes dans l'index
+        de X avant le fit ; y garde l'index d'entiers du frame plat, qui
+        correspond ligne à ligne à l'index d'origine de X : il est replacé sur
+        le MultiIndex converti au lieu d'être refusé.
+        """
+        flat = mixed_freq_panel_heterogeneous[['m1', 'q1', 'a2']].reset_index()
+        target = mixed_freq_panel_heterogeneous['a1'].reset_index(drop=True)
+        imputer = make_imputer(time_col='date', panel_cols=['country'])
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            imputer.fit(flat, target)
+
+        # La cible est nommée, détectée par entité et imputée
+        assert imputer.target_column_ == 'a1'
+        assert imputer.detected_frequencies_[('FR', 'a1')] == 'Y'
+        assert 'a1' in {step.var_name for step in imputer.imputation_plan_}
+
+    @pytest.mark.parametrize(
+        'reduce',
+        [lambda data: data.iloc[[11]], lambda data: data * np.nan],
+        ids=['single_row', 'all_nan_frame'],
+    )
+    def test_no_detectable_frequency_raises(self, reference_timeseries, reduce):
+        """Aucune fréquence détectable sur aucune colonne : ValueError explicite.
+
+        Une seule ligne, ou un jeu entièrement NaN : chaque couple est
+        indétectable (moins de deux observations), et il ne reste rien à
+        classer.
+        """
+        with pytest.raises(ValueError, match='Could not detect frequency for any column'):
+            fit_quietly(make_imputer(), reduce(reference_timeseries))
+
+    def test_refit_under_the_frequency_order_purges_cv_(self, reference_timeseries):
+        """Un second fit sous l'ordre 'frequency' efface le cv_ du premier (§13.2)."""
+        imputer = fit_quietly(
+            make_imputer(fit_predict_order='cv', cv=3), reference_timeseries
+        )
+        assert hasattr(imputer, 'cv_')
+
+        imputer.set_params(fit_predict_order='frequency')
+        fit_quietly(imputer, reference_timeseries)
+
+        assert not hasattr(imputer, 'cv_')
+
+    def test_additive_transformer_returning_a_pair_is_unpacked(self, reference_timeseries):
+        """Un transformateur additif de type XY, qui rend (X, y), est déballé (phase 2).
+
+        La doublure est l'identité : le plan et les valeurs imputées sont
+        exactement ceux d'un ajustement sans transformateur.
+        """
+        imputer = fit_quietly(
+            make_imputer(additive_transformer=_PairReturningIdentity()), reference_timeseries
+        )
+        bare = fit_quietly(make_imputer(), reference_timeseries)
+
+        assert [(s.pred_freq_label, s.var_name) for s in imputer.imputation_plan_] == [
+            (s.pred_freq_label, s.var_name) for s in bare.imputation_plan_
+        ]
+        values, _provenance = replay(imputer, reference_timeseries)
+        bare_values, _bare_provenance = replay(bare, reference_timeseries)
+        pd.testing.assert_frame_equal(values, bare_values)
+
     @pytest.mark.slow
     def test_entity_never_observing_a_column_is_left_out(
         self, mixed_freq_panel_heterogeneous
@@ -317,6 +475,23 @@ class TestPerEntityFrequencies:
         # Colonnes homogènes : repli sur la forme scalaire
         assert by_column['q1'] == 'Q'
         assert by_column['m1'] == 'M'
+
+    def test_composite_stage_label_when_entities_diverge(self, mixed_freq_panel_multifrequency):
+        """Une étape liant des fréquences différentes porte un libellé composite (§5.2).
+
+        Sous ``impute_intermediate_frequencies=False``, l'unique étape est la
+        liaison ``{FR: M, DE: Q, IT: M}`` elle-même. DE a pour cible Q, où q1
+        et v sont déjà : rien ne lui est imputé ; FR reçoit q1 et v, IT q1
+        seulement (v y est mensuelle).
+        """
+        imputer = fit_quietly(
+            make_imputer(target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'}),
+            mixed_freq_panel_multifrequency,
+        )
+        label = "('DE',)=Q+('FR',)=M+('IT',)=M"
+
+        assert {step.pred_freq_label for step in imputer.imputation_plan_} == {label}
+        assert plan_groups(imputer, label) == {('q1', 'Q'): (FR, IT), ('v', 'Y'): (FR,)}
 
     def test_hyperparameter_dicts_stay_keyed_by_column(self, mixed_freq_panel_multifrequency):
         """Les dicts d'hyperparamètres restent indexés par colonne, jamais par couple (D10)."""
@@ -502,19 +677,24 @@ class TestPhaseFiveEdgeCases:
         with pytest.raises(ValueError, match='not sorted'):
             fit_with_spy(reference_timeseries.iloc[::-1])
 
-    def test_duplicated_index_does_not_crash(self, reference_timeseries):
-        """Un index dupliqué n'interrompt pas le fit."""
-        duplicated = pd.concat([reference_timeseries, reference_timeseries.iloc[[0]]])
-        imputer = make_imputer(estimator=SpyEstimator())
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            try:
-                imputer.fit(duplicated)
-            except ValueError as error:
-                # Un refus explicite est un comportement acceptable
-                assert 'duplicat' in str(error).lower() or 'unique' in str(error).lower()
-                return
-        assert len(imputer.imputation_plan_) >= 1
+    @pytest.mark.parametrize(
+        'fixture_name', ['reference_timeseries', 'mixed_freq_panel_multifrequency']
+    )
+    def test_duplicated_index_is_refused(self, fixture_name, request):
+        """Un index dupliqué est refusé explicitement, sur série comme sur panel.
+
+        Une date (ou un couple (entité, date)) présente deux fois compterait
+        double dans les agrégations exactes et dans les totaux de période
+        (ANO-FREQ-022, ANO-FREQ-039) : la validation stricte du contrat
+        d'entrée (§12.5) la refuse avant tout calcul. Le doublon est trié à
+        sa place, pour que le refus porte sur la duplication et non sur le
+        désordre.
+        """
+        data = request.getfixturevalue(fixture_name)
+        duplicated = pd.concat([data, data.iloc[[5]]]).sort_index()
+
+        with pytest.raises(ValueError, match='duplicate'):
+            fit_with_spy(duplicated)
 
     def test_yearly_variable_with_two_anchors_only(self, reference_timeseries):
         """Deux ancres seulement : y_train de taille 2, sans repli forcé."""
@@ -577,3 +757,317 @@ class TestPhaseFiveEdgeCases:
         imputer = fit_with_spy(data)
         assert len(imputer.imputation_plan_) == 0
         assert imputer.imputation_models_ == {}
+
+
+    def test_all_nan_predictions_fall_back_and_warn(self, reference_timeseries):
+        """Un modèle qui ne prédit que des NaN est traité comme un échec de prédiction.
+
+        ANO-FREQ-064 : rien n'étant produit, l'étape est dégradée en repli
+        d'interpolation — le plan dit ce qui a réellement été fait — et
+        l'avertissement agrégé des étapes dégradées le nomme, comme pour une
+        exception. Valeur d'or : les 36 mois de chaque colonne interpolés.
+        """
+        imputer = make_imputer(estimator=ConstantEstimator(constant=np.nan))
+
+        degraded = _messages_of_family(
+            lambda: imputer.fit(reference_timeseries), 'degraded during the fit'
+        )
+
+        assert [(step.var_name, step.is_fallback, step.n_written)
+                for step in imputer.imputation_plan_] == [
+            ('q1', True, 36), ('a1', True, 36), ('a2', True, 36),
+        ]
+        assert len(degraded) == 1
+        assert degraded[0].count('the model predicted only NaN, interpolation fallback') == 3
+
+    def test_partly_nan_predictions_are_left_unwritten_and_named(self, reference_timeseries):
+        """Des prédictions NaN éparses restent non écrites, et l'avertissement agrégé le dit.
+
+        L'estimateur ne prédit NaN qu'une ligne sur deux : l'étape reste un
+        modèle, ses autres cellules sont écrites ; l'année dont une
+        sous-période manque n'est pas recalée (§11.1). Valeur d'or pour a1 :
+        18 cellules NaN sur 36, 18 écrites.
+        """
+        imputer = make_imputer(estimator=_EveryOtherNaNEstimator())
+
+        degraded = _messages_of_family(
+            lambda: imputer.fit(reference_timeseries), 'degraded during the fit'
+        )
+
+        step = next(s for s in imputer.imputation_plan_ if s.var_name == 'a1')
+        assert (step.is_fallback, step.n_written) == (False, 18)
+        assert len(degraded) == 1
+        assert "'a1' at stage M: 18 of 36 prediction(s) are NaN and stay unimputed" in degraded[0]
+
+
+# =============================================================================
+# Fenêtres sans entraînement possible (phases 1 et 5)
+# =============================================================================
+class TestWindowWithoutTraining:
+    """Fenêtres vides ou sans ancre : repli d'interpolation, jamais d'exception."""
+
+    def test_disjoint_coverages_warn_once_and_impute_nothing(self, reference_timeseries):
+        """Couvertures disjointes : UN avertissement, fenêtres vides, rien d'écrit.
+
+        m1 n'est observée qu'en 2021 et q1 qu'en 2023 : aucune période ne
+        couvre toutes les colonnes, la fenêtre stricte — donc celle
+        d'entraînement et celle d'imputation — est vide. Chaque étape retombe
+        sur le repli sans ligne d'entraînement, et la grille de prédiction
+        vide n'écrit rien. Un seul message le dit : l'imputeur n'ajoute plus
+        un second avertissement annonçant un repli qui n'a pas lieu.
+        """
+        data = reference_timeseries[['m1', 'q1', 'a1']].copy()
+        data.loc['2022-01-01':, 'm1'] = np.nan
+        data.loc[:'2022-12-31', 'q1'] = np.nan
+        imputer = make_imputer()
+
+        fit_messages = _messages_of_family(lambda: imputer.fit(data), '')
+        transform_messages = _messages_of_family(lambda: imputer.transform(data), '')
+
+        assert len(fit_messages) == 1
+        assert 'There is no period in the DataFrame' in fit_messages[0]
+        assert 'no value can be imputed' in fit_messages[0]
+        # Le transform ne recompte pas les lignes d'une fenêtre qui n'existe pas
+        assert transform_messages == fit_messages
+        assert not imputer.training_window_mask_.any()
+        assert not imputer.imputation_window_mask_.any()
+        assert [(step.var_name, step.is_fallback, step.n_training_rows, step.n_written)
+                for step in imputer.imputation_plan_] == [
+            ('q1', True, 0, 0), ('a1', True, 0, 0),
+        ]
+
+    def test_panel_without_any_strict_window_imputes_nothing(self, panel_reference_full):
+        """Un panel sans fenêtre stricte nulle part n'impute rien, comme la série temporelle.
+
+        Mêmes couvertures disjointes que ci-dessus, pour les trois entités.
+        Le calculateur levait « No imputation window found for any entity »,
+        l'imputeur retombait sur des masques tout-vrais (« Using all available
+        data ») et imputait les 108 cellules de q1 et de a1 (ANO-FREQ-072).
+        Désormais : masques tout-faux, rien d'écrit, un message au fit qui
+        nomme les trois entités, un seul au transform.
+        """
+        data = panel_reference_full[['m1', 'q1', 'a1']].copy()
+        dates = data.index.get_level_values(-1)
+        data.loc[dates >= '2022-01-01', 'm1'] = np.nan
+        data.loc[dates <= '2022-12-31', 'q1'] = np.nan
+        imputer = make_imputer(keep_lower_frequencies=False)
+
+        fit_messages = _messages_of_family(lambda: imputer.fit(data), '')
+        transform_messages = _messages_of_family(lambda: imputer.transform(data), '')
+
+        assert [step.n_written for step in imputer.imputation_plan_] == [0, 0]
+        assert len(fit_messages) == 1
+        assert "There is no period for 3 entity(ies)" in fit_messages[0]
+        assert len(transform_messages) == 1 and 'no value can be imputed' in transform_messages[0]
+
+    def test_training_window_without_any_anchor_falls_back(self, reference_timeseries):
+        """Fenêtre d'entraînement sans aucune ancre : repli, 0 ligne, 0 covariable.
+
+        m1 s'arrête en novembre 2021 : la fenêtre va du 2021-01-31 au
+        2021-11-30, avant la première ancre annuelle de a1. Valeur d'or : 11
+        mois interpolés, l'année 2021 tronquée par la fenêtre n'étant pas
+        recalée.
+        """
+        data = reference_timeseries[['m1', 'a1']].copy()
+        data.loc['2021-12-31':, 'm1'] = np.nan
+        imputer = make_imputer()
+
+        degraded = _messages_of_family(lambda: imputer.fit(data), 'degraded during the fit')
+
+        assert imputer.training_window_ == (
+            pd.Timestamp('2021-01-31'), pd.Timestamp('2021-11-30')
+        )
+        (step,) = imputer.imputation_plan_
+        assert (step.is_fallback, step.n_training_rows, step.feature_cols, step.n_written) == (
+            True, 0, (), 11,
+        )
+        assert len(degraded) == 1
+        assert "'a1' at stage M: empty training set (0 row(s), 0 covariate(s))" in degraded[0]
+
+    def test_finer_rows_alone_keep_their_covariates(self, reference_timeseries):
+        """Sous True, des lignes d'entraînement toutes plus fines que le bloc gardent m1.
+
+        Même fenêtre que ci-dessus, avec q1 pour créer l'étape Q. À l'étape
+        Q, a1 n'a aucune ancre dans la fenêtre : repli, qui écrit T1 à T3
+        2021 (origine 'interpolated'). À l'étape M, ces trois trimestres sont
+        les SEULES lignes de a1 — couche Q, la couche Y étant vide — et m1 y
+        vaut la somme de chaque trimestre (§5.4bis, I18 b). La sélection des
+        covariables lit chaque couche à sa fréquence (ANO-FREQ-066) : lue à
+        la fréquence du bloc (Y) sur ces dates trimestrielles, m1 y paraissait
+        vide, était écartée, et a1 retombait en repli avec trois lignes
+        exploitables.
+        """
+        data = reference_timeseries[['m1', 'q1', 'a1']].copy()
+        data.loc['2021-12-31':, 'm1'] = np.nan
+        imputer = fit_quietly(make_imputer(impute_intermediate_frequencies=True), data)
+
+        steps = {(s.pred_freq_label, s.var_name): s for s in imputer.imputation_plan_}
+        # L'étape Q a bien écrit trois trimestres par repli
+        assert (steps[('Q', 'a1')].is_fallback, steps[('Q', 'a1')].n_written) == (True, 3)
+        # Étape M : trois lignes trimestrielles
+        step = steps[('M', 'a1')]
+        assert step.n_training_rows == 3
+        # Attente : m1 retenue, modèle ajusté sur une cible d'origine
+        # 'interpolated' (les souillures d'une étape de repli sont remises à
+        # 'none' : elles ne se lisent qu'une fois le modèle ajusté)
+        assert 'm1' in step.feature_cols
+        assert not step.is_fallback
+        assert step.target_taint == 'interpolated'
+
+    def test_covariate_absent_from_the_training_grid_is_not_selected(
+        self, reference_timeseries
+    ):
+        """Une covariable vide sur la grille d'entraînement n'est jamais retenue (§7.2).
+
+        ``late`` reprend m1 à partir de février 2023 seulement. Sous
+        ``training_scope='unrestricted'``, a1 s'entraîne sur ses trois ancres
+        annuelles, où ``late`` — aucune année complète — ne s'agrège nulle
+        part ; la grille de prédiction (février-décembre 2023) la porte
+        pourtant. Une covariable non vide sur une seule des deux grilles
+        entraînerait un coefficient sans support : elle est écartée.
+        """
+        data = reference_timeseries.copy()
+        data['late'] = data['m1'].where(data.index >= '2023-02-01')
+
+        imputer = fit_quietly(make_imputer(training_scope='unrestricted'), data)
+
+        step = next(s for s in imputer.imputation_plan_ if s.var_name == 'a1')
+        assert step.feature_cols == ('m1', 'q1', 'a2')
+
+
+# =============================================================================
+# Avertissements agrégés de la phase 5 (§12.3 PHASE 6, §12.5)
+# =============================================================================
+# Messages d'une famille d'avertissements, relevés pendant un appel
+def _messages_of_family(call, family: str) -> list:
+    """Run a call and return the warning messages containing ``family``.
+
+    Args:
+        call: Zero-argument callable to run.
+        family: Fragment identifying the family of the message.
+
+    Returns:
+        The matching messages, in emission order.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        call()
+    return [str(item.message) for item in caught if family in str(item.message)]
+
+
+class TestAggregatedWarnings:
+    """Un avertissement par famille et par phase, jamais un par variable × étape."""
+
+    # Jeu TS dont les deux colonnes annuelles portent des totaux NÉGATIFS
+    @pytest.fixture
+    def negative_annual_totals(self, reference_timeseries) -> pd.DataFrame:
+        """``TS`` whose ``a1`` and ``a2`` are negated: -120 / -132 / -150 and -60 / -66 / -72."""
+        data = reference_timeseries.copy()
+        data[['a1', 'a2']] = -data[['a1', 'a2']]
+        return data
+
+    def test_flipped_profiles_of_two_columns_over_two_stages_warn_once(
+        self, negative_annual_totals
+    ):
+        """Deux colonnes à signe inversé sur deux étapes : UN avertissement « flipped ».
+
+        L'estimateur constant prédit +1 sur chaque sous-période : l'agrégat de
+        chaque année est positif face à un total négatif, aux étapes Q ET M,
+        pour a1 comme pour a2 — quatre recalages dégénérés, qui donnaient
+        chacun leur message (ANO-FREQ-059). Valeur d'or : 2 colonnes × 3
+        années = 6 périodes observées ; une année inversée aux deux étapes
+        compte une fois, le message dénombrant des périodes observées et non
+        des recalages.
+        """
+        imputer = make_imputer(
+            estimator=ConstantEstimator(constant=1.0),
+            impute_intermediate_frequencies=True,
+        )
+
+        flipped = _messages_of_family(
+            lambda: imputer.fit(negative_annual_totals), 'flipped the predicted profile'
+        )
+
+        # Les deux étapes ont bien été parcourues par les deux colonnes
+        assert [(s.pred_freq_label, s.var_name) for s in imputer.imputation_plan_] == [
+            ('Q', 'a1'), ('Q', 'a2'), ('M', 'q1'), ('M', 'a1'), ('M', 'a2'),
+        ]
+        # Un seul message, nommant les deux colonnes et le total des périodes
+        assert len(flipped) == 1
+        assert "6 period(s), in column(s) ['a1', 'a2']" in flipped[0]
+
+    def test_the_replay_warns_once_too(self, negative_annual_totals):
+        """Le rejeu du plan au transform agrège de même : un seul avertissement."""
+        imputer = fit_quietly(
+            make_imputer(
+                estimator=ConstantEstimator(constant=1.0),
+                impute_intermediate_frequencies=True,
+            ),
+            negative_annual_totals,
+        )
+
+        flipped = _messages_of_family(
+            lambda: imputer.transform(negative_annual_totals),
+            'flipped the predicted profile',
+        )
+
+        assert len(flipped) == 1
+        assert "6 period(s), in column(s) ['a1', 'a2']" in flipped[0]
+
+    def test_a_covariate_interpolated_for_several_variables_warns_once(
+        self, reference_timeseries
+    ):
+        """Une covariable interpolée à chaque usage n'avertit qu'une fois.
+
+        Ancres de a2 alternées (+100, -10, +100) : l'interpolation linéaire de
+        2022 descend de 100 à -10, son agrégat est positif face à un total
+        négatif. a2 est matérialisée pour q1 et pour a1, sur la grille
+        d'entraînement comme sur celle de prédiction — six recalages de la
+        même année, et autant de messages avant la correction. Valeur d'or :
+        une seule période, 2022 de a2.
+        """
+        data = reference_timeseries.copy()
+        data['a2'] = np.nan
+        data.loc['2021-12-31', 'a2'] = 100.0
+        data.loc['2022-12-31', 'a2'] = -10.0
+        data.loc['2023-12-31', 'a2'] = 100.0
+
+        flipped = _messages_of_family(
+            lambda: make_imputer(estimator=ConstantEstimator(constant=1.0)).fit(data),
+            'flipped the predicted profile',
+        )
+
+        assert len(flipped) == 1
+        assert "1 period(s), in column(s) ['a2'] (e.g. 2022)" in flipped[0]
+
+    def test_zero_aggregates_of_two_columns_warn_once(self, reference_timeseries):
+        """Famille « aggregate to zero » : un message pour toutes les colonnes et les deux étapes.
+
+        L'estimateur constant prédit 0 : chaque année de a1 et de a2 agrège
+        à zéro face à un total non nul, à l'étape Q comme à l'étape M, et
+        chaque trimestre de q1 à l'étape M. Valeur d'or : 3 années × 2
+        colonnes annuelles + 12 trimestres de q1 = 18 périodes, prédictions
+        brutes gardées.
+        """
+        imputer = make_imputer(
+            estimator=ConstantEstimator(constant=0.0),
+            impute_intermediate_frequencies=True,
+        )
+
+        zero = _messages_of_family(
+            lambda: imputer.fit(reference_timeseries), 'aggregate to zero'
+        )
+
+        assert len(zero) == 1
+        assert (
+            "18 period(s) with a non-zero observed total, in column(s) ['a1', 'a2', 'q1']"
+            in zero[0]
+        )
+
+    def test_no_degenerate_period_no_warning(self, reference_timeseries):
+        """Un ajustement nominal n'émet aucun avertissement de recalage."""
+        messages = _messages_of_family(
+            lambda: make_imputer().fit(reference_timeseries), 'Aggregation constraint'
+        )
+
+        assert messages == []

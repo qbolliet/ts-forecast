@@ -4248,3 +4248,349 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Avertissement `estimator=None`** (ANO-FREQ-055) : au `fit`, en phase 0, avant tout entraînement.
 - **Inversion juste après un `fit`** (ANO-FREQ-051) : licite, `restore_original_values=True` compris ; le `fit`
   est une passe au même titre qu'un `transform`.
+
+### ANO-FREQ-059 — Avertissements de recalage émis une fois par (étape, colonne) et par covariable interpolée
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 5) et
+  `::_transform` (phase 5'), via `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint.rescale`
+  (appelée par `_execute_step` et par `CovariateMaterializer._interpolate_series`)
+- **Sévérité** : mineure
+- **Observé** : chaque appel à `rescale` émet ses propres avertissements « aggregate to zero » / « flipped the
+  predicted profile ». Sur `TS` dont `a1` et `a2` sont négatives (-120 / -132 / -150, -60 / -66 / -72), un
+  estimateur constant à +1 et `impute_intermediate_frequencies=True` : **quatre** messages « flipped » au `fit`
+  (`a1` et `a2`, étapes Q et M, « for 3 period(s), in column(s) ['a1'] » ...), quatre de plus au `transform`. Une
+  covariable `a2` d'ancres +100 / -10 / +100, interpolée pour q1 et pour a1 sur les grilles d'entraînement et de
+  prédiction : **six** messages identiques pour la seule année 2022.
+- **Attendu** : §12.5 — « Avertissements uniques (… périodes à signe inversé …), jamais un par variable × étape :
+  accumulation puis message agrégé en fin de phase ». Un message par famille pour toute la phase, nommant les
+  colonnes et le nombre total de périodes.
+- **Reproduction** :
+  ```python
+  data = reference_timeseries.copy(); data[['a1', 'a2']] = -data[['a1', 'a2']]
+  HighFrequencyImputer(target_frequency='M', estimator=ConstantEstimator(constant=1.0),
+                       impute_intermediate_frequencies=True).fit(data)   # 4 avertissements « flipped »
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestAggregatedWarnings`
+  (`test_flipped_profiles_of_two_columns_over_two_stages_warn_once`, `test_the_replay_warns_once_too`,
+  `test_a_covariate_interpolated_for_several_variables_warns_once`, `test_zero_aggregates_of_two_columns_warn_once`),
+  `tests/unit/frequency/test_aggregation_constraint.py::TestDeferredWarnings`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : `AggregationConstraint.deferred_warnings()` (gestionnaire de contexte, réentrant) : dans le bloc,
+  `rescale` et `transform` recensent les périodes dégénérées au lieu d'avertir, dédoublonnées par colonne ; à la
+  sortie, `_emit_warnings` émet un message par cas pour tout le bloc (rien en cas d'exception, aucun état résiduel).
+  `HighFrequencyImputer` ouvre ce bloc autour de la boucle des étapes (phase 5) et du rejeu (phase 5') : les
+  recalages des étapes et ceux des covariables interpolées par le matérialiseur, qui partage la même instance,
+  donnent un message par famille et par phase. **Décompte** : une période (colonne, période observée) rencontrée à
+  plusieurs étapes ou par plusieurs appels compte **une** fois — 6 périodes dans le scénario ci-dessus (2 colonnes
+  × 3 années), et non 12 (arbitrage de l'auteur, 2026-10-13 : le décompte porte sur les périodes observées, non sur
+  les recalages). Utilisé seul, `rescale` garde son comportement (un message par appel).
+
+### ANO-FREQ-060 — Colonne à fréquence indétectable retenue comme covariable : les autres variables retombent en repli
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._select_feature_columns`
+  (via `_prepare_variable`)
+- **Sévérité** : majeure
+- **Observé** : une colonne observée une seule fois (cible `y` à une observation, ou colonne de X) a une fréquence
+  indétectable et rejoint les couples non détectés ; elle n'est pas imputée, mais reste **candidate covariable** :
+  non vide sur les deux fenêtres (sa seule valeur y figure), elle est retenue. Ni agrégeable ni interpolable faute de
+  fréquence, elle n'apporte que des NaN à `X_train`, et un estimateur qui ne les tolère pas échoue : sur `TS` avec
+  `y = a1` réduite à 150 au 2023-12-31, q1 et a2 tombent en repli (« estimator fit failed (ValueError: Input X
+  contains NaN…), interpolation fallback »). Une colonne entièrement NaN, elle, est bien écartée.
+- **Attendu** : §12.5 — « Fréquence indétectable, jamais fatale : … un couple inutilisable ne fait pas échouer le
+  `fit` des autres » ; §4.5 (éligibilité). Un couple sans fréquence détectée n'est pas une covariable éligible : q1
+  et a2 s'ajustent comme sans a1.
+- **Reproduction** :
+  ```python
+  y = reference_timeseries['a1'].where(reference_timeseries.index == '2023-12-31')
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+  imputer.fit(reference_timeseries[['m1', 'q1', 'a2']], y)
+  [step.is_fallback for step in imputer.imputation_plan_]   # [True, True]
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_undetectable_column_is_not_used_as_a_covariate`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : `_prepare_variable` ne retient comme candidates que les colonnes dotées d'une fréquence détectée pour
+  au moins une entité (clés de `_detected_frequencies_by_column`) ; une colonne indétectable — ou dont tous les
+  couples sont hors de leur grille calendaire (ANO-FREQ-065) — n'est jamais covariable. Sur un panel, une entité
+  indétectable d'une colonne détectée ailleurs garde le traitement arbitré d'ANO-FREQ-046 (côté covariables). Test :
+  plus de `xfail`.
+
+### ANO-FREQ-061 — Entité réduite à une ligne : la fenêtre de tout le panel est perdue
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator.fit` (détection de la
+  fréquence d'index sur tout le `MultiIndex`), via `HighFrequencyImputer._fit_imputation_window`
+- **Sévérité** : mineure
+- **Observé** : une entité qui ne compte qu'une ligne fait échouer `detect_index_frequency` sur l'index entier ; le
+  calculateur lève, et l'imputeur avertit « Could not calculate imputation window: Series has only 1 non-null
+  observations, minimum required is 2. Using all available data. » : les trois masques valent True partout, pour
+  **toutes** les entités. Sur `PANEL-F` dont m1 de DE s'arrête fin 2022, les douze mois 2023 de DE entrent dans la
+  fenêtre d'imputation. `imputation_window_` devient le tuple global au lieu du dict par entité.
+- **Attendu** : la règle d'ANO-FREQ-020 — une entité sans fenêtre déterminable rejoint `entities_without_window_`
+  (avertissement unique), les autres gardent leurs masques. Cohérence avec l'entité entièrement NaN, déjà traitée
+  ainsi.
+- **Reproduction** :
+  ```python
+  base = mixed_freq_panel_multifrequency.copy()   # m1 de DE à NaN à partir de 2023
+  lu = pd.DataFrame({'m1': [100.0], 'q1': [np.nan], 'v': [np.nan]},
+                    index=pd.MultiIndex.from_tuples([('LU', pd.Timestamp('2021-01-31'))], names=base.index.names))
+  HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(pd.concat([base, lu]))
+  # UserWarning: Could not calculate imputation window: Series has only 1 non-null observations ...
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_entity_reduced_to_one_row_leaves_the_other_windows_intact`,
+  `tests/unit/frequency/test_imputation_window.py::TestEntitiesWithoutWindow::test_entity_reduced_to_one_row_has_no_window_and_costs_the_others_nothing`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : sur un panel, `ImputationWindowCalculator.fit` détecte la fréquence d'index entité par entité
+  (`_detect_entity_index_frequencies`) ; une entité indéterminable vaut `None` et rejoint `entities_without_window_`,
+  avec l'avertissement unique d'ANO-FREQ-020. Les autres entités gardent leurs fenêtres.
+
+### ANO-FREQ-062 — Entité entièrement NaN : avertissement « entities not in data » erroné
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 0 : expansion
+  de `target_frequency` sur `entities_`, puis `TargetFrequencyValidator.validate` contre les seules fréquences
+  détectées)
+- **Sévérité** : cosmétique
+- **Observé** : sur `PANEL-F` dont IT est entièrement NaN, avec `target_frequency='M'` (une chaîne) : « target_frequency
+  dict contains entries for entities not in data: {('IT',)}. These will be ignored. » L'utilisateur n'a passé aucun
+  dict, et IT est dans les données. L'avertissement de fenêtre la nomme déjà correctement (« 1 entity(ies) without a
+  determinable window (… no observation at all) »). Résultat inchangé (IT vide et non marquée, FR et DE identiques à un
+  ajustement sans IT).
+- **Attendu** : aucun message affirmant l'absence d'une entité présente ; au plus un message nommant l'entité comme
+  jamais observée (avertissements uniques et exacts, §12.5).
+- **Reproduction** :
+  ```python
+  data = mixed_freq_panel_multifrequency.copy(); data.loc[('IT',), :] = np.nan
+  HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(data)
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_all_nan_entity_is_not_said_absent_from_the_data`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : en phase 0, les entités présentes mais sans aucune fréquence détectée (entièrement NaN, ou réduites
+  à une ligne) sont retirées de la cible effective avant la validation ; seul l'avertissement de la fenêtre les nomme.
+  Une entrée de dict nommant une entité réellement absente des données reste signalée par le validateur.
+
+### ANO-FREQ-063 — Échec de prédiction d'une étape sans ancre annoncé comme repli d'interpolation
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._predict_step` (message
+  accumulé quel que soit `step.unanchored`)
+- **Sévérité** : cosmétique
+- **Observé** : sous `impute_unobserved_entities=True`, quand la prédiction d'une étape sans ancre lève (covariable
+  NaN, estimateur intolérant), l'avertissement agrégé des étapes dégradées annonce « 'v' at stage M: prediction failed
+  (…), interpolation fallback », alors qu'aucun repli n'a lieu : les cellules restent NaN et non marquées, et le
+  second avertissement (« unobserved (entity, column) pair(s) could not be imputed … ») nomme le couple. Deux messages
+  pour un fait, dont un inexact.
+- **Attendu** : §5.10, conséquence 5 — « Le repli d'une entité sans ancre ne peut pas être l'interpolation : ses
+  cellules restent NaN et non marquées, et un avertissement agrégé nomme les couples concernés. »
+- **Reproduction** : `HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+  impute_unobserved_entities=True).fit(panel_f_with_a_mute_entity)` (fixture du paquet).
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_mutualization.py::TestUnobservedEntities::test_unanchored_prediction_failure_announces_no_fallback`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : `_predict_step` n'accumule plus de message « interpolation fallback » pour une étape sans ancre ;
+  seul l'avertissement des couples non imputés la nomme, reformulé : « no prediction on the target grid (no usable
+  covariate, or the prediction failed), and no interpolation fallback exists without an anchor ».
+
+### ANO-FREQ-064 — Prédictions entièrement NaN : rien n'est écrit, ni repli, ni avertissement
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._execute_step`
+- **Sévérité** : à arbitrer
+- **Observé** : un estimateur dont `predict` rend des NaN (sans lever) produit une étape figée comme un succès
+  (`is_fallback=False`, `n_written=0`) ; aucune cellule n'est écrite et aucun avertissement n'est émis. Une prédiction
+  partiellement NaN laisse de même des trous silencieux. Un échec de prédiction par exception, lui, dégrade l'étape
+  en repli d'interpolation et l'annonce.
+- **Attendu** : à arbitrer — (i) comportement actuel, NaN jamais écrit (cohérent avec la règle « une ligne que les
+  covariables ne nourrissent pas rend un NaN, qui n'est jamais écrit », §5.10) ; (ii) repli d'interpolation et
+  avertissement, comme pour une exception (§12.3 : « le plan dise toujours ce qui a réellement été fait ») ; (iii)
+  au moins un avertissement agrégé nommant les étapes restées vides.
+- **Reproduction** : `HighFrequencyImputer(target_frequency='M', estimator=ConstantEstimator(constant=np.nan)).fit(reference_timeseries)`
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestPhaseFiveEdgeCases::test_all_nan_predictions_fall_back_and_warn`,
+  `::test_partly_nan_predictions_are_left_unwritten_and_named`
+- **Statut** : corrigé (2026-10-13) — option (ii) retenue, recommandée à l'auteur et à confirmer
+- **Correction** : des prédictions entièrement NaN sont traitées comme un échec de prédiction — repli d'interpolation,
+  étape figée `is_fallback=True`, message « the model predicted only NaN, interpolation fallback » dans
+  l'avertissement agrégé des étapes dégradées. Des NaN épars restent des cellules non écrites, nommées par le même
+  avertissement (« N of K prediction(s) are NaN and stay unimputed »). Une étape sans ancre n'a pas de repli : ses
+  couples sont nommés par leur propre avertissement.
+
+### ANO-FREQ-065 — Ancres basse fréquence hors du calendrier civil : aucune ligne d'entraînement
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._training_mask_at` /
+  `TrainingSetBuilder` (masque 'training' lu par date exacte), face à
+  `tsforecast/frequency/aggregation_constraint.py` (rattachement par période)
+- **Sévérité** : à arbitrer
+- **Observé** : une colonne annuelle dont les ancres ne tombent pas aux bornes civiles — exercice clos au 30 juin sur
+  un index `ME`, ou ancre datée au 1er décembre sur un index `MS` (ce que produit `to_period_start` appliqué tel
+  quel à `PANEL-X`) — est détectée `'Y'`. Le masque 'training' annuel ne porte que des dates civiles (31 décembre ou
+  1er janvier) : les ancres en sortent, l'étape retombe sur le repli sans ligne d'entraînement (« empty training set
+  (0 row(s), …) »), et le repli n'écrit qu'une partie de la grille (30 mois sur 36 pour l'exercice décalé ; 75 cellules
+  sur 108 pour `to_period_start(PANEL-X)`, où **toutes** les étapes tombent en repli). `AggregationConstraint`, elle,
+  rattache ces mêmes ancres à leur année civile (`Period(date, 'Y')`) : les deux composants ne lisent pas l'ancre de
+  la même façon.
+- **Attendu** : à arbitrer — (i) refuser ou signaler explicitement des ancres hors de la grille calendaire de leur
+  fréquence ; (ii) lire les ancres par période (comme le recalage) dans le masque d'entraînement ; (iii) supporter
+  les exercices décalés (fréquence ancrée `YE-JUN`). La spec ne traite que des périodes civiles.
+- **Reproduction** :
+  ```python
+  data = reference_timeseries[['m1']].copy()
+  data['a1'] = pd.Series([120.0, 132.0, 150.0],
+                         index=pd.to_datetime(['2021-06-30', '2022-06-30', '2023-06-30'])).reindex(data.index)
+  HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(data).imputation_plan_
+  # a1 : is_fallback=True, n_training_rows=0
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestPeriodPositions::test_off_calendar_anchors_are_left_out_with_one_warning`,
+  `::test_off_calendar_quarter_anchors_of_one_entity_only`
+- **Statut** : corrigé (2026-10-13) — option (i) retenue, recommandée à l'auteur et à confirmer
+- **Correction** : `_misaligned_anchor_pairs` repère, en phase 0, les couples mensuels, trimestriels ou annuels dont
+  une observation n'est pas sur la borne calendaire de sa période (fin sous un index de fin de période, début sous un
+  index de début ; contrôle omis pour une entité sans position d'index, journalière ou ouvrée). Ces couples sont
+  écartés de `detected_frequencies_` — ni imputés, ni covariables (ANO-FREQ-060), ni traités comme sans ancre — et un
+  `UserWarning` unique les nomme en invitant à les redater. Leurs observations ressortent telles quelles. Le support
+  des exercices décalés (fréquences ancrées `YE-JUN`) reste hors périmètre : il supposerait que la détection, les
+  masques de fenêtre, les agrégations et le recalage portent tous le mois d'ancrage.
+
+### ANO-FREQ-066 — Sélection des covariables lue à la fréquence du bloc, et non par couche (D30)
+- **Type** : [SPEC] code ≠ spec
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._prepare_variable`
+  (vue `train_view` construite à `_block_binding(blocks, …)`, lue par `_select_feature_columns`)
+- **Sévérité** : mineure
+- **Observé** : sous `impute_intermediate_frequencies=True`, la vue d'entraînement qui décide de la sélection des
+  covariables est matérialisée à la fréquence du **bloc**, sur toutes les dates de la grille, y compris celles des
+  couches plus fines. Une covariable vide à la fréquence du bloc mais pleine sur une couche plus fine est écartée.
+  Cas limite mesuré : `TS[['m1', 'q1', 'a1']]` dont m1 s'arrête en novembre 2021 ; à l'étape M, les trois seules lignes
+  de a1 sont les trimestres T1-T3 2021 écrits par le repli de l'étape Q (couche Q, couche Y vide) ; m1 y vaut la somme
+  de chaque trimestre, mais lue à la fréquence Y sur ces dates elle est vide : m1 est écartée, et a1 retombe en repli
+  avec trois lignes exploitables. Plus largement : une covariable mensuelle dont les années sont incomplètes mais les
+  trimestres complets n'est jamais retenue pour une variable annuelle, même quand ses lignes trimestrielles
+  pourraient la porter.
+- **Attendu** : §5.4bis / D30 — « Un bloc cesse d'être homogène dès qu'une étape antérieure y a écrit des cellules
+  plus fines que sa fréquence propre. Tout ce qui se lit "à la fréquence du bloc" se lit alors à la fréquence de chaque
+  LIGNE, une couche à la fois. » La sélection (§7.2 : non-vacuité sur les deux fenêtres) doit lire chaque couche à sa
+  fréquence ; I18 (b) : `X_train` plein sur les lignes trimestrielles.
+- **Reproduction** :
+  ```python
+  data = reference_timeseries[['m1', 'q1', 'a1']].copy(); data.loc['2021-12-31':, 'm1'] = np.nan
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                 impute_intermediate_frequencies=True).fit(data)
+  # étape (M, a1) : n_training_rows=3, feature_cols=(), is_fallback=True
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_finer_rows_alone_keep_their_covariates`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : la vue d'entraînement de la sélection est construite par `_training_view`, couche par couche (une
+  trame d'étape par couche, à la liaison de la couche, sur sa sous-grille), comme le masque 'training', la
+  matérialisation et les diviseurs. Une seule couche — axe 2 éteint — redonne la vue d'origine.
+
+### ANO-FREQ-067 — `to_diagnostic_frame` : `training_blocks` sérialisé dans l'ordre d'entrée des entités
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/imputation_plan.py::ImputationPlan.to_diagnostic_frame` (colonne
+  `training_blocks`), alimentée par l'ordre des blocs de `TrainingSetBuilder.build`
+- **Sévérité** : cosmétique
+- **Observé** : sur `reverse_entities(PANEL-X)`, valeurs et provenances sont identiques à celles de l'original, mais
+  la colonne `training_blocks` du diagnostic vaut `'IT=Q, FR=Q, DE=Q'` au lieu de `'DE=Q, FR=Q, IT=Q'`. La colonne
+  `entities`, elle, est triée. Le diagnostic — destiné au suivi d'expériences — dépend donc de l'ordre des lignes
+  d'entrée.
+- **Attendu** : un diagnostic indépendant de l'ordre des entités en entrée, comme le plan (`_imputable_groups` : « l'ordre
+  du plan ne doit dépendre ni de l'ordre des colonnes ni de celui des lignes en entrée ») — sérialisation triée par clé
+  d'entité.
+- **Reproduction** :
+  ```python
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                 covariate_eligibility='all_entities').fit(reverse_entities(panel_reference_full))
+  imputer.imputation_plan_.to_diagnostic_frame()['training_blocks'][0]   # 'IT=Q, FR=Q, DE=Q'
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestPerturbationInvariance::test_diagnostic_frame_is_unchanged_up_to_renaming[reverse_entities]`,
+  `tests/unit/frequency/test_imputation_plan.py::TestDiagnosticFrame::test_training_blocks_rendering_ignores_the_entity_order`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : `to_diagnostic_frame` trie `training_blocks` par clé d'entité. Le test d'or
+  `TestDiagnosticFrame::test_golden_row_of_a_panel_step`, qui figeait l'ordre d'insertion (`'FR=M, DE=Q'`), attend
+  désormais `'DE=Q, FR=M'` (changement délibéré).
+
+### ANO-FREQ-068 — « Panel structure issues: Missing panel columns » sous `panel_cols` converties en index
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer._check_panel_consistency`
+- **Sévérité** : cosmétique
+- **Observé** : sous `time_col` / `panel_cols` et `convert_cols_to_index=True` (le cas de `HighFrequencyImputer`), la
+  validation fait passer les colonnes de panel dans l'index, puis le contrôle de cohérence les cherche parmi les
+  colonnes et avertit « Panel structure issues: Missing panel columns: {'country'} ».
+- **Attendu** : aucun avertissement — l'identifiant est présent, comme niveau d'index.
+- **Test** : `tests/unit/base/test_transformers.py::TestMissingPanelColumns::test_panel_cols_converted_to_index_raise_no_consistency_warning`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : l'identifiant se lit parmi les colonnes ou les niveaux d'index ; ses valeurs manquantes aussi.
+
+### ANO-FREQ-069 — Message de tri conseillant `auto_sort=True` à un transformateur qui ne l'expose pas
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer` (validations MultiIndex et par colonnes)
+- **Sévérité** : cosmétique
+- **Observé** : un panel non trié passé à `HighFrequencyImputer` lève « Panel entities are not contiguous in MultiIndex.
+  Consider sorting by entity levels or enabling auto_sort=True » ; l'imputeur fige `auto_sort=False` (§12.5) et ne
+  l'expose pas.
+- **Attendu** : un conseil réalisable.
+- **Test** : `tests/unit/base/test_transformers.py::TestSortingAdvice`,
+  `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_unsorted_panel_is_refused`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : `_sorting_advice` ne propose `auto_sort=True` que si le paramètre figure dans `get_params()` ;
+  sinon « Sort the data by … before calling <classe>, which never sorts implicitly ».
+
+### ANO-FREQ-070 — Frame à une seule colonne : « Could not calculate imputation window … min_columns=2 »
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._make_window_calculator`
+- **Sévérité** : cosmétique
+- **Observé** : l'imputeur imposait `min_columns=2` au calculateur (depuis l'implémentation initiale, sans
+  justification) ; un frame d'une seule colonne émettait « Could not calculate imputation window: Data has 1 columns,
+  but min_columns=2. Using all available data. » au `fit` et au `transform`.
+- **Attendu** : une colonne suffit à définir une fenêtre (sa propre couverture) : aucun avertissement.
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_no_low_frequency_column_gives_an_empty_plan`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : le calculateur garde son défaut (`min_columns=1`).
+
+### ANO-FREQ-071 — Couvertures disjointes : trois avertissements pour une cause, dont un inexact
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._compute_window` /
+  `_fit_panel`, `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 1) et `_fit_variable`
+- **Sévérité** : mineure
+- **Observé** : sans période couverte par toutes les colonnes, le calculateur avertissait « There is no period in the
+  DataFrame … » (une fois **par entité** sur un panel, sans la nommer), l'imputeur ajoutait « The training window is
+  empty: … all imputations will fall back to interpolation » — inexact : la fenêtre d'imputation est vide aussi et
+  rien n'est écrit — puis le message des étapes dégradées annonçait un repli pour chaque variable.
+- **Attendu** : un message unique et exact (§12.5).
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_disjoint_coverages_warn_once_and_impute_nothing`,
+  `tests/unit/frequency/test_imputation_window.py::TestNoStrictWindow::test_time_series_message_says_nothing_is_imputed`,
+  `::test_entities_without_strict_window_are_named_by_one_warning`
+- **Statut** : corrigé (2026-10-13)
+- **Correction** : `_compute_window` signale l'absence de fenêtre stricte (`no_strict_window`) sans avertir ;
+  `_fit_ts` et `_fit_panel` émettent un message unique, qui nomme les entités d'un panel et dit qu'aucune valeur n'est
+  imputable. L'imputeur ne double plus ce message : une fenêtre d'entraînement vide implique une fenêtre d'imputation
+  vide (les deux contiennent la fenêtre stricte, aucune extension ne naît d'une fenêtre stricte vide), et un repli
+  n'est plus annoncé quand la grille de prédiction est vide et qu'aucun groupe sans ancre ne prédit.
+
+### ANO-FREQ-072 — Panel sans fenêtre stricte pour aucune entité : imputé sur toutes ses lignes
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 1, repli sur des
+  masques tout-vrais), face à `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._fit_panel`
+- **Sévérité** : mineure
+- **Observé** : sur un panel dont aucune entité n'a de période couverte par toutes ses colonnes, le calculateur lève
+  « No imputation window found for any entity in the panel » (comportement voulu du composant, testé) ; l'imputeur
+  attrape l'erreur, avertit « Could not calculate imputation window: … Using all available data » et impute **toutes**
+  les lignes. Les mêmes données en série temporelle n'imputent **rien** (fenêtres vides, un message). Mesuré sur
+  `PANEL-X[['m1', 'q1', 'a1']]`, m1 limitée à 2021 et q1 à 2023 : 108 cellules écrites pour q1 et pour a1 sur le panel,
+  0 sur `TS`.
+- **Attendu** : le comportement de la série temporelle, cohérent avec §7 / B23 — une entité sans fenêtre stricte n'a
+  rien à imputer, que les autres entités en aient une ou non. Le repli « Using all available data » est à réserver
+  aux échecs qui ne disent rien des fenêtres (il n'est plus atteint pour un frame d'une colonne, ANO-FREQ-070).
+- **Reproduction** :
+  ```python
+  data = panel_reference_full[['m1', 'q1', 'a1']].copy(); dates = data.index.get_level_values(-1)
+  data.loc[dates >= '2022-01-01', 'm1'] = np.nan; data.loc[dates <= '2022-12-31', 'q1'] = np.nan
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(data)
+  [step.n_written for step in imputer.imputation_plan_]   # [108, 108] ; sur data.loc['FR'] : [0, 0]
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_panel_without_any_strict_window_imputes_nothing`,
+  `tests/unit/frequency/test_imputation_window.py::TestFitInputValidation::test_accepts_panel_where_no_entity_has_a_window`,
+  `::TestNoStrictWindow::test_panel_without_window_behaves_like_a_time_series`,
+  `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_all_nan_entity_is_named_once_at_transform`
+- **Statut** : corrigé (2026-10-13) — arbitrage de l'auteur : aligner le panel sur la série temporelle
+- **Correction** : `ImputationWindowCalculator._fit_panel` ne lève plus quand aucune entité n'a de fenêtre stricte :
+  comme une série (B23), les trois masques existent — tout faux, tout vrai à l'entraînement sous
+  `training_scope='unrestricted'` — et l'avertissement unique d'ANO-FREQ-071 nomme les entités ; le message « No entity
+  has a strict imputation window … » disparaît, redondant. Les deux tests du calculateur qui figeaient l'erreur
+  (`test_rejects_panel_where_no_entity_has_a_window`, `test_panel_without_window_raises_by_default`) sont réécrits sur le
+  nouveau contrat (changement délibéré). Au `transform`, `_warn_rows_outside_window` ne recompte plus les lignes d'une
+  entité — ou d'une série — sans aucune ligne dans la fenêtre : le calculateur l'a déjà nommée (même règle pour une
+  entité entièrement NaN). Le repli « Using all available data » du `fit` (masques tout-vrais sur échec du
+  calculateur), devenu inatteignable, est supprimé à la demande de l'auteur : un échec du calcul de fenêtre au `fit`
+  lève désormais. Son pendant au `transform` reste — une seule ligne à transformer ne porte aucune fenêtre.

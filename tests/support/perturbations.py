@@ -296,6 +296,92 @@ def to_period_start(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, p
         return df.copy()
 
 
+def to_period_start_by_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Re-date every observation at the start of ITS OWN period.
+
+    Edge case: the start-anchored counterpart of a mixed-frequency frame.
+    :func:`to_period_start` moves the shared index, so the yearly anchor of a
+    monthly grid lands on December 1st — the start of December, not of the
+    year. Here each (entity, column) pair is read at its own detected
+    frequency, and each of its observations moves to the first day of the
+    period it covers: a yearly value to January 1st, a quarterly one to the
+    first day of its quarter, a monthly one to the first of its month. The
+    grid itself is :func:`to_period_start` of the index.
+
+    Args:
+        df: Time series or panel ``DataFrame`` (``MultiIndex`` with the date
+            last), anchored at period end, on a grid fine enough to hold every
+            period start (monthly for monthly, quarterly and yearly columns).
+
+    Returns:
+        A copy on the start-anchored grid, every observation re-dated, NaN
+        elsewhere.
+
+    Raises:
+        ValueError: If the frequency of an observed (entity, column) pair
+            cannot be detected (fewer than two observations), or if a period
+            start falls outside the start-anchored grid.
+
+    Examples:
+        >>> import numpy as np
+        >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+        >>> yearly = [np.nan] * 11 + [120.0] + [np.nan] * 11 + [132.0]
+        >>> df = pd.DataFrame({'m': np.arange(24.0), 'y': yearly}, index=dates)
+        >>> start = to_period_start_by_column(df)
+        >>> start['y'].dropna().index.strftime('%Y-%m-%d').tolist()
+        ['2021-01-01', '2022-01-01']
+        >>> start['m'].tolist() == df['m'].tolist()
+        True
+    """
+    # Détection par couple (entité, colonne) : importée ici pour garder le
+    # module léger à l'import
+    from tsforecast.utils.frequency import detect_frequency, normalize_frequency
+
+    # Grille de début de période, et trame vide à remplir
+    grid = to_period_start(df).index
+    out = pd.DataFrame(float('nan'), index=grid, columns=df.columns)
+
+    # Blocs d'entité : un seul bloc d'entité vide pour une série temporelle
+    is_panel = isinstance(df.index, pd.MultiIndex)
+    if is_panel:
+        # Niveau scalaire pour une seule entité : pandas rendra sinon des tuples
+        levels = list(range(df.index.nlevels - 1))
+        level = levels[0] if len(levels) == 1 else levels
+        blocks = [
+            (entity if isinstance(entity, tuple) else (entity,), block)
+            for entity, block in df.groupby(level=level, sort=False)
+        ]
+    else:
+        blocks = [((), df)]
+
+    # Chaque observation est redatée au début de SA période
+    for entity, block in blocks:
+        dates = block.index.get_level_values(-1)
+        for column in df.columns:
+            observed = pd.Series(block[column].to_numpy(), index=dates).dropna()
+            if observed.empty:
+                continue
+            try:
+                frequency = detect_frequency(data=observed)
+            except ValueError as error:
+                raise ValueError(
+                    f"Cannot detect the frequency of {entity + (column,)}: {error}"
+                ) from error
+            if frequency is None:
+                raise ValueError(f"Cannot detect the frequency of {entity + (column,)}")
+            base = normalize_frequency(frequency, return_format='base')
+            starts = observed.index.to_period(base).start_time
+            keys = [(*entity, start) for start in starts] if is_panel else list(starts)
+            outside = [key for key in keys if key not in out.index]
+            if outside:
+                raise ValueError(
+                    f"Period starts outside the start-anchored grid for "
+                    f"{entity + (column,)}: {outside[:3]}"
+                )
+            out.loc[keys, column] = observed.to_numpy()
+    return out
+
+
 def to_period_end(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.Series]:
     """Flip a start/end-anchored index to end-of-period anchoring.
 

@@ -27,7 +27,9 @@ Contracts pinned here:
 - sklearn protocol: ``clone``, ``get_params`` / ``set_params``,
   ``fit_transform == fit().transform()``, ``NotFittedError``, metadata errors;
 - warnings: aggregated and unique per degenerate case, never one per period
-  nor per column;
+  nor per column; ``deferred_warnings`` gathers a chain of calls (several
+  columns, stages, covariates of the materializer) into one warning per case,
+  each period counted once (ANO-FREQ-059);
 - corrections of ANO-FREQ-021 to 027: numerically zero aggregate (rounding
   bound of the summation), duplicated dates rejected, setting validated again
   after ``set_params``, ``grid_freq`` validated (readable, covering every
@@ -1723,3 +1725,194 @@ class TestWarnings:
         )
 
         assert messages == []
+
+
+# Exécution d'une suite d'appels dans un bloc différé
+def _within_deferred_block(constraint: AggregationConstraint, *calls) -> None:
+    """Run each call inside one ``deferred_warnings`` block of ``constraint``.
+
+    Args:
+        constraint: Constraint whose block gathers the warnings.
+        *calls: Zero-argument callables, run in order.
+    """
+    with constraint.deferred_warnings():
+        for call in calls:
+            call()
+
+
+class TestDeferredWarnings:
+    """``deferred_warnings``: one warning per case for a whole chain of calls (ANO-FREQ-059).
+
+    ``HighFrequencyImputer`` rescales every (stage, column) and every
+    interpolated covariate; §12.5 asks for one warning per family, "never one
+    per variable × stage: accumulation then an aggregated message at the end of
+    the phase".
+    """
+
+    def test_several_rescale_calls_give_one_warning(self):
+        """Two columns rescaled by two calls: ONE warning naming both, 2 periods."""
+        constraint = AggregationConstraint('sum')
+        flipped = _raw_predictions(values=[-1.0] * 12)
+
+        _result, messages = _record_warnings(
+            _within_deferred_block,
+            constraint,
+            lambda: constraint.rescale(flipped, _annual_observations(), 'Y', column='a1'),
+            lambda: constraint.rescale(flipped, _annual_observations(), 'Y', column='a2'),
+        )
+
+        assert len(messages) == 1
+        assert "2 period(s), in column(s) ['a1', 'a2'] (e.g. 2021)" in messages[0]
+
+    def test_a_period_met_twice_counts_once(self):
+        """The same year of the same column, rescaled at two grids, counts once.
+
+        Valeur d'or : l'année 2021 de a1, inversée sur la grille mensuelle
+        puis sur la grille trimestrielle — une seule période observée.
+        """
+        constraint = AggregationConstraint('sum')
+        monthly = _raw_predictions(values=[-1.0] * 12)
+        quarters = pd.date_range('2021-03-31', periods=4, freq='QE')
+        quarterly = pd.Series(-1.0, index=quarters, name='a1')
+        observations = pd.Series([np.nan, np.nan, np.nan, 120.0], index=quarters)
+
+        _result, messages = _record_warnings(
+            _within_deferred_block,
+            constraint,
+            lambda: constraint.rescale(monthly, _annual_observations(), 'Y', column='a1'),
+            lambda: constraint.rescale(quarterly, observations, 'Y', column='a1'),
+        )
+
+        assert len(messages) == 1
+        assert "1 period(s), in column(s) ['a1']" in messages[0]
+
+    def test_both_cases_give_one_warning_each_for_the_block(self):
+        """A zero aggregate in one call, a flipped profile in another: two warnings."""
+        constraint = AggregationConstraint('sum')
+
+        _result, messages = _record_warnings(
+            _within_deferred_block,
+            constraint,
+            lambda: constraint.rescale(
+                _raw_predictions(values=[0.0] * 12), _annual_observations(), 'Y', column='a1'
+            ),
+            lambda: constraint.rescale(
+                _raw_predictions(values=[-1.0] * 12), _annual_observations(), 'Y', column='a2'
+            ),
+        )
+
+        kinds = sorted('zero' if 'aggregate to zero' in m else 'flipped' for m in messages)
+        assert kinds == ['flipped', 'zero']
+
+    def test_transform_joins_the_block(self):
+        """``transform`` inside the block reports to it rather than warning."""
+        grid = _monthly_grid()
+        X = pd.DataFrame({'a1': [-1.0] * 12}, index=grid)
+        observations = pd.DataFrame({'a1': [np.nan] * 11 + [120.0]}, index=grid)
+        constraint = AggregationConstraint('sum', 'Y', observations).fit(X)
+        flipped = _raw_predictions(values=[-1.0] * 12).rename('a2')
+
+        _result, messages = _record_warnings(
+            _within_deferred_block,
+            constraint,
+            lambda: constraint.transform(X),
+            lambda: constraint.rescale(flipped, _annual_observations(), 'Y', column='a2'),
+        )
+
+        assert len(messages) == 1
+        assert "in column(s) ['a1', 'a2']" in messages[0]
+
+    def test_nested_blocks_warn_once_at_the_outer_exit(self):
+        """A nested block joins the outer census: nothing at the inner exit."""
+        constraint = AggregationConstraint('sum')
+        flipped = _raw_predictions(values=[-1.0] * 12)
+        inner_messages = []
+
+        def _nested():
+            # Bloc imbriqué : rien n'est émis à sa sortie
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                with constraint.deferred_warnings():
+                    constraint.rescale(flipped, _annual_observations(), 'Y', column='a2')
+            inner_messages.extend(str(w.message) for w in caught)
+
+        _result, messages = _record_warnings(
+            _within_deferred_block,
+            constraint,
+            lambda: constraint.rescale(flipped, _annual_observations(), 'Y', column='a1'),
+            _nested,
+        )
+
+        assert inner_messages == []
+        assert len(messages) == 1
+        assert "2 period(s), in column(s) ['a1', 'a2']" in messages[0]
+
+    def test_an_exception_drops_the_census(self):
+        """A block left on an exception emits nothing, and leaves no census behind."""
+        constraint = AggregationConstraint('sum')
+        flipped = _raw_predictions(values=[-1.0] * 12)
+
+        def _failing_block():
+            with constraint.deferred_warnings():
+                constraint.rescale(flipped, _annual_observations(), 'Y', column='a1')
+                raise RuntimeError('boom')
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            with pytest.raises(RuntimeError, match='boom'):
+                _failing_block()
+        assert caught == []
+
+        # Hors bloc, l'appel suivant avertit immédiatement : aucun état résiduel
+        _result, messages = _record_warnings(
+            constraint.rescale, flipped, _annual_observations(), 'Y', column='a1'
+        )
+        assert len(messages) == 1
+
+    def test_a_silent_block_stays_silent(self, two_column_stage):
+        """No degenerate period in the block: no warning at its exit."""
+        X, observations = two_column_stage
+        constraint = AggregationConstraint('sum', 'Y', observations).fit(X)
+
+        _result, messages = _record_warnings(
+            _within_deferred_block, constraint, lambda: constraint.transform(X)
+        )
+
+        assert messages == []
+
+    def test_the_block_leaves_the_parameters_untouched(self):
+        """``get_params`` and ``clone`` are the same before, inside and after the block."""
+        constraint = AggregationConstraint({'a1': None, DEFAULT_CONSTRAINT_KEY: 'sum'})
+        before = constraint.get_params()
+
+        with constraint.deferred_warnings():
+            inside = clone(constraint).get_params()
+
+        assert inside == before
+        assert constraint.get_params() == before
+
+    def test_the_materializer_covariates_join_the_block(self):
+        """Covariates interpolated through the applier report to the block.
+
+        Deux interpolations de la même colonne, ancres 100 puis -10 : 2022
+        agrège positivement face à -10 à chaque appel. Une seule période.
+        """
+        constraint = AggregationConstraint('sum')
+        materializer = CovariateMaterializer(aggregation_constraint_applier=constraint)
+        grid = pd.date_range('2021-01-31', periods=24, freq='ME')
+        source = pd.DataFrame({'a2': np.nan}, index=grid)
+        source.loc['2021-12-31', 'a2'] = 100.0
+        source.loc['2022-12-31', 'a2'] = -10.0
+
+        def _interpolate():
+            materializer.interpolate_column(
+                column='a2', grid_index=grid, stage_freq='M',
+                detected_frequencies={'a2': 'Y'}, source_data=source,
+            )
+
+        _result, messages = _record_warnings(
+            _within_deferred_block, constraint, _interpolate, _interpolate
+        )
+
+        assert len(messages) == 1
+        assert "1 period(s), in column(s) ['a2'] (e.g. 2022)" in messages[0]

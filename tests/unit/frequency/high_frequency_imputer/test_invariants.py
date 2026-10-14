@@ -3,10 +3,12 @@
 Covers I1, I2, I3, I4, I5, I10, I13, I16, I17 and the worked examples of
 §5.5 and §6.5. The module also holds the traceability of the twenty-one
 invariants of §16 to the tests of the whole package, checked against the tests
-as they are (prompt F10, 2026-10-12; gaps filled the same day). Paths are
-relative to ``tests/unit/frequency/high_frequency_imputer/``; §16 asks each
-invariant on the time series AND on the panel, and every one is now measured
-on both where §16 names a dataset.
+as they are (prompt F10, 2026-10-12; gaps filled the same day; tests of prompt
+F11 added 2026-10-13). Paths are relative to
+``tests/unit/frequency/high_frequency_imputer/``; §16 asks each invariant on the
+time series AND on the panel, and every one is now measured on both where §16
+names a dataset. A test marked *xfail* measures the invariant against an open
+anomaly.
 
 ======  =====================================================================
 Code    Tests (``module::Class::test``) — coverage notes
@@ -32,7 +34,11 @@ I4      ``test_invariants::TestAggregationAdditivity`` (TS, PANEL-F),
         test_one_covariate_takes_three_ways_on_the_pooled_grid``, and the
         covariate carried from an earlier stage (rank 3):
         ``TestAggregationAdditivity::
-        test_carried_covariate_sums_to_the_period_total``.
+        test_carried_covariate_sums_to_the_period_total``. Realistic
+        datasets, three strategies, predictions and fallbacks alike:
+        ``test_robustness::TestRealisticDatasets::
+        test_complete_periods_sum_to_their_totals`` (irregular TS,
+        heterogeneous panel).
 I5      ``test_invariants::TestTrainPredictScale`` (TS, both mixed cases of
         §16), ``test_materialization::TestPerEntityMaterialization::
         test_the_three_ways_land_on_the_same_scale`` (PANEL-F).
@@ -86,7 +92,10 @@ I15     ``test_mutualization::TestMutualizedTrainingSet::
         ``test_transform::TestSharedModelReplay``.
 I16     ``test_invariants::TestReferenceExamples::
         test_timeseries_results_unchanged_by_pooling`` (and
-        ``training_set_builder/test_blocks_and_rows.py``, component level).
+        ``training_set_builder/test_blocks_and_rows.py``, component level);
+        panel side: ``test_robustness::TestInputEdgeCases::
+        test_single_entity_panel_matches_the_time_series`` (a one-entity
+        panel gives the time series' values and provenances bit for bit).
 I17     ``test_invariants::TestOrderingSeesTheFittedSets`` (5 tests, TS and
         PANEL-F, ``training_scope='unrestricted'``, ``'frequency'`` order).
 I18     (a) and (c): component level only,
@@ -98,13 +107,35 @@ I18     (a) and (c): component level only,
         ``TestOriginFilter::test_target_taint_families`` (``'imputed'``),
         ``TestStagePlanAxis2::test_x_train_is_full_on_the_quarterly_rows``
         (Y and Q rows, ``'imputed'``, ``m1`` = quarter sum at stage scale).
+        Finer rows alone (empty Y layer): ``test_fit_phases::
+        TestWindowWithoutTraining::test_finer_rows_alone_keep_their_covariates``
+        (covariate selection read layer by layer, ANO-FREQ-066).
 I19     ``test_frequency_progression::TestFrequencyProgression::
         test_progression_per_target_frequency_group_on_panel``,
         ``::test_entity_stopping_early_still_feeds_the_finer_stage`` (``DE``
-        feeds the ``y_train`` of stage M, no ``DE`` cell imputed at M).
+        feeds the ``y_train`` of stage M, no ``DE`` cell imputed at M),
+        ``test_mutualization::TestUnobservedEntities::
+        test_stage_not_binding_the_entity_leaves_it_out`` (no M stage binds
+        ``IT``, target ``{FR: M, DE: M, IT: Q}``), ``test_fit_phases::
+        TestPerEntityFrequencies::test_composite_stage_label_when_entities_diverge``
+        (single stage binding diverging targets under ``False``).
 I20     ``test_frequency_progression::TestCoincidentCells`` (6 tests).
-I21     ``test_mutualization::TestUnobservedEntities`` (11 tests).
+I21     ``test_mutualization::TestUnobservedEntities`` (17 tests: every stage
+        binding the entity and only those, a column no entity observes, an
+        entity without window predicted on its whole grid, NaN predictions,
+        the failed-step warnings, ANO-FREQ-063), ``test_robustness::
+        TestInputEdgeCases::test_all_nan_entity_is_left_alone_and_costs_the_others_nothing``
+        (default ``False``: cells NaN and unmarked, other entities unchanged).
 ======  =====================================================================
+
+Outside the table — robustness of the fit to its inputs (prompt F11),
+``test_robustness``: edge cases of ``CLAUDE.md`` (``TestInputEdgeCases``),
+invariance to the index perturbations on ``PANEL-X`` — reversed entities,
+special column names, non-standard index names, three-level index; shuffled
+rows refused (``TestPerturbationInvariance``) —, start-of-period positions
+(``TestPeriodPositions``) and the realistic datasets of notebook 3 under each
+strategy (``TestRealisticDatasets``); aggregated warnings of phase 5
+(§12.5, ANO-FREQ-059): ``test_fit_phases::TestAggregatedWarnings``.
 """
 
 # Modules de base

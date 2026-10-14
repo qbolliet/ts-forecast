@@ -720,8 +720,21 @@ class TestDiagnosticFrame:
         row = ImputationPlan((self._panel_step(),)).to_diagnostic_frame().iloc[0]
         assert row['entities'] == 'FR, DE'
         assert row['n_entities'] == 2
-        assert row['training_blocks'] == 'FR=M, DE=Q'
+        # Blocs triés par clé d'entité, quel que soit l'ordre du dict (ANO-FREQ-067)
+        assert row['training_blocks'] == 'DE=Q, FR=M'
         assert row['emitted_provenance'] is ProvenanceType.MODEL_ON_IMPUTED_TARGET
+
+    def test_training_blocks_rendering_ignores_the_entity_order(self):
+        """Two orders of the same blocks give the same rendering (ANO-FREQ-067)."""
+        forward = self._panel_step(training_blocks={('FR',): 'M', ('DE',): 'Q', ('IT',): 'M'})
+        backward = self._panel_step(training_blocks={('IT',): 'M', ('DE',): 'Q', ('FR',): 'M'})
+
+        rendered = [
+            ImputationPlan((step,)).to_diagnostic_frame().loc[0, 'training_blocks']
+            for step in (forward, backward)
+        ]
+
+        assert rendered == ['DE=Q, FR=M, IT=M'] * 2
 
     def test_multi_level_entity_label_is_joined_by_a_pipe(self):
         """A multi-level entity key is rendered ``level1|level2``."""

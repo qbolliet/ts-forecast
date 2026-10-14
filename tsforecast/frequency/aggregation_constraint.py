@@ -29,10 +29,18 @@ would state nothing the cell's own provenance does not already state, and would
 hide whether the value came from a model or from an interpolation. Both masks
 above are therefore diagnostic — they say which cells moved and which rows held
 an observation — and neither drives a marking.
+
+Degenerate periods (zero aggregate, flipped profile) are reported by one
+aggregated warning per case and per operation. A caller chaining many
+rescalings — ``HighFrequencyImputer``, one per (stage, column) plus one per
+interpolated covariate — wraps them in
+:meth:`AggregationConstraint.deferred_warnings` to get one warning per case
+for the whole chain.
 """
 # Importation des modules
 # Modules de base
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Tuple, Union
+from contextlib import contextmanager
+from typing import Any, Dict, Iterable, Iterator, List, Literal, Mapping, Optional, Tuple, Union
 import warnings
 
 # Calcul numérique
@@ -419,7 +427,8 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
       total is rescaled — the constraint takes precedence — but every
       sub-period then flips sign, and a single aggregated ``UserWarning`` is
       emitted for the whole operation, naming the columns and the number of
-      periods concerned. Never one warning per period.
+      periods concerned. Never one warning per period, and — inside
+      :meth:`deferred_warnings` — never one per call either.
 
     Anchor disaggregation, not parameterizable:
 
@@ -963,6 +972,98 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
                 UserWarning
             )
 
+    # Méthode auxiliaire de signalement des périodes dégénérées
+    def _report(
+        self,
+        zero_periods: Mapping[str, List[Any]],
+        flipped_periods: Mapping[str, List[Any]],
+    ) -> None:
+        """Warn about the degenerate periods of one operation, or set them aside.
+
+        Outside :meth:`deferred_warnings`, the warnings are emitted at once.
+        Inside, the periods join the census of the block, deduplicated per
+        column: the same period met by several calls — one covariate
+        interpolated for several variables, one variable rescaled at several
+        stages — counts once.
+
+        Args:
+            zero_periods: Periods whose predicted aggregate was zero against a
+                non-zero observed total, per column.
+            flipped_periods: Periods whose profile was flipped, per column.
+        """
+        # Hors bloc différé : émission immédiate, comportement d'origine
+        census = getattr(self, '_deferred_census', None)
+        if census is None:
+            self._emit_warnings(zero_periods, flipped_periods)
+            return
+
+        # Bloc différé : recensement dédoublonné par colonne, ordre de première
+        # rencontre conservé pour l'exemple cité par le message
+        for store, reported in zip(census, (zero_periods, flipped_periods)):
+            for column, periods in reported.items():
+                if periods:
+                    store.setdefault(column, {}).update(dict.fromkeys(periods))
+
+    # Méthode de report des avertissements sur une opération composée
+    @contextmanager
+    def deferred_warnings(self) -> Iterator['AggregationConstraint']:
+        """Gather the warnings of every rescaling of the block into one per case.
+
+        :meth:`rescale` and :meth:`transform` each warn once per degenerate
+        case and per call. A caller chaining many calls — the stage loop of
+        ``HighFrequencyImputer``, which rescales every (stage, column) and
+        every interpolated covariate — would still receive one warning per
+        call. Inside this block they report instead of warning; on the way
+        out, one warning per degenerate case covers the whole block, naming
+        every column concerned and the number of distinct periods: a period
+        met at several stages, or by several calls, counts once.
+
+        Re-entrant: a nested block joins the census of the outer one. When the
+        block exits on an exception, nothing is emitted — the exception says
+        more than the warnings would.
+
+        Yields:
+            The constraint itself.
+
+        Examples:
+            >>> grid = pd.date_range('2021-01-31', periods=12, freq='ME')
+            >>> observations = pd.Series([np.nan] * 11 + [-120.0], index=grid)
+            >>> constraint = AggregationConstraint('sum')
+            >>> with warnings.catch_warnings(record=True) as caught:
+            ...     warnings.simplefilter('always')
+            ...     with constraint.deferred_warnings():
+            ...         for column in ('a1', 'a2'):
+            ...             _ = constraint.rescale(
+            ...                 pd.Series(1.0, index=grid), observations, 'Y', column=column
+            ...             )
+            >>> len(caught)
+            1
+            >>> "2 period(s), in column(s) ['a1', 'a2']" in str(caught[0].message)
+            True
+        """
+        # Bloc imbriqué : il rejoint le recensement du bloc englobant
+        if getattr(self, '_deferred_census', None) is not None:
+            yield self
+            return
+
+        # Recensement du bloc : périodes nulles puis périodes inversées
+        self._deferred_census: Tuple[Dict[str, Dict[Any, None]], Dict[str, Dict[Any, None]]] = (
+            {}, {}
+        )
+        try:
+            yield self
+            zero_periods, flipped_periods = self._deferred_census
+        finally:
+            # Aucun état ne survit au bloc : ni clone, ni sérialisation, ni
+            # appel ultérieur hors bloc ne le voient
+            del self._deferred_census
+
+        # Émission unique, une par cas dégénéré, pour tout le bloc
+        self._emit_warnings(
+            {column: list(periods) for column, periods in zero_periods.items()},
+            {column: list(periods) for column, periods in flipped_periods.items()},
+        )
+
     # Méthode de recalage d'une colonne
     def rescale(
         self,
@@ -980,7 +1081,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         the dict form, so the protocol signature is honoured as is.
 
         The five guards of the class docstring apply. A single aggregated
-        ``UserWarning`` is emitted per degenerate case, never one per period.
+        ``UserWarning`` is emitted per degenerate case, never one per period;
+        inside :meth:`deferred_warnings`, it is held back until the block
+        exits.
 
         Args:
             values: Values produced on the stage grid, indexed by date for a
@@ -1051,9 +1154,10 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             values, observations, period_freq, grid_freq
         )
 
-        # Avertissements agrégés sur l'unique colonne traitée
+        # Avertissements agrégés sur l'unique colonne traitée, différés dans un
+        # bloc "deferred_warnings"
         label = column if column is not None else values.name
-        self._emit_warnings({label: zero_periods}, {label: flipped_periods})
+        self._report({label: zero_periods}, {label: flipped_periods})
 
         return rescaled, mask
 
@@ -1255,8 +1359,9 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
             zero_periods[column] = zeros
             flipped_periods[column] = flipped
 
-        # Avertissements agrégés : un seul message pour toute l'opération
-        self._emit_warnings(zero_periods, flipped_periods)
+        # Avertissements agrégés : un seul message pour toute l'opération, ou
+        # pour tout le bloc "deferred_warnings" englobant
+        self._report(zero_periods, flipped_periods)
 
         self.rescaled_mask_ = pd.DataFrame(masks, index=X.index)
         return rescaled

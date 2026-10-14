@@ -2,7 +2,11 @@
 
 Covers the pooled training set and the single fit per (stage, variable)
 (I14, I15, D17-D19), and entities never observing the imputed column
-(``impute_unobserved_entities``, D33, I21).
+(``impute_unobserved_entities``, D33, I21): every stage binding the entity and
+only those, a column no entity observes, a column whose only group is
+unanchored under the ``'model'`` order, an entity without window predicted on
+its whole grid, NaN predictions, and the warnings of a failed unanchored step
+(ANO-FREQ-063).
 """
 
 # Modules de base
@@ -19,7 +23,7 @@ from tsforecast.frequency.covariate_materializer import CovariateMaterializer
 from tsforecast.frequency.provenance import resolve_model_provenance
 
 # Outils de test partagés
-from tests.support.estimators import SpyEstimator
+from tests.support.estimators import ConstantEstimator, SpyEstimator
 from tests.unit.frequency.high_frequency_imputer.helpers import (
     FR,
     DE,
@@ -506,3 +510,135 @@ class TestUnobservedEntities:
         assert {str(value) for value in self._provenance(imputer, 'IT')} == {
             'model_unanchored'
         }
+
+    def test_stage_not_binding_the_entity_leaves_it_out(self, panel_f_without_it_v):
+        """Une étape qui ne lie pas l'entité ne lui crée aucune étape sans ancre (D31).
+
+        Cible ``{FR: M, DE: M, IT: Q}`` sous ``True`` : la progression est
+        ``[{FR: Q, DE: Q, IT: Q}, {FR: M, DE: M}]``. IT est liée à l'étape Q
+        seulement : une étape sans ancre l'y sert, aucune à l'étape M.
+        """
+        imputer = fit_with_spy(
+            panel_f_without_it_v,
+            target_frequency={'FR': 'M', 'DE': 'M', 'IT': 'Q'},
+            impute_intermediate_frequencies=True,
+            impute_unobserved_entities=True,
+        )
+
+        assert imputer.frequency_progression_[-1] == {FR: 'M', DE: 'M'}
+        unanchored = [step for step in self._v_steps(imputer) if step.unanchored]
+        assert [(step.pred_freq_label, step.entities) for step in unanchored] == [
+            ('Q', (IT,)),
+        ]
+        assert imputer.unanchored_pairs_ == (('IT', 'v'),)
+
+    def test_column_observed_by_no_entity_is_never_imputed_unanchored(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Une colonne qu'aucune entité n'observe n'a pas de modèle à partager (§5.10).
+
+        Sans aucune ligne d'entraînement possible, la capacité ne joue pas :
+        aucune étape, aucune cellule, aucun couple sans ancre.
+        """
+        data = mixed_freq_panel_multifrequency.copy()
+        data['empty'] = np.nan
+
+        imputer = fit_with_spy(data, impute_unobserved_entities=True)
+
+        assert 'empty' not in {step.var_name for step in imputer.imputation_plan_}
+        assert imputer.unanchored_pairs_ == ()
+
+    def test_column_with_only_an_unanchored_group_ranks_at_its_target(
+        self, mixed_freq_panel_multifrequency
+    ):
+        """Sous 'model', une colonne sans groupe ancré se range à la fréquence cible de ses entités.
+
+        FR et DE observent v chaque mois, IT jamais : à l'étape M, le seul
+        groupe de v est ``(v, None) → (IT,)``. Sans fréquence source à
+        comparer, l'ordre 'frequency' la place à la fréquence cible d'IT (M),
+        donc APRÈS q1, trimestrielle.
+        """
+        data = mixed_freq_panel_multifrequency.copy()
+        monthly_v = data.loc[('IT',), 'v'].to_numpy()
+        data.loc[('FR',), 'v'] = monthly_v
+        data.loc[('DE',), 'v'] = monthly_v
+        data.loc[('IT',), 'v'] = np.nan
+
+        imputer = fit_with_spy(
+            data, covariate_strategy='model', impute_unobserved_entities=True
+        )
+
+        assert imputer.imputation_order_ == {'M': ['q1', 'v']}
+        (step,) = self._v_steps(imputer)
+        assert (step.source_frequency, step.entities) == (None, (IT,))
+
+    def test_entity_without_window_is_predicted_on_its_whole_grid(
+        self, panel_f_without_it_v
+    ):
+        """Entité sans ancre ET sans fenêtre : grille de l'étape sans restriction (§5.10, 6).
+
+        m1 n'est observée chez IT qu'en 2021 et q1 qu'en 2023 : la fenêtre
+        d'IT est vide. Son étape sans ancre lève la restriction et prédit sur
+        les 36 mois ; l'estimateur espion, tolérant aux NaN, rend une valeur
+        partout. Les étapes ancrées de FR et DE ne sont pas élargies.
+        """
+        data = panel_f_without_it_v.copy()
+        italy = data.index.get_level_values(0) == 'IT'
+        dates = data.index.get_level_values(-1)
+        data.loc[italy & (dates >= '2022-01-01'), 'm1'] = np.nan
+        data.loc[italy & (dates < '2023-01-01'), 'q1'] = np.nan
+
+        imputer = fit_with_spy(data, impute_unobserved_entities=True)
+
+        assert imputer.imputation_window_[IT] == (None, None)
+        provenance = self._provenance(imputer, 'IT')
+        assert len(provenance) == 36
+        assert {str(value) for value in provenance} == {'model_unanchored'}
+        anchored = [step for step in self._v_steps(imputer) if not step.unanchored]
+        assert {step.n_written for step in anchored} == {36}
+
+    def test_unanchored_step_predicting_nan_writes_nothing_and_warns_once(
+        self, panel_f_without_it_v
+    ):
+        """Des prédictions entièrement NaN laissent IT vide, nommée par UN avertissement.
+
+        Une ligne que les covariables ne nourrissent pas rend un NaN, jamais
+        écrit (§5.10, conséquence 5) ; un estimateur qui ne rend que des NaN
+        en est le cas limite.
+        """
+        imputer = make_imputer(
+            estimator=ConstantEstimator(constant=np.nan), impute_unobserved_entities=True
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.fit(panel_f_without_it_v)
+
+        assert self._provenance(imputer, 'IT').isna().all()
+        assert imputer.unanchored_pairs_ == ()
+        naming = [str(w.message) for w in caught if "('IT', 'v')" in str(w.message)]
+        assert len(naming) == 1
+
+    def test_unanchored_prediction_failure_announces_no_fallback(
+        self, panel_f_with_a_mute_entity
+    ):
+        """L'échec de prédiction d'une étape sans ancre n'annonce aucun repli.
+
+        Sans ancre, l'interpolation ne peut pas servir de repli : les
+        cellules restent NaN et un avertissement agrégé nomme le couple
+        (§5.10, conséquence 5). Le message des étapes dégradées annonçait en
+        outre « interpolation fallback » pour l'étape (v, M) d'IT, qui
+        n'écrit rien (ANO-FREQ-063).
+        """
+        imputer = make_imputer(impute_unobserved_entities=True)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            imputer.fit(panel_f_with_a_mute_entity)
+
+        # Rien n'est écrit pour IT : aucun repli n'a eu lieu
+        assert self._provenance(imputer, 'IT').isna().all()
+        messages = [str(w.message) for w in caught]
+        # Aucun « repli » annoncé pour une étape sans ancre ; le seul message
+        # qui la concerne nomme le couple et dit qu'aucun repli n'existe
+        assert [m for m in messages if "'v' at stage M: prediction failed" in m] == []
+        naming = [m for m in messages if "('IT', 'v')" in m]
+        assert len(naming) == 1 and 'no interpolation fallback exists' in naming[0]

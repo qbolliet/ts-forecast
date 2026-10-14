@@ -571,6 +571,66 @@ class TestMissingPanelColumns:
         with pytest.raises(ValueError, match="Panel columns not found"):
             transformer.fit(sorted_panel_data)
 
+    def test_panel_cols_converted_to_index_raise_no_consistency_warning(self, sorted_panel_data):
+        """Panel columns moved into the index by the validation are not "missing".
+
+        Sous ``convert_cols_to_index=True``, la validation fait passer
+        ``country`` et ``date`` dans l'index avant le contrôle de cohérence,
+        qui ne cherchait l'identifiant que parmi les colonnes et avertissait
+        « Missing panel columns: {'country'} ».
+        """
+        transformer = ConcreteTransformer(
+            time_col='date', panel_cols=['country'], convert_cols_to_index=True
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            transformer.fit(sorted_panel_data)
+
+        assert [str(w.message) for w in caught if 'Panel structure issues' in str(w.message)] == []
+
+
+# Sous-classe qui fige auto_sort, à la manière de HighFrequencyImputer
+class FixedSortTransformer(ConcreteTransformer):
+    """Concrete transformer that never sorts and does not expose ``auto_sort``."""
+
+    def __init__(self, time_col=None, panel_cols=None):
+        super().__init__(time_col=time_col, panel_cols=panel_cols, auto_sort=False)
+
+
+class TestSortingAdvice:
+    """The sorting advice suggests ``auto_sort`` only where the parameter exists."""
+
+    @pytest.mark.parametrize(
+        'transformer',
+        [ConcreteTransformer(time_col='date', panel_cols=['country']),
+         FixedSortTransformer(time_col='date', panel_cols=['country'])],
+        ids=['auto_sort_exposed', 'auto_sort_fixed'],
+    )
+    def test_interleaved_entities(self, interleaved_panel_data, transformer):
+        """``auto_sort`` is suggested if and only if the transformer exposes it."""
+        exposed = 'auto_sort' in transformer.get_params()
+
+        with pytest.raises(ValueError, match='not contiguous') as excinfo:
+            transformer.fit(interleaved_panel_data)
+
+        assert ('auto_sort=True' in str(excinfo.value)) is exposed
+        assert ('never sorts implicitly' in str(excinfo.value)) is not exposed
+
+    def test_unsorted_multiindex_under_a_fixed_sort(self):
+        """A MultiIndex unsorted within an entity: the caller is told to sort."""
+        index = pd.MultiIndex.from_tuples(
+            [('A', pd.Timestamp('2023-02-01')), ('A', pd.Timestamp('2023-01-01'))],
+            names=['entity', 'date'],
+        )
+        data = pd.DataFrame({'value': [1.0, 2.0]}, index=index)
+
+        with pytest.raises(ValueError, match='not sorted within panel groups') as excinfo:
+            FixedSortTransformer().fit(data)
+
+        assert 'auto_sort' not in str(excinfo.value)
+        assert 'Sort the data by date within each entity' in str(excinfo.value)
+
 
 class TestValidationPreservesData:
     """Tests pour vérifier que la validation préserve les données."""

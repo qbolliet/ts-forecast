@@ -577,6 +577,35 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
 
         return data_validated
 
+    # Méthode auxiliaire du conseil de tri des messages de validation
+    def _sorting_advice(self, sort_keys: str) -> str:
+        """Phrase the sorting advice closing a validation message.
+
+        ``auto_sort`` is worth suggesting only when the transformer exposes it
+        as a parameter. A subclass that fixes it — ``HighFrequencyImputer``
+        refuses any implicit sort, which would silently move its windows and
+        aggregates — must ask the caller to sort instead.
+
+        Args:
+            sort_keys: What the data must be sorted by, e.g. ``'panel_cols'``.
+
+        Returns:
+            The advice sentence.
+
+        Examples:
+            >>> PanelTimeSeriesTransformer._sorting_advice(
+            ...     ConcreteTransformer(), 'panel_cols')            # doctest: +SKIP
+            'Consider sorting by panel_cols or enabling auto_sort=True'
+        """
+        # Paramètre exposé : la suggestion historique reste valable
+        if 'auto_sort' in self.get_params(deep=False):
+            return f"Consider sorting by {sort_keys} or enabling auto_sort=True"
+        # Paramètre figé par la sous-classe : seul un tri par l'appelant est possible
+        return (
+            f"Sort the data by {sort_keys} before calling "
+            f"{type(self).__name__}, which never sorts implicitly"
+        )
+
     # Méthodes auxiliaires de validation selon la structure
     # Méthode auxiliaire de validation de données de panel sous forme de multi-index
     def _validate_multiindex_panel(self, data: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.Series]:
@@ -637,7 +666,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         if not validate_entities_grouped(data_validated, panel_cols=None):
             msg = (
                 "Panel entities are not contiguous in MultiIndex. "
-                "Consider sorting by entity levels or enabling auto_sort=True"
+                + self._sorting_advice('entity levels (e.g. X.sort_index())')
             )
             if self.strict_validation:
                 raise ValueError(msg)
@@ -652,7 +681,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         ):
             msg = (
                 "Time series not sorted within panel groups. "
-                "Consider enabling auto_sort=True"
+                + self._sorting_advice('date within each entity (e.g. X.sort_index())')
             )
             if self.strict_validation:
                 raise ValueError(msg)
@@ -738,7 +767,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
                 # Message
                 msg = (
                     "Panel entities are not contiguous. "
-                    "Consider sorting by panel_cols or enabling auto_sort=True"
+                    + self._sorting_advice('panel_cols')
                 )
                 # Affichage
                 if self.strict_validation:
@@ -754,7 +783,7 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
                 # Message
                 msg = (
                     "Time series not sorted within panel groups. "
-                    "Consider enabling auto_sort=True"
+                    + self._sorting_advice('panel_cols then time_col')
                 )
                 # Affichage
                 if self.strict_validation:
@@ -909,16 +938,20 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
                     issues.append(f"Missing values in panel identifier level: {level_name}")
 
         else:
-            # Panel colonnes
-            missing_cols = set(self.panel_cols) - set(X.columns)
+            # Panel déclaré par colonnes. Sous convert_cols_to_index, la
+            # validation les a déjà fait passer dans l'index : un identifiant
+            # se lit donc parmi les colonnes OU parmi les niveaux d'index
+            index_levels = [name for name in X.index.names if name is not None]
+            missing_cols = set(self.panel_cols) - set(X.columns) - set(index_levels)
             # Vérification des colonnes manquantes
             if missing_cols:
                 issues.append(f"Missing panel columns: {missing_cols}")
                 return False, issues
             # Parcours des colonnes de panel
             for col in self.panel_cols:
+                values = X[col] if col in X.columns else X.index.get_level_values(col)
                 # Vérification des valeurs manquantes parmi les entités
-                if X[col].isnull().any():
+                if values.isnull().any():
                     issues.append(f"Missing values in panel identifier: {col}")
 
         return len(issues) == 0, issues

@@ -521,7 +521,9 @@ class ImputationPlan:
             ``is_fallback``, ``interpolation_method``,
             ``interpolation_anchor``, ``materialization`` (rendered as a
             comma-separated ``col=way`` string) and ``training_blocks``
-            (rendered as a comma-separated ``entity=frequency`` string).
+            (rendered as a comma-separated ``entity=frequency`` string,
+            sorted by entity key so that the frame does not depend on the
+            order of the input rows).
 
         Examples:
             >>> ImputationPlan().to_diagnostic_frame().columns.tolist()
@@ -544,10 +546,14 @@ class ImputationPlan:
             materialization_repr = ", ".join(
                 f"{col}={way}" for col, way in step.materialization.items()
             )
-            # Rendu lisible de la composition du jeu mutualisé
+            # Rendu lisible de la composition du jeu mutualisé, trié par clé
+            # d'entité comme les entités du groupe : le diagnostic ne dépend
+            # pas de l'ordre des lignes en entrée
             training_blocks_repr = ", ".join(
                 f"{_entity_label(entity)}={freq}"
-                for entity, freq in step.training_blocks.items()
+                for entity, freq in sorted(
+                    step.training_blocks.items(), key=lambda item: repr(item[0])
+                )
             )
             # Rendu lisible des entités du groupe ; None signale une série
             # temporelle, dont l'entité dégénérée n'a rien à afficher

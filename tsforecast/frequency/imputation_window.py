@@ -394,8 +394,11 @@ class ImputationWindowCalculator:
             self: The fitted calculator.
 
         Raises:
-            ValueError: If data is invalid, has too few columns, or no
-                valid imputation window exists.
+            ValueError: If data is invalid, has too few columns, or no column
+                frequency can be detected. A frame without any strict window
+                — time series or panel alike — does not raise: its masks are
+                all False (all True for an ``'unrestricted'`` training scope)
+                and a single warning says so.
 
         Examples:
             >>> calc = ImputationWindowCalculator()
@@ -424,8 +427,13 @@ class ImputationWindowCalculator:
 
         # Détection des fréquences par colonne (et par entité pour panel)
         self._detected_frequencies = detect_dataset_frequency(data)
-        # Détection de la fréquence de l'index
-        self.index_freq_ = detect_index_frequency(data.index)
+        # Détection de la fréquence de l'index : entité par entité sur un
+        # panel, une entité indéterminable (une seule ligne) valant None — elle
+        # rejoint alors les entités sans fenêtre, sans coûter la leur aux autres
+        if self._is_panel:
+            self.index_freq_ = self._detect_entity_index_frequencies(data.index)
+        else:
+            self.index_freq_ = detect_index_frequency(data.index)
 
         # Calcul des fenêtres selon le type de données
         if self._is_panel:
@@ -435,6 +443,45 @@ class ImputationWindowCalculator:
 
         self._is_fitted = True
         return self
+
+    # Méthode auxiliaire de détection de la fréquence d'index, entité par entité
+    @staticmethod
+    def _detect_entity_index_frequencies(
+        index: pd.MultiIndex,
+    ) -> Dict[tuple, Optional[str]]:
+        """Detect the index frequency of each entity, None where it cannot be.
+
+        :func:`detect_index_frequency` raises as soon as one entity holds fewer
+        than two dates, which would cost every entity its window. Each entity
+        is detected on its own instead, and one whose frequency cannot be read
+        maps to None: :meth:`_fit_panel` then lists it among
+        ``entities_without_window_``.
+
+        Args:
+            index: Panel ``MultiIndex``, the date as last level.
+
+        Returns:
+            Mapping from entity key tuple to detected frequency, or None.
+
+        Examples:
+            >>> idx = pd.MultiIndex.from_tuples(
+            ...     [('A', pd.Timestamp('2021-01-31')), ('A', pd.Timestamp('2021-02-28')),
+            ...      ('B', pd.Timestamp('2021-01-31'))], names=['entity', 'date'])
+            >>> ImputationWindowCalculator._detect_entity_index_frequencies(idx)
+            {('A',): 'M', ('B',): None}
+        """
+        # Dates et entités de chaque ligne
+        dates = index.get_level_values(-1)
+        entities = index.droplevel(-1)
+        # Détection entité par entité, l'échec d'une seule n'arrêtant rien
+        frequencies: Dict[tuple, Optional[str]] = {}
+        for entity in entities.unique():
+            try:
+                frequency = detect_index_frequency(dates[entities == entity])
+            except ValueError:
+                frequency = None
+            frequencies[normalize_entity_key(entity)] = frequency
+        return frequencies
 
     # Méthode auxiliaire d'estimation de la fenêtre sur des données de séries temporelles
     def _fit_ts(self, data: pd.DataFrame) -> None:
@@ -481,6 +528,10 @@ class ImputationWindowCalculator:
             {(): result['absent_columns']}, {(): result['undetected_columns']}
         )
 
+        # Aucune période couverte par toutes les colonnes : fenêtre vide
+        if result['no_strict_window']:
+            self._warn_no_strict_window(())
+
     # Méthode auxiliaire d'estimation de la fenêtre sur des données de panel
     def _fit_panel(self, data: pd.DataFrame) -> None:
         """Compute per-entity windows and masks for panel data (MultiIndex).
@@ -517,6 +568,7 @@ class ImputationWindowCalculator:
         training_mask_parts: List[pd.Series] = []
         coverage_parts: List[pd.Series] = []
         entities_without_window: List[tuple] = []
+        entities_without_strict_window: List[tuple] = []
         absent_by_entity: Dict[tuple, Tuple[str, ...]] = {}
         undetected_by_entity: Dict[tuple, Tuple[str, ...]] = {}
 
@@ -568,6 +620,8 @@ class ImputationWindowCalculator:
             self.column_coverage_[entity_key] = result['column_coverage']
             absent_by_entity[entity_key] = result['absent_columns']
             undetected_by_entity[entity_key] = result['undetected_columns']
+            if result['no_strict_window']:
+                entities_without_strict_window.append(entity_key)
 
             # Cas où la grille de couverture est vide : même traitement que la
             # fréquence non identifiée, l'entité n'a pas de masque exploitable
@@ -613,22 +667,40 @@ class ImputationWindowCalculator:
                 UserWarning
             )
 
-        # Vérification qu'au moins une entité a une fenêtre valide. Une fenêtre
-        # stricte absente partout reste rédhibitoire : l'extension ne peut jamais
-        # créer de fenêtre là où aucune fenêtre stricte n'existe (cf.
-        # _compute_window). Seul training_scope='unrestricted' y échappe, en
-        # couvrant toute la grille — le panel reste alors entraînable, même si
-        # aucune valeur n'y est imputable
-        valid_starts = [v for v in self.imputation_strict_window_start_.values() if v is not None]
-        if not valid_starts:
-            if not bool(self.training_window_mask_.any()):
-                raise ValueError("No imputation window found for any entity in the panel")
-            # Warning
-            warnings.warn(
-                "No entity has a strict imputation window; training proceeds on the "
-                "unrestricted training window, but no value can be imputed.",
-                UserWarning
-            )
+        # Entités sans période couverte par toutes leurs colonnes : un seul
+        # avertissement les nommant toutes, jamais un par entité. Aucune entité
+        # n'en a-t-elle une, le panel suit la règle de la série temporelle :
+        # les trois masques existent — tout faux, ou tout vrai à
+        # l'entraînement sous training_scope='unrestricted' — et rien n'est
+        # imputable. Jamais une erreur : elle renvoyait l'imputeur vers des
+        # masques tout-vrais, qui imputaient tout le panel là où la même série
+        # temporelle n'impute rien
+        if entities_without_strict_window:
+            self._warn_no_strict_window(tuple(entities_without_strict_window))
+
+    # Méthode auxiliaire d'avertissement sur l'absence de fenêtre stricte
+    @staticmethod
+    def _warn_no_strict_window(entities: Tuple[tuple, ...]) -> None:
+        """Warn once that no period is covered by every column.
+
+        The strict window is then empty, hence the imputation window too —
+        no extension can create a window where no strict one exists —, and
+        only ``training_scope='unrestricted'`` still trains.
+
+        Args:
+            entities: Entities concerned on a panel, ``()`` for a time series.
+        """
+        # Sujet du message : le jeu entier, ou les entités nommées
+        subject = (
+            "in the DataFrame" if not entities
+            else f"for {len(entities)} entity(ies) {list(entities)}"
+        )
+        warnings.warn(
+            f"There is no period {subject} where all the variables are available: "
+            f"the imputation window is empty, so no value can be imputed, and only "
+            f"training_scope='unrestricted' allows training in this case.",
+            UserWarning
+        )
 
     # Méthode auxiliaire d'avertissement sur les colonnes écartées du dénominateur
     @classmethod
@@ -850,11 +922,17 @@ class ImputationWindowCalculator:
                 - 'undetected_columns': Tuple of the observed columns without
                   a detectable frequency, excluded from the grid and from the
                   coverage denominator.
-            Every value is None — the two tuples empty — when the grid is
-            empty (no observation in a column of detected frequency).
+                - 'no_strict_window': True when no date of the grid is
+                  covered by every column. Reported, never warned here: the
+                  caller emits one warning for the whole fit, naming the
+                  entities of a panel.
+            Every value is None — the two tuples empty, the flag False — when
+            the grid is empty (no observation in a column of detected
+            frequency).
         """
         # Initialisation du dictionnaire résultat par défaut
         _none_result = {
+            'no_strict_window': False,
             'imputation_start': None,
             'imputation_end': None,
             'training_start': None,
@@ -936,16 +1014,14 @@ class ImputationWindowCalculator:
 
         # Cas où pour aucune période l'ensemble des variables sont disponibles simultanément
         if len(strict_dates) == 0:
-            warnings.warn(
-                "There is no period in the DataFrame where all the variables are available. "
-                "Only training_scope='unrestricted' allows training in this case.",
-                UserWarning
-            )
-            # Les extensions sont tout de même appliquées : partant d'un masque strict
-            # vide, leur garde "len(masked_dates) == 0" les rend inopérantes et le
-            # résultat reste tout-faux, sauf pour 'unrestricted' qui devient tout-vrai
+            # Signalé à l'appelant, qui émet un avertissement unique pour tout
+            # l'ajustement. Les extensions sont tout de même appliquées : partant
+            # d'un masque strict vide, leur garde "len(masked_dates) == 0" les
+            # rend inopérantes et le résultat reste tout-faux, sauf pour
+            # 'unrestricted' qui devient tout-vrai
             return {
                 **_none_result,
+                'no_strict_window': True,
                 'coverage': coverage,
                 'column_coverage': column_coverage,
                 'absent_columns': absent_columns,
@@ -1024,6 +1100,7 @@ class ImputationWindowCalculator:
         training_end = training_dates.max()
 
         return {
+            'no_strict_window': False,
             'imputation_start': imputation_start,
             'imputation_end': imputation_end,
             'training_start': training_start,

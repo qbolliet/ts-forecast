@@ -295,11 +295,14 @@ class TestFitInputValidation:
         with pytest.raises(ValueError, match='Cannot detect any column frequency'):
             ImputationWindowCalculator().fit(df)
 
-    def test_rejects_panel_where_no_entity_has_a_window(self):
-        """Disjoint observation ranges in every entity: no strict window anywhere.
+    def test_accepts_panel_where_no_entity_has_a_window(self):
+        """Disjoint observation ranges in every entity: no strict window anywhere, no error.
 
         Both columns exist (none is excluded from the denominator), but their
-        joint coverage never reaches 1.0.
+        joint coverage never reaches 1.0. Like a time series (B23), the panel
+        gets all-False masks and one warning naming the entities; it used to
+        raise, which sent ``HighFrequencyImputer`` to all-True masks
+        (ANO-FREQ-072).
         """
         dates = pd.date_range('2020-01-01', periods=12, freq='MS')
         index = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
@@ -307,8 +310,13 @@ class TestFitInputValidation:
         second_half = [np.nan] * 6 + [1.0] * 6
         df = pd.DataFrame({'a': first_half * 2, 'b': second_half * 2}, index=index)
 
-        with pytest.raises(ValueError, match='No imputation window'):
-            _fit_quietly(ImputationWindowCalculator(), df)
+        with warnings.catch_warnings(record=True) as records:
+            warnings.simplefilter('always')
+            calc = ImputationWindowCalculator().fit(df)
+
+        named = [m for m in _warning_messages(records) if 'no period' in m]
+        assert len(named) == 1 and "[('A',), ('B',)]" in named[0]
+        assert not calc.imputation_window_mask_.any()
 
     def test_fit_returns_self(self):
         """``fit`` returns the calculator itself, for chaining."""
@@ -672,25 +680,70 @@ class TestNoStrictWindow:
 
         assert (bool(calc.training_window_mask_.all()), bool(calc.imputation_window_mask_.any())) == (True, False)
 
-    def test_panel_without_window_raises_by_default(self):
-        """On a panel, no strict window for any entity is a hard error by default."""
+    def test_panel_without_window_behaves_like_a_time_series(self):
+        """On a panel, no strict window for any entity gives all-False masks, as on a time series.
+
+        Ce cas levait « No imputation window found for any entity in the
+        panel » ; l'imputeur en déduisait des masques tout-vrais et imputait
+        tout le panel (ANO-FREQ-072).
+        """
         _, df = _make_df_without_strict_window()
         panel = pd.concat({'A': df, 'B': df}, names=['entity', 'date'])
+        calc = _fit_quietly(ImputationWindowCalculator(imputation_scope='extended_both', min_columns=2), panel)
 
-        with pytest.raises(ValueError, match='No imputation window'):
-            _fit_quietly(ImputationWindowCalculator(min_columns=2), panel)
+        assert all(
+            isinstance(getattr(calc, attr), pd.Series) and not getattr(calc, attr).any()
+            for attr in _MASK_ATTRIBUTES
+        )
 
     def test_panel_without_window_is_trainable_under_unrestricted(self):
-        """Under 'unrestricted', the panel stays trainable and warns that nothing is imputable."""
+        """Under 'unrestricted', the panel stays trainable and warns once that nothing is imputable."""
         _, df = _make_df_without_strict_window()
         panel = pd.concat({'A': df, 'B': df}, names=['entity', 'date'])
         calc = ImputationWindowCalculator(training_scope='unrestricted', min_columns=2)
 
-        with pytest.warns(UserWarning, match='no value can be imputed'):
+        with warnings.catch_warnings(record=True) as records:
+            warnings.simplefilter('always')
             calc.fit(panel)
 
+        named = [m for m in _warning_messages(records) if 'no value can be imputed' in m]
+        assert len(named) == 1
         assert (bool(calc.training_window_mask_.loc['A'].all()),
                 bool(calc.imputation_window_mask_.loc['A'].any())) == (True, False)
+
+    def test_time_series_message_says_nothing_is_imputed(self):
+        """One message, saying the imputation window is empty and what still trains."""
+        _, df = _make_df_without_strict_window()
+
+        with warnings.catch_warnings(record=True) as records:
+            warnings.simplefilter('always')
+            ImputationWindowCalculator(min_columns=2).fit(df)
+
+        named = [m for m in _warning_messages(records) if 'no period' in m]
+        assert named == [
+            "There is no period in the DataFrame where all the variables are available: "
+            "the imputation window is empty, so no value can be imputed, and only "
+            "training_scope='unrestricted' allows training in this case."
+        ]
+
+    def test_entities_without_strict_window_are_named_by_one_warning(self):
+        """Two entities without strict window next to one with: ONE message naming both.
+
+        Le message était émis une fois par entité, sans la nommer, et parlait
+        du « DataFrame » entier.
+        """
+        _, without = _make_df_without_strict_window()
+        with_window = without.fillna(1.0)
+        panel = pd.concat({'A': with_window, 'B': without, 'C': without}, names=['entity', 'date'])
+
+        with warnings.catch_warnings(record=True) as records:
+            warnings.simplefilter('always')
+            calc = ImputationWindowCalculator(min_columns=2).fit(panel)
+
+        named = [m for m in _warning_messages(records) if 'no period' in m]
+        assert len(named) == 1
+        assert "for 2 entity(ies) [('B',), ('C',)]" in named[0]
+        assert bool(calc.imputation_window_mask_.loc['A'].all())
 
 
 # =============================================================================
@@ -838,6 +891,30 @@ class TestEntitiesWithoutWindow:
 
         named = [m for m in _warning_messages(records) if 'without a determinable window' in m]
         assert (len(named), "[('B',)]" in named[0]) == (1, True)
+
+    def test_entity_reduced_to_one_row_has_no_window_and_costs_the_others_nothing(self):
+        """An entity of a single row joins the entities without window (ANO-FREQ-061).
+
+        Sa fréquence d'index est indétectable (une seule date) : la détection
+        de l'index entier levait, et le calcul échouait pour tout le panel.
+        """
+        panel = _make_panel([('A',), ('B',)])
+        single_row = pd.DataFrame(
+            {'a': [1.0], 'b': [2.0]},
+            index=pd.MultiIndex.from_tuples(
+                [('C', pd.Timestamp('2020-01-01'))], names=panel.index.names
+            ),
+        )
+
+        with warnings.catch_warnings(record=True) as records:
+            warnings.simplefilter('always')
+            calc = ImputationWindowCalculator().fit(pd.concat([panel, single_row]))
+
+        assert calc.entities_without_window_ == (('C',),)
+        assert calc.index_freq_[('C',)] is None
+        assert bool(calc.imputation_window_mask_.drop(index='C', level=0).all())
+        named = [m for m in _warning_messages(records) if 'without a determinable window' in m]
+        assert len(named) == 1 and "[('C',)]" in named[0]
 
     def test_no_warning_when_every_entity_has_a_window(self):
         """A panel where every entity has a window fits silently."""

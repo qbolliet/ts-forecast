@@ -19,6 +19,7 @@ from tests.support.perturbations import (
     to_period_end,
     to_period_index,
     to_period_start,
+    to_period_start_by_column,
     to_three_level_index,
     with_duplicated_rows,
     with_index_names,
@@ -253,6 +254,62 @@ class TestPeriodPosition:
         """``pd.infer_freq`` fails on an irregular index: the conversion is skipped."""
         result = to_period_index(irregular_index_timeseries)
         assert isinstance(result.index, pd.DatetimeIndex)
+
+
+class TestPeriodStartByColumn:
+    """``to_period_start_by_column``: each observation at the start of its own period."""
+
+    def test_each_frequency_moves_to_its_own_period_start(
+        self, reference_timeseries: pd.DataFrame
+    ) -> None:
+        """Y on January 1st, Q on the quarter's first day, M on the month's first day."""
+        start = to_period_start_by_column(reference_timeseries)
+
+        # Valeurs d'or : ancres annuelles 120 / 132 / 150 au 1er janvier
+        assert start['a1'].dropna().to_dict() == {
+            pd.Timestamp('2021-01-01'): 120.0,
+            pd.Timestamp('2022-01-01'): 132.0,
+            pd.Timestamp('2023-01-01'): 150.0,
+        }
+        # Ancres trimestrielles au premier jour du trimestre, mêmes valeurs
+        quarters = start['q1'].dropna()
+        assert [date.month for date in quarters.index[:4]] == [1, 4, 7, 10]
+        assert quarters.tolist() == reference_timeseries['q1'].dropna().tolist()
+        # Colonne mensuelle : mêmes valeurs, au 1er du mois
+        assert start['m1'].tolist() == reference_timeseries['m1'].tolist()
+        assert all(date.day == 1 for date in start.index)
+
+    def test_panel_reads_the_frequency_of_each_entity(
+        self, mixed_freq_panel_multifrequency: pd.DataFrame
+    ) -> None:
+        """``v`` annual for FR, quarterly for DE, monthly for IT: three different starts."""
+        start = to_period_start_by_column(mixed_freq_panel_multifrequency)
+
+        first_dates = {
+            entity: start.loc[entity, 'v'].dropna().index[:2].strftime('%Y-%m-%d').tolist()
+            for entity in ('FR', 'DE', 'IT')
+        }
+        assert first_dates == {
+            'FR': ['2021-01-01', '2022-01-01'],
+            'DE': ['2021-01-01', '2021-04-01'],
+            'IT': ['2021-01-01', '2021-02-01'],
+        }
+        # Aucune observation perdue ni créée
+        assert start.notna().sum().equals(mixed_freq_panel_multifrequency.notna().sum())
+
+    def test_undetectable_pair_raises(self, reference_timeseries: pd.DataFrame) -> None:
+        """A pair observed once has no frequency to read its period from."""
+        data = reference_timeseries.copy()
+        data.loc[:'2022-12-31', 'a1'] = float('nan')
+
+        with pytest.raises(ValueError, match='Cannot detect the frequency'):
+            to_period_start_by_column(data)
+
+    def test_does_not_mutate_input(self, reference_timeseries: pd.DataFrame) -> None:
+        """The input frame is left untouched."""
+        before = reference_timeseries.copy()
+        to_period_start_by_column(reference_timeseries)
+        pd.testing.assert_frame_equal(reference_timeseries, before)
 
 
 class TestDropEntity:

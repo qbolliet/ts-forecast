@@ -41,7 +41,7 @@ from ..panel.utils import (
     normalize_entity_key,
     split_variable_key,
 )
-from ..utils._constants import FREQUENCY_LEVEL_NAME
+from ..utils._constants import FREQUENCY_LEVEL_NAME, MONTH_BASED_FREQUENCIES
 from .aggregation_constraint import (
     AggregationConstraint,
     ConstraintSetting,
@@ -60,7 +60,6 @@ from .imputation_plan import (
     append_step,
     to_entity_tuple,
 )
-from .imputation_plan import _scale_equal as _scale_factors_equal
 from .imputation_window import (
     ImputationScope,
     ImputationWindowCalculator,
@@ -326,6 +325,25 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     two-level one. A partial key such as ``'Zone euro'`` matches **no**
     entity; it is reported by the same warning, and the entities it was
     meant for fall back on the nested ``'__default__'``.
+
+    **Unusable (entity, column) pairs are left out, never fatal**: a pair
+    observed fewer than twice has no detectable frequency, and a monthly,
+    quarterly or yearly pair observed off the calendar bounds of its own
+    frequency — a fiscal year closing in June on a period-end index, a yearly
+    value dated 1 December on a period-start index — has no consistent
+    calendar reading. Neither is imputed nor used as a covariate, so it never
+    degrades the fit of the other variables; the second kind is named by a
+    single ``UserWarning`` at ``fit``. A calendar value dated elsewhere comes
+    back once re-dated at the end (period-end index) or at the start
+    (period-start index) of its calendar period; a non-calendar period, such
+    as a fiscal year, cannot be imputed by this class.
+
+    **A prediction that produces nothing is a failed prediction**: a step
+    whose model predicts only NaN is degraded into the interpolation
+    fallback and named by the aggregated warning of the degraded steps;
+    scattered NaN predictions stay unwritten cells, named by the same warning.
+    An unanchored step has no fallback: its pairs are named by their own
+    aggregated warning.
 
     Args:
         target_frequency: Target frequency, as a string applying to every
@@ -1310,7 +1328,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         observation). The training set must not borrow it: ``f_block(e)`` is
         the entity's OWN frequency, and a lent one would scale its rows by
         the wrong divisor. The target column is therefore handed over per
-        entity, each undetectable pair mapped to None explicitly — the
+        entity, each undetectable pair — or pair observed off the calendar
+        bounds of its frequency — mapped to None explicitly — the
         :class:`TrainingSetBuilder` then drops that block, whatever the other
         entities do. Covariate entries are left untouched.
 
@@ -1323,10 +1342,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             undetectable, otherwise a copy whose ``column`` entry is the
             explicit per-entity mapping.
         """
-        # Couples indétectables de la colonne : rien à expliciter sans eux
+        # Couples indétectables ou observés hors de leur grille calendaire de
+        # la colonne : rien à expliciter sans eux
         undetected = [
             split_variable_key(key)[0]
-            for key in self._undetected_frequencies_
+            for key in (*self._undetected_frequencies_, *self._misaligned_pairs)
             if split_variable_key(key)[1] == column
         ]
         if not self.is_panel_ or not undetected:
@@ -1400,14 +1420,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         Args:
             prediction_frequency: Frequency at which predictions will be made
-                (str for a time series, dict entity -> frequency for a panel).
+                (str for a time series, dict entity -> frequency for a panel:
+                a panel target is always expanded into a binding at phase 0,
+                and a dict target on a time series is refused there).
 
         Returns:
             Dict with keys ``'aggregate'``, ``'impute'`` and
             ``'target_freq'``, each holding a list of variable keys.
-
-        Raises:
-            TypeError: If a dict is passed for time series data.
         """
         # Initialisation du dictionnaire résultat
         result: Dict[str, List[Union[str, tuple]]] = {
@@ -1422,13 +1441,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 # Décomposition de la clé : entité toujours en tuple
                 entity, _ = split_variable_key(key)
 
-                # Extraction de la fréquence cible associée à l'entité
-                if isinstance(prediction_frequency, dict):
-                    pred_freq = prediction_frequency.get(entity)
-                else:
-                    pred_freq = prediction_frequency
-
-                # Vérification que la fréquence cible est spécifiée
+                # Fréquence cible liée à l'entité : une entité que la liaison
+                # ne nomme pas n'est pas classée à cette fréquence
+                pred_freq = prediction_frequency.get(entity)
                 if pred_freq is None:
                     continue
 
@@ -1448,12 +1463,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     result['impute'].append(key)
         # Cas des séries temporelles
         else:
-            # Cas d'erreur si la fréquence cible est un dictionnaire
-            if not isinstance(prediction_frequency, str):
-                raise TypeError(
-                    "'prediction_frequency' should be a string when applied "
-                    "to time series"
-                )
             # Parcours des fréquences détectées
             for col, freq in self.detected_frequencies_.items():
                 # Normalisation des deux fréquences comparées
@@ -1576,7 +1585,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         emits ``MODEL_UNANCHORED``.
 
         Args:
-            prediction_frequency: Frequency of the stage, scalar or per
+            prediction_frequency: Frequency of the stage — on a panel, the
+                only case where the capability plays, always a binding per
                 entity.
 
         Returns:
@@ -1586,7 +1596,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             from.
 
         Examples:
-            >>> imputer._unanchored_pairs_at('M')       # doctest: +SKIP
+            >>> imputer._unanchored_pairs_at({("IT",): "M"})   # doctest: +SKIP
             [(('IT',), 'v')]
         """
         # Capacité fermée par défaut, et sans objet sur une série temporelle :
@@ -1599,12 +1609,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         for key in self._undetected_frequencies_:
             entity, column = split_variable_key(key)
 
-            # Fréquence de prédiction liée à l'entité par l'étape
-            if isinstance(prediction_frequency, dict):
-                pred_freq = prediction_frequency.get(entity)
-            else:
-                pred_freq = prediction_frequency
-            if pred_freq is None:
+            # Fréquence de prédiction liée à l'entité par l'étape : sur un
+            # panel, une étape est toujours une liaison par entité
+            if prediction_frequency.get(entity) is None:
                 continue
 
             # Colonne observée par au moins une autre entité : sans elle, le
@@ -1688,18 +1695,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         )
 
         # Non-vacuité sur les deux fenêtres : une colonne vide sur l'une des
-        # deux grilles n'apporte aucune information exploitable
-        kept = []
-        for column in candidates:
-            if column not in eligible:
-                continue
-            if column not in training_frame.columns:
-                continue
-            if column not in prediction_frame.columns:
-                continue
-            if training_frame[column].notna().any() and prediction_frame[column].notna().any():
-                kept.append(column)
-        return tuple(kept)
+        # deux grilles n'apporte aucune information exploitable. Les deux
+        # trames d'étape portent toutes les colonnes du jeu de travail
+        return tuple(
+            column for column in candidates
+            if column in eligible
+            and training_frame[column].notna().any()
+            and prediction_frame[column].notna().any()
+        )
 
     # Méthode auxiliaire d'élimination des lignes d'entraînement sans covariable
     @staticmethod
@@ -1895,9 +1898,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         Raises:
             ValueError: If no frequency can be detected, if a
-                ``target_frequency`` dict misses entities (B16), if the
-                indices of X and y disagree (B14), or if an index level bears
-                the reserved name ``'frequency'``.
+                ``target_frequency`` dict misses entities, if the
+                indices of X and y disagree, if an index level bears
+                the reserved name ``'frequency'``, or if the window
+                calculator cannot be fitted — an empty window is not a
+                failure, it imputes nothing and is warned about.
         """
         # =================================================================
         # PHASE 0 — Setup
@@ -1982,8 +1987,29 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Détection des fréquences par (entité, colonne) : sur un panel, la
         # même colonne peut porter une fréquence différente selon l'entité
-        # et les clés sont alors des tuples (entité..., colonne)
-        raw_frequencies = self._detect_frequencies_robustly(X_work)
+        # et les clés sont alors des tuples (entité..., colonne). Un couple
+        # indétectable (moins de deux observations) vaut None, sans lever
+        raw_frequencies = detect_frequency(data=X_work)
+
+        # Couples observés hors de la grille calendaire de leur fréquence
+        # (exercice décalé, ancre annuelle au 1er décembre d'un index MS) :
+        # écartés de la classification comme des covariables, et nommés par un
+        # avertissement unique
+        self._misaligned_pairs = self._misaligned_anchor_pairs(X_work, raw_frequencies)
+        if self._misaligned_pairs:
+            warnings.warn(
+                f"{len(self._misaligned_pairs)} (entity, column) pair(s) are observed "
+                f"off the calendar bounds of their own frequency and are left out "
+                f"(neither imputed nor used as covariates): "
+                f"{list(self._misaligned_pairs)}. A monthly, quarterly or yearly "
+                f"value must be dated at the end of its calendar period on a "
+                f"period-end index, at its start on a period-start index: re-date "
+                f"a calendar value dated elsewhere (a yearly value dated 1 December "
+                f"on a period-start index belongs on 1 January). A non-calendar "
+                f"period, such as a fiscal year closing in June, has no calendar "
+                f"reading and cannot be imputed by this class.",
+                UserWarning,
+            )
 
         # Écartement des couples sans fréquence détectable : une entité
         # n'observant jamais une colonne n'a pas de fréquence pour elle.
@@ -1994,7 +2020,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             key for key, freq in raw_frequencies.items() if freq is None
         )
         self.detected_frequencies_ = {
-            key: freq for key, freq in raw_frequencies.items() if freq is not None
+            key: freq for key, freq in raw_frequencies.items()
+            if freq is not None and key not in self._misaligned_pairs
         }
         # Vérification que le dictionnaire des fréquences détectées est non vide
         if not self.detected_frequencies_:
@@ -2006,6 +2033,21 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 f"pair(s) never observed, left out of the classification: "
                 f"{self._undetected_frequencies_}"
             )
+
+        # Entités présentes mais jamais observées (entièrement NaN, ou réduites
+        # à une ligne) : sans fréquence détectée, elles n'ont rien à imputer et
+        # le calculateur de fenêtre les nomme déjà. Elles sont retirées de la
+        # cible avant validation, qui les dirait à tort absentes des données ;
+        # une entrée de dict nommant une entité réellement inconnue reste,
+        # elle, signalée par le validateur
+        if self.is_panel_ and isinstance(self.effective_target_frequency_, dict):
+            observed = {split_variable_key(key)[0] for key in self.detected_frequencies_}
+            silent = set(self.entities_ or ()) - observed
+            self.effective_target_frequency_ = {
+                entity: frequency
+                for entity, frequency in self.effective_target_frequency_.items()
+                if entity not in silent
+            }
 
         # Validation de la fréquence cible contre les fréquences détectées
         self.effective_target_frequency_ = self._target_freq_validator.validate(
@@ -2099,67 +2141,42 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 1 — Fenêtres : les trois masques
         # =================================================================
-        # Initialisation du calculateur de fenêtre
-        window_calc, window_error = self._fit_imputation_window(X_work)
+        # Calcul des fenêtres sur les données du fit, par la même fabrique de
+        # calculateur qu'au transform. Un échec lève : un repli sur des masques
+        # tout-vrais imputerait tout le jeu en silence,
+        # et une fenêtre vide n'est jamais un échec (masques
+        # tout-faux et avertissement du calculateur)
+        window_calc = self._make_window_calculator().fit(X_work)
+        self._imputation_window_calc = window_calc
 
-        # Cas d'échec du calcul : le calculateur non entraîné est conservé,
-        # les gardes "_is_fitted" des consommateurs le neutralisent
-        if window_calc is None:
-            self._imputation_window_calc = self._make_window_calculator()
-            warnings.warn(
-                f"Could not calculate imputation window: {window_error}. "
-                f"Using all available data.",
-                UserWarning
-            )
-            # Repli sur les bornes extrêmes de l'index
-            if isinstance(X_work.index, pd.MultiIndex):
-                time_idx = X_work.index.get_level_values(-1)
-            else:
-                time_idx = X_work.index
-            self.imputation_window_ = (time_idx.min(), time_idx.max())
-            self.training_window_ = self.imputation_window_
-            # Aucune restriction : les trois masques valent True partout
-            permissive = pd.Series(True, index=X_work.index)
-            self.strict_window_mask_ = permissive
-            self.imputation_window_mask_ = permissive.copy()
-            self.training_window_mask_ = permissive.copy()
-        else:
-            self._imputation_window_calc = window_calc
+        # Chaque appelant nomme explicitement son masque
+        self.strict_window_mask_ = window_calc.get_imputation_window_mask(
+            X_work, kind='strict'
+        )
+        self.imputation_window_mask_ = window_calc.get_imputation_window_mask(
+            X_work, kind='imputation'
+        )
+        self.training_window_mask_ = window_calc.get_imputation_window_mask(
+            X_work, kind='training'
+        )
 
-            # Chaque appelant nomme explicitement son masque
-            self.strict_window_mask_ = window_calc.get_imputation_window_mask(
-                X_work, kind='strict'
-            )
-            self.imputation_window_mask_ = window_calc.get_imputation_window_mask(
-                X_work, kind='imputation'
-            )
-            self.training_window_mask_ = window_calc.get_imputation_window_mask(
-                X_work, kind='training'
-            )
+        # Bornes lisibles : chaque attribut porte celles de son masque.
+        self.imputation_window_ = self._zip_window_bounds(
+            window_calc.imputation_window_start_,
+            window_calc.imputation_window_end_,
+        )
+        self.training_window_ = self._zip_window_bounds(
+            window_calc.training_window_start_,
+            window_calc.training_window_end_,
+        )
 
-            # Bornes lisibles : chaque attribut porte celles de son masque.
-            self.imputation_window_ = self._zip_window_bounds(
-                window_calc.imputation_window_start_,
-                window_calc.imputation_window_end_,
-            )
-            self.training_window_ = self._zip_window_bounds(
-                window_calc.training_window_start_,
-                window_calc.training_window_end_,
-            )
-
-            # Avertissement global si la fenêtre d'ENTRAÎNEMENT est vide :
-            # sans lui, tous les entraînements échouent silencieusement un à un
-            # et tout finit en repli par interpolation. C'est bien cette
-            # fenêtre que lit le jeu d'entraînement, et non la stricte, qui
-            # n'est plus qu'un attribut de diagnostic ; sous le scope par
-            # défaut (training_scope=None) les deux coïncident, et un scope
-            # élargi éteint légitimement l'avertissement
-            if not bool(self.training_window_mask_.to_numpy(dtype=bool).any()):
-                warnings.warn(
-                    "The training window is empty: no model can be trained; "
-                    "all imputations will fall back to interpolation.",
-                    UserWarning
-                )
+        # Fenêtre d'entraînement vide : aucun avertissement propre à
+        # l'imputeur. Les masques d'imputation et d'entraînement contiennent
+        # tous deux la fenêtre stricte, et aucune extension ne crée de
+        # fenêtre là où la stricte est vide : une fenêtre d'entraînement
+        # vide implique une fenêtre d'imputation vide, que le calculateur
+        # signale déjà (« no period … where all the variables are
+        # available ») — rien n'est alors imputé, ni par modèle ni par repli
 
         # Câblage du constructeur de jeu d'entraînement mutualisé.
         # Le "kind" du masque est nommé ici, une fois pour toutes : le
@@ -2218,10 +2235,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # étape par étape, chaque étape étant construite PUIS exécutée au fil
         # de l'eau — l'étape k dépend des imputations de l'étape k-1
         self.imputation_plan_ = ImputationPlan()
-        # Parcours des fréquences
-        for stage_freq in self.frequency_progression_:
-            # Exécution de l'imputation à l'étape donnée
-            self._execute_stage(X_work, stage_freq)
+        # Recalages de la phase sous un bloc différé : périodes nulles et
+        # profils inversés — des étapes comme des covariables interpolées —
+        # donnent un avertissement par cas en fin de phase, jamais un par
+        # variable × étape
+        with self._aggregation_constraint.deferred_warnings():
+            # Parcours des fréquences
+            for stage_freq in self.frequency_progression_:
+                # Exécution de l'imputation à l'étape donnée
+                self._execute_stage(X_work, stage_freq)
 
         # Avertissements de la phase, agrégés en UN SEUL message
         if self._warnings:
@@ -2238,8 +2260,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             named = sorted({pair for pair in self._unanchored_failures}, key=repr)
             warnings.warn(
                 f"{len(named)} unobserved (entity, column) pair(s) could not be "
-                f"imputed for lack of usable covariates on the target grid; "
-                f"their cells stay NaN and unmarked: {named}",
+                f"imputed: no prediction on the target grid (no usable covariate, "
+                f"or the prediction failed), and no interpolation fallback exists "
+                f"without an anchor; their cells stay NaN and unmarked: {named}",
                 UserWarning,
             )
 
@@ -2479,13 +2502,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         feature_cols: Sequence[str],
         freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
         ways: Dict[str, MaterializationWay],
-        binding: Union[str, Dict[EntityKey, str]],
         blocks: Dict[EntityKey, str],
         stage_freq: Union[str, Dict[EntityKey, str]],
         row_frequency: pd.Series,
         real_index: pd.Index,
         row_entities: Sequence[EntityKey],
-    ) -> Union[pd.Series, pd.DataFrame]:
+    ) -> pd.DataFrame:
         """Divide the covariates by the period their own row spans.
 
         The grid of a mutualized training set is homogeneous only as long as
@@ -2496,58 +2518,35 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         too — the very same unifying rule the target divisor follows.
 
         One call to :meth:`StageScaler.feature_divisors` per layer of rows
-        sharing one frequency per entity, never one per row. A grid where
-        every row already sits at its block frequency — the case as soon as
-        axis 2 injects nothing — short-circuits back to the single historical
-        call, block binding included.
+        sharing one frequency per entity, never one per row: a grid where
+        axis 2 injected nothing is a single layer, hence a single call at the
+        block binding.
 
         Args:
             feature_cols: Covariate columns to scale.
             freqs_by_column: Detected frequencies, keyed by column.
             ways: Materialization way retained for each covariate.
-            binding: Block frequency binding of the training grid.
             blocks: Block frequency of each contributing entity.
             stage_freq: Frequency of the stage.
             row_frequency: Frequency each training row was produced at,
                 indexed on the training grid — stamped with a frequency level
                 or not.
             real_index: The ``(entity..., date)`` grid of the same rows, the
-                only shape :class:`StageScaler` ever reads. The very object
-                ``row_frequency.index`` is when no frequency level was stamped.
+                only shape :class:`StageScaler` ever reads.
             row_entities: Entity key of each row, decomposed once by
                 :func:`split_training_index`.
 
         Returns:
-            Whatever :meth:`StageScaler.feature_divisors` returns for a
-            homogeneous, unstamped grid; a ``DataFrame`` indexed like
-            ``row_frequency`` and columned like ``feature_cols`` otherwise.
+            A ``DataFrame`` of per-row divisors, indexed like
+            ``row_frequency`` and columned like ``feature_cols``.
         """
         # Extraction de l'index
         index = row_frequency.index
         # Extraction des fréquences
         frequencies = row_frequency.to_numpy(dtype=object)
-        # Grille estampillée : elle n'est jamais remise au scaler
-        stamped = real_index is not index
 
-        # Fréquence de bloc attendue pour chaque ligne
-        expected = np.array(
-            [blocks.get(entity) for entity in row_entities], dtype=object
-        )
-
-        # Grille homogène et non estampillée : le chemin d'origine, à la
-        # liaison de bloc
-        if not stamped and bool((frequencies == expected).all()):
-            return self._stage_scaler.feature_divisors(
-                columns=feature_cols,
-                column_frequencies=freqs_by_column,
-                ways=ways,
-                grid_freq=binding,
-                stage_freq=stage_freq,
-                index=index,
-            )
-
-        # Grille hétérogène : un appel par couche, puis remontée au format par
-        # ligne, seul capable de porter deux échelles sur une même colonne
+        # Un appel par couche, puis remontée au format par ligne, seul capable
+        # de porter deux échelles sur une même colonne
         divisors = pd.DataFrame(
             np.nan, index=index, columns=list(feature_cols), dtype=float
         )
@@ -2634,29 +2633,24 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self,
         *,
         column: str,
-        binding: Union[str, Dict[EntityKey, str]],
         blocks: Dict[EntityKey, str],
         stage_freq: Union[str, Dict[EntityKey, str]],
         row_frequency: pd.Series,
         real_index: pd.Index,
         row_entities: Sequence[EntityKey],
-    ) -> Union[float, pd.Series]:
+    ) -> pd.Series:
         """Divide the target by the period its own row spans.
 
-        Strictly the historical single call
-        (:meth:`StageScaler.target_divisor` with ``produced_freq``) as long as
-        the grid carries no frequency level. Once it does, two rows share a
-        date and the scaler — which groups by ``(stage frequency, production
-        frequency)`` and writes its results back by label — would set both.
-        The call is then split layer by layer, each layer being handed the
-        real, duplicate-free ``(entity..., date)`` sub-grid, and the results
-        written back positionally.
+        :meth:`StageScaler.target_divisor` with ``produced_freq``, called
+        layer by layer: under a stamped grid two rows share a date, and the
+        scaler — which groups by ``(stage frequency, production frequency)``
+        and writes its results back by label — would set both. Each layer is
+        handed the real, duplicate-free ``(entity..., date)`` sub-grid, and
+        the results are written back positionally. A grid where axis 2
+        injected nothing is a single layer, hence a single call.
 
         Args:
             column: Column being imputed, for scale-mode resolution.
-            binding: Block frequency binding of the training grid. Unread by
-                the scaler as soon as ``produced_freq`` is given, and kept
-                only to leave the historical call untouched.
             blocks: Block frequency of each contributing entity.
             stage_freq: Frequency of the stage.
             row_frequency: Frequency each training row was produced at.
@@ -2664,24 +2658,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             row_entities: Entity key of each row.
 
         Returns:
-            A ``Series`` of per-row divisors indexed like ``row_frequency``,
-            or the float ``1.0`` when the target is exempt from scaling.
+            A ``Series`` of per-row divisors indexed like ``row_frequency``
+            (all ``1.0`` when the target is exempt from scaling).
         """
         # Extraction de l'index et des fréquences de ligne
         index = row_frequency.index
         frequencies = row_frequency.to_numpy(dtype=object)
 
-        # Grille non estampillée : l'appel unique d'origine, inchangé
-        if real_index is index:
-            return self._stage_scaler.target_divisor(
-                column,
-                source_freq=binding,
-                pred_freq=stage_freq,
-                index=index,
-                produced_freq=row_frequency,
-            )
-
-        # Grille estampillée : un appel par couche, sur la grille réelle
+        # Un appel par couche, sur la grille réelle
         divisors = pd.Series(np.nan, index=index, dtype=float)
         for layer, in_layer in self._row_layers(row_entities, frequencies, blocks):
             positions = np.flatnonzero(in_layer)
@@ -2696,35 +2680,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
             divisors.iloc[positions] = np.asarray(sub_divisors, dtype=float)
         return divisors
-
-    # Méthode auxiliaire d'extraction de l'entité de chaque ligne d'une grille
-    @staticmethod
-    def _row_entities(
-        index: pd.Index,
-        has_frequency_level: bool = False,
-    ) -> List[EntityKey]:
-        """Return the entity key of every row of a grid.
-
-        Thin pass-through over :func:`split_training_index`, the single
-        decomposition of a training grid: under
-        ``keep_coincident_cells`` the grid carries a frequency level on the
-        entity side and the entity is ``key[:-2]``, not ``key[:-1]``.
-
-        Args:
-            index: Grid, ``MultiIndex`` ``(entity..., date)`` on a panel,
-                ``(entity..., freq, date)`` when stamped.
-            has_frequency_level: Whether the grid carries that extra level,
-                read from :attr:`TrainingSet.has_frequency_level`.
-
-        Returns:
-            One entity key per row, in grid order. A time series yields the
-            degenerate key ``()`` everywhere.
-        """
-        # Décomposition unique, partagée avec le constructeur du jeu
-        _real, entities = split_training_index(
-            index, has_frequency_level=has_frequency_level
-        )
-        return entities
 
     # Méthode auxiliaire d'ordonnancement des colonnes d'une étape
     def _order_columns(
@@ -2803,13 +2758,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 entities=entities if self.is_panel_ else None,
             )
 
-        # Ajustement paresseux de l'ordonnanceur : l'avertissement croisé qu'il
-        # émet ne concerne que la validation croisée et n'aurait aucun sens
-        # sous l'ordre 'frequency'
+        # Ajustement paresseux de l'ordonnanceur, sous l'ordre 'frequency'
+        # seulement — la phase 0 l'ajuste déjà sous 'cv' : l'avertissement
+        # croisé qu'il émet ne concerne que la validation croisée et n'aurait
+        # ici aucun sens
         if not hasattr(self._variable_orderer, 'cv_'):
             with warnings.catch_warnings():
-                if self.fit_predict_order != 'cv':
-                    warnings.simplefilter('ignore', UserWarning)
+                warnings.simplefilter('ignore', UserWarning)
                 self._variable_orderer.fit()
 
         # Jeux de scoring de l'ordre 'cv' : ceux-là mêmes que la 5c ajustera.
@@ -2989,31 +2944,28 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         )
         blocks = dict(probe.blocks)
 
-        # Grille réelle de la sonde : le matérialiseur et le scaler ne lisent
-        # jamais le niveau de fréquence. Dédoublonnée, deux cellules
-        # coïncidentes partageant par définition une date
-        probe_real, _probe_entities = split_training_index(
-            probe.X.index, has_frequency_level=probe.has_frequency_level
-        )
-        probe_real = probe_real[~probe_real.duplicated()]
-
         # Grille de prédiction des entités concernées
         pred_grid = self._prediction_grid(X_work, stage_freq, entities)
 
         # Vues des deux fenêtres, chacune à sa fréquence : la grille
-        # d'entraînement est au pas des blocs, la grille de prédiction au pas
-        # de l'étape
-        train_view = materializer.stage_frame(
-            grid_index=probe_real,
-            stage_freq=self._block_binding(blocks, probe_real) if blocks else stage_freq,
-            detected_frequencies=freqs_by_column,
-            source_data=X_work,
+        # d'entraînement au pas de chaque couche de lignes, la grille de
+        # prédiction au pas de l'étape
+        train_view = self._training_view(
+            probe, blocks, stage_freq, freqs_by_column, X_work
         )
         pred_view = stage_frame.reindex(pred_grid)
 
-        # Sélection des covariables : non-vacuité sur les deux fenêtres, puis
-        # éligibilité par entité
-        candidates = [name for name in X_work.columns if name != column]
+        # Sélection des covariables : disponibilité sur les deux fenêtres, puis
+        # éligibilité par entité. Seules les colonnes dotées d'une fréquence
+        # détectée pour au moins une entité sont candidates : sans fréquence
+        # (une seule observation, ancres hors de leur grille calendaire), une
+        # colonne ne peut être ni agrégée ni interpolée et n'apporterait que
+        # des NaN — un couple inutilisable ne fait pas échouer l'ajustement des
+        # autres
+        candidates = [
+            name for name in X_work.columns
+            if name != column and name in freqs_by_column
+        ]
         feature_cols = self._select_feature_columns(candidates, train_view, pred_view)
 
         # Voie de matérialisation : décidée une seule, sur la grille de
@@ -3051,12 +3003,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 training.X.index,
                 has_frequency_level=training.has_frequency_level,
             )
-            binding = self._block_binding(blocks, real_index)
             y_train = self._stage_scaler.apply(
                 y_train,
                 self._target_divisors_per_row(
                     column=column,
-                    binding=binding,
                     blocks=dict(training.blocks),
                     stage_freq=stage_freq,
                     row_frequency=training.row_frequency,
@@ -3071,7 +3021,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         feature_cols=feature_cols,
                         freqs_by_column=freqs_by_column,
                         ways=ways,
-                        binding=binding,
                         blocks=dict(training.blocks),
                         stage_freq=stage_freq,
                         row_frequency=training.row_frequency,
@@ -3099,6 +3048,71 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             X_train=X_train,
             y_train=y_train,
         )
+
+    # Méthode auxiliaire de la vue d'entraînement, lue couche par couche
+    def _training_view(
+        self,
+        probe: TrainingSet,
+        blocks: Dict[EntityKey, str],
+        stage_freq: Union[str, Dict[EntityKey, str]],
+        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
+        X_work: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Build the frame the covariate selection reads on the training grid.
+
+        Read layer by layer: a row produced at an earlier stage,
+        finer than its block, is read at its own frequency and never at the
+        block's — read at the block frequency, a covariate full on those rows
+        would look empty there and be dropped. A single layer, the case as
+        soon as axis 2 injects nothing, gives the block binding on the whole
+        grid.
+
+        Args:
+            probe: Covariate-free training set of the variable, carrying the
+                rows, their production frequency and the blocks.
+            blocks: Block frequency of each contributing entity.
+            stage_freq: Frequency of the stage, used when there is no row.
+            freqs_by_column: Detected frequencies, keyed by column.
+            X_work: Working frame.
+
+        Returns:
+            The stage frames of every layer, stacked; rows are never written
+            back, only read for their non-emptiness.
+        """
+        # Matérialiseur, seul producteur des trames d'étape
+        materializer = self._covariate_materializer
+        # Grille réelle de la sonde et entité de chaque ligne : le niveau de
+        # fréquence n'est jamais lu par le matérialiseur
+        real_index, row_entities = split_training_index(
+            probe.X.index, has_frequency_level=probe.has_frequency_level
+        )
+
+        # Une trame par couche, sur sa sous-grille dédoublonnée : deux cellules
+        # coïncidentes partagent par définition une date
+        frames: List[pd.DataFrame] = []
+        if blocks:
+            layers = self._row_layers(
+                row_entities, probe.row_frequency.to_numpy(dtype=object), blocks
+            )
+            for layer, in_layer in layers:
+                sub_grid = real_index[in_layer]
+                sub_grid = sub_grid[~sub_grid.duplicated()]
+                frames.append(materializer.stage_frame(
+                    grid_index=sub_grid,
+                    stage_freq=self._block_binding(layer, sub_grid),
+                    detected_frequencies=freqs_by_column,
+                    source_data=X_work,
+                ))
+
+        # Aucune ligne : trame vide à la forme de l'étape
+        if not frames:
+            return materializer.stage_frame(
+                grid_index=real_index[:0],
+                stage_freq=stage_freq,
+                detected_frequencies=freqs_by_column,
+                source_data=X_work,
+            )
+        return pd.concat(frames)
 
     # Méthode d'ajustement d'une variable à une étape
     def _fit_variable(
@@ -3186,9 +3200,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             + [pred_origins.get(name, 'observed') for name in feature_cols]
         ))
 
-        # Ajustement unique, quel que soit le nombre de groupes
+        # Ajustement unique, quel que soit le nombre de groupes. Grille de
+        # prédiction vide et aucun groupe sans ancre (qui prédit, lui, hors
+        # fenêtre) : ce fit n'écrit rien, et un repli éventuel n'est pas
+        # annoncé — l'absence de fenêtre d'imputation l'est déjà par le
+        # calculateur de fenêtre
+        writes_something = len(pred_grid) > 0 or any(
+            source_frequency is None for _column, source_frequency in groups
+        )
         model, is_fallback = self._fit_estimator(
-            column, X_train, y_train, feature_cols, stage_label
+            column, X_train, y_train, feature_cols, stage_label,
+            announce=writes_something,
         )
         # Logging
         self._log(
@@ -3249,6 +3271,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         y_train: pd.Series,
         feature_cols: Tuple[str, ...],
         stage_label: str,
+        announce: bool = True,
     ) -> Tuple[Any, bool]:
         """Fit the estimator of one variable, or fall back on interpolation.
 
@@ -3258,46 +3281,46 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             y_train: Scaled training target.
             feature_cols: Covariates retained.
             stage_label: Readable label of the stage, for the messages.
+            announce: Whether a fallback is worth announcing. False when the
+                fit has nothing to write with the step — an empty prediction
+                grid, whose cause the window calculator already reports.
 
         Returns:
             Tuple ``(model, is_fallback)``: the fitted estimator and False, or
             the ``INTERPOLATE_FALLBACK`` sentinel and True. Every failure
             message is accumulated, never emitted here.
         """
+        # Repli d'interpolation, annoncé par l'avertissement agrégé de la phase
+        def _fallback(reason: str) -> Tuple[Any, bool]:
+            if announce:
+                self._warnings.append(
+                    f"{column!r} at stage {stage_label}: {reason}, "
+                    f"interpolation fallback"
+                )
+            return INTERPOLATE_FALLBACK, True
+
         # Extraction de l'estimateur
         estimator = self._estimator_for(column)
         # Aucun estimateur pour cette colonne : le repli est la règle, et
         # l'avertissement global de la phase 0 a déjà été émis
         if estimator is None:
             if self.estimator is not None:
-                # Warning
-                self._warnings.append(
-                    f"{column!r} at stage {stage_label}: no estimator covers "
-                    f"this column, interpolation fallback"
-                )
+                return _fallback("no estimator covers this column")
             return INTERPOLATE_FALLBACK, True
 
         # Jeu d'entraînement inexploitable : aucune covariable, ou aucune ligne
         if not feature_cols or len(y_train) == 0:
-            # Warning
-            self._warnings.append(
-                f"{column!r} at stage {stage_label}: empty training set "
-                f"({len(y_train)} row(s), {len(feature_cols)} covariate(s)), "
-                f"interpolation fallback"
+            return _fallback(
+                f"empty training set ({len(y_train)} row(s), "
+                f"{len(feature_cols)} covariate(s))"
             )
-            return INTERPOLATE_FALLBACK, True
 
         # Échec d'ajustement : repli, jamais une exception qui ferait perdre
         # les autres variables de l'étape
         try:
             estimator.fit(X_train, y_train)
         except Exception as error:
-            # Warning
-            self._warnings.append(
-                f"{column!r} at stage {stage_label}: estimator fit failed "
-                f"({type(error).__name__}: {error}), interpolation fallback"
-            )
-            return INTERPOLATE_FALLBACK, True
+            return _fallback(f"estimator fit failed ({type(error).__name__}: {error})")
 
         return estimator, False
 
@@ -3409,17 +3432,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 scale mode.
 
         Returns:
-            The factor, or 1.0 when the scaler refuses the conversion.
+            The factor. A conversion the scaler refuses raises: a silent
+            ``1.0`` would mis-scale every prediction of the group.
         """
-        try:
-            return self._stage_scaler.fit_scale_factor(
-                column,
-                source_freq=source_frequency,
-                pred_freq=stage_freq,
-                index=grid,
-            )
-        except (ValueError, KeyError, TypeError):
-            return 1.0
+        return self._stage_scaler.fit_scale_factor(
+            column,
+            source_freq=source_frequency,
+            pred_freq=stage_freq,
+            index=grid,
+        )
 
     # Méthode unique d'exécution d'une étape du plan
     def _execute_step(
@@ -3489,8 +3510,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         degraded = values is None and not step.is_fallback
 
         # Absence d'ancre : l'interpolation ne peut pas être le repli, faute
-        # d'observation à interpoler. Les couples restent NaN et ORIGINAL, et
-        # l'avertissement agrégé de la fin du fit les nomme
+        # d'observation à interpoler. Les couples restent NaN et non marqués,
+        # et l'avertissement agrégé de la fin du fit les nomme
         if step.unanchored and values is None:
             self._unanchored_failures.extend(self._step_pairs(step))
             return False, 0
@@ -3606,7 +3627,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         Returns:
             The predictions at the scale of the stage, or None when the
-            prediction failed — the caller then falls back on interpolation.
+            prediction failed or produced nothing but NaN — the caller then
+            falls back on interpolation, or, for an unanchored step, reports
+            the pair. A failure is announced by the aggregated warning of the
+            degraded steps, an unanchored step excepted: having no fallback,
+            it is named by the warning of the unimputed pairs only.
         """
         # Covariables produites en mode rejeu des voies de l'étape : c'est le
         # seul chemin autorisé pour X_pred.
@@ -3640,29 +3665,39 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 self._stage_scaler.apply(X_pred, divisors)
             )
         except Exception as error:
-            # Warning
-            self._warnings.append(
-                f"{step.var_name!r} at stage {step.pred_freq_label}: prediction "
-                f"failed ({type(error).__name__}: {error}), interpolation fallback"
-            )
+            # Sans ancre, aucun repli n'existe : seul l'avertissement des
+            # couples non imputés le dira, jamais un « repli » qui n'a pas lieu
+            if not step.unanchored:
+                self._warnings.append(
+                    f"{step.var_name!r} at stage {step.pred_freq_label}: prediction "
+                    f"failed ({type(error).__name__}: {error}), interpolation fallback"
+                )
             return None
 
-        # Report d'échelle du modèle vers l'étape : le rapport vaut 1.0 tant
-        # que le modèle est ajusté pour l'étape courante, ce qui est toujours
-        # le cas hors réutilisation inter-étapes
+        # Prédictions à l'échelle de l'étape : le modèle est toujours ajusté
+        # pour l'étape courante (aucune réutilisation inter-étapes), et la
+        # cible l'a été ligne à ligne — aucune remise à l'échelle à appliquer
         values = pd.Series(
             np.asarray(predictions, dtype=float).ravel(), index=grid, name=step.var_name
         )
-        # Report court-circuité : les deux facteurs sont le même
-        # objet tant que le modèle est ajusté pour l'étape courante. Diviser
-        # puis multiplier n'ajouterait que du bruit d'arrondi et, sous
-        # 'calendar', désalignerait une Series figée sur la grille du fit
-        # contre celle du transform — donc rendrait tout NaN
-        if _scale_factors_equal(step.scale_factor, step.fit_scale_factor):
-            return values
-        return self._stage_scaler.invert(
-            self._stage_scaler.apply(values, step.scale_factor), step.fit_scale_factor
-        )
+
+        # Prédictions entièrement NaN : rien n'est produit, l'étape est traitée
+        # comme un échec de prédiction. Des NaN épars restent des cellules non
+        # écrites, signalées par le même avertissement agrégé
+        n_missing = int(values.isna().sum())
+        if n_missing == len(values):
+            if not step.unanchored:
+                self._warnings.append(
+                    f"{step.var_name!r} at stage {step.pred_freq_label}: the model "
+                    f"predicted only NaN, interpolation fallback"
+                )
+            return None
+        if n_missing and not step.unanchored:
+            self._warnings.append(
+                f"{step.var_name!r} at stage {step.pred_freq_label}: {n_missing} of "
+                f"{len(values)} prediction(s) are NaN and stay unimputed"
+            )
+        return values
 
     # Méthode auxiliaire de la fréquence d'étape ligne à ligne
     @staticmethod
@@ -3727,49 +3762,75 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             self._log(f"[fit] training mask unavailable ({error}); every row kept")
             return None
 
-    # Méthode auxiliaire de détection tolérante des fréquences
-    def _detect_frequencies_robustly(
+    # Méthode auxiliaire de repérage des couples observés hors de la grille calendaire
+    def _misaligned_anchor_pairs(
         self,
         X_work: pd.DataFrame,
-    ) -> Dict[Union[str, tuple], Optional[str]]:
-        """Detect the frequency of every (entity, column) pair, undetectable ones included.
+        frequencies: Mapping[Union[str, tuple], Optional[str]],
+    ) -> Tuple[Union[str, tuple], ...]:
+        """Find the pairs observed off the calendar bounds of their own frequency.
 
-        ``detect_frequency`` raises on a series holding fewer than two
-        observations — an entirely NaN column, or an entity observing a column
-        once — which would abort the whole fit over one unusable pair. The
-        classification already has a place for such a pair: ``None``, which
-        :attr:`_undetected_frequencies_` collects and leaves out. This method
-        is the crossing point between the two conventions: the global
-        detection first, and a pair-by-pair retry when it refuses.
+        A monthly, quarterly or yearly value describes a calendar period, and
+        the position of the index says which bound dates it: the last day on
+        a period-end index (``ME``: 31 December for a year), the first day on
+        a period-start index (``MS``: 1 January). A pair observed elsewhere —
+        a fiscal year closing in June, a yearly value dated 1 December on a
+        ``MS`` index — has no consistent reading downstream: the training
+        mask, built on calendar periods, drops every one of its anchors, while
+        the rescaling attaches each of them to its calendar year. Such a pair
+        is left out rather than imputed on a wrong reading.
+
+        Only the monthly, quarterly and yearly frequencies are checked, and
+        only for an entity whose index carries a position: a daily or
+        business-day index implies no calendar bound.
 
         Args:
             X_work: Working frame, time series or panel.
+            frequencies: Detected frequency of each pair, keyed like
+                ``detected_frequencies_``, None when undetectable.
 
         Returns:
-            Mapping from column name (time series) or ``(entity..., column)``
-            tuple (panel) to the detected frequency, ``None`` where none could
-            be detected.
-        """
-        # Chemin nominal : une seule détection sur tout le jeu
-        try:
-            return detect_frequency(data=X_work)
-        except (ValueError, TypeError) as error:
-            self._log(
-                f"[fit] dataset-wide frequency detection refused ({error}); "
-                f"falling back on a pair-by-pair detection"
-            )
+            The keys of the misaligned pairs, sorted for determinism.
 
-        # Repli : couple par couple, une paire indétectable valant None
-        detected: Dict[Union[str, tuple], Optional[str]] = {}
-        for entity, _mask, block in iter_entity_blocks(X_work):
+        Examples:
+            >>> imputer._misaligned_anchor_pairs(fiscal_years, {'a1': 'Y'})  # doctest: +SKIP
+            ('a1',)
+        """
+        # Initialisation de la liste des couples mal placés
+        misaligned: List[Union[str, tuple]] = []
+        # Parcours des blocs d'entité, indexés par la seule date
+        for entity, _mask, block in iter_entity_blocks(X_work, is_panel=self.is_panel_):
             prefix = normalize_entity_key(entity) if self.is_panel_ else ()
+
+            # Position de l'index de l'entité : sans position (index journalier,
+            # ouvré, ou fréquence indéterminable), aucune borne n'est impliquée
+            try:
+                parsed = detect_index_frequency(block.index, return_format='components')
+            except (ValueError, TypeError):
+                continue
+            position = getattr(parsed, 'position', None)
+            if position not in ('S', 'E'):
+                continue
+
+            # Contrôle des seules fréquences calendaires de chaque couple
             for column in block.columns:
                 key = (*prefix, column) if prefix else column
-                try:
-                    detected[key] = detect_frequency(data=block[column])
-                except (ValueError, TypeError):
-                    detected[key] = None
-        return detected
+                frequency = frequencies.get(key)
+                if frequency is None:
+                    continue
+                base = normalize_frequency(frequency, return_format='base')
+                if base not in MONTH_BASED_FREQUENCIES:
+                    continue
+                # Borne attendue de chaque observation : début ou fin de SA période
+                dates = pd.DatetimeIndex(block.index[block[column].notna().to_numpy()])
+                periods = dates.to_period(base)
+                bounds = (
+                    periods.start_time if position == 'S'
+                    else periods.end_time.normalize()
+                )
+                if not bool((dates.normalize() == bounds).all()):
+                    misaligned.append(key)
+        return tuple(sorted(misaligned, key=repr))
 
     # Méthode auxiliaire de vérification de la couverture des entités
     def _check_target_frequency_covers_entities(
@@ -3787,11 +3848,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 The message names them — a silent gap would only surface much
                 later, as entities the classification never imputes.
         """
-        # Contrôle sans objet hors panel, ou tant que les entités sont inconnues
-        if not self.is_panel_ or not self.entities_:
-            return
-
-        # Énumération des entités absentes du dictionnaire
+        # Énumération des entités absentes du dictionnaire. Seul un panel
+        # atteint ce contrôle : un dict sur une série temporelle est refusé par
+        # la validation de format, et un panel porte toujours ses entités
+        # (panel_cols converties en index avant le fit)
         missing = [
             entity for entity in self.entities_
             if normalize_entity_key(entity) not in normalized_target_frequency
@@ -3813,13 +3873,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             four window parameters.
         """
         # Les deux paramètres d'entraînement retombent sur ceux de prédiction
-        # quand ils valent None : le calculateur porte lui-même cette règle
+        # quand ils valent None : le calculateur porte lui-même cette règle.
+        # Une seule colonne suffit à définir une fenêtre — sa propre
+        # couverture : aucun minimum supérieur n'est imposé
         return ImputationWindowCalculator(
             coverage_threshold=self.coverage_threshold,
             imputation_scope=self.imputation_scope,
             training_scope=self.training_scope,
             training_coverage_threshold=self.training_coverage_threshold,
-            min_columns=2,
         )
 
     # Méthode auxiliaire d'ajustement d'un calculateur de fenêtre d'imputation
@@ -3827,13 +3888,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self,
         data: pd.DataFrame,
     ) -> Tuple[Optional[ImputationWindowCalculator], Optional[ValueError]]:
-        """Fit a fresh window calculator on the given data.
+        """Fit a fresh window calculator on the data being transformed.
 
         The window is a constraint on data availability, not an estimated
         parameter: it is a deterministic function of the frame it is computed
-        on. ``_fit`` and ``_transform`` therefore share this factory and each
-        compute the window on their own data, which is what preserves
-        ``fit_transform(X) == fit(X).transform(X)``.
+        on. ``_fit`` and ``_transform`` therefore build their calculator with
+        the same factory (:meth:`_make_window_calculator`) and each compute
+        the window on their own data, which is what preserves
+        ``fit_transform(X) == fit(X).transform(X)``. Only the transform
+        tolerates a failure — a single row to transform carries no window —
+        and replays the plan without restriction; at ``fit``, a failure
+        raises.
 
         Args:
             data: Frame the window is computed on. Must be the frame BEFORE
@@ -3996,11 +4061,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             ValueError: If a column known at fit time is absent from the data
                 being transformed. The message names the missing columns.
         """
+        # Couples connus du fit, mal placés compris : ils ne sont pas
+        # "nouveaux" au transform, seulement écartés
+        misaligned = getattr(self, '_misaligned_pairs', ())
         # Colonnes du fit, couples indétectables compris : une colonne
         # entièrement NaN au fit reste une colonne attendue au transform
         fit_columns = {
             split_variable_key(key)[1]
-            for key in (*self.detected_frequencies_, *self._undetected_frequencies_)
+            for key in (
+                *self.detected_frequencies_, *self._undetected_frequencies_, *misaligned
+            )
         }
         # Colonnes disparues : erreur nommant les colonnes, jamais un silence
         missing = sorted(
@@ -4015,7 +4085,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
 
         # Redétection sur les données du transform
-        detected = self._detect_frequencies_robustly(X_work)
+        detected = detect_frequency(data=X_work)
 
         # Divergences, couple par couple, sur les seules clés communes
         diverging: List[Tuple[Any, str, str]] = []
@@ -4052,6 +4122,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             for key, freq in detected.items()
             if freq is not None
             and key not in self.detected_frequencies_
+            and key not in misaligned
             and split_variable_key(key)[1] in fit_columns
         }
 
@@ -4067,7 +4138,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         parameter: it is recomputed on the transformed data. Rows falling
         outside it are simply not predicted — nothing is ever blanked — and a
         single aggregated message names how many they are and which entities
-        they belong to.
+        they belong to. An entity — or a time series — with no row at all in
+        the window is left out of that count: the calculator has already named
+        it (no period covered by every column, or no determinable window), and
+        a second message would only restate the same cause.
 
         Args:
             window_calc: Window calculator fitted on the transformed data.
@@ -4079,8 +4153,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         except (ValueError, KeyError, TypeError):
             return
 
-        # Lignes du périmètre laissées hors fenêtre
-        outside = mask.index[~mask.to_numpy(dtype=bool)]
+        # Lignes dans la fenêtre, et entités qui en ont au moins une : les
+        # autres sont déjà nommées par l'avertissement du calculateur
+        inside = pd.Series(mask.to_numpy(dtype=bool), index=mask.index)
+        if isinstance(mask.index, pd.MultiIndex):
+            levels = list(range(mask.index.nlevels - 1))
+            has_window = inside.groupby(
+                level=levels[0] if len(levels) == 1 else levels, sort=False
+            ).transform('any')
+        else:
+            has_window = pd.Series(bool(inside.any()), index=mask.index)
+
+        # Lignes du périmètre laissées hors d'une fenêtre qui existe
+        outside = mask.index[(~inside & has_window).to_numpy(dtype=bool)]
         if len(outside) == 0:
             return
 
@@ -4552,7 +4637,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # PHASE 5' — Rejeu du plan
         # =================================================================
         with self._replay_state(window_calc, tracker, new_frequencies):
-            frames, provenances = self._replay_plan(X_stage)
+            # Recalages du rejeu sous un bloc différé, comme au fit : un
+            # avertissement par cas dégénéré pour tout le rejeu
+            with self._aggregation_constraint.deferred_warnings():
+                frames, provenances = self._replay_plan(X_stage)
             # Avertissements accumulés pendant le rejeu, relevés avant que le
             # contexte ne restaure les accumulateurs du fit
             degraded = list(self._warnings)
@@ -4569,9 +4657,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if unanchored_failures:
             warnings.warn(
                 f"{len(unanchored_failures)} unobserved (entity, column) "
-                f"pair(s) could not be imputed for lack of usable covariates "
-                f"on the target grid; their cells stay NaN and unmarked: "
-                f"{unanchored_failures}",
+                f"pair(s) could not be imputed: no prediction on the target grid "
+                f"(no usable covariate, or the prediction failed), and no "
+                f"interpolation fallback exists without an anchor; their cells "
+                f"stay NaN and unmarked: {unanchored_failures}",
                 UserWarning,
             )
         if notes:
