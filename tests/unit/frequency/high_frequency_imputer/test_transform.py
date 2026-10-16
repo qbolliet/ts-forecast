@@ -7,8 +7,7 @@ and the stacked output (D35, D37, D38, D43), a target coarser than the index
 mutates the fitted state (§12.1) —, the transform on dates after the fit, the
 shared-model replay (§5.8 R6), new entities and pairs unknown to the fit
 (D34, D42), columns without any observation in the transformed data (§12.1,
-§5.10), the coverage of a short entity of the realistic heterogeneous panel,
-the input contract of ``transform`` (``y``, additive transformer, one-row
+§5.10), the input contract of ``transform`` (``y``, additive transformer, one-row
 input, truncated period — D46) and the reserved ``'frequency'`` level name.
 """
 
@@ -26,7 +25,6 @@ from sklearn.preprocessing import FunctionTransformer
 # Objets testés
 from tsforecast.frequency.provenance import ProvenanceType, provenance_statistics
 from tsforecast.frequency.training_set_builder import TrainingSetBuilder
-from tsforecast.utils.frequency import normalize_frequency
 
 # Outils de test partagés
 from tests.support.estimators import SpyEstimator
@@ -1274,77 +1272,6 @@ class TestColumnWithoutAnchorAtTransform:
         assert result.loc['2023', 'a1'].notna().all()
         marks = set(imputer.imputation_provenance_.loc['2023', 'a1'])
         assert len(marks) == 1 and marks.pop().value.startswith('model_on_')
-
-
-@pytest.mark.slow
-class TestShortEntityCoverage:
-    """I7 on the realistic panel — a short entity is never stretched past its coverage.
-
-    ``heterogeneous_coverage_panel``: France and Italie run to 2024-07,
-    Allemagne stops at 2024-04. The imputer is fitted on the data up to
-    2023-12 and transforms the whole panel, so every 2024 row is new.
-    """
-
-    @pytest.fixture(scope='class', params=['interpolate', 'model'])
-    def replay(self, request, _heterogeneous_coverage_panel_session):
-        """Fit up to 2023-12, transform everything: ``(input, output, provenance, imputer)``."""
-        data = _heterogeneous_coverage_panel_session.copy()
-        dates = data.index.get_level_values('date')
-        imputer = fit_quietly(
-            make_imputer(covariate_strategy=request.param, keep_lower_frequencies=False),
-            data[dates <= '2023-12-31'],
-        )
-        output = transform_quietly(imputer, data)
-        return data, output, imputer.imputation_provenance_, imputer
-
-    def test_short_entity_ends_where_its_input_ends(self, replay):
-        """Allemagne's output stops at 2024-04-01, France's goes on to 2024-07-01."""
-        data, output, _provenance, _imputer = replay
-        last_dates = {
-            entity: output.loc[entity].index.max() for entity in ('Allemagne', 'France')
-        }
-        assert last_dates == {
-            'Allemagne': data.loc['Allemagne'].index.max(),
-            'France': pd.Timestamp('2024-07-01'),
-        }
-        assert last_dates['Allemagne'] == pd.Timestamp('2024-04-01')
-
-    def test_no_column_is_filled_past_its_coverage(self, replay):
-        """No cell of Allemagne is filled after the period its column's last observation covers.
-
-        A yearly value dated 2023-01-01 covers 2023 (period-start index); a
-        quarterly one dated 2024-01-01 covers the first quarter of 2024.
-        Beyond, a value would be an extrapolation no provenance announces.
-        """
-        data, output, _provenance, imputer = replay
-        source = data.loc['Allemagne']
-        filled_beyond = {}
-        for column in source.columns:
-            last = source[column].last_valid_index()
-            detected = imputer.detected_frequencies_.get(('Allemagne', column))
-            # Colonne jamais observée ou de fréquence indétectable : rien à couvrir
-            if last is None or detected is None:
-                continue
-            frequency = normalize_frequency(detected, return_format='base')
-            covered_until = pd.Period(last, freq=frequency).end_time
-            beyond = output.loc['Allemagne', column].loc[lambda s: s.index > covered_until]
-            filled_beyond[column] = int(beyond.notna().sum())
-        # Toutes les colonnes observées sont contrôlées, aucune n'est débordée
-        assert len(filled_beyond) == int(source.notna().any().sum())
-        assert set(filled_beyond.values()) == {0}
-
-    def test_every_filled_cell_of_the_short_entity_has_its_provenance(self, replay):
-        """Each filled cell of Allemagne is marked, ``ORIGINAL`` only where the input observed it."""
-        data, output, provenance, _imputer = replay
-        values = output.loc['Allemagne']
-        marks = provenance.loc['Allemagne'].reindex(index=values.index, columns=values.columns)
-        observed = data.loc['Allemagne'].reindex(index=values.index, columns=values.columns).notna()
-
-        # Aucune valeur sans provenance
-        assert not (values.notna() & marks.isna()).any().any()
-        # ORIGINAL réservé aux cellules observées en entrée
-        is_original = marks.apply(lambda column: column == ProvenanceType.ORIGINAL)
-        assert not (is_original & ~observed).any().any()
 
 
 # =============================================================================

@@ -120,6 +120,70 @@ sa période. `inverse_transform` défait la dernière passe et rend **l'index de
 son entrée**, dans son ordre : sans `restore_original_values`, seules les
 cellules `ORIGINAL` y reviennent ; avec, toutes les valeurs observées.
 
+## Dans un pipeline entraîné avec `y`
+
+Entraîné avec `y`, `HighFrequencyImputer` **augmente un jeu d'entraînement** (`X`
+et `y`) ; il n'a pas vocation à transformer des données de test. Un
+`XYPipeline` appelle `fit_transform` sur ses étapes pendant son `fit`, et
+`transform` pendant `predict` / `score` : les deux passes diffèrent.
+
+| Appel | Passe | Ce qui sort |
+|---|---|---|
+| `fit_transform(X, y)` | entraînement | `X` **et** `y` sur la grille cible, lignes ajoutées comprises ; aucune ligne retirée |
+| `transform(X)` / `transform(X, y)` | prédiction | les colonnes de `X` seules, imputées par les modèles figés, **sur les lignes d'entrée** (sortie plate) ; `y` rendu **inchangé** |
+
+`y` est imputé comme une colonne, mais n'est **pas une covariable** des autres
+colonnes par défaut (`target_as_covariate=False`) : une feature imputée à partir
+de la cible en porte le bruit, gonfle les métriques sur l'entraînement et biaise
+le modèle aval, et la passe de prédiction n'a pas de `y` pour alimenter un tel
+modèle. `target_as_covariate=True` rétablit ce rôle ; la passe de prédiction
+lève alors si un modèle de `X` lit `y`.
+
+La passe d'entraînement garde les lignes sans cible : une étape aval peut encore
+décaler `X` vers plusieurs horizons. Les retirer revient à
+[`DropNaNTarget`](../api/xy/DropNaNTarget.md), placée **juste avant
+l'estimateur** :
+
+```python
+pipeline = XYPipeline([
+    ('delays', PublicationDelayTransformer(...)),
+    ('imputer', HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                     keep_lower_frequencies=False)),
+    ('drop', DropNaNTarget()),
+    ('model', HistGradientBoostingRegressor()),
+])
+```
+
+Ajusté **sans** `y`, rien de cela ne s'applique : `transform` rejoue le plan sur
+n'importe quelles données, et `fit_transform(X)` égale `fit(X).transform(X)`.
+
+### Limite : évaluer une cible à plus basse fréquence que la grille
+
+Quand `y` à une fréquence plus basse que `target_frequency` (un PIB trimestriel
+imputé au mois pour multiplier les lignes d'entraînement), le modèle apprend à
+prédire une **valeur mensuelle**. À l'évaluation, `y_test` n'est pas imputé : il
+porte le **total trimestriel** sur la ligne d'ancre, et NaN ailleurs. Après
+`DropNaNTarget`, le score compare donc une prédiction mensuelle à un total
+trimestriel : il s'exécute, mais **son échelle est fausse**.
+
+Montage suggéré : agréger, **en aval** de l'imputeur, les données à la
+fréquence de la cible, par exemple en **trimestres glissants** (sommes sur trois
+mois). Chaque ligne mensuelle porte alors une quantité trimestrielle : la passe
+d'entraînement garde trois fois plus de lignes qu'un jeu trimestriel, et, sur
+les lignes d'ancre du test, la prédiction d'un trimestre glissant se compare
+directement au total observé. Deux points de vigilance :
+
+- **côté `y`**, l'agrégation n'a lieu qu'à la passe d'entraînement (le `y`
+  imputé au mois devient des trimestres glissants) ; à la passe de prédiction,
+  `y_test` reste tel qu'observé. Un transformateur de fenêtres glissantes qui ne
+  traite que `X` ne suffit donc pas : il faut une étape XY qui suive la même
+  convention que l'imputeur (`fit_transform` agrège `X` et `y`, `transform`
+  agrège `X` seul) ;
+- **l'alignement de la fenêtre** suit la position des ancres : une fenêtre
+  **passée** (`[t-2, t]`) pour des ancres de fin de période (`ME`, `QE`), une
+  fenêtre **future** (`[t, t+2]`) pour des ancres de début de période (`MS`,
+  `QS`), sans quoi la somme ne couvre pas le trimestre observé.
+
 ## Entités et couples inconnus du `fit`
 
 Au `transform`, `impute_unobserved_entities` gouverne aussi les couples

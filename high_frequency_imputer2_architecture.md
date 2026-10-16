@@ -2374,6 +2374,9 @@ class HighFrequencyImputer2(XYPanelTimeSeriesTransformer):
         impute_intermediate_frequencies: Literal[False, 'covariates_only', True] = False,
         impute_unobserved_entities: bool = False,          # §5.10, D33
 
+        # --- Rôle de y (D47) ---
+        target_as_covariate: bool = False,
+
         # --- Ordre d'imputation (§8) ---
         fit_predict_order: Literal['frequency', 'cv'] = 'frequency',
         cv: Union[int, BaseCrossValidator, Iterable, None] = None,
@@ -2568,6 +2571,15 @@ Arbitrages de l'auteur sur les anomalies relevées par la campagne de tests du `
 | **D45** | `provenance_statistics_` est un attribut **par passe**, comme `imputation_provenance_` : réécrit par chaque `transform`, sur le niveau cible de sa sortie ; l'état d'une passe (matrice, statistiques, instantané d'entrée) est publié **d'un seul tenant, en fin de passe** | les statistiques décrivaient le `fit` alors que la docstring et `tracking.imputation_metrics` annonçaient la dernière passe (ANO-FREQ-077) ; et un `transform` refusé avait déjà écrasé l'instantané lu par l'inversion de la passe précédente (ANO-FREQ-078) |
 | **D46** | une période observée que la grille ne porte qu'en partie (D25) reste non recalée, et un **avertissement agrégé unique** par passe recense ces périodes, colonne par colonne | son total observé n'est plus déductible de la sortie — au plus fort, un `transform` d'une seule ligne rend 6.67 là où `q1` valait 20 — et cette perte était silencieuse |
 
+Arbitrages de l'auteur sur les anomalies relevées par les tests d'intégration (prompt F13,
+`tests/integration/frequency/`, ANO-FREQ-080 à 082) : l'imputeur sert à **augmenter un jeu
+d'entraînement** (`X` et `y`), jamais à transformer des données de test.
+
+| Code | Décision | Motif |
+|---|---|---|
+| **D47** | ajusté **avec `y`**, l'imputeur a deux passes : `fit_transform(X, y)` est la **passe d'entraînement** (`X` et `y` sur la grille cible, lignes ajoutées comprises, aucune retirée) ; `transform(X, y=None)` est la **passe de prédiction** : seules les colonnes de `X` sont imputées, par les modèles figés, sur les **lignes d'entrée** (sortie plate quel que soit `keep_lower_frequencies`), et `y`, s'il est passé (`score`), est rendu **inchangé**. `y` est imputé mais n'est **pas covariable** des autres colonnes par défaut : `target_as_covariate: bool = False` ; sous `True`, la passe de prédiction **lève** dès qu'un modèle d'une colonne de `X` lit `y`. Sans `y` au fit, rien ne change (I1, I7) | un pipeline ajusté doit prédire à partir de `X` seul (I9) : `XYPipeline.predict` appelle `transform` sans `y`, et les scorers textuels aussi (ANO-FREQ-080). Une feature imputée à partir de la cible en porte le bruit : mesuré sur une simulation (`x` trimestriel, `y = 2x + 0,5 m1 + bruit`), l'erreur d'imputation baisse mais le R² d'entraînement dépasse celui de l'oracle, le coefficient aval se biaise (2,76 au lieu de 2 sous bruit fort) et l'erreur de test ne s'améliore pas (ANO-FREQ-081). sklearn admet que `fit_transform` diffère de `fit().transform()` (`TargetEncoder`) ; un pipeline appelle l'un au `fit`, l'autre au `predict` / `score` |
+| **D48** | la passe d'entraînement **ne retire aucune ligne**, même sans cible ; leur retrait revient à une étape XY dédiée, `tsforecast.xy.DropNaNTarget`, placée juste avant l'estimateur : elle retire les lignes sans cible au `fit` et au `score`, aucune au `predict` | en aval de l'imputation, un décalage de `X` vers plusieurs horizons lit encore ces lignes ; les complétions de période au-delà de la fin d'un pli d'entraînement ne portent que de l'information de ce pli (mesuré : perturber le pli de test ne change rien à l'entraînement). Un pli de test qui coupe une période ne gagne plus de ligne : la passe de prédiction reste sur les lignes d'entrée (ANO-FREQ-082) |
+
 ---
 
 ## 15 — Prérequis et travaux annexes
@@ -2634,7 +2646,7 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 
 | Code | Invariant | Détail |
 |---|---|---|
-| **I1** | symétrie | `fit_transform(X)` ≡ `fit(X).transform(X)` : égalité stricte des valeurs, des provenances et des attributs de sortie |
+| **I1** | symétrie | `fit_transform(X)` ≡ `fit(X).transform(X)` : égalité stricte des valeurs, des provenances et des attributs de sortie — **sans `y` au fit** ; ajusté avec `y`, `transform` est la passe de prédiction (D47, I22) |
 | **I2** | invariant NaN (§3) | par étape et par colonne, l'ensemble des dates renseignées dans `X_pred` contient l'image de celui de `X_train` (formulation D14) ; mesuré par estimateur espion, sous les trois stratégies. C'est le test qui échoue sur `hfi` aujourd'hui |
 | **I3** | invariance à l'ordre des colonnes | permuter les colonnes d'entrée ne change ni les valeurs ni les provenances, sous les trois stratégies (sous `'model'`, grâce au tie-break alphabétique §8.1) |
 | **I4** | additivité | sous `aggregation_constraint='sum'`, chaque colonne imputée somme au total observé de chaque période **complète** — imputations, interpolations et covariables portées comprises ; et la ligne d'ancre ne porte plus le total (§11.2) |
@@ -2655,6 +2667,7 @@ temporelle** ET sur le **panel** (y compris l'entité sans feature, §15.1).
 | **I19** | fusion des progressions de panel (D31) | sur `PANEL-F` avec `target_frequency={FR: 'M', DE: 'Q', IT: 'M'}` et `impute_intermediate_frequencies=True`, `frequency_progression_` vaut `[{FR: 'Q', DE: 'Q', IT: 'Q'}, {FR: 'M', IT: 'M'}]` ; **aucune** étape mensuelle ne porte `DE` dans ses entités, **aucune** cellule de `DE` n'est écrite à la fréquence `M`, et `DE` contribue pourtant au `y_train` de l'étape `M` (R1) |
 | **I20** | cellules coïncidentes (§5.9, D32) | sur `TS` sous `True`, à l'étape `M` : `len(y_train)` de `a1` vaut **12** sous `aggregation_constraint='sum'` et **15** sous `None` ; sous `'sum'` la somme des 4 imputations trimestrielles de chaque année **égale** l'ancre (à `1e-9`), sous `None` elle en **diffère** ; sous `None` l'index du jeu d'entraînement porte un niveau de fréquence et les deux cellules du `2021-12-31` (`('Y', …)` et `('Q', …)`) coexistent, avec des diviseurs `12` et `3` ; sous `'sum'` l'index est **inchangé** par rapport à aujourd'hui. Sous `False` et `'covariates_only'`, `aggregation_constraint` n'a **aucun** effet sur `y_train` |
 | **I21** | entités sans ancre (§5.10, D33) | sur `PANEL-F` dont `v` est effacée pour `IT` : sous `impute_unobserved_entities=False`, les 36 cellules d'`IT` restent NaN et **non marquées** (§5.10), et aucune étape de plan ne porte `IT` ; sous `True`, les 36 sont renseignées, portent **toutes** `MODEL_UNANCHORED`, l'étape de plan correspondante a `source_frequency is None` et `scale_factor == 1.0`, elle **partage l'objet modèle** (`is`) des étapes `(v, Y)` et `(v, Q)` de la même étape de fréquence, `IT` ne contribue **aucune** ligne à `y_train` (R1 inchangée), et **aucun** total annuel n'est imposé à `IT`. La progression est **identique** dans les deux cas : un couple sans fréquence détectée n'entre pas dans `F` |
+| **I22** | passes avec `y` (D47, D48) | ajusté avec `y` : aucune étape d'une colonne de `X` ne lit `y` sous `target_as_covariate=False` ; la passe de prédiction rend `X` sur ses lignes d'entrée, identique sur les données du fit à la passe d'entraînement, indépendant des valeurs de `y` passées, et rend `y` inchangé ; la passe d'entraînement ne retire aucune ligne |
 
 **État au lot L12** : les vingt et un invariants sont couverts par
 `tests/frequency/test_high_frequency_imputer2.py`. I1 (`TestTransformSymmetry`), I7

@@ -1365,7 +1365,8 @@ class CovariateMaterializer:
             cap_interpolation: Whether an entity whose applicable way is
                 ``'interpolate'`` is served its raw anchors instead — the
                 per-entity cap of :meth:`stage_frame`, which fabricates no
-                interpolated value.
+                interpolated value — and whether a mirror-served entity keeps
+                its raw anchors where the mirror holds nothing.
 
         Returns:
             Tuple ``(values, origins, production_freq)``, three Series indexed
@@ -1425,6 +1426,17 @@ class CovariateMaterializer:
                 column, entity_way, source_block[column], dates, f_col, f_stage,
                 mirror_block,
             )
+            # Vue d'étape servie par le miroir : il recouvre les observations,
+            # il ne les remplace pas. Là où le modèle n'a rien produit — hors de
+            # la fenêtre d'imputation notamment — les ancres brutes restent, aucune
+            # observation d'entrée est détruite
+            if cap_interpolation and entity_way in _MODEL_WAYS:
+                anchors = source_block[column].dropna().reindex(dates)
+                keep_anchor = produced.isna() & anchors.notna()
+                produced = produced.where(~keep_anchor, anchors)
+                produced_origins = produced_origins.where(
+                    ~keep_anchor, _WAY_ORIGIN['raw_anchors']
+                )
 
             # Report du bloc sur les lignes de l'entité dans la grille
             filled = produced.notna().to_numpy()
@@ -1762,7 +1774,10 @@ class CovariateMaterializer:
         left at its raw anchors, while an entity observing the column at least
         as finely as the grid keeps its identity or exact aggregation, and an
         entity served by the mirror (ranks 2 and 3, under
-        ``covariate_strategy='model'`` only) keeps it.
+        ``covariate_strategy='model'`` only) keeps it. The mirror **overlays**
+        the raw anchors rather than replacing them: wherever the model produced
+        nothing — outside the imputation window above all — the observation
+        stays, as the cap leaves it to the other ways.
 
         Nothing is written to the three stores: the frame is a view.
 

@@ -44,6 +44,15 @@ implémenter `_fit` / `_transform` / `_inverse_transform` avec la convention de
 retour `(X_t, y_t)` si `y` est fourni, `X_t` sinon. **`fit_transform` doit être
 implémenté** pour que `y` soit correctement passé.
 
+## Retirer les lignes sans cible
+
+Une étape qui augmente le jeu d'entraînement (`HighFrequencyImputer`, des
+retards vers plusieurs horizons...) laisse volontairement des lignes sans cible.
+[`DropNaNTarget`](../api/xy/DropNaNTarget.md), placée juste avant l'estimateur,
+les retire au `fit` et au `score` (quand `y` traverse le pipeline) et n'en
+retire aucune au `predict`. Un scorer textuel compare les prédictions au `y`
+brut, hors du pipeline : il ne peut pas recevoir une cible de test NaN.
+
 ## Compatibilité
 
 `XYPipeline` reste compatible `GridSearchCV`, `cross_validate`, le *metadata
@@ -54,5 +63,6 @@ s'applique en ordre inverse et gère `X` comme `y`.
 
 - Tutoriel : [Pipeline XY](../tutorials/xy_pipeline.md)
 - API : [XYPipeline](../api/xy/XYPipeline.md),
-  [XYTransformerMixin](../api/xy/XYTransformerMixin.md)
+  [XYTransformerMixin](../api/xy/XYTransformerMixin.md),
+  [DropNaNTarget](../api/xy/DropNaNTarget.md)
 - Classes de base : [Classes de base des transformateurs](base_transformers.md)

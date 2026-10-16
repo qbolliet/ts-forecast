@@ -7,37 +7,27 @@ NaN target, no low-frequency column (empty plan), panel of a single entity —;
 the invariance of the fit to the index perturbations of
 ``tests/support/perturbations.py`` on ``PANEL-X`` (reversed entities, special
 column names, non-standard index names, three-level index; shuffled rows are
-refused, §12.5); the start-of-period position (§10.2), including the extra row
-an ``MS`` grid was suspected to carry; and the realistic datasets of notebook 3
-under each ``covariate_strategy`` (no exception, observed cells, aggregated
-warnings, additivity I4).
+refused, §12.5); and the start-of-period position (§10.2), including the extra
+row an ``MS`` grid was suspected to carry. The realistic datasets of notebook 3
+are integration tests: ``tests/integration/frequency/test_hfi_on_realistic_dataset.py``.
 
 The duplicated index and the unsorted time series are pinned in
 ``test_fit_phases.py::TestPhaseFiveEdgeCases``.
 """
 
 # Modules de base
-import re
 import warnings
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List
 
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.linear_model import LinearRegression
 
 # Objets testés
 from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
-from tsforecast.utils.frequency import normalize_frequency
 
 # Outils de test partagés
-from tests.support.datasets import (
-    HETEROGENEOUS_PANEL_COUNTRIES,
-    build_mixed_frequency_panel,
-    build_mixed_frequency_timeseries,
-    build_panel_reference,
-)
+from tests.support.datasets import build_panel_reference
 from tests.support.perturbations import (
     drop_entity,
     reverse_entities,
@@ -72,43 +62,6 @@ def _caught_messages(call: Callable[[], object]) -> List[str]:
         warnings.simplefilter('always')
         call()
     return [str(item.message) for item in caught]
-
-
-# Famille d'un message : son préambule, nombres effacés
-def _family(message: str) -> str:
-    """Reduce a warning message to its family.
-
-    The family is the text before the first colon, every number replaced by
-    ``#``: two messages of one family differ only by their counts and the
-    names they list.
-
-    Args:
-        message: Warning message.
-
-    Returns:
-        The family label.
-
-    Examples:
-        >>> _family("3 imputation step(s) degraded during the fit:\\n  - 'a1'")
-        '# imputation step(s) degraded during the fit'
-    """
-    return re.sub(r'\d+', '#', message.split(':')[0])
-
-
-# Bloc d'une entité, indexé par la seule date
-def _entity_frame(frame: pd.DataFrame, entity: tuple) -> pd.DataFrame:
-    """Return the rows of one entity, or the frame itself for a time series.
-
-    Args:
-        frame: Time series or one-entity-level panel frame.
-        entity: Entity key tuple, ``()`` for a time series.
-
-    Returns:
-        Rows of the entity, indexed by date.
-    """
-    if not entity:
-        return frame
-    return frame.xs(entity[0], level=0)
 
 
 # =============================================================================
@@ -684,192 +637,3 @@ class TestPeriodPositions:
         assert {(s.var_name, s.entities) for s in imputer.imputation_plan_ if s.var_name == 'v'} == {
             ('v', (FR,)),
         }
-
-
-# =============================================================================
-# Jeux réalistes du notebook 3, sous chaque stratégie (§4)
-# =============================================================================
-# Estimateur de chaque stratégie : 'tolerate_nan' exige un estimateur tolérant
-_STRATEGY_ESTIMATORS: Dict[str, Callable[[], object]] = {
-    'interpolate': LinearRegression,
-    'model': LinearRegression,
-    'tolerate_nan': lambda: HistGradientBoostingRegressor(max_iter=20, min_samples_leaf=2),
-}
-
-# Jeux réalistes : index réellement irrégulier, couvertures hétérogènes
-_REALISTIC_BUILDERS: Dict[str, Callable[[], pd.DataFrame]] = {
-    'irregular_index_timeseries': lambda: build_mixed_frequency_timeseries(
-        annual_start_date='2015-01-01'
-    ),
-    'heterogeneous_coverage_panel': lambda: build_mixed_frequency_panel(
-        countries=HETEROGENEOUS_PANEL_COUNTRIES
-    ),
-}
-
-# Combinaisons (jeu, stratégie)
-_REALISTIC_CASES: List[Tuple[str, str]] = [
-    (dataset, strategy)
-    for dataset in _REALISTIC_BUILDERS
-    for strategy in _STRATEGY_ESTIMATORS
-]
-
-
-@pytest.fixture(scope='module')
-def realistic_fits() -> Callable[[str, str], dict]:
-    """Fit and replay each realistic dataset under each strategy, once per module.
-
-    Returns:
-        Callable ``(dataset, strategy) -> record``, the record holding the
-        data, the fitted imputer, the replayed values and provenance, and the
-        warning messages of the fit and of the transform.
-    """
-    cache: Dict[Tuple[str, str], dict] = {}
-
-    def _get(dataset: str, strategy: str) -> dict:
-        key = (dataset, strategy)
-        if key not in cache:
-            data = _REALISTIC_BUILDERS[dataset]()
-            imputer = make_imputer(
-                estimator=_STRATEGY_ESTIMATORS[strategy](),
-                covariate_strategy=strategy,
-                keep_lower_frequencies=False,
-            )
-            fit_messages = _caught_messages(lambda: imputer.fit(data))
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter('always')
-                values = imputer.transform(data)
-            cache[key] = {
-                'data': data,
-                'imputer': imputer,
-                'values': values,
-                'provenance': imputer.imputation_provenance_.copy(),
-                'fit_messages': fit_messages,
-                'transform_messages': [str(item.message) for item in caught],
-            }
-        return cache[key]
-
-    return _get
-
-
-# Couples (entité, colonne) imputables, sous la forme des clés d'entité
-def _imputable_pairs(imputer: HighFrequencyImputer) -> set:
-    """Return the imputable pairs as ``(entity tuple, column)``.
-
-    Args:
-        imputer: Fitted imputer.
-
-    Returns:
-        Set of pairs, the entity being ``()`` on a time series.
-    """
-    pairs = set()
-    for key in imputer.variable_categories_['impute']:
-        if isinstance(key, tuple):
-            pairs.add((tuple(key[:-1]), key[-1]))
-        else:
-            pairs.add(((), key))
-    return pairs
-
-
-# Écarts des périodes complètes à leur total observé
-def _period_gaps(record: dict) -> List[tuple]:
-    """List the complete periods whose imputed sub-periods miss their total.
-
-    A period is complete when the output grid holds all its sub-periods and
-    every one of them was written by the step (provenance other than
-    ``ORIGINAL``). Its sub-periods must then sum to the observed total.
-
-    Args:
-        record: One record of :func:`realistic_fits`.
-
-    Returns:
-        ``(column, entity, period, gap)`` for every complete period whose
-        gap exceeds ``1e-9``.
-    """
-    imputer = record['imputer']
-    gaps = []
-    for step in imputer.imputation_plan_:
-        if step.unanchored:
-            continue
-        base = normalize_frequency(step.source_frequency, return_format='base')
-        for entity in (step.entities or [()]):
-            column = step.var_name
-            observed = _entity_frame(record['data'], entity)[column].dropna()
-            values = _entity_frame(record['values'], entity)[column]
-            marks = _entity_frame(record['provenance'], entity)[column]
-            written = marks.notna() & (marks.astype(str) != 'original')
-            months = values.index.to_period('M')
-            for date, total in observed.items():
-                period = pd.Period(date, freq=base)
-                expected = (period.end_time.to_period('M') - period.start_time.to_period('M')).n + 1
-                in_period = (months >= period.start_time.to_period('M')) & (
-                    months <= period.end_time.to_period('M')
-                )
-                if in_period.sum() != expected or not written[in_period].all():
-                    continue
-                gap = abs(float(values[in_period].sum()) - float(total))
-                if gap > 1e-9:
-                    gaps.append((column, entity, str(period), gap))
-    return gaps
-
-
-@pytest.mark.slow
-class TestRealisticDatasets:
-    """Jeux du notebook 3 sous les trois stratégies : propriétés, à défaut de valeurs d'or."""
-
-    @pytest.mark.parametrize('dataset, strategy', _REALISTIC_CASES)
-    def test_observed_cells_of_non_imputed_pairs_stay_original(
-        self, realistic_fits, dataset, strategy
-    ):
-        """Aucune cellule observée d'un couple non imputé n'est marquée imputée ni modifiée.
-
-        Seules les ancres des couples imputés sont réécrites, par construction
-        (§11.2 : la ligne d'ancre porte la valeur et la provenance de la
-        sous-période qui l'occupe). Toute autre cellule observée reste
-        ``ORIGINAL``, avec sa valeur d'entrée ; aucune ne reste sans marque.
-        """
-        record = realistic_fits(dataset, strategy)
-        data, provenance, values = record['data'], record['provenance'], record['values']
-        imputable = _imputable_pairs(record['imputer'])
-
-        offending = []
-        for column in data.columns:
-            for key in data.index[data[column].notna().to_numpy()]:
-                entity = tuple(key[:-1]) if isinstance(key, tuple) else ()
-                if (entity, column) in imputable:
-                    continue
-                mark = provenance.at[key, column]
-                if str(mark) != 'original' or values.at[key, column] != data.at[key, column]:
-                    offending.append((key, column, mark))
-
-        assert offending == []
-
-    @pytest.mark.parametrize('dataset, strategy', _REALISTIC_CASES)
-    def test_one_warning_per_family_at_most(self, realistic_fits, dataset, strategy):
-        """Un avertissement par famille au plus, au fit comme au transform (§12.5)."""
-        record = realistic_fits(dataset, strategy)
-
-        repeated = {
-            phase: [
-                family for family, count in pd.Series(
-                    [_family(message) for message in record[f'{phase}_messages']],
-                    dtype=object,
-                ).value_counts().items()
-                if count > 1
-            ]
-            for phase in ('fit', 'transform')
-        }
-
-        assert repeated == {'fit': [], 'transform': []}
-
-    @pytest.mark.parametrize('dataset, strategy', _REALISTIC_CASES)
-    def test_complete_periods_sum_to_their_totals(self, realistic_fits, dataset, strategy):
-        """I4 — sous 'sum', chaque période complète somme à son total observé (1e-9).
-
-        Vrai des prédictions comme des replis d'interpolation, recalés de
-        même ; une période que la grille ou la fenêtre tronque n'est pas
-        contrainte (§11.1) et sort du contrôle — les ancres annuelles
-        isolées d'avant la grille mensuelle, notamment.
-        """
-        record = realistic_fits(dataset, strategy)
-
-        assert _period_gaps(record) == []

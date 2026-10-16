@@ -4850,3 +4850,168 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   d'une colonne plus fine que la ligne. Celle-ci portait auparavant l'`ORIGINAL` de la cellule d'entrée de même
   date : une somme trimestrielle de `m1` (303) que l'inversion sans restauration rendait pour l'observation
   mensuelle (102). Le §6.4 prescrivait déjà `AGGREGATED`.
+
+### ANO-FREQ-080 — Imputeur ajusté avec `y` : `transform(X)` sans `y` lève, `XYPipeline.predict` et les scorers textuels échouent
+- **Type** : [SPEC] code ≠ spec (I9 : conformité `Pipeline`)
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._check_transform_frequencies`
+  (colonne de `y` fusionnée dans le plan au `fit` par `_fit`, exigée au `transform`)
+- **Sévérité** : majeure
+- **Observé** : au `fit(X, y)`, `y` est fusionnée dans la frame de travail sous son nom et entre dans le plan figé. Un
+  `transform(X)` sans `y` lève alors `ValueError: transform is missing 1 column(s) seen at fit time:
+  ['taux_chomage']. Every column of the fit must be present, even entirely empty: it is part of the frozen plan.`
+  Dans un `XYPipeline([PublicationDelayTransformer, HighFrequencyImputer, estimateur])`, `predict(X)` passe `y=None` à
+  chaque étape : un pipeline ajusté ne sait donc pas prédire. Tout scorer textuel (`scoring='neg_mean_absolute_error'`)
+  appelle `predict(X)` et échoue de même ; seul `scoring=None` passe, parce que `XYPipeline.score(X, y)` transporte `y`.
+- **Attendu** : I9 promet la compatibilité `Pipeline` / `GridSearchCV` ; un pipeline sklearn ajusté prédit à partir de
+  `X` seul. Au `transform` sans `y`, la colonne de `y` devrait être traitée comme absente sans erreur (imputation des
+  seules colonnes de `X`). La correction croise ANO-FREQ-081 : si `y` reste une covariable des colonnes de `X`, son
+  absence au `predict` change les features (rupture de l'invariant I11 entre `fit` et `transform`).
+- **Reproduction** :
+  ```python
+  data = build_mixed_frequency_timeseries(annual_start_date='2015-01-01')
+  data = data[data['taux_chomage'].notna()]
+  X, y = data.drop(columns='taux_chomage'), data['taux_chomage']
+  pipeline = XYPipeline([('imputer', HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                                          keep_lower_frequencies=False)),
+                         ('model', SpyEstimator())]).fit(X.iloc[:-6], y.iloc[:-6])
+  pipeline.predict(X.iloc[-6:])   # ValueError: transform is missing 1 column(s) seen at fit time: ['taux_chomage']
+  ```
+- **Test** : `tests/integration/frequency/test_pipelines.py::TestPredictWithoutTarget` (le `xfail` est retiré) ;
+  `tests/unit/frequency/high_frequency_imputer/test_xy_passes.py::TestPredictionPass`
+- **Statut** : corrigé (2026-10-15) — arbitrage de l'auteur : l'imputeur augmente un jeu d'entraînement (`X` et
+  `y`) et n'a pas vocation à transformer des données de test ; conception arrêtée avec ANO-FREQ-081 et 082
+- **Correction** : D47 (spec §14, I22). Ajusté avec `y`, `transform(X, y=None)` est la **passe de prédiction** : la
+  colonne cible est absente du jeu de travail (`_check_transform_frequencies(optional_columns=...)`), ses étapes ne
+  sont pas rejouées (`_replay_plan(skip_columns=...)`), les colonnes de `X` sont imputées par les modèles figés et
+  rendues sur les lignes d'entrée, sortie plate ; `y`, s'il est passé, revient inchangé. `fit_transform(X, y)`,
+  surchargé, reste la **passe d'entraînement** (rejeu complet, `y` compris). `XYPipeline.predict(X)` et les scorers
+  textuels fonctionnent. Hors du §4.3 de la campagne : modification de `tsforecast/` demandée explicitement par
+  l'auteur.
+### ANO-FREQ-081 — `y` covariable de l'imputation de `X` : la cible du pli de test alimente les features imputées
+- **Type** : [SPEC] à arbitrer (D15 appliquée hors de son cas d'usage)
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` / `_transform`
+  (fusion de `y` dans la frame de travail, puis sélection des covariables)
+- **Sévérité** : à arbitrer
+- **Observé** : D15 fait de `y` « une colonne comme une autre ». Au `fit(X, y)`, `y` devient donc une covariable des
+  modèles qui imputent les colonnes basse fréquence de `X` : sur la série réaliste, `taux_chomage` figure dans les
+  `feature_cols` des deux étapes (`pib_trimestriel`, `balance_commerciale_annuelle`). Dans un `XYPipeline` évalué par
+  `cross_validate(scoring=None)`, le pli de test est transformé avec `y_test` : les features imputées du pli de test
+  dépendent de sa cible. Multiplier `y_test` par 10 change le `X_test` imputé.
+- **Attendu** : à arbitrer. Pour le cas d'usage de D15 (désagréger une cible basse fréquence `y` à l'aide de `X`), `y`
+  est la colonne imputée et son rôle de covariable des autres colonnes est accessoire. Dans un pipeline de prévision,
+  la cible ne devrait pas entrer dans les features : sinon le score d'un pli mesure un modèle qui a vu sa cible, et la
+  prédiction sans `y` est impossible (ANO-FREQ-080). Pistes : exclure `y` des `feature_cols` des autres colonnes ;
+  ou un paramètre qui choisit le rôle de `y`.
+- **Reproduction** :
+  ```python
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                 keep_lower_frequencies=False).fit(X.iloc[:-6], y.iloc[:-6])
+  [step.feature_cols for step in imputer.imputation_plan_]      # 'taux_chomage' dans chaque étape
+  a, _ = imputer.transform(X.iloc[-6:], y.iloc[-6:])
+  b, _ = imputer.transform(X.iloc[-6:], 10 * y.iloc[-6:])
+  a.equals(b)                                                    # False
+  ```
+- **Test** : `tests/integration/frequency/test_pipelines.py::TestTargetRole` ;
+  `tests/unit/frequency/high_frequency_imputer/test_xy_passes.py::TestTargetAsCovariate`,
+  `::TestPredictionPass::test_imputed_x_ignores_the_target`
+- **Statut** : corrigé (2026-10-15) — arbitrage de l'auteur, après une simulation : avec `y` covariable, l'erreur
+  d'imputation de `x` baisse (0,20 contre 0,77) mais le R² d'entraînement dépasse celui de l'oracle (0,99 contre 0,97),
+  le coefficient aval se biaise sous bruit fort (2,76 au lieu de 2) et l'erreur de test ne s'améliore pas
+  (2,18 contre 2,00)
+- **Correction** : D47. Nouveau paramètre `target_as_covariate: bool = False` : `y` est imputé à partir de `X`
+  mais exclu des covariables candidates des autres colonnes (`_fit_variable`). Sous `True`, l'ancien comportement
+  revient et la passe de prédiction lève (`_check_prediction_pass_replayable`) dès qu'un modèle d'une colonne de `X`
+  lit `y`, en nommant les colonnes concernées. La passe de prédiction ne lit jamais `y` : le `X` imputé d'un pli de
+  test ne dépend plus de sa cible.
+### ANO-FREQ-082 — Pli d'entraînement ou de test qui coupe une période : la grille de l'imputeur la complète
+- **Type** : [CODE] à arbitrer (interaction imputeur × validation croisée)
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
+  (sortie = index du masque d'imputation, grille complète par période, D38 / D43)
+- **Sévérité** : à arbitrer
+- **Observé** : la sortie de l'imputeur court jusqu'à la fin de la dernière période observée. Dans un `XYPipeline`
+  évalué par `cross_validate` + `TSOutOfSampleSplit(n_splits=3, test_size=6)` sur la série réaliste :
+  (1) le pli d'entraînement qui s'arrête en 2023-06 porte l'ancre annuelle 2023-01-01, et l'estimateur final reçoit
+  72 lignes au lieu de 66, de 2023-07 à 2023-12, soit des dates du pli de test, avec une cible NaN et des valeurs
+  tirées du seul pli d'entraînement. Aucune information du pli de test ne fuit : perturber le pli de test ne change
+  rien à l'entraînement. Mais un estimateur qui refuse les NaN de `y` échoue au `fit`.
+  (2) Avec `test_size=7`, un pli de test coupe un trimestre : l'imputeur ajoute les mois manquants, leur cible est
+  NaN, et `score` lève `ValueError: Input contains NaN` (`r2_score`).
+- **Attendu** : à arbitrer. La complétion de période est voulue en usage autonome (D38 : grille par période).
+  En mode XY, quand l'imputeur reçoit `y`, deux options : borner la sortie à l'index de `y` (les lignes ajoutées
+  n'ont aucune cible), ou documenter que l'estimateur final et le scorer doivent tolérer ces lignes.
+- **Reproduction** :
+  ```python
+  data = build_mixed_frequency_timeseries(annual_start_date='2015-01-01')
+  data = data[data['taux_chomage'].notna()]
+  X, y = data.drop(columns='taux_chomage'), data['taux_chomage']
+  pipeline = XYPipeline([('imputer', HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                                          keep_lower_frequencies=False)),
+                         ('model', SpyEstimator())])
+  cross_validate(pipeline, X, y, cv=TSOutOfSampleSplit(n_splits=3, test_size=7))   # ValueError: Input contains NaN
+  ```
+- **Test** : `tests/integration/frequency/test_pipelines.py::TestNoLeakage::test_test_fold_cutting_a_period_is_scored`,
+  `::TestFullChainWithDropNaNTarget` ; `tests/unit/xy/test_transformers.py`
+- **Statut** : corrigé (2026-10-15) — arbitrage de l'auteur : ne retirer aucune ligne dans l'imputeur (un décalage
+  aval vers plusieurs horizons lit encore les lignes sans cible)
+- **Correction** : D48. (2) La passe de prédiction reste sur les lignes d'entrée : un pli de test qui coupe une
+  période ne gagne plus de ligne, `score` aboutit. (1) La passe d'entraînement garde ses lignes de complétion, qui
+  ne portent que de l'information du pli d'entraînement (vérifié par perturbation du pli de test) ; leur retrait
+  revient à la nouvelle étape `tsforecast.xy.DropNaNTarget`, placée juste avant l'estimateur, qui retire les lignes
+  sans cible au `fit` et au `score` et aucune au `predict`. Limite sklearn documentée : un scorer textuel compare
+  les prédictions au `y` de test brut, hors du pipeline ; une cible de test NaN ne peut y être scorée.
+### ANO-FREQ-083 — Sous `covariate_strategy='model'`, les ancres hors fenêtre des couples imputés sont effacées
+- **Type** : [SPEC] code ≠ spec (I7 : « ne détruit jamais une observation d'entrée »)
+- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer.stage_frame` (voie miroir,
+  rangs 2-3, propre à `'model'`), lue par `HighFrequencyImputer._replay_plan`
+- **Sévérité** : majeure
+- **Observé** : sur `irregular_index_timeseries` (fenêtre d'imputation 2019-01 → 2024-06, faute de
+  `production_industrielle` avant 2019), les observations de `pib_trimestriel` (2018-01, 04, 07, 10, 2024-01, 04) et
+  de `balance_commerciale_annuelle` (2015-2018) situées hors de la fenêtre sortent **NaN et sans marque**
+  sous `'model'`, quelle que soit la modalité de `impute_intermediate_frequencies`. Sous `'interpolate'` et
+  `'tolerate_nan'`, les mêmes cellules gardent leur valeur et la marque `ORIGINAL`. Même chose sur
+  `heterogeneous_coverage_panel`. Seule l'inversion avec `restore_original_values=True` les rend. Cause : sous
+  `'model'`, la frame d'étape sert la colonne imputée depuis le miroir des cellules produites (rang 2-3). Ce miroir
+  est vide hors fenêtre et ne retombe pas sur les ancres brutes, alors que la voie `'interpolate'` plafonnée les garde.
+- **Attendu** : I7, et cohérence entre stratégies : la stratégie de covariables ne change rien hors de la fenêtre
+  d'imputation (§7.2 : les lignes hors fenêtre gardent leurs valeurs d'entrée). Les ancres hors fenêtre restent
+  intactes et `ORIGINAL`, comme sous `'interpolate'`.
+- **Reproduction** :
+  ```python
+  data = build_mixed_frequency_timeseries(annual_start_date='2015-01-01')
+  for strategy in ('interpolate', 'model'):
+      imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                     covariate_strategy=strategy, keep_lower_frequencies=False)
+      print(strategy, imputer.fit_transform(data).loc['2018-01-01', 'pib_trimestriel'])
+  # interpolate 2500.0 ; model nan   (observé : 2500.0)
+  ```
+- **Test** : `tests/integration/frequency/test_hfi_on_realistic_dataset.py::TestResidualNaN::test_input_rows_outside_the_window_are_left_as_is`
+  (les 18 cellules, `xfail` retiré) ; `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFrameMirror::test_coarser_production_never_lands_raw_on_a_finer_grid`
+  (assertion resserrée sur son intention : aucune production trimestrielle sur la grille mensuelle, l'observation
+  annuelle 2021 restant à sa date)
+- **Statut** : corrigé (2026-10-15) — demande de l'auteur : traiter l'anomalie de la manière la plus logique
+- **Correction** : `CovariateMaterializer._produce_column`, dans la seule vue d'étape (`cap_interpolation=True`,
+  chemin de `stage_frame`) : pour une entité servie par le miroir (rangs 2-3), le miroir **recouvre** les ancres
+  brutes au lieu de les remplacer ; là où le modèle n'a rien produit, hors fenêtre notamment, l'observation reste.
+  C'est la règle que le plafonnement appliquait déjà aux autres voies, et la docstring de `stage_frame` (« les
+  valeurs d'entrée, … et le miroir »). `materialize` (`X_train` / `X_pred`) n'est pas touché : modèles, voies et
+  I11 inchangés. Les ancres hors fenêtre sortent avec leur valeur et la marque `ORIGINAL`, sous les trois
+  stratégies.
+### ANO-FREQ-084 — Notebook 5 : la cellule 33 lit `_check_transform_frequencies` comme un dict
+- **Type** : [DOC] notebook ≠ code
+- **Composant** : `notebooks/5 - QB - HighFrequencyImputer pas a pas.ipynb` (cellule 33), face à
+  `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._check_transform_frequencies`
+- **Sévérité** : mineure
+- **Observé** : la cellule appelle la méthode **privée** `REF_T._check_transform_frequencies(PANEL_X.copy())` et
+  passe le résultat à `dict(...)`. Depuis `c9ecf79` (D42, correction d'ANO-FREQ-073), la méthode renvoie un tuple
+  `(frequencies, misaligned)` : `ValueError: dictionary update sequence element #0 has length 0; 2 is required`.
+  C'est la seule cellule en erreur sur les 44 cellules de code.
+- **Attendu** : le notebook suit le code (changement délibéré, prouvé par l'historique). Correctif d'une ligne :
+  `new_pairs, _misaligned = REF_T._check_transform_frequencies(PANEL_X.copy())`. Mieux : passer par l'API publique,
+  puisqu'un notebook utilisateur ne devrait pas dépendre d'une méthode privée.
+- **Reproduction** : exécuter le notebook (`jupyter nbconvert --execute`, ou le test ci-dessous).
+- **Test** : `tests/integration/frequency/test_notebooks.py::TestStepByStepNotebook::test_notebook_runs_without_error`
+- **Statut** : corrigé (2026-10-15) — arbitrage de l'auteur : corriger le notebook
+- **Correction** : cellule 33 alignée sur la signature actuelle :
+  `new_pairs, misaligned = REF_T._check_transform_frequencies(PANEL_X.copy())`, commentaire mis à jour (D42). Le
+  notebook audite volontairement les méthodes privées : il reste exposé à leurs changements de signature, que
+  le test d'exécution (`slow`) détecte. Le `xfail` est retiré ; le notebook s'exécute sans erreur.

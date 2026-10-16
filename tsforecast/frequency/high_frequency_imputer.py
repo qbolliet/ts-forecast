@@ -10,6 +10,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    FrozenSet,
     Iterable,
     List,
     Literal,
@@ -221,6 +222,40 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     ``interpolation_method`` and ``interpolation_anchor`` tune the shape of
     that reconstruction, never its direction.
 
+    **Training and prediction passes, once fitted with** ``y``: the imputer
+    then **augments a training set** — ``X`` and ``y`` on the target grid — and
+    is never meant to transform test data. An ``XYPipeline`` calls
+    ``fit_transform`` on its steps during its own ``fit`` and ``transform``
+    during ``predict`` / ``score``, and the two passes differ accordingly (as
+    sklearn allows, e.g. ``TargetEncoder``):
+
+    - ``fit_transform(X, y)`` is the **training pass**: ``X`` and ``y`` come
+      out on the target grid, rows added by the grid included — no row is
+      dropped, a downstream step may still shift ``X`` towards several
+      horizons; dropping the rows without target is the job of
+      :class:`tsforecast.xy.DropNaNTarget`, right before the estimator;
+    - ``transform(X, y=None)`` is the **prediction pass**: only the columns of
+      ``X`` are imputed, by the frozen models, on the **input rows** (flat
+      output, whatever ``keep_lower_frequencies``, no added row), and ``y`` —
+      when given, as ``score`` does — comes back **unchanged**: a test target
+      is never imputed nor used.
+
+    ``y`` is imputed like any column but is **not a covariate** of the other
+    columns by default (``target_as_covariate=False``): an imputed feature
+    built from the target carries its noise, inflates every in-sample metric
+    and biases the downstream model, and the prediction pass has no ``y`` to
+    feed such a model with. ``target_as_covariate=True`` restores it, at the
+    price of a prediction pass that raises whenever a model needs ``y``.
+    Without ``y`` at ``fit``, nothing of this applies: ``transform`` replays
+    the plan on any data and ``fit_transform(X) == fit(X).transform(X)``.
+
+    **Limit — scoring a target coarser than the grid**: the model then
+    predicts sub-period values, while the test target keeps its observed
+    period totals; a score compares the two on different scales. Aggregate
+    downstream to the target frequency — e.g. rolling three-month sums for a
+    quarterly target, by an XY step aggregating ``y`` at the training pass only —
+    before scoring (see ``docs/concepts/mixed_frequency_imputation.md``).
+
     **Inert combinations, documented and never warned about**
     — a ``UserWarning`` per combination would make
     hyperparameter search unbearable:
@@ -402,6 +437,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Under ``False`` and ``'covariates_only'`` no coincidence is
             possible and ``aggregation_constraint`` has no effect whatsoever
             on the composition of ``y_train``.
+        target_as_covariate: Whether ``y``, when given at ``fit``, may be a
+            covariate of the other imputed columns. ``False`` (default) keeps
+            it out of every ``feature_cols`` — it is still imputed itself, from
+            the columns of ``X`` — so that the prediction pass, which never
+            sees ``y``, replays the same models. ``True`` lets it in; the
+            prediction pass then raises if a model of a column of ``X`` needs
+            it. Inert without ``y``.
         impute_unobserved_entities: Whether an entity that never observes an
             imputable column may receive a complete imputation of it, learned
             on the other entities of the panel. ``False`` (default) leaves
@@ -604,6 +646,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # --- Axe 2 : fréquences intermédiaires ---
         impute_intermediate_frequencies: IntermediateFrequencies = False,
         impute_unobserved_entities: bool = False,
+        # --- Rôle de y ---
+        target_as_covariate: bool = False,
         # --- Ordre d'imputation ---
         fit_predict_order: Literal['frequency', 'cv'] = 'frequency',
         cv: Union[int, Any, Iterable, None] = None,
@@ -655,6 +699,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.interpolation_anchor = interpolation_anchor
         self.impute_intermediate_frequencies = impute_intermediate_frequencies
         self.impute_unobserved_entities = impute_unobserved_entities
+        self.target_as_covariate = target_as_covariate
         self.fit_predict_order = fit_predict_order
         self.cv = cv
         self.cv_scoring = cv_scoring
@@ -780,6 +825,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             'restore_original_values': self.restore_original_values,
             'verbose': self.verbose,
             'impute_unobserved_entities': self.impute_unobserved_entities,
+            'target_as_covariate': self.target_as_covariate,
         }
         for param_name, param_value in boolean_params.items():
             if not isinstance(param_value, (bool, np.bool_)):
@@ -2977,10 +3023,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # (une seule observation, ancres hors de leur grille calendaire), une
         # colonne ne peut être ni agrégée ni interpolée et n'apporterait que
         # des NaN — un couple inutilisable ne fait pas échouer l'ajustement des
-        # autres
+        # autres. La cible y n'est candidate que sous target_as_covariate=True :
+        # la passe de prédiction ne la voit jamais, un modèle qui la lirait n'y
+        # serait pas rejouable
+        excluded_target = None if self.target_as_covariate else self.target_column_
         candidates = [
             name for name in X_work.columns
-            if name != column and name in freqs_by_column
+            if name != column and name != excluded_target and name in freqs_by_column
         ]
         feature_cols = self._select_feature_columns(candidates, train_view, pred_view)
 
@@ -4060,6 +4109,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     def _check_transform_frequencies(
         self,
         X_work: pd.DataFrame,
+        optional_columns: Iterable[str] = (),
     ) -> Tuple[Dict[Union[str, tuple], str], Tuple[Union[str, tuple], ...]]:
         """Compare the frequencies of the transform with those of the fit.
 
@@ -4072,6 +4122,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Args:
             X_work: Working frame of the transform, before the additive
                 transformer.
+            optional_columns: Columns of the fit allowed to be absent — the
+                target column in the prediction pass, which never sees ``y``.
 
         Returns:
             Tuple ``(frequencies, misaligned)``. ``frequencies`` maps the
@@ -4099,7 +4151,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         }
         # Colonnes disparues : erreur nommant les colonnes, jamais un silence
         missing = sorted(
-            column for column in fit_columns if column not in X_work.columns
+            column for column in fit_columns
+            if column not in X_work.columns and column not in set(optional_columns)
         )
         if missing:
             raise ValueError(
@@ -4436,6 +4489,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     def _replay_plan(
         self,
         X_stage: pd.DataFrame,
+        skip_columns: FrozenSet[str] = frozenset(),
     ) -> Tuple["OrderedDict[str, pd.DataFrame]", "OrderedDict[str, pd.DataFrame]"]:
         """Replay every frozen step of the plan, in the order of the fit.
 
@@ -4449,6 +4503,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             X_stage: Working frame after the additive transformer. Never
                 modified: the imputations travel through the registers of
                 :class:`CovariateMaterializer`, exactly as at fit time.
+            skip_columns: Columns whose steps are not replayed — the target
+                column in the prediction pass, absent from ``X_stage``. No
+                other step reads them: ``target_as_covariate=False`` kept the
+                target out of every ``feature_cols``, and the prediction pass
+                refuses a plan where it is not.
 
         Returns:
             Tuple ``(frames, provenances)``, both keyed by stage label in
@@ -4488,11 +4547,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Liaison de fréquence, étendue aux entités nouvelles (D34)
             binding = self._extend_stage_binding(stage_freq, new_entities, stage_label)
 
-            # Étapes de plan de l'étape, complétées pour les couples que le fit
+            # Étapes du plan de l'étape, complétées pour les couples que le fit
             # n'a jamais observés
-            steps = self._replay_steps(
-                by_stage.get(stage_label, ()), new_entities, binding, X_stage
+            # (étapes des colonnes écartées retirées avant toute dérivation)
+            stage_steps = tuple(
+                step for step in by_stage.get(stage_label, ())
+                if step.var_name not in skip_columns
             )
+            steps = self._replay_steps(stage_steps, new_entities, binding, X_stage)
             # Logging
             self._log(
                 f"[transform] stage {stage_label}: replaying {len(steps)} step(s)"
@@ -4507,7 +4569,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # retomberait alors sans bruit sur tout l'index
             output_binding = self._output_binding(binding, carried, X_stage)
 
-            # Grille de la frame : l'INDEX du masque, jamais ses seules lignes
+            # Grille de la frame : l'index du masque, jamais ses seules lignes
             # vraies — les lignes hors fenêtre restent dans la sortie avec
             # leurs valeurs d'entrée. Une ligne d'entrée hors de la grille (une
             # cible plus grossière que l'index) n'y figure pas : elle n'y
@@ -4781,7 +4843,99 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         return result
 
     # Méthode de transformation : rejeu du plan figé
-    def _transform(self, X, y=None):
+    def fit_transform(
+        self,
+        X: pd.DataFrame,
+        y: Optional[pd.Series] = None,
+    ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.Series]]:
+        """Fit the plan, then run the training pass on the same data.
+
+        Always the full replay of :meth:`_replay_pass`, ``y`` included: fitted
+        with ``y``, this is the **training pass** — ``X`` and ``y`` on the target
+        grid, the rows the grid adds included, none dropped. It therefore
+        differs from ``fit(X, y).transform(X, y)``, which runs the prediction
+        pass; without ``y`` the two are equal.
+
+        Args:
+            X: Features.
+            y: Target (optional).
+
+        Returns:
+            The transformed features, or the pair ``(X, y)`` when ``y`` is
+            given.
+
+        Examples:
+            >>> X_train, y_train = imputer.fit_transform(X, y)   # doctest: +SKIP
+        """
+        # Entraînement du transformer
+        self.fit(X, y)
+        # Validation de X, comme le "transform" public
+        if self.validate_input:
+            X = self._validate_input(X)
+        return self._replay_pass(X, y, prediction=False)
+
+    # Aiguillage du transform public entre rejeu et passe de prédiction
+    def _transform(
+        self,
+        X: pd.DataFrame,
+        y: Optional[pd.Series] = None,
+    ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.Series]]:
+        """Run the prediction pass if the imputer was fitted with ``y``, else replay.
+
+        Fitted with ``y``, the imputer augments a training set and ``transform``
+        is the **prediction pass** of a pipeline (``predict`` / ``score``): only
+        the columns of ``X`` are imputed, on the input rows, and ``y`` — when
+        given — comes back unchanged. Fitted without ``y``, ``transform``
+        replays the plan on any data.
+
+        Args:
+            X: Features to transform.
+            y: Target, optional. Never imputed nor read by the prediction pass.
+
+        Returns:
+            The transformed features, or the pair ``(X, y)`` when ``y`` is
+            given.
+        """
+        return self._replay_pass(X, y, prediction=self.target_column_ is not None)
+
+    # Garde de la passe de prédiction : aucun modèle de X ne lit la cible
+    def _check_prediction_pass_replayable(self) -> None:
+        """Refuse a prediction pass whose models would need the target.
+
+        Under ``target_as_covariate=True`` a model of a column of ``X`` may
+        read ``y``, which the prediction pass never has: replaying it would
+        feed the model a covariate it was never fitted without.
+
+        Raises:
+            ValueError: If a non-fallback step of a column other than the
+                target lists the target among its ``feature_cols``.
+        """
+        # Identification des cas où la variable dépendante y est utilisée en covariable de l'imputation d'autres variables
+        dependent = sorted({
+            step.var_name for step in self.imputation_plan_
+            if not step.is_fallback
+            and step.var_name != self.target_column_
+            and self.target_column_ in step.feature_cols
+        })
+        # Message d'erreur
+        if dependent:
+            raise ValueError(
+                f"The prediction pass cannot impute {dependent}: their models "
+                f"use the target {self.target_column_!r} as a covariate "
+                f"(target_as_covariate=True), and transform never reads y once "
+                f"the imputer is fitted with it. Refit with "
+                f"target_as_covariate=False, or impute the training set with "
+                f"fit_transform."
+            )
+
+    # Rejeu du plan : passe d'entraînement, rejeu autonome ou passe de prédiction
+    def _replay_pass(
+        self,
+        X: pd.DataFrame,
+        y: Optional[pd.Series] = None,
+        *,
+        prediction: bool = False,
+    ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.Series]]:
         """Replay the fitted plan on new data.
 
         Phases 0'-4' recompute what depends on the data — ``y`` alignment and
@@ -4802,19 +4956,27 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             a pass and leaves the previous one invertible. ``fit`` purges
             them, then writes its own matrix, statistics and snapshot.
 
+        In the **prediction pass** (``prediction=True``, imputer fitted with
+        ``y``) the target column is absent from the working frame and its steps
+        are not replayed; the output is the target level reindexed on the
+        input rows, with the columns of ``X``, and ``y`` is returned as given.
+
         Args:
             X: Features to transform.
-            y: Target to transform (optional).
+            y: Target to transform (optional); returned unchanged by the
+                prediction pass.
+            prediction: Whether to run the prediction pass.
 
         Returns:
             The transformed features, or the pair ``(X, y)`` when ``y`` is
             given. Under ``keep_lower_frequencies=True`` the index carries a
-            ``'frequency'`` level.
+            ``'frequency'`` level — except in the prediction pass, always flat.
 
         Raises:
             ValueError: If ``X`` is not a DataFrame, if it carries no usable
-                temporal index, if a column of the fit is missing, or if an
-                index level bears the reserved name ``'frequency'``.
+                temporal index, if a column of the fit is missing, if an
+                index level bears the reserved name ``'frequency'``, or if the
+                prediction pass meets a model that needs the target.
 
         Examples:
             >>> imputed = imputer.fit(df).transform(df)      # doctest: +SKIP
@@ -4832,26 +4994,33 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # parmi les colonnes d'étapes
         if y is not None:
             y = self._align_target_index(X, y)
+        # Passe de prédiction : aucun modèle de X ne doit lire la cible absente
+        if prediction:
+            self._check_prediction_pass_replayable()
+        # Colonne absente de la passe de prédiction : la cible, jamais lue
+        target_skipped = (self.target_column_,) if prediction else ()
 
         # Instantané de l'entrée, publié en fin de passe seulement : un appel
         # qui lève n'est pas une passe, et l'inversion de la précédente doit
         # continuer de lire l'entrée de celle-ci
         snapshot_X = X.copy()
-        snapshot_y = y.copy() if y is not None else None
+        snapshot_y = y.copy() if y is not None and not prediction else None
 
         # Concaténation en un unique jeu de travail. L'index est déjà temporel :
         # la validation de base a converti "time_col" et "panel_cols" en index
-        # et refusé tout autre index
+        # et refusé tout autre index. La passe de prédiction n'y met jamais y
         y_col_name: Optional[str] = None
-        if y is not None:
+        if y is not None and not prediction:
             y_col_name = self._resolve_target_column_name(y)
             X_work = pd.concat([X, y.to_frame(name=y_col_name)], axis=1)
         else:
             X_work = X.copy()
 
-        # Contrôle des fréquences (D11) : erreur sur colonne manquante,
+        # Contrôle des fréquences : erreur sur colonne manquante,
         # avertissement unique sur divergence, silence sur colonne en trop
-        new_frequencies, new_misaligned = self._check_transform_frequencies(X_work)
+        new_frequencies, new_misaligned = self._check_transform_frequencies(
+            X_work, optional_columns=target_skipped
+        )
 
         # =================================================================
         # PHASE 1' — Fenêtres recalculées
@@ -4875,10 +5044,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # PHASE 2' — Transformateur additif, avec l'objet ajusté
         # =================================================================
         if self.additive_transformer_ is not None:
-            X_stage = self.additive_transformer_.transform(X_work)
+            # Ajusté sur un jeu portant la cible : elle lui est remise vide en
+            # passe de prédiction, puis retirée
+            additive_input = (
+                X_work.assign(**{self.target_column_: np.nan}) if prediction else X_work
+            )
+            X_stage = self.additive_transformer_.transform(additive_input)
             # Déballage du couple (X, y) que renvoie un transformateur XY
             if isinstance(X_stage, tuple):
                 X_stage = X_stage[0]
+            if prediction and self.target_column_ in X_stage.columns:
+                X_stage = X_stage.drop(columns=[self.target_column_])
         else:
             X_stage = X_work.copy()
 
@@ -4895,7 +5071,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Recalages du rejeu sous un bloc différé, comme au fit : un
             # avertissement par cas dégénéré pour tout le rejeu
             with self._aggregation_constraint.deferred_warnings():
-                frames, provenances = self._replay_plan(X_stage)
+                frames, provenances = self._replay_plan(
+                    X_stage, skip_columns=frozenset(target_skipped)
+                )
             # Avertissements accumulés pendant le rejeu, relevés avant que le
             # contexte ne restaure les accumulateurs du fit
             degraded = list(self._warnings)
@@ -4935,7 +5113,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # elle, et non le nom d'un niveau, qui identifie à l'inversion une
         # sortie multi-fréquences
         stacked_nlevels: Optional[int] = None
-        if self.keep_lower_frequencies:
+        if prediction:
+            # Passe de prédiction : niveau cible, sur les lignes d'entrée et les
+            # colonnes de X — aucune ligne ajoutée, ni niveau de fréquence
+            data_result = frames[final_label].reindex(index=X.index, columns=X.columns)
+            provenance = provenances[final_label].reindex(index=X.index, columns=X.columns)
+        elif self.keep_lower_frequencies:
             data_result = self._build_multifreq_output(frames)
             provenance = self._build_multifreq_output(provenances)
             stacked_nlevels = data_result.index.nlevels
@@ -4950,7 +5133,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self._original_y_ = snapshot_y
         self._stacked_index_nlevels: Optional[int] = stacked_nlevels
         self.imputation_provenance_ = provenance
-        self.provenance_statistics_ = provenance_statistics(provenances[final_label])
+        self.provenance_statistics_ = provenance_statistics(
+            provenance if prediction else provenances[final_label]
+        )
+
+        # Passe de prédiction : y rendu tel quel, jamais imputé
+        if prediction:
+            return data_result if y is None else (data_result, y)
 
         # Scission X / y, la cible gardant le nom qu'elle portait en entrée
         if y is not None and y_col_name in data_result.columns:

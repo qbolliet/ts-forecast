@@ -45,9 +45,9 @@ I4      ``test_invariants::TestAggregationAdditivity`` (TS, PANEL-F),
         ``TestAggregationAdditivity::
         test_carried_covariate_sums_to_the_period_total``. Realistic
         datasets, three strategies, predictions and fallbacks alike:
-        ``test_robustness::TestRealisticDatasets::
-        test_complete_periods_sum_to_their_totals`` (irregular TS,
-        heterogeneous panel). At transform: the new 2023 periods
+        ``tests/integration/frequency/test_hfi_on_realistic_dataset.py::
+        TestPeriodTotals`` (irregular TS, heterogeneous panel, three
+        modalities). At transform: the new 2023 periods
         (``test_transform::TestTransformOnLaterDates``, TS and PANEL-F), the
         fit frequency kept for the rescaling under a divergence
         (``TestTransformFrequencyControl::
@@ -76,7 +76,8 @@ I6      ``test_provenance::TestProvenanceFamilies``,
 I7      ``test_transform::TestTransformOutsideWindow`` (TS, and
         ``test_transform_outside_fit_window_on_panel``),
         ``TestTransformOnLaterDates`` (new periods imputed, TS and PANEL-F),
-        ``TestShortEntityCoverage`` (realistic heterogeneous panel fitted to
+        ``tests/integration/frequency/test_hfi_on_realistic_dataset.py::
+        TestShortEntityCoverage`` (realistic heterogeneous panel fitted to
         2023-12: Allemagne never stretched past 2024-04, no cell filled past
         its column's coverage, every filled cell marked),
         ``TestKeepLowerFrequencies::
@@ -192,8 +193,8 @@ Outside the table — robustness of the fit to its inputs (prompt F11),
 invariance to the index perturbations on ``PANEL-X`` — reversed entities,
 special column names, non-standard index names, three-level index; shuffled
 rows refused (``TestPerturbationInvariance``) —, start-of-period positions
-(``TestPeriodPositions``) and the realistic datasets of notebook 3 under each
-strategy (``TestRealisticDatasets``); aggregated warnings of phase 5
+(``TestPeriodPositions``) — the realistic datasets of notebook 3 moved to
+``tests/integration/frequency/test_hfi_on_realistic_dataset.py`` —; aggregated warnings of phase 5
 (§12.5, ANO-FREQ-059): ``test_fit_phases::TestAggregatedWarnings``.
 Transform side (prompt F12), ``test_transform``: frequency control (D11:
 one warning naming the pair, fit frequencies kept, a missing column — even

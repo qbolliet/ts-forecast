@@ -156,7 +156,13 @@ class TestStageFrameMirror:
         assert int(frame['a1'].notna().sum()) == expected
 
     def test_coarser_production_never_lands_raw_on_a_finer_grid(self, reference_timeseries):
-        """2021 imputed at Q, 2022-2023 at M: the M frame shows no quarterly value."""
+        """2021 imputed at Q, 2022-2023 at M: the M frame shows no quarterly value.
+
+        The mirror holds nothing for 2021 at M: the frame keeps the raw
+        observation of 2021 at its anchor — the mirror overlays the anchors
+        without replacing them (ANO-FREQ-083) —, never the quarterly
+        production (99).
+        """
         grid, quarters = monthly_grid(), quarterly_grid()
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(99.0, index=quarters[quarters.year == 2021]), 'Q', 'model')
@@ -168,7 +174,8 @@ class TestStageFrameMirror:
             detected_frequencies=TS_FREQUENCIES,
             source_data=reference_timeseries,
         )
-        assert frame['a1'].loc['2021'].isna().all()
+        # Valeur d'or (§2.2) : seule l'observation annuelle de 2021, 120, à sa date
+        assert frame['a1'].loc['2021'].dropna().to_dict() == {pd.Timestamp('2021-12-31'): 120.0}
 
     @pytest.mark.parametrize('fallback', ['interpolate', 'tolerate_nan'])
     def test_entity_with_an_empty_mirror_is_capped_to_its_raw_anchors(

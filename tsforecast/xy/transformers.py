@@ -7,8 +7,10 @@ les features (X) et les targets (y).
 # Importation des modules
 # Modules de base
 from abc import ABC, abstractmethod
+# Manipulation de données
+import numpy as np
 # Sklearn
-from sklearn.base import TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 # Module du package
 from ..base.transformers import PanelTimeSeriesTransformer
@@ -247,3 +249,90 @@ class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement _inverse_transform"
         )
+
+# Étape XY de retrait des lignes sans cible, placée juste avant l'estimateur
+class DropNaNTarget(BaseEstimator, XYTransformerMixin):
+    """Drop the rows whose target is missing, right before an estimator.
+
+    A training set augmented upstream (``HighFrequencyImputer.fit_transform``,
+    lagged features towards several horizons...) keeps rows without target on
+    purpose: a later step may still read them. No estimator learns from them,
+    though, and most refuse a NaN target. This step drops them **at the last
+    moment**, in the training pass (``fit_transform``) and when ``score``
+    passes ``y`` (``transform(X, y)``); without ``y`` — ``predict`` — ``X``
+    goes through untouched: a prediction never loses a row.
+
+    Stateless: ``fit`` learns nothing.
+
+    Examples:
+        >>> import numpy as np
+        >>> import pandas as pd
+        >>> X = pd.DataFrame({'x': [1.0, 2.0, 3.0]})
+        >>> y = pd.Series([10.0, np.nan, 30.0])
+        >>> X_kept, y_kept = DropNaNTarget().fit_transform(X, y)
+        >>> X_kept['x'].tolist(), y_kept.tolist()
+        ([1.0, 3.0], [10.0, 30.0])
+        >>> DropNaNTarget().fit(X, y).transform(X).shape
+        (3, 1)
+    """
+
+    # Étape sans état : toujours ajustée au sens de sklearn
+    def __sklearn_is_fitted__(self) -> bool:
+        """Report the step as fitted: it learns nothing."""
+        return True
+
+    # Apprentissage : rien à apprendre
+    def _fit(self, X, y):
+        """Learn nothing.
+
+        Args:
+            X: Features.
+            y: Target.
+
+        Returns:
+            self
+        """
+        return self
+
+    # Transformation : retrait des lignes dont la cible manque
+    def _transform(self, X, y=None):
+        """Drop the rows of ``X`` and ``y`` whose target is NaN.
+
+        A multi-output target drops a row as soon as one of its targets is
+        missing. The rows are matched by position: ``X`` and ``y`` must have
+        the same length.
+
+        Args:
+            X: Features (DataFrame, Series or array).
+            y: Target (Series, DataFrame or array), optional.
+
+        Returns:
+            ``X`` unchanged when ``y`` is None, the pair ``(X_kept, y_kept)``
+            otherwise, in the input types.
+
+        Raises:
+            ValueError: If ``X`` and ``y`` differ in length.
+        """
+        # Passe de prédiction : aucune ligne n'est retirée
+        if y is None:
+            return X
+        if len(X) != len(y):
+            raise ValueError(
+                f"X and y must have the same length, got {len(X)} and {len(y)}"
+            )
+
+        # Masque des lignes dont toute cible est renseignée
+        if hasattr(y, 'notna'):
+            observed = y.notna()
+            keep = (observed.all(axis=1) if observed.ndim == 2 else observed).to_numpy()
+        else:
+            values = np.asarray(y, dtype=float).reshape(len(y), -1)
+            keep = ~np.isnan(values).any(axis=1)
+
+        return self._take(X, keep), self._take(y, keep)
+
+    # Méthode auxiliaire de sélection positionnelle, quel que soit le type
+    @staticmethod
+    def _take(data, keep: np.ndarray):
+        """Select the rows of ``data`` flagged by ``keep``, by position."""
+        return data.iloc[keep] if hasattr(data, 'iloc') else np.asarray(data)[keep]

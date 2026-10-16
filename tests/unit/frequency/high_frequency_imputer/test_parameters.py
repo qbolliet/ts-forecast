@@ -224,11 +224,11 @@ class TestParameterValidation:
 
     @pytest.mark.parametrize(
         'param', ['keep_lower_frequencies', 'restore_original_values', 'verbose',
-                  'impute_unobserved_entities']
+                  'impute_unobserved_entities', 'target_as_covariate']
     )
     @pytest.mark.parametrize('value', ['yes', 1, None])
     def test_booleans_are_validated_as_a_group(self, param, value):
-        """Les quatre booléens sont validés ensemble, un entier ne passant pas pour un bool."""
+        """Les cinq booléens sont validés ensemble, un entier ne passant pas pour un bool."""
         with pytest.raises(TypeError, match=param):
             make_imputer(**{param: value})
 
@@ -286,6 +286,7 @@ _ADMITTED = (
        for name in ('keep_lower_frequencies', 'restore_original_values', 'verbose')
        for value in (False, True, np.True_, np.False_)]
     + [('impute_unobserved_entities', value) for value in (np.True_, np.False_)]
+    + [('target_as_covariate', value) for value in (False, True, np.True_, np.False_)]
     + [('on_frequency_mismatch', value) for value in ('error', 'warn')]
     + [('time_col', value) for value in (None, 'date')]
     + [('panel_cols', value) for value in (None, ['country'])]
@@ -393,7 +394,7 @@ class TestRejectedValues:
 
     @pytest.mark.parametrize(
         'param', ['keep_lower_frequencies', 'restore_original_values', 'verbose',
-                  'impute_unobserved_entities'],
+                  'impute_unobserved_entities', 'target_as_covariate'],
     )
     def test_numpy_booleans_take_effect(self, reference_timeseries, param):
         """A ``numpy.bool_`` is admitted like a ``bool``, as sklearn does, and honoured."""
@@ -455,6 +456,7 @@ _SPEC_DEFAULTS = {
     'interpolation_anchor': None,
     'impute_intermediate_frequencies': False,
     'impute_unobserved_entities': False,
+    'target_as_covariate': False,
     'fit_predict_order': 'frequency',
     'cv': None,
     'cv_scoring': 'neg_mean_absolute_percentage_error',

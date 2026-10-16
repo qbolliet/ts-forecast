@@ -51,7 +51,7 @@ from sklearn.utils.validation import check_is_fitted
 
 # Objets testés
 from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
-from tsforecast.xy import XYPipeline
+from tsforecast.xy import DropNaNTarget, XYPipeline
 
 # Outils de test partagés
 from tests.unit.frequency.high_frequency_imputer.helpers import (
@@ -199,7 +199,12 @@ class TestSklearnConformance:
     def test_grid_search_on_panel_with_target_frequency_dict(
         self, mixed_freq_panel_multifrequency
     ):
-        """`GridSearchCV` explore l'imputeur sur un panel à cible par entité."""
+        """`GridSearchCV` explore l'imputeur sur un panel à cible par entité.
+
+        La cible `v` est basse fréquence pour FR et DE : la passe d'entraînement
+        l'impute, la passe de prédiction la rend telle quelle (D47), avec ses NaN
+        hors ancres ; `DropNaNTarget` les retire avant le régresseur (D48).
+        """
         panel = mixed_freq_panel_multifrequency
         X = panel[['m1', 'q1']]
         y = panel['v']
@@ -220,6 +225,7 @@ class TestSklearnConformance:
                 keep_lower_frequencies=False,
             )),
             ('fill', SimpleImputer()),
+            ('drop', DropNaNTarget()),
             ('regressor', LinearRegression()),
         ])
         search = GridSearchCV(
