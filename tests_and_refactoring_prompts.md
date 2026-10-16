@@ -8,6 +8,12 @@
 > prompt. Après chaque prompt, relire le diff et le rapport d'anomalies avant de lancer le
 > suivant.
 >
+> **Mise à jour 2026-10-16** : ajout de la **partie B** (tests de `base`, `crossvals`, `panel`,
+> `xy`, non couverts par A / U / D / F), de la **partie N** (normalisation du code : suppression
+> des renvois à la spec / aux anomalies dans commentaires et docstrings, en-têtes de fichier,
+> découpage des tests de plus de 1 200 lignes, doctests) et de la **partie P** (passage à
+> pandas ≥ 3.0). Ordre d'exécution : **B → C → N0-N6 → P1 → N7-N8 → R**.
+>
 > **Deux campagnes, dans cet ordre.**
 > 1. **Tests** (parties A, U, D, F, C) : caractériser `tsforecast/utils`, `tsforecast/delays`
 >    et `tsforecast/frequency` **sans modifier le code du package**. Les tests existants en
@@ -28,7 +34,10 @@
 5. [Récapitulatif, modèles, plan mode, effort](#5-récapitulatif)
 6. Prompts — [A. Socle](#partie-a--socle) · [U. utils](#partie-u--tsforecastutils) ·
    [D. delays](#partie-d--tsforecastdelays) · [F. frequency](#partie-f--tsforecastfrequency) ·
-   [C. Clôture](#partie-c--clôture-de-la-campagne-de-tests)
+   [B. base / crossvals / panel / xy](#partie-b--tsforecastbase-crossvals-panel-xy) ·
+   [C. Clôture](#partie-c--clôture-de-la-campagne-de-tests) ·
+   [N. Normalisation du code](#partie-n--normalisation-du-code-autoportance-en-têtes-tests-courts-doctests) ·
+   [P. pandas 3](#partie-p--passage-à-pandas--30)
 7. [Refactoring : proposition](#7-refactoring--proposition)
 8. Prompts — [R. Refactoring](#partie-r--refactoring)
 
@@ -131,8 +140,9 @@ Constats établis par exécution avant rédaction — ne pas les redécouvrir en
 | `data_manager.py` | 101 | 30 | 66 % | `test_data_manager.py` (48, ne s'importe pas) |
 | `transformers.py` (1 935 lignes) | 432 | 140 | **64 %** | `test_transformers.py` (77) + `test_integration.py` (19) |
 
-**Hors campagne** (signalé, non traité) : `panel/transformers.py` 37 %, `base/transformers.py`
-69 %, `xy/pipeline.py` 70 %, `crossvals/base.py` 84 %.
+**Hors campagne A / U / D / F** (traité par la partie B) : `panel/transformers.py` 58 %,
+`panel/utils.py` 45 %, `base/transformers.py` 69 %, `xy/pipeline.py` 70 %, `crossvals/base.py`
+84 % (mesures du 2026-10-16, branches incluses).
 
 ### 2.3 Sources de vérité
 
@@ -260,6 +270,13 @@ Chaque prompt demande de relire cette section : elle fait partie du prompt.
      quand c'est possible), type hints systématiques.
 3. Organisation : classes `Test<Contrat>` ; `pytest.mark.parametrize` avec `ids=` lisibles
    plutôt que des boucles ; une assertion **principale** par test.
+4. **Autoportance** (règles de `CLAUDE.md`, « Règles de rédaction du code ») : aucun commentaire
+   ni aucune docstring de test ne cite un `§`, une décision, un invariant, une spec ou une
+   anomalie ; la règle vérifiée est **énoncée**. Seul l'identifiant `ANO-…` du `reason=` d'un
+   `xfail` est admis, suivi d'une phrase complète. Aucun historique (« auparavant »,
+   « corrigé »). Chaque fichier créé commence par une docstring de module en anglais. Un fichier
+   de tests de plus de 1 200 lignes devient un paquet. *(Les prompts A à F, déjà exécutés,
+   ont produit des tests qui ne respectent pas ces règles : la partie N les corrige.)*
 
 ### 4.2 Données
 
@@ -313,7 +330,7 @@ sortie du code comme valeur d'or sans l'avoir vérifiée indépendamment.
 
 1. Test du comportement **attendu**, marqué
    `@pytest.mark.xfail(strict=True, reason="ANO-<MOD>-NNN: <résumé>")`, avec `<MOD>` ∈
-   {`UTILS`, `DELAYS`, `FREQ`} ;
+   {`UTILS`, `DELAYS`, `FREQ`, `BASE`, `CV`, `PANEL`, `XY`} ;
 2. entrée dans `tests/ANOMALIES.md`, section du module :
 
    ```markdown
@@ -390,9 +407,28 @@ Rapport en français :
 | **F11** | HFI 2/3 : `fit`, cas limites, robustesse d'index | Opus | Non | xhigh | F10 |
 | **F12** | HFI 3/3 : `transform`, `inverse_transform`, sortie multi-fréquences | Opus | Non | xhigh | F11 |
 | **F13** | Intégration `frequency` : notebook 3, `XYPipeline`, crossvals, délais, tracking | Opus | **Oui** | high | F12, D5 |
-| **C1** | Couverture : CI GitHub Actions, Codecov, badges `README.md`, `CLAUDE.md` | Sonnet | Non | medium | toutes U, D, F |
+| **B0** | `base` / `crossvals` / `panel` / `xy` : audit, plan `tests/PLAN_B.md`, réorganisation | Opus | **Oui** | high | A1 |
+| **B1** | `base/transformers.py` (69 %) | Opus | Non | high | B0 |
+| **B2** | `crossvals/base.py` + `time_series.py` : propriétés des splitters | Opus | Non | high | B0 |
+| **B3** | `crossvals/panel.py` + intégration `crossvals` | Opus | Non | high | B2 |
+| **B4** | `panel/utils.py` (45 %) | Sonnet | Non | high | B0 |
+| **B5** | `panel/transformers.py` (58 %) + tri des 14 xfail hérités | Opus | Non | high | B4 |
+| **B6** | `xy/transformers.py` + cœur de `XYPipeline` (matrice de scénarios) | Opus | **Oui** | high | B0 |
+| **B7** | `XYPipeline` : intégration sklearn (routage, `GridSearchCV`, cache, sérialisation) | Opus | Non | high | B6 |
+| **B8** | Intégration `base` / `panel` / `xy` / `crossvals`, clôture de la partie B | Opus | Non | high | B1-B7 |
+| **C1** | Couverture : CI GitHub Actions, Codecov, badges `README.md`, `CLAUDE.md` | Sonnet | Non | medium | toutes U, D, F, B |
 | **C2** | Bilan : liste transitoire vide, `ANOMALIES.md` consolidé | Opus | Non | high | C1 |
-| **R0** | *Golden master* : sorties de référence figées de `HighFrequencyImputer` | Opus | Non | high | C2 |
+| **N0** | Vérificateur de conventions (`scripts/check_conventions.py`), config doctest | Sonnet | Non | medium | — |
+| **N1** | `tsforecast/` : suppression des renvois spec / anomalies et de l'historique | Sonnet | Non | high | N0 |
+| **N2** | `tests/` du paquet `frequency` : idem | Sonnet | Non | medium | N0 |
+| **N3** | `tests/` de `utils` et `delays` : idem | Haiku | Non | medium | N0 |
+| **N4** | Autres `tests/`, `tests/support`, `scripts/` : idem | Haiku | Non | medium | N0 |
+| **N5** | Découpage des fichiers de tests > 1 200 lignes en paquets | Sonnet | Non | medium | N2-N4 |
+| **N6** | En-têtes de fichier (docstring de module, commentaire des `.yml` / `.toml`) | Haiku | Non | medium | N5 |
+| **P1** | Passage à pandas ≥ 3.0 sans régression (6 phases, sorties de référence) | Opus | **Oui** | xhigh | C2 (N1-N6 recommandés) |
+| **N7** | Doctests : `base`, `crossvals`, `panel`, `xy`, `utils`, `delays`, `tracking` | Sonnet | Non | medium | P1, N1 |
+| **N8** | Doctests : `frequency` | Sonnet | Non | high | N7 |
+| **R0** | *Golden master* : sorties de référence figées de `HighFrequencyImputer` | Opus | Non | high | N8 |
 | **R1** | Renommage `frequency` → `imputation`, hiérarchie, relocalisations, tests miroir | Sonnet | **Oui** | high | R0 |
 | **R2** | Extraction : validation des paramètres | Sonnet | Non | medium | R1 |
 | **R3** | Extraction : état d'exécution (`_RunContext`) et avertissements agrégés | Opus | **Oui** | xhigh | R2 |
@@ -403,7 +439,8 @@ Rapport en français :
 | **R8** | Extraction : rejeu du plan et assemblage de la sortie | Opus | Non | xhigh | R7 |
 | **R9** | Finalisation : tests `internal`, docs mkdocs, spec, `CLAUDE.md` | Sonnet | Non | medium | R8 |
 
-**Parallélisables** : après A0, {U1, U2, U3, U4} ; après A1, {U5, D3, F1, F2, F3, F4, F5, F6,
+**Parallélisables** : après B0, {B1, B2, B4, B6} (B3 après B2, B5 après B4, B7 après B6) ;
+{N1, N2, N3, N4} une fois N0 fait (périmètres disjoints) ; après A0, {U1, U2, U3, U4} ; après A1, {U5, D3, F1, F2, F3, F4, F5, F6,
 F9} ; seul `tests/ANOMALIES.md` est partagé (numéros à relire au moment de l'écriture).
 L'ordre recommandé reste **U → D → F** : `frequency` consomme `utils/frequency` (le
 convertisseur surtout), et une anomalie du convertisseur trouvée en U8 évite de la
@@ -411,7 +448,9 @@ re-diagnostiquer trois fois en F. La partie R est **strictement séquentielle**.
 
 ### Critère de choix du modèle
 
-**Opus** dès que la valeur d'or d'un test ou la sûreté d'une extraction exige de raisonner sur
+**Haiku** n'est utilisé que pour des lots **vérifiables par un script** (parties N3, N4, N6) :
+le vérificateur de N0 détecte toute sortie de périmètre, et un fichier qui résiste deux fois est
+repris par Sonnet. **Opus** dès que la valeur d'or d'un test ou la sûreté d'une extraction exige de raisonner sur
 des **échelles de fréquence**, des **positions de période**, des **fenêtres**, des **délais
 relatifs à une date de référence** ou la **symétrie fit / transform** : un test faux y passe au
 vert sans rien signaler, et c'est là que se trouvent les anomalies. **Sonnet** pour les lots à
@@ -1419,11 +1458,393 @@ Critères §4.6 (rapporter l'apport à la couverture globale) ; rapport §4.7.
 
 ---
 
+## Partie B — `tsforecast/base`, `crossvals`, `panel`, `xy`
+
+> Contexte commun aux prompts B. **Ces quatre paquets n'ont pas été couverts par la campagne
+> A / U / D / F** : leurs tests datent d'avant la partie A, ont été migrés mécaniquement par A0 et
+> **n'ont jamais été triés** (§4.4 s'applique donc aussi aux tests verts). Toutes les conventions
+> de la section 4 s'appliquent, y compris « ne jamais modifier `tsforecast/` » (§4.3) : une
+> anomalie de code se documente (`xfail(strict=True)` + `ANOMALIES.md`), elle ne se corrige pas
+> ici.
+>
+> **État vérifié (2026-10-16)** — `pytest tests/unit/{base,crossvals,panel,xy,tracking}
+> tests/integration/crossvals` : 306 passed, 14 xfailed (51 s). Couverture lignes + branches :
+>
+> | Module | Taille | Couv. | Tests existants |
+> |---|---:|---:|---|
+> | `base/transformers.py` | 1 199 l. | **69 %** | `tests/unit/base/test_transformers.py` (816 l.) |
+> | `crossvals/base.py` | 1 449 l. | 84 % | `test_base_classes.py` (472 l.), `test_base_helpers.py` (319 l.) |
+> | `crossvals/time_series.py` | 171 l. | 100 % | `test_time_series.py` (546 l.) |
+> | `crossvals/panel.py` | 301 l. | 92 % | `test_panel.py` (725 l.) |
+> | `panel/utils.py` | 491 l. | **45 %** | `test_utils.py` (83 l.) |
+> | `panel/transformers.py` | 826 l. | **58 %** | `test_panelwise_transformer.py` (495 l., dont **14 xfail hérités**) |
+> | `xy/pipeline.py` | 941 l. | **70 %** | `test_xy_pipeline.py` (715 l.) |
+> | `xy/transformers.py` | 338 l. | 90 % | `tests/unit/xy/test_transformers.py` (182 l.) |
+>
+> `tracking/metrics.py` (96 %) est **hors périmètre**. Les 14 entrées « hors campagne » de
+> `tests/legacy_failures.txt` portent toutes sur `test_panelwise_transformer.py` : la partie B
+> les **trie et les retire** (B5). Le message `Cannot determine time index` de
+> `base/transformers.py`, rencontré par la partie D, relève de B1.
+>
+> **Sources de vérité** (ordre) : le code **et** l'historique git des changements délibérés
+> (`git log -p -- <fichier>`) ; `docs/concepts/{base_transformers,cross_validation,
+> panelwise_transforms,xy_pipeline}.md` et les notebooks `0 - QB - Crossvals.ipynb`
+> (possiblement périmés) ; les docstrings en dernier (écart = `[DOC]`). Contrats externes : le
+> contrat des splitters sklearn (`split` / `get_n_splits`), celui de `sklearn.pipeline.Pipeline`
+> (`XYPipeline` en est un **remplacement direct**), `clone` / `get_params` / `set_params`.
+>
+> **Préfixes d'anomalies** : `ANO-BASE`, `ANO-CV` (crossvals), `ANO-PANEL`, `ANO-XY` — numérotation
+> continue par préfixe dans `tests/ANOMALIES.md` (une section par préfixe, créée au besoin).
+>
+> **Commandes** : sur cette machine `uv run` échoue — utiliser `.venv/Scripts/python.exe -m
+> pytest …` et `.venv/Scripts/python.exe -m coverage …` à la place de `uv run pytest`.
+>
+> **Données** : jeux de `tests/support/` (panels `build_panel_two_level`, `build_panel_reference`,
+> `heterogeneous_coverage_panel`, `irregular_index_timeseries`, perturbations) ; compléter
+> `tests/support/` plutôt que dupliquer un constructeur dans un fichier de test.
+
+### Prompt B0 — Audit, plan de campagne, réorganisation des tests
+
+**Modèle : Opus · Plan mode : Oui · Effort : high · Dépendances : A1**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md (en particulier « Règles de rédaction du code »),
+les sections 2, 3 et 4 de tests_and_refactoring_prompts.md et l'encadré « Contexte commun aux
+prompts B » de la partie B. Aucun changement dans tsforecast/.
+
+Objectif : décider de la structure de la campagne B avant que les prompts B1 à B8 (sessions
+indépendantes, parallélisables) n'écrivent des tests. Tu produis un PLAN, tu réorganises les
+fichiers (déplacements uniquement), tu n'écris pas de nouveaux tests de fond.
+
+1. Inventaire. Pour chacun des modules cibles (base/transformers, crossvals/{base,time_series,
+   panel}, panel/{utils,transformers}, xy/{pipeline,transformers}) : liste des symboles publics
+   (classes, méthodes, fonctions, attributs ajustés suffixés `_`), tableau symbole → tests
+   existants qui l'exercent → trou (aucun test / seulement chemin nominal / seulement via un
+   symbole privé). Compter les appels à des symboles privés `_xxx` par fichier de test
+   (`grep`), c'est l'indicateur de fragilité.
+2. Pré-tri des tests existants : exécuter chaque fichier, repérer les tests douteux même verts
+   (assertions faibles `is not None`, `len(x) > 0`, valeur d'or recopiée de la sortie, absence
+   d'assertion, tests dupliqués). Lister les 14 xfail hérités de test_panelwise_transformer.py
+   avec une hypothèse de catégorie (a/b/c/d, §4.4) ; le tri définitif est fait en B5.
+3. Réorganisation par `git mv` (historique conservé), règle de miroir §3 :
+   - tests/unit/xy/test_xy_pipeline.py → tests/unit/xy/test_pipeline.py ;
+   - tests/unit/panel/test_panelwise_transformer.py → tests/unit/panel/test_transformers.py ;
+   - tests/unit/crossvals/test_base_classes.py + test_base_helpers.py → paquet
+     tests/unit/crossvals/base/ (un fichier par thème : OutOfSampleSplit, InSampleSplit,
+     aides internes) puisque crossvals/base.py fait 1 449 lignes et que les tests dépasseront
+     1 200 lignes ;
+   - décider, fichier par fichier, ceux qui deviendront des paquets (seuil 1 200 lignes de tests
+     APRÈS complétion, estimation à justifier) ;
+   - mettre à jour tests/legacy_failures.txt, collect_ignore et toute référence aux anciens
+     chemins (ANOMALIES.md, docs/, README.md, CLAUDE.md, notebooks) : `grep -rn` des anciens
+     noms avant et après.
+4. Besoins en tests/support : lister (sans les écrire, sauf trivialité) les constructeurs et
+   perturbations manquants — panel à 3 niveaux d'index, panel dont une entité est absente d'un
+   pli, entité à une seule observation, estimateur espion qui enregistre les appels
+   fit/transform/predict et les `y` reçus (SpyEstimator existe : vérifier), transformateur XY
+   minimal fixe (X, y) → (X', y') — et dire quel prompt B les crée (un seul propriétaire par
+   fichier de support, pour éviter les conflits entre sessions parallèles).
+5. Écrire le plan dans `tests/PLAN_B.md` (fichier TRANSITOIRE, supprimé en C2) : par prompt B1-B8,
+   le périmètre, la liste de scénarios attendus (cas limites de CLAUDE.md inclus), les propriétaires
+   des fichiers de support, les ids d'anomalies déjà pressentis. Les prompts B1-B8 le liront.
+
+Critères : `pytest tests/unit/{base,crossvals,panel,xy} -q` identique à l'état initial (306 passed,
+14 xfailed) après les déplacements ; aucun test supprimé ni modifié dans ce prompt ; git mv
+seulement. Rapport §4.7 + le plan.
+```
+
+### Prompt B1 — `base/transformers.py`
+
+**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : B0**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
+tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B » et tests/PLAN_B.md
+(section B1). Aucun changement dans tsforecast/.
+
+Cible : tsforecast/base/transformers.py (69 %) — TimeSeriesTransformerMixin,
+PanelTimeSeriesTransformer, ReversibleTransformerMixin, InverseTransformer ; tests dans
+tests/unit/base/test_transformers.py. Cette base est héritée par les transformateurs de delays
+et de frequency : un défaut ici se propage, et le message « Cannot determine time index » y
+naît. Lis docs/concepts/base_transformers.md.
+
+1. Tri (§4.4) de tous les tests existants du fichier, même verts ; consigner chaque décision.
+2. Compléter, par classe, sur des sous-classes concrètes MINIMALES définies dans le test :
+   - TimeSeriesTransformerMixin : détermination de l'index temporel (index seul, colonne
+     time_col, MultiIndex 2 et 3 niveaux, noms d'index non standards, index non temporel,
+     doublons, non trié), validation de la structure, restitution de la structure d'origine ;
+     tout message d'erreur est vérifié par `match=` ;
+   - PanelTimeSeriesTransformer : méthodes abstraites non implémentées (TypeError),
+     fit / transform / fit_transform sur série, DataFrame, panel ; entités manquantes ;
+     attributs ajustés suffixés `_` ; erreurs NotFittedError avant fit ; get_params / set_params /
+     clone (contrat sklearn : les paramètres du constructeur sont stockés tels quels) ;
+   - ReversibleTransformerMixin et InverseTransformer : transform → inverse_transform ==
+     identité (à la tolérance près) sur chaque perturbation de tests/support/perturbations.py ;
+     inverse avant fit ; InverseTransformer(transformer) échange bien transform et inverse ;
+   - non-mutation : aucun transformateur ne modifie l'entrée de l'appelant (copie profonde avant,
+     comparaison après).
+3. Cas où validate_temporal_data (utils/validation) refuse un jeu raisonnable : consigner une
+   anomalie ANO-BASE-NNN ET la rattacher à l'anomalie utils correspondante (U5) si elle existe.
+
+Critères §4.6 (objectif 95 %, minimum 90 % lignes ET branches) ; rapport §4.7.
+```
+
+### Prompt B2 — `crossvals/base.py` et `time_series.py`
+
+**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : B0**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
+tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B » et tests/PLAN_B.md
+(section B2). Aucun changement dans tsforecast/. CLAUDE.md classe crossvals parmi les modules
+critiques (objectif > 90 %).
+
+Cibles : tsforecast/crossvals/base.py (84 %) — OutOfSampleSplit, InSampleSplit et leurs aides —
+et tsforecast/crossvals/time_series.py (TSOutOfSampleSplit, TSInSampleSplit). Lis
+docs/concepts/cross_validation.md et le notebook « 0 - QB - Crossvals » (possiblement périmé).
+
+Principe : la sûreté d'un splitter est une affaire de PROPRIÉTÉS, pas seulement de valeurs
+d'or. Pour chaque configuration, écrire d'abord les indices attendus à la main sur un petit jeu
+(12-24 dates), puis vérifier en plus ces propriétés sur tous les plis :
+- absence de fuite : toute date d'apprentissage est strictement antérieure aux dates de test
+  (OutOfSample), `gap` respecté exactement ; pour InSample, définir (d'après le code et la doc)
+  ce qui est autorisé et le tester explicitement ;
+- couverture : les ensembles de test sont disjoints / se succèdent comme documenté, la taille
+  des plis correspond à test_size, max_train_size, expanding vs rolling, n_splits ;
+- get_n_splits(X) == nombre réel de plis produits par split(X), pour toutes les configurations
+  y compris celles qui lèvent ;
+- split() est un générateur reproductible (deux appels identiques), accepte y=None et groups=None,
+  X en Series / DataFrame / ndarray ; contrat sklearn : cross_validate, cross_val_score,
+  GridSearchCV avec ces splitters (modèle trivial, cv=splitter).
+Cas limites (CLAUDE.md) : données non triées (le comportement — tri interne ? erreur ? — se
+déduit du code : épingler et documenter), index dupliqués, une seule observation, jeu vide,
+gap ou test_size plus grand que les données, n_splits trop grand, paramètres invalides (messages
+vérifiés par `match=`), DatetimeIndex / RangeIndex / PeriodIndex, index non monotone, NaN dans X.
+Tests de la totalité des branches de base.py : lire le rapport term-missing, justifier chaque
+ligne non couverte (code mort ? → candidat anomalie ANO-CV).
+Corriger au passage les FutureWarning d'alias pandas ('H', 'M', 'Y') des tests existants
+(tests/integration/crossvals/test_integration.py notamment) : utiliser 'h', 'ME', 'YE'.
+
+Critères §4.6 (95 % visé, 90 % minimum) ; rapport §4.7.
+```
+
+### Prompt B3 — `crossvals/panel.py` et intégration `crossvals`
+
+**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : B2**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
+tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B » et tests/PLAN_B.md
+(section B3). Aucun changement dans tsforecast/. Les propriétés de B2 (absence de fuite,
+couverture, get_n_splits cohérent) sont reprises ici, par entité.
+
+Cibles : tsforecast/crossvals/panel.py (92 %) — PanelOutOfSampleSplit, PanelInSampleSplit,
+PanelOutOfSampleSplitPerEntity, PanelInSampleSplitPerEntity — et
+tests/integration/crossvals/test_integration.py.
+
+1. Unit : écrire d'abord la différence de contrat entre variantes « globales » (dates communes à
+   toutes les entités) et « PerEntity » (découpage propre à chaque entité), sur un panel à 3
+   entités de longueurs différentes (heterogeneous_coverage_panel). Scénarios : entité absente
+   d'un pli, entité à une seule observation, entité plus courte que gap + test_size,
+   MultiIndex 2 et 3 niveaux, niveaux nommés différemment, panel désordonné (entrelacé,
+   trié par entité mais pas par date), colonne time_col, entités à clés tuples / entiers / chaînes
+   avec espaces. Propriété par entité : aucune fuite temporelle, unions des tests = ce qui est
+   documenté. get_n_splits cohérent avec split.
+2. Integration (tests/integration/crossvals/) : splitters de panel avec cross_validate +
+   XYPipeline + PanelwiseTransformer + estimateur trivial, GridSearchCV ; séries mensuelles
+   réalistes (irregular_index_timeseries) avec TSOutOfSampleSplit. Vérifier que les pondérations
+   `groups` éventuelles sont respectées.
+3. Tri (§4.4) des tests existants de test_panel.py et de l'intégration.
+
+Critères §4.6 ; rapport §4.7.
+```
+
+### Prompt B4 — `panel/utils.py`
+
+**Modèle : Sonnet · Plan mode : Non · Effort : high · Dépendances : B0**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
+tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B » et tests/PLAN_B.md
+(section B4). Aucun changement dans tsforecast/.
+
+Cible : tsforecast/panel/utils.py (45 %, 83 lignes de tests) — is_panel_data, get_entity_levels,
+detect_panel_structure, extract_time_series_from_multiindex, normalize_entity_key,
+normalize_entity_mapping, split_variable_key, get_unique_panel_entities,
+group_keys_by_entity_and_variable, extract_column_names, get_entity_mask,
+get_entity_target_frequency, resolve_entity_column_frequencies, iter_entity_blocks,
+build_panel_index. Ces fonctions servent delays, frequency et PanelwiseTransformer : une
+erreur de clé d'entité y devient une erreur silencieuse ailleurs.
+
+1. Une classe de tests par fonction, valeurs d'or écrites à la main sur de petits panels :
+   index simple, MultiIndex 2 et 3 niveaux, niveaux nommés ou non, entité à clé scalaire vs
+   tuple (normalize_entity_key : 'FR' ≡ ('FR',) ≡ ('FR',) dans les deux sens), clés avec espaces /
+   accents / types mixtes, colonnes en MultiIndex, jeu vide, une entité, une colonne.
+2. normalize_entity_mapping, split_variable_key, group_keys_by_entity_and_variable :
+   dictionnaires par entité, par (entité, colonne), clés mélangeant les deux notations, clés en
+   conflit après normalisation (comportement à épingler).
+3. get_entity_mask / iter_entity_blocks / build_panel_index : l'aller-retour
+   iter_entity_blocks → build_panel_index restitue le panel d'origine (ordre et index) ;
+   panel désordonné ; entité absente.
+4. resolve_entity_column_frequencies / get_entity_target_frequency : une fréquence est une
+   propriété du couple (entité, colonne) (§4.2.5) ; cas : fréquence déclarée globale, par
+   entité, par colonne, par couple, précédences, entité sans colonne déclarée.
+5. Ajouter les tests doctest-able en lisant les docstrings : tout écart docstring ↔ code est une
+   anomalie [DOC] ANO-PANEL-NNN (§4.5).
+
+Critères §4.6 (95 % visé, 90 % minimum) ; rapport §4.7.
+```
+
+### Prompt B5 — `panel/transformers.py` (`PanelwiseTransformer`)
+
+**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : B4**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
+tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B » et tests/PLAN_B.md
+(section B5). Aucun changement dans tsforecast/. Lis docs/concepts/panelwise_transforms.md.
+
+Cible : tsforecast/panel/transformers.py (58 %) — PanelwiseTransformer ; tests dans
+tests/unit/panel/test_transformers.py (ex test_panelwise_transformer.py).
+
+1. TRIAGE PRIORITAIRE des 14 tests « hors campagne » de tests/legacy_failures.txt (tous dans ce
+   fichier) : pour chacun, établir la cause AVANT toute modification, catégorie a/b/c/d (§4.4),
+   preuve (commit, docstring, cohérence avec les autres composants), action. Retirer chaque
+   entrée de legacy_failures.txt au fur et à mesure ; à la fin de ce prompt le groupe
+   « hors campagne » doit être vide (ou n'afficher que des tests expliqués dans l'ANOMALIES.md).
+   Remarque : le warning « Error fitting entity ('DE',): ('DE',). Skipping. » observé dans la
+   suite a un message qui répète la clé au lieu de la cause : à instruire (anomalie ANO-PANEL
+   [CODE] mineure si la cause réelle est masquée).
+2. Compléter : fit / transform / fit_transform / inverse_transform sur panel MultiIndex 2 et 3
+   niveaux, une seule entité, entité absente au transform (comportements selon le paramètre de
+   gestion des erreurs : raise / warn / ignore — lire le constructeur), entité inconnue au
+   fit_transform, paramètres propres à une entité (dictionnaire par entité), panel_cols,
+   n_jobs=1 vs n_jobs=2 (joblib) : résultats IDENTIQUES et ordre des lignes conservé, entités
+   désordonnées, estimateur sous-jacent qui échoue pour une entité (FailingEstimator), attributs
+   ajustés (transformers_ par entité, get_entity_transformer), get_params / set_params / clone,
+   GridSearchCV avec paramètre imbriqué, pickle/joblib.dump aller-retour du transformateur ajusté.
+3. Non-mutation de l'entrée ; index et noms de colonnes préservés (restore de la structure) ;
+   dtype de sortie.
+4. heterogeneous_coverage_panel : propriétés (index restitué, aucune fuite d'une entité dans une
+   autre : transformer un panel contenant FR+DE == concaténer les transformations de FR et de DE
+   prises isolément).
+
+Critères §4.6 ; rapport §4.7 (avec le tableau de tri des 14 xfail).
+```
+
+### Prompt B6 — `xy/transformers.py` et cœur de `XYPipeline`
+
+**Modèle : Opus · Plan mode : Oui · Effort : high · Dépendances : B0**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
+tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B » et tests/PLAN_B.md
+(section B6). Aucun changement dans tsforecast/. Lis docs/concepts/xy_pipeline.md.
+Plan mode : commence par établir la matrice de scénarios ci-dessous, la soumettre, puis écrire.
+
+Cibles : tsforecast/xy/transformers.py (90 %) — XYTransformerMixin, DropNaNTarget — et le cœur
+de tsforecast/xy/pipeline.py (70 %) — XYPipeline : propagation de y à travers les étapes pour
+fit, fit_transform, transform, predict, fit_predict, score. Le passage de y d'étape en étape est
+la raison d'être de la classe : une erreur y est silencieuse.
+
+Matrice à couvrir (une dimension = une classe de tests, `parametrize` avec ids) :
+- composition : étapes toutes XY, mélange XY + transformateurs sklearn ordinaires (qui
+  ignorent y), étape « passthrough » / None, estimateur final présent / absent, étape XY en
+  dernière position, pipeline d'une seule étape, pipeline vide (erreur) ;
+- y : Series, DataFrame multi-cibles, ndarray, None (pipeline non supervisé), index différent
+  de X, lignes retirées par une étape (X et y restent alignés — propriété à vérifier par
+  l'index), y entièrement NaN ;
+- fit vs transform vs predict : transform ne reçoit jamais y modifié (y rendu inchangé),
+  predict n'applique pas DropNaNTarget (jamais au predict, CLAUDE.md), score applique le retrait
+  des NaN de la cible ; vérification par SpyEstimator des (X, y) réellement reçus par chaque
+  étape à chaque appel ;
+- DropNaNTarget : cible sans NaN (identité), tous NaN (jeu vide : comportement épinglé), NaN
+  partiels, X avec NaN conservés, MultiIndex panel, y DataFrame (NaN sur une seule colonne de y :
+  comportement épinglé), index restitué, ordre conservé ;
+- XYTransformerMixin : contrat de la sous-classe minimale (fit_transform(X, y) → (X', y')),
+  méthode non implémentée → erreur explicite, interaction avec get_params / clone.
+Équivalence : sur un pipeline sans étape XY, XYPipeline donne les MÊMES résultats que
+sklearn.pipeline.Pipeline (remplacement direct) — test paramétré sur plusieurs
+transformateurs sklearn.
+Tri (§4.4) de tests/unit/xy/ ; erreurs vérifiées par `match=` ; non-mutation de l'entrée.
+
+Critères §4.6 (couverture de xy/transformers.py ≥ 95 % ; xy/pipeline.py : la part de B7 s'y
+ajoute, viser ici ≥ 80 %) ; rapport §4.7.
+```
+
+### Prompt B7 — `XYPipeline` : intégration sklearn
+
+**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : B6**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
+tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B » et tests/PLAN_B.md
+(section B7). Aucun changement dans tsforecast/. Les fichiers de test de B6 existent déjà : ne
+pas les dupliquer, créer tests/unit/xy/pipeline/ (paquet) si B0 l'a décidé.
+
+Cible : surface « sklearn » de tsforecast/xy/pipeline.py (XYPipeline, 70 %) :
+- introspection : named_steps, steps, __getitem__ / slicing (`pipe[:-1]` donne un pipeline
+  fonctionnel), __len__, get_params(deep=True) / set_params avec `étape__param`, remplacement
+  d'une étape par set_params, passthrough, clone (étapes clonées, non ajustées), repr ;
+- méthodes déléguées à l'estimateur final : predict_proba, decision_function, score_samples,
+  predict_log_proba, transform, inverse_transform, classes_, n_features_in_,
+  feature_names_in_, get_feature_names_out ; disponibilité conditionnelle (hasattr faux quand
+  l'estimateur final n'a pas la méthode — `available_if`), NotFittedError avant fit ;
+- paramètres d'ajustement par étape (`fit_params` / `étape__sample_weight`) et metadata routing
+  (`sklearn.set_config(enable_metadata_routing=True)` : set_fit_request, routage vers une étape
+  XY) — restaurer la configuration après chaque test (fixture) ;
+- mise en cache `memory=` (répertoire tmp_path) : un second fit ne recalcule pas les étapes
+  mises en cache ;
+- GridSearchCV, RandomizedSearchCV, cross_validate, cross_val_predict avec TSOutOfSampleSplit :
+  les lignes retirées par une étape XY ne désalignent pas scores et prédictions ; n_jobs=2 ;
+- sérialisation : joblib.dump / load d'un pipeline ajusté, prédictions identiques ;
+- erreurs : nom d'étape dupliqué, étape sans fit/transform, estimateur intermédiaire, messages
+  vérifiés.
+Chaque ligne non couverte du rapport term-missing de pipeline.py est justifiée ou testée.
+Comparer systématiquement avec sklearn.pipeline.Pipeline sur les comportements communs.
+
+Critères §4.6 (pipeline.py 95 % visé, 90 % minimum) ; rapport §4.7.
+```
+
+### Prompt B8 — Intégration `base` / `panel` / `xy` / `crossvals` et clôture de la partie B
+
+**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : B1-B7**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
+tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B », tests/PLAN_B.md
+et tests/ANOMALIES.md. Aucun changement dans tsforecast/.
+
+1. Intégration (tests/integration/pipeline/ ou crossvals/, selon le plan) : un flux complet
+   réaliste sur heterogeneous_coverage_panel et irregular_index_timeseries — XYPipeline avec une
+   étape PanelwiseTransformer (transformateur dérivé de PanelTimeSeriesTransformer, p. ex.
+   PublicationDelayTransformer), DropNaNTarget, un estimateur, évalué avec cross_validate et
+   un splitter de panel : scores finis, absence de fuite entre plis et entre entités
+   (propriété : le résultat pour une entité ne dépend pas des autres), non-mutation des
+   entrées, reproductibilité, n_jobs=1 vs 2.
+2. Clôture B : exécuter l'ensemble des tests des quatre paquets avec couverture ligne+branche ;
+   tableau final par module (objectif ≥ 90 %, chaque ligne manquante justifiée) ; vérifier que
+   le groupe « hors campagne » de tests/legacy_failures.txt est vide ; chaque xfail « ANO-… » de
+   ces quatre paquets a son entrée dans ANOMALIES.md et inversement (script de contrôle dans le
+   scratchpad) ; aucun fichier de test > 1 200 lignes ; aucun test > 2 s sans `slow`.
+3. Ajouter les modules de ces quatre paquets au seuil de 90 % de tests/run_tests.py --mode
+   coverage s'il existe déjà (sinon laisser C1 le faire) ; mettre à jour la section « Hors
+   campagne » du §2.2 de tests_and_refactoring_prompts.md pour qu'elle indique l'état réel.
+4. Synthèse « Préalables au refactoring » : ajouter à ANOMALIES.md un paragraphe sur les
+   anomalies base / crossvals / panel / xy qui pourraient gêner la partie N / P / R. Laisser
+   tests/PLAN_B.md en place : C2 le supprime.
+
+Rapport §4.7 : couverture avant → après par module, tests unit / integration / xfail par paquet,
+les anomalies les plus graves.
+```
+
+---
+
 ## Partie C — Clôture de la campagne de tests
 
 ### Prompt C1 — Couverture, CI, badges `README.md`
 
-**Modèle : Sonnet · Plan mode : Non · Effort : medium · Dépendances : toutes les parties U, D, F**
+**Modèle : Sonnet · Plan mode : Non · Effort : medium · Dépendances : toutes les parties U, D, F, B**
 
 ```text
 Contexte : dépôt ts-forecast, remote https://github.com/qbolliet/ts-forecast. Lis CLAUDE.md
@@ -1445,8 +1866,8 @@ pytest-cov et sert un badge à jour à chaque push.
    (https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg), et un badge par
    paquet si disponible. Réécrire la section « Test » (commandes run_tests.py, arborescence
    unit / integration / support, lien vers tests/ANOMALIES.md).
-4. run_tests.py --mode coverage : échec si un module de tsforecast/{utils,delays,frequency} est
-   sous 90 % (lecture de coverage.json / coverage.xml), liste des modules fautifs.
+4. run_tests.py --mode coverage : échec si un module de
+   tsforecast/{utils,delays,frequency,base,crossvals,panel,xy} est sous 90 % (lecture de coverage.json / coverage.xml), liste des modules fautifs.
 5. CLAUDE.md : section « Couverture de Code » (outil, seuils, badges, CI) et « Stratégie de
    Tests » à jour.
 6. NE PAS pousser. Terminer par les actions manuelles : activer le dépôt sur codecov.io, créer le
@@ -1464,11 +1885,11 @@ Rapport §4.7 avec la couverture finale par module.
 Contexte : dépôt ts-forecast. Lis CLAUDE.md, la section 4 de tests_and_refactoring_prompts.md,
 tests/ANOMALIES.md et tests/legacy_failures.txt. Aucun changement dans tsforecast/.
 
-1. Vérifications : suite complète verte ; tests/legacy_failures.txt ne contient plus que
-   « hors campagne » (sinon : lister les restes et s'arrêter) — s'il est vide, le supprimer avec
-   le hook correspondant de tests/conftest.py ; collect_ignore vide ; chaque xfail « ANO-… » a
+1. Vérifications : suite complète verte ; tests/legacy_failures.txt est VIDE (la partie B a
+   traité le groupe « hors campagne » ; sinon : lister les restes et s'arrêter) — le supprimer
+   avec le hook correspondant de tests/conftest.py ; supprimer tests/PLAN_B.md ; collect_ignore vide ; chaque xfail « ANO-… » a
    son entrée dans ANOMALIES.md et inversement (script de contrôle dans le scratchpad) ;
-   couverture ≥ 90 % par module de utils, delays, frequency.
+   couverture ≥ 90 % par module de utils, delays, frequency, base, crossvals, panel, xy.
 2. ANOMALIES.md consolidé : dédoublonner, regrouper par cause racine, classer par sévérité ;
    pour chaque anomalie de frequency, préciser si le refactoring (partie R, qui ne change AUCUN
    comportement) la laisse intacte — ce doit être le cas — et quel correctif ultérieur la
@@ -1479,6 +1900,559 @@ tests/ANOMALIES.md et tests/legacy_failures.txt. Aucun changement dans tsforecas
 
 Rapport §4.7 : tableau couverture par module, nombre de tests unit / integration / slow /
 internal / xfail, les cinq anomalies les plus graves.
+```
+
+---
+
+## Partie N — Normalisation du code (autoportance, en-têtes, tests courts, doctests)
+
+> Contexte commun aux prompts N. Cette partie applique les règles de **CLAUDE.md**, section
+> « Règles de rédaction du code » (à lire en entier avant chaque prompt) à tout le dépôt :
+>
+> 1. aucune référence à un numéro de paragraphe (`§`), de décision, de spécification,
+>    d'invariant, d'anomalie ou de prompt dans un **commentaire** ou une **docstring** — la règle
+>    visée doit être **énoncée**, pas citée ;
+> 2. aucune justification de décision ni mention de l'état antérieur du code (« auparavant »,
+>    « désormais », « corrigé », « remplace l'ancien… ») : le texte décrit **ce que le code est**,
+>    lisible par quelqu'un qui ne connaît pas l'historique ;
+> 3. un **en-tête de fichier** (docstring de module, en anglais) en première instruction de chaque
+>    fichier `.py`, et un commentaire d'en-tête équivalent pour les `.yml` / `.yaml` / `.toml` ;
+> 4. aucun fichier de test de plus de **1 200 lignes** : il devient un paquet de fichiers
+>    thématiques ;
+> 5. des **doctests** qui passent.
+>
+> **État mesuré (2026-10-16)** : 928 lignes de commentaires / docstrings contiennent un motif de
+> référence (`§`, `D<n>`, `I<n>`, `ANO-…`) réparties sur 79 fichiers (surtout `tests/`) ; 38 fichiers
+> `.py` n'ont pas de docstring de module ; 14 fichiers de tests dépassent 1 000 lignes (9 dépassent
+> 1 200) ; `pytest --doctest-modules tsforecast` : **43 échecs** (`base/transformers.py` 12,
+> `frequency/provenance.py` 13, `crossvals/base.py` 6, `frequency/imputation_window.py` 4,
+> `crossvals/time_series.py` 4, 4 modules à 1).
+>
+> **Pourquoi des modèles plus petits (Sonnet / Haiku)** : le volume est important mais le travail
+> est **vérifiable mécaniquement**. Le prompt N0 construit donc d'abord un vérificateur
+> (`scripts/check_conventions.py`) dont les règles sont binaires ; chaque prompt suivant a pour
+> critère d'acceptation « le vérificateur ne signale plus rien » **et** « l'arbre syntaxique du
+> code est inchangé » (hors docstrings). Un modèle qui se trompe est rattrapé par le script, pas par
+> la relecture de l'auteur. Chaque prompt est **reprenable** : il peut s'arrêter à n'importe quel
+> fichier terminé, la relance repart de la liste du vérificateur.
+>
+> **Ordre d'exécution** : N0 → {N1, N2, N3, N4} (parallélisables : périmètres disjoints) → N5 → N6
+> → **P1 (pandas 3, partie suivante)** → N7 → N8. Les doctests (N7, N8) sont volontairement
+> **après** P1 : les représentations affichées changent avec pandas 3 (dtype `str`, résolution des
+> dates) et les exemples ne doivent être corrigés qu'une fois.
+>
+> **Règles pour les petits modèles (toutes les prompts N)** :
+> - ne jamais deviner : si la règle visée par une référence (`D47`, `I11`, `§3.2`) ne se lit pas
+>   dans le code voisin (±40 lignes), **ne pas l'inventer** — supprimer la mention, et lister
+>   l'emplacement dans le rapport (« règle introuvable ») ;
+> - modifier **uniquement** des commentaires, docstrings et (N5) l'organisation des fichiers de
+>   test : toute autre modification de code est une erreur, le vérificateur la détecte ;
+> - travailler **fichier par fichier**, lire le fichier par blocs de 300 lignes, relancer le
+>   vérificateur sur le fichier avant de passer au suivant ;
+> - si un fichier est trop lourd pour le contexte, terminer proprement le fichier en cours, le
+>   dire, s'arrêter : la relance reprendra.
+>
+> **Gabarit de réécriture** (exemples à reproduire, du plus au moins fréquent) :
+>
+> | Avant | Après | Pourquoi |
+> |---|---|---|
+> | `# Invariant I11 : jamais de dégradation fit → predict` | `# La prédiction ne dispose jamais de moins d'information que l'entraînement : toute colonne produite au fit l'est aussi au predict` | la règle est énoncée |
+> | `"""Resolve the frequencies (decision D42)."""` | `"""Resolve the frequencies."""` | la décision citée n'ajoute rien au lecteur |
+> | `# Correction ANO-FREQ-073 : les paires désalignées sont désormais renvoyées` | `# Renvoi des paires désalignées en plus des fréquences détectées` | état courant, sans historique |
+> | `# Auparavant calculé en jours ; passage aux nanosecondes pour éviter l'erreur d'arrondi` | `# Calcul en nanosecondes entières : exact pour toute unité de durée` | contrainte technique permanente conservée, histoire retirée |
+> | `# Valeur d'or (spec §2) : 120 / 12 = 10 par mois` | `# Valeur d'or : 120 / 12 = 10 par mois` | le calcul se suffit |
+> | `"""Test for ANO-UTILS-014."""` | `"""Month-end positions are preserved when converting weekly to monthly."""` | le test décrit son comportement |
+>
+> Cas à ne **pas** modifier : l'identifiant `ANO-…` dans `reason=` d'un `xfail` (ce n'est ni un
+> commentaire ni une docstring ; la phrase qui suit doit être autoporteuse) ; `tests/ANOMALIES.md` ;
+> les archives `high_frequency_imputer*_*.md` ; `tests_and_refactoring_prompts.md`.
+
+### Prompt N0 — Vérificateur de conventions, configuration des doctests
+
+**Modèle : Sonnet · Plan mode : Non · Effort : medium · Dépendances : aucune**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md (section « Règles de rédaction du code ») et
+l'encadré « Contexte commun aux prompts N » de tests_and_refactoring_prompts.md. Commandes sur
+cette machine : `.venv/Scripts/python.exe -m pytest …` (uv run échoue). Aucun changement dans
+tsforecast/.
+
+Objectif : créer l'outil qui servira de critère d'acceptation aux prompts N1 à N8. Bibliothèque
+standard uniquement (ast, tokenize, re, subprocess, argparse, pathlib).
+
+1. scripts/check_conventions.py, avec en-tête, type hints, docstrings Google Style et
+   commentaires en français. Interface :
+   `python scripts/check_conventions.py [--rule refs|history|header|length|doctest|all]
+    [--format summary|detail] [chemins…]`
+   Périmètre par défaut : tsforecast/, tests/, scripts/ (fichiers .py) ; pour la règle header
+   aussi les .yml / .yaml / .toml du dépôt hors uv.lock, site/, htmlcov/, .venv/. Exclure
+   __pycache__ et tests/support/golden/. Code de sortie 1 si une règle BLOQUANTE est violée.
+   Règles :
+   - refs (bloquante) : analyser les COMMENTAIRES (module tokenize) et les DOCSTRINGS de module /
+     classe / fonction (module ast) — jamais les autres chaînes. Motifs interdits :
+     `§\s*\d` ; `\b[Ss]ection\s+\d+(\.\d+)*` ; `\bD\d{1,3}\b` ; `\bI\d{1,2}\b` ;
+     `\bANO-[A-Z]+-\d+` ; `ANOMALIES\.md` ; `\[(CODE|DOC|SPEC)\]` ;
+     `\b(décision|decision|invariant|Invariant|Décision)\s+[A-Z]?\d+` ;
+     `\bprompt\s+[A-Z]\d+\b` ; `high_frequency_imputer\d?_(architecture|prompts|review|annotations)` ;
+     `tests_and_refactoring_prompts` ; `PLAN_B` ; `\b(spec|spécification)\b` suivi, sur la même
+     ligne, d'un chiffre ou d'un §. Pour chaque `reason="…ANO-…"` d'un xfail : exiger au moins 6
+     mots en plus de l'identifiant (sinon violation).
+   - history (NON bloquante, à relire) : mots-clés d'historique ou de justification de décision
+     dans les commentaires / docstrings — FR : auparavant, anciennement, ancien(ne), désormais,
+     n'est plus, plus besoin, précédemment, était, corrigé, correction de, suite à,
+     remplace(é), contrairement à, workaround ; EN : previously, formerly, used to, no longer,
+     legacy, fixed, workaround, instead of the old, was changed, now returns. Sortie
+     « à relire » avec le contexte (fichier:ligne + 1 ligne).
+   - header (bloquante) : la première instruction du module est une docstring d'au moins 40
+     caractères, en anglais (heuristique : aucun caractère accentué `[àâçéèêëîïôùûü]` ni mot
+     français courant `\b(le|la|les|des|pour|dans|avec|une?)\b`), qui ne contient aucun motif
+     de la règle refs. .yml / .yaml / .toml : première ligne non vide = commentaire `#` (shebang
+     et `# yaml-language-server` tolérés au-dessus).
+   - length (bloquante pour tests/**/*.py) : plus de 1 200 lignes ; pour tsforecast/ : liste
+     informative des fichiers > 1 500 lignes, non bloquante.
+   - doctest (bloquante) : lance `pytest --doctest-modules tsforecast -q` et résume les échecs
+     par fichier.
+   - Option `--verify-code-unchanged <git-ref>` (défaut HEAD) : pour chaque .py modifié par
+     rapport au ref, comparer `ast.dump` de la version courante et de la version du ref APRÈS
+     suppression des docstrings (module, classes, fonctions) ; toute différence restante est une
+     modification de code → violation avec le diff. Les fichiers créés ou supprimés sont ignorés.
+2. tests/unit/scripts/test_check_conventions.py : tests du vérificateur sur de petits fichiers
+   temporaires (tmp_path) pour CHAQUE règle (cas qui passe, cas qui échoue, faux positif évité :
+   `D1` dans une chaîne non docstring, `reason=` d'xfail conforme / non conforme).
+3. Configuration doctest dans pyproject.toml, [tool.pytest.ini_options] :
+   `doctest_optionflags = ["NORMALIZE_WHITESPACE", "ELLIPSIS"]` — SANS ajouter
+   `--doctest-modules` aux addopts (la suite normale ne doit pas changer de durée) ; ne PAS
+   injecter pd / np par doctest_namespace : les exemples doivent importer ce qu'ils utilisent.
+4. tests/run_tests.py : modes `--mode conventions` (lance le vérificateur, règles bloquantes) et
+   `--mode doctest`.
+5. Exécuter `--rule all --format summary` et coller le tableau de départ (violations par règle
+   et par dossier) dans le rapport : c'est la ligne de base des prompts suivants.
+6. CLAUDE.md : ajouter les trois commandes (`python scripts/check_conventions.py`, mode
+   conventions, mode doctest) dans « Stratégie de Tests ».
+
+Critères : tests du script verts ; `--rule all` s'exécute de bout en bout (il échoue sur les
+violations existantes, c'est attendu) ; le script respecte lui-même ses règles (en-tête,
+refs). Rapport en français : fichiers créés, tableau de départ, limites connues de l'heuristique
+(faux positifs rencontrés).
+```
+
+### Prompt N1 — `tsforecast/` : références et historique
+
+**Modèle : Sonnet · Plan mode : Non · Effort : high · Dépendances : N0**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md (section « Règles de rédaction du code »),
+l'encadré « Contexte commun aux prompts N » (gabarit de réécriture et règles pour petits modèles)
+de tests_and_refactoring_prompts.md. Commandes : `.venv/Scripts/python.exe …`. Tu ne modifies QUE
+des commentaires et des docstrings.
+
+Périmètre : tsforecast/ (tous les paquets). Les docstrings de ce dossier sont la documentation
+publique : leur qualité compte plus que leur brièveté.
+
+Boucle, fichier par fichier, en commençant par ceux que signale
+`python scripts/check_conventions.py --rule refs tsforecast --format detail` puis
+`--rule history` :
+1. lire le fichier par blocs de 300 lignes ;
+2. pour chaque mention (référence ou historique), lire le code voisin pour comprendre la RÈGLE
+   que la mention désigne, puis réécrire le commentaire / la docstring pour énoncer cette règle
+   dans les mots du code courant — selon le gabarit ; si la règle est introuvable : supprimer la
+   mention et l'ajouter à la liste « règle introuvable » du rapport ;
+3. commentaires internes en français, formulations nominales ; docstrings en anglais, Google
+   Style (CLAUDE.md) ; ne pas reformuler ce qui n'est pas signalé, ne pas « embellir » ;
+4. règle `history` : une mention qui décrit une CONTRAINTE TECHNIQUE PERMANENTE (« les mois de
+   28 jours imposent un calcul entier ») se conserve sans l'historique ; une mention qui justifie
+   un choix passé ou compare à l'ancien état se supprime ou se reformule à l'état présent ; en
+   cas de doute, supprimer l'historique et garder la contrainte ;
+5. relancer le vérificateur sur le fichier avant de passer au suivant.
+
+Ne pas toucher : le code exécutable, les noms de symboles, les chaînes de messages d'erreur
+(`match=` des tests en dépendent), les valeurs de `reason=`.
+
+Critères : `python scripts/check_conventions.py --rule refs tsforecast` → 0 violation ;
+`--rule history tsforecast` → chaque entrée restante est justifiée dans le rapport
+(« contrainte permanente ») ; `python scripts/check_conventions.py --verify-code-unchanged HEAD`
+→ aucun écart de code ; `.venv/Scripts/python.exe -m pytest tests/unit -q -m "not slow"` → même
+résultat qu'avant. Rapport : fichiers modifiés, nombre de mentions réécrites / supprimées, liste
+« règle introuvable », liste des entrées `history` conservées.
+```
+
+### Prompt N2 — `tests/` du paquet `frequency` : références et historique
+
+**Modèle : Sonnet · Plan mode : Non · Effort : medium · Dépendances : N0**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md (section « Règles de rédaction du code »),
+l'encadré « Contexte commun aux prompts N » de tests_and_refactoring_prompts.md. Commandes :
+`.venv/Scripts/python.exe …`. Tu ne modifies QUE des commentaires et des docstrings.
+
+Périmètre : tests/unit/frequency/, tests/integration/frequency/, tests/support/ (c'est là que se
+concentrent les renvois aux décisions « D<n> », invariants « I<n> », sections « § », aux
+anomalies « ANO-FREQ-… » de la spécification de HighFrequencyImputer). Les identifiants
+`ANO-…` DANS `reason="…"` d'un xfail restent, à condition que la phrase soit autoporteuse.
+
+Boucle (même procédure que N1, étapes 1 à 5), en commençant par le fichier le plus chargé de
+`python scripts/check_conventions.py --rule refs tests/unit/frequency --format summary`.
+Spécificités :
+- un test dont la docstring est « Test for D47 » ou « Invariant I11 » est réécrit pour dire le
+  COMPORTEMENT vérifié (une ligne, en anglais, à la 3e personne : « Fitting with a target keeps
+  the training grid. ») ; pour comprendre ce comportement, lis les assertions du test ;
+- une valeur d'or accompagnée de « (spec §x) » garde son calcul, perd le renvoi ;
+- une classe de tests nommée d'après un identifiant (`TestD47`, `TestInvariantI11`) : NE PAS la
+  renommer (le nom est un node id, utilisé par ANOMALIES.md) — corriger sa docstring seulement ;
+  signaler dans le rapport les noms de classes / fonctions qui contiennent encore un
+  identifiant, pour une décision de l'auteur ;
+- ne jamais modifier une assertion, un décorateur, une fixture ou un `parametrize(ids=…)`.
+
+Critères : `--rule refs tests/unit/frequency tests/integration/frequency tests/support` → 0
+violation ; `--rule history` sur ces dossiers relu ; `--verify-code-unchanged HEAD` sans écart ;
+`.venv/Scripts/python.exe -m pytest tests/unit/frequency -q -m "not slow"` inchangé. Si le
+contexte sature : terminer le fichier en cours et s'arrêter (reprise possible).
+Rapport : fichiers modifiés, mentions réécrites / supprimées, « règle introuvable », noms de
+tests contenant un identifiant.
+```
+
+### Prompt N3 — `tests/` de `utils` et `delays` : références et historique
+
+**Modèle : Haiku · Plan mode : Non · Effort : medium · Dépendances : N0**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md (section « Règles de rédaction du code »),
+l'encadré « Contexte commun aux prompts N » de tests_and_refactoring_prompts.md (gabarit de
+réécriture et règles pour petits modèles : ne jamais deviner, ne modifier que des commentaires
+et des docstrings). Commandes : `.venv/Scripts/python.exe …`.
+
+Périmètre : tests/unit/utils/, tests/unit/delays/, tests/integration/delays/.
+
+Procédure, UN FICHIER À LA FOIS :
+1. `python scripts/check_conventions.py --rule refs <fichier> --format detail` : liste des
+   lignes à corriger ;
+2. pour chaque ligne : ouvre le test concerné, lis ses assertions, puis réécris le commentaire
+   ou la docstring pour dire ce que le test vérifie (voir le gabarit) ; si tu ne comprends pas
+   la règle, supprime la mention et note-la dans ta liste « règle introuvable » ;
+3. ne change JAMAIS une assertion, un décorateur, un nom de fonction ou de classe, un `ids=` ;
+   les `reason="ANO-…"` d'xfail restent tels quels ;
+4. relance la commande 1 sur le fichier : il doit être à zéro ; puis
+   `.venv/Scripts/python.exe -m pytest <fichier> -q` : même résultat qu'avant ;
+5. passe au fichier suivant.
+Puis `--rule history` sur le périmètre : reformule à l'état présent les commentaires qui
+parlent de l'ancien comportement ; en cas de doute, supprime la phrase.
+
+Fin : `python scripts/check_conventions.py --rule refs tests/unit/utils tests/unit/delays
+tests/integration/delays` → 0 ; `--verify-code-unchanged HEAD` → aucun écart. Si le vérificateur
+signale un écart de code sur un de tes fichiers : `git diff` ce fichier, annule la modification
+de code (garde les commentaires), recommence. Rapport : fichiers traités, nombre de mentions,
+liste « règle introuvable », fichiers où tu as eu un doute.
+```
+
+### Prompt N4 — Autres `tests/`, `scripts/`, `tests/support` : références et historique
+
+**Modèle : Haiku · Plan mode : Non · Effort : medium · Dépendances : N0**
+
+```text
+Contexte : identique au prompt N3 (même procédure, mêmes interdits, mêmes critères). Lis CLAUDE.md
+(section « Règles de rédaction du code ») et l'encadré « Contexte commun aux prompts N » de
+tests_and_refactoring_prompts.md.
+
+Périmètre : tests/unit/{base,crossvals,panel,xy,tracking,scripts}/,
+tests/integration/crossvals/, tests/conftest.py, tests/run_tests.py, tests/support/ HORS les
+fichiers déjà traités par N2 (les dossiers frequency), et scripts/.
+
+Procédure et critères : ceux de N3 ; le vérificateur doit afficher 0 pour `--rule refs` sur ce
+périmètre. `tests/ANOMALIES.md` et `tests/legacy_failures.txt` ne sont PAS du code : ne pas les
+modifier. Rapport comme en N3.
+```
+
+### Prompt N5 — Découpage des fichiers de tests de plus de 1 200 lignes
+
+**Modèle : Sonnet · Plan mode : Non · Effort : medium · Dépendances : N2, N3, N4 (et B8 si la partie B est faite)**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md (règle de miroir et seuil de 1 200 lignes),
+la section 3 de tests_and_refactoring_prompts.md et l'encadré « Contexte commun aux prompts N ».
+Commandes : `.venv/Scripts/python.exe …`. Aucun changement dans tsforecast/. Les corps des tests
+ne sont PAS modifiés : seul leur emplacement change.
+
+Périmètre : les fichiers listés par `python scripts/check_conventions.py --rule length tests`
+(à l'état 2026-10-16 : tests/unit/frequency/{test_stage_scaler,test_aggregation_constraint,
+test_imputation_window,test_frequency_aligner,test_provenance}.py,
+tests/unit/utils/validation/test_utils.py, tests/unit/delays/{test_calculator,test_data_manager}.py,
+tests/unit/frequency/high_frequency_imputer/test_transform.py ; relancer la commande, la liste
+fait foi).
+
+Pour CHAQUE fichier, dans cet ordre :
+1. Empreinte AVANT : `pytest <fichier> --collect-only -q` sauvegardé dans le scratchpad
+   (identifiants `Classe::test[param-id]`), puis `pytest <fichier> -q -rA -p no:randomly` :
+   nombres passed / xfailed / skipped / deselected, et marqueurs (slow, internal, xfail reasons)
+   ;
+2. Plan de découpage : paquet `tests/unit/<…>/<module>/` (même nom que le fichier sans
+   `test_`, avec `__init__.py`), un fichier `test_<thème>.py` par groupe de classes de même
+   thème, chaque fichier entre 200 et ~800 lignes, JAMAIS une classe coupée en deux ; le thème
+   se lit dans les docstrings de classes ; si un dossier du même nom existe déjà (ex.
+   high_frequency_imputer/), y ajouter les fichiers au lieu de créer un paquet imbriqué ;
+3. Éléments partagés : fixtures utilisées par ≥ 2 nouveaux fichiers → `conftest.py` du paquet ;
+   fonctions utilitaires partagées → `helpers.py` du paquet (ou tests/support/ si d'autres
+   modules les utilisent déjà) ; constantes de module partagées → idem. Les imports du fichier
+   d'origine sont repartis : chaque nouveau fichier n'importe que ce qu'il utilise ;
+4. Déplacer les classes TELLES QUELLES (copie exacte du texte) ; chaque nouveau fichier reçoit un
+   en-tête (docstring de module en anglais : symboles testés + thème, selon CLAUDE.md) ;
+5. Supprimer l'ancien fichier (`git rm`) ; mettre à jour TOUTES les références à l'ancien
+   chemin ou à ses node ids : `grep -rn` sur tests/ANOMALIES.md (lignes « Test »),
+   tests/legacy_failures.txt, collect_ignore, docs/, README.md, CLAUDE.md, notebooks/, autres
+   tests qui importaient des helpers de l'ancien fichier ; zéro occurrence à la fin ;
+6. Empreinte APRÈS et comparaison : l'ensemble des `Classe::test[param-id]` est IDENTIQUE
+   (seuls les chemins changent), mêmes compteurs passed / xfailed / skipped, mêmes marqueurs.
+   Toute différence = erreur de découpage à corriger avant de continuer.
+
+Critères : `python scripts/check_conventions.py --rule length tests` → 0 ;
+`--rule header tests` → 0 sur les nouveaux fichiers ; `--verify-code-unchanged HEAD` n'est pas
+applicable ici (fichiers créés) : la comparaison d'empreinte la remplace ; suite complète
+`-m "not slow"` inchangée ; durée totale non dégradée de plus de 10 %.
+Rapport : tableau ancien fichier → nouveaux fichiers (lignes, nombre de tests), références
+mises à jour, éléments partagés créés.
+```
+
+### Prompt N6 — En-têtes de fichier
+
+**Modèle : Haiku · Plan mode : Non · Effort : medium · Dépendances : N5**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md (section « Règles de rédaction du code », paragraphe
+« En-tête de fichier ») et l'encadré « Contexte commun aux prompts N » de
+tests_and_refactoring_prompts.md. Commandes : `.venv/Scripts/python.exe …`. Tu n'ajoutes ou ne
+modifies QUE des en-têtes.
+
+Périmètre : la liste de `python scripts/check_conventions.py --rule header --format detail`
+(fichiers .py sans docstring de module, ou dont la docstring est en français, trop courte ou
+porteuse d'une référence ; fichiers .yml / .yaml / .toml sans commentaire d'en-tête).
+
+Pour chaque fichier .py :
+1. lis le fichier (au moins les imports, les noms de classes / fonctions, leurs docstrings) ;
+2. écris UNE docstring de module, en anglais, première instruction du fichier (avant tout import,
+   y compris `from __future__`), de 1 à 4 phrases, qui décrit CE QUE LE FICHIER CONTIENT :
+   - code de `tsforecast/` : rôle du module + principaux symboles publics ;
+   - fichier de tests : quels symboles sont testés et quelles familles de scénarios (cas
+     nominal, cas limites, robustesse d'index…) — déduis-les des noms de classes et de tests,
+     n'invente rien ;
+   - `__init__.py` : le rôle du paquet et ce qu'il réexporte (1 phrase) ; `__init__.py` de
+     tests vide : « Test package for <chemin du paquet testé>. » ;
+   - `conftest.py` / `support/*.py` / `scripts/*.py` : ce qu'ils fournissent ;
+3. interdits : français, références (§, D<n>, I<n>, ANO-…, spec), historique (« previously »,
+   « refactored »), formules creuses (« This module contains code »), listes de plus de 6
+   symboles (grouper par famille) ;
+4. si une docstring de module existe déjà mais viole la règle (français, référence), la réécrire
+   selon les mêmes principes.
+Exemples :
+- tests : `"""Unit tests for ``compare_and_detect_delays``: delay inference on aligned, shifted and
+  partially overlapping datasets, with unsorted, duplicated and multi-entity indexes."""`
+- source : `"""Sub-period rescaling so that imputed values sum to the observed aggregate total, for
+  flow and stock variables (``AggregationConstraint``)."""`
+Pour les .yml / .yaml / .toml : 1 à 3 lignes de commentaire `#` en anglais en tête (rôle du
+fichier : p. ex. « GitHub Actions workflow running the test suite and uploading coverage. »).
+Les .md, .ipynb, .json, .lock ne font pas partie de cette passe : ne pas les modifier ; lister
+dans le rapport les .md de docs/ qui n'ont pas de paragraphe introductif sous le titre.
+
+Critères : `python scripts/check_conventions.py --rule header` → 0 ; `--verify-code-unchanged
+HEAD` → aucun écart ; `.venv/Scripts/python.exe -m pytest tests -q -m "not slow"` inchangé.
+Rapport : nombre de fichiers traités par dossier, fichiers où l'objet du fichier n'était pas
+clair (à relire par l'auteur).
+```
+
+### Prompt N7 — Doctests : `base`, `crossvals`, `panel`, `xy`, `utils`, `delays`, `tracking`
+
+**Modèle : Sonnet · Plan mode : Non · Effort : medium · Dépendances : P1 (pandas 3 migré), N1**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md (docstrings « Examples » : les doctests doivent
+passer ; règles de rédaction du code) et l'encadré « Contexte commun aux prompts N ». Commandes :
+`.venv/Scripts/python.exe -m pytest --doctest-modules <chemin> -q` (pandas 3 est installé).
+
+Périmètre : tsforecast/{base,crossvals,panel,xy,utils,delays,tracking}. Mesure de départ
+(pandas 2.3, 2026-10-16) : base/transformers.py 12 échecs, crossvals/base.py 6,
+crossvals/time_series.py 4, crossvals/__init__.py 1, panel/transformers.py 1, xy/pipeline.py 1 ;
+la mesure sous pandas 3 prime : relance-la.
+
+Pour CHAQUE exemple en échec, établir la cause avant de modifier :
+(i) exemple mal écrit ou périmé — import manquant, sortie obsolète, représentation dépendant de
+    la version ou non déterministe → corriger l'EXEMPLE ;
+(ii) l'exemple expose un comportement du code contraire à ce que la docstring décrit → NE PAS
+    modifier le code (hors périmètre) : choisir un exemple qui illustre le comportement
+    documenté sans emprunter le chemin fautif, ajouter l'anomalie dans tests/ANOMALIES.md
+    (protocole §4.5, type [CODE], avec un test xfail(strict=True) dans tests/unit/…) et la
+    signaler dans le rapport.
+Règles pour les exemples : imports explicites dans l'exemple (pas de pd / np implicites) ;
+déterministes (graine, tri) ; courts (≤ 15 lignes) ; sortie lisible — préférer `print(df)`,
+`.tolist()`, `.to_dict()` aux réprs larges ; `# doctest: +NORMALIZE_WHITESPACE` et
+`+ELLIPSIS` autorisés, `+SKIP` interdit ; les données sont de petite taille et illustrent un
+cas d'usage concret (CLAUDE.md). Un exemple manquant sur une fonction publique : en ajouter un.
+Ne touche pas aux autres parties des docstrings (sauf référence §/D/I rencontrée : la retirer
+selon le gabarit).
+
+Critères : `.venv/Scripts/python.exe -m pytest --doctest-modules tsforecast/{base,crossvals,panel,
+xy,utils,delays,tracking} -q` → 0 échec, 0 skip dû à +SKIP ; `python scripts/check_conventions.py
+--verify-code-unchanged HEAD` → aucun écart de code ; suite normale inchangée. Rapport : nombre
+d'exemples corrigés par module, anomalies (i)/(ii), exemples ajoutés.
+```
+
+### Prompt N8 — Doctests : `frequency`
+
+**Modèle : Sonnet · Plan mode : Non · Effort : high · Dépendances : N7**
+
+```text
+Contexte : identique à N7 (même procédure, même catégorisation (i) / (ii), mêmes règles pour les
+exemples, mêmes critères). Périmètre : tsforecast/frequency/ (mesure de départ sous pandas 2.3 :
+provenance.py 13 échecs, imputation_window.py 4, high_frequency_imputer.py 1 ; relancer sous
+pandas 3).
+
+Spécificités : les exemples de provenance (ProvenanceType, ImputationProvenanceTracker) affichent
+des matrices de chaînes — rendre l'affichage stable avec `print(tracker.to_string_matrix())` ou
+`.tolist()` plutôt que le repr d'un DataFrame ; les exemples de HighFrequencyImputer doivent
+tenir en < 2 s et ≤ 20 lignes (jeu minimal : une série mensuelle et une colonne trimestrielle) ;
+une fréquence détectée est une propriété du couple (entité, colonne) — l'exemple le montre quand
+il met en jeu un panel. Un résultat d'exemple qui te paraît faux (valeur d'imputation
+incohérente, NaN inattendu) est une anomalie (ii) : instruire avant de « corriger » l'exemple.
+Critères N7 appliqués à tsforecast/frequency ; puis, vérification globale finale :
+`python scripts/check_conventions.py --rule all` → 0 violation bloquante.
+```
+
+---
+
+## Partie P — Passage à pandas ≥ 3.0
+
+> Contexte. `pyproject.toml` épingle aujourd'hui `pandas>=2.3.1,<3` (installé : 2.3.1, Python 3.13).
+> pandas 3.0 change des comportements **sans lever d'erreur** : le risque principal n'est pas
+> l'exception, c'est la divergence silencieuse de résultats. Ce prompt s'appuie donc sur trois
+> garde-fous : (1) migrer d'abord **à l'intérieur de pandas 2.3** en activant les futurs
+> comportements (c'est le chemin officiel) ; (2) comparer des **sorties de référence** produites
+> avant la montée de version ; (3) ajouter des tests de **robustesse à la résolution des dates**
+> et à la **non-mutation des entrées**, absents aujourd'hui.
+
+### Prompt P1 — Migration vers pandas ≥ 3.0 sans régression
+
+**Modèle : Opus · Plan mode : Oui · Effort : xhigh · Dépendances : C2 (suite verte et anomalies consolidées), N1-N6 recommandés ; avant R0**
+
+```text
+Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2 à 4 de
+tests_and_refactoring_prompts.md et tests/ANOMALIES.md. Commandes sur cette machine :
+`.venv/Scripts/python.exe -m pytest …` (uv run échoue ; si `uv lock` / `uv sync` échouent aussi,
+installe avec `.venv/Scripts/python.exe -m pip install "pandas>=3,<4"` et dis-le dans le rapport
+pour que l'auteur régénère uv.lock). Plan mode : soumettre le plan de la phase 1 (inventaire
+chiffré des occurrences à migrer, par catégorie et par fichier) AVANT d'exécuter les phases 2 à 5.
+
+Objectif : passer le paquet à pandas >= 3.0 (`pandas>=3.0,<4`) sans introduire de bug ni changer
+un résultat numérique. Aucun support simultané de pandas 2 : pas de branche `if pandas_version`,
+pas de `# type: ignore` de contournement. Le comportement du paquet reste identique, sauf là où
+pandas 3 impose un changement documenté dans le rapport.
+
+PHASE 0 — Lecture. Avant toute décision, lire la documentation officielle de pandas 3.0 (notes de
+version « What's new in 3.0.0 », guide de migration du nouveau dtype chaîne, guide Copy-on-Write,
+liste des dépréciations de la 2.x devenues erreurs) ; ne pas t'appuyer sur ta mémoire : cite
+dans le rapport les pages lues. Vérifier que numpy, scikit-learn, scipy, joblib, mkdocs /
+mkdocstrings, jupyter / nbconvert et toute dépendance du groupe dev acceptent pandas 3
+(`pip index versions`, notes de version) ; lister les relèvements de bornes nécessaires.
+Familles de changements à instruire A COUP SÛR (non exhaustif) :
+ a. Copy-on-Write généralisé : plus de chaînage d'affectation (`df['a'][m] = v`, `df.loc[m]['a']
+    = v`), plus de vues partagées ; `inplace=True` sur un objet dérivé n'affecte plus l'original ;
+    une fonction qui modifiait en place un DataFrame reçu « par effet de bord » ne le fait plus ;
+    les tableaux `.values` / `.to_numpy()` / `np.asarray(df)` sont en lecture seule →
+    `ValueError: assignment destination is read-only` à toute écriture en place ;
+ b. dtype chaîne par défaut (`str`, NaN-aware) à la place d'`object` : tests `dtype == object`,
+    `select_dtypes('object')`, `is_object_dtype`, niveaux de MultiIndex et noms de colonnes /
+    d'entités en chaîne, `astype(str)`, `fillna('')`, `.str` sur colonnes de chaînes
+    (matrices de provenance de frequency/provenance.py), comparaisons à `None` / `pd.NA` / `np.nan` ;
+ c. résolution des dates : l'inférence par défaut ne donne plus toujours `datetime64[ns]`
+    (`pd.to_datetime`, `date_range`, `Timestamp`, `Timedelta` peuvent être en `s`, `ms`, `us`) :
+    toute conversion `.astype('int64')`, `.view('i8')`, `.asi8`, `.value`, `np.timedelta64(…,'ns')`,
+    division de Timedelta, `get_duration_nanoseconds`, arithmétique de délais (delays/), calcul
+    de bornes de période (utils/time) et de pas de fréquence doit être explicite sur l'unité ;
+    comparaisons et concaténations d'index de résolutions différentes ; `freq` inféré ;
+ d. alias de fréquence : suppression des alias dépréciés ('H', 'T', 'S', 'M', 'Q', 'Y', 'A',
+    'L', 'U', 'N'…), `Period` / `PeriodIndex` / `to_period` / `asfreq`, `offsets` ;
+ e. API supprimées ou durcies : `Series[int]` positionnel sur index non entier, `fillna(method=)`,
+    `ffill`/`bfill` avec `downcast`, `DataFrame.applymap`, `Series.view`, `is_categorical_dtype`,
+    `groupby(...).apply` (colonnes de regroupement exclues), `observed` des groupby catégoriels,
+    `stack`/`unstack` (nouvelle implémentation, `dropna`), `concat` avec entrées vides / toutes-NA,
+    `replace` et `downcasting`, `Index.format`, `swaplevel`, `reindex` sur MultiIndex,
+    `pd.options.mode.*` retirées, `resample` / `asfreq` sur index non triés, `sort_index` stable.
+ Chercher chacune de ces familles par `Grep` sur tsforecast/, tests/, scripts/, notebooks/ et
+ docs/, et chiffrer.
+
+PHASE 1 — Ligne de base (pandas 2.3, AVANT toute modification de pandas).
+ 1. Suite complète (sans `-m "not slow"`) : sauvegarder dans le scratchpad les ensembles
+    {passed, xfailed, skipped} par node id.
+ 2. Sorties de référence numériques, produites par un script du scratchpad (rejouable sous les
+    deux versions) à partir des jeux de tests/support : HighFrequencyImputer.fit_transform /
+    transform sur les séries et panels mixtes (valeurs ET matrices de provenance, par stratégie de
+    covariable), PublicationDelayTransformer / ShiftTransformer / MaskTransformer et
+    compare_and_detect_delays sur les jeux de delays, indices de chaque splitter de crossvals sur
+    un panel, FrequencyConverter / FrequencyDetector / validate_temporal_data sur toutes les
+    perturbations, PanelwiseTransformer et XYPipeline. Écrites en parquet ou pickle dans le
+    scratchpad (dtype et index inclus), avec un manifeste. Rien n'est ajouté au dépôt à ce stade.
+ 3. Exécuter la suite avec les futurs comportements ACTIVÉS sous pandas 2.3 :
+    `pd.options.mode.copy_on_write = True`, `pd.options.future.infer_string = True`
+    (via un conftest temporaire ou la variable d'environnement correspondante), et
+    `-W error::FutureWarning -W error::DeprecationWarning` (+ `Pandas4Warning` si elle existe en
+    2.3.1) restreint aux avertissements émis par pandas. Chaque échec devient une ligne de la
+    liste de travail, classée par famille a-e.
+
+PHASE 2 — Migration à l'intérieur de pandas 2.3. Corriger le code de tsforecast/ famille par
+famille jusqu'à ce que la suite complète soit verte sous ces options, SANS changer la version :
+ - privilégier l'expression explicite (copie `.copy()` là où le code comptait sur une vue
+   modifiée ; unité de datetime explicite ; `astype('string')` / comparaisons indépendantes du
+   dtype chaîne) plutôt que le contournement ; ne jamais ajouter de `warnings.filterwarnings`
+   pour faire taire pandas ;
+ - un changement de code qui modifie un résultat de référence est une anomalie : s'arrêter,
+   comprendre, consigner (ANOMALIES.md) ; ne jamais ajuster une valeur d'or de test pour
+   « suivre » pandas sans preuve que l'ancienne valeur était le comportement voulu.
+ Les tests existants ne se modifient que pour supprimer une dépendance à un détail de pandas
+ (p. ex. `dtype == object`), jamais pour assouplir une assertion de fond.
+
+PHASE 3 — Nouveaux tests de garde (avant la montée de version, verts sous pandas 2.3).
+ - tests/support/perturbations.py : perturbation « résolution des dates » (index et colonnes en
+   `datetime64[s]`, `[ms]`, `[us]`, `[ns]`, et `Timedelta` de ces résolutions) ; tests
+   paramétrés sur cette perturbation pour : utils/validation, utils/frequency (détecteur,
+   convertisseur), utils/time, utils/duration (get_duration_nanoseconds), delays (calculator,
+   transformers), frequency (fit/transform d'un HighFrequencyImputer minimal), crossvals — le
+   résultat doit être INDÉPENDANT de la résolution (au dtype d'index près, vérifié par
+   assert_frame_equal(check_index_type=False) puis par une assertion explicite sur l'unité de
+   sortie). Les écarts sont des anomalies.
+ - non-mutation des entrées (copy-on-write) : test paramétré sur tous les transformateurs /
+   splitters publics (copie profonde avant, `assert_frame_equal` après fit / transform /
+   inverse_transform / split).
+ - noms d'entités, de colonnes et niveaux de MultiIndex en `str` : aller-retour identique
+   (index et colonnes restitués) pour les transformateurs de panel, y compris entités à
+   caractères spéciaux.
+ - sorties en lecture seule : aucun code ne doit écrire dans un `to_numpy()` / `.values` reçu.
+
+PHASE 4 — Montée de version. Modifier pyproject.toml (`pandas>=3.0,<4`, bornes des dépendances
+relevées en phase 0), installer, régénérer le verrou si possible. Exécuter la suite complète.
+Traiter les résidus (typiquement : résolution de date, dtype chaîne, représentation dans
+quelques tests). Comparer les sorties de référence de la phase 1 avec celles produites sous
+pandas 3 : égalité à la tolérance flottante près (`assert_frame_equal(check_dtype=False,
+rtol=1e-12)`) ; chaque différence restante est justifiée une à une dans le rapport (changement
+de dtype d'index, p. ex. `datetime64[us]` au lieu de `[ns]`) et son effet sur les utilisateurs du
+paquet est évalué (le paquet doit-il normaliser l'unité en sortie ? décision à soumettre à
+l'auteur, pas à prendre seul).
+
+PHASE 5 — Finitions.
+ - Les doctests sont traités par N7 / N8 (ne pas les corriger ici) mais lance
+   `pytest --doctest-modules tsforecast -q` et joins le décompte au rapport.
+ - Notebooks : exécuter tests/integration/frequency/test_notebooks.py (slow) et les notebooks de
+   notebooks/ ; corriger les cellules cassées par pandas 3 (alias de fréquence, chaînage).
+ - `uv run mkdocs build --strict` (ou l'équivalent `.venv/Scripts/python.exe -m mkdocs build
+   --strict`) vert.
+ - README.md, CLAUDE.md (mention de la version de pandas, des conventions CoW : pas de chaînage
+   d'affectation, unité de datetime explicite), docs/ : mettre à jour toute mention de
+   pandas 2.
+ - Aucun `FutureWarning` / `DeprecationWarning` de pandas ne subsiste dans la suite complète.
+
+Critères d'acceptation : suite complète = mêmes ensembles passed / xfailed / skipped qu'en phase 1
+(plus les nouveaux tests) ; 0 xpass strict ; sorties de référence équivalentes ou différences
+justifiées ; `python scripts/check_conventions.py --rule all` sans nouvelle violation bloquante
+hors doctests ; couverture non dégradée ; durée de la suite non dégradée de plus de 15 %.
+Rapport en français : tableau famille a-e → nombre d'occurrences → fichiers → traitement ;
+liste des différences de sortie justifiées ; anomalies ; bornes de dépendances relevées ;
+décisions à arbitrer par l'auteur (unité de datetime en sortie, dtype chaîne des noms
+d'entités) ; pages de documentation pandas lues.
 ```
 
 ---
@@ -1597,7 +2571,7 @@ dépicklera pas forcément après — à accepter explicitement) et les tests ma
 
 ### Prompt R0 — Golden master de `HighFrequencyImputer`
 
-**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : C2**
+**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : N8 (golden master produit sous pandas 3)**
 
 ```text
 Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 4 et 7 de tests_and_refactoring_prompts.md
