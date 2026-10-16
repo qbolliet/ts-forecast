@@ -32,4 +32,4 @@ python tests/run_tests.py --mode fast
 python tests/run_tests.py --mode coverage
 
 ### Run a specific target (file, directory or node id)
-python tests/run_tests.py --path tests/unit/crossvals/test_base_classes.py
+python tests/run_tests.py --path tests/unit/crossvals/base/

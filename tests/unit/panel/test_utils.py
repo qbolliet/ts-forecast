@@ -3,7 +3,7 @@
 Only ``get_entity_levels``, ``split_variable_key`` and
 ``normalize_entity_mapping`` are covered here; the
 other helpers are exercised through ``PanelwiseTransformer``
-(``test_panelwise_transformer.py``).
+(``test_transformers.py``).
 """
 import pandas as pd
 import pytest

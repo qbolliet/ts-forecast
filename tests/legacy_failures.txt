@@ -9,17 +9,17 @@
 # groupe "# hors campagne".
 
 # hors campagne
-tests/unit/panel/test_panelwise_transformer.py::TestErrorHandling::test_error_handling_raise
-tests/unit/panel/test_panelwise_transformer.py::TestErrorHandling::test_missing_panel_cols_error
-tests/unit/panel/test_panelwise_transformer.py::TestMultiLevelPanel::test_get_entity_transformer
-tests/unit/panel/test_panelwise_transformer.py::TestMultiLevelPanel::test_multi_level_fit_transform
-tests/unit/panel/test_panelwise_transformer.py::TestPanelwiseTransformerBasic::test_fit_and_transform_separately
-tests/unit/panel/test_panelwise_transformer.py::TestPanelwiseTransformerBasic::test_fit_transform_no_validation
-tests/unit/panel/test_panelwise_transformer.py::TestPanelwiseTransformerBasic::test_inverse_transform
-tests/unit/panel/test_panelwise_transformer.py::TestPanelwiseTransformerBasic::test_per_entity_scaling
-tests/unit/panel/test_panelwise_transformer.py::TestSklearnCompatibility::test_gridsearchcv_compatible
-tests/unit/panel/test_panelwise_transformer.py::TestSklearnCompatibility::test_in_pipeline
-tests/unit/panel/test_panelwise_transformer.py::TestSklearnCompatibility::test_nested_pipeline
-tests/unit/panel/test_panelwise_transformer.py::TestStructurePreservation::test_column_order_preservation
-tests/unit/panel/test_panelwise_transformer.py::TestStructurePreservation::test_index_preservation
-tests/unit/panel/test_panelwise_transformer.py::TestStructurePreservation::test_row_order_preservation
+tests/unit/panel/test_transformers.py::TestErrorHandling::test_error_handling_raise
+tests/unit/panel/test_transformers.py::TestErrorHandling::test_missing_panel_cols_error
+tests/unit/panel/test_transformers.py::TestMultiLevelPanel::test_get_entity_transformer
+tests/unit/panel/test_transformers.py::TestMultiLevelPanel::test_multi_level_fit_transform
+tests/unit/panel/test_transformers.py::TestPanelwiseTransformerBasic::test_fit_and_transform_separately
+tests/unit/panel/test_transformers.py::TestPanelwiseTransformerBasic::test_fit_transform_no_validation
+tests/unit/panel/test_transformers.py::TestPanelwiseTransformerBasic::test_inverse_transform
+tests/unit/panel/test_transformers.py::TestPanelwiseTransformerBasic::test_per_entity_scaling
+tests/unit/panel/test_transformers.py::TestSklearnCompatibility::test_gridsearchcv_compatible
+tests/unit/panel/test_transformers.py::TestSklearnCompatibility::test_in_pipeline
+tests/unit/panel/test_transformers.py::TestSklearnCompatibility::test_nested_pipeline
+tests/unit/panel/test_transformers.py::TestStructurePreservation::test_column_order_preservation
+tests/unit/panel/test_transformers.py::TestStructurePreservation::test_index_preservation
+tests/unit/panel/test_transformers.py::TestStructurePreservation::test_row_order_preservation

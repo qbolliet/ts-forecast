@@ -410,9 +410,9 @@ Rapport en français :
 | **B0** | `base` / `crossvals` / `panel` / `xy` : audit, plan `tests/PLAN_B.md`, réorganisation | Opus | **Oui** | high | A1 |
 | **B1** | `base/transformers.py` (69 %) | Opus | Non | high | B0 |
 | **B2** | `crossvals/base.py` + `time_series.py` : propriétés des splitters | Opus | Non | high | B0 |
-| **B3** | `crossvals/panel.py` + intégration `crossvals` | Opus | Non | high | B2 |
+| **B3** | `crossvals/panel.py` + intégration `crossvals` | Opus | Non | high | B2, B4 |
 | **B4** | `panel/utils.py` (45 %) | Sonnet | Non | high | B0 |
-| **B5** | `panel/transformers.py` (58 %) + tri des 14 xfail hérités | Opus | Non | high | B4 |
+| **B5** | `panel/transformers.py` (58 %) + tri des 14 xfail hérités | Opus | Non | high | B4, B6 |
 | **B6** | `xy/transformers.py` + cœur de `XYPipeline` (matrice de scénarios) | Opus | **Oui** | high | B0 |
 | **B7** | `XYPipeline` : intégration sklearn (routage, `GridSearchCV`, cache, sérialisation) | Opus | Non | high | B6 |
 | **B8** | Intégration `base` / `panel` / `xy` / `crossvals`, clôture de la partie B | Opus | Non | high | B1-B7 |
@@ -439,7 +439,7 @@ Rapport en français :
 | **R8** | Extraction : rejeu du plan et assemblage de la sortie | Opus | Non | xhigh | R7 |
 | **R9** | Finalisation : tests `internal`, docs mkdocs, spec, `CLAUDE.md` | Sonnet | Non | medium | R8 |
 
-**Parallélisables** : après B0, {B1, B2, B4, B6} (B3 après B2, B5 après B4, B7 après B6) ;
+**Parallélisables** : après B0, {B1, B2, B4, B6} (B3 après B2 et B4, B5 après B4 et B6, B7 après B6) ;
 {N1, N2, N3, N4} une fois N0 fait (périmètres disjoints) ; après A0, {U1, U2, U3, U4} ; après A1, {U5, D3, F1, F2, F3, F4, F5, F6,
 F9} ; seul `tests/ANOMALIES.md` est partagé (numéros à relire au moment de l'écriture).
 L'ordre recommandé reste **U → D → F** : `frequency` consomme `utils/frequency` (le
@@ -1473,16 +1473,24 @@ Critères §4.6 (rapporter l'apport à la couverture globale) ; rapport §4.7.
 > | Module | Taille | Couv. | Tests existants |
 > |---|---:|---:|---|
 > | `base/transformers.py` | 1 199 l. | **69 %** | `tests/unit/base/test_transformers.py` (816 l.) |
-> | `crossvals/base.py` | 1 449 l. | 84 % | `test_base_classes.py` (472 l.), `test_base_helpers.py` (319 l.) |
+> | `crossvals/base.py` | 1 449 l. | 84 % | paquet `tests/unit/crossvals/base/` : `test_out_of_sample_split.py` (238 l.), `test_in_sample_split.py` (249 l.), `test_helpers.py` (319 l.) |
 > | `crossvals/time_series.py` | 171 l. | 100 % | `test_time_series.py` (546 l.) |
 > | `crossvals/panel.py` | 301 l. | 92 % | `test_panel.py` (725 l.) |
 > | `panel/utils.py` | 491 l. | **45 %** | `test_utils.py` (83 l.) |
-> | `panel/transformers.py` | 826 l. | **58 %** | `test_panelwise_transformer.py` (495 l., dont **14 xfail hérités**) |
-> | `xy/pipeline.py` | 941 l. | **70 %** | `test_xy_pipeline.py` (715 l.) |
+> | `panel/transformers.py` | 826 l. | **58 %** | `tests/unit/panel/test_transformers.py` (495 l., dont **14 xfail hérités**) |
+> | `xy/pipeline.py` | 941 l. | **70 %** | paquet `tests/unit/xy/pipeline/` : `conftest.py`, `test_core.py` (310 l.), `test_sklearn_surface.py` (301 l.) |
 > | `xy/transformers.py` | 338 l. | 90 % | `tests/unit/xy/test_transformers.py` (182 l.) |
 >
+> **Réorganisation B0 (2026-10-16)** : chemins ci-dessus après déplacement ;
+> `pytest tests/unit/{base,crossvals,panel,xy}` seul donne 266 passed, 14 xfailed. Les doublures
+> XY (`LogTransformXY`, `ScaleXY`, `DropRowsXY`) sont dans `tests/support/estimators.py`. Le
+> découpage en paquets à venir (`base/transformers/` par B1, `crossvals/panel/` par B3,
+> `panel/transformers/` par B5), le propriétaire de chaque fichier de `tests/support/` et les
+> anomalies pressenties sont fixés dans `tests/PLAN_B.md`. Toute fonction de `panel/utils.py` sans
+> préfixe `_` est publique (décision de l'auteur).
+>
 > `tracking/metrics.py` (96 %) est **hors périmètre**. Les 14 entrées « hors campagne » de
-> `tests/legacy_failures.txt` portent toutes sur `test_panelwise_transformer.py` : la partie B
+> `tests/legacy_failures.txt` portent toutes sur `tests/unit/panel/test_transformers.py` : la partie B
 > les **trie et les retire** (B5). Le message `Cannot determine time index` de
 > `base/transformers.py`, rencontré par la partie D, relève de B1.
 >
@@ -1564,7 +1572,8 @@ tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B »
 
 Cible : tsforecast/base/transformers.py (69 %) — TimeSeriesTransformerMixin,
 PanelTimeSeriesTransformer, ReversibleTransformerMixin, InverseTransformer ; tests dans
-tests/unit/base/test_transformers.py. Cette base est héritée par les transformateurs de delays
+tests/unit/base/test_transformers.py, à transformer en paquet tests/unit/base/transformers/ selon
+le découpage de tests/PLAN_B.md (section 2). Cette base est héritée par les transformateurs de delays
 et de frequency : un défaut ici se propage, et le message « Cannot determine time index » y
 naît. Lis docs/concepts/base_transformers.md.
 
@@ -1602,6 +1611,10 @@ critiques (objectif > 90 %).
 Cibles : tsforecast/crossvals/base.py (84 %) — OutOfSampleSplit, InSampleSplit et leurs aides —
 et tsforecast/crossvals/time_series.py (TSOutOfSampleSplit, TSInSampleSplit). Lis
 docs/concepts/cross_validation.md et le notebook « 0 - QB - Crossvals » (possiblement périmé).
+Tests : paquet tests/unit/crossvals/base/ (créé par B0 ; fichiers à ajouter en section 2 de
+tests/PLAN_B.md) et tests/unit/crossvals/test_time_series.py. Tu es propriétaire de
+tests/support/splits.py (à créer : collect_folds, assert_no_leakage, ... — section 1 du plan),
+réutilisé par B3.
 
 Principe : la sûreté d'un splitter est une affaire de PROPRIÉTÉS, pas seulement de valeurs
 d'or. Pour chaque configuration, écrire d'abord les indices attendus à la main sur un petit jeu
@@ -1630,7 +1643,7 @@ Critères §4.6 (95 % visé, 90 % minimum) ; rapport §4.7.
 
 ### Prompt B3 — `crossvals/panel.py` et intégration `crossvals`
 
-**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : B2**
+**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : B2, B4**
 
 ```text
 Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
@@ -1640,7 +1653,10 @@ couverture, get_n_splits cohérent) sont reprises ici, par entité.
 
 Cibles : tsforecast/crossvals/panel.py (92 %) — PanelOutOfSampleSplit, PanelInSampleSplit,
 PanelOutOfSampleSplitPerEntity, PanelInSampleSplitPerEntity — et
-tests/integration/crossvals/test_integration.py.
+tests/integration/crossvals/test_integration.py. tests/unit/crossvals/test_panel.py devient le
+paquet tests/unit/crossvals/panel/ selon le découpage de tests/PLAN_B.md (section 2). Les
+perturbations de panel sont écrites par B4 (tests/support/perturbations.py) ; build_staggered_panel
+est à créer ici, dans tests/support/datasets.py.
 
 1. Unit : écrire d'abord la différence de contrat entre variantes « globales » (dates communes à
    toutes les entités) et « PerEntity » (découpage propre à chaque entité), sur un panel à 3
@@ -1674,7 +1690,10 @@ normalize_entity_mapping, split_variable_key, get_unique_panel_entities,
 group_keys_by_entity_and_variable, extract_column_names, get_entity_mask,
 get_entity_target_frequency, resolve_entity_column_frequencies, iter_entity_blocks,
 build_panel_index. Ces fonctions servent delays, frequency et PanelwiseTransformer : une
-erreur de clé d'entité y devient une erreur silencieuse ailleurs.
+erreur de clé d'entité y devient une erreur silencieuse ailleurs. Toute fonction sans préfixe `_`
+est publique, y compris les quatre absentes de tsforecast.panel.__all__ (ANO-PANEL-007). Tu es
+propriétaire de tests/support/perturbations.py : perturbations à ajouter en section 1 de
+tests/PLAN_B.md, réutilisées par B3 et B5.
 
 1. Une classe de tests par fonction, valeurs d'or écrites à la main sur de petits panels :
    index simple, MultiIndex 2 et 3 niveaux, niveaux nommés ou non, entité à clé scalaire vs
@@ -1697,7 +1716,7 @@ Critères §4.6 (95 % visé, 90 % minimum) ; rapport §4.7.
 
 ### Prompt B5 — `panel/transformers.py` (`PanelwiseTransformer`)
 
-**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : B4**
+**Modèle : Opus · Plan mode : Non · Effort : high · Dépendances : B4, B6**
 
 ```text
 Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
@@ -1705,7 +1724,10 @@ tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B »
 (section B5). Aucun changement dans tsforecast/. Lis docs/concepts/panelwise_transforms.md.
 
 Cible : tsforecast/panel/transformers.py (58 %) — PanelwiseTransformer ; tests dans
-tests/unit/panel/test_transformers.py (ex test_panelwise_transformer.py).
+tests/unit/panel/test_transformers.py (ex test_panelwise_transformer.py), à transformer en paquet
+tests/unit/panel/transformers/ selon le découpage de tests/PLAN_B.md (section 2), en mettant à
+jour tests/legacy_failures.txt dans le même temps. Le tableau d'hypothèses de tri des 14 xfail
+est dans tests/PLAN_B.md (section 4).
 
 1. TRIAGE PRIORITAIRE des 14 tests « hors campagne » de tests/legacy_failures.txt (tous dans ce
    fichier) : pour chacun, établir la cause AVANT toute modification, catégorie a/b/c/d (§4.4),
@@ -1720,7 +1742,8 @@ tests/unit/panel/test_transformers.py (ex test_panelwise_transformer.py).
    gestion des erreurs : raise / warn / ignore — lire le constructeur), entité inconnue au
    fit_transform, paramètres propres à une entité (dictionnaire par entité), panel_cols,
    n_jobs=1 vs n_jobs=2 (joblib) : résultats IDENTIQUES et ordre des lignes conservé, entités
-   désordonnées, estimateur sous-jacent qui échoue pour une entité (FailingEstimator), attributs
+   désordonnées, transformateur sous-jacent qui échoue pour une entité (FailingTransformer,
+   créé par B6 dans tests/support/estimators.py), attributs
    ajustés (transformers_ par entité, get_entity_transformer), get_params / set_params / clone,
    GridSearchCV avec paramètre imbriqué, pickle/joblib.dump aller-retour du transformateur ajusté.
 3. Non-mutation de l'entrée ; index et noms de colonnes préservés (restore de la structure) ;
@@ -1745,7 +1768,11 @@ Plan mode : commence par établir la matrice de scénarios ci-dessous, la soumet
 Cibles : tsforecast/xy/transformers.py (90 %) — XYTransformerMixin, DropNaNTarget — et le cœur
 de tsforecast/xy/pipeline.py (70 %) — XYPipeline : propagation de y à travers les étapes pour
 fit, fit_transform, transform, predict, fit_predict, score. Le passage de y d'étape en étape est
-la raison d'être de la classe : une erreur y est silencieuse.
+la raison d'être de la classe : une erreur y est silencieuse. Tests : tests/unit/xy/test_transformers.py
+et le paquet tests/unit/xy/pipeline/ (créé par B0) — test_core.py est à toi ; test_y_propagation.py
+et test_equivalence.py à créer (tests/PLAN_B.md, section 2). Tu es propriétaire de
+tests/support/estimators.py : doublures listées en section 1 de tests/PLAN_B.md (SpyTransformer,
+SpyXYTransformer, MixinScaleXY, FailingTransformer pour B5).
 
 Matrice à couvrir (une dimension = une classe de tests, `parametrize` avec ids) :
 - composition : étapes toutes XY, mélange XY + transformateurs sklearn ordinaires (qui
@@ -1757,7 +1784,7 @@ Matrice à couvrir (une dimension = une classe de tests, `parametrize` avec ids)
 - fit vs transform vs predict : transform ne reçoit jamais y modifié (y rendu inchangé),
   predict n'applique pas DropNaNTarget (jamais au predict, CLAUDE.md), score applique le retrait
   des NaN de la cible ; vérification par SpyEstimator des (X, y) réellement reçus par chaque
-  étape à chaque appel ;
+  étape à chaque appel (SpyTransformer / SpyXYTransformer pour les étapes intermédiaires) ;
 - DropNaNTarget : cible sans NaN (identité), tous NaN (jeu vide : comportement épinglé), NaN
   partiels, X avec NaN conservés, MultiIndex panel, y DataFrame (NaN sur une seule colonne de y :
   comportement épinglé), index restitué, ordre conservé ;
@@ -1780,7 +1807,8 @@ ajoute, viser ici ≥ 80 %) ; rapport §4.7.
 Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
 tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B » et tests/PLAN_B.md
 (section B7). Aucun changement dans tsforecast/. Les fichiers de test de B6 existent déjà : ne
-pas les dupliquer, créer tests/unit/xy/pipeline/ (paquet) si B0 l'a décidé.
+pas les dupliquer. Le paquet tests/unit/xy/pipeline/ existe (créé par B0) : test_sklearn_surface.py
+et les fichiers listés en section 2 de tests/PLAN_B.md sont à toi.
 
 Cible : surface « sklearn » de tsforecast/xy/pipeline.py (XYPipeline, 70 %) :
 - introspection : named_steps, steps, __getitem__ / slicing (`pipe[:-1]` donne un pipeline
@@ -1815,7 +1843,7 @@ Contexte : dépôt ts-forecast. Lis CLAUDE.md, les sections 2, 3 et 4 de
 tests_and_refactoring_prompts.md, l'encadré « Contexte commun aux prompts B », tests/PLAN_B.md
 et tests/ANOMALIES.md. Aucun changement dans tsforecast/.
 
-1. Intégration (tests/integration/pipeline/ ou crossvals/, selon le plan) : un flux complet
+1. Intégration (tests/integration/pipeline/test_panel_workflow.py, d'après tests/PLAN_B.md) : un flux complet
    réaliste sur heterogeneous_coverage_panel et irregular_index_timeseries — XYPipeline avec une
    étape PanelwiseTransformer (transformateur dérivé de PanelTimeSeriesTransformer, p. ex.
    PublicationDelayTransformer), DropNaNTarget, un estimateur, évalué avec cross_validate et

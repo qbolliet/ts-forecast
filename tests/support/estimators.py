@@ -6,7 +6,7 @@ module), renamed without prefix for cross-cutting use.
 """
 # Modules de base
 import numpy as np
-from sklearn.base import BaseEstimator, RegressorMixin, clone
+from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin, clone
 
 
 class SpyEstimator(BaseEstimator, RegressorMixin):
@@ -123,3 +123,68 @@ class RecordingEstimator(BaseEstimator, RegressorMixin):
             self.predict_X_ = []
         self.predict_X_.append(X.copy())
         return self.estimator_.predict(X)
+
+
+# ==============================================================================
+# Transformateurs XY pour les tests
+# ==============================================================================
+
+
+class LogTransformXY(BaseEstimator, TransformerMixin):
+    """Transformateur XY qui applique log1p sur X et y."""
+
+    def fit(self, X, y=None):
+        self.is_fitted_ = True
+        return self
+
+    def transform(self, X, y=None):
+        X_t = np.log1p(np.abs(X))
+        if y is not None:
+            return X_t, np.log1p(np.abs(y))
+        return X_t
+
+    def fit_transform(self, X, y=None):
+        return self.fit(X, y).transform(X, y)
+
+    def inverse_transform(self, X, y=None):
+        X_inv = np.expm1(X)
+        if y is not None:
+            return X_inv, np.expm1(y)
+        return X_inv
+
+
+class ScaleXY(BaseEstimator, TransformerMixin):
+    """Transformateur XY qui scale X et y par un facteur."""
+
+    def __init__(self, scale_factor=2.0):
+        self.scale_factor = scale_factor
+
+    def fit(self, X, y=None):
+        self.is_fitted_ = True
+        return self
+
+    def transform(self, X, y=None):
+        X_t = X * self.scale_factor
+        if y is not None:
+            return X_t, y * self.scale_factor
+        return X_t
+
+    def fit_transform(self, X, y=None):
+        return self.fit(X, y).transform(X, y)
+
+
+class DropRowsXY(BaseEstimator, TransformerMixin):
+    """Transformateur XY qui supprime les lignes avec des valeurs négatives dans y."""
+
+    def fit(self, X, y=None):
+        self.is_fitted_ = True
+        return self
+
+    def transform(self, X, y=None):
+        if y is not None:
+            mask = y >= 0
+            return X[mask], y[mask]
+        return X
+
+    def fit_transform(self, X, y=None):
+        return self.fit(X, y).transform(X, y)

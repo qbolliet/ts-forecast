@@ -5015,3 +5015,11 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `new_pairs, misaligned = REF_T._check_transform_frequencies(PANEL_X.copy())`, commentaire mis à jour (D42). Le
   notebook audite volontairement les méthodes privées : il reste exposé à leurs changements de signature, que
   le test d'exécution (`slow`) détecte. Le `xfail` est retiré ; le notebook s'exécute sans erreur.
+
+## BASE
+
+## CV
+
+## PANEL
+
+## XY
