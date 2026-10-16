@@ -152,10 +152,10 @@ class TestDataTypeCompatibility:
     def test_datetime_index_compatibility(self):
         """Test compatibility with different datetime index types."""
         # Test different datetime frequencies
-        for freq in ['D', 'H', 'M', 'Y']:
-            if freq == 'Y':
+        for freq in ['D', 'h', 'ME', 'YE']:
+            if freq == 'YE':
                 periods = 10
-            elif freq == 'M':
+            elif freq == 'ME':
                 periods = 24
             else:
                 periods = 50
@@ -241,14 +241,14 @@ class TestEdgeCaseHandling:
     def test_gap_edge_cases(self):
         """Test edge cases with gap parameter."""
         X = pd.Series(range(10))
-        
-        # Gap equal to available training data
-        splitter = TSOutOfSampleSplit(n_splits=2, test_size=2, gap=7)
-        splits = list(splitter.split(X))
-        
-        # Should result in minimal or empty training sets
-        for train_idx, test_idx in splits:
-            assert len(train_idx) <= 1
+
+        # Écart qui ne laisse qu'une ligne d'apprentissage au premier pli (test à partir de la ligne 6)
+        splits = list(TSOutOfSampleSplit(n_splits=2, test_size=2, gap=5).split(X))
+        assert [train_idx.tolist() for train_idx, _ in splits] == [[0], [0, 1, 2]]
+
+        # Écart qui ne laisse aucune ligne d'apprentissage : configuration refusée
+        with pytest.raises(ValueError, match='No training data before the test set starting at row 6'):
+            list(TSOutOfSampleSplit(n_splits=2, test_size=2, gap=7).split(X))
 
     def test_max_train_size_edge_cases(self):
         """Test edge cases with max_train_size parameter."""

@@ -1,172 +1,139 @@
+"""Cross-validators for a single time series: ``TSOutOfSampleSplit`` and ``TSInSampleSplit``.
+
+Both treat the data as one temporal sequence: ``groups`` are ignored with a
+warning, and panel data (a ``MultiIndex``) is refused in favour of the
+``Panel*Split`` classes of :mod:`tsforecast.crossvals.panel`.
+"""
 # Importation des modules
 # Modules de base
 import warnings
 
-# Importations locales
-from .base import OutOfSampleSplit, InSampleSplit
+import pandas as pd
 
-# Classe de base pour la validation croisée out-of-sample sur séries temporelles
-class TSOutOfSampleSplit(OutOfSampleSplit):
-    """Time series out-of-sample cross-validation split.
-    
-    This class extends OutOfSampleSplit for time series data where temporal ordering
-    is crucial and no grouping by entities is needed. The split respects chronological
-    order and prevents data leakage by ensuring training data comes before test data.
-    
-    Key characteristics:
-    - Maintains temporal ordering in splits
-    - Applies gap between training and test sets to avoid leakage
-    - Supports rolling window validation with configurable train size
-    - Groups parameter is ignored (time series = single entity)
-    
-    Args:
-        n_splits (int, optional): Number of splits for cross-validation. Defaults to 5.
-        test_indices (list, optional): Specific test periods to use. Can be:
-            - Dates/timestamps as strings or pd.Timestamp objects
-            - Integer positions in the time series
-            Defaults to None (uses equally spaced splits).
-        max_train_size (int, optional): Maximum size of training window.
-            If None, uses expanding window. Defaults to None.
-        test_size (int, optional): Number of time periods per test set.
-            Defaults to None (calculated automatically).
-        gap (int, optional): Number of periods between training and test sets
-            to prevent data leakage. Defaults to 0.
-    
-    Examples:
-        >>> # Create time series data
-        >>> dates = pd.date_range('2020-01-01', periods=100, freq='D')
-        >>> X = pd.DataFrame({'value': np.random.randn(100)}, index=dates)
-        
-        >>> # Rolling window out-of-sample validation
-        >>> splitter = TSOutOfSampleSplit(n_splits=5, test_size=10, gap=1)
-        >>> for train_idx, test_idx in splitter.split(X):
-        ...     X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-        ...     # Train on past, test on future with 1-day gap
-        
-        >>> # Specific test dates
-        >>> test_dates = ['2020-02-01', '2020-03-01', '2020-04-01']
-        >>> splitter = TSOutOfSampleSplit(test_indices=test_dates, test_size=7)
-        >>> for train_idx, test_idx in splitter.split(X):
-        ...     # Test on specific weeks
-        ...     pass
+# Importations locales
+from .base import InSampleSplit, OutOfSampleSplit
+
+
+def _check_single_series(splitter, X, panel_class: str) -> None:
+    """Refuse panel data: a time series splitter needs a single sequence.
+
+    Raises:
+        ValueError: If ``X`` has a MultiIndex.
     """
-    
+    if isinstance(X, (pd.Series, pd.DataFrame)) and isinstance(X.index, pd.MultiIndex):
+        raise ValueError(
+            f"{splitter.__class__.__name__} splits a single time series, but X has a MultiIndex "
+            f"(panel data); use {panel_class} instead"
+        )
+
+
+def _warn_ignored_groups(splitter, groups) -> None:
+    """Warn that ``groups`` are ignored by a time series splitter."""
+    if groups is not None:
+        warnings.warn(
+            f"The groups parameter is ignored by {splitter.__class__.__name__}. "
+            f"Time series splits treat data as a single temporal sequence.",
+            UserWarning,
+        )
+
+
+# Classe de validation croisée out-of-sample sur séries temporelles
+class TSOutOfSampleSplit(OutOfSampleSplit):
+    """Out-of-sample cross-validator for a single time series.
+
+    Same folds as :class:`~tsforecast.crossvals.base.OutOfSampleSplit` without
+    groups: training strictly before each test set, ``gap`` rows apart, in an
+    expanding or rolling (``max_train_size``) window.
+
+    Args:
+        n_splits: Number of folds when ``test_indices`` is None.
+        test_indices: Test starts: integer positions or dates.
+        max_train_size: Maximum number of training rows, or None.
+        test_size: Number of rows of each test set.
+        gap: Number of rows between training and test.
+
+    Examples:
+        >>> import numpy as np
+        >>> X = np.arange(10).reshape(-1, 1)
+        >>> [(train.tolist(), test.tolist()) for train, test in TSOutOfSampleSplit(n_splits=2, test_size=2, gap=1).split(X)]
+        [([0, 1, 2, 3, 4], [6, 7]), ([0, 1, 2, 3, 4, 5, 6], [8, 9])]
+    """
+
     # Méthode principale de séparation des données de séries temporelles
     def split(self, X, y=None, groups=None):
-        """Generate indices to split time series data into training and test sets.
-        
+        """Generate out-of-sample folds of a single time series.
+
         Args:
-            X (array-like): Time series data. Can be pandas DataFrame/Series with
-                DatetimeIndex for better date handling.
-            y (array-like, optional): Target values with same index as X. Defaults to None.
-            groups (array-like, optional): Ignored for time series. Will issue warning
-                if provided. Defaults to None.
-                
-        Yields:
-            tuple: (train_indices, test_indices) where train_indices come before
-                test_indices chronologically, respecting the gap parameter.
-                
-        Warnings:
-            UserWarning: If groups parameter is provided (will be ignored)
-            
+            X: Array-like, Series or DataFrame without MultiIndex.
+            y: Target with the same index as ``X``.
+            groups: Ignored, with a warning.
+
+        Returns:
+            Generator of ``(train_positions, test_positions)`` integer arrays.
+
+        Raises:
+            ValueError: If ``X`` has a MultiIndex (panel data), or for any
+                error of ``OutOfSampleSplit.split``.
+
+        Warns:
+            UserWarning: If ``groups`` is given.
+
         Examples:
-            >>> # Simple time series split
+            >>> import pandas as pd
             >>> X = pd.Series(range(100), index=pd.date_range('2020-01-01', periods=100))
-            >>> splitter = TSOutOfSampleSplit(n_splits=3, test_size=10)
-            >>> splits = list(splitter.split(X))
-            >>> len(splits)  # 3 splits
+            >>> len(list(TSOutOfSampleSplit(n_splits=3, test_size=10).split(X)))
             3
         """
-        # Avertissement si des groupes sont spécifiés car ils sont ignorés
-        if groups is not None:
-            warnings.warn(
-                f"The groups parameter is ignored by {self.__class__.__name__}. "
-                f"Time series splits treat data as a single temporal sequence.",
-                UserWarning,
-            )
-        
-        # Appel de la méthode parente avec groups=None pour le comportement série temporelle
+        _check_single_series(self, X, 'PanelOutOfSampleSplit')
+        _warn_ignored_groups(self, groups)
         return super().split(X, y, groups=None)
 
 
-# Classe de base pour la validation croisée in-sample sur séries temporelles
+# Classe de validation croisée in-sample sur séries temporelles
 class TSInSampleSplit(InSampleSplit):
-    """Time series in-sample cross-validation split.
-    
-    This class extends InSampleSplit for time series data where the training set
-    includes the test period, allowing models to learn from future information.
-    This is useful for historical backtesting and performance evaluation.
-    
-    Key characteristics:
-    - Training data includes the test period (in-sample validation)
-    - Maintains temporal structure of the data
-    - Useful for historical model evaluation and calibration
-    - Groups parameter is ignored (time series = single temporal sequence)
-    
+    """In-sample cross-validator for a single time series.
+
+    Same fold as :class:`~tsforecast.crossvals.base.InSampleSplit` without
+    groups: one fold whose training set contains the test period.
+
     Args:
-        n_splits (int, optional): Number of splits for cross-validation. Defaults to 5.
-        test_indices (list, optional): Specific test periods to use. Can be:
-            - Dates/timestamps as strings or pd.Timestamp objects
-            - Integer positions in the time series
-            Defaults to None (uses last portion of data).
-        max_train_size (int, optional): Maximum size of training window.
-            Training extends from start of data up to and including test period.
-            Defaults to None (uses all available data).
-        test_size (int, optional): Number of time periods per test set.
-            Defaults to None (calculated automatically).
-    
+        n_splits: Sets the default ``test_size`` (``n_samples // (n_splits + 1)``).
+        test_indices: Test rows: integer positions or dates.
+        max_train_size: Maximum number of training rows, or None.
+        test_size: Number of rows of the test period.
+
     Examples:
-        >>> # Create time series data
-        >>> dates = pd.date_range('2020-01-01', periods=100, freq='D')
-        >>> X = pd.DataFrame({'value': np.random.randn(100)}, index=dates)
-        
-        >>> # In-sample validation on last portion
-        >>> splitter = TSInSampleSplit(test_size=10)
-        >>> for train_idx, test_idx in splitter.split(X):
-        ...     X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-        ...     # Training includes test period for historical analysis
-        
-        >>> # Specific test period with controlled training window
-        >>> test_dates = ['2020-03-01']
-        >>> splitter = TSInSampleSplit(test_indices=test_dates, test_size=7, max_train_size=50)
-        >>> for train_idx, test_idx in splitter.split(X):
-        ...     # Test on specific week, train on preceding 50 days + test week
-        ...     pass
+        >>> import numpy as np
+        >>> [(train.tolist(), test.tolist()) for train, test in TSInSampleSplit(test_size=2).split(np.arange(5))]
+        [([0, 1, 2, 3, 4], [3, 4])]
     """
-    
+
     # Méthode principale de séparation des données de séries temporelles (in-sample)
     def split(self, X, y=None, groups=None):
-        """Generate indices to split time series data with in-sample validation.
-        
+        """Generate the in-sample fold of a single time series.
+
         Args:
-            X (array-like): Time series data. Can be pandas DataFrame/Series with
-                DatetimeIndex for better date handling.
-            y (array-like, optional): Target values with same index as X. Defaults to None.
-            groups (array-like, optional): Ignored for time series. Will issue warning
-                if provided. Defaults to None.
-                
-        Yields:
-            tuple: (train_indices, test_indices) where train_indices include the
-                test period, enabling in-sample validation.
-                
-        Warnings:
-            UserWarning: If groups parameter is provided (will be ignored)
-            
+            X: Array-like, Series or DataFrame without MultiIndex.
+            y: Target with the same index as ``X``.
+            groups: Ignored, with a warning.
+
+        Returns:
+            Generator of one ``(train_positions, test_positions)`` pair.
+
+        Raises:
+            ValueError: If ``X`` has a MultiIndex (panel data), or for any
+                error of ``InSampleSplit.split``.
+
+        Warns:
+            UserWarning: If ``groups`` is given.
+
         Examples:
-            >>> # In-sample time series validation
+            >>> import pandas as pd
             >>> X = pd.Series(range(100), index=pd.date_range('2020-01-01', periods=100))
-            >>> splitter = TSInSampleSplit(test_size=10)
-            >>> for train_idx, test_idx in splitter.split(X):
-            ...     # Training data includes test period
-            ...     assert max(test_idx) < len(train_idx)  # Test period is in training
+            >>> train, test = next(TSInSampleSplit(test_size=10).split(X))
+            >>> bool(set(test) <= set(train))
+            True
         """
-        # Avertissement si des groupes sont spécifiés car ils sont ignorés
-        if groups is not None:
-            warnings.warn(
-                f"The groups parameter is ignored by {self.__class__.__name__}. "
-                f"Time series splits treat data as a single temporal sequence.",
-                UserWarning,
-            )
-        
-        # Appel de la méthode parente avec groups=None pour le comportement série temporelle
+        _check_single_series(self, X, 'PanelInSampleSplit')
+        _warn_ignored_groups(self, groups)
         return super().split(X, y, groups=None)

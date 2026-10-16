@@ -46,12 +46,14 @@ def simple_timeseries_df():
 @pytest.fixture
 def simple_panel():
     """Simple panel data for testing."""
+    # Générateur à graine fixe : jeu identique d'une exécution à l'autre
+    rng = np.random.default_rng(0)
     entities = ['A', 'B', 'C']
     dates = pd.date_range('2020-01-01', periods=20, freq='D')
     idx = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
     return pd.DataFrame({
         'feature1': range(60),
-        'feature2': np.random.randn(60),
+        'feature2': rng.standard_normal(60),
         'target': range(60, 120)
     }, index=idx)
 
@@ -59,25 +61,27 @@ def simple_panel():
 @pytest.fixture
 def unbalanced_panel():
     """Unbalanced panel data for testing."""
+    # Générateur à graine fixe : jeu identique d'une exécution à l'autre
+    rng = np.random.default_rng(1)
     data = []
     indices = []
 
     # Entity A: 10 periods
     entity_a_dates = pd.date_range('2020-01-01', periods=10, freq='D')
     for i, date in enumerate(entity_a_dates):
-        data.append([i, np.random.randn(), i + 100])
+        data.append([i, rng.standard_normal(), i + 100])
         indices.append(('A', date))
 
     # Entity B: 15 periods
     entity_b_dates = pd.date_range('2020-01-01', periods=15, freq='D')
     for i, date in enumerate(entity_b_dates):
-        data.append([i + 10, np.random.randn(), i + 200])
+        data.append([i + 10, rng.standard_normal(), i + 200])
         indices.append(('B', date))
 
     # Entity C: 8 periods
     entity_c_dates = pd.date_range('2020-01-01', periods=8, freq='D')
     for i, date in enumerate(entity_c_dates):
-        data.append([i + 25, np.random.randn(), i + 300])
+        data.append([i + 25, rng.standard_normal(), i + 300])
         indices.append(('C', date))
 
     idx = pd.MultiIndex.from_tuples(indices, names=['entity', 'date'])
@@ -87,35 +91,41 @@ def unbalanced_panel():
 @pytest.fixture
 def large_timeseries():
     """Large time series for performance testing."""
+    # Générateur à graine fixe : jeu identique d'une exécution à l'autre
+    rng = np.random.default_rng(2)
     dates = pd.date_range('2000-01-01', periods=1000, freq='D')
     return pd.DataFrame({
-        'feature1': np.cumsum(np.random.randn(1000)),
+        'feature1': np.cumsum(rng.standard_normal(1000)),
         'feature2': np.sin(np.arange(1000) * 0.01),
-        'feature3': np.random.exponential(1, 1000),
-        'target': np.cumsum(np.random.randn(1000)) + np.random.randn(1000) * 0.1
+        'feature3': rng.exponential(1, 1000),
+        'target': np.cumsum(rng.standard_normal(1000)) + rng.standard_normal(1000) * 0.1
     }, index=dates)
 
 
 @pytest.fixture
 def large_panel():
     """Large panel data for performance testing."""
+    # Générateur à graine fixe : jeu identique d'une exécution à l'autre
+    rng = np.random.default_rng(3)
     entities = [f'entity_{i:02d}' for i in range(10)]
     dates = pd.date_range('2010-01-01', periods=200, freq='D')
     idx = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
 
     n_obs = len(entities) * len(dates)
     return pd.DataFrame({
-        'feature1': np.random.randn(n_obs),
-        'feature2': np.cumsum(np.random.randn(n_obs).reshape(len(entities), -1), axis=1).flatten(),
-        'feature3': np.random.exponential(1, n_obs),
-        'target': np.random.randn(n_obs) * 0.5 + np.arange(n_obs) * 0.01
+        'feature1': rng.standard_normal(n_obs),
+        'feature2': np.cumsum(rng.standard_normal(n_obs).reshape(len(entities), -1), axis=1).flatten(),
+        'feature3': rng.exponential(1, n_obs),
+        'target': rng.standard_normal(n_obs) * 0.5 + np.arange(n_obs) * 0.01
     }, index=idx)
 
 
 @pytest.fixture
 def numpy_array_data():
     """Simple numpy array data for testing."""
-    return np.random.randn(50, 3)
+    # Générateur à graine fixe : jeu identique d'une exécution à l'autre
+    rng = np.random.default_rng(4)
+    return rng.standard_normal(50, 3)
 
 
 @pytest.fixture
@@ -207,44 +217,36 @@ def various_panel_types(request):
         return X, groups
 
 
-class TestHelpers:
-    """Helper methods for testing cross-validation functionality."""
+@pytest.fixture
+def cv_frame_12() -> pd.DataFrame:
+    """Twelve month-end dates of 2024 whose value is the row position.
 
-    @staticmethod
-    def assert_valid_split(train_idx, test_idx, X):
-        """Assert that a train/test split is valid."""
-        # Check types
-        assert isinstance(train_idx, np.ndarray)
-        assert isinstance(test_idx, np.ndarray)
-
-        # Check bounds
-        n_samples = len(X)
-        assert np.all(train_idx >= 0)
-        assert np.all(train_idx < n_samples)
-        assert np.all(test_idx >= 0)
-        assert np.all(test_idx < n_samples)
-
-        # Check no duplicates within each set
-        assert len(np.unique(train_idx)) == len(train_idx)
-        assert len(np.unique(test_idx)) == len(test_idx)
-
-    @staticmethod
-    def assert_temporal_order_preserved(train_idx, test_idx, gap=0):
-        """Assert that temporal order is preserved (for out-of-sample)."""
-        if len(train_idx) > 0 and len(test_idx) > 0:
-            actual_gap = min(test_idx) - max(train_idx) - 1
-            assert actual_gap >= gap, f"Gap should be at least {gap}, got {actual_gap}"
-
-    @staticmethod
-    def assert_insample_property(train_idx, test_idx):
-        """Assert in-sample property (test indices included in training)."""
-        assert np.all(np.isin(test_idx, train_idx)), "Test indices should be subset of training indices"
+    ``DatetimeIndex`` from 2024-01-31 to 2024-12-31 (``ME``), single column
+    ``v`` equal to 0..11: the date of position ``k`` is the end of month
+    ``k + 1``, so expected folds are written by hand as positions.
+    """
+    dates = pd.date_range('2024-01-31', periods=12, freq='ME', name='date')
+    return pd.DataFrame({'v': np.arange(12.0)}, index=dates)
 
 
 @pytest.fixture
-def test_helpers():
-    """Provide test helper methods."""
-    return TestHelpers
+def cv_frame_24() -> pd.DataFrame:
+    """Twenty-four month-end dates (2023-01-31 to 2024-12-31), value equal to the position."""
+    dates = pd.date_range('2023-01-31', periods=24, freq='ME', name='date')
+    return pd.DataFrame({'v': np.arange(24.0)}, index=dates)
+
+
+@pytest.fixture
+def cv_panel_2x6() -> pd.DataFrame:
+    """Two-entity panel sorted by entity then date, value equal to the row position.
+
+    ``MultiIndex`` (``entity``, ``date``): entity ``A`` holds positions 0-5
+    and entity ``B`` positions 6-11, both on the six month-ends from
+    2024-01-31 to 2024-06-30.
+    """
+    dates = pd.date_range('2024-01-31', periods=6, freq='ME')
+    index = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+    return pd.DataFrame({'v': np.arange(12.0)}, index=index)
 
 
 # =============================================================================

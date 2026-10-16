@@ -222,6 +222,22 @@ Celles marquées ✔ ont été reproduites par B0.
 - ANO-CV-007 [DOC] / à arbitrer : `InSampleSplit` ignore `test_size` quand plusieurs `test_indices`
   sont donnés.
 
+**Bilan B2 (2026-10-16)** : 001, 002, 003, 007 consignées sous ces numéros ; ajoutées 008 à 021 (voir
+`ANOMALIES.md`). **004, 005 et 006 restent réservées à B3** ; B3 numérote ses nouvelles anomalies à partir
+de 022. **Toutes corrigées dans `tsforecast/crossvals/base.py` et `time_series.py`** (décision de l'auteur,
+2026-10-16). Effets à connaître pour B3 : `groups` est confronté au premier niveau de l'index (longueur,
+valeurs, `NaN`) ; dates et couples (entité, date) répétés sont refusés ; un pli sans apprentissage est
+refusé ; une position ou un tuple de panel ouvre un pli limité à son entité ; les dates par défaut d'un
+panel sont lues **triées** (`_sorted_time_points`) ; `get_n_splits` suit la convention sklearn (paramètres
+seuls) et **`Panel*SplitPerEntity` en hérite sans multiplier par le nombre d'entités** (à traiter en B3,
+avec ANO-CV-005) ; l'erreur « Cannot find test indices for the group » du chemin des dates (ANO-CV-006)
+est inchangée. `tests/support/splits.py`
+fournit `collect_folds`, `as_lists`, `time_values`, `entity_values`, `split_folds_by_entity`,
+`assert_valid_folds`, `assert_no_leakage` (dates, entité par entité, `gap` exact ou minimal),
+`assert_train_window`, `assert_in_sample`, `assert_folds_cover` (positions : à appliquer entité par entité
+via `split_folds_by_entity`) et `assert_n_splits_consistent`. Fixtures ajoutées à `fixtures.py` :
+`cv_frame_12`, `cv_frame_24`, `cv_panel_2x6` ; `TestHelpers` (inutilisé) supprimé.
+
 **PANEL (B4, B5)**
 - ANO-PANEL-001 [CODE] **bloquante** ✔ : panel en colonnes cassé (`.xs(entity_key)` sur un index
   simple), origine `33cec68` ; touche fit, transform et inverse_transform.

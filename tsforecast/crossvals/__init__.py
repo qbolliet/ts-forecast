@@ -1,28 +1,17 @@
-"""Cross-validation utilities for time series and panel data.
+"""Time-aware cross-validators for time series and panel data.
 
-This module provides cross-validation classes that respect temporal ordering
-and support both time series and panel data structures.
-
-Classes:
-    OutOfSampleSplit: Base class for out-of-sample cross-validation
-    InSampleSplit: Base class for in-sample cross-validation  
-    TSOutOfSampleSplit: Time series specific out-of-sample validation
-    TSInSampleSplit: Time series specific in-sample validation
-    PanelOutOfSampleSplit: Panel data specific out-of-sample validation
-    PanelInSampleSplit: Panel data specific in-sample validation
+Re-exports the base splitters ``OutOfSampleSplit`` and ``InSampleSplit``, the
+time series splitters ``TSOutOfSampleSplit`` and ``TSInSampleSplit``, and the
+panel splitters ``PanelOutOfSampleSplit``, ``PanelInSampleSplit``,
+``PanelOutOfSampleSplitPerEntity`` and ``PanelInSampleSplitPerEntity``. All
+follow the sklearn splitter contract (``split``, ``get_n_splits``).
 
 Examples:
-    >>> # Time series validation
+    >>> import numpy as np
     >>> from tsforecast.crossvals import TSOutOfSampleSplit
-    >>> splitter = TSOutOfSampleSplit(n_splits=5, test_size=10, gap=1)
-    >>> for train_idx, test_idx in splitter.split(X):
-    ...     # Perform validation
-    
-    >>> # Panel data validation
-    >>> from tsforecast.crossvals import PanelOutOfSampleSplit
-    >>> splitter = PanelOutOfSampleSplit(test_size=5)
-    >>> for train_idx, test_idx in splitter.split(X, groups=groups):
-    ...     # Perform validation across entities
+    >>> splitter = TSOutOfSampleSplit(n_splits=2, test_size=3, gap=1)
+    >>> [(train.tolist(), test.tolist()) for train, test in splitter.split(np.arange(10))]
+    [([0, 1, 2], [4, 5, 6]), ([0, 1, 2, 3, 4, 5], [7, 8, 9])]
 """
 
 # Importation des classes de base

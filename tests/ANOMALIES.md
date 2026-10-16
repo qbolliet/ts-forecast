@@ -5337,6 +5337,327 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ## CV
 
+Numéros ANO-CV-004 à 006 réservés au prompt B3 (`crossvals/panel.py`, voir `tests/PLAN_B.md`).
+
+### ANO-CV-001 — Données non triées : plis renvoyés avec la permutation inverse (fuite)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::OutOfSampleSplit._split`, `::InSampleSplit._split`
+  (et `::_verify_and_sort_data`, dont la docstring décrit l'inverse de ce qu'elle renvoie)
+- **Sévérité** : bloquante
+- **Observé** : `_verify_and_sort_data` renvoie `sort_indices` tel que `sort_indices[k]` est la position d'origine de
+  la k-ième ligne triée (sa docstring dit le contraire : « mapping original positions to sorted positions »). `_split`
+  inverse cette permutation (`np.argsort(sort_mapping)`) avant de l'appliquer : les plis désignent d'autres lignes
+  que prévu. Sur les dates `[3, 1, 5, 2, 4]` (`n_splits=2, test_size=1`), le premier pli teste la date 1 et apprend
+  sur les dates 3, 4 et 5. Une permutation qui est sa propre inverse (ordre renversé) donne par hasard le bon
+  résultat. Seul l'avertissement « not sorted by date. Sorting automatically. » était testé. Touche toutes les
+  variantes (série, panel avec `groups`, `TS*`, `Panel*`), en hors échantillon comme en échantillon.
+- **Attendu** : les plis d'une série désordonnée désignent les mêmes dates que ceux de la série triée (remap par
+  `sort_mapping[indices]`) ; aucune fuite.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.crossvals import OutOfSampleSplit
+  d = pd.date_range('2024-01-31', periods=5, freq='ME')
+  X = pd.Series(range(5), index=d[[2, 0, 4, 1, 3]])
+  train, test = next(OutOfSampleSplit(n_splits=2, test_size=1).split(X))
+  X.index[train].max() > X.index[test].min()   # True : apprentissage postérieur au test
+  ```
+- **Correctif** : `_split` ramène les plis par `sort_mapping[indices]` ; la docstring de `_verify_and_sort_data` décrit `sort_indices[k]` comme la position d'origine de la k-ième ligne triée. Le tri d'un panel est un tri stable sur tous les niveaux.
+- **Test** : `tests/unit/crossvals/base/test_index_robustness.py::TestUnsortedData::test_folds_select_the_same_dates_as_on_sorted_data`, `::test_no_leakage`, `::test_no_leakage_on_an_interleaved_panel`, `::test_sort_is_announced`, `::test_reversed_order`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-002 — `get_n_splits` renvoie `n_splits`, pas le nombre de plis produits
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::OutOfSampleSplit`, `::InSampleSplit` (`get_n_splits` hérité de
+  `sklearn.model_selection._split._BaseKFold`)
+- **Sévérité** : majeure
+- **Observé** : `get_n_splits` renvoie toujours `n_splits`. Or avec `test_indices`, le nombre de plis est
+  `len(test_indices)` ; un découpage en échantillon produit toujours un seul pli. `GridSearchCV` refuse alors le
+  splitter : « cv.split and cv.get_n_splits returned inconsistent results. Expected 5 splits, got 2 » (ou « got 1 »
+  pour `TSInSampleSplit`). Pour une configuration que `split` refuse (trop de plis, jeu vide, `test_size` trop
+  grand), `get_n_splits` annonce quand même `n_splits` plis.
+- **Attendu** : `get_n_splits(X, y, groups) == len(list(split(X, y, groups)))` ; quand `split` refuse les données,
+  `get_n_splits` les refuse aussi (ce second point est à confirmer : les splitters sklearn ne regardent pas les
+  données dans `get_n_splits`).
+- **Reproduction** :
+  ```python
+  from sklearn.linear_model import Ridge
+  from sklearn.model_selection import GridSearchCV
+  cv = TSOutOfSampleSplit(test_indices=['2024-06-30', '2024-09-30'], test_size=3)
+  GridSearchCV(Ridge(), {'alpha': [0.1, 1.0]}, cv=cv).fit(X, y)   # ValueError: ... Expected 5 splits, got 2
+  ```
+- **Correctif** : décision de l'auteur (2026-10-16) : convention sklearn. `get_n_splits` se calcule sur les paramètres seuls, sans lire les données : nombre de `test_indices` s'il y en a, `n_splits` sinon ; `InSampleSplit.get_n_splits` renvoie 1. Pour toute donnée acceptée par `split`, le compte est exact ; pour une donnée refusée, `get_n_splits` ne lève pas (comme `TimeSeriesSplit`). `PanelOutOfSampleSplitPerEntity` / `PanelInSampleSplitPerEntity` héritent de ce compte, qui ne multiplie pas par le nombre d'entités : reste à traiter en B3.
+- **Test** : `tests/unit/crossvals/base/test_properties.py::TestNSplitsConsistency` (`test_other_configurations`, `test_panel_configurations`, `test_count_does_not_read_the_data`), `tests/unit/crossvals/test_time_series.py::TestSklearnModelSelection::test_grid_search_with_other_folds`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-003 — Plis à apprentissage vide produits sans erreur
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::OutOfSampleSplit._get_timeseries_train_indices`,
+  `::_get_group_train_indices`
+- **Sévérité** : à arbitrer
+- **Observé** : quand `gap` dépasse l'historique disponible avant un pli (ou quand la première date est un indice de
+  test explicite), le pli est produit avec un ensemble d'apprentissage vide, sans erreur ni avertissement
+  (`n=12, n_splits=3, gap=7` : apprentissages `[]`, `[]`, `[0, 1]`). Un estimateur ne peut rien en faire. Le contrôle
+  « Too many splits » ne tient pas compte de `gap` (commentaire du code : « On peut ajouter -self.gap si on veut
+  s'assurer des données d'entraînement »).
+- **Attendu** : à trancher : refuser la configuration (`ValueError` qui compte `gap`), retirer les plis sans
+  apprentissage (et les décompter dans `get_n_splits`, ANO-CV-002), ou garder et documenter.
+- **Reproduction** : `list(OutOfSampleSplit(n_splits=3, gap=7).split(np.zeros(12)))[0][0]   # array([])`
+- **Correctif** : décision de l'auteur (2026-10-16) : configuration refusée. Un pli sans donnée d'apprentissage lève « No training data before the test set starting at row 3 (gap=7); reduce gap or the number of splits » (série) ou « No training data for the group 'A' before its test set (gap=5); … » (panel), à la production du pli.
+- **Test** : `tests/unit/crossvals/base/test_out_of_sample_split.py::TestDefaultFolds::test_gap_longer_than_the_history_is_refused`, `::TestExplicitTestIndices::test_first_position_is_refused`, `::test_gap_reaching_the_first_date_is_refused`, `::TestPanelGroups::test_gap_longer_than_an_entity_history_is_refused`, `tests/unit/crossvals/test_time_series.py::TestTSOutOfSampleSplit::test_gap_leaving_no_training_data`, `::TestSklearnModelSelection::test_fold_without_training_data_is_reported`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-007 — `test_size` ignoré quand `InSampleSplit` reçoit plusieurs `test_indices`
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/crossvals/base.py::InSampleSplit` (docstrings de classe et d'`__init__`),
+  `tsforecast/crossvals/time_series.py::TSInSampleSplit`
+- **Sévérité** : mineure
+- **Observé** : avec plusieurs indices de test, le pli unique teste une ligne par indice et `test_size` n'est pas lu.
+  Changement délibéré (commit `1b27e04` « (fix) insample iter_test_indices behavior with multiple test indices »),
+  décrit seulement dans la docstring de la méthode privée `_iter_test_indices`. La docstring publique dit « test_size:
+  Size of each test set. If None, uses 1 for specific test_indices ».
+- **Attendu** : docstrings publiques qui décrivent les deux modes (un début + `test_size`, ou plusieurs points).
+- **Correctif** : docstrings de `InSampleSplit` (classe, `n_splits`) et de `TSInSampleSplit` réécrites : un début et `test_size`, ou plusieurs lignes testées une à une (`test_size` non utilisé).
+- **Test** : `tests/unit/crossvals/base/test_in_sample_split.py::TestExplicitTestIndices::test_several_dates_form_one_test_set`, doctests du module
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-008 — Un apprentissage vide est un tableau `float64`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::OutOfSampleSplit._get_timeseries_train_indices`
+  (`np.array([])`), `::_get_group_train_indices` (`np.array(train_indices)` sur une liste vide)
+- **Sévérité** : mineure
+- **Observé** : le tableau d'apprentissage vide a le type `float64` : `np.arange(12)[train]` lève « arrays used as
+  indices must be of integer (or boolean) type », et `cross_validate` échoue avec un message sans rapport : « No
+  valid specification of the columns. Only a scalar, list or slice of all integers or all strings, or boolean mask
+  is allowed ».
+- **Attendu** : positions entières dans tous les cas (`np.array([], dtype=int)`) ; l'estimateur signale alors
+  lui-même l'apprentissage vide (« Found array with 0 sample(s) »).
+- **Reproduction** : `next(OutOfSampleSplit(n_splits=3, gap=7).split(np.zeros(12)))[0].dtype   # float64`
+- **Correctif** : toutes les positions sont des tableaux d'entiers (`dtype=int`) ; un apprentissage vide n'est de toute façon plus produit (ANO-CV-003).
+- **Test** : `tests/unit/crossvals/base/test_properties.py::TestNoLeakage::test_folds_are_valid_positions`, `::TestInSampleContract::test_contract_holds`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-009 — `InSampleSplit` sans ligne de test : « max() iterable argument is empty »
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::InSampleSplit._iter_default_timeseries_test_indices`,
+  `::_get_timeseries_train_indices`
+- **Sévérité** : mineure
+- **Observé** : quand la période de test calculée est vide (jeu vide ; moins de `n_splits + 1` lignes sans
+  `test_size`, une observation comprise ; `test_size=0`), le pli de test vide atteint `max(test_indices)` et lève
+  « max() iterable argument is empty ». `OutOfSampleSplit` refuse les mêmes données par un message explicite
+  (« Cannot have number of folds=… greater than the number of samples=… »).
+- **Attendu** : `ValueError` qui nomme la cause (`test_size` nul, nombre de lignes insuffisant).
+- **Reproduction** : `list(InSampleSplit().split(pd.Series([1.0, 2.0, 3.0])))   # 3 // 6 = 0 ligne de test`
+- **Correctif** : « Cannot split an empty dataset: number of samples=0 » pour un jeu vide ; « Empty test period: test_size=0 for number of samples=3 with n_splits=5; set test_size or reduce n_splits » quand la taille calculée est nulle ; `test_size=0` est refusé par la validation des paramètres (ANO-CV-010).
+- **Test** : `tests/unit/crossvals/base/test_in_sample_split.py::TestDegenerateData::test_empty_test_period_is_refused_with_a_clear_message` (5 cas), `tests/unit/crossvals/test_time_series.py::TestTSInSampleSplit::test_empty_series`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-010 — `gap`, `test_size` et `max_train_size` jamais validés ; un `gap` négatif fait fuiter
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::OutOfSampleSplit`, `::InSampleSplit`
+- **Sévérité** : majeure
+- **Observé** : seul `n_splits` est contrôlé (par `_BaseKFold`). `gap=-1` place la première date de test de chaque
+  pli dans l'apprentissage, sans erreur. `test_size=0` lève « range() arg 3 must not be zero », `test_size=-1`
+  « min() iterable argument is empty ». `max_train_size=0` vaut « pas de limite » en hors échantillon (test de
+  vérité) mais « apprentissage = test » en échantillon (`is not None`) ; `max_train_size=-1` donne des
+  apprentissages vides.
+- **Attendu** : `ValueError` nommant le paramètre pour `gap < 0`, `test_size < 1`, `max_train_size < 1` ; même
+  interprétation de `max_train_size` dans les deux familles.
+- **Reproduction** : `next(OutOfSampleSplit(n_splits=3, gap=-1).split(np.zeros(12)))   # ([0..3], [3, 4, 5])`
+- **Correctif** : `split` valide les paramètres à l'appel : « gap must be a non-negative integer, got -1 », « test_size must be a positive integer or None, got 0 », « max_train_size must be a positive integer or None, got 0 » (booléens et flottants refusés, entiers numpy acceptés). `max_train_size` se lit `is not None` dans les deux familles.
+- **Test** : `tests/unit/crossvals/base/test_out_of_sample_split.py::TestInvalidParameters` (`test_is_refused_with_its_name`, 8 cas ; `test_numpy_integers_are_accepted`), `tests/unit/crossvals/base/test_in_sample_split.py::TestInvalidParameters::test_is_refused_with_its_name` (4 cas)
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-011 — `test_indices` : formes de dates courantes refusées par une `TypeError` brute
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::_resolve_test_positions`
+- **Sévérité** : mineure
+- **Observé** : seules une liste ou un tableau dont le **premier** élément est un entier, une chaîne, un `Timestamp`,
+  un `datetime` ou un tuple sont résolus. Un `DatetimeIndex` (`X.index[[3, 7]]`), des `numpy.datetime64`, des
+  `datetime.date`, des `pandas.Period` (sur un `PeriodIndex`) ou une chaîne seule passent tels quels à `np.array` et
+  échouent sur la comparaison `>= n_samples` (`TypeError` ou `UFuncTypeError`, et non la `ValueError` documentée).
+  Des flottants (`[3.0]`) sont pris pour des positions et produisent des tableaux d'indices `float64` ; un booléen
+  est pris pour la position 0 ou 1.
+- **Attendu** : toute représentation d'une date résolue comme une chaîne ; refus explicite (`ValueError`) de ce qui
+  n'est ni une position entière ni une date.
+- **Reproduction** : `list(OutOfSampleSplit(test_indices=X.index[[3, 7]]).split(X))   # UFuncTypeError`
+- **Correctif** : `_parse_test_indices` classe **chaque** élément : entier (Python ou numpy) = position, tuple = couple (entité, date), chaîne / `date` / `datetime` / `Timestamp` / `numpy.datetime64` / `Period` = date ; conteneurs acceptés : liste, tuple, tableau, `Index` (dont `DatetimeIndex`), `Series` ; une valeur seule est un indice. Refus explicites : booléen (décision de l'auteur, « got the boolean True »), flottant, `None`, mélange de natures. `_normalize_label` convertit une date au type de l'index (fuseau horaire, période) ; une date partielle qui désigne plusieurs lignes est refusée.
+- **Test** : `tests/unit/crossvals/base/test_out_of_sample_split.py::TestExplicitTestIndices` (`test_other_date_forms_are_resolved` 5 cas, `test_single_date_is_one_test_start`, `test_dates_on_a_time_zone_aware_index`, `test_other_types_are_refused`, `test_booleans_are_refused`, `test_booleans_are_refused_by_get_n_splits`, `test_positions_and_dates_cannot_be_mixed`, `test_partial_date_matching_several_rows_is_refused`), `tests/unit/crossvals/base/test_index_robustness.py::TestIndexKinds::test_test_index_on_a_period_index`, `::test_partial_date_matching_one_row`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-012 — Dates répétées : une date à la fois en apprentissage et en test
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::OutOfSampleSplit` (découpage positionnel),
+  `::_resolve_test_positions`
+- **Sévérité** : à arbitrer
+- **Observé** : un index trié qui répète une date n'est ni refusé ni signalé ; les plis sont coupés par position,
+  si bien qu'une date répétée de part et d'autre de la frontière est apprise et testée dans le même pli. Une date
+  répétée donnée en `test_indices` se résout en `slice` (`get_loc`) et lève « '>=' not supported between instances
+  of 'slice' and 'int' ».
+- **Attendu** : à trancher : refuser les dates répétées d'une série (`ValueError`), ou couper les plis sur les dates
+  (toutes les lignes d'une date du même côté) ; dans les deux cas, une date répétée en `test_indices` désigne toutes
+  ses lignes ou est refusée explicitement.
+- **Reproduction** :
+  ```python
+  d = pd.to_datetime(['2024-01-31', '2024-02-29', '2024-02-29', '2024-03-31', '2024-04-30', '2024-05-31'])
+  next(OutOfSampleSplit(n_splits=2, test_size=2).split(pd.Series(range(6), index=d)))   # ([0, 1], [2, 3])
+  ```
+- **Correctif** : décision de l'auteur (2026-10-16) : refus. `_verify_and_sort_data` lève « X has duplicated dates: [Timestamp('2024-02-29 00:00:00')]; each date must appear once » (« (entity, date) pairs … once per entity » pour un panel), avant tout tri et avant la résolution des `test_indices`.
+- **Test** : `tests/unit/crossvals/base/test_index_robustness.py::TestDuplicatedDates::test_is_refused_naming_the_date` (4 cas), `::test_unsorted_duplicates_are_refused_before_sorting`, `tests/unit/crossvals/base/test_out_of_sample_split.py::TestPanelGroups::test_duplicated_entity_date_pairs_are_refused`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-013 — En échantillon, plusieurs points de test et `max_train_size` : des points de test hors apprentissage
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::InSampleSplit._get_timeseries_train_indices`,
+  `::_get_group_train_indices`
+- **Sévérité** : mineure
+- **Observé** : la fenêtre vaut `max(max_train_size, len(test))` lignes avant la dernière date de test : elle suppose
+  un test contigu. Avec des points espacés (`test_indices=[1, 7, 10], max_train_size=4`), l'apprentissage est
+  `[7, 8, 9, 10]` et ne contient plus le point 1, contrairement au contrat « training includes test period ».
+- **Attendu** : chaque point de test reste dans l'apprentissage (fenêtre d'au moins l'étendue du test), ou refus
+  explicite de la combinaison.
+- **Reproduction** : `list(InSampleSplit(test_indices=[1, 7, 10], max_train_size=4).split(np.zeros(12)))`
+- **Correctif** : la fenêtre compte `max(max_train_size, étendue du test)` lignes, l'étendue allant de la première à la dernière ligne de test (de l'entité pour un panel).
+- **Test** : `tests/unit/crossvals/base/test_in_sample_split.py::TestExplicitTestIndices::test_several_points_with_max_train_size_stay_in_training`, `::test_several_points_with_a_wider_window`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-014 — `X` sous forme de liste : `AttributeError`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::OutOfSampleSplit.split`, `::InSampleSplit.split`,
+  `::_verify_and_sort_data`
+- **Sévérité** : mineure
+- **Observé** : la détection d'un objet pandas repose sur `hasattr(X, 'index')`, vrai pour une liste (méthode
+  `list.index`). `split(list)` lève « 'builtin_function_or_method' object has no attribute 'is_monotonic_increasing' »,
+  et `cross_validate` sur des listes (qu'il transmet telles quelles) lève « … has no attribute 'equals' ». Les
+  splitters sklearn acceptent tout tableau.
+- **Attendu** : une liste est découpée comme le tableau équivalent (test `isinstance(…, (pd.Series, pd.DataFrame))`).
+- **Reproduction** : `list(OutOfSampleSplit(n_splits=3).split(list(range(12))))`
+- **Correctif** : la détection d'un objet pandas teste `isinstance(X, (pd.Series, pd.DataFrame))` (aide `_is_pandas`), pour `X` comme pour `y`.
+- **Test** : `tests/unit/crossvals/base/test_index_robustness.py::TestContainers::test_list_gives_the_folds_of_the_array` (2 cas), `tests/unit/crossvals/test_time_series.py::TestSklearnModelSelection::test_cross_validate_on_lists`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-015 — Panel : `test_indices` en positions ou en tuples (entité, date) inutilisables
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::OutOfSampleSplit._iter_group_test_indices`,
+  `::_get_group_train_indices`, `::InSampleSplit._iter_group_test_indices`
+- **Sévérité** : majeure
+- **Observé** : sur un panel (avec `groups`), chaque position ou tuple ouvre son propre pli, limité à son entité ; le
+  calcul de l'apprentissage lève alors « Cannot find test indices for the group : B » pour les autres entités. Les
+  tuples, annoncés par les docstrings (« Tuples (entity, date) for specific entity-date combinations »), ne
+  fonctionnent donc jamais en hors échantillon dès qu'il y a deux entités ; en échantillon, une position seule échoue
+  de même (plusieurs positions ou tuples fonctionnent : un seul pli). Même cause que l'erreur des panels
+  déséquilibrés (ANO-CV-006, B3).
+- **Attendu** : des plis sans fuite qui testent les lignes demandées ; une entité sans ligne de test dans un pli n'y
+  est pas évaluée (ou y apprend sur son historique), sans erreur.
+- **Reproduction** :
+  ```python
+  cv = OutOfSampleSplit(test_indices=[('A', d[3]), ('B', d[3])], test_size=2)
+  list(cv.split(panel, groups=panel.index.get_level_values(0)))   # ValueError: ... group : B
+  ```
+- **Correctif** : une position ou un couple (entité, date) ouvre un pli qui teste **et entraîne** son entité seule ; les autres entités sont absentes du pli (`every_group=False` dans le calcul de l'apprentissage). Un test par position est coupé à la fin de son entité (en échantillon aussi). Le chemin des dates garde l'erreur « Cannot find test indices for the group » (ANO-CV-006, B3).
+- **Test** : `tests/unit/crossvals/base/test_out_of_sample_split.py::TestPanelGroups::test_entity_specific_test_indices` (3 cas), `::test_entity_specific_fold_with_gap_and_window`, `tests/unit/crossvals/base/test_in_sample_split.py::TestPanelGroups::test_single_entity_specific_index` (2 cas), `::test_tuples_of_one_entity`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-016 — `groups` jamais confronté à `X` : aucun pli, ou erreur sans rapport
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::OutOfSampleSplit`, `::InSampleSplit` (chemins panel)
+- **Sévérité** : mineure
+- **Observé** : les entités sont lues dans `groups`, mais les positions de test par `X.index.get_loc((groupe, date))`.
+  Des `groups` qui ne reprennent pas le premier niveau de l'index (autre casse, autre codage) donnent **zéro pli**,
+  sans erreur, avec un avertissement « Cannot find test period … » par entité et par date ; `get_n_splits` en
+  annonce `n_splits`. Des `groups` plus courts que `X` ne sont pas refusés : les lignes omises n'appartiennent à
+  aucun groupe et l'erreur porte sur un autre groupe.
+- **Attendu** : `ValueError` si `groups` n'a pas une étiquette par ligne ou ne correspond pas au premier niveau de
+  l'index (ou bien `groups` lu comme seule source des entités, à documenter).
+- **Reproduction** : `list(OutOfSampleSplit(n_splits=2).split(panel, groups=np.array(['a'] * 6 + ['b'] * 6)))   # []`
+- **Correctif** : `_check_groups` refuse des `groups` de longueur différente (« groups must hold one label per row: got 6 labels for 12 rows ») ou différents du premier niveau (« groups must match the first index level (entity) of X, row by row »). Les entités sont ensuite lues dans `groups` seul ; la table `_precompute_multiindex_mappings` est supprimée.
+- **Test** : `tests/unit/crossvals/base/test_out_of_sample_split.py::TestPanelGroups::test_groups_inconsistent_with_the_index_are_refused` (2 cas), `::test_groups_of_another_length_are_refused`, `tests/unit/crossvals/base/test_in_sample_split.py::TestPanelGroups::test_groups_inconsistent_with_the_index_are_refused` (3 cas)
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-017 — Un panel passé à un splitter de série est découpé en silence
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/time_series.py::TSOutOfSampleSplit`, `::TSInSampleSplit`
+- **Sévérité** : à arbitrer
+- **Observé** : un `MultiIndex` (entité, date) passé sans `groups` est découpé par position comme une seule série :
+  les plis de test ne contiennent que la dernière entité, et l'apprentissage contient les autres entités aux mêmes
+  dates (ou plus tard) que le test. Aucun avertissement, alors que `groups` déclenche, lui, « The groups parameter is
+  ignored ».
+- **Attendu** : à trancher : avertissement ou erreur orientant vers `Panel*Split`, ou comportement documenté.
+- **Correctif** : décision de l'auteur (2026-10-16) : cas non toléré. `TSOutOfSampleSplit.split` / `TSInSampleSplit.split` lèvent « TSOutOfSampleSplit splits a single time series, but X has a MultiIndex (panel data); use PanelOutOfSampleSplit instead » (`Series` comme `DataFrame`), avant l'avertissement sur `groups`.
+- **Test** : `tests/unit/crossvals/test_time_series.py::TestPanelGivenToATimeSeriesSplitter::test_multiindex_is_refused` (4 cas), `::test_refusal_precedes_the_groups_warning`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-018 — Étiquette d'entité manquante : erreurs sans rapport avec la cause
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py` (chemins panel ; `_precompute_multiindex_mappings` s'appuie sur
+  `groupby(level=0)`, qui écarte les clés manquantes)
+- **Sévérité** : mineure
+- **Observé** : une entité `NaN` dans le premier niveau atteint les branches de repli des tables d'entités (seul cas
+  où elles servent), puis échoue : « Cannot find test indices for the group : nan » (`groups == nan` est toujours
+  faux) ou, en échantillon sans `test_indices`, « max() iterable argument is empty ».
+- **Attendu** : refus explicite d'une étiquette d'entité manquante (même règle que la base des transformateurs,
+  ANO-BASE-011).
+- **Reproduction** : `panel` à entités `[1.0, nan]` ; `list(OutOfSampleSplit(n_splits=2).split(panel, groups=panel.index.get_level_values(0)))`
+- **Correctif** : `_check_groups` lève « Entity labels must not be missing: the entity level or groups holds a missing value ».
+- **Test** : `tests/unit/crossvals/base/test_index_robustness.py::TestMissingEntityLabel::test_is_refused_with_a_clear_message` (4 cas)
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-019 — Panel en échantillon par défaut : `test_size` réduit à une ligne par entité
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::InSampleSplit._iter_default_group_test_indices`
+- **Sévérité** : mineure
+- **Observé** : la période de test commence à la **dernière** date du panel ; `test_size` ne peut donc que la couper
+  à la fin de l'entité : une seule ligne par entité, quel que soit `test_size`. Sur une série, la même classe teste
+  bien les `test_size` dernières dates. La docstring annonce « with size controlled by test_size parameter ».
+- **Attendu** : les `test_size` dernières dates de chaque entité.
+- **Reproduction** : `list(InSampleSplit(test_size=2).split(panel_2x6, groups=...))   # test [5, 11]`
+- **Correctif** : la période de test par défaut d'un panel en échantillon est faite des `test_size` dernières dates du panel (dates triées), testées pour chaque entité qui les porte ; une entité qui en manque une est signalée.
+- **Test** : `tests/unit/crossvals/base/test_in_sample_split.py::TestPanelGroups::test_default_fold_holds_the_last_test_size_dates`, `::test_default_fold_is_the_last_date`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-020 — Docstrings et page de concept de `crossvals` : exemples et affirmations inexacts
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/crossvals/base.py`, `tsforecast/crossvals/time_series.py`,
+  `docs/concepts/cross_validation.md`
+- **Sévérité** : mineure
+- **Observé** :
+  1. `_verify_and_sort_data` : `sort_indices` décrit comme « mapping original positions to sorted positions » ; c'est
+     l'inverse (origine d'ANO-CV-001).
+  2. Exemples non exécutables ou trompeurs : `InSampleSplit` utilise `X` et `groups` non définis ;
+     `TSOutOfSampleSplit` / `TSInSampleSplit` utilisent `pd`, `np` (non importés par le module) et `np.random.randn`
+     sans graine ; `OutOfSampleSplit`, `_resolve_test_positions` et `_precompute_multiindex_mappings` affichent sans
+     sortie attendue ou en commentaire ; le troisième exemple de `OutOfSampleSplit` découpe un panel sans `groups`
+     (découpage positionnel, ANO-CV-017) ; `_resolve_test_positions` annonce lever des `ValueError` seulement
+     (ANO-CV-011).
+  3. `InSampleSplit` : « test_size … calculated size for default splits » ; sur un panel, la taille par défaut vaut 1
+     (et `test_size` est réduit à une ligne, ANO-CV-019) ; `n_splits` ne fixe jamais le nombre de plis (toujours 1).
+  4. `docs/concepts/cross_validation.md` : « Tous les splitters partagent l'API de `OutOfSampleSplit` » (les
+     splitters en échantillon n'ont pas `gap`) ; « l'entraînement précède toujours le test » (faux en échantillon) ;
+     une série est décrite par un `DatetimeIndex` alors que tout index trié convient (découpage positionnel) ;
+     l'exemple `GridSearchCV(estimator, param_grid, cv=cv)` ne fonctionne qu'avec les plis par défaut hors
+     échantillon (ANO-CV-002).
+- **Attendu** : docstrings et page alignées sur le code, exemples exécutables (recoupe N7).
+- **Correctif** : docstrings de `crossvals/base.py`, `crossvals/time_series.py` et `crossvals/__init__.py` réécrites (en-têtes de module, exemples exécutables : `pytest --doctest-modules tsforecast/crossvals` 22 passed) ; page `docs/concepts/cross_validation.md` alignée (index trié, dates répétées refusées, `gap` hors échantillon seulement, `get_n_splits`, formes de `test_indices`). Les docstrings de `crossvals/panel.py` (ANO-CV-005) restent à B3.
+- **Test** : doctests du paquet `tsforecast/crossvals`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-021 — Branches inatteignables de `crossvals/base.py` (code mort)
+- **Type** : [CODE] comportement (nettoyage, pas un bogue)
+- **Composant** : `tsforecast/crossvals/base.py`
+- **Sévérité** : cosmétique
+- **Observé** : décelé par la couverture (98 %, seules ces branches manquent) : `if hasattr(X.index, 'get_loc')` de
+  `OutOfSampleSplit._iter_group_test_indices` et `if hasattr(X, 'index') and hasattr(X.index, 'get_level_values')`
+  de `_iter_default_test_indices` / `InSampleSplit._iter_default_group_test_indices` (toujours vrais : avec `groups`,
+  `_verify_and_sort_data` exige un `MultiIndex`) ; le dernier repli `group_positions = []` des trois méthodes de
+  test par groupe (`level_0_values` existe dès qu'il y a un `MultiIndex`) ; dans
+  `InSampleSplit._iter_timeseries_test_indices` et `_iter_group_test_indices`, le filtre `if test_idx < n_samples`
+  et le test `if test_indices:` (les positions hors bornes sont refusées en amont, la liste n'est jamais vide). Les
+  autres replis (`elif level_0_values is not None`) ne servent qu'aux entités `NaN` (ANO-CV-018).
+- **Attendu** : branches supprimées, sans changement de comportement.
+- **Correctif** : branches supprimées par la réécriture de `base.py` (tables MultiIndex et replis inutiles retirés) : `base.py` 100 % lignes et branches.
+- **Test** : couverture des tests de `tests/unit/crossvals/base/` et `tests/unit/crossvals/test_time_series.py`
+- **Statut** : corrigée (2026-10-16)
+
 ## PANEL
 
 ## XY
