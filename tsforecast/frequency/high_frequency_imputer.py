@@ -1249,6 +1249,21 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Liste explicite plutôt que la convention du suffixe
         return all(hasattr(self, attr) for attr in _FITTED_ATTRIBUTES)
 
+    # Contrôle des colonnes au transform propre à l'imputeur
+    def _check_feature_names(self, X: pd.DataFrame) -> None:
+        """Skip the column check of the base class: the imputer has its own contract.
+
+        At ``transform``, a column seen at ``fit`` and now missing is refused by
+        ``_check_transform_frequencies``, which names it; an extra column belongs to
+        no plan and is carried through untouched. The strict equality of the base
+        class would refuse the extra columns.
+
+        Args:
+            X: Data passed to ``transform``, after validation.
+        """
+        # Contrat de colonnes appliqué par le rejeu du plan
+        return None
+
     # Vue en lecture seule des modèles ajustés du plan
     @property
     def imputation_models_(self) -> Dict[Tuple[Any, Any], Any]:
@@ -1325,8 +1340,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             return y
 
         # Cas colonnes -> index : la conversion appliquée à X, jamais à y,
-        # est réappliquée à y en réutilisant les métadonnées de conversion
-        conversion_meta = getattr(self, 'conversion_metadata_', None)
+        # est réappliquée à y en réutilisant les métadonnées de conversion des
+        # données de l'appel en cours (fit ou transform)
+        conversion_meta = getattr(self, '_current_conversion_metadata', None)
         if (
             conversion_meta is not None
             and conversion_meta.get('index_was_replaced')

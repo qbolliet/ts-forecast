@@ -317,6 +317,12 @@ Fréquences : globale, par entité, par colonne, par couple, ordre de précéden
 code → [DOC] ; ANO-PANEL-007.
 
 ### B5 — `panel/transformers.py` → paquet `tests/unit/panel/transformers/`
+0. Ajout de B1 (décision de l'auteur, 2026-10-16) : corriger **ANO-BASE-010** (`convert_cols_to_index=False`
+   garde `time_col` / `panel_cols` en colonnes, `tsforecast/base/transformers.py::_validate_column_based`) **en même
+   temps qu'ANO-PANEL-001** : sans cela, un panel en colonnes validé passe par le chemin colonnes cassé de
+   `PanelwiseTransformer`. Voir l'entrée ANO-BASE-010 de `ANOMALIES.md` pour les effets attendus. Depuis B1, la base
+   refuse aussi toute entrée qui n'est pas un `DataFrame` et contrôle les colonnes au `transform` (mêmes noms, même
+   ordre).
 1. Tri des 14 xfail (tableau de la section 4) ; `legacy_failures.txt`, groupe « hors campagne »,
    vidé ; `test_unknown_entity_warning` retrié (vert à tort).
 2. Chemins colonnes **et** MultiIndex (2 et 3 niveaux), une entité, entité inconnue au transform

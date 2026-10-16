@@ -829,7 +829,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   réutilise `_convert_to_datetime` (auparavant `pd.to_datetime` nu). Effet de bord : le test
   `delays` `TestShiftTransformerEdgeCases::test_non_datetime_index` (« rejet des index
   non-datetime ») passe, retiré de `tests/legacy_failures.txt`.
-- **Test** : `tests/unit/base/test_transformers.py::TestValidateTimeIndex` (numérique rejeté, `Period`, `MultiIndex`, `time_col`),
+- **Test** : `tests/unit/base/transformers/test_time_index.py::TestValidateTimeIndex` (numérique rejeté, `Period`, `MultiIndex`, `time_col`),
   `tests/unit/utils/validation/test_utils.py::TestIndexBasedValidation::test_numeric_index_is_rejected_when_strict`,
   `::test_default_range_index_is_rejected_when_strict`, `::test_numeric_index_warns_and_returns_data_when_not_strict`,
   `::TestMultiIndexValidation::test_integer_last_level_is_rejected_when_strict`,
@@ -4508,7 +4508,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   validation fait passer les colonnes de panel dans l'index, puis le contrôle de cohérence les cherche parmi les
   colonnes et avertit « Panel structure issues: Missing panel columns: {'country'} ».
 - **Attendu** : aucun avertissement — l'identifiant est présent, comme niveau d'index.
-- **Test** : `tests/unit/base/test_transformers.py::TestMissingPanelColumns::test_panel_cols_converted_to_index_raise_no_consistency_warning`
+- **Test** : `tests/unit/base/transformers/test_structure.py::TestPanelIdentifierConsistency::test_panel_cols_moved_into_the_index_are_not_missing`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : l'identifiant se lit parmi les colonnes ou les niveaux d'index ; ses valeurs manquantes aussi.
 
@@ -4520,7 +4520,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   Consider sorting by entity levels or enabling auto_sort=True » ; l'imputeur fige `auto_sort=False` (§12.5) et ne
   l'expose pas.
 - **Attendu** : un conseil réalisable.
-- **Test** : `tests/unit/base/test_transformers.py::TestSortingAdvice`,
+- **Test** : `tests/unit/base/transformers/test_validation.py::TestSortingAdvice`,
   `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_unsorted_panel_is_refused`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : `_sorting_advice` ne propose `auto_sort=True` que si le paramètre figure dans `get_params()` ;
@@ -5017,6 +5017,323 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   le test d'exécution (`slow`) détecte. Le `xfail` est retiré ; le notebook s'exécute sans erreur.
 
 ## BASE
+
+### ANO-BASE-001 — `InverseTransformer` inutilisable après `clone`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::InverseTransformer`
+- **Sévérité** : majeure
+- **Observé** : `fit` ne fait rien et `clone` remplace le transformateur enveloppé par une copie non ajustée :
+  `clone(InverseTransformer(ajusté)).fit(X).transform(X)` lève l'erreur du transformateur enveloppé non ajusté
+  (`NotFittedError` avec `CenteredScaler`, `AttributeError` pour une sous-classe sans `check_is_fitted`).
+  `cross_validate`, `GridSearchCV` et `Pipeline(memory=…)` clonent : l'étape y est inutilisable.
+- **Attendu** : un clone ajusté comme toute étape sklearn transforme comme l'original. Pistes : `__sklearn_clone__`
+  conservant le transformateur ajusté (estimateur « figé »), ou `fit` qui ajuste un clone du transformateur
+  enveloppé (sur des données de l'espace d'origine, à documenter).
+- **Reproduction** :
+  ```python
+  from sklearn.base import clone
+  from sklearn.preprocessing import StandardScaler
+  from tsforecast.base.transformers import InverseTransformer
+  X = [[1.0], [3.0], [5.0]]
+  inv = InverseTransformer(StandardScaler().fit(X))
+  clone(inv).fit(X).transform(X)   # NotFittedError
+  ```
+- **Correctif** : décision de l'auteur (2026-10-16) : option la plus standard, celle de
+  `sklearn.frozen.FrozenEstimator` (étape pré-ajustée). `__sklearn_clone__` renvoie l'enveloppe elle-même,
+  `__sklearn_is_fitted__` suit l'état du transformateur enveloppé, `transform` / `inverse_transform` appellent
+  `check_is_fitted`. Un `set_params` sur un clone modifie donc l'original (documenté).
+- **Test** : `tests/unit/base/transformers/test_reversible.py::TestInverseTransformer::test_clone_keeps_a_usable_transformer`,
+  `::test_clone_is_the_wrapper_itself`, `::test_fitted_state_follows_the_wrapped_transformer`,
+  `::test_cross_validate_with_a_pipeline`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-002 — L'entrée de l'appelant est modifiée (index converti en place)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer._validate_index_time_series`
+- **Sévérité** : majeure
+- **Observé** : `data.index = pd.to_datetime(data.index)` s'applique à l'objet passé à `fit` / `transform` : un index
+  de chaînes de dates ressort `datetime64` chez l'appelant ; un `RangeIndex` ressort en dates de 1970 (voir
+  ANO-BASE-004). Même effet sur une `Series`. Le dernier niveau d'un `MultiIndex` et les colonnes ne sont pas touchés
+  (`validate_temporal_data` travaille sur une copie).
+- **Attendu** : aucune méthode ne modifie l'entrée (copie avant conversion, ou conversion confiée à
+  `validate_temporal_data`).
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  X = pd.DataFrame({'v': [1.0, 2.0]}, index=['2023-01-31', '2023-02-28'])
+  MyTransformer().fit(X)      # toute sous-classe concrète de PanelTimeSeriesTransformer
+  X.index.dtype               # datetime64[ns]
+  ```
+- **Correctif** : `_validate_index_time_series` ne convertit plus l'index : la conversion est faite par
+  `validate_temporal_data`, sur une copie ; la convertibilité est vérifiée en amont par `_detect_data_structure`.
+- **Test** : `tests/unit/base/transformers/test_sklearn_contract.py::TestNonMutation::test_converted_index_is_left_intact`
+  (chaînes de dates en `DataFrame` et en `Series`, `PeriodIndex`), `::test_fit_transform_inverse_leave_the_input_intact`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-003 — `transform` réécrit l'attribut ajusté `conversion_metadata_`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer._validate_column_based`,
+  `::ReversibleTransformerMixin._restore_structure_if_converted`
+- **Sévérité** : mineure
+- **Observé** : sous `convert_cols_to_index=True`, chaque `transform` remplace `conversion_metadata_` par les
+  métadonnées de ses propres données. `inverse_transform` d'une sortie antérieure restaure alors l'index des
+  dernières données transformées : `out = t.transform(A)`, `t.transform(B)`, `t.inverse_transform(out)` porte
+  l'index de `B`. La convention sklearn veut que `transform` ne modifie pas l'état ajusté.
+- **Attendu** : `inverse_transform(transform(X))` restitue `X` quels que soient les appels intermédiaires.
+- **Reproduction** :
+  ```python
+  first = panel_en_colonnes                    # index 0..7
+  second = first.set_axis(range(10, 18))
+  t = MyReversible(time_col='date', panel_cols=['country'], convert_cols_to_index=True)
+  out = t.fit(first).transform(first); t.transform(second)
+  t.inverse_transform(out).index               # 10..17
+  ```
+- **Correctif** : décision de l'auteur (2026-10-16). `conversion_metadata_` est figé au `fit` et ne garde que la
+  structure (colonnes déplacées, positions, noms : `original_index` à `None`) ; `transform` ne le modifie plus, et un
+  nouveau `fit` sans conversion le retire. Les colonnes rendues reçoivent un `RangeIndex` neuf (même règle qu'après
+  un tri, ANO-UTILS-024). Les métadonnées de l'appel en cours (index d'origine compris) sont gardées dans l'attribut
+  privé `_current_conversion_metadata`, que `HighFrequencyImputer._align_target_index` lit pour réaligner `y` sur `X`.
+- **Test** : `tests/unit/base/transformers/test_reversible.py::TestRestoreStructure::test_inverse_does_not_depend_on_later_transforms`,
+  `::test_transform_leaves_the_fitted_structure_untouched`, `::test_restored_columns_get_a_fresh_range_index`,
+  `::test_refit_without_conversion_drops_the_structure`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-004 — Index numérique accepté par `fit` en mode strict, lu en nanosecondes depuis 1970
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer._detect_data_structure` et
+  `::_validate_index_time_series`
+- **Sévérité** : majeure
+- **Rattachement** : ANO-UTILS-028 (décision de l'auteur du 2026-09-29 : rejeter un index numérique).
+  `validate_temporal_data` et `_validate_time_index` appliquent la décision (`_convert_to_datetime`), mais la
+  détection de structure et la validation d'une série en index appellent `pd.to_datetime` nu.
+- **Observé** : `RangeIndex`, années entières (`2020, 2021`) ou flottants passent `fit` en mode strict, sans erreur
+  ni avertissement ; `_fit` reçoit `1970-01-01 00:00:00.000002020`, … (et l'entrée de l'appelant est modifiée,
+  ANO-BASE-002). Le dernier niveau numérique d'un `MultiIndex` est, lui, bien rejeté.
+- **Attendu** : même règle que `validate_temporal_data` : rejet en mode strict.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  t = MyTransformer().fit(pd.DataFrame({'v': [1.0, 2.0]}, index=[2020, 2021]))   # aucune erreur
+  ```
+- **Correctif** : `_detect_data_structure` applique `_convert_to_datetime` (règles de la validation) à un index
+  simple ; un index numérique y est refusé dans les deux modes, comme un index de chaînes qui ne sont pas des dates :
+  « When time_col and panel_cols are None, the index must hold dates (datetimes, date strings or periods) for a
+  time series, or be a MultiIndex for panel data. »
+- **Test** : `tests/unit/base/transformers/test_time_index.py::TestRejectedTimeLabels::test_numeric_index_is_rejected`
+  (`range`, `integer-years`, `floats` × strict / permissif)
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-005 — `PeriodIndex` refusé par `fit` ; périodes d'un panel jamais restituées
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer._detect_data_structure`,
+  `::_validate_index_time_series`, `::ReversibleTransformerMixin._restore_structure_if_converted`
+- **Sévérité** : mineure
+- **Rattachement** : ANO-UTILS-029 (décision de l'auteur du 2026-09-29 : accepter `PeriodIndex`, lu au premier
+  instant, et le rendre par `restore_original_structure`). Ici ce n'est pas `validate_temporal_data` qui refuse,
+  mais la détection de structure de `base`, qui ne l'atteint pas.
+- **Observé** : un `PeriodIndex` simple lève `ValueError: When time_col and panel_cols are None, index must be
+  DatetimeIndex (for time series) or MultiIndex (for panel data)` (`pd.to_datetime` nu refuse les périodes). Un
+  dernier niveau `Period` de `MultiIndex` est accepté et converti en `Timestamp`, mais ni `transform` ni
+  `inverse_transform` ne rendent les périodes : l'aller-retour change le type de l'index.
+- **Attendu** : `PeriodIndex` accepté comme par `validate_temporal_data` ; aller-retour à l'identité.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  X = pd.DataFrame({'v': [1.0, 2.0]}, index=pd.period_range('2023-01', periods=2, freq='M'))
+  MyTransformer().fit(X)   # ValueError: When time_col and panel_cols are None, ...
+  ```
+- **Test** : `tests/unit/base/transformers/test_time_index.py::TestTimeIndexThroughFit::test_period_index_is_read_at_first_instants`,
+  `tests/unit/base/transformers/test_reversible.py::TestRoundTripOnPerturbations::test_series[to_period_index]`,
+  `::test_panel[to_period_index]`, `::TestRestoreStructure::test_periods_left_unconverted_are_kept`
+- **Correctif** : un `PeriodIndex` simple est accepté (même règle que l'index numérique, ANO-BASE-004) ; `fit`
+  note la fréquence des périodes de l'index (ou du dernier niveau) et `_restore_structure_if_converted` rend les
+  périodes (`_restore_periods`). La sortie de `transform` porte le premier instant de chaque période, comme la donnée
+  validée transmise à `_transform`.
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-006 — `fit` sur une `pandas.Series` : `IndexError`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer.fit`
+- **Sévérité** : mineure
+- **Observé** : `_validate_input` route explicitement les `Series` (commit `f22bbb0` « (add) Series validation »),
+  puis `fit` lève `IndexError: tuple index out of range` sur `self.n_features_in_ = X.shape[1]`, avec ou sans
+  validation.
+- **Attendu** : `Series` traitée comme une seule variable (`n_features_in_ == 1`), ou refus explicite et documenté.
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  s = pd.Series([1.0, 2.0], index=pd.date_range('2023-01-31', periods=2, freq='ME'), name='v')
+  MyTransformer().fit(s)   # IndexError: tuple index out of range
+  ```
+- **Correctif** : décision de l'auteur (2026-10-16) : convention sklearn, `X` est à deux dimensions. `fit` et
+  `transform` (base et `XYPanelTimeSeriesTransformer`) refusent tout ce qui n'est pas un `DataFrame`, validation
+  activée ou non : « X must be a pandas DataFrame, got Series; pass series.to_frame() for a single series » (même
+  libellé que le refus de `HighFrequencyImputer`). Le routage des `Series` de `_validate_input` est supprimé.
+- **Test** : `tests/unit/base/transformers/test_sklearn_contract.py::TestInputKinds::test_series_is_refused_at_fit`,
+  `::test_series_is_refused_at_transform`, `::test_single_column_frame_of_a_series`,
+  `tests/unit/base/transformers/test_structure.py::TestInvalidStructures::test_non_pandas_input`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-007 — `inverse_transform` abstrait de `ReversibleTransformerMixin` non imposé
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::ReversibleTransformerMixin`
+- **Sévérité** : mineure
+- **Observé** : le mixin n'a pas `ABCMeta` pour métaclasse ; `ABCMeta` de `PanelTimeSeriesTransformer` ne lit que
+  les `__abstractmethods__` des bases, que le mixin n'a pas. Une sous-classe sans `inverse_transform`
+  s'instancie, et `inverse_transform` renvoie `None` (corps `pass` du mixin), sans erreur.
+- **Attendu** : `TypeError` à l'instanciation, comme pour `_fit` / `_transform` (le mixin dérive de `ABC`).
+- **Reproduction** :
+  ```python
+  class NoInverse(PanelTimeSeriesTransformer, ReversibleTransformerMixin):
+      def _fit(self, X, y=None): pass
+      def _transform(self, X): return X
+  NoInverse().inverse_transform(X)   # None
+  ```
+- **Correctif** : `ReversibleTransformerMixin` dérive de `ABC`.
+- **Test** : `tests/unit/base/transformers/test_reversible.py::TestReversibleContract::test_missing_inverse_transform_is_refused`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-008 — `InverseTransformer` non exporté par `tsforecast.base`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/__init__.py`
+- **Sévérité** : mineure
+- **Observé** : classe publique (sans préfixe `_`, même règle que pour `panel/utils.py`) absente de
+  `tsforecast.base.__all__` et des imports du paquet.
+- **Attendu** : exportée comme les trois autres classes du module.
+- **Reproduction** : `'InverseTransformer' in tsforecast.base.__all__   # False`
+- **Correctif** : ajouté aux imports et à `__all__` de `tsforecast/base/__init__.py`.
+- **Test** : `tests/unit/base/transformers/test_reversible.py::TestInverseTransformer::test_exported_by_the_package`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-009 — `transform` ne contrôle pas les colonnes vues au `fit`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer.transform`
+- **Sévérité** : à arbitrer
+- **Observé** : `n_features_in_` et `feature_names_in_` sont enregistrés au `fit` mais jamais comparés à l'entrée de
+  `transform` : une colonne en plus ou en moins est transmise telle quelle à `_transform` (l'erreur éventuelle
+  vient de la sous-classe, ou n'existe pas).
+- **Attendu** : à trancher. sklearn contrôle ces attributs dans `transform` (`validate_data(reset=False)`) ; les
+  sous-classes du paquet (imputeur, transformateur par entité) acceptent peut-être des colonnes différentes au
+  `transform`. Comportement actuel épinglé.
+- **Correctif** : décision de l'auteur (2026-10-16) : contrôle au `transform`, comme sklearn
+  (`_check_feature_names`, appelé par `PanelTimeSeriesTransformer.transform` et
+  `XYPanelTimeSeriesTransformer.transform`, après validation) : mêmes noms, même ordre ; le message nomme les
+  colonnes nouvelles, absentes, ou signale un simple réordonnancement. `HighFrequencyImputer` surcharge
+  `_check_feature_names` (sans effet) : sa spec fixe son propre contrat (colonne manquante refusée en la nommant,
+  colonne supplémentaire ignorée silencieusement).
+- **Test** : `tests/unit/base/transformers/test_sklearn_contract.py::TestFeatureNamesAtTransform` (6 tests) ;
+  contrat de l'imputeur : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestTransformFrequencyControl`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-010 — `convert_cols_to_index=False` fait quand même passer les colonnes dans l'index
+- **Type** : [DOC] docstring ≠ code / à arbitrer
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer` (docstrings de classe et
+  d'`__init__`), `::_validate_column_based`
+- **Sévérité** : à arbitrer
+- **Observé** : la docstring décrit `convert_cols_to_index` : « If True, converts time_col and panel_cols to index
+  and stores metadata for restoration ». Or la validation par colonnes appelle toujours `validate_temporal_data`,
+  qui indexe par `panel_cols + [time_col]` : avec `False`, la sortie est indexée de même, sans métadonnées, avec
+  l'avertissement « Index replaced with [...] » à chaque `fit` et `transform`, et `inverse_transform` ne peut pas
+  rendre les colonnes. Le paramètre ne décide en fait que de la conservation des métadonnées.
+- **Attendu** : à trancher : documenter ce comportement, ou ne pas déplacer les colonnes quand le paramètre vaut `False`.
+- **Test** : `tests/unit/base/transformers/test_structure.py::TestConvertColsToIndex::test_without_conversion_the_columns_still_move_into_the_index`
+  (suit le code)
+- **Décision de l'auteur (2026-10-16)** : avec `convert_cols_to_index=False`, `time_col` et `panel_cols` restent des
+  colonnes (ce n'est donc plus le cas par défaut). Correction **reportée à B5**, avec ANO-PANEL-001 : aujourd'hui
+  `PanelwiseTransformer` ne traite un panel en colonnes que parce que la validation le convertit en `MultiIndex` ;
+  corrigée seule, cette anomalie le ferait passer par son chemin colonnes, cassé (trois tests de
+  `tests/unit/panel/test_transformers.py` : `test_fit_transform_with_validation`, `test_multiindex_after_validation`,
+  `test_scaling_with_multiindex`). Effets attendus : la vérification du tri d'une série en colonnes porte sur la
+  colonne `time_col` ; `n_features_in_` compte les colonnes de temps et d'entité ; l'avertissement « Index replaced »
+  disparaît ; le test ci-dessus devient un test du comportement voulu.
+- **Statut** : ouvert (reporté à B5)
+
+### ANO-BASE-011 — Identifiant d'entité manquant : simple avertissement, même en mode strict
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer.fit` (`_check_panel_consistency`)
+- **Sévérité** : à arbitrer
+- **Observé** : une valeur manquante dans un niveau d'entité ou une colonne `panel_cols` produit
+  « Panel structure issues: Missing values in panel identifier… » en avertissement, que `strict_validation` vaille
+  `True` ou `False`. Le test d'origine passait `strict_validation=False` avec le commentaire « Use warnings instead of
+  errors », ce qui suppose une erreur en mode strict.
+- **Attendu** : à trancher : erreur en mode strict (cohérent avec les autres contrôles), ou avertissement documenté.
+  Comportement actuel épinglé.
+- **Correctif** : décision de l'auteur (2026-10-16) : « Panel structure issues: … » lève une `ValueError` quand
+  `validate_input` et `strict_validation` valent `True`, avertit sinon (validation désactivée : simple signalement).
+- **Test** : `tests/unit/base/transformers/test_structure.py::TestPanelIdentifierConsistency::test_missing_entity_level_value_raises_in_strict_mode`,
+  `::test_missing_entity_level_value_warns_without_validation`, `::test_missing_entity_level_value_warns_when_not_strict`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-012 — `time_col` absente : message « Cannot determine time index » qui ne la nomme pas
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer._validate_column_based`
+  (`_validate_time_index`)
+- **Sévérité** : cosmétique
+- **Observé** : sur un panel en colonnes dont `time_col` n'existe pas, `fit` lève « Time validation failed: Cannot
+  determine time index. Please provide a datetime index or specify time_col parameter. », alors que `time_col` est
+  précisé. Si l'index porte des dates, le message devient « Cannot specify panel_cols without time_col » (strict) ou,
+  en mode permissif, un avertissement suivi de « For panel data, both panel_cols and time_col must be specified » :
+  aucun ne nomme la colonne manquante. C'est l'une des sources du message « Cannot determine time index » vu en
+  partie D. Sans `panel_cols`, une `time_col` absente laisse l'index porter les dates (comportement épinglé).
+- **Attendu** : « Time column 'period' not found in data » (message de `validate_temporal_data`).
+- **Reproduction** : `MyTransformer(time_col='period', panel_cols=['country']).fit(panel_en_colonnes)`
+- **Correctif** : sur un panel en colonnes, `_validate_column_based` lève « Time column 'period' not found in
+  data » dans les deux modes, que l'index porte des dates ou non. Sans `panel_cols`, le repli sur l'index est
+  conservé.
+- **Test** : `tests/unit/base/transformers/test_time_index.py::TestRejectedTimeLabels::test_absent_time_col_of_a_panel_is_named`
+  (index par défaut ou daté × strict / permissif)
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-013 — Docstrings de `base/transformers.py` : défaut, exemples, noms d'arguments
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/base/transformers.py`
+- **Sévérité** : cosmétique
+- **Observé** : la docstring de classe de `PanelTimeSeriesTransformer` annonce `time_col` « Default is 'date' »
+  (`None` dans `__init__`) ; les exemples de `fit`, `transform`, `_sorting_advice`, `_store_transformation_info` et
+  `_restore_structure_if_converted` utilisent `MyTransformer`, `ConcreteTransformer` et `MyReversibleTransformer`,
+  jamais définis, et instancient `PanelTimeSeriesTransformer`, abstraite (les doctests échouent ; recoupe N7) ;
+  `_validate_input` et `_validate_multiindex_panel` documentent un argument `X` qui s'appelle `data` ;
+  l'exemple de `fit` annonce `n_features_in_ == 3` pour un frame `date, value, feature` validé sur `time_col='date'`
+  (`2` observé, la date passe dans l'index).
+- **Attendu** : docstrings alignées sur le code ; exemples exécutables.
+- **Correctif** : docstrings réécrites (défaut `None`, attributs ajustés, `Series`) ; chaque exemple définit sa
+  sous-classe et passe en doctest (`pytest --doctest-modules tsforecast/base --noconftest` : 26 passed, aucun
+  `+SKIP`).
+- **Test** : doctests du module
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-014 — `docs/concepts/base_transformers.md` décrit une hiérarchie et des méthodes inexistantes
+- **Type** : [DOC] documentation ≠ code
+- **Composant** : `docs/concepts/base_transformers.md`
+- **Sévérité** : mineure
+- **Observé** : (1) l'arbre « Rapport avec les autres modules » fait hériter `XYTransformerMixin` et
+  `PublicationDelayTransformer` de `PanelTimeSeriesTransformer` : le premier dérive de `TransformerMixin`, le second
+  de `BaseEstimator, TransformerMixin` ; seuls `PanelwiseTransformer` et `XYPanelTimeSeriesTransformer` en
+  héritent. (2) `ReversibleTransformerMixin` « impose … son articulation avec `_inverse_transform` » : cette méthode
+  n'existe pas. (3) `PanelTimeSeriesTransformer` « prend en charge … la restauration de la structure d'origine en
+  sortie » : `transform` ne restaure rien, seule l'aide `_restore_structure_if_converted` du mixin le fait, à
+  l'appel de la sous-classe. (4) `InverseTransformer` et `convert_cols_to_index` ne sont pas mentionnés.
+- **Attendu** : page alignée sur le code.
+- **Correctif** : page réécrite (quatre briques, hiérarchie réelle, contrôles du `transform`, `InverseTransformer`).
+- **Test** : aucun
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-BASE-015 — Branches inatteignables (code mort)
+- **Type** : [CODE] comportement (nettoyage, pas un bogue)
+- **Composant** : `tsforecast/base/transformers.py::PanelTimeSeriesTransformer`
+- **Sévérité** : cosmétique
+- **Observé** : décelé par la couverture : `raise ValueError("Unexpected data structure configuration")` (les
+  quatre combinaisons `time_col` / `panel_cols` sont traitées avant) ; `raise ValueError("Invalid data structure
+  configuration")` de `_validate_input` (un panel en index a toujours le temps en index) ; les branches d'avertissement
+  du mode permissif après `validate_temporal_data` dans `_validate_multiindex_panel`, `_validate_index_time_series`
+  et `_validate_column_based` (en mode permissif la fonction avertit sans lever ; pour les colonnes, les causes
+  restantes sont refusées en amont) ; le test `isinstance(X_validated.index, pd.DatetimeIndex)` d'une série en
+  colonnes (toujours vrai) ; les contrôles `MultiIndex` de `_validate_multiindex_panel` et la conversion de
+  `_validate_index_time_series`, déjà garantis par `_detect_data_structure`.
+- **Correctif** : branches supprimées, sans changement de comportement. Les entrées `Series` passent désormais par
+  `_detect_data_structure`, comme les `DataFrame`. `base/transformers.py` : 100 % (lignes et branches).
+- **Test** : couverture des tests de `tests/unit/base/transformers/`
+- **Statut** : corrigée (2026-10-16)
 
 ## CV
 

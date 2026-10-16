@@ -184,9 +184,13 @@ class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
         """
         # Vérification de l'entraînement
         check_is_fitted(self)
+        # Données à deux dimensions seulement (convention sklearn)
+        self._check_input_type(X)
         # Validation de X
         if self.validate_input:
             X = self._validate_input(X)
+        # Vérification des colonnes vues au fit
+        self._check_feature_names(X)
 
         return self._transform(X, y)
     
