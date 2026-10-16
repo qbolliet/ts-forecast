@@ -11,24 +11,29 @@ import warnings
 import pandas as pd
 
 # Importations locales
+from ..panel.utils import is_panel_data
 from .base import InSampleSplit, OutOfSampleSplit
 
 
+# Fonction de refus des données de panel par un splitter de série temporelle
 def _check_single_series(splitter, X, panel_class: str) -> None:
     """Refuse panel data: a time series splitter needs a single sequence.
 
     Raises:
         ValueError: If ``X`` has a MultiIndex.
     """
-    if isinstance(X, (pd.Series, pd.DataFrame)) and isinstance(X.index, pd.MultiIndex):
+    # Panel (MultiIndex entité..., date) : découpé par position, il mêlerait les entités
+    if isinstance(X, (pd.Series, pd.DataFrame)) and is_panel_data(X):
         raise ValueError(
             f"{splitter.__class__.__name__} splits a single time series, but X has a MultiIndex "
             f"(panel data); use {panel_class} instead"
         )
 
 
+# Fonction d'avertissement pour des groupes ignorés
 def _warn_ignored_groups(splitter, groups) -> None:
     """Warn that ``groups`` are ignored by a time series splitter."""
+    # Groupes fournis : sans effet sur une série unique, signalés à l'utilisateur
     if groups is not None:
         warnings.warn(
             f"The groups parameter is ignored by {splitter.__class__.__name__}. "
@@ -84,8 +89,10 @@ class TSOutOfSampleSplit(OutOfSampleSplit):
             >>> len(list(TSOutOfSampleSplit(n_splits=3, test_size=10).split(X)))
             3
         """
+        # Refus d'un panel, puis avertissement si des groupes sont fournis
         _check_single_series(self, X, 'PanelOutOfSampleSplit')
         _warn_ignored_groups(self, groups)
+        # Découpage de la classe parente sans groupes : comportement de série temporelle
         return super().split(X, y, groups=None)
 
 
@@ -134,6 +141,8 @@ class TSInSampleSplit(InSampleSplit):
             >>> bool(set(test) <= set(train))
             True
         """
+        # Refus d'un panel, puis avertissement si des groupes sont fournis
         _check_single_series(self, X, 'PanelInSampleSplit')
         _warn_ignored_groups(self, groups)
+        # Découpage de la classe parente sans groupes : comportement de série temporelle
         return super().split(X, y, groups=None)

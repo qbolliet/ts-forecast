@@ -4,8 +4,9 @@ import numpy as np
 import pandas as pd
 import warnings
 
-# Local imports
-from .base import OutOfSampleSplit, InSampleSplit
+# Importations locales
+from ..panel.utils import is_panel_data
+from .base import InSampleSplit, OutOfSampleSplit, _entity_labels, _labels_array, _precompute_group_mappings
 
 # Sklearn
 from sklearn.utils import indexable
@@ -14,36 +15,40 @@ from sklearn.utils.validation import _num_samples
 
 # Fonction auxiliaire d'extraction des groupes depuis les données de panel
 def _extract_groups_from_panel(X):
-    """Extract entity groups from panel data structure efficiently.
-    
+    """Extract the entity of each row of panel data.
+
+    The entity is read from every index level but the last (the date): the
+    value of the entity level when there is one, the tuple of the entity
+    levels when there are several.
+
     Args:
-        X (pd.DataFrame or pd.Series): Panel data with MultiIndex (entity, time)
-        
+        X (pd.DataFrame or pd.Series): Panel data with MultiIndex (entity..., time)
+
     Returns:
-        np.ndarray: Array of group labels corresponding to each sample
-        
+        np.ndarray: One-dimensional object array of the entity of each row
+
     Raises:
-        ValueError: If data doesn't have required MultiIndex structure
-        
+        ValueError: If X is not a pandas object with a MultiIndex of at least
+            two levels
+
     Examples:
-        >>> # Create panel data
-        >>> entities = ['A', 'B', 'C']
-        >>> dates = pd.date_range('2020-01-01', periods=10, freq='D')
-        >>> idx = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
-        >>> X = pd.DataFrame({'value': range(30)}, index=idx)
-        >>> groups = _extract_groups_from_panel(X)
-        >>> # groups will be ['A', 'A', ..., 'B', 'B', ..., 'C', 'C', ...]
+        >>> idx = pd.MultiIndex.from_product([['A', 'B'], pd.date_range('2020-01-01', periods=2, freq='D')])
+        >>> _extract_groups_from_panel(pd.DataFrame({'value': range(4)}, index=idx)).tolist()
+        ['A', 'A', 'B', 'B']
+        >>> idx = pd.MultiIndex.from_product([['FR'], ['a', 'b'], [2020]])
+        >>> _extract_groups_from_panel(pd.Series(range(2), index=idx)).tolist()
+        [('FR', 'a'), ('FR', 'b')]
     """
-    # Vérification de la structure des données
-    if not hasattr(X, 'index'):
+    # Vérification qu'il s'agit d'un objet pandas
+    if not isinstance(X, (pd.Series, pd.DataFrame)):
         raise ValueError("Panel data requires pandas DataFrame/Series with MultiIndex")
-    
-    if not hasattr(X.index, 'get_level_values'):
+
+    # Vérification de la structure de panel : MultiIndex (entité..., date)
+    if not is_panel_data(X):
         raise ValueError("Panel data requires MultiIndex (entity, time)")
-    
-    # Extraction efficace des groupes directement depuis le MultiIndex
-    groups = X.index.get_level_values(0).values
-    return groups
+
+    # Entité de chaque ligne : niveaux d'entité (tous sauf le dernier)
+    return _entity_labels(X)
 
 # Classe de base pour la validation croisée out-of-sample sur données de panel
 class PanelOutOfSampleSplit(OutOfSampleSplit):
@@ -214,16 +219,13 @@ class PanelOutOfSampleSplitPerEntity(PanelOutOfSampleSplit):
         if groups is None:
             groups = _extract_groups_from_panel(X)
         
-        # Identification des entités uniques
-        unique_groups = np.unique(groups)
-        
+        # Positions des lignes de chaque entité (entités scalaires ou tuples)
+        group_mappings = _precompute_group_mappings(_labels_array(groups))
+
         # Génération des splits avec regroupement par entité
-        for train_indices, test_indices in super().split(X, y, groups):            
+        for train_indices, test_indices in super().split(X, y, groups):
             # Traitement entité par entité
-            for group in unique_groups:
-                # Identification des indices de cette entité
-                group_mask = groups == group
-                group_indices = np.where(group_mask)[0]
+            for group, group_indices in group_mappings.items():
                 
                 # Extraction des indices d'entraînement et de test pour cette entité
                 entity_train = train_indices[np.isin(train_indices, group_indices)]
@@ -282,16 +284,13 @@ class PanelInSampleSplitPerEntity(PanelInSampleSplit):
         if groups is None:
             groups = _extract_groups_from_panel(X)
         
-        # Identification des entités uniques
-        unique_groups = np.unique(groups)
-        
+        # Positions des lignes de chaque entité (entités scalaires ou tuples)
+        group_mappings = _precompute_group_mappings(_labels_array(groups))
+
         # Génération des splits avec regroupement par entité
-        for train_indices, test_indices in super().split(X, y, groups):            
+        for train_indices, test_indices in super().split(X, y, groups):
             # Traitement entité par entité
-            for group in unique_groups:
-                # Identification des indices de cette entité
-                group_mask = groups == group
-                group_indices = np.where(group_mask)[0]
+            for group, group_indices in group_mappings.items():
                 
                 # Extraction des indices d'entraînement et de test pour cette entité
                 entity_train = train_indices[np.isin(train_indices, group_indices)]

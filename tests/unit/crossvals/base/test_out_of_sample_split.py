@@ -534,5 +534,5 @@ class TestPanelGroups:
     def test_groups_inconsistent_with_the_index_are_refused(self, cv_panel_2x6, kwargs):
         """Groups that do not match the entity level are refused."""
         groups = np.char.lower(self._groups(cv_panel_2x6).astype(str))
-        with pytest.raises(ValueError, match='groups must match the first index level'):
+        with pytest.raises(ValueError, match='groups must match the entity levels'):
             collect_folds(OutOfSampleSplit(**kwargs), cv_panel_2x6, groups=groups)

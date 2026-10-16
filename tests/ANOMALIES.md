@@ -5337,7 +5337,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ## CV
 
-Numéros ANO-CV-004 à 006 réservés au prompt B3 (`crossvals/panel.py`, voir `tests/PLAN_B.md`).
+Numéros ANO-CV-005 et 006 réservés au prompt B3 (`crossvals/panel.py`, voir `tests/PLAN_B.md`).
 
 ### ANO-CV-001 — Données non triées : plis renvoyés avec la permutation inverse (fuite)
 - **Type** : [CODE] comportement
@@ -5405,6 +5405,31 @@ Numéros ANO-CV-004 à 006 réservés au prompt B3 (`crossvals/panel.py`, voir `
 - **Reproduction** : `list(OutOfSampleSplit(n_splits=3, gap=7).split(np.zeros(12)))[0][0]   # array([])`
 - **Correctif** : décision de l'auteur (2026-10-16) : configuration refusée. Un pli sans donnée d'apprentissage lève « No training data before the test set starting at row 3 (gap=7); reduce gap or the number of splits » (série) ou « No training data for the group 'A' before its test set (gap=5); … » (panel), à la production du pli.
 - **Test** : `tests/unit/crossvals/base/test_out_of_sample_split.py::TestDefaultFolds::test_gap_longer_than_the_history_is_refused`, `::TestExplicitTestIndices::test_first_position_is_refused`, `::test_gap_reaching_the_first_date_is_refused`, `::TestPanelGroups::test_gap_longer_than_an_entity_history_is_refused`, `tests/unit/crossvals/test_time_series.py::TestTSOutOfSampleSplit::test_gap_leaving_no_training_data`, `::TestSklearnModelSelection::test_fold_without_training_data_is_reported`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-004 — Entité lue sur le seul premier niveau, date sur le seul deuxième
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py` (`_resolve_test_positions`, `_check_groups`, `_sorted_time_points`,
+  `_rows_at`), `tsforecast/crossvals/panel.py::_extract_groups_from_panel`
+- **Sévérité** : majeure
+- **Observé** : la convention du paquet (`panel/utils.py::is_panel_data`, `get_entity_levels`,
+  `utils/validation::validate_entities_grouped`) définit l'entité par tous les niveaux du `MultiIndex` sauf le
+  dernier, et la date par le dernier. Les splitters lisaient l'entité au niveau 0 et la date au niveau 1 : sur un
+  panel (pays, secteur, date), les secteurs d'un même pays étaient fusionnés en une entité et les dates cherchées
+  dans le niveau des secteurs. `_extract_groups_from_panel` acceptait en outre un index simple (chaque ligne une
+  entité).
+- **Attendu** : entité = niveaux d'entité (valeur seule, ou tuple quand il y en a plusieurs), date = dernier
+  niveau ; un index simple n'est pas un panel.
+- **Correctif** : décision de l'auteur (2026-10-16). Détection du panel par `is_panel_data` ; entité de chaque ligne
+  par `_entity_labels` (`index.droplevel(-1)`), dates par `_time_level` (dernier niveau) ; `groups` confronté à ces
+  entités ; tables d'entités par `pd.factorize` (entités tuples) ; un tuple de test s'écrit `(pays, secteur, date)`
+  ou `(('pays', 'secteur'), date)`, avec une valeur par niveau d'entité (sinon `ValueError`).
+  `_extract_groups_from_panel` refuse un index simple (« Panel data requires MultiIndex (entity, time) ») et renvoie
+  les entités ; les deux classes `PerEntity` itèrent sur la même table.
+- **Test** : `tests/unit/crossvals/base/test_index_robustness.py::TestEntityOnSeveralLevels` (9 tests),
+  `tests/unit/crossvals/test_panel.py::TestEntityOnSeveralLevels` (2 tests),
+  `::TestExtractGroupsFromPanel::test_no_multiindex_error` (réécrit : il épinglait l'acceptation d'un index simple),
+  `::test_several_entity_levels_give_tuples`
 - **Statut** : corrigée (2026-10-16)
 
 ### ANO-CV-007 — `test_size` ignoré quand `InSampleSplit` reçoit plusieurs `test_indices`
@@ -5656,6 +5681,28 @@ Numéros ANO-CV-004 à 006 réservés au prompt B3 (`crossvals/panel.py`, voir `
 - **Attendu** : branches supprimées, sans changement de comportement.
 - **Correctif** : branches supprimées par la réécriture de `base.py` (tables MultiIndex et replis inutiles retirés) : `base.py` 100 % lignes et branches.
 - **Test** : couverture des tests de `tests/unit/crossvals/base/` et `tests/unit/crossvals/test_time_series.py`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-022 — Index de libellés non trié : tri alphabétique pris pour un ordre chronologique
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::_verify_and_sort_data`
+- **Sévérité** : majeure
+- **Observé** : un index non croissant était trié avec `argsort`, quel que soit son type. Pour des chaînes, l'ordre
+  obtenu est alphabétique : avec `timeseries_to_string(ts, format='%m/%d/%Y')` sur juillet 2023 à juin 2024, le
+  premier pli testait `['10/31/2023', '10/31/2024', '11/30/2023']` et apprenait sur 2024 (fuite), avec un simple
+  avertissement « not sorted by date ». Même effet pour des libellés numérotés (`'period_10'` avant `'period_2'`) et
+  pour le niveau des dates d'un panel.
+- **Attendu** : décision de l'auteur (2026-10-16) : refus d'un index de libellés non trié.
+- **Correctif** : `_is_chronologically_sortable` : dates, périodes, durées et nombres sont triés comme avant ; un index
+  de libellés non croissant lève « Time series index is not sorted and holds labels of dtype object, whose sorted
+  order is not chronological; convert it to dates (pd.to_datetime) or periods, or sort the rows by date » (« Panel
+  date level … » pour un panel dont les dates ne sont pas croissantes dans une entité). Un index de libellés déjà
+  croissant est pris dans l'ordre des lignes ; un panel à dates libellés, croissantes dans chaque entité mais aux
+  entités entrelacées, est regroupé par un tri stable sur les seuls niveaux d'entité.
+- **Test** : `tests/unit/crossvals/base/test_index_robustness.py::TestUnsortedData::test_unsorted_labels_are_refused`
+  (6 cas), `::test_sorted_labels_are_taken_in_their_order`, `::test_numbers_and_durations_are_sorted` (3 cas),
+  `::test_panel_with_label_dates_unsorted_within_an_entity_is_refused`,
+  `::test_panel_with_label_dates_interleaved_entities_are_regrouped`
 - **Statut** : corrigée (2026-10-16)
 
 ## PANEL

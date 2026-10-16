@@ -8,9 +8,8 @@ prédire le passé : les scores obtenus sont optimistes et ne disent rien de la
 performance réelle en production.
 
 `tsforecast.crossvals` fournit des *splitters* qui respectent l'ordre temporel :
-en hors échantillon, l'entraînement précède strictement le test, et un
-intervalle (`gap`) peut être imposé entre les deux pour reproduire un délai de
-prévision.
+dans le cas `out-of-sample`, l'entraînement précède strictement le test, et un
+intervalle (`gap`) peut être imposé entre les deux pour reproduire un délai du à l'horizon de prévision ou au délai de publication de la variable que l'on cherche à prédire.
 
 ## Deux familles
 
@@ -30,9 +29,13 @@ Chaque famille se décline pour :
     - `Panel*SplitPerEntity` : un découpage propre à chaque entité.
 
 Le découpage se fait par position, sur les données triées par date (par
-entité puis date pour un panel) : un index non trié est trié avec un
-avertissement, une date répétée (un couple entité-date répété pour un panel)
-est refusée.
+entité puis date pour un panel) : un index de dates, de périodes ou de nombres
+non trié est trié avec un avertissement ; un index de libellés (chaînes) doit
+déjà être trié, son ordre alphabétique n'étant pas chronologique
+(`'01/31/2024'` précède `'12/31/2023'`) : le convertir avec `pd.to_datetime` ;
+une date répétée (un couple entité-date répété pour un panel) est refusée.
+Pour un panel, l'entité est formée de tous les niveaux de l'index sauf le
+dernier, qui porte la date.
 
 ## Paramètres clés
 

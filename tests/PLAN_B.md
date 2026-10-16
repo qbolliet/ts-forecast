@@ -222,9 +222,9 @@ Celles marquées ✔ ont été reproduites par B0.
 - ANO-CV-007 [DOC] / à arbitrer : `InSampleSplit` ignore `test_size` quand plusieurs `test_indices`
   sont donnés.
 
-**Bilan B2 (2026-10-16)** : 001, 002, 003, 007 consignées sous ces numéros ; ajoutées 008 à 021 (voir
-`ANOMALIES.md`). **004, 005 et 006 restent réservées à B3** ; B3 numérote ses nouvelles anomalies à partir
-de 022. **Toutes corrigées dans `tsforecast/crossvals/base.py` et `time_series.py`** (décision de l'auteur,
+**Bilan B2 (2026-10-16)** : 001, 002, 003, 007 consignées sous ces numéros ; ajoutées 008 à 022 (voir
+`ANOMALIES.md`). **005 et 006 restent réservées à B3** (004, entité sur plusieurs niveaux, corrigée par B2 à la demande de l'auteur) ; B3 numérote ses nouvelles anomalies à partir
+de 023. **Toutes corrigées dans `tsforecast/crossvals/base.py` et `time_series.py`** (décision de l'auteur,
 2026-10-16). Effets à connaître pour B3 : `groups` est confronté au premier niveau de l'index (longueur,
 valeurs, `NaN`) ; dates et couples (entité, date) répétés sont refusés ; un pli sans apprentissage est
 refusé ; une position ou un tuple de panel ouvre un pli limité à son entité ; les dates par défaut d'un

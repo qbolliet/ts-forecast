@@ -52,13 +52,17 @@ class TestExtractGroupsFromPanel:
             _extract_groups_from_panel(X)
 
     def test_no_multiindex_error(self):
-        """Test that function works with non-MultiIndex data (treats each row as separate entity)."""
+        """A flat index is not panel data: refused."""
         X = pd.DataFrame({'value': range(10)})
-        
-        # Function should work and return each index position as a separate group
-        groups = _extract_groups_from_panel(X)
-        expected_groups = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        np.testing.assert_array_equal(groups, expected_groups)
+
+        with pytest.raises(ValueError, match=r"Panel data requires MultiIndex \(entity, time\)"):
+            _extract_groups_from_panel(X)
+
+    def test_several_entity_levels_give_tuples(self):
+        """With two entity levels, each group is the (country, sector) tuple."""
+        idx = pd.MultiIndex.from_product([['FR'], ['a', 'b'], pd.date_range('2020-01-01', periods=2, freq='D')])
+        groups = _extract_groups_from_panel(pd.Series(range(4), index=idx))
+        assert groups.tolist() == [('FR', 'a'), ('FR', 'a'), ('FR', 'b'), ('FR', 'b')]
 
     def test_numeric_entity_names(self):
         """Test with numeric entity names."""
@@ -724,3 +728,24 @@ class TestPanelInSampleSplitPerEntity:
             assert np.all(np.isin(test_idx, train_idx))
         
         assert entities_seen == {'X', 'Y'}
+
+class TestEntityOnSeveralLevels:
+    """Panel splitters on a (country, sector, date) MultiIndex."""
+
+    @pytest.fixture
+    def panel(self):
+        """Entities ('FR', 'a') on positions 0-3 and ('FR', 'b') on 4-7, four month-ends each."""
+        dates = pd.date_range('2024-01-31', periods=4, freq='ME')
+        index = pd.MultiIndex.from_product([['FR'], ['a', 'b'], dates], names=['country', 'sector', 'date'])
+        return pd.DataFrame({'v': np.arange(8.0)}, index=index)
+
+    def test_groups_are_deduced_from_every_entity_level(self, panel):
+        """Without groups, the (country, sector) entities are split separately."""
+        folds = [(tr.tolist(), te.tolist()) for tr, te in PanelOutOfSampleSplit(n_splits=2).split(panel)]
+        # Valeur d'or : tests aux dates 2 puis 3 de chaque secteur
+        assert folds == [([0, 1, 4, 5], [2, 6]), ([0, 1, 2, 4, 5, 6], [3, 7])]
+
+    def test_per_entity_folds(self, panel):
+        """PerEntity yields one fold per (country, sector) entity and per split."""
+        folds = [(tr.tolist(), te.tolist()) for tr, te in PanelOutOfSampleSplitPerEntity(n_splits=2).split(panel)]
+        assert folds == [([0, 1], [2]), ([4, 5], [6]), ([0, 1, 2], [3]), ([4, 5, 6], [7])]

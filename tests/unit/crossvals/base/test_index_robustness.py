@@ -2,8 +2,9 @@
 
 Covers the index kinds (``DatetimeIndex`` start or end anchored, with a
 time zone, ``RangeIndex``, ``PeriodIndex``, labels, date strings), the
-resolution of ``test_indices`` on each, unsorted data (automatic sort and
-the dates of the folds it returns), duplicated dates, missing values in
+resolution of ``test_indices`` on each, unsorted data (automatic sort of
+dates, periods and numbers, refusal of unsorted labels, the dates of the
+folds returned), duplicated dates, entities on several index levels, missing values in
 ``X`` and ``y``, and the containers accepted for ``X``.
 """
 # Importation des modules
@@ -148,11 +149,62 @@ class TestUnsortedData:
             folds = collect_folds(OutOfSampleSplit(n_splits=3), reversed_frame)
         assert [sorted(reversed_frame['v'].iloc[te]) for _, te in folds] == [[3, 4, 5], [6, 7, 8], [9, 10, 11]]
 
-    def test_labels_are_ordered_as_strings(self):
-        """A label index is sorted lexicographically: 'period_10' comes before 'period_2'."""
-        X = pd.Series(np.arange(12.0), index=[f'period_{i}' for i in range(12)])
+    @pytest.mark.parametrize('labels', [
+        pytest.param(pd.date_range('2023-07-31', periods=12, freq='ME').strftime('%m/%d/%Y'), id='non-iso-dates'),
+        pytest.param(pd.date_range('2023-01-31', periods=12, freq='ME').strftime('%Y-%m-%d')[::-1], id='iso-dates'),
+        pytest.param(pd.Index([f'period_{i}' for i in range(12)]), id='numbered-labels'),
+    ])
+    @pytest.mark.parametrize('cls', [OutOfSampleSplit, InSampleSplit], ids=['oos', 'is'])
+    def test_unsorted_labels_are_refused(self, labels, cls):
+        """Labels out of alphabetical order cannot be sorted by date: refused, without sorting."""
+        # Exemple : '01/31/2024' précède '12/31/2023' dans l'ordre alphabétique
+        X = pd.Series(np.arange(12.0), index=labels)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            with pytest.raises(ValueError, match=r'Time series index is not sorted and holds labels of dtype object.*pd\.to_datetime'):
+                collect_folds(cls(n_splits=3), X)
+
+    def test_sorted_labels_are_taken_in_their_order(self):
+        """Labels already in increasing order are split in their row order, without warning."""
+        X = pd.Series(np.arange(12.0), index=pd.date_range('2024-01-31', periods=12, freq='ME').strftime('%Y-%m-%d'))
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            assert as_lists(collect_folds(OutOfSampleSplit(n_splits=3), X)) == EXPECTED_OOS
+
+    @pytest.mark.parametrize('index', [
+        pytest.param(pd.Index([2031, 2020, 2025, 2022]), id='integers'),
+        pytest.param(pd.Index([3.5, 1.0, 2.25, 0.5]), id='floats'),
+        pytest.param(pd.timedelta_range('1D', periods=4)[[2, 0, 3, 1]], id='durations'),
+    ])
+    def test_numbers_and_durations_are_sorted(self, index):
+        """A numeric or duration index is sorted like dates, with a warning."""
+        X = pd.Series(np.arange(4.0), index=index)
         with pytest.warns(UserWarning, match='not sorted by date'):
-            collect_folds(OutOfSampleSplit(n_splits=3), X)
+            folds = collect_folds(OutOfSampleSplit(n_splits=2, test_size=1), X)
+        # Valeur d'or : les deux plus grandes valeurs d'index sont testées, dans l'ordre
+        assert [list(X.index[te]) for _, te in folds] == [[sorted(index)[2]], [sorted(index)[3]]]
+
+    def test_panel_with_label_dates_unsorted_within_an_entity_is_refused(self):
+        """A panel whose label dates are out of order inside an entity is refused."""
+        index = pd.MultiIndex.from_tuples(
+            [('A', '2024-02'), ('A', '2024-01'), ('B', '2024-01'), ('B', '2024-02')], names=['entity', 'date'],
+        )
+        X = pd.Series(np.arange(4.0), index=index)
+        with pytest.raises(ValueError, match='Panel date level is not sorted and holds labels'):
+            collect_folds(OutOfSampleSplit(test_indices=['2024-02']), X, groups=['A', 'A', 'B', 'B'])
+
+    def test_panel_with_label_dates_interleaved_entities_are_regrouped(self):
+        """Entities interleaved with label dates in order are regrouped, their rows kept in order."""
+        index = pd.MultiIndex.from_tuples(
+            [('B', '2024-01'), ('A', '2024-01'), ('B', '2024-02'), ('A', '2024-02'), ('B', '2024-03'), ('A', '2024-03')],
+            names=['entity', 'date'],
+        )
+        X = pd.Series(np.arange(6.0), index=index)
+        groups = ['B', 'A', 'B', 'A', 'B', 'A']
+        with pytest.warns(UserWarning, match='Panel data is not sorted by group then by date'):
+            folds = collect_folds(OutOfSampleSplit(test_indices=['2024-03']), X, groups=groups)
+        # Valeur d'or : test à la date 2024-03 (positions 4 et 5), apprentissage sur 2024-01 et 2024-02
+        assert [(sorted(tr.tolist()), sorted(te.tolist())) for tr, te in folds] == [([0, 1, 2, 3], [4, 5])]
 
 
 class TestDuplicatedDates:
@@ -208,6 +260,76 @@ class TestMissingEntityLabel:
         groups = panel.index.get_level_values(0).to_numpy()
         with pytest.raises(ValueError, match='Entity labels must not be missing'):
             collect_folds(splitter, panel, groups=groups)
+
+
+class TestEntityOnSeveralLevels:
+    """Panels whose entity is defined on several index levels (country, sector).
+
+    The panel holds the entities ``('FR', 'a')`` on positions 0-3 and
+    ``('FR', 'b')`` on 4-7, both on the month-ends 2024-01-31 to 2024-04-30:
+    reading the first level alone would merge them into one entity ``'FR'``.
+    """
+
+    @pytest.fixture
+    def panel(self) -> pd.DataFrame:
+        """Two sectors of one country, four month-ends each, value equal to the position."""
+        dates = pd.date_range('2024-01-31', periods=4, freq='ME')
+        index = pd.MultiIndex.from_product([['FR'], ['a', 'b'], dates], names=['country', 'sector', 'date'])
+        return pd.DataFrame({'v': np.arange(8.0)}, index=index)
+
+    @staticmethod
+    def _groups(X: pd.DataFrame) -> list:
+        """Return the (country, sector) entity of each row."""
+        return list(X.index.droplevel(-1))
+
+    def test_default_folds_per_entity(self, panel):
+        """Each fold tests the same date for each (country, sector) entity."""
+        # Valeur d'or : 4 dates, tests aux dates 2 puis 3 de chaque secteur
+        folds = collect_folds(OutOfSampleSplit(n_splits=2), panel, groups=self._groups(panel))
+        assert as_lists(folds) == [([0, 1, 4, 5], [2, 6]), ([0, 1, 2, 4, 5, 6], [3, 7])]
+        assert_no_leakage(panel, folds, groups=self._groups(panel))
+
+    def test_date_is_read_on_the_last_level(self, panel):
+        """A test date is looked up in the last level, not in the second one."""
+        splitter = OutOfSampleSplit(test_indices=['2024-03-31'], test_size=2)
+        assert as_lists(collect_folds(splitter, panel, groups=self._groups(panel))) == [([0, 1, 4, 5], [2, 3, 6, 7])]
+
+    @pytest.mark.parametrize('item', [('FR', 'b', '2024-03-31'), (('FR', 'b'), '2024-03-31')],
+                             ids=['level-by-level', 'entity-tuple'])
+    def test_entity_date_tuple(self, panel, item):
+        """The entity of a tuple is given level by level or as one tuple."""
+        folds = collect_folds(OutOfSampleSplit(test_indices=[item]), panel, groups=self._groups(panel))
+        assert as_lists(folds) == [([4, 5], [6])]
+
+    def test_tuple_without_every_entity_level_is_refused(self, panel):
+        """A tuple naming the country alone does not designate a row."""
+        with pytest.raises(ValueError, match=r'expected 2 entity value\(s\) followed by a date'):
+            collect_folds(OutOfSampleSplit(test_indices=[('FR', '2024-03-31')]), panel, groups=self._groups(panel))
+
+    def test_groups_of_the_first_level_alone_are_refused(self, panel):
+        """Groups holding the country only do not match the (country, sector) entities."""
+        with pytest.raises(ValueError, match='groups must match the entity levels'):
+            collect_folds(OutOfSampleSplit(n_splits=2), panel, groups=['FR'] * 8)
+
+    def test_in_sample_default_fold(self, panel):
+        """The in-sample test holds the last test_size dates of each entity."""
+        folds = collect_folds(InSampleSplit(test_size=2), panel, groups=self._groups(panel))
+        assert as_lists(folds) == [(list(range(8)), [2, 3, 6, 7])]
+
+    def test_unsorted_panel_is_sorted_by_every_entity_level(self, panel):
+        """Interleaved rows are sorted by country, sector, then date before splitting."""
+        unsorted = panel.iloc[[4, 0, 5, 1, 6, 2, 7, 3]]
+        with pytest.warns(UserWarning, match='Panel data is not sorted by group then by date'):
+            folds = collect_folds(OutOfSampleSplit(n_splits=2), unsorted, groups=self._groups(unsorted))
+        assert_no_leakage(unsorted, folds, groups=self._groups(unsorted))
+        assert [sorted(unsorted['v'].iloc[test]) for _, test in folds] == [[2, 6], [3, 7]]
+
+    def test_missing_value_in_a_secondary_entity_level_is_refused(self, panel):
+        """A missing sector is a missing entity label."""
+        index = panel.index.set_levels(['a', np.nan], level='sector', verify_integrity=False)
+        X = panel.set_axis(index)
+        with pytest.raises(ValueError, match='Entity labels must not be missing'):
+            collect_folds(OutOfSampleSplit(n_splits=2), X, groups=self._groups(X))
 
 
 class TestContainers:
