@@ -289,11 +289,12 @@ class TestPanelGroups:
         'kwargs', [{'test_indices': ['2024-06-30']}, {}], ids=['single-date', 'default'],
     )
     def test_entity_without_the_test_date(self, cv_panel_2x6, kwargs):
-        """An entity lacking the only test date is warned about, then the split fails."""
+        """An entity lacking the only test date is warned about, not tested, and trains up to that date."""
         X = cv_panel_2x6.drop(('B', pd.Timestamp('2024-06-30')))
-        with pytest.warns(UserWarning, match="Cannot find test period '2024-06-30.*' for entity 'B'"):
-            with pytest.raises(ValueError, match='Cannot find test indices for the group : B'):
-                collect_folds(InSampleSplit(**kwargs), X, groups=self._groups(X))
+        # Valeur d'or : A testée en juin (5) ; B (6-10, janvier-mai) en apprentissage seul
+        with pytest.warns(UserWarning, match="Cannot find test period '2024-06-30.*' for entity 'B'; the entity is not tested"):
+            folds = collect_folds(InSampleSplit(**kwargs), X, groups=self._groups(X))
+        assert as_lists(folds) == [(_upto(11), [5])]
 
     @pytest.mark.parametrize(
         ('indices', 'expected'),

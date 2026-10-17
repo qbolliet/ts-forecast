@@ -17,6 +17,7 @@ from tests.support.datasets import (
     build_mixed_frequency_timeseries,
     build_panel_reference,
     build_panel_two_level,
+    build_staggered_panel,
 )
 
 
@@ -247,6 +248,17 @@ def cv_panel_2x6() -> pd.DataFrame:
     dates = pd.date_range('2024-01-31', periods=6, freq='ME')
     index = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
     return pd.DataFrame({'v': np.arange(12.0)}, index=index)
+
+
+@pytest.fixture
+def staggered_panel() -> pd.DataFrame:
+    """Three-entity panel whose entities start and end on different month-ends of 2024.
+
+    ``build_staggered_panel()``: ``A`` January-December (positions 0-11),
+    ``B`` March-October (12-19), ``C`` July-December (20-25); value equal to
+    the row position.
+    """
+    return build_staggered_panel()
 
 
 # =============================================================================

@@ -5337,8 +5337,6 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ## CV
 
-Numéros ANO-CV-005 et 006 réservés au prompt B3 (`crossvals/panel.py`, voir `tests/PLAN_B.md`).
-
 ### ANO-CV-001 — Données non triées : plis renvoyés avec la permutation inverse (fuite)
 - **Type** : [CODE] comportement
 - **Composant** : `tsforecast/crossvals/base.py::OutOfSampleSplit._split`, `::InSampleSplit._split`
@@ -5427,9 +5425,94 @@ Numéros ANO-CV-005 et 006 réservés au prompt B3 (`crossvals/panel.py`, voir `
   `_extract_groups_from_panel` refuse un index simple (« Panel data requires MultiIndex (entity, time) ») et renvoie
   les entités ; les deux classes `PerEntity` itèrent sur la même table.
 - **Test** : `tests/unit/crossvals/base/test_index_robustness.py::TestEntityOnSeveralLevels` (9 tests),
-  `tests/unit/crossvals/test_panel.py::TestEntityOnSeveralLevels` (2 tests),
-  `::TestExtractGroupsFromPanel::test_no_multiindex_error` (réécrit : il épinglait l'acceptation d'un index simple),
-  `::test_several_entity_levels_give_tuples`
+  `tests/unit/crossvals/panel/test_index_robustness.py::TestSeveralEntityLevels` (dont les 2 tests
+  `test_groups_are_deduced_from_every_entity_level`, `test_per_entity_folds`),
+  `tests/unit/crossvals/panel/test_extract_groups.py::TestRefusals::test_flat_index_is_refused` (réécrit : il épinglait
+  l'acceptation d'un index simple), `::TestEntityOfEachRow::test_several_entity_levels_give_tuples`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-005 — Docstrings de `crossvals/panel.py` : dictionnaire annoncé, structure d'index et exemples inexacts
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/crossvals/panel.py::PanelOutOfSampleSplit`, `::PanelInSampleSplit`,
+  `::PanelOutOfSampleSplitPerEntity`, `::PanelInSampleSplitPerEntity` ; `docs/concepts/cross_validation.md`
+- **Sévérité** : mineure
+- **Observé** :
+  1. `PanelOutOfSampleSplitPerEntity` : « returning a dictionary mapping each entity to its (train_indices,
+     test_indices) » ; `PanelInSampleSplitPerEntity` : « Returns a dictionary mapping each entity ». Les deux
+     produisent des couples `(train, test)`, un par entité testée et par pli global (la docstring de `split` le dit,
+     pas celle de la classe).
+  2. Les deux classes `PerEntity` annoncent « Handling entities with different data availability » : faux, une entité
+     qui ne porte pas une date des plis globaux fait échouer le découpage (ANO-CV-006).
+  3. `PanelOutOfSampleSplit` / `PanelInSampleSplit` : « First level: entity identifiers / Second level: time
+     periods ». L'entité est formée de tous les niveaux sauf le dernier, qui porte la date (index à 3 niveaux
+     acceptés, entité tuple).
+  4. Ce que fait une variante `PerEntity` n'est dit nulle part : elle découpe les plis de la variante globale entité
+     par entité (mêmes dates de test pour toutes les entités, ordre « pli puis entité », entités dans l'ordre de leur
+     première ligne) ; `get_n_splits` ne compte pas ces plis (ANO-CV-023). La page de concept dit « un découpage propre
+     à chaque entité », ce qui suggère un découpage sur les dates de chaque entité.
+  5. Exemples : `np.random.randn` sans graine, aucune sortie affichée (les plis ne sont jamais montrés) ; les formes de
+     `test_indices` (positions, tuples qui limitent le pli à une entité) et le mode « plusieurs dates » d'`InSample`
+     (`test_size` non utilisé) ne sont pas décrits ; `split` ne documente que l'erreur « MultiIndex » parmi celles de
+     la base. Le module n'a pas de docstring d'en-tête.
+- **Attendu** : docstrings alignées sur le code, exemples exécutables qui affichent des plis (recoupe N7), page de
+  concept qui décrit précisément les deux variantes.
+- **Correctif** : `crossvals/panel.py` reçoit une docstring d'en-tête ; docstrings des quatre classes réécrites (entité
+  = tous les niveaux sauf le dernier, dates communes et entité en apprentissage seul pour les variantes globales,
+  découpage sur les dates de chaque entité pour `PerEntity`, ordre des plis, `get_n_splits`), exemples exécutables qui
+  affichent les plis ; docstrings de `OutOfSampleSplit` / `InSampleSplit` complétées ; page
+  `docs/concepts/cross_validation.md` alignée (comportement après ANO-CV-006 et ANO-CV-023).
+- **Test** : doctests de `tsforecast/crossvals` (`pytest --doctest-modules tsforecast/crossvals`),
+  `tests/unit/crossvals/panel/test_contract.py::TestGoldenFolds`,
+  `::test_per_entity_order_follows_the_first_appearance_of_entities`,
+  `tests/unit/crossvals/panel/test_index_robustness.py::TestSeveralEntityLevels`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-006 — Variantes `PerEntity` : une entité sans une date des plis globaux fait échouer le découpage
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/panel.py::PanelOutOfSampleSplitPerEntity.split`,
+  `::PanelInSampleSplitPerEntity.split` (qui délèguent à `tsforecast/crossvals/base.py::OutOfSampleSplit._get_group_train_indices`,
+  `::InSampleSplit._get_group_train_indices`)
+- **Sévérité** : majeure
+- **Observé** : une variante `PerEntity` découpe les plis de sa variante globale ; les dates de test sont donc celles
+  du panel entier (dernières dates de l'union, ou dates demandées), communes à toutes les entités. Une entité qui ne
+  porte pas l'une d'elles est signalée (« Cannot find test period '2024-11-30 00:00:00' for entity 'B' ») puis le
+  découpage lève « Cannot find test indices for the group : B ». Tout panel dont les entités ne finissent pas à la même
+  date est donc refusé, y compris le panel réaliste (`heterogeneous_coverage_panel` : Allemagne finit en avril 2024),
+  alors que les docstrings annoncent « Handling entities with different data availability » et la page de concept
+  « un découpage propre à chaque entité ». Les variantes globales ont le même comportement, cohérent avec leur contrat
+  (une même fenêtre de test pour toutes les entités) : il est épinglé, mais le message final ne nomme pas la date.
+- **Attendu** (à arbitrer, proposition encodée par les tests `xfail`) : une variante `PerEntity` découpe chaque entité
+  sur ses propres dates (plis par défaut : les dernières dates de l'entité) ; une date demandée qu'une entité ne porte
+  pas l'exclut de ce pli, sans erreur. Variante possible : garder les dates communes et seulement exclure les entités
+  qui ne les portent pas (les deux options coïncident sur un panel équilibré et sur le chemin des dates).
+- **Reproduction** :
+  ```python
+  from tests.support.datasets import build_staggered_panel
+  from tsforecast.crossvals import PanelOutOfSampleSplitPerEntity
+  X = build_staggered_panel()   # A janvier-décembre, B mars-octobre, C juillet-décembre
+  list(PanelOutOfSampleSplitPerEntity(n_splits=2).split(X))
+  # UserWarning: Cannot find test period '2024-11-30 00:00:00' for entity 'B'
+  # ValueError: Cannot find test indices for the group : B
+  ```
+- **Correctif** : décisions de l'auteur (2026-10-16).
+  1. `PerEntity` découpe chaque entité sur ses propres dates : plis par défaut sur ses dernières dates ; une entité trop
+     courte pour les plis par défaut est signalée (« Entity 'C' is too short for the default folds and gets none: … »)
+     et ne reçoit pas de pli ; une date demandée que l'entité ne porte pas, ou qui ne lui laisse aucune date
+     d'apprentissage, ne lui ouvre pas de pli (avertissement). En échantillon, une entité qui ne porte qu'une des dates
+     demandées est testée sur cette seule ligne. Positions et couples (entité, date) gardent les plis globaux, déjà
+     limités à une entité. Plis rangés découpage par découpage, entités dans l'ordre de leur première ligne.
+  2. Les variantes globales gardent des dates de test communes ; une entité qui ne porte pas les dates de test d'un pli
+     n'y est pas testée (avertissement « …; the entity is not tested in this fold ») et apprend sur ses dates
+     antérieures à la première date de test, moins `gap`, dans la fenêtre (jusqu'à la dernière date de test en
+     échantillon). Aucune date d'apprentissage d'aucune entité n'atteint la période de test. L'erreur « Cannot find test
+     indices for the group » disparaît ; une entité testée sans date d'apprentissage reste refusée (ANO-CV-003).
+- **Test** : `tests/unit/crossvals/panel/test_contract.py::TestGlobalFoldsWithDifferentCoverage` (7 tests),
+  `::TestPerEntityFoldsWithDifferentCoverage` (10 tests),
+  `tests/unit/crossvals/panel/test_panel_split.py::TestRealisticPanel::test_default_folds_when_an_entity_ends_earlier`,
+  `::TestDegenerateEntities::test_single_observation_entity_in_the_default_folds_is_refused`,
+  `tests/unit/crossvals/base/test_out_of_sample_split.py::TestPanelGroups::test_default_date_missing_for_one_entity`,
+  `::test_date_missing_for_one_entity`, `tests/unit/crossvals/base/test_in_sample_split.py::TestPanelGroups::test_entity_without_the_test_date`
+  (2 cas)
 - **Statut** : corrigée (2026-10-16)
 
 ### ANO-CV-007 — `test_size` ignoré quand `InSampleSplit` reçoit plusieurs `test_indices`
@@ -5705,6 +5788,95 @@ Numéros ANO-CV-005 et 006 réservés au prompt B3 (`crossvals/panel.py`, voir `
   `::test_panel_with_label_dates_interleaved_entities_are_regrouped`
 - **Statut** : corrigée (2026-10-16)
 
+### ANO-CV-023 — `get_n_splits` des variantes `PerEntity` ignore les entités ; `GridSearchCV` les refuse
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/panel.py::PanelOutOfSampleSplitPerEntity`, `::PanelInSampleSplitPerEntity`
+  (`get_n_splits` hérité de `OutOfSampleSplit` / `InSampleSplit`)
+- **Sévérité** : majeure
+- **Observé** : `get_n_splits` renvoie le nombre de plis **globaux** (`n_splits`, nombre de `test_indices`, ou 1 en
+  échantillon), alors que `split` en produit un par entité testée et par pli global. `GridSearchCV` compare les deux
+  et refuse le splitter : « cv.split and cv.get_n_splits returned inconsistent results. Expected 2 splits, got 6 »
+  (« Expected 1 splits, got 3 » en échantillon). `cross_validate`, qui ne lit pas `get_n_splits`, fonctionne.
+- **Attendu** : `get_n_splits(X, y, groups)` égal au nombre de plis produits quand les données sont fournies
+  (`GridSearchCV` les fournit). Sans données, le nombre d'entités est inconnu : à trancher (nombre de plis globaux
+  documenté, ou erreur), en accord avec la convention retenue pour ANO-CV-002.
+- **Reproduction** :
+  ```python
+  from sklearn.linear_model import Ridge
+  from sklearn.model_selection import GridSearchCV
+  cv = PanelOutOfSampleSplitPerEntity(n_splits=2)
+  GridSearchCV(Ridge(), {'alpha': [0.1, 1.0]}, cv=cv).fit(panel_2_entities_12_dates, y)
+  # ValueError: cv.split and cv.get_n_splits returned inconsistent results. Expected 2 splits, got 4
+  ```
+- **Correctif** : décision de l'auteur (2026-10-16) : `PanelOutOfSampleSplitPerEntity.get_n_splits` /
+  `PanelInSampleSplitPerEntity.get_n_splits` exigent `X` et comptent exactement les plis de `split` (sans répéter ses
+  avertissements) ; sans `X`, « … .get_n_splits requires X: the number of folds depends on the entities and their
+  dates » (même choix que `LeaveOneGroupOut`, qui exige `groups`). Les variantes globales gardent la convention de
+  ANO-CV-002.
+- **Test** : `tests/unit/crossvals/panel/test_contract.py::TestNumberOfSplits::test_per_entity_count_with_the_data`
+  (6 cas), `::test_per_entity_count_does_not_repeat_the_warnings`, `::test_per_entity_count_without_the_data_is_refused`
+  (2 cas), `tests/integration/crossvals/test_integration.py::TestPanelSplittersInGridSearch::test_per_entity_splitter` (2 cas)
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-024 — Entité dont la clé est un tuple, dans un seul niveau : inaccessible par un tuple de test
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::_pair_key`
+- **Sévérité** : mineure
+- **Observé** : sur un panel à un seul niveau d'entité dont les valeurs sont des tuples (`('FR', 'b')`), le tuple de test
+  `(('FR', 'b'), date)` est lu comme une entité sur deux niveaux et refusé : « Panel index (('FR', 'b'), '2024-06-30')
+  does not match the index: expected 1 entity value(s) followed by a date ». La forme niveau par niveau
+  `('FR', 'b', date)` est refusée de même : l'entité ne peut être désignée d'aucune façon. Les plis par défaut, par date
+  ou par position fonctionnent.
+- **Attendu** : avec un seul niveau d'entité, le premier élément du tuple de test est l'entité entière, tuple compris.
+- **Reproduction** :
+  ```python
+  level = pd.Index([('FR', 'a')] * 3 + [('FR', 'b')] * 3, tupleize_cols=False)
+  X = pd.DataFrame({'v': range(6)}, index=pd.MultiIndex.from_arrays([level, list(dates[:3]) * 2]))
+  list(PanelOutOfSampleSplit(test_indices=[(('FR', 'b'), dates[2])]).split(X))   # ValueError
+  ```
+- **Correctif** : `_pair_key` lit, quand il n'y a qu'un niveau d'entité, le premier élément d'un couple comme l'entité
+  entière.
+- **Test** : `tests/unit/crossvals/panel/test_index_robustness.py::TestEntityKeys::test_entity_date_tuple_with_tuple_keys`,
+  doctest de `_pair_key`
+- **Statut** : corrigée (2026-10-16)
+
+### ANO-CV-025 — Panel vide en échantillon : un pli sans ligne au lieu d'une erreur
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/crossvals/base.py::InSampleSplit._iter_default_group_test_indices`
+- **Sévérité** : mineure
+- **Observé** : `PanelInSampleSplit().split(panel.iloc[:0])` produit un pli `([], [])` ; `PanelInSampleSplitPerEntity`
+  ne produit aucun pli. Une série vide est refusée par « Cannot split an empty dataset: number of samples=0 », et
+  `PanelOutOfSampleSplit` refuse un panel vide (« Too many splits=2 for number of time points=0 … »).
+- **Attendu** : le même refus explicite que pour une série vide.
+- **Reproduction** : `list(PanelInSampleSplit().split(panel.iloc[:0]))   # [(array([]), array([]))]`
+- **Correctif** : `_iter_default_group_test_indices` refuse un panel vide (« Cannot split an empty dataset: number of
+  samples=0 ») ; les variantes `PerEntity` aussi, hors et dans l'échantillon.
+- **Test** : `tests/unit/crossvals/panel/test_panel_split.py::TestDegenerateEntities::test_empty_panel_is_refused_in_sample`,
+  `tests/unit/crossvals/panel/test_contract.py::TestPerEntityFoldsWithDifferentCoverage::test_empty_panel_is_refused` (2 cas)
+- **Statut** : corrigée (2026-10-16)
+
 ## PANEL
+
+### ANO-PANEL-009 — Sortie en tableau : le niveau des dates remplacé par des positions
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer._reconstruct_entity_dataframe` (appelée par
+  `_transform` et `inverse_transform`)
+- **Sévérité** : majeure
+- **Observé** : quand le transformateur d'une entité renvoie un `ndarray` (cas de tout transformateur sklearn sans
+  `set_output(transform='pandas')`, `StandardScaler` compris), le `DataFrame` reconstruit reçoit un `RangeIndex` : le
+  niveau des dates de la sortie vaut 0..n-1 pour chaque entité, et `transform(X).index` diffère de `X.index`. Une étape
+  suivante qui aligne sur l'index (cible, `DropNaNTarget`) ne retrouve plus les dates. Relevé par B3 (intégration
+  `crossvals`) ; numéro pris après les identifiants indicatifs 001 à 008 de `tests/PLAN_B.md`.
+- **Attendu** : un tableau qui garde une ligne par ligne d'entrée reprend les dates de l'entité ; `transform` et
+  `inverse_transform` restituent l'index d'entrée.
+- **Reproduction** :
+  ```python
+  out = PanelwiseTransformer(StandardScaler()).fit(panel).transform(panel)
+  out.index.get_level_values(-1)[:3]   # [0, 1, 2] au lieu des dates
+  ```
+- **Correctif** : décision de l'auteur (2026-10-16) : `_reconstruct_entity_dataframe` reçoit l'index des lignes de
+  l'entité et l'applique à un tableau de même nombre de lignes (un tableau d'une autre longueur garde des positions).
+- **Test** : `tests/unit/panel/test_transformers.py::TestDatesOfAnArrayOutput` (4 tests)
+- **Statut** : corrigée (2026-10-16)
 
 ## XY

@@ -244,15 +244,24 @@ def _pair_key(index: pd.MultiIndex, item: tuple) -> tuple:
 
     The entity is given either level by level, ``('FR', 'industry', date)``,
     or as one tuple, ``(('FR', 'industry'), date)``; the date is converted to
-    the type of the date level.
+    the type of the date level. With a single entity level, the first item
+    is the whole entity, even when the keys of that level are tuples.
 
     Raises:
         ValueError: If the entity does not have one value per entity level.
+
+    Examples:
+        >>> idx = pd.MultiIndex.from_arrays([pd.Index([('FR', 'a')], tupleize_cols=False), [2024]])
+        >>> _pair_key(idx, (('FR', 'a'), 2024))
+        (('FR', 'a'), 2024)
     """
     # Nombre de niveaux d'entité (tous les niveaux sauf le dernier)
     n_entity_levels = index.nlevels - 1
+    # Un seul niveau d'entité : le premier élément est l'entité entière (tuple compris)
+    if n_entity_levels == 1 and len(item) == 2:
+        entity = (item[0],)
     # Entité donnée d'un bloc (tuple en première position) ou niveau par niveau
-    if len(item) == 2 and isinstance(item[0], tuple):
+    elif len(item) == 2 and isinstance(item[0], tuple):
         entity = item[0]
     else:
         entity = tuple(item[:-1])
@@ -544,15 +553,17 @@ def _entity_runs_from(X: Any, mappings: dict, start_date: Any, test_size: int) -
     """Return, for each entity holding ``start_date``, ``test_size`` rows from it.
 
     Each run is cut at the end of its entity; an entity lacking the date is
-    warned about and skipped.
+    warned about and left out of the test (it may still train in the fold).
     """
     fold: list[int] = []
     for group, group_rows in mappings.items():
         # Recherche de la ligne de l'entité à la date de début
         starts = _rows_at(X, group_rows, start_date)
-        # Entité sans cette date : signalée, puis ignorée pour ce pli
+        # Entité sans cette date : signalée, puis absente du test de ce pli
         if len(starts) == 0:
-            warnings.warn(f"Cannot find test period '{start_date}' for entity '{group}'")
+            warnings.warn(
+                f"Cannot find test period '{start_date}' for entity '{group}'; the entity is not tested in this fold"
+            )
             continue
         # test_size lignes à partir de la date, sans dépasser la fin de l'entité
         start = int(starts[0])
@@ -582,8 +593,11 @@ class OutOfSampleSplit(_BaseKFold):
     expanding window), or the last ``max_train_size`` of them (a rolling
     window). For a panel (``groups`` given, MultiIndex ``(entity..., date)``),
     every rule applies entity by entity. A date selects the row of every
-    entity; an integer position or an ``(entity..., date)`` tuple opens a fold
-    that tests and trains one entity only.
+    entity; an entity that does not hold the test date of a fold is not
+    tested in it and trains on its rows before that date (minus ``gap``,
+    within the window), so that no training date of any entity reaches the
+    test period. An integer position or an ``(entity..., date)`` tuple opens
+    a fold that tests and trains one entity only.
 
     Args:
         n_splits: Number of folds when ``test_indices`` is None (at least 2).
@@ -738,7 +752,7 @@ class OutOfSampleSplit(_BaseKFold):
         if groups is None:
             return self._get_timeseries_train_indices(test_indices)
         # Panel : une fenêtre par entité
-        return self._get_group_train_indices(test_indices, groups, every_group)
+        return self._get_group_train_indices(X, test_indices, groups, every_group)
 
     # Méthode auxiliaire d'extraction des indices d'entraînement pour les séries temporelles
     def _get_timeseries_train_indices(self, test_indices):
@@ -761,40 +775,50 @@ class OutOfSampleSplit(_BaseKFold):
         return np.arange(train_start, train_end)
 
     # Méthode auxiliaire d'extraction des indices d'entraînement pour les données de panel
-    def _get_group_train_indices(self, test_indices, groups, every_group=True):
+    def _get_group_train_indices(self, X, test_indices, groups, every_group=True):
         """Return, entity by entity, the rows before its test rows, within the window.
 
         Args:
+            X: Sorted panel data, read for the dates of the rows.
             test_indices: Test positions of the fold (sorted data).
             groups: Entity label of each row (sorted data).
-            every_group: If True, every entity must have test rows in the
-                fold; otherwise entities without test rows are left out.
+            every_group: If True, the fold tests common dates: an entity
+                without test rows trains on its rows dated before the first
+                test date of the fold. Otherwise the fold belongs to other
+                entities and an entity without test rows is left out.
 
         Raises:
-            ValueError: If an entity has no test row while ``every_group`` is
-                True, or if an entity has no training row left.
+            ValueError: If a tested entity has no training row left.
         """
+        # Première date de test du pli : borne de l'apprentissage des entités non testées
+        dates = _time_level(X)
+        fold_start = dates[test_indices].min() if every_group and len(test_indices) else None
         # Initialisation de la liste des indices d'entraînement
         train_indices: list[int] = []
         for group, group_rows in _precompute_group_mappings(groups).items():
+            # Lignes de l'entité contiguës (données triées par entité puis date)
+            group_start = int(group_rows.min())
             # Lignes de test de l'entité dans ce pli
             group_test = test_indices[np.isin(test_indices, group_rows)]
             # Entité sans ligne de test
             if len(group_test) == 0:
-                # Pli commun à toutes les entités : l'absence est une erreur
-                if every_group:
-                    raise ValueError(f"Cannot find test indices for the group : {group}")
                 # Pli propre à une autre entité : celle-ci n'y participe pas
-                continue
-            # Lignes de l'entité contiguës (données triées par entité puis date)
-            group_start = int(group_rows.min())
-            train_end = int(group_test.min()) - self.gap
-            # Aucune ligne de l'entité avant son test : configuration refusée
-            if train_end <= group_start:
-                raise ValueError(
-                    f"No training data for the group {group!r} before its test set "
-                    f"(gap={self.gap}); reduce gap or the number of splits"
-                )
+                if fold_start is None:
+                    continue
+                # Pli sur des dates communes : apprentissage seul, sur les dates antérieures
+                # à la première date de test du pli, moins l'écart
+                train_end = group_start + int(np.sum(dates[group_rows] < fold_start)) - self.gap
+                # Aucune date antérieure : l'entité ne participe pas au pli
+                if train_end <= group_start:
+                    continue
+            else:
+                train_end = int(group_test.min()) - self.gap
+                # Aucune ligne de l'entité avant son test : configuration refusée
+                if train_end <= group_start:
+                    raise ValueError(
+                        f"No training data for the group {group!r} before its test set "
+                        f"(gap={self.gap}); reduce gap or the number of splits"
+                    )
             # Fenêtre extensible depuis le début de l'entité, ou glissante
             train_start = group_start if self.max_train_size is None else max(
                 group_start, train_end - self.max_train_size
@@ -917,7 +941,7 @@ class InSampleSplit(_BaseKFold):
 
     - without ``test_indices``, the last ``test_size`` rows (default
       ``n_samples // (n_splits + 1)``), or the last ``test_size`` dates of
-      each entity of a panel (default 1);
+      a panel (default 1), for every entity holding them;
     - with one test index, ``test_size`` rows from it (default 1), cut at the
       end of the data or of its entity;
     - with several test indices, exactly those rows, one per index
@@ -926,7 +950,9 @@ class InSampleSplit(_BaseKFold):
     Training holds the rows up to the last test row; with ``max_train_size``,
     only the last ``max(max_train_size, span of the test)`` of them, so that
     every test row stays a training row. For a panel (``groups`` given), every
-    rule applies entity by entity; integer positions and ``(entity..., date)``
+    rule applies entity by entity; an entity holding none of the test dates is
+    not tested and trains on its rows up to the last test date (the last
+    ``max_train_size`` of them). Integer positions and ``(entity..., date)``
     tuples test and train their own entities only.
 
     Args:
@@ -1048,7 +1074,7 @@ class InSampleSplit(_BaseKFold):
         if groups is None:
             return self._get_timeseries_train_indices(test_indices)
         # Panel : une fenêtre par entité
-        return self._get_group_train_indices(test_indices, groups, every_group)
+        return self._get_group_train_indices(X, test_indices, groups, every_group)
 
     # Méthode auxiliaire de calcul de la fenêtre d'apprentissage d'un bloc
     def _window(self, test_indices, block_start):
@@ -1069,27 +1095,40 @@ class InSampleSplit(_BaseKFold):
         return np.asarray(self._window(test_indices, 0), dtype=int)
 
     # Méthode auxiliaire d'extraction des indices d'entraînement pour les données de panel
-    def _get_group_train_indices(self, test_indices, groups, every_group=True):
+    def _get_group_train_indices(self, X, test_indices, groups, every_group=True):
         """Return, entity by entity, the rows up to its last test row, within the window.
 
-        Raises:
-            ValueError: If an entity has no test row while ``every_group`` is
-                True.
+        Args:
+            X: Sorted panel data, read for the dates of the rows.
+            test_indices: Test positions of the fold (sorted data).
+            groups: Entity label of each row (sorted data).
+            every_group: If True, the fold tests common dates: an entity
+                without test rows trains on its rows dated up to the last test
+                date (the last ``max_train_size`` of them). Otherwise the
+                fold belongs to other entities and such an entity is left out.
         """
+        # Dernière date de test du pli : borne de l'apprentissage des entités non testées
+        dates = _time_level(X)
+        fold_end = dates[test_indices].max() if every_group and len(test_indices) else None
         # Initialisation de la liste des indices d'entraînement
         train_indices: list[int] = []
         for group, group_rows in _precompute_group_mappings(groups).items():
+            group_start = int(group_rows.min())
             # Lignes de test de l'entité
             group_test = test_indices[np.isin(test_indices, group_rows)]
-            # Entité sans ligne de test
-            if len(group_test) == 0:
-                # Test commun à toutes les entités : l'absence est une erreur
-                if every_group:
-                    raise ValueError(f"Cannot find test indices for the group : {group}")
-                # Test propre à d'autres entités : celle-ci n'y participe pas
+            # Entité testée : fenêtre qui ne remonte pas avant son début
+            if len(group_test) > 0:
+                train_indices.extend(self._window(group_test, group_start))
                 continue
-            # Fenêtre de l'entité, qui ne remonte pas avant son début
-            train_indices.extend(self._window(group_test, int(group_rows.min())))
+            # Test propre à d'autres entités : celle-ci n'y participe pas
+            if fold_end is None:
+                continue
+            # Test sur des dates communes : apprentissage seul, jusqu'à la dernière date de test
+            train_end = group_start + int(np.sum(dates[group_rows] <= fold_end))
+            train_start = group_start if self.max_train_size is None else max(
+                group_start, train_end - self.max_train_size
+            )
+            train_indices.extend(range(train_start, train_end))
         return np.asarray(train_indices, dtype=int)
 
     # Méthode auxiliaire de génération des indices de test pour la validation in-sample
@@ -1177,7 +1216,13 @@ class InSampleSplit(_BaseKFold):
         """Yield the rows of each entity at the last ``test_size`` dates of the panel.
 
         An entity lacking one of these dates is warned about.
+
+        Raises:
+            ValueError: If the panel is empty.
         """
+        # Panel vide : aucune date à tester (même refus que pour une série vide)
+        if _num_samples(X) == 0:
+            raise ValueError("Cannot split an empty dataset: number of samples=0")
         # Taille de l'échantillon de test
         test_size = self.test_size if self.test_size is not None else 1
         # Les test_size dernières dates du panel, dans l'ordre chronologique

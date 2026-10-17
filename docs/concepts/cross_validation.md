@@ -24,9 +24,16 @@ Chaque famille se décline pour :
   `DatetimeIndex` ou un `PeriodIndex`), ou un tableau pris dans l'ordre de ses
   lignes ; les splitters `TS*` refusent un `MultiIndex` ;
 - un **panel** — `MultiIndex (entité..., date)`, avec deux variantes :
-    - `Panel*Split` : un découpage global, la même fenêtre de test pour toutes
-      les entités ;
-    - `Panel*SplitPerEntity` : un découpage propre à chaque entité.
+    - `Panel*Split` : un découpage global, les mêmes dates de test pour toutes
+      les entités, chaque pli contenant toutes les entités. Un modèle qui
+      mutualise les entités n'apprend ainsi jamais sur la période de test. Une
+      entité qui ne porte pas les dates de test d'un pli (entité qui finit plus
+      tôt) n'y est pas testée, mais apprend sur ses dates antérieures (avec
+      `gap` et la fenêtre) ; un avertissement la signale ;
+    - `Panel*SplitPerEntity` : un découpage propre à chaque entité, sur ses
+      propres dates (plis par défaut : ses dernières dates), un pli par entité
+      et par découpage. Une entité trop courte pour les plis par défaut, ou qui
+      ne porte pas une date demandée, ne reçoit pas de pli (avertissement).
 
 Le découpage se fait par position, sur les données triées par date (par
 entité puis date pour un panel) : un index de dates, de périodes ou de nombres
@@ -61,8 +68,12 @@ dernier, qui porte la date.
 
 Les splitters implémentent `split(X, y=None, groups=None)` et `get_n_splits()`.
 Comme pour sklearn, `get_n_splits` se calcule sur les paramètres seuls : le
-nombre de `test_indices` s'il y en a, `n_splits` sinon, 1 en échantillon. Ils
-s'utilisent donc directement partout où sklearn attend un `cv` :
+nombre de `test_indices` s'il y en a, `n_splits` sinon, 1 en échantillon. Les
+variantes `Panel*SplitPerEntity` font exception : leur nombre de plis dépend des
+entités et de leurs dates, `get_n_splits(X)` exige donc les données (comme
+`LeaveOneGroupOut` exige `groups`) et compte exactement les plis produits ;
+`GridSearchCV` les lui transmet. Ils s'utilisent donc directement partout où
+sklearn attend un `cv` :
 
 ```python
 from sklearn.model_selection import cross_validate, GridSearchCV

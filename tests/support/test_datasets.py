@@ -8,6 +8,9 @@ Since batch L13-0b (§2.6), the three datasets are PROJECTIONS of a
 single ``PANEL-X`` dataset (fixture ``panel_reference_full``). The
 projection identities are tested by ``TestPanelXProjections``: they
 guarantee that the factorization does not drift.
+
+``TestStaggeredPanel`` locks the coverage and values of
+``build_staggered_panel``, the hand-sized panel of the cross-validation tests.
 """
 # Manipulation de données
 import pandas as pd
@@ -20,6 +23,7 @@ from tests.support.datasets import (
     HETEROGENEOUS_PANEL_COUNTRIES,
     build_mixed_frequency_panel,
     build_mixed_frequency_timeseries,
+    build_staggered_panel,
 )
 
 
@@ -372,3 +376,36 @@ class TestRealisticMixedFrequencyDatasets:
 
         for entity in df.index.get_level_values('country').unique():
             assert is_regular(df.loc[entity]) is True
+
+
+class TestStaggeredPanel:
+    """``build_staggered_panel``: entities covering different month-ends of 2024."""
+
+    def test_coverage_of_each_entity(self) -> None:
+        """A covers January-December, B March-October, C July-December."""
+        panel = build_staggered_panel()
+        # Valeur d'or : premier et dernier mois de chaque entité, écrits à la main
+        spans = {
+            entity: (block.index.get_level_values('date').min().month, block.index.get_level_values('date').max().month)
+            for entity, block in panel.groupby(level='entity')
+        }
+        assert spans == {'A': (1, 12), 'B': (3, 10), 'C': (7, 12)}
+
+    def test_value_is_the_row_position(self) -> None:
+        """The column ``v`` equals the row position, entities sorted then dates sorted."""
+        panel = build_staggered_panel()
+        assert panel['v'].tolist() == [float(k) for k in range(26)]
+        assert panel.index.is_monotonic_increasing
+
+    def test_dates_are_consecutive_month_ends(self) -> None:
+        """Inside each entity, dates are consecutive month-ends (no gap)."""
+        panel = build_staggered_panel()
+        for _, block in panel.groupby(level='entity'):
+            dates = block.index.get_level_values('date')
+            assert dates.equals(pd.date_range(dates[0], periods=len(dates), freq='ME'))
+
+    def test_builds_a_new_frame_each_call(self) -> None:
+        """Two calls give equal but independent frames."""
+        first, second = build_staggered_panel(), build_staggered_panel()
+        first.iloc[0, 0] = -1.0
+        assert second.iloc[0, 0] == 0.0

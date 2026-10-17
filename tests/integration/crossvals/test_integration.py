@@ -1,245 +1,277 @@
-"""Integration tests for the crossvals module.
+"""Integration of the cross-validation splitters with sklearn model selection and the package pipeline.
 
-This module tests the integration between different components and
-real-world usage scenarios.
+Covered: panel splitters (global and per-entity, out of sample and in sample)
+driving ``cross_validate`` and ``GridSearchCV`` over an ``XYPipeline`` made of a
+``PanelwiseTransformer`` and a trivial estimator on the realistic
+heterogeneous-coverage panel, with the transformer fitted on training rows
+only and explicit ``groups`` routed to the splitter; ``TSOutOfSampleSplit`` /
+``TSInSampleSplit`` on the realistic irregular monthly series with
+``DropNaNTarget``; forecasting workflows whose exact linear target gives a
+known score; time-series edge cases; large datasets.
 """
 # Importation des modules
-# Modules de base
 import numpy as np
 import pandas as pd
 import pytest
-import warnings
-# Validations croisées à tester
-from tsforecast.crossvals import (
-    OutOfSampleSplit,
-    InSampleSplit,
-    TSOutOfSampleSplit,
-    TSInSampleSplit,
-    PanelOutOfSampleSplit,
-    PanelInSampleSplit,
-    PanelOutOfSampleSplitPerEntity,
-    PanelInSampleSplitPerEntity
+from sklearn.dummy import DummyRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import GridSearchCV, cross_validate
+from sklearn.preprocessing import StandardScaler
+
+from tests.support.estimators import RecordingEstimator
+from tests.support.splits import (
+    as_lists,
+    assert_folds_cover,
+    assert_in_sample,
+    assert_no_leakage,
+    collect_folds,
 )
+from tsforecast.crossvals import (
+    InSampleSplit,
+    PanelInSampleSplit,
+    PanelInSampleSplitPerEntity,
+    PanelOutOfSampleSplit,
+    PanelOutOfSampleSplitPerEntity,
+    TSInSampleSplit,
+    TSOutOfSampleSplit,
+)
+from tsforecast.panel import PanelwiseTransformer
+from tsforecast.xy import DropNaNTarget, XYPipeline
+
+# Dates de test portées par les trois entités du panel réaliste
+PANEL_DATES = ['2022-01-01', '2023-01-01']
+
+# Splitters de panel utilisables sur le panel réaliste (toutes les entités portent ces dates)
+PANEL_SPLITTERS = [
+    pytest.param(PanelOutOfSampleSplit(test_indices=PANEL_DATES, test_size=3, gap=1), id='global-out'),
+    pytest.param(PanelInSampleSplit(test_indices=PANEL_DATES), id='global-in'),
+    pytest.param(PanelOutOfSampleSplitPerEntity(test_indices=PANEL_DATES, test_size=3, gap=1), id='per-entity-out'),
+    pytest.param(PanelInSampleSplitPerEntity(test_indices=PANEL_DATES), id='per-entity-in'),
+]
 
 
-class TestCrossValidationWorkflows:
-    """Test realistic cross-validation workflows."""
+@pytest.fixture
+def panel_xy(heterogeneous_coverage_panel):
+    """Covariate ``inflation_ipc`` and target ``taux_chomage`` of the realistic panel, rows without NaN."""
+    # Lignes où covariable et cible sont observées : grille mensuelle de chaque entité
+    data = heterogeneous_coverage_panel[['inflation_ipc', 'taux_chomage']].dropna()
+    return data[['inflation_ipc']], data['taux_chomage']
 
-    def test_time_series_forecasting_workflow(self, simple_timeseries_df):
-        """Test a typical time series forecasting workflow."""
-        X = simple_timeseries_df[['feature1', 'feature2']]
-        y = simple_timeseries_df['target']
-        
-        # Test out-of-sample validation with rolling window
+
+def _scaling_pipeline(model) -> XYPipeline:
+    """Per-entity standardization followed by ``model``."""
+    return XYPipeline([('scale', PanelwiseTransformer(StandardScaler())), ('model', model)])
+
+
+class TestPanelSplittersInCrossValidate:
+    """Panel splitters driving cross_validate over XYPipeline + PanelwiseTransformer."""
+
+    @pytest.mark.parametrize('splitter', PANEL_SPLITTERS)
+    def test_cross_validate_uses_the_folds_of_the_splitter(self, panel_xy, splitter):
+        """cross_validate evaluates exactly the folds that split produces."""
+        X, y = panel_xy
+        result = cross_validate(_scaling_pipeline(DummyRegressor()), X, y, cv=splitter,
+                                scoring='neg_mean_absolute_error', return_indices=True)
+        produced = [(train.tolist(), test.tolist()) for train, test in zip(*result['indices'].values())]
+        assert produced == as_lists(collect_folds(splitter, X))
+
+    @pytest.mark.parametrize('splitter', PANEL_SPLITTERS)
+    def test_scores_are_finite(self, panel_xy, splitter):
+        """Every fold gives a finite score."""
+        X, y = panel_xy
+        result = cross_validate(_scaling_pipeline(DummyRegressor()), X, y, cv=splitter,
+                                scoring='neg_mean_absolute_error')
+        assert np.isfinite(result['test_score']).all()
+
+    def test_transformer_learns_on_the_training_rows_only(self, panel_xy):
+        """Test rows are standardized with the mean and deviation of their entity's training rows."""
+        X, y = panel_xy
+        splitter = PanelOutOfSampleSplit(test_indices=PANEL_DATES, test_size=3, gap=1)
+        result = cross_validate(_scaling_pipeline(RecordingEstimator(DummyRegressor())), X, y, cv=splitter,
+                                scoring='neg_mean_absolute_error', return_estimator=True, return_indices=True)
+        for estimator, train, test in zip(result['estimator'], *result['indices'].values()):
+            # Valeur attendue : (x - moyenne) / écart-type (ddof=0) de l'entité sur l'apprentissage seul
+            stats = X.iloc[train].groupby(level=0)['inflation_ipc'].agg(['mean', 'std'])
+            stats['std'] = X.iloc[train].groupby(level=0)['inflation_ipc'].std(ddof=0)
+            X_test = X.iloc[test]
+            entity = X_test.index.get_level_values(0)
+            expected = (X_test['inflation_ipc'].to_numpy() - stats.loc[entity, 'mean'].to_numpy()) \
+                / stats.loc[entity, 'std'].to_numpy()
+            seen = estimator.named_steps['model'].predict_X_[0]
+            np.testing.assert_allclose(np.asarray(seen, dtype=float).ravel(), expected)
+
+    def test_per_entity_folds_fit_one_entity_each(self, panel_xy):
+        """Each per-entity fold fits the transformer and the model on its entity alone."""
+        X, y = panel_xy
+        splitter = PanelOutOfSampleSplitPerEntity(test_indices=PANEL_DATES, test_size=3, gap=1)
+        result = cross_validate(_scaling_pipeline(DummyRegressor()), X, y, cv=splitter,
+                                scoring='neg_mean_absolute_error', return_estimator=True)
+        # Entités ajustées par le transformateur de chaque pli : une seule, dans l'ordre des entités
+        fitted = [list(estimator.named_steps['scale'].transformers_) for estimator in result['estimator']]
+        assert fitted == [[('Allemagne',)], [('France',)], [('Italie',)]] * 2
+
+    def test_explicit_groups_give_the_same_folds(self, panel_xy):
+        """groups passed to cross_validate reach the splitter and change no fold."""
+        X, y = panel_xy
+        splitter = PanelOutOfSampleSplit(test_indices=PANEL_DATES, test_size=3, gap=1)
+        groups = X.index.get_level_values(0).to_numpy()
+        with_groups = cross_validate(DummyRegressor(), X, y, cv=splitter, groups=groups, return_indices=True)
+        without = cross_validate(DummyRegressor(), X, y, cv=splitter, return_indices=True)
+        assert [t.tolist() for t in with_groups['indices']['test']] == [t.tolist() for t in without['indices']['test']]
+
+    def test_inconsistent_groups_are_refused(self, panel_xy):
+        """groups passed to cross_validate are checked against the entity level."""
+        X, y = panel_xy
+        groups = np.roll(X.index.get_level_values(0).to_numpy(), 1)
+        splitter = PanelOutOfSampleSplit(test_indices=PANEL_DATES)
+        with pytest.raises(ValueError, match='groups must match the entity levels'):
+            cross_validate(DummyRegressor(), X, y, cv=splitter, groups=groups)
+
+
+class TestPanelSplittersInGridSearch:
+    """Panel splitters as the cv of GridSearchCV over XYPipeline + PanelwiseTransformer."""
+
+    @staticmethod
+    def _search(splitter) -> GridSearchCV:
+        """Grid over the constant of the model and a parameter of the per-entity transformer."""
+        grid = {'model__constant': [0.0, 5.0], 'scale__transformer__with_std': [True, False]}
+        return GridSearchCV(_scaling_pipeline(DummyRegressor(strategy='constant', constant=0.0)), grid, cv=splitter,
+                            scoring='neg_mean_absolute_error')
+
+    @pytest.mark.parametrize('splitter', PANEL_SPLITTERS[:2])
+    def test_selects_the_constant_of_the_target(self, panel_xy, splitter):
+        """With a target constant at 5, the search picks the constant 5 with a zero error."""
+        X, _ = panel_xy
+        y = pd.Series(5.0, index=X.index)
+        search = self._search(splitter).fit(X, y)
+        # Valeur d'or : erreur absolue nulle pour la constante 5, 5 pour la constante 0
+        assert (search.best_params_['model__constant'], search.best_score_) == (5.0, 0.0)
+
+    @pytest.mark.parametrize(
+        ('splitter', 'n_folds'),
+        [
+            pytest.param(PanelOutOfSampleSplit(test_indices=PANEL_DATES, test_size=3, gap=1), 2, id='global-out'),
+            pytest.param(PanelInSampleSplit(test_indices=PANEL_DATES), 1, id='global-in'),
+        ],
+    )
+    def test_number_of_folds(self, panel_xy, splitter, n_folds):
+        """The search runs one evaluation per fold of the splitter."""
+        X, y = panel_xy
+        assert self._search(splitter).fit(X, y).n_splits_ == n_folds
+
+    def test_groups_passed_to_fit(self, panel_xy):
+        """groups given to fit reach the splitter and leave the scores unchanged."""
+        X, y = panel_xy
+        splitter = PanelOutOfSampleSplit(test_indices=PANEL_DATES, test_size=3, gap=1)
+        groups = X.index.get_level_values(0).to_numpy()
+        with_groups = self._search(splitter).fit(X, y, groups=groups).cv_results_['mean_test_score']
+        without = self._search(splitter).fit(X, y).cv_results_['mean_test_score']
+        np.testing.assert_allclose(with_groups, without)
+
+    @pytest.mark.parametrize(
+        ('splitter', 'n_folds'),
+        [
+            pytest.param(PanelOutOfSampleSplitPerEntity(test_indices=PANEL_DATES, test_size=3, gap=1), 6, id='out'),
+            pytest.param(PanelInSampleSplitPerEntity(test_indices=PANEL_DATES), 3, id='in'),
+        ],
+    )
+    def test_per_entity_splitter(self, panel_xy, splitter, n_folds):
+        """A per-entity splitter runs one evaluation per entity and per fold."""
+        X, y = panel_xy
+        assert self._search(splitter).fit(X, y).n_splits_ == n_folds
+
+
+class TestRealisticMonthlySeries:
+    """Time-series splitters on the irregular monthly series (annual anchors before the monthly grid)."""
+
+    def test_folds_have_no_leakage_and_tile_the_end(self, irregular_index_timeseries):
+        """Four adjacent test sets of six rows end at the last row, one row after their training."""
+        X = irregular_index_timeseries
+        folds = collect_folds(TSOutOfSampleSplit(n_splits=4, test_size=6, gap=1), X)
+        assert_no_leakage(X, folds, gap=1)
+        assert_folds_cover(folds, test_size=6, n_samples=len(X))
+
+    def test_rows_are_dates_not_calendar_months(self, irregular_index_timeseries):
+        """Training before January 2018 is the three annual anchors 2015-2017."""
+        X = irregular_index_timeseries
+        folds = collect_folds(TSOutOfSampleSplit(test_indices=['2018-01-01'], test_size=3), X)
+        assert as_lists(folds) == [([0, 1, 2], [3, 4, 5])]
+
+    def test_in_sample_contract(self, irregular_index_timeseries):
+        """In sample, the test dates are training dates and training stops at the last one."""
+        X = irregular_index_timeseries
+        assert_in_sample(X, collect_folds(TSInSampleSplit(test_indices=['2020-01-01', '2022-01-01']), X))
+
+    def test_cross_validate_with_drop_nan_target(self, irregular_index_timeseries):
+        """The model trains on the training rows whose target is observed; every score is finite."""
+        X = irregular_index_timeseries.drop(columns='taux_chomage')
+        y = irregular_index_timeseries['taux_chomage']
+        pipe = XYPipeline([
+            ('drop', DropNaNTarget()),
+            ('impute', SimpleImputer(keep_empty_features=True)),
+            ('model', RecordingEstimator(LinearRegression())),
+        ])
+        splitter = TSOutOfSampleSplit(n_splits=4, test_size=6, gap=1)
+        result = cross_validate(pipe, X, y, cv=splitter, return_estimator=True, return_indices=True)
+        # Nombre de cibles observées dans chaque apprentissage : seules lignes vues par le modèle
+        observed = [int(y.iloc[train].notna().sum()) for train in result['indices']['train']]
+        seen = [len(estimator.named_steps['model'].fit_y_) for estimator in result['estimator']]
+        assert (seen, bool(np.isfinite(result['test_score']).all())) == (observed, True)
+
+
+class TestForecastingWorkflows:
+    """Workflows whose target is an exact linear function of a covariate: the error is zero."""
+
+    def test_time_series_rolling_window(self, simple_timeseries_df):
+        """target = feature1 + 30 is recovered exactly on every fold."""
+        X, y = simple_timeseries_df[['feature1', 'feature2']], simple_timeseries_df['target']
         splitter = TSOutOfSampleSplit(n_splits=5, test_size=3, gap=1, max_train_size=15)
-        
-        rmse_scores = []
-        for train_idx, test_idx in splitter.split(X, y):
-            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-            
-            # Simple linear model for testing
-            # y = feature1 * coef + intercept
-            coef = np.mean(y_train / X_train['feature1'])
-            y_pred = X_test['feature1'] * coef
-            
-            rmse = np.sqrt(np.mean((y_test - y_pred) ** 2))
-            rmse_scores.append(rmse)
-        
-        assert len(rmse_scores) == 5
-        assert all(score >= 0 for score in rmse_scores)
+        result = cross_validate(LinearRegression(), X, y, cv=splitter, scoring='neg_mean_absolute_error')
+        np.testing.assert_allclose(result['test_score'], np.zeros(5), atol=1e-8)
 
-    def test_panel_data_forecasting_workflow(self, simple_panel):
-        """Test a typical panel data forecasting workflow."""
-        X = simple_panel[['feature1', 'feature2']]
-        y = simple_panel['target']
-        
-        # Test out-of-sample validation
-        splitter = PanelOutOfSampleSplit(n_splits=3, test_size=2, gap=1)
-        
-        entity_rmse = {}
-        for train_idx, test_idx in splitter.split(X, y):
-            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-            
-            # Simple model per entity
-            for entity in X_test.index.get_level_values(0).unique():
-                entity_mask_train = X_train.index.get_level_values(0) == entity
-                entity_mask_test = X_test.index.get_level_values(0) == entity
-                
-                if entity_mask_train.any() and entity_mask_test.any():
-                    X_entity_train = X_train[entity_mask_train]
-                    y_entity_train = y_train[entity_mask_train]
-                    X_entity_test = X_test[entity_mask_test]
-                    y_entity_test = y_test[entity_mask_test]
-                    
-                    # Simple linear model
-                    coef = np.mean(y_entity_train / X_entity_train['feature1'])
-                    y_pred = X_entity_test['feature1'] * coef
-                    
-                    rmse = np.sqrt(np.mean((y_entity_test - y_pred) ** 2))
-                    
-                    if entity not in entity_rmse:
-                        entity_rmse[entity] = []
-                    entity_rmse[entity].append(rmse)
-        
-        # Should have scores for each entity
-        assert len(entity_rmse) >= 2
-        for entity_scores in entity_rmse.values():
-            assert all(score >= 0 for score in entity_scores)
+    def test_panel_global_folds(self, simple_panel):
+        """target = feature1 + 60 in every entity is recovered exactly on every global fold."""
+        X, y = simple_panel[['feature1', 'feature2']], simple_panel['target']
+        result = cross_validate(LinearRegression(), X, y, cv=PanelOutOfSampleSplit(n_splits=3, test_size=2, gap=1),
+                                scoring='neg_mean_absolute_error')
+        np.testing.assert_allclose(result['test_score'], np.zeros(3), atol=1e-8)
 
-    def test_per_entity_validation_workflow(self, simple_panel):
-        """Test per-entity validation workflow."""
-        X = simple_panel[['feature1', 'feature2']]
-        y = simple_panel['target']
-        
-        # Test per-entity out-of-sample validation
+    def test_panel_per_entity_folds(self, simple_panel):
+        """Per-entity folds: two per entity, each fitting and testing one entity, zero error."""
+        X, y = simple_panel[['feature1', 'feature2']], simple_panel['target']
         splitter = PanelOutOfSampleSplitPerEntity(n_splits=2, test_size=3, gap=1)
-        
-        entity_results = {}
-        for train_idx, test_idx in splitter.split(X, y):
-            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-            
-            # Get entity for this split
-            entity = X_test.index.get_level_values(0).unique()[0]
-            
-            # Simple model
-            coef = np.mean(y_train / X_train['feature1'])
-            y_pred = X_test['feature1'] * coef
-            
-            rmse = np.sqrt(np.mean((y_test - y_pred) ** 2))
-            
-            if entity not in entity_results:
-                entity_results[entity] = []
-            entity_results[entity].append(rmse)
-        
-        # Should have results for each entity
-        expected_entities = simple_panel.index.get_level_values(0).unique()
-        for entity in expected_entities:
-            assert entity in entity_results
-            # Each entity should have 2 splits (n_splits=2)
-            assert len(entity_results[entity]) == 2
+        result = cross_validate(LinearRegression(), X, y, cv=splitter, scoring='neg_mean_absolute_error',
+                                return_indices=True)
+        tested = [X.index[test].get_level_values(0).unique().tolist() for test in result['indices']['test']]
+        assert tested == [['A'], ['B'], ['C']] * 2
+        np.testing.assert_allclose(result['test_score'], np.zeros(6), atol=1e-8)
 
-    def test_historical_backtesting_workflow(self, simple_timeseries_df):
-        """Test historical backtesting with in-sample validation."""
-        X = simple_timeseries_df[['feature1', 'feature2']]
-        y = simple_timeseries_df['target']
-        
-        # Test in-sample validation
-        test_dates = ['2020-01-15', '2020-01-25']
-        splitter = TSInSampleSplit(test_indices=test_dates, test_size=3)
-        
-        results = []
-        for train_idx, test_idx in splitter.split(X, y):
-            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-            
-            # Model has access to future information (in-sample)
-            coef = np.mean(y_train / X_train['feature1'])
-            y_pred = X_test['feature1'] * coef
-            
-            rmse = np.sqrt(np.mean((y_test - y_pred) ** 2))
-            results.append(rmse)
-        
-        # Should have one result (in-sample typically produces one split)
-        assert len(results) == 1
+    def test_historical_backtesting(self, simple_timeseries_df):
+        """Several in-sample dates: one fold testing those rows, training up to the last one."""
+        splitter = TSInSampleSplit(test_indices=['2020-01-15', '2020-01-25'], test_size=3)
+        # Valeur d'or : 15 et 25 janvier = positions 14 et 24 ; test_size non utilisé (plusieurs dates)
+        assert as_lists(collect_folds(splitter, simple_timeseries_df)) == [(list(range(25)), [14, 24])]
 
 
-class TestDataTypeCompatibility:
-    """Test compatibility with different data types and structures."""
+class TestTimeSeriesEdgeCases:
+    """Time-series folds on several frequencies and very small series."""
 
-    def test_datetime_index_compatibility(self):
-        """Test compatibility with different datetime index types."""
-        # Test different datetime frequencies
-        for freq in ['D', 'h', 'ME', 'YE']:
-            if freq == 'YE':
-                periods = 10
-            elif freq == 'ME':
-                periods = 24
-            else:
-                periods = 50
-                
-            dates = pd.date_range('2020-01-01', periods=periods, freq=freq)
-            X = pd.DataFrame({'feature': range(periods)}, index=dates)
-            
-            splitter = TSOutOfSampleSplit(n_splits=2, test_size=3)
-            splits = list(splitter.split(X))
-            
-            assert len(splits) == 2
-            for train_idx, test_idx in splits:
-                assert len(test_idx) == 3
+    @pytest.mark.parametrize(('freq', 'periods'), [('D', 50), ('h', 50), ('ME', 24), ('YE', 10)])
+    def test_frequency_does_not_change_the_positions(self, freq, periods):
+        """The folds depend on the number of rows only, not on the spacing of the dates."""
+        X = pd.DataFrame({'feature': range(periods)}, index=pd.date_range('2020-01-01', periods=periods, freq=freq))
+        folds = collect_folds(TSOutOfSampleSplit(n_splits=2, test_size=3), X)
+        n = periods
+        assert as_lists(folds) == [(list(range(n - 6)), [n - 6, n - 5, n - 4]), (list(range(n - 3)), [n - 3, n - 2, n - 1])]
 
-    def test_string_index_compatibility(self):
-        """Test compatibility with string indices."""
-        X = pd.DataFrame({
-            'feature': range(20)
-        }, index=[f'period_{i:02d}' for i in range(20)])
-        
-        splitter = TSOutOfSampleSplit(n_splits=3, test_size=2)
-        splits = list(splitter.split(X))
-        
-        assert len(splits) == 3
-        for train_idx, test_idx in splits:
-            assert len(test_idx) == 2
-
-    def test_numeric_entity_names(self):
-        """Test compatibility with numeric entity names in panel data."""
-        entities = [1, 2, 3, 4]
-        dates = pd.date_range('2020-01-01', periods=15, freq='D')
-        idx = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
-        X = pd.DataFrame({'feature': range(60)}, index=idx)
-        
-        splitter = PanelOutOfSampleSplit(n_splits=2, test_size=2)
-        splits = list(splitter.split(X))
-        
-        assert len(splits) == 2
-        for train_idx, test_idx in splits:
-            # Should have test data for all entities
-            test_entities = X.iloc[test_idx].index.get_level_values(0).unique()
-            assert len(test_entities) == 4
-
-    def test_mixed_data_types_in_features(self):
-        """Test with mixed data types in features."""
-        dates = pd.date_range('2020-01-01', periods=30, freq='D')
-        X = pd.DataFrame({
-            'numeric_feature': range(30),
-            'float_feature': np.random.randn(30),
-            'categorical_feature': ['A', 'B', 'C'] * 10,
-            'boolean_feature': [True, False] * 15
-        }, index=dates)
-        
-        splitter = TSOutOfSampleSplit(n_splits=3, test_size=5)
-        splits = list(splitter.split(X))
-        
-        assert len(splits) == 3
-        for train_idx, test_idx in splits:
-            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-            
-            # Verify all data types are preserved
-            assert X_train.dtypes.equals(X.dtypes)
-            assert X_test.dtypes.equals(X.dtypes)
-
-
-class TestEdgeCaseHandling:
-    """Test handling of edge cases and boundary conditions."""
-
-    def test_very_small_datasets(self):
-        """Test with very small datasets."""
-        # Test with 3 observations
-        X = pd.Series([1, 2, 3])
-        
-        splitter = TSOutOfSampleSplit(n_splits=2, test_size=1)
-        splits = list(splitter.split(X))
-        
-        # With n_splits=2 and 3 observations, only one split may be valid
-        assert len(splits) >= 1
-        train_idx, test_idx = splits[0]
-        assert len(test_idx) == 1
-        assert len(train_idx) <= 2
+    def test_very_small_series(self):
+        """Three rows give two folds of one test row."""
+        folds = collect_folds(TSOutOfSampleSplit(n_splits=2, test_size=1), pd.Series([1, 2, 3]))
+        assert as_lists(folds) == [([0], [1]), ([0, 1], [2])]
 
     def test_gap_edge_cases(self):
-        """Test edge cases with gap parameter."""
+        """A gap may leave one training row, but not zero."""
         X = pd.Series(range(10))
 
         # Écart qui ne laisse qu'une ligne d'apprentissage au premier pli (test à partir de la ligne 6)
@@ -250,229 +282,30 @@ class TestEdgeCaseHandling:
         with pytest.raises(ValueError, match='No training data before the test set starting at row 6'):
             list(TSOutOfSampleSplit(n_splits=2, test_size=2, gap=7).split(X))
 
-    def test_max_train_size_edge_cases(self):
-        """Test edge cases with max_train_size parameter."""
-        X = pd.Series(range(20))
-        
-        # max_train_size smaller than test_size
-        splitter = InSampleSplit(test_size=10, max_train_size=5)
-        splits = list(splitter.split(X))
-        
-        train_idx, test_idx = splits[0]
-        # Training should still include test period but respect constraints
-        assert np.all(np.isin(test_idx, train_idx))
-        assert len(train_idx) >= len(test_idx)
-
-    def test_single_entity_panel_edge_case(self):
-        """Test edge case with single entity in panel data."""
-        dates = pd.date_range('2020-01-01', periods=20, freq='D')
-        idx = pd.MultiIndex.from_product([['single_entity'], dates], names=['entity', 'date'])
-        X = pd.DataFrame({'feature': range(20)}, index=idx)
-        
-        splitter = PanelOutOfSampleSplit(n_splits=3, test_size=3)
-        splits = list(splitter.split(X))
-        
-        assert len(splits) == 3
-        # Should behave like time series for single entity
-        for train_idx, test_idx in splits:
-            assert len(test_idx) == 3
-            if len(train_idx) > 0:
-                assert max(train_idx) < min(test_idx)
+    def test_in_sample_window_shorter_than_the_test(self):
+        """A window shorter than the test is widened to the whole test period."""
+        # Valeur d'or : 10 dernières lignes testées, fenêtre max(5, 10) = 10 lignes
+        folds = collect_folds(InSampleSplit(test_size=10, max_train_size=5), pd.Series(range(20)))
+        assert as_lists(folds) == [(list(range(10, 20)), list(range(10, 20)))]
 
 
-class TestPerformanceAndScalability:
-    """Test performance with larger datasets."""
+class TestLargeData:
+    """Splitters on a thousand dates and on a panel of ten entities over two hundred dates."""
 
-    @pytest.mark.slow
-    def test_large_timeseries_performance(self, large_timeseries):
-        """Test performance with large time series."""
-        X = large_timeseries
-        
-        splitter = TSOutOfSampleSplit(n_splits=10, test_size=50, gap=5)
-        
-        import time
-        start_time = time.time()
-        splits = list(splitter.split(X))
-        end_time = time.time()
-        
-        # Should complete reasonably quickly (less than 1 second)
-        assert end_time - start_time < 1.0
-        assert len(splits) == 10
-        
-        for train_idx, test_idx in splits:
-            assert len(test_idx) == 50
+    def test_large_time_series(self, large_timeseries):
+        """Ten leak-free folds of fifty rows, five rows apart from their training."""
+        folds = collect_folds(TSOutOfSampleSplit(n_splits=10, test_size=50, gap=5), large_timeseries)
+        assert_no_leakage(large_timeseries, folds, gap=5)
+        assert_folds_cover(folds, test_size=50, n_samples=len(large_timeseries))
 
-    @pytest.mark.slow
-    def test_large_panel_performance(self, large_panel):
-        """Test performance with large panel data."""
-        X = large_panel
-        
-        splitter = PanelOutOfSampleSplit(n_splits=5, test_size=10, gap=2)
-        
-        import time
-        start_time = time.time()
-        splits = list(splitter.split(X))
-        end_time = time.time()
-        
-        # Should complete reasonably quickly (less than 2 seconds)
-        assert end_time - start_time < 2.0
-        assert len(splits) == 5
+    def test_large_panel(self, large_panel):
+        """Five leak-free folds testing ten dates of each of the ten entities."""
+        folds = collect_folds(PanelOutOfSampleSplit(n_splits=5, test_size=10, gap=2), large_panel)
+        assert_no_leakage(large_panel, folds, gap=2)
+        assert [len(test) for _, test in folds] == [100] * 5
 
-    @pytest.mark.slow
-    def test_per_entity_scaling(self, large_panel):
-        """Test per-entity splitting with many entities."""
-        X = large_panel
-        
-        splitter = PanelOutOfSampleSplitPerEntity(n_splits=3, test_size=5)
-        
-        import time
-        start_time = time.time()
-        splits = list(splitter.split(X))
-        end_time = time.time()
-        
-        # Should scale reasonably with number of entities
-        n_entities = X.index.get_level_values(0).nunique()
-        expected_splits = 3 * n_entities  # n_splits × n_entities
-        
-        assert len(splits) == expected_splits
-        assert end_time - start_time < 3.0
-
-
-class TestErrorHandlingAndValidation:
-    """Test comprehensive error handling and input validation."""
-
-    def test_comprehensive_parameter_validation(self):
-        """Test validation of all parameter combinations."""
-        X = pd.Series(range(20))
-        
-        # Test negative parameters
-        with pytest.raises(ValueError):
-            splitter = TSOutOfSampleSplit(n_splits=-1)
-            list(splitter.split(X))
-        
-        # Test impossible parameter combinations
-        with pytest.raises(ValueError):
-            splitter = TSOutOfSampleSplit(n_splits=10, test_size=5)
-            list(splitter.split(X))
-
-    def test_index_validation_comprehensive(self):
-        """Test comprehensive index validation."""
-        dates = pd.date_range('2020-01-01', periods=10, freq='D')
-        X = pd.Series(range(10), index=dates)
-        
-        # Test various invalid test_indices
-        invalid_indices = [
-            ['2019-12-31'],  # Before data start
-            ['2020-01-15'],  # After data end
-            [pd.Timestamp('2019-12-31')],  # Timestamp before data
-            [-1, -2],        # Negative positions
-            [15, 20],        # Positions beyond data
-        ]
-        
-        for test_indices in invalid_indices:
-            splitter = TSOutOfSampleSplit(test_indices=test_indices, test_size=1)
-            with pytest.raises(ValueError):
-                list(splitter.split(X))
-
-    def test_data_structure_validation_comprehensive(self):
-        """Test comprehensive data structure validation."""
-        # Test various invalid panel structures
-        invalid_panels = [
-            pd.DataFrame({'value': range(10)}),  # No MultiIndex
-            pd.Series(range(10)),               # Series without MultiIndex for panel
-        ]
-        
-        for X in invalid_panels:
-            splitter = PanelOutOfSampleSplit(n_splits=2, test_size=1)
-            with pytest.raises(ValueError):
-                list(splitter.split(X))
-
-    def test_warning_generation(self):
-        """Test that appropriate warnings are generated."""
-        # Test groups parameter warning for time series
-        X = pd.Series(range(10))
-        groups = np.array(['A'] * 5 + ['B'] * 5)
-        
-        splitter = TSOutOfSampleSplit(n_splits=2, test_size=2)
-        
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            list(splitter.split(X, groups=groups))
-            
-            assert len(w) == 1
-            assert "groups parameter is ignored" in str(w[0].message)
-
-    def test_data_sorting_warnings(self, unsorted_timeseries, unsorted_panel):
-        """Test warnings for unsorted data."""
-        # Test unsorted time series
-        splitter = TSOutOfSampleSplit(n_splits=2, test_size=2)
-        
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            list(splitter.split(unsorted_timeseries))
-            
-            assert len(w) == 1
-            assert "not sorted by date" in str(w[0].message)
-        
-        # Test unsorted panel
-        splitter = PanelOutOfSampleSplit(n_splits=2, test_size=1)
-        
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            list(splitter.split(unsorted_panel))
-            
-            assert len(w) == 1
-            assert "not sorted by group then by date" in str(w[0].message)
-
-
-class TestConsistencyAndReproducibility:
-    """Test consistency and reproducibility of splits."""
-
-    def test_split_consistency(self, simple_timeseries_df):
-        """Test that splits are consistent across multiple calls."""
-        X = simple_timeseries_df
-        
-        splitter = TSOutOfSampleSplit(n_splits=3, test_size=5, gap=2)
-        
-        # Generate splits multiple times
-        splits1 = list(splitter.split(X))
-        splits2 = list(splitter.split(X))
-        
-        # Should be identical
-        assert len(splits1) == len(splits2)
-        for (train1, test1), (train2, test2) in zip(splits1, splits2):
-            np.testing.assert_array_equal(train1, train2)
-            np.testing.assert_array_equal(test1, test2)
-
-    def test_parameter_independence(self, simple_timeseries_df):
-        """Test that different splitter instances with same parameters produce same results."""
-        X = simple_timeseries_df
-        
-        splitter1 = TSOutOfSampleSplit(n_splits=3, test_size=4, gap=1)
-        splitter2 = TSOutOfSampleSplit(n_splits=3, test_size=4, gap=1)
-        
-        splits1 = list(splitter1.split(X))
-        splits2 = list(splitter2.split(X))
-        
-        assert len(splits1) == len(splits2)
-        for (train1, test1), (train2, test2) in zip(splits1, splits2):
-            np.testing.assert_array_equal(train1, train2)
-            np.testing.assert_array_equal(test1, test2)
-
-    def test_data_modification_independence(self, simple_timeseries_df):
-        """Test that modifying data after split generation doesn't affect splits."""
-        X = simple_timeseries_df.copy()
-        
-        splitter = TSOutOfSampleSplit(n_splits=2, test_size=3)
-        splits_before = list(splitter.split(X))
-        
-        # Modify the data
-        X.iloc[0, 0] = 999999
-        
-        splits_after = list(splitter.split(X))
-        
-        # Splits should be different due to data change, but structure should be same
-        assert len(splits_before) == len(splits_after)
-        for (train1, test1), (train2, test2) in zip(splits_before, splits_after):
-            np.testing.assert_array_equal(train1, train2)
-            np.testing.assert_array_equal(test1, test2)
+    def test_large_panel_per_entity(self, large_panel):
+        """Three folds per entity: thirty single-entity folds."""
+        folds = collect_folds(PanelOutOfSampleSplitPerEntity(n_splits=3, test_size=5), large_panel)
+        entities = [large_panel.index[test].get_level_values(0).unique().tolist() for _, test in folds]
+        assert entities == [[f'entity_{i:02d}'] for i in range(10)] * 3

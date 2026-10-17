@@ -493,3 +493,41 @@ class TestWithValidation:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '--tb=short'])
+
+
+class TestDatesOfAnArrayOutput:
+    """A transformer returning an array keeps the dates of each entity in the output index."""
+
+    @pytest.fixture
+    def panel(self) -> pd.DataFrame:
+        """Two entities, A on three month-ends and B on two, values chosen for exact scaling."""
+        dates = pd.date_range('2024-01-31', periods=3, freq='ME')
+        index = pd.MultiIndex.from_tuples(
+            [('A', dates[0]), ('A', dates[1]), ('A', dates[2]), ('B', dates[1]), ('B', dates[2])],
+            names=['entity', 'date'],
+        )
+        return pd.DataFrame({'v': [1.0, 2.0, 3.0, 10.0, 30.0]}, index=index)
+
+    def test_transform_keeps_the_index(self, panel):
+        """StandardScaler returns an array: the output index is the input index."""
+        out = PanelwiseTransformer(StandardScaler()).fit(panel).transform(panel)
+        pd.testing.assert_index_equal(out.index, panel.index)
+
+    def test_transform_values(self, panel):
+        """Each entity is standardized with its own mean and deviation."""
+        out = PanelwiseTransformer(StandardScaler()).fit(panel).transform(panel)
+        # Valeur d'or : A moyenne 2, écart-type sqrt(2/3) ; B moyenne 20, écart-type 10
+        a = 1.0 / np.sqrt(2.0 / 3.0)
+        np.testing.assert_allclose(out['v'].to_numpy(), [-a, 0.0, a, -1.0, 1.0])
+
+    def test_transform_of_other_rows_keeps_their_dates(self, panel):
+        """Transforming a subset of rows gives back the dates of that subset."""
+        transformer = PanelwiseTransformer(StandardScaler()).fit(panel)
+        subset = panel.iloc[[2, 4]]
+        pd.testing.assert_index_equal(transformer.transform(subset).index, subset.index)
+
+    def test_inverse_transform_restores_the_input(self, panel):
+        """transform then inverse_transform gives back the values and the index."""
+        transformer = PanelwiseTransformer(StandardScaler()).fit(panel)
+        restored = transformer.inverse_transform(transformer.transform(panel))
+        pd.testing.assert_frame_equal(restored, panel)

@@ -465,11 +465,12 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 X_entity = X.loc[group_idx, self.transform_columns_].xs(entity_key)
                 X_entity_transformed = entity_transformer.transform(X_entity)
 
-                # Reconstruction du DataFrame avec la structure panel et l'index du transformer
+                # Reconstruction du DataFrame avec la structure panel et les dates de l'entité
                 df_part = self._reconstruct_entity_dataframe(
                     X_entity_transformed=X_entity_transformed,
                     entity_key=entity_key,
-                    original_index=X.index
+                    original_index=X.index,
+                    entity_index=X_entity.index
                 )
 
                 transformed_parts.append(df_part)
@@ -550,11 +551,12 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 X_entity = X.loc[group_idx, self.transform_columns_].xs(entity_key)
                 X_entity_inverted = entity_transformer.inverse_transform(X_entity)
 
-                # Reconstruction du DataFrame avec la structure panel et l'index retourné
+                # Reconstruction du DataFrame avec la structure panel et les dates de l'entité
                 df_part = self._reconstruct_entity_dataframe(
                     X_entity_transformed=X_entity_inverted,
                     entity_key=entity_key,
-                    original_index=X.index
+                    original_index=X.index,
+                    entity_index=X_entity.index
                 )
 
                 # Ajout à la liste des données transformées
@@ -579,7 +581,8 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         self,
         X_entity_transformed: Union[np.ndarray, pd.DataFrame],
         entity_key: tuple,
-        original_index: pd.Index
+        original_index: pd.Index,
+        entity_index: Optional[pd.Index] = None
     ) -> pd.DataFrame:
         """Reconstruct a DataFrame with proper panel structure from transformed entity data.
 
@@ -587,12 +590,18 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
             X_entity_transformed: Transformed data (array or DataFrame) with temporal index.
             entity_key: Entity identifier as tuple.
             original_index: Original MultiIndex or Index from the input data.
+            entity_index: Dates of the entity rows passed to the transformer. An
+                array output with one row per input row takes these dates as
+                index; an array of another length keeps positions.
 
         Returns:
             Reconstructed DataFrame with proper panel structure and index.
         """
         # Conversion en DataFrame si nécessaire
         if isinstance(X_entity_transformed, np.ndarray):
+            # Un tableau n'a pas d'index : les dates de l'entité sont reprises ligne à ligne
+            # quand le transformateur conserve le nombre de lignes
+            same_rows = entity_index is not None and len(entity_index) == X_entity_transformed.shape[0]
             # Gestion des noms de colonnes
             if X_entity_transformed.shape[1] != len(self.transform_columns_):
                 # Le transformer a changé le nombre de colonnes
@@ -606,7 +615,8 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
             # Création d'un DataFrame avec l'index temporel
             df_transformed = pd.DataFrame(
                 X_entity_transformed,
-                columns=cols
+                columns=cols,
+                index=entity_index if same_rows else None
             )
         else:
             df_transformed = X_entity_transformed

@@ -1,12 +1,35 @@
+"""Cross-validators for panel data: global and per-entity variants.
+
+``PanelOutOfSampleSplit`` and ``PanelInSampleSplit`` cut every entity at the
+same test dates and yield one fold holding all entities; an entity that does
+not hold the test dates of a fold only trains in it. The ``PerEntity``
+variants cut each entity on its own dates and yield one fold per entity and
+per split. Entities are read from the ``MultiIndex`` (every level but the
+last, which holds the date) when ``groups`` is not given.
+"""
 # Importation des modules
 # Modules de base
+import inspect
+import warnings
+
 import numpy as np
 import pandas as pd
-import warnings
 
 # Importations locales
 from ..panel.utils import is_panel_data
-from .base import InSampleSplit, OutOfSampleSplit, _entity_labels, _labels_array, _precompute_group_mappings
+from .base import (
+    _DATES,
+    InSampleSplit,
+    OutOfSampleSplit,
+    _entity_labels,
+    _labels_array,
+    _normalize_label,
+    _parse_test_indices,
+    _precompute_group_mappings,
+    _resolve_test_positions,
+    _time_level,
+    _verify_and_sort_data,
+)
 
 # Sklearn
 from sklearn.utils import indexable
@@ -50,252 +73,379 @@ def _extract_groups_from_panel(X):
     # Entité de chaque ligne : niveaux d'entité (tous sauf le dernier)
     return _entity_labels(X)
 
+
 # Classe de base pour la validation croisée out-of-sample sur données de panel
 class PanelOutOfSampleSplit(OutOfSampleSplit):
-    """Panel data out-of-sample cross-validation split.
-    
-    This class extends OutOfSampleSplit to handle panel data (multi-entity time series)
-    where observations are grouped by entities. The gap and training window constraints
-    are applied within each entity separately.
-    
-    Panel data is expected to have a MultiIndex with (entity, time) structure where:
-    - First level: entity identifiers (e.g., company IDs, country codes)
-    - Second level: time periods (e.g., dates, timestamps)
-    
+    """Out-of-sample cross-validator cutting every entity of a panel at common dates.
+
+    The panel has a MultiIndex ``(entity..., date)``: the entity is made of
+    every level but the last, which holds the date. Each fold tests the same
+    dates for every entity, so that a model pooling the entities never
+    trains on a date of the test period:
+
+    - without ``test_indices``, ``n_splits`` adjacent blocks of ``test_size``
+      dates (default 1) ending at the last date of the panel;
+    - with dates, one fold per date, ``test_size`` dates from it.
+
+    Each tested entity trains on its dates before the test, minus ``gap``,
+    within ``max_train_size`` dates. An entity that does not hold the test
+    date of a fold is warned about and not tested; it trains on its dates
+    before that date (minus ``gap``). An integer position or an
+    ``(entity..., date)`` tuple opens a fold that tests and trains its entity
+    only. Positions are those of the rows of ``X`` as given; an unsorted
+    panel is sorted internally (with a warning).
+
     Args:
-        n_splits (int, optional): Number of splits for cross-validation. Defaults to 5.
-        test_indices (list, optional): Specific test periods to use. Can be:
-            - Dates/timestamps for all entities
-            - Tuples of (entity, date) for specific entity-date combinations
-            Defaults to None.
-        max_train_size (int, optional): Maximum training window size per entity.
-            Defaults to None (no limit).
-        test_size (int, optional): Number of periods per test set. Defaults to None.
-        gap (int, optional): Number of periods between training and test sets
-            to avoid data leakage. Defaults to 0.
-    
+        n_splits: Number of folds when ``test_indices`` is None (at least 2).
+        test_indices: Dates (common to the entities), integer positions or
+            ``(entity..., date)`` tuples; see ``OutOfSampleSplit``.
+        max_train_size: Maximum number of training dates per entity, or
+            None for an expanding window.
+        test_size: Number of test dates per entity and per fold.
+        gap: Number of dates skipped between training and test.
+
     Examples:
-        >>> # Create panel data
-        >>> entities = ['AAPL', 'GOOGL', 'MSFT']
-        >>> dates = pd.date_range('2020-01-01', periods=100, freq='D')
-        >>> idx = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
-        >>> X = pd.DataFrame({'price': np.random.randn(300)}, index=idx)
-        
-        >>> # Out-of-sample split with specific test dates
-        >>> test_dates = ['2020-03-01', '2020-03-15', '2020-04-01']
-        >>> splitter = PanelOutOfSampleSplit(test_indices=test_dates, test_size=5, gap=1)
-        >>> for train_idx, test_idx in splitter.split(X):
-        ...     X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        >>> dates = pd.date_range('2024-01-31', periods=4, freq='ME')
+        >>> index = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+        >>> X = pd.DataFrame({'v': range(8)}, index=index)
+        >>> [(train.tolist(), test.tolist()) for train, test in PanelOutOfSampleSplit(n_splits=2).split(X)]
+        [([0, 1, 4, 5], [2, 6]), ([0, 1, 2, 4, 5, 6], [3, 7])]
+
+        ``B`` ends in March: it is not tested in April, but trains on January to March.
+
+        >>> X_short = X.drop(('B', dates[3]))
+        >>> with warnings.catch_warnings():
+        ...     warnings.simplefilter('ignore')
+        ...     folds = [(train.tolist(), test.tolist()) for train, test in PanelOutOfSampleSplit(n_splits=2).split(X_short)]
+        >>> folds
+        [([0, 1, 4, 5], [2, 6]), ([0, 1, 2, 4, 5, 6], [3])]
     """
-    
+
     # Méthode principale de séparation des données de panel
     def split(self, X, y=None, groups=None):
-        """Generate indices to split panel data into training and test sets.
-        
+        """Generate the ``(train, test)`` positions of each fold.
+
         Args:
-            X (pd.DataFrame or pd.Series): Panel data with MultiIndex (entity, time)
-            y (array-like, optional): Target values with same index as X. Defaults to None.
-            groups (array-like, optional): Group labels. If None, extracts from panel structure.
-                Defaults to None.
-                
-        Yields:
-            tuple: (train_indices, test_indices) for each split
-            
+            X (pd.DataFrame or pd.Series): Panel data with MultiIndex (entity..., date).
+            y (array-like, optional): Target; a pandas target must have the index of ``X``.
+            groups (array-like, optional): Entity of each row; must repeat the
+                entity levels of ``X``. Deduced from the index when None.
+
+        Returns:
+            Generator of ``(train_positions, test_positions)`` integer arrays.
+
         Raises:
-            ValueError: If X doesn't have required MultiIndex structure
+            ValueError: If ``X`` is not panel data, or for any error of
+                ``OutOfSampleSplit.split`` (invalid parameter, repeated
+                entity-date pair, inconsistent ``groups``, unknown test date,
+                too many splits, tested entity without training data).
         """
         # Extraction des groupes depuis la structure du panel si non fournis
         if groups is None:
             groups = _extract_groups_from_panel(X)
-        
+
         # Appel de la méthode parente avec les groupes pour le comportement panel
         return super().split(X, y, groups)
+
 
 # Classe de base pour la validation croisée in-sample sur données de panel
 class PanelInSampleSplit(InSampleSplit):
-    """Panel data in-sample cross-validation split.
-    
-    This class extends InSampleSplit to handle panel data (multi-entity time series)
-    where the training set includes the test period, allowing models to learn from
-    future information. This is useful for evaluating historical model performance.
-    
-    Panel data is expected to have a MultiIndex with (entity, time) structure where:
-    - First level: entity identifiers (e.g., company IDs, country codes)
-    - Second level: time periods (e.g., dates, timestamps)
-    
+    """In-sample cross-validator testing every entity of a panel at common dates.
+
+    It yields a single fold whose training set contains the test period. The
+    test dates are common to the entities: the last ``test_size`` dates of
+    the panel (default 1), ``test_size`` dates from a single test date, or
+    exactly the given dates when there are several (``test_size`` unused).
+    Each tested entity trains on its dates up to its last test date, the last
+    ``max(max_train_size, span of its test)`` of them with a window. An entity
+    holding none of the test dates is warned about and not tested; it trains
+    on its dates up to the last test date. Integer positions and
+    ``(entity..., date)`` tuples test and train their own entities only.
+
     Args:
-        n_splits (int, optional): Number of splits for cross-validation. Defaults to 5.
-        test_indices (list, optional): Specific test periods to use. Can be:
-            - Dates/timestamps for all entities
-            - Tuples of (entity, date) for specific entity-date combinations
-            Defaults to None.
-        max_train_size (int, optional): Maximum training window size per entity.
-            Defaults to None (no limit).
-        test_size (int, optional): Number of periods per test set. Defaults to None.
-    
+        n_splits: Unused by a panel (at least 2, as for sklearn splitters).
+        test_indices: Dates (common to the entities), integer positions or
+            ``(entity..., date)`` tuples; see ``InSampleSplit``.
+        max_train_size: Maximum number of training dates per entity, or None.
+        test_size: Number of test dates per entity.
+
     Examples:
-        >>> # Create panel data
-        >>> entities = ['AAPL', 'GOOGL', 'MSFT']
-        >>> dates = pd.date_range('2020-01-01', periods=100, freq='D')
-        >>> idx = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
-        >>> X = pd.DataFrame({'price': np.random.randn(300)}, index=idx)
-        
-        >>> # In-sample split - training includes test period
-        >>> test_dates = ['2020-03-01']
-        >>> splitter = PanelInSampleSplit(test_indices=test_dates, test_size=5)
-        >>> for train_idx, test_idx in splitter.split(X):
-        ...     # Training data includes test period
-        ...     X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        >>> dates = pd.date_range('2024-01-31', periods=4, freq='ME')
+        >>> index = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+        >>> X = pd.DataFrame({'v': range(8)}, index=index).drop(('B', dates[3]))
+        >>> with warnings.catch_warnings():
+        ...     warnings.simplefilter('ignore')
+        ...     folds = [(train.tolist(), test.tolist()) for train, test in PanelInSampleSplit().split(X)]
+        >>> folds
+        [([0, 1, 2, 3, 4, 5, 6], [3])]
     """
-    
+
     # Méthode principale de séparation des données de panel
     def split(self, X, y=None, groups=None):
-        """Generate indices to split panel data into training and test sets (in-sample).
-        
+        """Generate the in-sample ``(train, test)`` positions.
+
         Args:
-            X (pd.DataFrame or pd.Series): Panel data with MultiIndex (entity, time)
-            y (array-like, optional): Target values with same index as X. Defaults to None.
-            groups (array-like, optional): Group labels. If None, extracts from panel structure.
-                Defaults to None.
-                
-        Yields:
-            tuple: (train_indices, test_indices) where training includes test period
-            
+            X (pd.DataFrame or pd.Series): Panel data with MultiIndex (entity..., date).
+            y (array-like, optional): Target; a pandas target must have the index of ``X``.
+            groups (array-like, optional): Entity of each row; deduced from the index when None.
+
+        Returns:
+            Generator of one ``(train_positions, test_positions)`` pair.
+
         Raises:
-            ValueError: If X doesn't have required MultiIndex structure
+            ValueError: If ``X`` is not panel data or is empty, or for any
+                error of ``InSampleSplit.split``.
         """
         # Extraction des groupes depuis la structure du panel si non fournis
         if groups is None:
             groups = _extract_groups_from_panel(X)
-        
+
         # Appel de la méthode parente avec les groupes pour le comportement panel
         return super().split(X, y, groups)
 
 
+# Classe mixin des découpages entité par entité
+class _PerEntitySplitMixin:
+    """Per-entity splitting shared by the two ``PerEntity`` cross-validators.
 
-# Classe de validation croisée out-of-sample par entité
-class PanelOutOfSampleSplitPerEntity(PanelOutOfSampleSplit):
-    """Panel out-of-sample split that yields train/test indices separately for each entity.
-    
-    This class extends PanelOutOfSampleSplit to provide entity-specific splits,
-    returning a dictionary mapping each entity to its (train_indices, test_indices).
-    This is useful when you need to analyze or process each entity separately.
-    
-    The returned structure allows for:
-    - Entity-specific model training and evaluation
-    - Handling entities with different data availability
-    - Parallel processing by entity
-    
-    Examples:
-        >>> # Create panel data
-        >>> entities = ['AAPL', 'GOOGL', 'MSFT']
-        >>> dates = pd.date_range('2020-01-01', periods=50, freq='D')
-        >>> idx = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
-        >>> X = pd.DataFrame({'price': np.random.randn(150)}, index=idx)
-        
-        >>> # Split per entity
-        >>> splitter = PanelOutOfSampleSplitPerEntity(test_size=5, gap=1)
-        >>> for train_idx, test_idx in splitter.split(X):
-        ...     entity_train = X.iloc[train_idx]
-        ...     entity_test = X.iloc[test_idx]
-        ...     # Process each entity separately
+    Default folds and dates cut each entity on its own dates, with the
+    splitter of the global class (``_global_class``) applied to that entity
+    alone. Positions and ``(entity..., date)`` tuples, which already open
+    folds limited to one entity, reuse the global folds.
     """
-    
-    # Méthode de séparation des données avec indices groupés par entité
-    def split(self, X, y=None, groups=None):
-        """Generate train/test indices separately for each entity.
-        
+
+    # Classe globale dont les paramètres et le découpage sont repris
+    _global_class = None
+
+    # Méthode de calcul du nombre de plis
+    def get_n_splits(self, X=None, y=None, groups=None):
+        """Return the number of folds that ``split`` produces on ``X``.
+
+        The count depends on the entities and on their dates, so the data is
+        required (``GridSearchCV`` passes it).
+
         Args:
-            X (pd.DataFrame or pd.Series): Panel data with MultiIndex (entity, time)
-            y (array-like, optional): Target values with same index as X. Defaults to None.
-            groups (array-like, optional): Group labels. If None, extracts from panel structure.
-                Defaults to None.
-                
-        Yields:
-            tuple: (train_indices, test_indices) for each entity that has test data
-                in the current split. Entities are processed sequentially.
+            X: Panel data the folds would be computed on.
+            y: Target, as for ``split``.
+            groups: Entity of each row, as for ``split``.
+
+        Returns:
+            Number of per-entity folds.
+
+        Raises:
+            ValueError: If ``X`` is None, or if ``split`` refuses the data.
+        """
+        # Sans données, les entités et leurs dates sont inconnues
+        if X is None:
+            raise ValueError(
+                f"{type(self).__name__}.get_n_splits requires X: the number of folds depends on the "
+                f"entities and their dates"
+            )
+        # Décompte exact des plis, sans répéter les avertissements de split
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return sum(1 for _ in self.split(X, y, groups))
+
+    # Méthode de séparation des données entité par entité
+    def split(self, X, y=None, groups=None):
+        """Generate one ``(train, test)`` pair per entity and per split.
+
+        Folds come split by split (in date order), and within a split entity
+        by entity, in the order of their first row in ``X``.
+
+        Args:
+            X (pd.DataFrame or pd.Series): Panel data with MultiIndex (entity..., date).
+            y (array-like, optional): Target; a pandas target must have the index of ``X``.
+            groups (array-like, optional): Entity of each row; deduced from the index when None.
+
+        Returns:
+            Generator of ``(train_positions, test_positions)`` integer arrays,
+            each holding the rows of one entity.
+
+        Raises:
+            ValueError: If ``X`` is not panel data or is empty, if a
+                parameter or ``groups`` is invalid, or if a test date is held
+                by no entity.
         """
         # Extraction des groupes si non fournis
         if groups is None:
             groups = _extract_groups_from_panel(X)
-        
+        # Contrôle des paramètres, de la cible et des groupes dès l'appel ; plis globaux paresseux
+        global_folds = super().split(X, y, groups)
+        parsed = _parse_test_indices(self.test_indices)
+        # Positions et couples (entité, date) : plis globaux déjà limités à une entité
+        if parsed is not None and parsed[0] != _DATES:
+            return self._split_global_folds(global_folds, groups)
+        # Plis par défaut et dates : découpage sur les dates propres à chaque entité
+        return self._split_each_entity(X, groups, parsed)
+
+    # Méthode auxiliaire de répartition des plis globaux par entité
+    def _split_global_folds(self, global_folds, groups):
+        """Yield each global fold restricted to each of its tested entities."""
         # Positions des lignes de chaque entité (entités scalaires ou tuples)
         group_mappings = _precompute_group_mappings(_labels_array(groups))
-
-        # Génération des splits avec regroupement par entité
-        for train_indices, test_indices in super().split(X, y, groups):
-            # Traitement entité par entité
-            for group, group_indices in group_mappings.items():
-                
-                # Extraction des indices d'entraînement et de test pour cette entité
-                entity_train = train_indices[np.isin(train_indices, group_indices)]
+        for train_indices, test_indices in global_folds:
+            for group_indices in group_mappings.values():
                 entity_test = test_indices[np.isin(test_indices, group_indices)]
-                
-                # Inclusion seulement si l'entité a des données de test
+                # Entité sans ligne de test dans ce pli : pas de pli pour elle
                 if len(entity_test) > 0:
-                    yield (entity_train, entity_test)
+                    yield train_indices[np.isin(train_indices, group_indices)], entity_test
+
+    # Méthode auxiliaire de découpage de chaque entité sur ses propres dates
+    def _split_each_entity(self, X, groups, parsed):
+        """Yield the folds of every entity, each cut on its own dates."""
+        # Indexation
+        (X,) = indexable(X)
+        # Panel vide : aucune entité à découper
+        if _num_samples(X) == 0:
+            raise ValueError("Cannot split an empty dataset: number of samples=0")
+        # Contrôle et tri des données ; lignes de chaque entité dans l'ordre chronologique
+        labels = _labels_array(groups)
+        X_sorted, groups_sorted, sort_mapping = _verify_and_sort_data(X, labels)
+        sorted_rows = _precompute_group_mappings(groups_sorted)
+        # Date demandée absente de toutes les entités : refus
+        if parsed is not None:
+            _resolve_test_positions(self.test_indices, X_sorted)
+        # Plis rangés par numéro de découpage, entités dans l'ordre de leur première ligne
+        slots: dict = {}
+        for entity in _precompute_group_mappings(labels):
+            rows = sort_mapping[sorted_rows[entity]]
+            for slot, (train, test) in self._entity_folds(entity, X.iloc[rows], labels[rows], parsed):
+                slots.setdefault(slot, []).append((rows[train], rows[test]))
+        for slot in sorted(slots):
+            yield from slots[slot]
+
+    # Méthode auxiliaire de construction du splitter global d'une entité
+    def _global_splitter(self, **overrides):
+        """Return the global splitter with the parameters of ``self``, some overridden."""
+        names = [name for name in inspect.signature(self._global_class.__init__).parameters if name != 'self']
+        kwargs = {name: getattr(self, name) for name in names}
+        kwargs.update(overrides)
+        return self._global_class(**kwargs)
+
+    # Méthode auxiliaire des plis d'une entité
+    def _entity_folds(self, entity, X_entity, groups_entity, parsed):
+        """Yield ``(slot, (train, test))`` for one entity, positions within ``X_entity``.
+
+        ``slot`` numbers the split the fold belongs to: the default fold, or
+        the requested date, it is cut for.
+        """
+        # Plis par défaut : les dernières dates de l'entité
+        if parsed is None:
+            try:
+                folds = list(self._global_splitter().split(X_entity, None, groups_entity))
+            except ValueError as error:
+                # Entité trop courte pour porter les plis : signalée et ignorée
+                warnings.warn(f"Entity {entity!r} is too short for the default folds and gets none: {error}")
+                return
+            yield from enumerate(folds)
+            return
+        # Dates demandées : seules celles que porte l'entité
+        dates = _time_level(X_entity)
+        items = parsed[1]
+        held = []
+        for slot, item in enumerate(items):
+            if np.any(dates == _normalize_label(dates, item)):
+                held.append(slot)
+            else:
+                warnings.warn(f"Cannot find test period '{item}' for entity '{entity}'; the entity gets no fold for it")
+        yield from self._date_folds(entity, X_entity, groups_entity, items, held)
+
+
+# Classe de validation croisée out-of-sample par entité
+class PanelOutOfSampleSplitPerEntity(_PerEntitySplitMixin, PanelOutOfSampleSplit):
+    """Out-of-sample cross-validator cutting each entity of a panel on its own dates.
+
+    Each entity is split as ``PanelOutOfSampleSplit`` would split it alone,
+    and every fold holds the rows of one entity:
+
+    - without ``test_indices``, the last ``n_splits`` blocks of
+      ``test_size`` dates of each entity; an entity too short for them is
+      warned about and gets no fold;
+    - with dates, one fold per date and per entity holding it; an entity
+      lacking a date gets no fold for it (warned), as does an entity with no
+      date left for training before it;
+    - with positions or ``(entity..., date)`` tuples, the folds of
+      ``PanelOutOfSampleSplit``, each already limited to one entity.
+
+    Folds come split by split, and within a split entity by entity in the
+    order of their first row. ``get_n_splits`` requires ``X``.
+
+    Args:
+        n_splits: Number of default folds per entity (at least 2).
+        test_indices: Dates, integer positions or ``(entity..., date)`` tuples.
+        max_train_size: Maximum number of training dates, or None.
+        test_size: Number of test dates per fold.
+        gap: Number of dates skipped between training and test.
+
+    Examples:
+        >>> dates = pd.date_range('2024-01-31', periods=4, freq='ME')
+        >>> index = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+        >>> X = pd.DataFrame({'v': range(8)}, index=index).drop(('B', dates[3]))
+        >>> splitter = PanelOutOfSampleSplitPerEntity(n_splits=2)
+        >>> [(train.tolist(), test.tolist()) for train, test in splitter.split(X)]
+        [([0, 1], [2]), ([4], [5]), ([0, 1, 2], [3]), ([4, 5], [6])]
+        >>> splitter.get_n_splits(X)
+        4
+    """
+
+    _global_class = PanelOutOfSampleSplit
+
+    # Méthode auxiliaire des plis d'une entité aux dates demandées
+    def _date_folds(self, entity, X_entity, groups_entity, items, held):
+        """Yield one fold per held date; a date leaving no training date is skipped."""
+        for slot in held:
+            try:
+                (fold,) = self._global_splitter(test_indices=[items[slot]]).split(X_entity, None, groups_entity)
+            except ValueError as error:
+                # Aucune date d'apprentissage avant la date de test : signalée et ignorée
+                warnings.warn(f"Entity {entity!r} gets no fold for '{items[slot]}': {error}")
+                continue
+            yield slot, fold
 
 
 # Classe de validation croisée in-sample par entité
-class PanelInSampleSplitPerEntity(PanelInSampleSplit):
-    """Panel in-sample split that yields train/test indices separately for each entity.
-    
-    This class extends PanelInSampleSplit to provide entity-specific splits where
-    the training set includes the test period. Returns a dictionary mapping each
-    entity to its (train_indices, test_indices).
-    
-    This is particularly useful for:
-    - Historical backtesting where future information is available
-    - Entity-specific model calibration and evaluation
-    - Analyzing model performance across different entities
-    
-    Examples:
-        >>> # Create panel data
-        >>> entities = ['AAPL', 'GOOGL', 'MSFT']
-        >>> dates = pd.date_range('2020-01-01', periods=50, freq='D')
-        >>> idx = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
-        >>> X = pd.DataFrame({'price': np.random.randn(150)}, index=idx)
-        
-        >>> # In-sample split per entity
-        >>> test_dates = ['2020-02-01']
-        >>> splitter = PanelInSampleSplitPerEntity(test_indices=test_dates, test_size=5)
-        >>> for train_idx, test_idx in splitter.split(X):
-        ...     # Training includes test period for historical analysis
-        ...     entity_train = X.iloc[train_idx]  # Includes test period
-        ...     entity_test = X.iloc[test_idx]
-    """
-    
-    # Méthode de séparation des données avec indices groupés par entité (in-sample)
-    def split(self, X, y=None, groups=None):
-        """Generate train/test indices separately for each entity (in-sample).
-        
-        Args:
-            X (pd.DataFrame or pd.Series): Panel data with MultiIndex (entity, time)
-            y (array-like, optional): Target values with same index as X. Defaults to None.
-            groups (array-like, optional): Group labels. If None, extracts from panel structure.
-                Defaults to None.
-                
-        Yields:
-            tuple: (train_indices, test_indices) for each entity that has test data
-                in the current split. Training indices include the test period for
-                in-sample validation. Entities are processed sequentially.
-        """
-        # Extraction des groupes si non fournis
-        if groups is None:
-            groups = _extract_groups_from_panel(X)
-        
-        # Positions des lignes de chaque entité (entités scalaires ou tuples)
-        group_mappings = _precompute_group_mappings(_labels_array(groups))
+class PanelInSampleSplitPerEntity(_PerEntitySplitMixin, PanelInSampleSplit):
+    """In-sample cross-validator testing each entity of a panel on its own dates.
 
-        # Génération des splits avec regroupement par entité
-        for train_indices, test_indices in super().split(X, y, groups):
-            # Traitement entité par entité
-            for group, group_indices in group_mappings.items():
-                
-                # Extraction des indices d'entraînement et de test pour cette entité
-                entity_train = train_indices[np.isin(train_indices, group_indices)]
-                entity_test = test_indices[np.isin(test_indices, group_indices)]
-                
-                # Inclusion seulement si l'entité a des données de test
-                if len(entity_test) > 0:
-                    yield (entity_train, entity_test)
+    Each entity is split as ``PanelInSampleSplit`` would split it alone,
+    giving one fold per entity whose training set contains its test dates:
+
+    - without ``test_indices``, the last ``test_size`` dates of each entity;
+    - with dates, the dates the entity holds (``test_size`` dates from a
+      single requested date, one row per date when several are requested);
+      an entity holding none of them gets no fold (warned);
+    - with positions or ``(entity..., date)`` tuples, the fold of
+      ``PanelInSampleSplit``, split by entity.
+
+    Entities come in the order of their first row. ``get_n_splits`` requires
+    ``X``.
+
+    Args:
+        n_splits: Unused by a panel (at least 2, as for sklearn splitters).
+        test_indices: Dates, integer positions or ``(entity..., date)`` tuples.
+        max_train_size: Maximum number of training dates per entity, or None.
+        test_size: Number of test dates per entity.
+
+    Examples:
+        >>> dates = pd.date_range('2024-01-31', periods=4, freq='ME')
+        >>> index = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+        >>> X = pd.DataFrame({'v': range(8)}, index=index).drop(('B', dates[3]))
+        >>> [(train.tolist(), test.tolist()) for train, test in PanelInSampleSplitPerEntity().split(X)]
+        [([0, 1, 2, 3], [3]), ([4, 5, 6], [6])]
+    """
+
+    _global_class = PanelInSampleSplit
+
+    # Méthode auxiliaire du pli d'une entité aux dates demandées
+    def _date_folds(self, entity, X_entity, groups_entity, items, held):
+        """Yield the single fold of the held dates, if any."""
+        # Aucune date demandée portée par l'entité : pas de pli
+        if not held:
+            return
+        overrides = {'test_indices': [items[slot] for slot in held]}
+        # Plusieurs dates demandées : une ligne par date, même si l'entité n'en porte qu'une
+        if len(items) > 1 and len(held) == 1:
+            overrides['test_size'] = 1
+        (fold,) = self._global_splitter(**overrides).split(X_entity, None, groups_entity)
+        yield 0, fold

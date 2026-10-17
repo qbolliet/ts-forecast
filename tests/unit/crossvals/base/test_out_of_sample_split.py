@@ -472,19 +472,22 @@ class TestPanelGroups:
             collect_folds(splitter, cv_panel_2x6, groups=self._groups(cv_panel_2x6))
 
     def test_default_date_missing_for_one_entity(self, cv_panel_2x6):
-        """An entity lacking a default test date is warned about, then the split fails."""
+        """An entity lacking a default test date is warned about and only trains in that fold."""
         X = cv_panel_2x6.drop(('B', pd.Timestamp('2024-06-30')))
+        # Valeur d'or : B (6-10) finit en mai ; pli de juin : A testée (5), B apprend sur janvier-mai
         with pytest.warns(UserWarning, match="Cannot find test period '2024-06-30 00:00:00' for entity 'B'"):
-            with pytest.raises(ValueError, match='Cannot find test indices for the group : B'):
-                collect_folds(OutOfSampleSplit(n_splits=2), X, groups=self._groups(X))
+            folds = collect_folds(OutOfSampleSplit(n_splits=2), X, groups=self._groups(X))
+        assert as_lists(folds) == [([0, 1, 2, 3, 6, 7, 8, 9], [4, 10]), ([0, 1, 2, 3, 4, 6, 7, 8, 9, 10], [5])]
 
     def test_date_missing_for_one_entity(self, cv_panel_2x6):
-        """An entity without the test date is warned about, then the split fails."""
+        """An entity without the test date is warned about; it trains before the date, gap and window applied."""
         X = cv_panel_2x6.drop(('B', pd.Timestamp('2024-06-30')))
-        splitter = OutOfSampleSplit(test_indices=['2024-06-30'])
+        splitter = OutOfSampleSplit(test_indices=['2024-06-30'], gap=1, max_train_size=2)
+        # Valeur d'or : A teste juin (5) et apprend mars-avril (2, 3) ; B : dates avant juin = 6-10
+        # (janvier-mai), l'écart 1 retire mai (10), la fenêtre de 2 garde mars-avril (8, 9)
         with pytest.warns(UserWarning, match="Cannot find test period '2024-06-30' for entity 'B'"):
-            with pytest.raises(ValueError, match='Cannot find test indices for the group : B'):
-                collect_folds(splitter, X, groups=self._groups(X))
+            folds = collect_folds(splitter, X, groups=self._groups(X))
+        assert as_lists(folds) == [([2, 3, 8, 9], [5])]
 
     @pytest.mark.parametrize(
         ('indices', 'expected'),

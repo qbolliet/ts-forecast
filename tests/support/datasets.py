@@ -7,6 +7,8 @@ and of the unified ``PANEL-X`` dataset of
 ``high_frequency_imputer2_architecture.md`` §2.6), made public to be
 imported directly by tests and notebooks
 (``from tests.support.datasets import build_panel_reference``).
+``build_staggered_panel`` adds a hand-sized panel whose entities cover
+different date ranges, for the cross-validation tests.
 """
 # Modules de base
 import zlib
@@ -587,3 +589,50 @@ def build_panel_reference(seed: int = 42) -> pd.DataFrame:
     df_panel = df_panel.sort_index()
 
     return df_panel
+
+
+# Couverture de chaque entité du panel décalé : (premier mois, nombre de mois) sur
+# le calendrier des fins de mois de 2024 ; A couvre l'année, B commence plus tard et
+# finit plus tôt, C ne couvre que le second semestre
+_STAGGERED_SPANS = {'A': (1, 12), 'B': (3, 8), 'C': (7, 6)}
+
+
+def build_staggered_panel() -> pd.DataFrame:
+    """Build a small panel whose entities start and end on different dates.
+
+    Three entities on the month-ends of 2024, sorted by entity then date:
+
+    - ``A``: January to December (12 dates, positions 0-11);
+    - ``B``: March to October (8 dates, positions 12-19);
+    - ``C``: July to December (6 dates, positions 20-25).
+
+    The union of the dates is the 12 month-ends of 2024, but no date after
+    October is held by ``B`` and no date before July by ``C``: folds cut on
+    common dates and folds cut on each entity's own dates differ. The single
+    column ``v`` equals the row position, so expected folds are written by
+    hand as positions.
+
+    Returns:
+        ``DataFrame`` of 26 rows with a ``MultiIndex`` (``entity``, ``date``)
+        and a float column ``v``.
+
+    Examples:
+        >>> panel = build_staggered_panel()
+        >>> panel.groupby(level='entity').size().to_dict()
+        {'A': 12, 'B': 8, 'C': 6}
+        >>> panel.loc['B'].index[[0, -1]].strftime('%Y-%m-%d').tolist()
+        ['2024-03-31', '2024-10-31']
+        >>> panel['v'].tolist()[:3], panel.loc['C', 'v'].tolist()[0]
+        ([0.0, 1.0, 2.0], 20.0)
+    """
+    # Calendrier commun : les douze fins de mois de 2024
+    calendar = pd.date_range('2024-01-31', periods=12, freq='ME')
+    # Couples (entité, date) dans l'ordre entité puis date
+    rows = [
+        (entity, calendar[first_month - 1 + k])
+        for entity, (first_month, n_months) in _STAGGERED_SPANS.items()
+        for k in range(n_months)
+    ]
+    index = pd.MultiIndex.from_tuples(rows, names=['entity', 'date'])
+    # Valeur égale à la position de la ligne : plis lisibles directement
+    return pd.DataFrame({'v': np.arange(len(rows), dtype=float)}, index=index)

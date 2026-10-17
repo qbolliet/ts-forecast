@@ -238,6 +238,21 @@ fournit `collect_folds`, `as_lists`, `time_values`, `entity_values`, `split_fold
 via `split_folds_by_entity`) et `assert_n_splits_consistent`. Fixtures ajoutées à `fixtures.py` :
 `cv_frame_12`, `cv_frame_24`, `cv_panel_2x6` ; `TestHelpers` (inutilisé) supprimé.
 
+**Bilan B3 (2026-10-16)** : `tests/unit/crossvals/test_panel.py` → paquet `tests/unit/crossvals/panel/` (`conftest.py`,
+`test_contract.py`, `test_panel_split.py`, `test_per_entity_split.py`, `test_extract_groups.py` marqué `internal`,
+`test_index_robustness.py`) ; `crossvals/panel.py` 100 % lignes et branches. Ajouts au support : `build_staggered_panel`
+(`datasets.py`) et la fixture `staggered_panel` (`fixtures.py`). Les perturbations de panel de B4 n'existant pas encore,
+l'entrelacement, l'inversion des dates par entité et le renommage des entités sont écrits localement dans
+`test_index_robustness.py` (à remplacer par celles de `perturbations.py` une fois livrées). Anomalies 005 [DOC], 006,
+023, 024, 025 **corrigées dans `tsforecast/crossvals/`** (décision de l'auteur, 2026-10-16) : les variantes globales
+gardent des dates de test communes et une entité qui ne les porte pas n'apprend que (plus d'erreur « Cannot find test
+indices for the group ») ; `PerEntity` découpe chaque entité sur ses propres dates (entité trop courte : avertie,
+sans pli) et son `get_n_splits` exige `X`. Pour **B5** : ANO-PANEL-009 (sortie en tableau de `PanelwiseTransformer` :
+dates remplacées par des positions) **corrigée** dans `_reconstruct_entity_dataframe` (tests
+`tests/unit/panel/test_transformers.py::TestDatesOfAnArrayOutput`, à reprendre dans le paquet de B5) ; numéro pris
+après les identifiants indicatifs 001-008. Pour **B6** : `ConstantEstimator` ne pose aucun attribut ajusté, si bien que
+`XYPipeline.predict` (`check_is_fitted`) le croit non ajusté (laissé tel quel, décision de l'auteur).
+
 **PANEL (B4, B5)**
 - ANO-PANEL-001 [CODE] **bloquante** ✔ : panel en colonnes cassé (`.xs(entity_key)` sur un index
   simple), origine `33cec68` ; touche fit, transform et inverse_transform.
