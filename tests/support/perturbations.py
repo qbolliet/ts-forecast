@@ -12,6 +12,7 @@ rewriting them.
 # Modules de base
 from typing import Optional, Sequence, Union
 
+import numpy as np
 import pandas as pd
 from pandas.tseries.frequencies import get_period_alias
 
@@ -592,3 +593,270 @@ def empty_like(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.Ser
     # jeu absent (``None``) — la forme (colonnes, dtypes, noms d'index) reste
     # entièrement renseignée, seules les lignes disparaissent.
     return df.iloc[0:0].copy()
+
+
+def _as_entity_tuple(key: object) -> tuple:
+    """Return an entity key as a tuple (a scalar becomes a one-element tuple)."""
+    return key if isinstance(key, tuple) else (key,)
+
+
+def _entity_row_mask(df: Union[pd.DataFrame, pd.Series], entity: object) -> np.ndarray:
+    """Boolean mask of the rows whose entity levels equal ``entity``.
+
+    Raises:
+        TypeError: If ``df`` does not have a ``MultiIndex``.
+        ValueError: If the number of labels of ``entity`` differs from the
+            number of entity levels (all levels but the last).
+        KeyError: If no row belongs to ``entity``.
+    """
+    if not isinstance(df.index, pd.MultiIndex):
+        raise TypeError("a MultiIndex (panel data) is required")
+    key = _as_entity_tuple(entity)
+    n_levels = df.index.nlevels - 1
+    if len(key) != n_levels:
+        raise ValueError(f"entity {key!r} has {len(key)} labels, expected {n_levels}")
+    mask = np.ones(len(df), dtype=bool)
+    for level, label in enumerate(key):
+        mask &= np.asarray(df.index.get_level_values(level) == label)
+    if not mask.any():
+        raise KeyError(entity)
+    return mask
+
+
+def rename_entities(
+    df: Union[pd.DataFrame, pd.Series], mapping: dict
+) -> Union[pd.DataFrame, pd.Series]:
+    """Relabel the entities of a panel, keeping every row at its place.
+
+    Edge case: entity keys that are not plain ASCII strings — labels with
+    spaces or accents, integers, multi-level keys — must travel through the
+    components unchanged (masks, dictionaries keyed by entity, rebuilt
+    indexes).
+
+    Args:
+        df: Panel data with a ``MultiIndex`` (entity levels first, time last).
+        mapping: Old entity key -> new entity key. A key is a scalar for a
+            panel with a single entity level, a tuple (one label per entity
+            level) otherwise; a value has the same shape as its key. Entities
+            absent from the mapping keep their labels.
+
+    Returns:
+        A copy of ``df`` whose entity levels are relabelled, same row order,
+        same level names.
+
+    Raises:
+        TypeError: If ``df`` does not have a ``MultiIndex``.
+        KeyError: If a key of ``mapping`` matches no entity of ``df``.
+        ValueError: If a key or a value does not have one label per entity
+            level, or if two entities would receive the same new key.
+
+    Examples:
+        >>> import pandas as pd
+        >>> idx = pd.MultiIndex.from_tuples(
+        ...     [('FR', 0), ('DE', 0)], names=['entity', 'date']
+        ... )
+        >>> df = pd.DataFrame({'v': [1, 2]}, index=idx)
+        >>> list(rename_entities(df, {'FR': 'Côte d\\'Ivoire'}).index.get_level_values(0))
+        ["Côte d'Ivoire", 'DE']
+    """
+    # Cas limite : clés d'entité qui ne sont pas de simples chaînes ASCII
+    # (espaces, accents, entiers, clés multi-niveaux).
+    if not isinstance(df.index, pd.MultiIndex):
+        raise TypeError("rename_entities requires a MultiIndex (panel data)")
+    n_levels = df.index.nlevels - 1
+    renames = {}
+    for old, new in mapping.items():
+        old_key, new_key = _as_entity_tuple(old), _as_entity_tuple(new)
+        if len(new_key) != n_levels:
+            raise ValueError(f"new key {new!r} has {len(new_key)} labels, expected {n_levels}")
+        # Contrôle de l'existence (et de l'arité) de l'ancienne clé
+        _entity_row_mask(df, old_key)
+        renames[old_key] = new_key
+
+    # Clé d'entité de chaque ligne, puis relecture niveau par niveau
+    entity_rows = list(zip(*(df.index.get_level_values(i) for i in range(n_levels))))
+    new_rows = [renames.get(row, row) for row in entity_rows]
+    # Deux entités distinctes ne doivent pas fusionner
+    before = dict.fromkeys(entity_rows)
+    if len({renames.get(key, key) for key in before}) != len(before):
+        raise ValueError("two entities would receive the same new key")
+
+    arrays = [pd.Index([row[i] for row in new_rows]) for i in range(n_levels)]
+    arrays.append(df.index.get_level_values(-1))
+    out = df.copy()
+    out.index = pd.MultiIndex.from_arrays(arrays, names=df.index.names)
+    return out
+
+
+def interleave_entities(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, pd.Series]:
+    """Order the rows of a panel by date first, then by entity.
+
+    Edge case: entity rows that are not contiguous, so that a component
+    assuming one block per entity (``groupby`` on consecutive rows, slicing
+    by run) reads the wrong rows. Entities keep their order of first
+    appearance within a date; the order of the rows of an entity at a given
+    date is kept.
+
+    Args:
+        df: Panel data with a ``MultiIndex`` (entity levels first, time last).
+
+    Returns:
+        A copy of ``df`` sorted by date, then by order of first appearance of
+        the entity.
+
+    Raises:
+        TypeError: If ``df`` does not have a ``MultiIndex``.
+
+    Examples:
+        >>> import pandas as pd
+        >>> idx = pd.MultiIndex.from_product([['B', 'A'], [0, 1]], names=['entity', 'date'])
+        >>> df = pd.DataFrame({'v': [1, 2, 3, 4]}, index=idx)
+        >>> list(interleave_entities(df).index)
+        [('B', 0), ('A', 0), ('B', 1), ('A', 1)]
+    """
+    # Cas limite : lignes d'une même entité non contiguës (tri date puis entité)
+    if not isinstance(df.index, pd.MultiIndex):
+        raise TypeError("interleave_entities requires a MultiIndex (panel data)")
+    n_levels = df.index.nlevels - 1
+    entity_rows = list(zip(*(df.index.get_level_values(i) for i in range(n_levels))))
+    # Rang d'apparition de l'entité, rang chronologique de la date
+    entity_rank = pd.factorize(pd.Series(entity_rows, dtype=object))[0]
+    date_rank = pd.factorize(df.index.get_level_values(-1), sort=True)[0]
+    # ``lexsort`` trie d'abord sur la dernière clé et est stable
+    order = np.lexsort((entity_rank, date_rank))
+    return df.iloc[order].copy()
+
+
+def unsort_within_entities(
+    df: Union[pd.DataFrame, pd.Series], seed: int = 0
+) -> Union[pd.DataFrame, pd.Series]:
+    """Shuffle the dates inside each entity while keeping entity blocks contiguous.
+
+    Edge case: a panel sorted by entity but not by date, as left by a
+    concatenation of per-entity extracts. Entity blocks keep their order of
+    first appearance. Every entity of at least two rows is guaranteed to
+    change order.
+
+    Args:
+        df: Panel data with a ``MultiIndex`` (entity levels first, time last).
+        seed: Seed of the pseudo-random permutations, for reproducibility.
+
+    Returns:
+        A copy of ``df`` with the same rows; each entity block is contiguous
+        and its rows are permuted.
+
+    Raises:
+        TypeError: If ``df`` does not have a ``MultiIndex``.
+
+    Examples:
+        >>> import pandas as pd
+        >>> idx = pd.MultiIndex.from_product([['A', 'B'], range(3)], names=['entity', 'date'])
+        >>> df = pd.DataFrame({'v': range(6)}, index=idx)
+        >>> out = unsort_within_entities(df, seed=0)
+        >>> list(out.index.get_level_values('entity'))
+        ['A', 'A', 'A', 'B', 'B', 'B']
+        >>> out.index.get_level_values('date')[:3].is_monotonic_increasing
+        False
+    """
+    # Cas limite : panel trié par entité mais pas par date
+    if not isinstance(df.index, pd.MultiIndex):
+        raise TypeError("unsort_within_entities requires a MultiIndex (panel data)")
+    n_levels = df.index.nlevels - 1
+    entity_rows = list(zip(*(df.index.get_level_values(i) for i in range(n_levels))))
+    entity_rank = pd.factorize(pd.Series(entity_rows, dtype=object))[0]
+    rng = np.random.default_rng(seed)
+    positions = []
+    for rank in range(entity_rank.max() + 1 if len(entity_rank) else 0):
+        rows = np.flatnonzero(entity_rank == rank)
+        permutation = rng.permutation(len(rows))
+        # Une permutation identité laisserait l'entité triée : on l'inverse
+        if len(rows) > 1 and (permutation == np.arange(len(rows))).all():
+            permutation = permutation[::-1]
+        positions.append(rows[permutation])
+    order = np.concatenate(positions) if positions else np.array([], dtype=int)
+    return df.iloc[order].copy()
+
+
+def with_single_observation_entity(
+    df: Union[pd.DataFrame, pd.Series], entity: object
+) -> Union[pd.DataFrame, pd.Series]:
+    """Keep a single row (the first one) for one entity of a panel.
+
+    Edge case: an entity too short to carry any frequency, any split or any
+    window, next to entities with a normal history.
+
+    Args:
+        df: Panel data with a ``MultiIndex`` (entity levels first, time last).
+        entity: Entity key to reduce: a scalar for a single entity level, a
+            tuple otherwise.
+
+    Returns:
+        A copy of ``df`` where ``entity`` keeps only its first row; the other
+        entities and the row order are unchanged.
+
+    Raises:
+        TypeError: If ``df`` does not have a ``MultiIndex``.
+        ValueError: If ``entity`` does not have one label per entity level.
+        KeyError: If ``entity`` matches no row.
+
+    Examples:
+        >>> import pandas as pd
+        >>> idx = pd.MultiIndex.from_product([['A', 'B'], range(3)], names=['entity', 'date'])
+        >>> df = pd.DataFrame({'v': range(6)}, index=idx)
+        >>> list(with_single_observation_entity(df, 'A').index)
+        [('A', 0), ('B', 0), ('B', 1), ('B', 2)]
+    """
+    # Cas limite : entité réduite à une observation, à côté d'entités normales
+    mask = _entity_row_mask(df, entity)
+    # Première ligne de l'entité, dans l'ordre des données
+    first_row = np.flatnonzero(mask)[0]
+    keep = ~mask
+    keep[first_row] = True
+    return df[keep].copy()
+
+
+def truncate_entity(
+    df: Union[pd.DataFrame, pd.Series], entity: object, end: object
+) -> Union[pd.DataFrame, pd.Series]:
+    """Drop the rows of one entity dated after ``end``.
+
+    Edge case: an entity whose history stops before the others, hence absent
+    from the last folds of a time split or from the last windows of a
+    transformation.
+
+    Args:
+        df: Panel data with a ``MultiIndex`` (entity levels first, time last).
+        entity: Entity key to truncate: a scalar for a single entity level, a
+            tuple otherwise.
+        end: Last date kept for ``entity`` (inclusive); anything accepted by
+            ``pd.Timestamp``, or by ``pd.Period`` for a ``PeriodIndex``.
+
+    Returns:
+        A copy of ``df`` without the rows of ``entity`` dated after ``end``;
+        the other entities and the row order are unchanged.
+
+    Raises:
+        TypeError: If ``df`` does not have a ``MultiIndex``.
+        ValueError: If ``entity`` does not have one label per entity level.
+        KeyError: If ``entity`` matches no row.
+
+    Examples:
+        >>> import pandas as pd
+        >>> dates = pd.date_range('2020-01-01', periods=3, freq='MS')
+        >>> idx = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+        >>> df = pd.DataFrame({'v': range(6)}, index=idx)
+        >>> len(truncate_entity(df, 'A', '2020-02-01'))
+        5
+    """
+    # Cas limite : entité dont l'historique s'arrête avant celui des autres
+    mask = _entity_row_mask(df, entity)
+    dates = df.index.get_level_values(-1)
+    # Borne exprimée dans le type des dates du niveau temporel
+    if isinstance(dates, pd.PeriodIndex):
+        limit = pd.Period(end, freq=dates.freq)
+    elif isinstance(dates, pd.DatetimeIndex):
+        limit = pd.Timestamp(end)
+    else:
+        limit = end
+    keep = ~(mask & np.asarray(dates > limit))
+    return df[keep].copy()

@@ -531,3 +531,64 @@ class TestDatesOfAnArrayOutput:
         transformer = PanelwiseTransformer(StandardScaler()).fit(panel)
         restored = transformer.inverse_transform(transformer.transform(panel))
         pd.testing.assert_frame_equal(restored, panel)
+
+
+class _RecordingScaler(StandardScaler):
+    """Scaler remembering the index of the target it was fitted with."""
+
+    def fit(self, X, y=None, sample_weight=None):
+        """Fit like ``StandardScaler`` and keep the target index."""
+        self.target_index_ = None if y is None else y.index
+        return super().fit(X, y, sample_weight)
+
+
+class TestEntityBlocksOfIndexedPanel:
+    """Entities held in the index are cut into date-indexed blocks, in order of appearance."""
+
+    @pytest.fixture
+    def panel(self) -> pd.DataFrame:
+        """Entity B listed before A, two entity levels (region, country), three months."""
+        dates = pd.date_range('2024-01-31', periods=3, freq='ME')
+        index = pd.MultiIndex.from_tuples(
+            [(region, country, date)
+             for region, country in [('EU', 'B'), ('EU', 'A')] for date in dates],
+            names=['region', 'country', 'date'],
+        )
+        return pd.DataFrame({'v': [1.0, 2.0, 3.0, 10.0, 20.0, 30.0]}, index=index)
+
+    def test_transformers_follow_the_order_of_the_data(self, panel):
+        """The fitted transformers are listed like the entities appear, not sorted."""
+        transformer = PanelwiseTransformer(StandardScaler(), validate_input=False).fit(panel)
+        assert list(transformer.transformers_) == [('EU', 'B'), ('EU', 'A')]
+
+    def test_number_of_entities(self, panel):
+        """``entities_`` counts the entities of the index."""
+        assert PanelwiseTransformer(StandardScaler(), validate_input=False).fit(panel).entities_ == 2
+
+    def test_output_keeps_the_level_names_and_the_row_order(self, panel):
+        """Two entity levels: the rebuilt index is the input index."""
+        out = PanelwiseTransformer(StandardScaler(), validate_input=False).fit(panel).transform(panel)
+        pd.testing.assert_index_equal(out.index, panel.index)
+
+    @pytest.mark.parametrize('key', ['A', ('A',)], ids=['scalar', 'tuple'])
+    def test_entity_transformer_is_found_with_either_notation(self, key):
+        """``get_entity_transformer`` normalizes the key like the rest of the package."""
+        dates = pd.date_range('2024-01-31', periods=2, freq='ME')
+        index = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
+        transformer = PanelwiseTransformer(StandardScaler(), validate_input=False).fit(pd.DataFrame({'v': [1.0, 2, 3, 5]}, index=index))
+        assert transformer.get_entity_transformer(key) is transformer.transformers_[('A',)]
+
+    def test_target_is_cut_like_the_data(self, panel):
+        """Each entity transformer receives the target of its own rows, indexed by date."""
+        y = pd.Series(range(6), index=panel.index)
+        transformer = PanelwiseTransformer(_RecordingScaler(), validate_input=False).fit(panel, y)
+        recorded = transformer.get_entity_transformer(('EU', 'A')).target_index_
+        pd.testing.assert_index_equal(recorded, panel.index[3:].droplevel([0, 1]))
+
+    def test_missing_entity_label_is_refused(self, panel):
+        """Rows whose entity label is missing would be dropped silently: the fit refuses them."""
+        index = panel.index.to_frame(index=False)
+        index.loc[0, 'country'] = np.nan
+        broken = panel.set_axis(pd.MultiIndex.from_frame(index))
+        with pytest.raises(ValueError, match='must not be missing'):
+            PanelwiseTransformer(StandardScaler(), validate_input=False).fit(broken)

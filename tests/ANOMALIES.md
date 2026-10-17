@@ -3732,7 +3732,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Tests** : `tests/unit/frequency/covariate_materializer/test_classification.py::TestStageBindingResolution`
   (liaison unanime ; liaison discordante, sous `'model'` ; clés scalaires normalisées), `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : clés scalaires normalisées
-- **Correction** : `_stage_frequency` résout comme `StageScaler._stage_freq_for` : entrée propre, puis liaison **unanime** — aux alias de position près, une seule entrée comprise — valant pour tout le panel, sinon `None`. `_check_stage_coverage` lève une `ValueError` nommant les entités de la grille qu'une liaison discordante ne nomme pas, dans `decide_ways` et `_produce_column` (donc `materialize`, `stage_frame`, `interpolate_column`), avant toute lecture des registres. `_normalized_keys` normalise les clés des liaisons par entité (`detected_frequencies`, `stage_freq`) : `'FR'` vaut `('FR',)`, comme l'argument `entity` des méthodes publiques. Corollaire : sous `record=True`, plus aucune cellule n'est enregistrée avec une fréquence de production `None` (entité non liée). Même normalisation dans `StageScaler._freq_for` (arbitrage de l'auteur, 2026-10-12), par la fonction partagée `tsforecast.panel.utils.normalize_entity_mapping`, que le matérialiseur utilise aussi. Tests : `tests/unit/frequency/covariate_materializer/test_classification.py::TestStageBindingResolution`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`, `tests/unit/frequency/test_stage_scaler.py::TestPerEntityFrequencies::test_plain_entity_keys_behave_like_tuple_keys`, `tests/unit/panel/test_utils.py::TestNormalizeEntityMapping`.
+- **Correction** : `_stage_frequency` résout comme `StageScaler._stage_freq_for` : entrée propre, puis liaison **unanime** — aux alias de position près, une seule entrée comprise — valant pour tout le panel, sinon `None`. `_check_stage_coverage` lève une `ValueError` nommant les entités de la grille qu'une liaison discordante ne nomme pas, dans `decide_ways` et `_produce_column` (donc `materialize`, `stage_frame`, `interpolate_column`), avant toute lecture des registres. `_normalized_keys` normalise les clés des liaisons par entité (`detected_frequencies`, `stage_freq`) : `'FR'` vaut `('FR',)`, comme l'argument `entity` des méthodes publiques. Corollaire : sous `record=True`, plus aucune cellule n'est enregistrée avec une fréquence de production `None` (entité non liée). Même normalisation dans `StageScaler._freq_for` (arbitrage de l'auteur, 2026-10-12), par la fonction partagée `tsforecast.panel.utils.normalize_entity_mapping`, que le matérialiseur utilise aussi. Tests : `tests/unit/frequency/covariate_materializer/test_classification.py::TestStageBindingResolution`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`, `tests/unit/frequency/test_stage_scaler.py::TestPerEntityFrequencies::test_plain_entity_keys_behave_like_tuple_keys`, `tests/unit/panel/utils/test_entity_keys.py::TestNormalizeEntityMapping`.
 
 ### ANO-FREQ-038 — `decide_ways` : les égalités de rang sont départagées par l'ordre des entités
 - **Type** : [SPEC] code ≠ spec
@@ -5857,6 +5857,26 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ## PANEL
 
+### ANO-PANEL-007 — Quatre fonctions publiques de `panel/utils.py` absentes de `tsforecast.panel.__all__`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/__init__.py` ; `tsforecast/panel/utils.py::detect_panel_structure`,
+  `::extract_time_series_from_multiindex`, `::iter_entity_blocks`, `::build_panel_index`
+- **Sévérité** : mineure
+- **Observé** : ces quatre fonctions n'ont pas de préfixe `_` mais ne sont ni importées ni listées dans `__all__` du
+  paquet : `from tsforecast.panel import iter_entity_blocks` lève `ImportError`. Elles sont pourtant utilisées par
+  `frequency`, `utils/frequency/detector.py` et `frequency/provenance.py`, qui les importent depuis
+  `tsforecast.panel.utils`.
+- **Attendu** : décision de l'auteur (2026-10-16) : toute fonction de `panel/utils.py` sans préfixe `_` est
+  publique, donc exportée comme les onze autres.
+- **Reproduction** :
+  ```python
+  import tsforecast.panel as panel
+  'iter_entity_blocks' in panel.__all__    # False
+  ```
+- **Test** : `tests/unit/panel/utils/test_structure.py::TestPublicExports` (15 cas, une par fonction publique, découverte par introspection)
+- **Correctif** : décision de l'auteur : les quatre fonctions rejoignent `panel/__init__.py` (`import` et `__all__`).
+- **Statut** : corrigée (2026-10-17)
+
 ### ANO-PANEL-009 — Sortie en tableau : le niveau des dates remplacé par des positions
 - **Type** : [CODE] comportement
 - **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer._reconstruct_entity_dataframe` (appelée par
@@ -5878,5 +5898,197 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   l'entité et l'applique à un tableau de même nombre de lignes (un tableau d'une autre longueur garde des positions).
 - **Test** : `tests/unit/panel/test_transformers.py::TestDatesOfAnArrayOutput` (4 tests)
 - **Statut** : corrigée (2026-10-16)
+
+### ANO-PANEL-010 — `normalize_entity_key` renvoie une clé non hachable pour une liste
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/utils.py::normalize_entity_key`
+- **Sévérité** : mineure
+- **Observé** : `normalize_entity_key(['FR'])` renvoie `(['FR'],)` : une liste n'est pas un tuple, elle est donc traitée
+  comme un scalaire et emballée. Le résultat n'est pas hachable ; l'erreur n'apparaît qu'à l'usage
+  (`TypeError: unhashable type: 'list'` dans `normalize_entity_mapping`, un dictionnaire ou un `set`), loin de la cause.
+- **Attendu** : la docstring promet « Entity key (scalar or tuple) » : une liste est hors contrat, mais la fonction
+  qui sert de point de passage des clés d'entité ne doit jamais rendre une clé inutilisable. Soit la liste est
+  convertie en tuple, soit une `TypeError` explicite est levée.
+- **Reproduction** :
+  ```python
+  key = normalize_entity_key(['FR'])   # (['FR'],)
+  hash(key)                            # TypeError: unhashable type: 'list'
+  ```
+- **Test** : `tests/unit/panel/utils/test_entity_keys.py::TestNormalizeEntityKey::test_list_is_read_as_the_tuple_of_its_labels`, `::test_unhashable_key_is_refused`, `::test_result_is_hashable`
+- **Correctif** : une liste est lue comme le tuple de ses étiquettes (clé issue d'un JSON ou d'un YAML) ; toute autre clé non hachable lève `TypeError('Entity key must be hashable…')`.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-011 — `detect_panel_structure` rend un `FrozenList` immuable, et la conversion en liste ne s'exécute jamais
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/utils.py::detect_panel_structure`
+- **Sévérité** : cosmétique
+- **Observé** : sur détection automatique, `panel_cols_final` est `df.index.names[:-1]`, un `pandas.FrozenList`. Comme
+  `FrozenList` hérite de `list`, le test `isinstance(..., list)` qui devait déclencher `list(panel_cols_final)` est
+  toujours vrai : la conversion est du code mort (seule ligne du module non couverte). La valeur rendue est donc
+  immuable (`append` lève `TypeError`) alors que la docstring annonce « List of detected panel columns » et que
+  l'autre branche (`panel_cols` fourni) rend la liste de l'appelant.
+- **Attendu** : une `list` ordinaire dans tous les cas, ou une docstring qui annonce une séquence.
+- **Reproduction** :
+  ```python
+  cols, _ = detect_panel_structure(panel_df, None)
+  type(cols)    # pandas.core.indexes.frozen.FrozenList
+  ```
+- **Test** : `tests/unit/panel/utils/test_structure.py::TestDetectPanelStructure::test_detected_columns_are_a_plain_list`
+- **Correctif** : `detect_panel_structure` rend `list(df.index.names[:-1])`, une liste ordinaire neuve ; la branche morte est supprimée.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-012 — Docstring de `extract_time_series_from_multiindex` muette sur le nom perdu et les dates répétées
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/panel/utils.py::extract_time_series_from_multiindex`
+- **Sévérité** : mineure
+- **Observé** : la docstring promet une « simple time series with only the time index ». Le code ne garde que le
+  dernier niveau : (1) le nom de la Series est perdu (`name` vaut `None`) ; (2) avec plusieurs entités, chaque date
+  est répétée une fois par entité et l'index n'est pas unique, sans aucun contrôle (l'appelant, `FrequencyDetector`,
+  lui passe un seul groupe) ; (3) une entrée à un seul niveau est acceptée, un `DataFrame` est refusé
+  (`ValueError: Data must be 1-dimensional`). Le test suit le code.
+- **Attendu** : docstring qui dise que la fonction n'agrège ni ne sépare les entités (une entité par appel), que le
+  nom n'est pas conservé et que seule une Series est acceptée. Le nom perdu relève, si l'auteur le souhaite, d'un
+  correctif de code.
+- **Test** : `tests/unit/panel/utils/test_structure.py::TestExtractTimeSeriesFromMultiindex` (`test_name_of_the_series_is_kept`, `test_dataframe_is_refused`)
+- **Correctif** : docstring complétée (une entité par appel, dates répétées, `Raises`, `Examples`) ; le code conserve désormais le nom de la Series et refuse explicitement un `DataFrame` (`ValueError`).
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-013 — `get_unique_panel_entities` : `IndexError` annoncée, `ValueError` levée
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/panel/utils.py::get_unique_panel_entities`
+- **Sévérité** : mineure
+- **Observé** : la docstring annonce « Raises: IndexError: If panel_data has fewer than 2 index levels ». Sur un index
+  simple, `index.droplevel(-1)` lève `ValueError: Cannot remove 1 levels from an index with 1 levels: at least one
+  level must be left` ; un `MultiIndex` à un niveau lève la même erreur. Aucun `IndexError`.
+- **Attendu** : `Raises: ValueError`, ou une `ValueError` explicite écrite par la fonction. Le test suit le code.
+- **Reproduction** : `get_unique_panel_entities(pd.DataFrame({'x': [1, 2]}, index=pd.date_range('2023', periods=2)))`
+- **Test** : `tests/unit/panel/utils/test_structure.py::TestGetUniquePanelEntities::test_simple_index_is_refused`, `::test_one_level_multiindex_is_refused`
+- **Correctif** : `get_unique_panel_entities` lève une `ValueError` explicite (« at least 2 levels ») ; `Raises` corrigé.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-014 — Entité à identifiant manquant : listée mais introuvable, ses lignes sortent de tous les blocs
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/utils.py::get_unique_panel_entities`, `::get_entity_mask`, `::iter_entity_blocks`
+- **Sévérité** : mineure (l'identifiant manquant est déjà signalé en amont par un avertissement, ANO-BASE-011)
+- **Observé** : `get_unique_panel_entities` renvoie `(nan,)` pour des lignes dont l'étiquette d'entité est manquante,
+  mais `get_entity_mask(data, (nan,))` ne sélectionne rien (`nan != nan`). `iter_entity_blocks` produit donc un bloc
+  vide pour cette entité et les lignes n'appartiennent à aucun bloc : elles disparaissent sans erreur ni avertissement
+  de tout traitement par entité.
+- **Attendu** : soit chaque ligne appartient à un bloc (comparaison qui traite les manquants comme égaux), soit
+  l'identifiant manquant est refusé avec une erreur explicite.
+- **Reproduction** :
+  ```python
+  index = pd.MultiIndex.from_arrays([['A', 'A', np.nan, np.nan], dates.tolist() * 2])
+  data = pd.Series(range(4), index=index)
+  sum(mask.sum() for _, mask, _ in iter_entity_blocks(data))   # 2 lignes sur 4
+  ```
+- **Test** : `tests/unit/panel/utils/test_structure.py::TestGetUniquePanelEntities::test_missing_label_is_refused`, `tests/unit/panel/utils/test_blocks.py::TestIterEntityBlocks::test_rows_with_a_missing_entity_label_are_refused`, `::TestGetEntityMask::test_missing_label_in_the_key_is_refused`, `::TestBuildPanelIndex::test_missing_label_in_the_key_is_refused`, `tests/unit/panel/test_transformers.py::TestEntityBlocksOfIndexedPanel::test_missing_entity_label_is_refused`
+- **Correctif** : décision de l'auteur : une erreur. `get_unique_panel_entities` lève une `ValueError` (« Entity labels must not be missing ») pour un NaN / None dans un niveau d'entité ; `iter_entity_blocks` et `PanelwiseTransformer` en héritent ; `get_entity_mask` et `build_panel_index` refusent une clé portant une étiquette manquante.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-015 — `get_entity_mask` et `build_panel_index` lisent une clé scalaire caractère par caractère
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/utils.py::get_entity_mask`, `::build_panel_index`
+- **Sévérité** : mineure
+- **Observé** : la docstring demande un tuple, mais tout le reste du module accepte `'FR'` comme `('FR',)`
+  (`normalize_entity_key`, `normalize_entity_mapping`, `get_entity_target_frequency`). Avec la clé `'FR'` :
+  `get_entity_mask` compare le premier niveau à `'F'` et ne sélectionne rien, sans erreur ; `build_panel_index`
+  produit un index à deux niveaux d'entité `('F', 'R', date)`. Avec la clé entière `10`, les deux lèvent
+  `TypeError` (`'int' object is not subscriptable` / `is not iterable`).
+- **Attendu** : la clé scalaire est équivalente à son tuple (appel à `normalize_entity_key`), comme dans les fonctions
+  voisines ; ou une erreur explicite.
+- **Reproduction** :
+  ```python
+  get_entity_mask(panel, 'FR').any()                  # False, alors que get_entity_mask(panel, ('FR',)).any() est True
+  build_panel_index('FR', dates).nlevels              # 3 au lieu de 2
+  ```
+- **Test** : `tests/unit/panel/utils/test_blocks.py::TestGetEntityMask::test_scalar_key_is_the_same_entity_as_its_tuple`, `::TestBuildPanelIndex::test_scalar_key_is_the_same_entity_as_its_tuple` (chaîne, entier)
+- **Correctif** : décision de l'auteur : `get_entity_mask` et `build_panel_index` normalisent la clé d'abord (`normalize_entity_key`) : `'FR'` désigne l'entité à un niveau `('FR',)` et crée un seul niveau d'entité.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-016 — `get_entity_mask` : le nombre d'étiquettes de la clé n'est pas contrôlé
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/utils.py::get_entity_mask`
+- **Sévérité** : à arbitrer
+- **Observé** : sur un index à trois niveaux (deux niveaux d'entité), la clé `('EU',)` lève `IndexError: tuple index
+  out of range` et la clé `('EU', 'DE', 'autre')` sélectionne la même entité que `('EU', 'DE')` (l'étiquette
+  excédentaire est ignorée sans erreur). La clé vide `()` sur un panel lève aussi `IndexError`, alors que sur une
+  série temporelle (aucun niveau d'entité) toute clé sélectionne toutes les lignes. La docstring ne dit rien de
+  l'arité attendue ni des erreurs levées.
+- **Attendu** : à trancher : une `ValueError` explicite quand le nombre d'étiquettes diffère du nombre de niveaux
+  d'entité, ou comportement actuel documenté. Comportement actuel épinglé.
+- **Reproduction** : `get_entity_mask(panel_3_levels, ('EU',))   # IndexError`
+- **Test** : `tests/unit/panel/utils/test_blocks.py::TestGetEntityMask::test_key_with_the_wrong_number_of_labels_is_refused`, `::test_empty_key_is_refused_on_a_panel`, `::test_time_series_has_the_empty_entity_only`
+- **Correctif** : arité contrôlée : une clé doit porter une étiquette par niveau d'entité, sinon `ValueError` explicite (« Entity key … has N label(s), the data has M entity level(s) ») ; une série temporelle n'a que l'entité `()`.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-017 — Clé d'entité scalaire et tuple en conflit : trois règles de départage différentes
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/utils.py::normalize_entity_mapping`, `::get_entity_target_frequency`,
+  `::resolve_entity_column_frequencies`
+- **Sévérité** : à arbitrer
+- **Observé** : quand un dictionnaire déclare la même entité sous deux notations (`{'FR': 'Q', ('FR',): 'M'}`),
+  `normalize_entity_mapping` retient **la dernière clé listée** (documenté), alors que
+  `get_entity_target_frequency` et `resolve_entity_column_frequencies` retiennent **la forme tuple**, quel que soit
+  l'ordre (`{'FR': 'M', ('FR',): 'Q'}` donne `'Q'`, comme `{('FR',): 'Q', 'FR': 'M'}`). Un dictionnaire passé
+  d'abord à `normalize_entity_mapping` puis à `resolve_entity_column_frequencies` n'a pas la même lecture que passé
+  directement. Dans `get_entity_target_frequency`, une valeur `None` est aussi lue comme « non déclarée ». Les
+  docstrings des deux fonctions de fréquence ne décrivent pas ces règles.
+- **Attendu** : à trancher : une règle unique (refuser le conflit, ou dernière clé, ou tuple d'abord) appliquée
+  partout, et documentée. Comportements actuels épinglés.
+- **Reproduction** :
+  ```python
+  normalize_entity_mapping({'FR': 'M', ('FR',): 'Q'})                                      # {('FR',): 'Q'} (dernier)
+  normalize_entity_mapping({('FR',): 'Q', 'FR': 'M'})                                      # {('FR',): 'M'} (dernier)
+  get_entity_target_frequency(('FR',), {('FR',): 'Q', 'FR': 'M'})                          # 'Q' (tuple d'abord)
+  get_entity_target_frequency(('FR',), {'FR': 'M', ('FR',): 'Q'})                          # 'Q' (tuple d'abord)
+  ```
+- **Test** : `tests/unit/panel/utils/test_entity_keys.py::TestNormalizeEntityMapping::test_conflicting_notations_are_refused`, `tests/unit/panel/utils/test_frequencies.py::TestGetEntityTargetFrequency::test_both_notations_with_different_values_are_refused`, `::TestResolveEntityColumnFrequencies::test_both_notations_of_an_entity_with_different_values_are_refused`
+- **Correctif** : règle unique, partout : deux notations d'une même entité (`'FR'` et `('FR',)`) portant des valeurs **différentes** sont ambiguës et lèvent `ValueError('Conflicting values for entity …')` ; avec des valeurs égales elles forment une seule déclaration. `normalize_entity_mapping`, `get_entity_target_frequency` et `resolve_entity_column_frequencies` appliquent la même règle (une valeur `None` y compte comme non déclarée, sauf dans `normalize_entity_mapping`, générique) ; ces deux fonctions normalisent aussi l'entité demandée.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-018 — `extract_column_names` : ordre des colonnes dépendant du hachage des chaînes
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/utils.py::extract_column_names`
+- **Sévérité** : mineure
+- **Observé** : les noms sont collectés dans un `set` puis convertis en liste : l'ordre dépend du hachage des chaînes
+  (salé par processus) et change d'une exécution à l'autre. Les fonctions voisines (`group_keys_by_entity_and_variable`)
+  gardent l'ordre de première apparition. L'exemple de la docstring contourne le problème par `sorted(...)`.
+- **Attendu** : liste des noms distincts dans l'ordre de première apparition, reproductible d'un processus à l'autre.
+- **Reproduction** : `extract_column_names([('FR', n) for n in 'zyxwvutsrqpo'])   # ordre variable d'une exécution à l'autre`
+- **Test** : `tests/unit/panel/utils/test_entity_keys.py::TestExtractColumnNames::test_names_keep_their_order_of_first_appearance`, `::test_repeated_names_keep_the_position_of_their_first_appearance`
+- **Correctif** : noms collectés dans un `dict` : ordre de première apparition, reproductible.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-019 — Docstring de `resolve_entity_column_frequencies` : une clé scalaire désigne l'entité avant la colonne
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/panel/utils.py::resolve_entity_column_frequencies`
+- **Sévérité** : mineure
+- **Observé** : la docstring décrit les clés comme « an `(entity..., column)` tuple, an `(entity...)` tuple, or a plain
+  column name » : une clé scalaire serait donc toujours un nom de colonne. Le code lit d'abord une clé scalaire comme
+  l'entité (quand l'entité a un seul niveau), puis seulement comme une colonne : avec l'entité `('FR',)` et la clé
+  `{'FR': 'Q'}`, toutes les colonnes valent `'Q'`, y compris `cpi`, même si une colonne s'appelle `'FR'`. La clé
+  scalaire d'une entité à deux niveaux (`{'EU': 'Q'}` pour `('EU', 'FR')`) ne désigne rien. Le test suit le code.
+- **Attendu** : docstring qui énonce la précédence complète : `(entity..., column)` > `(entity...)` ou entité scalaire
+  (un seul niveau) > nom de colonne.
+- **Test** : `tests/unit/panel/utils/test_frequencies.py::TestResolveEntityColumnFrequencies::test_scalar_key_is_the_entity_before_being_a_column`,
+  `::test_scalar_key_of_another_entity_is_still_a_column_key`, `::test_scalar_key_does_not_cover_a_two_level_entity`
+- **Correctif** : docstring de `resolve_entity_column_frequencies` : précédence complète énoncée (paire > entité, tuple ou scalaire à un niveau > colonne), scalaire lu comme entité avant d'être lu comme colonne, section `Raises`.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-020 — `panel/utils.py` : sections `Examples` et `Raises` manquantes
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/panel/utils.py::detect_panel_structure`, `::extract_time_series_from_multiindex`,
+  `::normalize_entity_key`, `::get_unique_panel_entities`, `::get_entity_mask`, `::iter_entity_blocks`
+- **Sévérité** : cosmétique
+- **Observé** : les cinq premières fonctions n'ont pas de section `Examples:` (convention du projet : exemple en
+  doctest qui passe). `get_entity_mask` ne documente pas les `IndexError` levées sur une clé trop courte
+  (ANO-PANEL-016) ; `iter_entity_blocks` ne documente pas la `ValueError` levée par `is_panel=True` sur un index
+  simple. Les dix doctests existants du module passent.
+- **Attendu** : compléter les docstrings (recoupe la normalisation des doctests).
+- **Test** : `tests/unit/panel/utils/test_blocks.py::TestIterEntityBlocks::test_forcing_panel_on_a_simple_index_is_refused`,
+  `::TestGetEntityMask::test_key_shorter_than_the_entity_levels_is_refused`
+- **Correctif** : sections `Examples` et `Raises` ajoutées aux fonctions concernées (doctests : 20 passent).
+- **Statut** : corrigée (2026-10-17)
 
 ## XY

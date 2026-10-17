@@ -13,6 +13,8 @@ import pytest
 from tests.support.perturbations import (
     drop_entity,
     empty_like,
+    interleave_entities,
+    rename_entities,
     reverse_entities,
     shuffle_rows,
     single_observation,
@@ -21,8 +23,11 @@ from tests.support.perturbations import (
     to_period_start,
     to_period_start_by_column,
     to_three_level_index,
+    truncate_entity,
+    unsort_within_entities,
     with_duplicated_rows,
     with_index_names,
+    with_single_observation_entity,
     with_special_column_names,
 )
 
@@ -371,3 +376,240 @@ class TestEmptyLike:
         """The index name stays set despite the absence of rows."""
         empty = empty_like(small_timeseries)
         assert empty.index.name == small_timeseries.index.name
+
+
+@pytest.fixture
+def panel_3x3() -> pd.DataFrame:
+    """Three entities (B, A, C in this order), three monthly dates, values 0..8."""
+    dates = pd.date_range('2020-01-01', periods=3, freq='MS')
+    idx = pd.MultiIndex.from_product([['B', 'A', 'C'], dates], names=['entity', 'date'])
+    return pd.DataFrame({'v': range(9)}, index=idx)
+
+
+@pytest.fixture
+def panel_region() -> pd.DataFrame:
+    """Three-level panel (region, country, date): (EU, FR), (EU, DE), (AS, JP), 2 dates each."""
+    dates = pd.date_range('2020-01-01', periods=2, freq='MS')
+    keys = [('EU', 'FR'), ('EU', 'DE'), ('AS', 'JP')]
+    idx = pd.MultiIndex.from_tuples(
+        [(*key, date) for key in keys for date in dates], names=['region', 'country', 'date']
+    )
+    return pd.DataFrame({'v': range(6)}, index=idx)
+
+
+class TestRenameEntities:
+    """``rename_entities``: entity labels replaced, rows and level names kept."""
+
+    def test_scalar_labels_with_spaces_and_accents(self, panel_3x3: pd.DataFrame) -> None:
+        """Golden value: B -> 'Côte d'Ivoire' and C -> 'New York', A kept."""
+        renamed = rename_entities(panel_3x3, {'B': "Côte d'Ivoire", 'C': 'New York'})
+
+        labels = list(dict.fromkeys(renamed.index.get_level_values('entity')))
+        assert labels == ["Côte d'Ivoire", 'A', 'New York']
+
+    def test_integer_labels(self, panel_3x3: pd.DataFrame) -> None:
+        """Labels can become integers (the level is then integer-typed)."""
+        renamed = rename_entities(panel_3x3, {'B': 1, 'A': 2, 'C': 3})
+
+        assert list(dict.fromkeys(renamed.index.get_level_values('entity'))) == [1, 2, 3]
+
+    def test_rows_values_and_names_unchanged(self, panel_3x3: pd.DataFrame) -> None:
+        """Only the entity labels change: values, dates, order and names are kept."""
+        renamed = rename_entities(panel_3x3, {'A': 'Z'})
+
+        assert renamed['v'].tolist() == panel_3x3['v'].tolist()
+        assert renamed.index.names == panel_3x3.index.names
+        assert renamed.index.get_level_values('date').equals(panel_3x3.index.get_level_values('date'))
+
+    def test_tuple_keys_on_three_levels(self, panel_region: pd.DataFrame) -> None:
+        """A multi-level key is replaced as a whole by a tuple of the same arity."""
+        renamed = rename_entities(panel_region, {('EU', 'FR'): ('Zone euro', 'France')})
+
+        keys = list(dict.fromkeys(zip(
+            renamed.index.get_level_values('region'), renamed.index.get_level_values('country')
+        )))
+        assert keys == [('Zone euro', 'France'), ('EU', 'DE'), ('AS', 'JP')]
+
+    def test_input_is_not_mutated(self, panel_3x3: pd.DataFrame) -> None:
+        """The input panel keeps its labels."""
+        before = panel_3x3.copy()
+        rename_entities(panel_3x3, {'A': 'Z'})
+        pd.testing.assert_frame_equal(panel_3x3, before)
+
+    def test_unknown_entity_raises(self, panel_3x3: pd.DataFrame) -> None:
+        """A key matching no entity is a mistake of the test, not a silent no-op."""
+        with pytest.raises(KeyError):
+            rename_entities(panel_3x3, {'X': 'Y'})
+
+    def test_wrong_arity_raises(self, panel_region: pd.DataFrame) -> None:
+        """A new key must have one label per entity level."""
+        with pytest.raises(ValueError, match='expected 2'):
+            rename_entities(panel_region, {('EU', 'FR'): 'France'})
+
+    def test_merging_two_entities_raises(self, panel_3x3: pd.DataFrame) -> None:
+        """Two entities cannot receive the same label (the rename is a bijection)."""
+        with pytest.raises(ValueError, match='same new key'):
+            rename_entities(panel_3x3, {'A': 'C'})
+
+    def test_raises_on_non_multiindex(self, small_timeseries: pd.DataFrame) -> None:
+        """No notion of entity on a plain time series."""
+        with pytest.raises(TypeError):
+            rename_entities(small_timeseries, {'A': 'B'})
+
+
+class TestInterleaveEntities:
+    """``interleave_entities``: rows ordered by date, then by entity."""
+
+    def test_golden_order(self, panel_3x3: pd.DataFrame) -> None:
+        """Entities B, A, C over three dates: values 0..8 by entity become 0,3,6,1,4,7,2,5,8."""
+        assert interleave_entities(panel_3x3)['v'].tolist() == [0, 3, 6, 1, 4, 7, 2, 5, 8]
+
+    def test_entity_rows_are_no_longer_contiguous(self, panel_3x3: pd.DataFrame) -> None:
+        """No two consecutive rows belong to the same entity."""
+        entities = interleave_entities(panel_3x3).index.get_level_values('entity')
+        assert all(entities[i] != entities[i + 1] for i in range(len(entities) - 1))
+
+    def test_dates_are_non_decreasing(self, panel_3x3: pd.DataFrame) -> None:
+        """The date level is sorted."""
+        assert interleave_entities(panel_3x3).index.get_level_values('date').is_monotonic_increasing
+
+    def test_same_rows_as_input(self, panel_3x3: pd.DataFrame) -> None:
+        """No row lost or created: the rows are a permutation of the input."""
+        out = interleave_entities(panel_3x3)
+        assert sorted(out.index) == sorted(panel_3x3.index)
+        assert out.loc[out.index[0], 'v'] == panel_3x3.loc[out.index[0], 'v']
+
+    def test_three_level_entities(self, panel_region: pd.DataFrame) -> None:
+        """A three-level panel is interleaved entity key by entity key."""
+        out = interleave_entities(panel_region)
+        assert out['v'].tolist() == [0, 2, 4, 1, 3, 5]
+
+    def test_irregular_coverage_keeps_every_row(self, heterogeneous_coverage_panel: pd.DataFrame) -> None:
+        """Property on the realistic panel: same number of rows, sorted dates."""
+        out = interleave_entities(heterogeneous_coverage_panel)
+        assert len(out) == len(heterogeneous_coverage_panel)
+        assert out.index.get_level_values(-1).is_monotonic_increasing
+
+    def test_raises_on_non_multiindex(self, small_timeseries: pd.DataFrame) -> None:
+        """No notion of entity on a plain time series."""
+        with pytest.raises(TypeError):
+            interleave_entities(small_timeseries)
+
+
+class TestUnsortWithinEntities:
+    """``unsort_within_entities``: contiguous entity blocks, permuted dates."""
+
+    def test_entity_blocks_stay_contiguous_in_first_appearance_order(self, panel_3x3: pd.DataFrame) -> None:
+        """Entities B, A, C each keep their three consecutive rows."""
+        out = unsort_within_entities(panel_3x3, seed=3)
+        assert list(out.index.get_level_values('entity')) == list('BBBAAACCC')
+
+    def test_every_entity_is_out_of_date_order(self, panel_3x3: pd.DataFrame) -> None:
+        """Whatever the seed, no entity block is left sorted by date."""
+        for seed in range(20):
+            out = unsort_within_entities(panel_3x3, seed=seed)
+            for entity in 'ABC':
+                dates = out.loc[entity].index
+                assert not dates.is_monotonic_increasing
+
+    def test_rows_are_a_permutation_of_the_input(self, panel_3x3: pd.DataFrame) -> None:
+        """Index and values keep their pairing."""
+        out = unsort_within_entities(panel_3x3, seed=1)
+        pd.testing.assert_frame_equal(out.sort_index(), panel_3x3.sort_index())
+
+    def test_reproducible_with_same_seed(self, panel_3x3: pd.DataFrame) -> None:
+        """The same seed gives the same permutation."""
+        pd.testing.assert_frame_equal(
+            unsort_within_entities(panel_3x3, seed=5), unsort_within_entities(panel_3x3, seed=5)
+        )
+
+    def test_single_row_entity_is_untouched(self, panel_3x3: pd.DataFrame) -> None:
+        """An entity with one row has nothing to permute."""
+        panel = with_single_observation_entity(panel_3x3, 'A')
+        out = unsort_within_entities(panel, seed=0)
+        assert out.loc[['A']].equals(panel.loc[['A']])
+
+    def test_raises_on_non_multiindex(self, small_timeseries: pd.DataFrame) -> None:
+        """No notion of entity on a plain time series."""
+        with pytest.raises(TypeError):
+            unsort_within_entities(small_timeseries)
+
+
+class TestWithSingleObservationEntity:
+    """``with_single_observation_entity``: one entity reduced to its first row."""
+
+    def test_entity_keeps_only_its_first_row(self, panel_3x3: pd.DataFrame) -> None:
+        """Entity A (rows 3, 4, 5) keeps value 3, at its first date."""
+        out = with_single_observation_entity(panel_3x3, 'A')
+
+        assert out.loc[['A'], 'v'].tolist() == [3]
+        assert out.loc['A'].index[0] == pd.Timestamp('2020-01-01')
+
+    def test_other_entities_and_row_order_are_unchanged(self, panel_3x3: pd.DataFrame) -> None:
+        """Rows 0-2 (B) and 6-8 (C) remain, in the original order."""
+        out = with_single_observation_entity(panel_3x3, 'A')
+        assert out['v'].tolist() == [0, 1, 2, 3, 6, 7, 8]
+
+    def test_tuple_key_on_three_levels(self, panel_region: pd.DataFrame) -> None:
+        """A multi-level key selects one entity."""
+        out = with_single_observation_entity(panel_region, ('EU', 'DE'))
+        assert out['v'].tolist() == [0, 1, 2, 4, 5]
+
+    def test_unknown_entity_raises(self, panel_3x3: pd.DataFrame) -> None:
+        """An entity absent from the panel is a mistake of the test."""
+        with pytest.raises(KeyError):
+            with_single_observation_entity(panel_3x3, 'X')
+
+    def test_wrong_arity_raises(self, panel_region: pd.DataFrame) -> None:
+        """A scalar key does not designate an entity of a three-level panel."""
+        with pytest.raises(ValueError, match='expected 2'):
+            with_single_observation_entity(panel_region, 'EU')
+
+
+class TestTruncateEntity:
+    """``truncate_entity``: an entity whose history stops earlier than the others."""
+
+    def test_rows_after_end_are_dropped(self, panel_3x3: pd.DataFrame) -> None:
+        """Entity A keeps January and February; B and C keep their three dates."""
+        out = truncate_entity(panel_3x3, 'A', '2020-02-01')
+
+        assert out.loc['A'].index.tolist() == [pd.Timestamp('2020-01-01'), pd.Timestamp('2020-02-01')]
+        assert out['v'].tolist() == [0, 1, 2, 3, 4, 6, 7, 8]
+
+    def test_end_date_is_inclusive(self, panel_3x3: pd.DataFrame) -> None:
+        """A row dated exactly ``end`` is kept."""
+        out = truncate_entity(panel_3x3, 'C', pd.Timestamp('2020-03-01'))
+        assert len(out) == len(panel_3x3)
+
+    def test_end_before_first_date_removes_the_entity(self, panel_3x3: pd.DataFrame) -> None:
+        """The entity is then absent from the result."""
+        out = truncate_entity(panel_3x3, 'A', '2019-12-31')
+        assert list(dict.fromkeys(out.index.get_level_values('entity'))) == ['B', 'C']
+
+    def test_period_index(self, panel_3x3: pd.DataFrame) -> None:
+        """The bound is read in the period type of the date level."""
+        panel = to_period_index(panel_3x3)
+        out = truncate_entity(panel, 'A', '2020-02')
+        assert out.loc['A'].index.tolist() == [pd.Period('2020-01', 'M'), pd.Period('2020-02', 'M')]
+
+    def test_tuple_key_on_three_levels(self, panel_region: pd.DataFrame) -> None:
+        """A multi-level key truncates one entity only."""
+        out = truncate_entity(panel_region, ('AS', 'JP'), '2020-01-01')
+        assert out['v'].tolist() == [0, 1, 2, 3, 4]
+
+    def test_unknown_entity_raises(self, panel_3x3: pd.DataFrame) -> None:
+        """An entity absent from the panel is a mistake of the test."""
+        with pytest.raises(KeyError):
+            truncate_entity(panel_3x3, 'X', '2020-01-01')
+
+    def test_realistic_panel_entity_stops_early(self, heterogeneous_coverage_panel: pd.DataFrame) -> None:
+        """Property on the realistic panel: the truncated entity ends at ``end``, the others do not."""
+        panel = heterogeneous_coverage_panel
+        entity = panel.index.get_level_values(0)[0]
+        out = truncate_entity(panel, entity, '2020-12-31')
+
+        assert out.loc[entity].index.max() <= pd.Timestamp('2020-12-31')
+        assert len(out) < len(panel)
+        pd.testing.assert_frame_equal(
+            out.drop(index=entity, level=0), panel.drop(index=entity, level=0)
+        )

@@ -8,7 +8,7 @@ parameterization via callable factories or entity_kwargs.
 # Modules de base
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, Union, List, Any, Callable, Tuple
+from typing import Dict, Iterator, Optional, Union, List, Any, Callable, Tuple
 import warnings
 # Joblib
 from joblib import Parallel, delayed
@@ -22,14 +22,15 @@ from ..base.transformers import (
     PanelTimeSeriesTransformer,
     ReversibleTransformerMixin
 )
-from .utils import normalize_entity_key
+from .utils import build_panel_index, is_panel_data, iter_entity_blocks, normalize_entity_key
 
-# Fonction auxuliaire d'itération sur les groupes d'entités dans l'ordre des données
+# Fonction auxiliaire d'itération sur les groupes d'entités dans l'ordre des données
 def _groups_in_order_of_appearance(entity_groups) -> List[Tuple[Any, pd.Index]]:
     """List the entity groups in the order of their first row in the data.
 
     ``GroupBy.groups`` is sorted by key: iterating over it would return the
-    entities sorted, not in the order of the input.
+    entities sorted, not in the order of the input. Used for entities held in
+    columns, where the blocks of ``iter_entity_blocks`` do not apply.
 
     Args:
         entity_groups: Pandas ``GroupBy`` object over the entity keys.
@@ -271,6 +272,54 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         # Sinon, c'est une factory si c'est callable
         return callable(self.transformer)
 
+    # Méthode auxiliaire de découpage des données en blocs d'entités
+    def _entity_blocks(self, X: pd.DataFrame) -> Iterator[Tuple[tuple, np.ndarray, Optional[pd.DataFrame]]]:
+        """Iterate over the entities of the data, in order of first appearance.
+
+        Panel data (entities in the ``MultiIndex``) is cut by
+        :func:`tsforecast.panel.utils.iter_entity_blocks`. Entities held in
+        columns are grouped by ``panel_cols``; their rows cannot be extracted as
+        a block indexed by date, hence the block is None.
+
+        Args:
+            X: Input data.
+
+        Yields:
+            Tuple ``(entity_key, mask, block)``: the normalized entity key, the
+            boolean mask of its rows in ``X`` and its rows indexed by date only
+            (None when the entities are held in columns).
+        """
+        # Entités portées par l'index : blocs datés fournis par l'utilitaire de panel
+        if is_panel_data(X):
+            yield from iter_entity_blocks(X, is_panel=True)
+            return
+        # Entités portées par des colonnes : groupes dans l'ordre d'apparition
+        for entity_key, group_idx in _groups_in_order_of_appearance(X.groupby(self.panel_cols)):
+            yield normalize_entity_key(entity_key), X.index.isin(group_idx), None
+
+    # Méthode auxiliaire d'extraction des colonnes à transformer d'un bloc d'entité
+    def _entity_data(self, block: Optional[pd.DataFrame], entity_key: tuple) -> pd.DataFrame:
+        """Select the columns to transform in the block of an entity.
+
+        Args:
+            block: Rows of the entity indexed by date, or None.
+            entity_key: Normalized entity key, for the error message.
+
+        Returns:
+            The block restricted to ``transform_columns_``.
+
+        Raises:
+            ValueError: If the block is None, i.e. the entities are held in
+                columns instead of index levels.
+        """
+        if block is None:
+            raise ValueError(
+                f"Cannot extract the rows of entity {entity_key}: the entities must be "
+                "levels of the index (set validate_input=True or index the data by "
+                "the panel columns and the dates)"
+            )
+        return block[self.transform_columns_]
+
     # Méthode auxiliaire d'entraînement du transformer
     def _fit(self, X: pd.DataFrame, y: Optional[Union[pd.Series, np.ndarray]] = None) -> None:
         """Fit a separate transformer for each panel entity.
@@ -294,14 +343,12 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
 
         # Détection du format des données (colonnes vs MultiIndex)
         # Après validation, les colonnes peuvent avoir été converties en index
-        self._has_multiindex = isinstance(X.index, pd.MultiIndex)
+        self._has_multiindex = is_panel_data(X)
 
         # Détermination des colonnes à transformer
         if self._has_multiindex:
             # Les colonnes panel sont dans l'index, on transforme toutes les colonnes
             self.transform_columns_ = list(X.columns)
-            # Récupération des entités depuis l'index
-            entity_level_indices = list(range(X.index.nlevels - 1))
         else:
             # Les colonnes panel sont dans le DataFrame
             exclude_cols = set(self.panel_cols)
@@ -319,50 +366,48 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         if y is not None and isinstance(y, np.ndarray):
             y = pd.Series(y, index=X.index)
 
-        # Groupement par entité
-        if self._has_multiindex:
-            # Groupement par les niveaux de l'index
-            entity_groups = X.groupby(level=entity_level_indices)
-        else:
-            entity_groups = X.groupby(self.panel_cols)
+        # Découpage par entité (dans l'ordre d'apparition des données)
+        blocks = list(self._entity_blocks(X))
+
+        # Blocs de y par entité, sur la même structure de panel que X
+        y_blocks = None
+        if y is not None:
+            y_blocks = {}
+            if self._has_multiindex:
+                y_blocks = {entity: block for entity, _, block in iter_entity_blocks(y)}
 
         # Extraction du nombre d'entités
-        self.entities_ = entity_groups.ngroups
+        self.entities_ = len(blocks)
 
         # Fit parallèle ou séquentiel
         if self.n_jobs == 1:
-            self._fit_sequential(entity_groups, X, y)
+            self._fit_sequential(blocks, y_blocks)
         else:
-            self._fit_parallel(entity_groups, X, y)
+            self._fit_parallel(blocks, y_blocks)
 
     # Méthode auxiliaire d'entraînement séquenciel des transformers
     def _fit_sequential(
         self,
-        entity_groups,
-        X: pd.DataFrame,
-        y: Optional[pd.Series]
+        blocks: List[Tuple[tuple, np.ndarray, Optional[pd.DataFrame]]],
+        y_blocks: Optional[Dict[tuple, Union[pd.Series, pd.DataFrame]]]
     ) -> None:
         """Fit transformers sequentially for each entity.
 
         Args:
-            entity_groups: GroupBy object grouping entities.
-            X: Complete input DataFrame.
-            y: Target variable aligned with X.
+            blocks: Entity blocks ``(entity_key, mask, block)`` of the input data.
+            y_blocks: Target block of each entity, or None without target.
         """
         # Parcours des entités
-        for entity_key, group_idx in entity_groups.groups.items():
-            # Normalisation de la clé en tuple
-            entity_key = normalize_entity_key(entity_key)
-
+        for entity_key, _, block in blocks:
             try:
                 # Création du transformer pour cette entité
                 entity_transformer = self._create_entity_transformer(entity_key)
 
                 # Extraction des données de l'entité
-                X_entity = X.loc[group_idx, self.transform_columns_].xs(entity_key)
+                X_entity = self._entity_data(block, entity_key)
 
                 # Extraction de y pour cette entité si fourni
-                y_entity = y.loc[group_idx].xs(entity_key) if y is not None else None
+                y_entity = y_blocks[entity_key] if y_blocks is not None else None
 
                 # Fit du transformer
                 entity_transformer.fit(X_entity, y_entity)
@@ -376,45 +421,43 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
     # Méthode auxiliaire d'entraînement parallèle des transformers
     def _fit_parallel(
         self,
-        entity_groups,
-        X: pd.DataFrame,
-        y: Optional[pd.Series]
+        blocks: List[Tuple[tuple, np.ndarray, Optional[pd.DataFrame]]],
+        y_blocks: Optional[Dict[tuple, Union[pd.Series, pd.DataFrame]]]
     ) -> None:
         """Fit transformers in parallel for each entity.
 
         Args:
-            entity_groups: GroupBy object grouping entities.
-            X: Complete input DataFrame.
-            y: Target variable aligned with X.
+            blocks: Entity blocks ``(entity_key, mask, block)`` of the input data.
+            y_blocks: Target block of each entity, or None without target.
         """
         # Référence à self pour la closure
         parent = self
 
-        def fit_single_entity(entity_key, group_idx) -> tuple:
+        def fit_single_entity(entity_key, X_entity, y_entity) -> tuple:
             """Fit a transformer for a single entity.
 
             Args:
-                entity_key: Entity identifier (scalar or tuple).
-                group_idx: Index locations for the entity group.
+                entity_key: Normalized entity key.
+                X_entity: Rows of the entity, indexed by date.
+                y_entity: Target of the entity, or None.
 
             Returns:
-                Tuple of (normalized_entity_key, fitted_transformer).
+                Tuple of (entity_key, fitted_transformer).
             """
-            # Normalisation de la clé de l'entité
-            entity_key = normalize_entity_key(entity_key)
             # Création du transformer pour cette entité
             entity_transformer = parent._create_entity_transformer(entity_key)
-            # Identification des observations afférentes au groupe
-            X_entity = X.loc[group_idx, parent.transform_columns_].xs(entity_key)
-            y_entity = y.loc[group_idx].xs(entity_key) if y is not None else None
             # Entrainement du transformer
             entity_transformer.fit(X_entity, y_entity)
             return entity_key, entity_transformer
 
         # Exécution parallèle
         results = Parallel(n_jobs=self.n_jobs)(
-            delayed(fit_single_entity)(entity_key, group_idx)
-            for entity_key, group_idx in entity_groups.groups.items()
+            delayed(fit_single_entity)(
+                entity_key,
+                self._entity_data(block, entity_key),
+                y_blocks[entity_key] if y_blocks is not None else None,
+            )
+            for entity_key, _, block in blocks
         )
 
         # Collecte des résultats
@@ -431,30 +474,17 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         Returns:
             Transformed data with same structure as input.
         """
-        # Détection du format des données
-        has_multiindex = isinstance(X.index, pd.MultiIndex)
-
-        # Groupement par entité
-        if has_multiindex:
-            entity_level_indices = list(range(X.index.nlevels - 1))
-            entity_groups = X.groupby(level=entity_level_indices)
-        else:
-            entity_groups = X.groupby(self.panel_cols)
-
         # Liste pour stocker les DataFrames transformés
         transformed_parts = []
 
-        # Parcours des entités
-        for entity_key, group_idx in _groups_in_order_of_appearance(entity_groups):
-            # Normalisation de la clé de l'entité
-            entity_key = normalize_entity_key(entity_key)
-
+        # Parcours des entités, dans l'ordre d'apparition des données
+        for entity_key, mask, block in self._entity_blocks(X):
             # Vérification que l'entité a été vue pendant le fit
             if entity_key not in self.transformers_:
                 # Gestion des identités inconnues
                 self._handle_unknown_entity(entity_key)
                 # Conservation des données non transformées
-                transformed_parts.append(X.loc[group_idx])
+                transformed_parts.append(X[mask])
                 continue
 
             try:
@@ -462,7 +492,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 entity_transformer = self.transformers_[entity_key]
 
                 # Extraction et transformation des données
-                X_entity = X.loc[group_idx, self.transform_columns_].xs(entity_key)
+                X_entity = self._entity_data(block, entity_key)
                 X_entity_transformed = entity_transformer.transform(X_entity)
 
                 # Reconstruction du DataFrame avec la structure panel et les dates de l'entité
@@ -479,7 +509,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 # Gestion de l'erreur de transformation
                 self._handle_entity_error(entity_key, e, "transforming")
                 # Conservation des données non transformées
-                transformed_parts.append(X.loc[group_idx])
+                transformed_parts.append(X[mask])
 
         # Concaténation des résultats
         X_result = pd.concat(transformed_parts, axis=0)
@@ -517,30 +547,17 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 "does not support inverse_transform"
             )
 
-        # Détection du format des données
-        has_multiindex = isinstance(X.index, pd.MultiIndex)
-
-        # Groupement par entité
-        if has_multiindex:
-            entity_level_indices = list(range(X.index.nlevels - 1))
-            entity_groups = X.groupby(level=entity_level_indices)
-        else:
-            entity_groups = X.groupby(self.panel_cols)
-
         # Liste pour stocker les DataFrames inversés
         inverted_parts = []
 
-        # Parcours des entités
-        for entity_key, group_idx in _groups_in_order_of_appearance(entity_groups):
-            # Normalisation de l'entité
-            entity_key = normalize_entity_key(entity_key)
-
+        # Parcours des entités, dans l'ordre d'apparition des données
+        for entity_key, mask, block in self._entity_blocks(X):
             # Renvoie une erreur si l'entité n'a pas de transformer associé
             if entity_key not in self.transformers_:
                 # Gestion des identités inconnues
                 self._handle_unknown_entity(entity_key)
                 # Conservation des données non transformées
-                inverted_parts.append(X.loc[group_idx])
+                inverted_parts.append(X[mask])
                 continue
 
             try:
@@ -548,7 +565,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 entity_transformer = self.transformers_[entity_key]
 
                 # Extraction des colonnes transformées et transformation inverse
-                X_entity = X.loc[group_idx, self.transform_columns_].xs(entity_key)
+                X_entity = self._entity_data(block, entity_key)
                 X_entity_inverted = entity_transformer.inverse_transform(X_entity)
 
                 # Reconstruction du DataFrame avec la structure panel et les dates de l'entité
@@ -566,7 +583,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
                 # Gestion de l'erreur de transformation
                 self._handle_entity_error(entity_key, e, "inverse_transforming")
                 # Conservation des données non transformées
-                inverted_parts.append(X.loc[group_idx])
+                inverted_parts.append(X[mask])
 
         # Concaténation et tri
         X_result = pd.concat(inverted_parts, axis=0)
@@ -623,20 +640,10 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
 
         # Reconstruction du MultiIndex avec l'entité
         if isinstance(original_index, pd.MultiIndex):
-            # Extraction des noms des niveaux panel
-            panel_level_names = list(original_index.names[:-1])
-            time_level_name = original_index.names[-1]
-
-            # Création du MultiIndex pour cette entité
-            n_rows = len(df_transformed)
-            entity_arrays = [[entity_key[i]] * n_rows for i in range(len(entity_key))]
-            time_array = df_transformed.index
-
-            new_index = pd.MultiIndex.from_arrays(
-                entity_arrays + [time_array],
-                names=panel_level_names + [time_level_name]
+            # Réattachement de l'entité aux dates de la sortie, avec les noms de niveaux d'origine
+            df_transformed.index = build_panel_index(
+                entity_key, df_transformed.index, names=original_index.names
             )
-            df_transformed.index = new_index
 
         return df_transformed
 
@@ -791,7 +798,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         # Vérification que les transformers sont estimés
         check_is_fitted(self, ['transformers_'])
         # Normalisation de l'entité
-        entity_key = self._normalize_entity_key(entity_key)
+        entity_key = normalize_entity_key(entity_key)
         # Renvoie une erreur si la clé n'est pas dans le dictionnaire de transformers
         if entity_key not in self.transformers_:
             raise KeyError(

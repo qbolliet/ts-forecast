@@ -1,3 +1,10 @@
+"""Helpers for panel data: entity keys, panel structure, entity selection and frequencies.
+
+A panel is a ``MultiIndex`` whose last level is the time and whose other levels identify the
+entity. Entity keys are normalized to tuples (``'FR'`` and ``('FR',)`` designate the same
+entity); the functions here detect the structure, list the entities, select their rows,
+rebuild panel indexes and resolve per-entity (and per-column) target frequencies.
+"""
 # Importation des modules
 # Modules de base
 import numpy as np
@@ -68,8 +75,18 @@ def detect_panel_structure(
 
     Returns:
         Tuple (panel_cols_final, panel_in_index) where:
-            - panel_cols_final: List of detected panel columns (None if no panel)
+            - panel_cols_final: List of detected panel columns (None if no panel).
+              Detected from the entity levels of the index, it is a new plain list.
             - panel_in_index: True if panel is in the index, False if in columns
+
+    Examples:
+        >>> idx = pd.MultiIndex.from_tuples(
+        ...     [('FR', '2023-01'), ('DE', '2023-01')], names=['country', 'date']
+        ... )
+        >>> detect_panel_structure(pd.DataFrame({'x': [1, 2]}, index=idx), None)
+        (['country'], True)
+        >>> detect_panel_structure(pd.DataFrame({'x': [1, 2]}), ['country'])
+        (['country'], False)
     """
     # Initialisation de l'indicateur que le panel est en index
     panel_in_index = False
@@ -79,11 +96,8 @@ def detect_panel_structure(
     # Auto-détection si panel_cols non spécifié et index MultiIndex
     if panel_cols is None and isinstance(df.index, pd.MultiIndex):
         if df.index.nlevels >= 2:
-            # Extraction des noms des niveaux de panel (tous sauf le dernier)
-            panel_cols_final = df.index.names[:-1]
-            # Conversion en liste si nécessaire
-            if not isinstance(panel_cols_final, list):
-                panel_cols_final = list(panel_cols_final)
+            # Noms des niveaux de panel (tous sauf le dernier), en liste ordinaire
+            panel_cols_final = list(df.index.names[:-1])
             panel_in_index = True
     # Vérification si panel_cols spécifiés sont dans l'index
     elif panel_cols is not None and isinstance(df.index, pd.MultiIndex):
@@ -97,30 +111,94 @@ def detect_panel_structure(
 def extract_time_series_from_multiindex(series: pd.Series) -> pd.Series:
     """Extract a simple time series from a series with MultiIndex.
 
+    Only the last level (the dates) is kept, so the function neither separates
+    nor aggregates entities: call it on the rows of one entity. With several
+    entities, every date appears once per entity and the index is not unique.
+
     Args:
-        series: Series with MultiIndex where the last level is the date.
+        series: Series with MultiIndex where the last level is the date. A
+            Series is required: a DataFrame is refused.
 
     Returns:
-        Simple time series with only the time index.
+        Time series carrying the values and the name of ``series``, indexed by
+        the dates only.
+
+    Raises:
+        ValueError: If ``series`` is two-dimensional.
+
+    Examples:
+        >>> idx = pd.MultiIndex.from_product([['FR'], pd.date_range('2023-01-01', periods=2)])
+        >>> extract_time_series_from_multiindex(pd.Series([1, 2], index=idx, name='gdp'))
+        2023-01-01    1
+        2023-01-02    2
+        Name: gdp, dtype: int64
     """
+    # Refus des données à deux dimensions : seule une Series porte un nom et des valeurs uniques
+    if series.ndim != 1:
+        raise ValueError(f"Data must be 1-dimensional (a Series), got {series.ndim} dimensions")
     # Extraction de l'index temporel (dernier niveau)
     time_index = series.index.get_level_values(-1)
     # Création d'une série temporelle simple avec l'index temporel
-    return pd.Series(series.values, index=time_index)
+    return pd.Series(series.values, index=time_index, name=series.name)
 
 # Fonction de normalisation de l'entité du panel
 def normalize_entity_key(key) -> tuple:
     """Normalize entity key to tuple format.
 
+    A scalar label designates a single-level entity: ``'FR'`` and ``('FR',)``
+    are the same key. A list is read as the tuple of its labels, as a key coming
+    from a JSON or YAML configuration is.
+
     Args:
-        key: Entity key (scalar or tuple).
+        key: Entity key (scalar, tuple or list of labels).
 
     Returns:
-        Normalized entity key as a tuple.
+        Normalized entity key as a hashable tuple.
+
+    Raises:
+        TypeError: If the key cannot be hashed (a dict, a set, an array, or a
+            tuple holding one), hence cannot index a dictionary.
+
+    Examples:
+        >>> normalize_entity_key('FR')
+        ('FR',)
+        >>> normalize_entity_key(('EU', 'FR'))
+        ('EU', 'FR')
+        >>> normalize_entity_key(['EU', 'FR'])
+        ('EU', 'FR')
     """
-    if isinstance(key, tuple):
-        return key
-    return (key,)
+    # Une liste désigne les étiquettes d'une entité à plusieurs niveaux
+    if isinstance(key, list):
+        key = tuple(key)
+    normalized = key if isinstance(key, tuple) else (key,)
+    # Une clé d'entité sert de clé de dictionnaire : elle doit être hachable
+    try:
+        hash(normalized)
+    except TypeError:
+        raise TypeError(f"Entity key must be hashable, got {key!r}") from None
+    return normalized
+
+# Fonction auxiliaire de comparaison de deux valeurs déclarées
+def _same_value(first: Any, second: Any) -> bool:
+    """Tell whether two declared values are equal, a failing comparison meaning no.
+
+    Args:
+        first: First value.
+        second: Second value.
+
+    Returns:
+        True if ``first == second`` evaluates to a true boolean.
+
+    Examples:
+        >>> _same_value('Q', 'Q'), _same_value('Q', 'M')
+        (True, False)
+        >>> _same_value(np.array([1, 2]), np.array([1, 2]))
+        False
+    """
+    try:
+        return bool(first == second)
+    except (TypeError, ValueError):
+        return False
 
 # Fonction de normalisation des clés d'une liaison par entité
 def normalize_entity_mapping(mapping: Mapping[Any, Any]) -> Dict[tuple, Any]:
@@ -136,16 +214,37 @@ def normalize_entity_mapping(mapping: Mapping[Any, Any]) -> Dict[tuple, Any]:
 
     Returns:
         A new dict holding the same values, keyed by tuples, in the order of
-        ``mapping``. When a scalar key and its tuple form are both present,
-        the one listed last wins.
+        ``mapping``. When a scalar key and its tuple form are both present with
+        equal values, they make a single binding.
+
+    Raises:
+        ValueError: If a scalar key and its tuple form (or two notations of the
+            same entity) hold different values: the binding is ambiguous.
+        TypeError: If a key cannot be hashed once normalized.
 
     Examples:
         >>> normalize_entity_mapping({'FR': 'Q', ('DE',): 'M'})
         {('FR',): 'Q', ('DE',): 'M'}
         >>> normalize_entity_mapping({('Zone euro', 'IT'): 'Y'})
         {('Zone euro', 'IT'): 'Y'}
+        >>> normalize_entity_mapping({'FR': 'Q', ('FR',): 'M'})
+        Traceback (most recent call last):
+        ...
+        ValueError: Conflicting values for entity ('FR',): 'Q' and 'M'
     """
-    return {normalize_entity_key(key): value for key, value in mapping.items()}
+    # Initialisation du dictionnaire normalisé
+    normalized: Dict[tuple, Any] = {}
+    # Parcours des couples clé-valeur du mapping
+    for key, value in mapping.items():
+        # Normalisation de l'entité
+        entity = normalize_entity_key(key)
+        # Deux notations d'une même entité doivent porter la même valeur
+        if entity in normalized and not _same_value(normalized[entity], value):
+            raise ValueError(
+                f"Conflicting values for entity {entity}: {normalized[entity]!r} and {value!r}"
+            )
+        normalized.setdefault(entity, value)
+    return normalized
 
 # Fonction de décomposition d'une clé de variable en (entité, colonne)
 def split_variable_key(key: Union[str, Tuple]) -> Tuple[tuple, str]:
@@ -193,21 +292,45 @@ def get_unique_panel_entities(panel_data: Union[pd.DataFrame, pd.Series]) -> Lis
             where entity levels come first, followed by a time/date level.
 
     Returns:
-        List of unique normalized entity keys as tuples.
+        List of unique normalized entity keys as tuples, in order of first
+        appearance.
 
     Raises:
-        IndexError: If panel_data has fewer than 2 index levels.
+        ValueError: If panel_data has fewer than 2 index levels, or if an entity
+            label is missing (NaN, None): such rows could be selected by no
+            entity.
+
+    Examples:
+        >>> idx = pd.MultiIndex.from_product(
+        ...     [['FR', 'DE'], pd.date_range('2023-01-01', periods=2)]
+        ... )
+        >>> get_unique_panel_entities(pd.Series([1, 2, 3, 4], index=idx))
+        [('FR',), ('DE',)]
     """
+    # Refus des données sans niveau d'entité
+    if not is_panel_data(panel_data):
+        raise ValueError(
+            "Panel data must have a MultiIndex with at least 2 levels "
+            f"(entity levels then time), got {panel_data.index.nlevels} level(s)"
+        )
+
     # Extraction des levels d'entité (tous sauf le dernier qui est la date)
     entity_index = panel_data.index.droplevel(-1)
-    
+
+    # Refus des étiquettes d'entité manquantes : aucun masque ne les sélectionne
+    for position in range(entity_index.nlevels):
+        if entity_index.get_level_values(position).isna().any():
+            name = entity_index.names[position]
+            raise ValueError(
+                f"Entity labels must not be missing, level "
+                f"{name if name is not None else position!r} holds missing values"
+            )
+
     # Récupération des combinaisons uniques d'entités
     unique_entities = entity_index.unique()
-    
-    # Normalisation des clés d'entité
-    normalized_entities = [normalize_entity_key(entity) for entity in unique_entities]
 
-    return normalized_entities
+    # Normalisation des clés d'entité
+    return [normalize_entity_key(entity) for entity in unique_entities]
 
 # Fonction de regroupement des variables par entité
 def group_keys_by_entity_and_variable(
@@ -255,54 +378,144 @@ def extract_column_names(
             (entity..., column) tuples).
 
     Returns:
-        List of unique column names.
+        List of unique column names, in order of first appearance.
 
     Examples:
-        >>> sorted(extract_column_names([('FR', 'gdp'), ('DE', 'gdp'), 'cpi']))
-        ['cpi', 'gdp']
+        >>> extract_column_names([('FR', 'gdp'), ('DE', 'gdp'), 'cpi'])
+        ['gdp', 'cpi']
     """
-    # Initialisation des noms de colonnes
-    column_names = set()
+    # Noms de colonnes distincts, dans l'ordre d'apparition (un dict garde l'ordre d'insertion)
+    column_names: Dict[Any, None] = {}
     # Parcours des clés
     for key in keys:
         # Cas où la clé est un tuple : extraction du dernier élément
-        if isinstance(key, tuple):
-            column_names.add(key[-1])
-        else:
-            column_names.add(key)
+        column_names[key[-1] if isinstance(key, tuple) else key] = None
     return list(column_names)
+
+# Fonction de normalisation d'une clé d'entité à sélectionner ou à créer
+def _normalize_present_entity_key(entity) -> tuple:
+    """Normalize an entity key and refuse missing labels.
+
+    A missing label (NaN, None) is equal to nothing, itself included: an entity
+    carrying one can neither be selected nor listed.
+
+    Args:
+        entity: Entity key (scalar or tuple).
+
+    Returns:
+        Normalized entity key as a tuple.
+
+    Raises:
+        ValueError: If a label of the key is missing.
+
+    Examples:
+        >>> _normalize_present_entity_key('FR')
+        ('FR',)
+        >>> _normalize_present_entity_key(('FR', float('nan')))
+        Traceback (most recent call last):
+        ...
+        ValueError: Entity key ('FR', nan) holds a missing label
+    """
+    # Clé associée à l'entité
+    key = normalize_entity_key(entity)
+    # Cas invalides (label nul comme clé)
+    if any(pd.api.types.is_scalar(label) and pd.isna(label) for label in key):
+        raise ValueError(f"Entity key {key} holds a missing label")
+    return key
 
 # Fonction de construction du masque des observations associées à une entité
 def get_entity_mask(
     X: Union[pd.DataFrame, pd.Series],
-    entity: tuple,
+    entity: Union[tuple, Any],
 ) -> np.ndarray:
     """Get a boolean mask for rows belonging to a specific entity.
 
+    The key is normalized first, so a scalar label selects a single-level
+    entity: ``'FR'`` and ``('FR',)`` give the same mask. A time series (simple
+    index) has no entity level: its only entity is ``()``, which selects every
+    row.
+
     Args:
         X: DataFrame or Series with MultiIndex (entity levels + time level).
-        entity: Entity tuple to filter on.
+        entity: Entity key, one label per entity level (scalar or tuple).
 
     Returns:
         Boolean numpy array of shape (len(X),).
+
+    Raises:
+        ValueError: If the number of labels of the key differs from the number
+            of entity levels of ``X``, or if a label of the key is missing.
+
+    Examples:
+        >>> idx = pd.MultiIndex.from_product(
+        ...     [['FR', 'DE'], pd.date_range('2023-01-01', periods=2)]
+        ... )
+        >>> get_entity_mask(pd.Series([1, 2, 3, 4], index=idx), 'DE')
+        array([False, False,  True,  True])
+        >>> get_entity_mask(pd.Series([1, 2, 3, 4], index=idx), ('FR', 'DE'))
+        Traceback (most recent call last):
+        ...
+        ValueError: Entity key ('FR', 'DE') has 2 label(s), the data has 1 entity level(s)
     """
+    # Normalisation de la clé (un scalaire désigne une entité à un niveau)
+    entity = _normalize_present_entity_key(entity)
     # Extraction de l'index
     index = X.index
     # Extraction des niveaux associés aux entités
     n_entity_levels = index.nlevels - 1
 
-    # Cas où les entités sont sur un seul niveau
-    if n_entity_levels == 1:
-        return (index.get_level_values(0) == entity[0])
-    else:
-        # Construction d'un masque pour les entités multi-niveaux
-        # Initialisation du masque
-        mask = np.ones(len(X), dtype=bool)
-        # Parcours des niveaux associés aux entités
-        for i in range(n_entity_levels):
-            # Mise à jour du masque
-            mask &= (index.get_level_values(i) == entity[i])
-        return mask
+    # Contrôle du nombre d'étiquettes de la clé
+    if len(entity) != n_entity_levels:
+        raise ValueError(
+            f"Entity key {entity} has {len(entity)} label(s), "
+            f"the data has {n_entity_levels} entity level(s)"
+        )
+
+    # Construction du masque : une égalité par niveau d'entité (tout vrai sans niveau)
+    mask = np.ones(len(X), dtype=bool)
+    for level, label in enumerate(entity):
+        mask &= (index.get_level_values(level) == label)
+    return mask
+
+# Fonction de lecture de la valeur déclarée pour une entité
+def _entity_binding(mapping: Mapping[Any, Any], entity: tuple) -> Any:
+    """Read the value a mapping declares for an entity, under any of its notations.
+
+    A single-level entity may be declared by its tuple (``('FR',)``) or by its
+    scalar label (``'FR'``). A value of None counts as undeclared.
+
+    Args:
+        mapping: Mapping whose keys may be entity tuples or scalar labels.
+        entity: Entity key as a tuple.
+
+    Returns:
+        The declared value, or None when the entity is not declared.
+
+    Raises:
+        ValueError: If both notations are declared with different values.
+
+    Examples:
+        >>> _entity_binding({'FR': 'M'}, ('FR',))
+        'M'
+        >>> _entity_binding({('EU', 'FR'): 'Q'}, ('EU', 'FR'))
+        'Q'
+        >>> _entity_binding({'FR': 'M', ('FR',): 'Q'}, ('FR',))
+        Traceback (most recent call last):
+        ...
+        ValueError: Conflicting values for entity ('FR',): 'Q' and 'M'
+    """
+    # Extraction de la valeur associée à l'entité
+    tuple_value = mapping.get(entity)
+    scalar_value = mapping.get(entity[0]) if len(entity) == 1 else None
+    # Valeur non renseignée
+    if tuple_value is None:
+        return scalar_value
+    # Valeur déjà présente pour l'entité
+    if scalar_value is not None and not _same_value(tuple_value, scalar_value):
+        raise ValueError(
+            f"Conflicting values for entity {entity}: {tuple_value!r} and {scalar_value!r}"
+        )
+    return tuple_value
 
 # Fonction d'extraction de la fréquence cible d'une entité
 def get_entity_target_frequency(
@@ -310,6 +523,10 @@ def get_entity_target_frequency(
     target_frequency: Union[str, Dict],
 ) -> str:
     """Get the target frequency for a specific entity.
+
+    A dict declares the entities by their tuple or, for a single-level entity,
+    by their scalar label (``{'FR': 'M'}`` is ``{('FR',): 'M'}``). A value of
+    None counts as undeclared.
 
     Args:
         entity: Entity tuple (e.g., ('FR',) or ('FR', 'GDP')).
@@ -320,7 +537,8 @@ def get_entity_target_frequency(
         Target frequency string for the entity.
 
     Raises:
-        ValueError: If no target frequency found for the entity.
+        ValueError: If no target frequency found for the entity, or if both
+            notations of the entity are declared with different frequencies.
 
     Examples:
         >>> get_entity_target_frequency(('FR',), 'M')
@@ -330,11 +548,8 @@ def get_entity_target_frequency(
     """
     # Cas où la fréquence cible est un dictionnaire
     if isinstance(target_frequency, dict):
-        # Extraction de la fréquence cible
-        freq = target_frequency.get(entity)
-        # Recherche en extrayant l'entité du tuple
-        if freq is None and len(entity) == 1:
-            freq = target_frequency.get(entity[0])
+        # Lecture de la déclaration de l'entité, sous la notation tuple ou scalaire
+        freq = _entity_binding(target_frequency, normalize_entity_key(entity))
         # Cas où la fréquence n'est pas trouvée
         if freq is None:
             raise ValueError(
@@ -353,11 +568,14 @@ def resolve_entity_column_frequencies(
     """Resolve the target frequency of each column for a given panel entity.
 
     Supports a target specification whose keys may be mixed: an
-    ``(entity..., column)`` tuple, an ``(entity...)`` tuple, or a plain column
-    name. For each column the most specific key wins, following the precedence
-    ``(entity, column)`` > ``(entity,)`` > ``column``. Columns without any
-    matching key are omitted from the result (they are meant to be left
-    unchanged by the caller).
+    ``(entity..., column)`` tuple, an entity (a tuple, or a scalar label for a
+    single-level entity), or a plain column name. For each column the most
+    specific key wins, following the precedence ``(entity, column)`` > entity >
+    ``column``. A scalar key is read as the entity before being read as a
+    column: with the entity ``('FR',)``, ``{'FR': 'Q'}`` covers every column.
+    Columns without any matching key are omitted from the result (they are
+    meant to be left unchanged by the caller). A value of None counts as
+    undeclared.
 
     Args:
         entity: Entity tuple (e.g., ``('FR',)`` or ``('FR', 'sector1')``).
@@ -368,6 +586,10 @@ def resolve_entity_column_frequencies(
     Returns:
         Dict mapping each covered column to its resolved frequency string.
         Columns with no matching key are absent from the dict.
+
+    Raises:
+        ValueError: If a single-level entity is declared both by its tuple and
+            by its scalar label, with different frequencies.
 
     Examples:
         >>> resolve_entity_column_frequencies(('FR',), ['gdp', 'cpi'], 'M')
@@ -386,20 +608,20 @@ def resolve_entity_column_frequencies(
     if not isinstance(target_frequency, dict):
         return {col: target_frequency for col in columns}
 
-    # Résolution par colonne selon la précédence (entité,col) > (entité,) > col
+    # Déclaration de l'entité (tuple ou scalaire), commune à toutes les colonnes
+    entity_freq = _entity_binding(target_frequency, normalize_entity_key(entity))
+
+    # Résolution par colonne selon la précédence (entité,col) > entité > col
     resolved: Dict[str, str] = {}
     for col in columns:
         # Clé la plus spécifique : entité + colonne
-        entity_col_key = (*entity, col)
-        if entity_col_key in target_frequency:
-            resolved[col] = target_frequency[entity_col_key]
-        # Clé d'entité (tuple), avec repli sur le scalaire si entité mono-niveau
-        elif entity in target_frequency:
-            resolved[col] = target_frequency[entity]
-        elif len(entity) == 1 and entity[0] in target_frequency:
-            resolved[col] = target_frequency[entity[0]]
+        pair_freq = target_frequency.get((*entity, col))
+        if pair_freq is not None:
+            resolved[col] = pair_freq
+        elif entity_freq is not None:
+            resolved[col] = entity_freq
         # Clé de colonne globale
-        elif col in target_frequency:
+        elif target_frequency.get(col) is not None:
             resolved[col] = target_frequency[col]
         # Sinon : colonne non couverte, omise (laissée inchangée)
 
@@ -429,6 +651,11 @@ def iter_entity_blocks(
         (``()`` for a time series), ``mask`` a boolean array selecting the
         entity's rows in ``data``, and ``block`` the entity's data indexed by
         date only.
+
+    Raises:
+        ValueError: On the first iteration, if the data is read as a panel but
+            has a simple index, or if an entity label is missing (see
+            :func:`get_unique_panel_entities`).
 
     Examples:
         >>> dates = pd.date_range('2023-01-01', periods=2, freq='MS')
@@ -461,22 +688,29 @@ def iter_entity_blocks(
 
 # Fonction de reconstruction d'un MultiIndex de panel pour une entité
 def build_panel_index(
-    entity: tuple,
+    entity: Union[tuple, Any],
     times: pd.Index,
     names: Optional[Sequence] = None,
 ) -> pd.MultiIndex:
     """Rebuild a panel MultiIndex from an entity key and its dates.
 
     Inverse of the block extraction performed by :func:`iter_entity_blocks`:
-    re-attaches the entity levels dropped there.
+    re-attaches the entity levels dropped there. The key is normalized first:
+    ``'FR'`` builds the same one-level entity as ``('FR',)``.
 
     Args:
-        entity: Entity key as a tuple (e.g. ``('FR',)``).
+        entity: Entity key (scalar or tuple, e.g. ``'FR'`` or ``('EU', 'FR')``).
         times: Dates of the entity.
         names: Names of the resulting index levels (entity levels then time).
+            If None, the entity levels are unnamed and the time level keeps
+            the name of ``times``.
 
     Returns:
         MultiIndex pairing ``entity`` with each date of ``times``.
+
+    Raises:
+        ValueError: If a label of the key is missing, or if ``names`` does not
+            hold one name per level.
 
     Examples:
         >>> dates = pd.date_range('2023-01-01', periods=2, freq='MS')
@@ -484,7 +718,14 @@ def build_panel_index(
         MultiIndex([('FR', '2023-01-01'),
                     ('FR', '2023-02-01')],
                    names=['entity', 'date'])
+        >>> build_panel_index('FR', dates.rename('date')).names
+        FrozenList([None, 'date'])
     """
+    # Normalisation de la clé (un scalaire désigne une entité à un niveau)
+    entity = _normalize_present_entity_key(entity)
+    # Noms par défaut : niveaux d'entité anonymes, niveau temporel nommé comme les dates
+    if names is None:
+        names = [*([None] * len(entity)), getattr(times, 'name', None)]
     # Réplication de chaque niveau d'entité sur la longueur de l'index temporel
     arrays = [np.full(len(times), level) for level in entity]
     # Reconstruction du MultiIndex (niveaux d'entité puis niveau temporel)

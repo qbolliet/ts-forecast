@@ -19,7 +19,7 @@ ultérieure peuvent le compléter une fois le propriétaire terminé.
 
 | Fichier | Propriétaire | Contenu à ajouter |
 |---|---|---|
-| `tests/support/perturbations.py` (+ `test_perturbations.py`) | **B4** | `rename_entities(df, mapping)` (clés avec espaces, accents, entiers, tuples) ; `interleave_entities(df)` (tri date puis entité) ; `unsort_within_entities(df, seed)` (trié par entité, pas par date) ; `with_single_observation_entity(df, entity)` ; `truncate_entity(df, entity, end)` (entité absente des derniers plis). Existants : `to_three_level_index`, `drop_entity`, `shuffle_rows`, `reverse_entities`, `with_duplicated_rows`, `single_observation`, `empty_like`, `to_period_index`, `to_period_start`/`end`, `with_special_column_names`, `with_index_names`. |
+| `tests/support/perturbations.py` (+ `test_perturbations.py`) | **B4** | **Livrées par B4 (2026-10-17)**, clé d'entité scalaire (un niveau d'entité) ou tuple (une étiquette par niveau d'entité), `KeyError` si l'entité est absente : `rename_entities(df, mapping)` (ancienne clé → nouvelle clé de même arité, étiquettes avec espaces / accents / entiers / tuples ; refuse la fusion de deux entités) ; `interleave_entities(df)` (tri date puis entité, entités dans l'ordre de première apparition) ; `unsort_within_entities(df, seed)` (blocs d'entité contigus, dates permutées : toute entité d'au moins deux lignes change d'ordre) ; `with_single_observation_entity(df, entity)` (garde la première ligne de l'entité) ; `truncate_entity(df, entity, end)` (retire les lignes de l'entité datées après `end`, inclus ; `end` lu en `Timestamp` ou en `Period` selon le niveau des dates). Existants : `to_three_level_index`, `drop_entity`, `shuffle_rows`, `reverse_entities`, `with_duplicated_rows`, `single_observation`, `empty_like`, `to_period_index`, `to_period_start`/`end`, `with_special_column_names`, `with_index_names`. |
 | `tests/support/estimators.py` (+ nouveau `test_estimators.py`) | **B6** | Mise au propre des doublures XY déplacées par B0 (`LogTransformXY`, `ScaleXY`, `DropRowsXY` : docstrings, et `LogTransformXY` non inversible sur les négatifs) ; `MixinScaleXY` (sous-classe minimale de `XYTransformerMixin`, (X, y) → (k·X, k·y)) ; `SpyTransformer` / `SpyXYTransformer` (journal des appels : méthode, index et forme de X, `y` reçu ou `None`) ; `FailingTransformer(fail_on=…, method='fit'\|'transform')` (échec ciblé par entité, pour B5). `SpyEstimator` existe : il enregistre `fit_X_`, `fit_y_` et `predict_X_`, mais exige `y`, n'enregistre ni `transform` ni `score`, et son compteur de classe `n_fits` est partagé entre tests et invisible avec `n_jobs > 1` ; ne pas le modifier (frequency en dépend), ajouter plutôt les doublures ci-dessus. |
 | `tests/support/splits.py` (nouveau, + `test_splits.py`) | **B2** | `collect_folds(splitter, X, y=None, groups=None)`, `assert_no_leakage(X, folds, gap)` (sur les dates, entité par entité), `assert_folds_cover(...)`, `assert_n_splits_consistent(splitter, X, ...)`. Y transférer `TestHelpers` de `fixtures.py` s'il fait doublon. |
 | `tests/support/fixtures.py` (section crossvals) | **B2**, puis B3 | B5, B6 et B7 n'y ajoutent rien : fixtures locales dans le `conftest.py` de leur paquet. |
@@ -274,6 +274,25 @@ après les identifiants indicatifs 001-008. Pour **B6** : `ConstantEstimator` ne
   `tsforecast.panel.__all__`, xfail strict).
 - ANO-PANEL-008 [DOC] : les exemples de la classe utilisent `df` et `PublicationDelayTransformer` sans
   les définir ; `__repr__` surchargé contourne le repr de sklearn.
+
+**Bilan B4 (2026-10-17)** : `tests/unit/panel/test_utils.py` → paquet `tests/unit/panel/utils/` (`conftest.py`,
+`test_entity_keys.py`, `test_structure.py`, `test_blocks.py`, `test_frequencies.py`) ; `panel/utils.py` à 99 % (lignes et
+branches) avant correction. Les cinq perturbations de panel sont livrées (section 1) pour B3 (qui peut remplacer ses
+versions locales de `test_index_robustness.py`) et B5. Anomalies **007** et **010** à **020** consignées puis **toutes
+corrigées le même jour** sur décision de l'auteur (`ANOMALIES.md`) : exports complets, clé liste lue comme tuple, liste ordinaire
+pour `detect_panel_structure`, étiquette d'entité manquante refusée (`ValueError`), clé scalaire normalisée dans
+`get_entity_mask` / `build_panel_index`, arité de la clé contrôlée, conflit entre notations `'FR'` / `('FR',)` refusé partout
+de la même façon, ordre stable de `extract_column_names`, nom de Series conservé, niveau des dates nommé conservé par
+`build_panel_index` quand `names` est absent. Les identifiants 001-006 et 008 restent réservés à B5.
+Pour **B5** : `PanelwiseTransformer` s'appuie désormais sur `is_panel_data`, `iter_entity_blocks`, `build_panel_index` et
+`normalize_entity_key` (méthodes `_entity_blocks` / `_entity_data`) ; `transformers_` suit l'ordre d'apparition des entités
+(et non l'ordre trié), les lignes à identifiant manquant lèvent une `ValueError` au lieu d'être écartées par `groupby`,
+`get_entity_transformer` utilise `normalize_entity_key` (l'`AttributeError` d'ANO-PANEL-003 disparaît). Le chemin « panel en
+colonnes » (ANO-PANEL-001) reste cassé, mais l'échec porte maintenant un message explicite (entités à placer dans l'index) et
+suit `error_handling`. Tests ajoutés : `test_transformers.py::TestEntityBlocksOfIndexedPanel`. Le doctest de la classe
+`PanelwiseTransformer` échoue toujours (ANO-PANEL-008). `utils/frequency/converter.py::_convert_panel` recompose lui aussi
+l'itération par entité et la reconstruction d'index à la main (`get_unique_panel_entities` + `get_entity_mask` +
+`droplevel`, `MultiIndex.from_tuples`) : candidat naturel à `iter_entity_blocks` / `build_panel_index`.
 
 **XY (B6, B7)**
 - ANO-XY-001 [CODE] majeure ✔ : `transform` / `predict` réappliquent l'**index et les colonnes du fit**
