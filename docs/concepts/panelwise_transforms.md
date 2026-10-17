@@ -32,9 +32,16 @@ df_scaled = pt.fit_transform(df)          # un StandardScaler par pays
 
 ## Points d'attention
 
-- `n_jobs` : parallélisation (joblib) de l'ajustement et de la transformation.
-- `error_handling` (`'raise'` / `'warn'` / `'ignore'`) : que faire si une entité
-  échoue ; les entités en échec sont listées dans `failed_entities_`.
+- Disposition : panel dans un `MultiIndex` (entités, puis dates), ou en colonnes
+  avec `panel_cols` (et `time_col`) ; la sortie garde la disposition, les
+  étiquettes et l'ordre des lignes de l'entrée.
+- `n_jobs` : parallélisation (joblib) de l'ajustement ; la transformation reste
+  séquentielle.
+- `error_handling` (`'raise'` / `'warn'` / `'ignore'`) : que faire d'une entité
+  absente du `fit` (`ValueError` sous `'raise'`) ou d'une entité dont le
+  transformateur échoue ; les entités en échec au `fit` sont listées dans
+  `failed_entities_`, les échecs ultérieurs sont signalés par avertissement.
+- Données vides : la sortie est une copie vide de l'entrée.
 - État ajusté : `transformers_` (`{entité: transformateur ajusté}`), `entities_`.
 - Réversible via `ReversibleTransformerMixin` si le transformateur de base l'est.
 

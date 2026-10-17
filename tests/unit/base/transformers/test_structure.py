@@ -51,6 +51,17 @@ class TestStructureDetection:
         panel = index_panel if levels == 2 else to_three_level_index(index_panel)
         assert ConcreteTransformer().fit(panel).is_panel_ is True
 
+    def test_time_col_absent_from_a_multiindex_reads_the_panel(self, index_panel):
+        """A ``time_col`` that is not a column of a ``MultiIndex`` panel leaves the panel in the index.
+
+        The entities (``FR`` then ``DE``) are not in increasing order: read as one
+        series, the index would be refused as unsorted.
+        """
+        transformer = ConcreteTransformer(time_col='date').fit(index_panel)
+
+        assert transformer.is_panel_ is True
+        pd.testing.assert_frame_equal(transformer.fit_input_, index_panel)
+
     def test_single_entity_multiindex_is_a_panel_like_for_is_panel_data(self, index_panel):
         """A one-entity ``MultiIndex`` is a panel, as for ``tsforecast.panel.is_panel_data``.
 
@@ -65,10 +76,16 @@ class TestStructureDetection:
         transformer = ConcreteTransformer(time_col='date', panel_cols=['country']).fit(panel)
         assert transformer.is_panel_ is True
 
-    def test_column_panel_output_is_indexed_by_entity_then_date(self, column_panel, index_panel):
-        """The validated column panel reaches ``_fit`` indexed by ``(country, date)``."""
-        transformer = ConcreteTransformer(time_col='date', panel_cols=['country']).fit(column_panel)
+    def test_converted_column_panel_is_indexed_by_entity_then_date(self, column_panel, index_panel):
+        """Under ``convert_cols_to_index=True``, the column panel reaches ``_fit`` indexed by ``(country, date)``."""
+        transformer = ConcreteTransformer(time_col='date', panel_cols=['country'], convert_cols_to_index=True)
+        transformer.fit(column_panel)
         pd.testing.assert_frame_equal(transformer.fit_input_, index_panel, check_freq=False)
+
+    def test_unconverted_column_panel_keeps_its_columns(self, column_panel):
+        """By default, the validated column panel reaches ``_fit`` as it was given."""
+        transformer = ConcreteTransformer(time_col='date', panel_cols=['country']).fit(column_panel)
+        pd.testing.assert_frame_equal(transformer.fit_input_, column_panel)
 
 
 class TestInvalidStructures:
@@ -106,19 +123,26 @@ class TestColumnBasedStructure:
     """Panels and series stored in columns are transformed on their value columns."""
 
     def test_column_panel_values(self, column_panel):
-        """Only the value columns are scaled; entity and date move into the index."""
+        """Only the value columns are scaled; entity and date stay columns."""
         output = CenteredScaler(time_col='date', panel_cols=['country']).fit_transform(column_panel)
 
         # Valeur d'or : moyenne poolée de a = 4.5, (a - 4.5) * 2
-        assert list(output.index.names) == ['country', 'date']
+        assert list(output.columns) == ['country', 'date', 'a', 'b']
         assert output['a'].tolist() == [-7.0, -5.0, -3.0, -1.0, 1.0, 3.0, 5.0, 7.0]
 
     def test_column_series_values(self, series_frame):
-        """A series in columns is indexed by its dates and scaled."""
-        output = CenteredScaler(time_col='date').fit_transform(series_frame.reset_index())
+        """A series in columns keeps its date column and is scaled."""
+        frame = series_frame.reset_index()
+        output = CenteredScaler(time_col='date').fit_transform(frame)
 
         # Valeur d'or : moyenne 2.5, (v - 2.5) * 2
         assert output['value'].tolist() == [-3.0, -1.0, 1.0, 3.0]
+        pd.testing.assert_series_equal(output['date'], frame['date'])
+
+    def test_converted_column_series_is_indexed_by_its_dates(self, series_frame):
+        """Under ``convert_cols_to_index=True``, a series in columns is indexed by its dates."""
+        output = CenteredScaler(time_col='date', convert_cols_to_index=True).fit_transform(series_frame.reset_index())
+
         pd.testing.assert_index_equal(output.index, month_ends(), exact=False)
 
 
@@ -231,21 +255,34 @@ class TestConvertColsToIndex:
 
         pd.testing.assert_frame_equal(restored, frame, check_exact=False, rtol=1e-12)
 
-    def test_without_conversion_the_columns_still_move_into_the_index(self, column_panel):
-        """``convert_cols_to_index=False`` still indexes by ``(country, date)``, without metadata.
-
-        Current behavior pinned: the column validation always builds the index; the
-        flag only decides whether restoration metadata is kept, so ``inverse_transform``
-        cannot give the columns back.
-        """
+    def test_without_conversion_the_columns_stay_columns(self, column_panel):
+        """``convert_cols_to_index=False`` leaves the layout as is: no index replaced, no metadata."""
         transformer = CenteredScaler(time_col='date', panel_cols=['country'])
 
-        with pytest.warns(UserWarning, match=r"Index replaced with \['country', 'date'\]"):
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error', message='Index replaced')
             output = transformer.fit_transform(column_panel)
 
-        assert list(output.index.names) == ['country', 'date']
+        pd.testing.assert_index_equal(output.index, column_panel.index)
         assert not hasattr(transformer, 'conversion_metadata_')
-        assert list(transformer.inverse_transform(output).index.names) == ['country', 'date']
+
+    def test_without_conversion_the_round_trip_restores_the_input(self, column_panel):
+        """Nothing having moved, ``inverse_transform(transform(X))`` is the column panel itself."""
+        transformer = CenteredScaler(time_col='date', panel_cols=['country'])
+
+        restored = transformer.inverse_transform(transformer.fit_transform(column_panel))
+
+        pd.testing.assert_frame_equal(restored, column_panel, check_exact=False, rtol=1e-12)
+
+    def test_without_conversion_sorted_rows_get_fresh_labels(self, column_panel):
+        """Rows sorted by ``auto_sort`` keep their columns and get fresh labels ``0..n-1``."""
+        shuffled = shuffle_rows(column_panel, seed=0)
+
+        output = ConcreteTransformer(time_col='date', panel_cols=['country'], auto_sort=True).fit_transform(shuffled)
+
+        # Valeur d'or : lignes triées par (pays, date) ; DE avant FR dans l'ordre alphabétique
+        expected = column_panel.sort_values(['country', 'date']).reset_index(drop=True)
+        pd.testing.assert_frame_equal(output, expected)
 
 
 # =============================================================================

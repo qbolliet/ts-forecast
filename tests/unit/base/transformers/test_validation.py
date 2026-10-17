@@ -59,9 +59,9 @@ def interleaved_panel() -> pd.DataFrame:
     })
 
 
-def _indexed(frame: pd.DataFrame, keys: list) -> pd.DataFrame:
-    """Expected validated frame: sorted by ``keys`` and indexed by them."""
-    return frame.sort_values(keys).set_index(keys)
+def _sorted(frame: pd.DataFrame, keys: list) -> pd.DataFrame:
+    """Expected validated frame: sorted by ``keys``, still in columns, with fresh row labels."""
+    return frame.sort_values(keys).reset_index(drop=True)
 
 
 # =============================================================================
@@ -76,7 +76,7 @@ class TestStrictValidationMode:
             warnings.filterwarnings('error', message='Time series index is not sorted')
             transformer = ConcreteTransformer(time_col='date').fit(daily_frame)
 
-        pd.testing.assert_frame_equal(transformer.fit_input_, _indexed(daily_frame, ['date']))
+        pd.testing.assert_frame_equal(transformer.fit_input_, daily_frame)
 
     def test_unsorted_series_raises(self, shuffled_daily_frame):
         """Unsorted dates raise in strict mode."""
@@ -88,7 +88,7 @@ class TestStrictValidationMode:
         with pytest.warns(UserWarning, match='Time series index is not sorted'):
             transformer = ConcreteTransformer(time_col='date', strict_validation=False).fit(shuffled_daily_frame)
 
-        assert transformer.fit_input_.index.tolist() == shuffled_daily_frame['date'].tolist()
+        assert transformer.fit_input_['date'].tolist() == shuffled_daily_frame['date'].tolist()
 
 
 # =============================================================================
@@ -100,7 +100,7 @@ class TestAutoSortFeature:
     def test_unsorted_series_is_sorted(self, shuffled_daily_frame, daily_frame):
         """Shuffled rows come out sorted, identical to the sorted series."""
         output = ConcreteTransformer(time_col='date', auto_sort=True).fit_transform(shuffled_daily_frame)
-        pd.testing.assert_frame_equal(output, _indexed(daily_frame, ['date']))
+        pd.testing.assert_frame_equal(output, _sorted(daily_frame, ['date']))
 
     def test_sorted_series_is_left_in_order(self, daily_frame):
         """Already sorted data comes out in the same order."""
@@ -113,7 +113,7 @@ class TestAutoSortFeature:
 
         output = ConcreteTransformer(time_col='date', panel_cols=['country'], auto_sort=True).fit_transform(shuffled)
 
-        pd.testing.assert_frame_equal(output, _indexed(country_panel, ['country', 'date']))
+        pd.testing.assert_frame_equal(output, _sorted(country_panel, ['country', 'date']))
 
 
 # =============================================================================
@@ -123,9 +123,9 @@ class TestPanelDataValidation:
     """Column panels must be contiguous by entity and sorted by date within each entity."""
 
     def test_sorted_panel_passes(self, country_panel):
-        """A sorted, grouped panel reaches ``_fit`` indexed by ``(country, date)``."""
+        """A sorted, grouped panel reaches ``_fit`` unchanged, its columns kept."""
         transformer = ConcreteTransformer(time_col='date', panel_cols=['country']).fit(country_panel)
-        pd.testing.assert_frame_equal(transformer.fit_input_, _indexed(country_panel, ['country', 'date']))
+        pd.testing.assert_frame_equal(transformer.fit_input_, country_panel)
 
     def test_interleaved_entities_raise(self, interleaved_panel):
         """Entities alternating row by row raise in strict mode."""

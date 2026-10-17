@@ -5236,8 +5236,11 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   l'avertissement « Index replaced with [...] » à chaque `fit` et `transform`, et `inverse_transform` ne peut pas
   rendre les colonnes. Le paramètre ne décide en fait que de la conservation des métadonnées.
 - **Attendu** : à trancher : documenter ce comportement, ou ne pas déplacer les colonnes quand le paramètre vaut `False`.
-- **Test** : `tests/unit/base/transformers/test_structure.py::TestConvertColsToIndex::test_without_conversion_the_columns_still_move_into_the_index`
-  (suit le code)
+- **Test** : `tests/unit/base/transformers/test_structure.py::TestConvertColsToIndex::test_without_conversion_the_columns_stay_columns`,
+  `::test_without_conversion_the_round_trip_restores_the_input`, `::test_without_conversion_sorted_rows_get_fresh_labels`,
+  `::TestStructureDetection::test_unconverted_column_panel_keeps_its_columns`,
+  `tests/unit/base/transformers/test_time_index.py::TestTimeIndexThroughFit::test_time_col_stays_a_column_without_conversion`,
+  `tests/unit/base/transformers/test_sklearn_contract.py::TestFittedAttributes::test_unconverted_time_and_panel_columns_count`
 - **Décision de l'auteur (2026-10-16)** : avec `convert_cols_to_index=False`, `time_col` et `panel_cols` restent des
   colonnes (ce n'est donc plus le cas par défaut). Correction **reportée à B5**, avec ANO-PANEL-001 : aujourd'hui
   `PanelwiseTransformer` ne traite un panel en colonnes que parce que la validation le convertit en `MultiIndex` ;
@@ -5246,7 +5249,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `test_scaling_with_multiindex`). Effets attendus : la vérification du tri d'une série en colonnes porte sur la
   colonne `time_col` ; `n_features_in_` compte les colonnes de temps et d'entité ; l'avertissement « Index replaced »
   disparaît ; le test ci-dessus devient un test du comportement voulu.
-- **Statut** : ouvert (reporté à B5)
+- **Correctif** (B5, 2026-10-17, avec ANO-PANEL-001) : `_validate_column_based` valide toujours sur les données
+  indexées par `panel_cols` puis `time_col` (doublons, tri, contiguïté), sans l'avertissement « Index replaced » ; sans
+  conversion demandée, il rend ensuite les colonnes à leur place par `restore_original_structure` (colonne de dates
+  convertie en `datetime64`, étiquettes de ligne d'origine sauf lignes triées ou retirées). Docstrings de la classe,
+  d'`__init__` et de `_validate_column_based` mises à jour. Les douze tests de base qui épinglaient l'ancien
+  comportement suivent le nouveau (ceux qui portaient sur l'indexation passent `convert_cols_to_index=True`).
+- **Statut** : corrigée (2026-10-17)
 
 ### ANO-BASE-011 — Identifiant d'entité manquant : simple avertissement, même en mode strict
 - **Type** : [CODE] comportement
@@ -5857,6 +5866,121 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ## PANEL
 
+### ANO-PANEL-001 — Panel en colonnes : aucune entité ne peut être ajustée
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer` (`_fit`, `_transform`, `inverse_transform`)
+- **Sévérité** : bloquante
+- **Observé** : sur un panel dont les entités sont des colonnes (`panel_cols`, index simple), chaque entité échoue. Le
+  commit `33cec68` « (fix) panelwise transformer » a remplacé `X.loc[group_idx, cols]` par
+  `X.loc[group_idx, cols].xs(entity_key)`, qui lève `KeyError(('DE',))` sur un index simple ; depuis la refonte de B4,
+  l'échec est une `ValueError` « Cannot extract the rows of entity … ». La cible n'était pas découpée non plus
+  (`y_blocks = {}` puis `y_blocks[entity_key]` : `KeyError`). Sous `'raise'`, le `fit` lève ; sous `'warn'`, toutes les
+  entités sont écartées, `transformers_` reste vide et le `transform` avertit « not seen during fit » pour toutes (d'où
+  le vert à tort de l'ancien `test_unknown_entity_warning`). Le chemin ne fonctionnait que validé, parce que la
+  validation déplaçait les colonnes dans l'index (ANO-BASE-010). Touchait `fit`, `transform` et `inverse_transform` :
+  14 tests hérités en échec.
+- **Attendu** : la docstring de `_fit` annonce « panel_cols as columns or MultiIndex » et `_fit` garde une branche
+  colonnes (`exclude_cols`) : le mode colonnes est voulu. Chaque entité est ajustée sur ses lignes ; la sortie garde
+  les colonnes d'identifiants, les étiquettes et l'ordre des lignes d'entrée.
+- **Reproduction** :
+  ```python
+  panel = pd.DataFrame({'country': ['FR'] * 3 + ['DE'] * 3, 'date': list(dates) * 2, 'a': range(6)})
+  PanelwiseTransformer(StandardScaler(), panel_cols=['country'], validate_input=False).fit(panel)   # erreur
+  ```
+- **Correctif** (décision de l'auteur, 2026-10-17, avec ANO-BASE-010) : `_entity_blocks` regroupe les lignes d'un panel
+  en colonnes **par position** (étiquettes de ligne répétées sans effet), dans l'ordre d'apparition, chaque bloc indexé
+  par `time_col` (ou par les étiquettes de ligne si `time_col` n'est pas une colonne) ; une étiquette d'entité manquante
+  est refusée (`ValueError`, comme sur l'index) ; la cible est découpée par position. `_apply_per_entity` (commun à
+  `transform` et `inverse_transform`) et `_reassemble_entity` réattachent les colonnes d'identifiants et les étiquettes
+  des lignes d'entrée ; une sortie qui ne reprend pas des lignes d'entrée (dates nouvelles, tableau d'une autre longueur)
+  reçoit les étiquettes d'entité, ses propres dates et des étiquettes neuves `0..n-1`. Dans les deux dispositions, l'ordre
+  des lignes d'entrée est restitué quand chaque sortie reprend des lignes d'entrée (panel entrelacé ou dates désordonnées,
+  non validés).
+- **Test** : `tests/unit/panel/transformers/test_fit_transform.py::TestColumnPanel` (15 tests),
+  `tests/unit/panel/transformers/test_structure.py::TestLabelsAndOrder`, `::TestChangedRows`,
+  `tests/unit/panel/transformers/test_sklearn.py::TestPipelines::test_inside_a_pipeline`
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-002 — Avertissement d'une entité en échec : la cause est réduite à `str(erreur)`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer._handle_entity_error`
+- **Sévérité** : mineure
+- **Observé** : sous `'warn'`, le message est `f"Error {operation} entity {entity_key}: {error}. Skipping."`. Le type de
+  l'exception est perdu ; pour une `KeyError`, `str(error)` n'est que la clé : le message « Error fitting entity
+  ('DE',): ('DE',). Skipping. » vu dans la suite (cause réelle : la `KeyError` d'ANO-PANEL-001) répète la clé et masque la
+  cause. Avec `FailingTransformer(error=KeyError)` : « Error fitting entity ('DE',): 'deliberate failure'. Skipping. ».
+- **Attendu** : le type et le message, par exemple « Error fitting entity ('DE',): KeyError: 'deliberate failure' ».
+- **Reproduction** :
+  ```python
+  PanelwiseTransformer(FailingTransformer(error=KeyError), time_col=None, error_handling='warn',
+                       entity_kwargs={('DE',): {'fail_on': 'fit'}}).fit(panel)
+  ```
+- **Test** : `tests/unit/panel/transformers/test_error_handling.py::TestFailingEntityTransformer::test_warning_names_the_type_of_the_error`
+- **Correctif** (2026-10-17) : le message nomme le type de l'erreur : « Error fitting entity ('DE',): KeyError: 'deliberate failure'. Skipping. ».
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-003 — `get_entity_transformer` appelait une méthode inexistante
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer.get_entity_transformer`
+- **Sévérité** : majeure
+- **Observé** : la méthode appelait `self._normalize_entity_key`, absente de la classe : `AttributeError` à chaque appel
+  (masquée par ANO-PANEL-001 dans `test_get_entity_transformer`).
+- **Attendu** : la clé est normalisée comme ailleurs (`'FR'` ≡ `('FR',)`) et le transformateur ajusté est rendu.
+- **Correctif** : par B4 (2026-10-17), lors de la refonte sur `tsforecast.panel.utils` : `normalize_entity_key`.
+- **Test** : `tests/unit/panel/transformers/test_sklearn.py::TestFittedAttributes::test_entity_transformer_is_found_with_either_notation`,
+  `::test_entity_transformer_of_a_two_column_entity`, `::test_unknown_entity_lists_the_available_ones`
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-004 — Ajustement parallèle : `error_handling` ignoré
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer._fit_parallel`
+- **Sévérité** : majeure
+- **Observé** : avec `n_jobs != 1`, aucune erreur n'est interceptée : une entité en échec fait lever le `fit` même sous
+  `'warn'` ou `'ignore'` (`RuntimeError: deliberate failure`), et `failed_entities_` reste vide. Sans échec, `n_jobs=1`,
+  `2` et `-1` donnent la même sortie et les mêmes transformateurs, dans le même ordre.
+- **Attendu** : le même contrat qu'en séquentiel : l'entité est écartée, signalée (`'warn'`) et listée dans
+  `failed_entities_`. La documentation (`docs/concepts/panelwise_transforms.md`) présente `n_jobs` comme une simple
+  parallélisation.
+- **Reproduction** :
+  ```python
+  PanelwiseTransformer(FailingTransformer(), time_col=None, n_jobs=2, error_handling='warn',
+                       entity_kwargs={('DE',): {'fail_on': 'fit'}}).fit(panel)   # RuntimeError
+  ```
+- **Test** : `tests/unit/panel/transformers/test_parallel.py::TestParallelErrorHandling` (`test_warn_skips_the_failing_entity`, `test_ignore_matches_the_sequential_fit`, `test_raise_propagates_the_error`)
+- **Correctif** (2026-10-17) : chaque worker rend `(entité, transformateur, erreur)` au lieu de lever ; le processus principal applique `error_handling` dans l'ordre des entités, comme en séquentiel (`failed_entities_` renseigné).
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-005 — Panel en colonnes sans `panel_cols` ni validation : `TypeError` interne
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer._fit`
+- **Sévérité** : mineure
+- **Observé** : avec `panel_cols=None`, `validate_input=False` et un index simple, `_fit` calcule `set(self.panel_cols)` :
+  `TypeError: 'NoneType' object is not iterable`. Le contrôle explicite « panel_cols must be specified » a été retiré
+  par `33cec68` (délibérément : un panel `MultiIndex` n'a pas besoin de `panel_cols`), d'où le message obsolète de
+  l'ancien test. Validé, le même panel est lu comme une seule série et refusé pour dates répétées (« Duplicate rows
+  found for combination of columns: ['date'] ») : explicite, mais sans nommer `panel_cols`.
+- **Attendu** : une `ValueError` qui dit que les entités d'un index simple se désignent par `panel_cols`.
+- **Reproduction** : `PanelwiseTransformer(StandardScaler(), panel_cols=None, validate_input=False).fit(panel_en_colonnes)`
+- **Test** : `tests/unit/panel/transformers/test_error_handling.py::TestInvalidSettings::test_unvalidated_column_panel_without_panel_cols_is_refused`
+  (et `::test_validated_column_panel_without_panel_cols_is_a_series_with_repeated_dates`, qui suit le code)
+- **Correctif** (2026-10-17) : sur un index simple sans `panel_cols`, `_fit` lève « panel_cols must name the entity columns when X has a simple index; for a panel held in the index, use a MultiIndex (entity levels, then dates) ». Le cas validé (dates répétées) est inchangé.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-006 — Entité inconnue sous `'raise'` : `KeyError`, l'ancien test attendait `ValueError`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer._handle_unknown_entity`
+- **Sévérité** : à arbitrer
+- **Observé** : une entité absente du `fit` lève `KeyError("Entity ('DE',) was not seen during fit")` au `transform`
+  et à l'`inverse_transform`. L'ancien test `test_error_handling_raise` attendait une `ValueError` ; aucune docstring ne
+  précise le type.
+- **Attendu** : à trancher. `KeyError` est cohérente avec `get_entity_transformer` (clé introuvable) ; sklearn lève
+  `ValueError` pour une catégorie inconnue (`OneHotEncoder(handle_unknown='error')`). Comportement actuel épinglé ;
+  documenter le type dans `Raises` dans les deux cas.
+- **Test** : `tests/unit/panel/transformers/test_error_handling.py::TestUnknownEntity::test_raise`,
+  `::test_inverse_transform_raises_on_an_unseen_entity`
+- **Correctif** (2026-10-17) : décision de l'auteur : `ValueError` (entrée invalide, comme une catégorie inconnue pour sklearn) au `transform` et à l'`inverse_transform`, documentée dans `Raises` ; `get_entity_transformer` garde sa `KeyError` (recherche par clé).
+- **Statut** : corrigée (2026-10-17)
+
 ### ANO-PANEL-007 — Quatre fonctions publiques de `panel/utils.py` absentes de `tsforecast.panel.__all__`
 - **Type** : [CODE] comportement
 - **Composant** : `tsforecast/panel/__init__.py` ; `tsforecast/panel/utils.py::detect_panel_structure`,
@@ -5875,6 +5999,24 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```
 - **Test** : `tests/unit/panel/utils/test_structure.py::TestPublicExports` (15 cas, une par fonction publique, découverte par introspection)
 - **Correctif** : décision de l'auteur : les quatre fonctions rejoignent `panel/__init__.py` (`import` et `__all__`).
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-008 — Docstrings, `__repr__` et page de concept de `PanelwiseTransformer`
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer` (docstring de classe, `__repr__`),
+  `docs/concepts/panelwise_transforms.md`
+- **Sévérité** : mineure
+- **Observé** : (1) les exemples de la classe utilisent `df` et `PublicationDelayTransformer` sans les définir : le
+  doctest échoue ; ils passent `panel_cols=['country']` sans dire que le panel doit alors être en colonnes. (2)
+  `__repr__` surchargé remplace celui de sklearn : il masque `n_jobs`, `error_handling` et les paramètres de validation,
+  et affiche `time_col='None'` (entre guillemets) pour `None`. (3) La page de concept annonce que `n_jobs` parallélise
+  « l'ajustement et la transformation » : seul le `fit` est parallèle. (4) La docstring de `_fit` annonçait « Raises:
+  ValueError: If panel_cols is not specified » (contrôle retiré par `33cec68`, voir ANO-PANEL-005) ; corrigée avec
+  ANO-PANEL-001.
+- **Attendu** : exemples exécutables (cf. normalisation des doctests), `__repr__` de sklearn ou complet, page de concept
+  exacte.
+- **Test** : `tests/unit/panel/transformers/test_sklearn.py::TestRepr` ; doctests `pytest --doctest-modules tsforecast/panel`
+- **Correctif** (2026-10-17) : exemples de la classe réécrits en doctests exécutables (index, colonnes, fabrique, `entity_kwargs`) ; `__repr__` surchargé supprimé au profit de celui de sklearn ; page de concept corrigée (`n_jobs` au `fit` seulement, disposition conservée, `error_handling`, données vides) ; docstrings des paramètres complétées.
 - **Statut** : corrigée (2026-10-17)
 
 ### ANO-PANEL-009 — Sortie en tableau : le niveau des dates remplacé par des positions
@@ -5896,7 +6038,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```
 - **Correctif** : décision de l'auteur (2026-10-16) : `_reconstruct_entity_dataframe` reçoit l'index des lignes de
   l'entité et l'applique à un tableau de même nombre de lignes (un tableau d'une autre longueur garde des positions).
-- **Test** : `tests/unit/panel/test_transformers.py::TestDatesOfAnArrayOutput` (4 tests)
+- **Test** : `tests/unit/panel/transformers/test_fit_transform.py::TestDatesOfAnArrayOutput` (4 tests)
 - **Statut** : corrigée (2026-10-16)
 
 ### ANO-PANEL-010 — `normalize_entity_key` renvoie une clé non hachable pour une liste
@@ -5982,7 +6124,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   data = pd.Series(range(4), index=index)
   sum(mask.sum() for _, mask, _ in iter_entity_blocks(data))   # 2 lignes sur 4
   ```
-- **Test** : `tests/unit/panel/utils/test_structure.py::TestGetUniquePanelEntities::test_missing_label_is_refused`, `tests/unit/panel/utils/test_blocks.py::TestIterEntityBlocks::test_rows_with_a_missing_entity_label_are_refused`, `::TestGetEntityMask::test_missing_label_in_the_key_is_refused`, `::TestBuildPanelIndex::test_missing_label_in_the_key_is_refused`, `tests/unit/panel/test_transformers.py::TestEntityBlocksOfIndexedPanel::test_missing_entity_label_is_refused`
+- **Test** : `tests/unit/panel/utils/test_structure.py::TestGetUniquePanelEntities::test_missing_label_is_refused`, `tests/unit/panel/utils/test_blocks.py::TestIterEntityBlocks::test_rows_with_a_missing_entity_label_are_refused`, `::TestGetEntityMask::test_missing_label_in_the_key_is_refused`, `::TestBuildPanelIndex::test_missing_label_in_the_key_is_refused`, `tests/unit/panel/transformers/test_fit_transform.py::TestIndexedPanel::test_missing_entity_label_is_refused` (et `::TestColumnPanel::test_missing_entity_label_is_refused`)
 - **Correctif** : décision de l'auteur : une erreur. `get_unique_panel_entities` lève une `ValueError` (« Entity labels must not be missing ») pour un NaN / None dans un niveau d'entité ; `iter_entity_blocks` et `PanelwiseTransformer` en héritent ; `get_entity_mask` et `build_panel_index` refusent une clé portant une étiquette manquante.
 - **Statut** : corrigée (2026-10-17)
 
@@ -6089,6 +6231,92 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/panel/utils/test_blocks.py::TestIterEntityBlocks::test_forcing_panel_on_a_simple_index_is_refused`,
   `::TestGetEntityMask::test_key_shorter_than_the_entity_levels_is_refused`
 - **Correctif** : sections `Examples` et `Raises` ajoutées aux fonctions concernées (doctests : 20 passent).
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-021 — `time_col='date'` par défaut : un panel `MultiIndex` est validé comme une série
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer.__init__` (défaut de `time_col`), lu par
+  `tsforecast/base/transformers.py::PanelTimeSeriesTransformer._detect_data_structure`
+- **Sévérité** : majeure
+- **Observé** : `PanelwiseTransformer` fixe `time_col='date'` par défaut (la base : `None`). `_detect_data_structure`
+  lit alors toute entrée comme « série temporelle en colonnes », même un panel `MultiIndex` : `is_panel_` vaut `False`,
+  les contrôles de panel (contiguïté des entités, tri par entité) sont remplacés par un contrôle de tri **global** de
+  l'index, et un panel `(country, date)` dont les entités ne sont pas dans l'ordre croissant (`FR` puis `DE`) est refusé :
+  `ValueError: Time series index is not sorted`. Un panel aux entités `A`, `B` passe par hasard. Tous les appelants du
+  paquet (`delays/transformers.py`, tutoriel) passent `time_col=None` explicitement pour l'éviter.
+- **Attendu** : sur un `MultiIndex` dont `time_col` n'est pas une colonne, le panel se lit dans l'index (entités, puis
+  dates), comme avec `time_col=None` ; ou un défaut `None` comme la base.
+- **Reproduction** :
+  ```python
+  index = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['country', 'date'])
+  PanelwiseTransformer(StandardScaler()).fit(pd.DataFrame({'a': range(6)}, index=index))   # ValueError
+  ```
+- **Test** : `tests/unit/panel/transformers/test_structure.py::TestDefaultTimeColumn` (3 tests), `tests/unit/base/transformers/test_structure.py::TestStructureDetection::test_time_col_absent_from_a_multiindex_reads_the_panel`
+- **Correctif** (2026-10-17) : option retenue : la base, pas le défaut. Dans `PanelTimeSeriesTransformer._detect_data_structure`, un `time_col` seul (sans `panel_cols`) qui n'est pas une colonne d'un `MultiIndex` d'au moins deux niveaux désigne un panel en index, comme `time_col=None`. Le défaut `'date'` reste utile aux panels en colonnes ; le cas `time_col` + `panel_cols` (`HighFrequencyImputer`) est inchangé.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-022 — `entity_kwargs` : une clé scalaire est ignorée en silence
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer._create_entity_transformer`
+- **Sévérité** : mineure
+- **Observé** : `entity_kwargs.get(entity_key)` compare la clé normalisée `('FR',)` aux clés telles que fournies :
+  `entity_kwargs={'FR': {...}}` ne désigne aucune entité, ses paramètres ne sont jamais appliqués, sans erreur ni
+  avertissement (l'entité retombe sur `default_entity_kwargs` ou sur le clone simple).
+- **Attendu** : `'FR'` ≡ `('FR',)`, comme partout dans le paquet (`normalize_entity_mapping`, `get_entity_transformer`),
+  conflits de notation refusés de la même façon.
+- **Reproduction** : `PanelwiseTransformer(StandardScaler(), time_col=None, entity_kwargs={'FR': {'with_mean': False}}).fit(panel).get_entity_transformer('FR').with_mean   # True`
+- **Test** : `tests/unit/panel/transformers/test_modes.py::TestEntityKwargsMode` (`test_scalar_key_designates_the_one_level_entity`, `test_conflicting_notations_are_refused`, `test_entity_kwargs_parameter_is_left_as_given`)
+- **Correctif** (2026-10-17) : `_fit` normalise les clés (`normalize_entity_mapping`, dans un attribut privé : le paramètre reste tel quel) ; deux notations d'une même entité aux valeurs différentes lèvent « Conflicting values for entity … ».
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-023 — `failed_entities_` modifié par chaque `transform`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer._handle_entity_error`
+- **Sévérité** : mineure
+- **Observé** : `failed_entities_` est remis à zéro au `fit` seulement ; chaque échec au `transform` ou à
+  l'`inverse_transform` (sous `'warn'` / `'ignore'`) y est ajouté : l'attribut ajusté grossit à chaque appel
+  (`[('DE',), ('DE',)]` après deux `transform`) et mêle les échecs du `fit` et ceux des appels suivants.
+- **Attendu** : un attribut ajusté décrit le `fit` et n'est pas modifié par `transform` (convention sklearn, même règle
+  qu'ANO-BASE-003) ; les échecs d'un appel se signalent par l'avertissement, ou par un attribut distinct documenté.
+- **Test** : `tests/unit/panel/transformers/test_error_handling.py::TestFailingEntityTransformer::test_transform_does_not_change_the_fitted_state`
+- **Correctif** (2026-10-17) : seuls les échecs du `fit` sont ajoutés à `failed_entities_` ; ceux du `transform` et de l'`inverse_transform` sont signalés par l'avertissement (`'warn'`).
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-024 — Panel vide : `fit` accepté, `transform` lève « No objects to concatenate »
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer._fit`, `::_apply_per_entity`
+- **Sévérité** : à arbitrer
+- **Observé** : un panel sans ligne s'ajuste sans erreur (`entities_ == 0`, `transformers_` vide), puis `transform`
+  lève `ValueError: No objects to concatenate` (concaténation d'une liste vide).
+- **Attendu** : à trancher : refus explicite au `fit` (sklearn : « Found array with 0 sample(s) »), ou sortie vide de
+  mêmes colonnes. Comportement actuel épinglé.
+- **Test** : `tests/unit/panel/transformers/test_error_handling.py::TestEmptyData` (5 tests)
+- **Correctif** (2026-10-17) : décision de l'auteur : sortie vide. Le `fit` d'un panel vide est accepté (zéro entité) ; `transform` et `inverse_transform` d'une donnée sans ligne rendent sa copie vide (mêmes colonnes, même index). Faute de ligne, le transformateur d'entité n'est pas appelé : un transformateur qui change les colonnes rend les colonnes d'entrée (documenté).
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-025 — `entity_kwargs` invalide : `TypeError` annoncée, `ValueError` levée (branche morte)
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer._create_entity_transformer`
+- **Sévérité** : cosmétique
+- **Observé** : la docstring annonce « TypeError: If entity_kwargs contains invalid parameter names » et le code
+  enveloppe `set_params` dans `except TypeError`. Or sklearn lève `ValueError: Invalid parameter 'nope' for estimator
+  StandardScaler()…` : la branche `except TypeError` est inatteignable (seule ligne non couverte du module hors
+  processus joblib) et l'erreur remonte telle quelle, déjà explicite.
+- **Attendu** : `Raises: ValueError` et suppression de la branche morte (ou enveloppe sur `ValueError` qui nomme
+  l'entité).
+- **Test** : `tests/unit/panel/transformers/test_modes.py::TestEntityKwargsMode::test_invalid_parameter_name_is_refused` (suit le code)
+- **Correctif** (2026-10-17) : la `ValueError` de `set_params` est enveloppée : « Invalid parameters in entity_kwargs for entity ('FR',): Invalid parameter 'nope' … » ; `Raises` corrigé ; plus de branche morte.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-PANEL-026 — `error_handling` jamais validé
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/panel/transformers.py::PanelwiseTransformer` (`_handle_entity_error`, `_handle_unknown_entity`)
+- **Sévérité** : mineure
+- **Observé** : une valeur hors de `'raise'`, `'warn'`, `'ignore'` (faute de frappe : `'oops'`, `'warning'`) est
+  acceptée et se comporte comme `'ignore'` : entités inconnues et échecs passent en silence.
+- **Attendu** : une `ValueError` au `fit` qui liste les valeurs admises.
+- **Test** : `tests/unit/panel/transformers/test_error_handling.py::TestInvalidSettings::test_unknown_error_handling_is_refused_at_fit`, `::test_unknown_error_handling_set_after_fit_is_refused`
+- **Correctif** (2026-10-17) : `error_handling` est contrôlé au `fit` et à chaque `transform` / `inverse_transform` (valeur changée par `set_params`) : « error_handling must be one of ['raise', 'warn', 'ignore'], got 'oops' ».
 - **Statut** : corrigée (2026-10-17)
 
 ## XY

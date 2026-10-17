@@ -165,8 +165,9 @@ class TestFittedAttributes:
         ('build', 'kwargs', 'names'),
         [(build_series_frame, {}, ['value']),
          (build_index_panel, {}, ['a', 'b']),
-         (build_column_panel, {'time_col': 'date', 'panel_cols': ['country']}, ['a', 'b'])],
-        ids=['series', 'index-panel', 'column-panel'],
+         (build_column_panel, {'time_col': 'date', 'panel_cols': ['country'], 'convert_cols_to_index': True},
+          ['a', 'b'])],
+        ids=['series', 'index-panel', 'converted-column-panel'],
     )
     def test_feature_names_exclude_time_and_panel_columns(self, build, kwargs, names):
         """Only value columns count: time and panel columns moved into the index do not."""
@@ -178,6 +179,12 @@ class TestFittedAttributes:
     def test_feature_names_are_an_object_array(self, index_panel):
         """``feature_names_in_`` is a numpy array of dtype ``object``."""
         assert ConcreteTransformer().fit(index_panel).feature_names_in_.dtype == object
+
+    def test_unconverted_time_and_panel_columns_count(self, column_panel):
+        """Validated without conversion, the time and panel columns stay columns, and count as features."""
+        transformer = ConcreteTransformer(time_col='date', panel_cols=['country']).fit(column_panel)
+
+        assert list(transformer.feature_names_in_) == ['country', 'date', 'a', 'b']
 
     def test_without_validation_every_column_counts(self, column_panel):
         """Without validation the time and panel columns stay columns, and count as features."""

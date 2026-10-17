@@ -34,22 +34,30 @@ class TestTimeIndexThroughFit:
         transformer = ConcreteTransformer().fit(series_frame)
         pd.testing.assert_frame_equal(transformer.fit_input_, series_frame)
 
-    def test_time_col_becomes_the_index(self, series_frame):
-        """A ``time_col`` column is moved into a ``DatetimeIndex`` named after it."""
+    def test_time_col_becomes_the_index_when_converted(self, series_frame):
+        """Under ``convert_cols_to_index=True``, a ``time_col`` becomes a ``DatetimeIndex`` named after it."""
         # Construction d'une série en colonnes : la date est une colonne ordinaire
+        frame = series_frame.reset_index()
+
+        transformer = ConcreteTransformer(time_col='date', convert_cols_to_index=True).fit(frame)
+
+        pd.testing.assert_frame_equal(transformer.fit_input_, series_frame, check_freq=False)
+
+    def test_time_col_stays_a_column_without_conversion(self, series_frame):
+        """By default, the ``time_col`` column reaches ``_fit`` as a column, rows unchanged."""
         frame = series_frame.reset_index()
 
         transformer = ConcreteTransformer(time_col='date').fit(frame)
 
-        pd.testing.assert_frame_equal(transformer.fit_input_, series_frame, check_freq=False)
+        pd.testing.assert_frame_equal(transformer.fit_input_, frame)
 
     def test_string_time_col_is_converted(self):
-        """ISO date strings in ``time_col`` become datetimes."""
+        """ISO date strings in ``time_col`` become datetimes, in the column itself."""
         frame = pd.DataFrame({'date': ['2023-01-31', '2023-02-28'], 'value': [1.0, 2.0]})
 
         transformer = ConcreteTransformer(time_col='date').fit(frame)
 
-        pd.testing.assert_index_equal(transformer.fit_input_.index, month_ends(2))
+        pd.testing.assert_index_equal(pd.DatetimeIndex(transformer.fit_input_['date']), month_ends(2), exact=False)
 
     def test_two_level_multiindex_uses_its_last_level(self, index_panel):
         """A ``(country, date)`` panel reaches ``_fit`` with the same index."""

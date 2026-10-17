@@ -141,17 +141,19 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             if False, emits warnings. Default is True.
         auto_sort (bool): If True, automatically sorts unsorted data by panel
             and time columns. Default is False.
-        convert_cols_to_index (bool): If True, stores the metadata needed to give
-            the ``time_col`` and ``panel_cols`` columns back after they were moved
-            into the index. Default is False.
+        convert_cols_to_index (bool): If True, the validated ``time_col`` and
+            ``panel_cols`` columns are moved into the index (entities first, dates
+            last) and the metadata needed to give them back is stored. If False,
+            they stay columns: the validation checks and converts them (dates read
+            as ``datetime64``) without changing the layout. Default is False.
 
     Attributes:
         is_panel_ (bool): Whether the data seen at ``fit`` is a panel, read from
             the layout (``MultiIndex`` or ``panel_cols``), whatever the number of
             entities.
-        n_features_in_ (int): Number of feature columns seen at ``fit``, the
-            time and panel columns excluded once moved into the index (sklearn
-            convention, read by ``Pipeline.n_features_in_``).
+        n_features_in_ (int): Number of columns seen at ``fit`` (sklearn
+            convention, read by ``Pipeline.n_features_in_``): the time and panel
+            columns count while they are columns, not once moved into the index.
         feature_names_in_ (np.ndarray): Names of those columns, as an object
             array (sklearn convention).
         conversion_metadata_ (dict): Structure of the column data seen at ``fit``
@@ -203,8 +205,9 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             validate_input: Whether to activate input data validation
             strict_validation: If True, raises errors; if False, emits warnings
             auto_sort: If True, automatically sorts improperly ordered data
-            convert_cols_to_index: If True, stores the metadata needed to restore
-                the time_col and panel_cols columns moved into the index
+            convert_cols_to_index: If True, moves the time_col and panel_cols
+                columns into the index and stores the metadata needed to restore
+                them; if False, they stay columns
 
         Examples:
             >>> class Identity(PanelTimeSeriesTransformer):
@@ -228,7 +231,10 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         """Detect data structure (panel vs time series, columns vs index).
 
         Determines whether data is panel or time series, and whether temporal
-        and panel information is in columns or index levels.
+        and panel information is in columns or index levels. A ``time_col``
+        without ``panel_cols`` designates a time series in columns, unless it
+        is not a column of ``X`` and ``X`` has a ``MultiIndex``: the panel is
+        then read from the index, as with ``time_col=None``.
 
         Args:
             X: Input DataFrame
@@ -257,6 +263,8 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             >>> panel = df.set_index(['entity', 'date'])
             >>> Identity()._detect_data_structure(panel)
             (True, True, True)
+            >>> Identity(time_col='date')._detect_data_structure(panel)
+            (True, True, True)
             >>> Identity()._detect_data_structure(df.iloc[:2].set_index('date'))
             (False, False, True)
         """
@@ -264,8 +272,15 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         if self.time_col is not None and self.panel_cols is not None:
             return True, False, False
 
-        # Cas 2: Seulement time_col → série temporelle colonnes
+        # Cas 2: Seulement time_col → série temporelle colonnes, sauf quand time_col
+        # n'est pas une colonne d'un MultiIndex : le panel se lit alors dans l'index
         if self.time_col is not None:
+            if (
+                self.time_col not in X.columns
+                and isinstance(X.index, pd.MultiIndex)
+                and X.index.nlevels >= 2
+            ):
+                return True, True, True
             return False, False, False
 
         # Cas 3: panel_cols sans time_col → invalide
@@ -739,11 +754,17 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         rather than index levels. A ``time_col`` that is not a column leaves the
         index in charge of the time labels, unless ``panel_cols`` are given.
 
+        The checks run on the data indexed by ``panel_cols`` then ``time_col``.
+        With ``convert_cols_to_index=True`` this indexed data is returned; otherwise
+        the columns are given back at their positions (time column converted to
+        dates), with the original row labels unless rows were sorted or dropped.
+
         Args:
             X: DataFrame with time and panel information in columns
 
         Returns:
-            Validated DataFrame, indexed by ``panel_cols`` then ``time_col``
+            Validated DataFrame, indexed by ``panel_cols`` then ``time_col`` under
+            ``convert_cols_to_index=True``, in columns otherwise
 
         Raises:
             ValueError: If a panel or time column is missing, if the time labels are
@@ -762,6 +783,8 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             >>> transformer = Identity(time_col='date', panel_cols=['entity'], convert_cols_to_index=True)
             >>> transformer._validate_column_based(df).index.names
             FrozenList(['entity', 'date'])
+            >>> list(Identity(time_col='date', panel_cols=['entity'])._validate_column_based(df).columns)
+            ['entity', 'date', 'value']
         """
         # Vérification colonnes panel, puis de la colonne temporelle sans laquelle
         # aucun index (entité, date) ne peut être construit
@@ -783,29 +806,20 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
         # une erreur stricte (doublons) peut encore remonter
         time_col = self.time_col if self.time_col in X.columns else None
         try:
-            if self.convert_cols_to_index:
-                X_validated, metadata = validate_temporal_data(
-                    data=X,
-                    time_col=time_col,
-                    panel_cols=self.panel_cols,
-                    strict=self.strict_validation,
-                    sort_data=self.auto_sort,
-                    return_metadata=True
-                )
-                # Métadonnées des données de cet appel (index d'origine compris) ;
-                # le fit en tire la structure figée ``conversion_metadata_``
-                self._current_conversion_metadata = metadata
-            else:
-                X_validated = validate_temporal_data(
-                    data=X,
-                    time_col=time_col,
-                    panel_cols=self.panel_cols,
-                    strict=self.strict_validation,
-                    sort_data=self.auto_sort,
-                    return_metadata=False
-                )
+            X_validated, metadata = validate_temporal_data(
+                data=X,
+                time_col=time_col,
+                panel_cols=self.panel_cols,
+                strict=self.strict_validation,
+                sort_data=self.auto_sort,
+                return_metadata=True
+            )
         except ValueError as e:
             raise ValueError(f"Temporal data validation failed: {e}") from e
+        # Métadonnées des données de cet appel (index d'origine compris) ; le fit
+        # en tire la structure figée ``conversion_metadata_``
+        if self.convert_cols_to_index:
+            self._current_conversion_metadata = metadata
 
         # Validations spécifiques panel
         if self.panel_cols:
@@ -847,6 +861,9 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             else:
                 warnings.warn(msg)
 
+        # Sans conversion demandée, colonnes temporelle et d'entité rendues à leur place
+        if not self.convert_cols_to_index and metadata['index_was_replaced']:
+            return restore_original_structure(X_validated, metadata)
         return X_validated
 
     # Méthode auxiliaire de validation d'une série temporelle en index

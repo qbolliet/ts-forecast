@@ -294,6 +294,21 @@ suit `error_handling`. Tests ajoutés : `test_transformers.py::TestEntityBlocksO
 l'itération par entité et la reconstruction d'index à la main (`get_unique_panel_entities` + `get_entity_mask` +
 `droplevel`, `MultiIndex.from_tuples`) : candidat naturel à `iter_entity_blocks` / `build_panel_index`.
 
+**Bilan B5 (2026-10-17)** : `tests/unit/panel/test_transformers.py` → paquet `tests/unit/panel/transformers/` (`conftest.py`,
+`test_fit_transform.py`, `test_modes.py`, `test_error_handling.py`, `test_parallel.py` marqué `slow`, `test_sklearn.py`,
+`test_structure.py`) ; `panel/transformers.py` 58 % → 99 % (lignes et branches). Les 14 tests « hors campagne » sont triés et
+retirés de `legacy_failures.txt` (groupe vide). **ANO-BASE-010 et ANO-PANEL-001 corrigées ensemble** (décision de l'auteur) :
+sans `convert_cols_to_index`, les colonnes de temps et d'entité restent des colonnes ; le chemin « panel en colonnes » de
+`PanelwiseTransformer` découpe par position, réattache identifiants et étiquettes et restitue l'ordre des lignes d'entrée (aussi
+pour un `MultiIndex` entrelacé non validé). ANO-PANEL-003 (corrigée par B4) consignée. **Puis, sur décision de l'auteur, toutes
+les autres corrigées le même jour** : 002 (type de l'erreur dans l'avertissement), 004 (`error_handling` en parallèle), 005
+(`panel_cols` manquant : `ValueError`), 006 (entité inconnue : `ValueError`), 008 (doctests, repr de sklearn, page de concept), 021
+(dans la base : un `time_col` absent des colonnes d'un `MultiIndex` lit le panel dans l'index), 022 (clés d'`entity_kwargs`
+normalisées), 023 (`failed_entities_` décrit le `fit`), 024 (données vides : copie vide de l'entrée), 025, 026 (`error_handling`
+validé). `FailingTransformer` n'existant pas encore (B6), une doublure locale du même nom est dans le `conftest.py` du paquet
+(`fail_on` = méthode qui échoue, ciblée par `entity_kwargs`) : à remplacer par celle de `tests/support/estimators.py` une fois
+livrée. Pour **B8** : une entité inconnue lève désormais `ValueError` (et non `KeyError`) sous `'raise'`.
+
 **XY (B6, B7)**
 - ANO-XY-001 [CODE] majeure ✔ : `transform` / `predict` réappliquent l'**index et les colonnes du fit**
   (métadonnées enregistrées seulement dans `_fit`) : `transform(X_test)` d'index 100..105 sort avec
