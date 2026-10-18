@@ -53,6 +53,24 @@ les retire au `fit` et au `score` (quand `y` traverse le pipeline) et n'en
 retire aucune au `predict`. Un scorer textuel compare les prédictions au `y`
 brut, hors du pipeline : il ne peut pas recevoir une cible de test NaN.
 
+Les méthodes de prédiction (`predict`, `predict_proba`, `predict_log_proba`,
+`decision_function`, `score_samples`) ne prennent pas de `y`, comme celles de
+`Pipeline` : une prédiction ne dépend jamais de la cible, et elle compte
+toujours une valeur par ligne de `X`. Pour évaluer le pipeline sur une cible,
+utiliser `score(X, y)`.
+
+## Structure pandas des sorties
+
+Avec `preserve_dataframe=True` (défaut), une sortie en tableau d'une entrée
+pandas redevient un `DataFrame` (et la cible une `Series`), avec les étiquettes
+**de l'appel en cours** :
+
+- lignes : l'index du `X` reçu tant que le nombre de lignes est inchangé ; une
+  fois des lignes retirées, l'index de la cible rendue, si `X` et `y` ont été
+  passés avec le même index (`X` et `y` restent alignés) ;
+- colonnes : les noms donnés par `get_feature_names_out` des étapes, sinon les
+  colonnes d'entrée si la largeur est inchangée, sinon des positions.
+
 ## Compatibilité
 
 `XYPipeline` reste compatible `GridSearchCV`, `cross_validate`, le *metadata

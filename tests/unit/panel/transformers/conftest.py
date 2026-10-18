@@ -3,62 +3,22 @@
 Small hand-built panels whose per-entity centring is computable by hand (two
 entities ``FR`` then ``DE`` on three month ends, in a ``MultiIndex`` or in
 columns), the expected centred values, and test doubles: ``FailingTransformer``
-(a centring transformer that raises at a chosen method, targeted at one entity
-through ``entity_kwargs``) and ``RecordingScaler`` (remembers the target it was
-fitted with).
+(re-exported from ``tests.support.estimators``: a centring transformer that
+raises at a chosen method, targeted at one entity through ``entity_kwargs``)
+and ``RecordingScaler`` (remembers the target it was fitted with).
 """
-from typing import Optional
-
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import StandardScaler
-from sklearn.utils.validation import check_is_fitted
+
+# Doublure partagée, réexportée pour les modules de tests du paquet
+from tests.support.estimators import FailingTransformer  # noqa: F401
 
 
 # =============================================================================
 # Doublures
 # =============================================================================
-class FailingTransformer(BaseEstimator, TransformerMixin):
-    """Centring transformer (``X - mean``) that raises at the method named by ``fail_on``.
-
-    It returns a ``DataFrame`` that keeps the index of its input. Combined with
-    ``entity_kwargs={('DE',): {'fail_on': 'fit'}}``, the failure hits one entity only.
-
-    Args:
-        fail_on: ``'fit'``, ``'transform'``, ``'inverse_transform'`` or None (never fails).
-        error: Exception class raised, with the message ``'deliberate failure'``.
-    """
-
-    def __init__(self, fail_on: Optional[str] = None, error: type = RuntimeError):
-        self.fail_on = fail_on
-        self.error = error
-
-    def _maybe_fail(self, method: str) -> None:
-        # Échec délibéré à la méthode désignée
-        if self.fail_on == method:
-            raise self.error('deliberate failure')
-
-    def fit(self, X, y=None):
-        """Learn the column means, unless ``fail_on='fit'``."""
-        self._maybe_fail('fit')
-        self.mean_ = X.mean()
-        return self
-
-    def transform(self, X):
-        """Subtract the learnt means, unless ``fail_on='transform'``."""
-        check_is_fitted(self)
-        self._maybe_fail('transform')
-        return X - self.mean_
-
-    def inverse_transform(self, X):
-        """Add the learnt means back, unless ``fail_on='inverse_transform'``."""
-        check_is_fitted(self)
-        self._maybe_fail('inverse_transform')
-        return X + self.mean_
-
-
 class RecordingScaler(StandardScaler):
     """``StandardScaler`` remembering the target it was fitted with."""
 

@@ -34,7 +34,14 @@ class XYTransformerMixin(TransformerMixin):
     The dual-argument signature allows transformations where X depends on y
     or vice versa.
 
+    ``fit`` marks the instance as fitted, so that ``check_is_fitted`` (and an
+    ``XYPipeline`` ending with the step) recognises a fitted subclass even
+    when its ``_fit`` learns nothing.
+
     Example:
+        >>> import numpy as np
+        >>> import pandas as pd
+        >>> from sklearn.base import BaseEstimator
         >>> class LogTransformXY(BaseEstimator, XYTransformerMixin):
         ...     def _fit(self, X, y):
         ...         self.X_offset_ = X.min(axis=0)
@@ -54,7 +61,43 @@ class XYTransformerMixin(TransformerMixin):
         ...             return X_inv
         ...         y_inv = np.expm1(y) + self.y_offset_
         ...         return X_inv, y_inv
+        >>> X = pd.DataFrame({'x': [1.0, 2.0, 4.0]})
+        >>> y = pd.Series([10.0, 11.0, 13.0])
+        >>> step = LogTransformXY()
+        >>> X_t, y_t = step.fit_transform(X, y)
+        >>> [round(value, 4) for value in y_t]
+        [0.0, 0.6931, 1.3863]
+        >>> X_inv, y_inv = step.inverse_transform(X_t, y_t)
+        >>> [round(value, 6) for value in y_inv]
+        [10.0, 11.0, 13.0]
     """
+
+    # État ajusté au sens de sklearn : marqueur posé par fit, ou attribut
+    # appris (suffixe _) d'une sous-classe qui surcharge fit
+    def __sklearn_is_fitted__(self) -> bool:
+        """Report whether the transformer is fitted.
+
+        Returns:
+            True once ``fit`` has run, or when the instance carries a learnt
+            attribute (name ending with ``_``), as ``check_is_fitted`` expects.
+
+        Examples:
+            >>> from sklearn.base import BaseEstimator
+            >>> class Identity(BaseEstimator, XYTransformerMixin):
+            ...     def _fit(self, X, y):
+            ...         return self
+            ...     def _transform(self, X, y=None):
+            ...         return X if y is None else (X, y)
+            >>> step = Identity()
+            >>> step.__sklearn_is_fitted__()
+            False
+            >>> step.fit([[1.0]], [1.0]).__sklearn_is_fitted__()
+            True
+        """
+        # Marquage de l'attribut
+        if getattr(self, '_is_fitted', False):
+            return True
+        return any(name.endswith('_') and not name.startswith('__') for name in vars(self))
 
     # Méthode d'apprentissage des paramètres de transformation
     def fit(self, X, y=None):
@@ -163,12 +206,27 @@ class XYTransformerMixin(TransformerMixin):
         return self.fit(X, y).transform(X, y)
 
 
-# Classe de transformation XYSur des données de panel et des séries temporelles
+# Classe de transformation XY sur des données de panel et des séries temporelles
 class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
     """Panel transformer with XY transformation support.
-    
+
     Combines PanelTimeSeriesTransformer validation with the ability to
-    transform both X and y simultaneously.
+    transform both X and y simultaneously. Subclasses implement ``_fit(X, y)``
+    and ``_transform(X, y=None)``, which returns ``(X_t, y_t)`` when ``y`` is
+    given and ``X_t`` otherwise; ``_inverse_transform`` is optional.
+
+    Examples:
+        >>> import pandas as pd
+        >>> class CentreXY(XYPanelTimeSeriesTransformer):
+        ...     def _fit(self, X, y=None):
+        ...         self.mean_ = X.mean()
+        ...     def _transform(self, X, y=None):
+        ...         return X - self.mean_ if y is None else (X - self.mean_, y * 2)
+        >>> dates = pd.date_range('2024-01-31', periods=3, freq='ME')
+        >>> X = pd.DataFrame({'a': [1.0, 2.0, 3.0]}, index=dates)
+        >>> X_t, y_t = CentreXY().fit_transform(X, pd.Series([1.0, 2.0, 3.0], index=dates))
+        >>> X_t['a'].tolist(), y_t.tolist()
+        ([-1.0, 0.0, 1.0], [2.0, 4.0, 6.0])
     """
     
     # Surcharge de transform pour accepter y tout en gardant les validations

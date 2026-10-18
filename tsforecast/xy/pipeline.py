@@ -10,12 +10,13 @@ Le pipeline est entièrement compatible avec GridSearchCV de sklearn
 # Importation des modules
 # Modules de base
 import inspect
-from typing import Any
+from typing import Any, Optional
 # manipulation de données
 import numpy as np
 import pandas as pd
 # Sklearn
 from sklearn.base import clone, _fit_context
+from sklearn.exceptions import NotFittedError
 from sklearn.pipeline import Pipeline
 from sklearn.utils.metaestimators import available_if
 from sklearn.utils.metadata_routing import (
@@ -41,7 +42,7 @@ def _accepts_y_param(transformer: Any, method_name: str) -> bool:
     # Vérification de l'existence de la méthode
     if not hasattr(transformer, method_name):
         return False
-    
+
     # Extraction de la méthode
     method = getattr(transformer, method_name)
 
@@ -50,7 +51,7 @@ def _accepts_y_param(transformer: Any, method_name: str) -> bool:
         sig = inspect.signature(method)
     except (ValueError, TypeError):
         return False
-    
+
     # Extraction des paramètres de la signature
     params = list(sig.parameters.values())
 
@@ -76,6 +77,32 @@ def _final_estimator_has(attr: str):
     return check
 
 
+# Refus de la cible dans les passes de prédiction : une prédiction ne dépend
+# jamais de la cible, et une étape XY qui la lirait pourrait retirer des lignes
+def _refuse_target(method: str, params: dict) -> None:
+    """Raise if a prediction method is given a target as keyword argument.
+
+    Args:
+        method: Name of the prediction method called.
+        params: Keyword arguments it received.
+
+    Raises:
+        TypeError: If ``params`` contains ``y``.
+
+    Examples:
+        >>> _refuse_target('predict', {})
+        >>> _refuse_target('predict', {'y': [1.0]})
+        Traceback (most recent call last):
+            ...
+        TypeError: XYPipeline.predict does not take y: a prediction never depends on the target; use score(X, y) to evaluate the pipeline
+    """
+    if "y" in params:
+        raise TypeError(
+            f"XYPipeline.{method} does not take y: a prediction never depends on "
+            "the target; use score(X, y) to evaluate the pipeline"
+        )
+
+
 # Pipeline étendu qui supporte les transformers retournant (X, y).
 # Compatible avec GridSearchCV, cross_val_score, et le metadata routing.
 class XYPipeline(Pipeline):
@@ -97,8 +124,9 @@ class XYPipeline(Pipeline):
             order. The last step can be any estimator.
         memory: Used to cache fitted transformers. By default, no caching.
         verbose: If True, the fitting time of each step will be printed.
-        preserve_dataframe: If True, preserve pandas DataFrame structure through
-            transformations when possible. Default is True.
+        preserve_dataframe: If True, an array output of a pandas input gets the
+            pandas structure back, with the labels of the call inputs (see
+            ``fit_transform`` and ``transform``). Default is True.
 
     Attributes:
         named_steps: Access the steps by name.
@@ -107,11 +135,15 @@ class XYPipeline(Pipeline):
         feature_names_in_: Names of features seen during fit.
 
     Example:
-        >>> from sklearn.preprocessing import StandardScaler
+        >>> import numpy as np
+        >>> import pandas as pd
+        >>> from sklearn.base import BaseEstimator, TransformerMixin
+        >>> from sklearn.preprocessing import MinMaxScaler
         >>> from tsforecast.xy import XYPipeline
         >>>
         >>> class LogTransformXY(BaseEstimator, TransformerMixin):
         ...     def fit(self, X, y=None):
+        ...         self.is_fitted_ = True
         ...         return self
         ...     def transform(self, X, y=None):
         ...         X_t = np.log1p(X)
@@ -121,15 +153,25 @@ class XYPipeline(Pipeline):
         ...     def fit_transform(self, X, y=None):
         ...         return self.fit(X, y).transform(X, y)
         ...
+        >>> X = pd.DataFrame({'x': [0.0, 1.0, 2.0]})
+        >>> y = pd.Series([0.0, 1.0, 3.0], name='y')
         >>> pipe = XYPipeline([
-        ...     ('scaler', StandardScaler()),
+        ...     ('scaler', MinMaxScaler()),
         ...     ('log_xy', LogTransformXY()),
         ... ])
         >>> X_t, y_t = pipe.fit_transform(X, y)
+        >>> [round(value, 4) for value in y_t]
+        [0.0, 0.6931, 1.3863]
+        >>> list(X_t.columns)
+        ['x']
 
     Notes:
         - XY transformers MUST implement fit_transform to properly pass y.
         - When calling transform(X) without y, XY transformers receive y=None.
+        - The prediction methods (``predict``, ``predict_proba``,
+          ``predict_log_proba``, ``decision_function``, ``score_samples``) take
+          no y, like those of ``Pipeline``: the steps receive y=None, so a step
+          dropping the rows without target never drops a prediction.
         - inverse_transform works in reverse order and handles both X and y.
         - Metadata routing is supported (sklearn >= 1.4 required).
     """
@@ -157,76 +199,109 @@ class XYPipeline(Pipeline):
         # Instanciation des attributs
         self.preserve_dataframe = preserve_dataframe
 
-    # Sauvegarde des métadonnées pandas pour restauration ultérieure
-    def _save_pandas_metadata(self, X, y=None):
-        """Save pandas metadata for later restoration.
+    # Restauration de la structure pandas des sorties d'un appel
+    def _restore_pandas_output(self, X, y, Xt, yt=None):
+        """Give the array outputs of a call the pandas structure of its inputs.
+
+        An array output of a ``DataFrame`` input becomes a ``DataFrame``; a 1-D
+        array target of a ``Series`` input becomes a ``Series`` with its name.
+        The labels come from the inputs of this very call:
+
+        - rows: the index of the input when the row count is unchanged; once
+          rows are dropped, the index of the other pandas output of the same
+          length, provided the input ``X`` and ``y`` share their index; positions
+          ``0..n-1`` otherwise;
+        - columns: the names given by ``get_feature_names_out`` when every step
+          provides it, the input columns when the width is unchanged, positions
+          ``0..n-1`` otherwise.
 
         Args:
-            X: Input features.
-            y: Input targets.
-        """
-        # Détection du type de X
-        self._X_is_dataframe = isinstance(X, pd.DataFrame)
-        self._y_is_series = isinstance(y, pd.Series)
-
-        # Sauvegarde des métadonnées de X
-        if self._X_is_dataframe:
-            self._X_columns = X.columns.tolist()
-            self._X_index = X.index.copy()
-        else:
-            self._X_columns = None
-            self._X_index = None
-
-        # Sauvegarde des métadonnées de y
-        if self._y_is_series:
-            self._y_name = y.name
-            self._y_index = y.index.copy()
-        else:
-            self._y_name = None
-            self._y_index = None
-
-    # Restauration de la structure pandas après transformation
-    def _restore_pandas_output(self, X, y=None, restore_X=True, restore_y=True):
-        """Restore pandas structure to outputs if applicable.
-
-        Args:
-            X: Transformed features.
-            y: Transformed targets.
-            restore_X: Whether to restore X structure.
-            restore_y: Whether to restore y structure.
+            X: Features given to the call.
+            y: Target given to the call, or None.
+            Xt: Transformed features.
+            yt: Transformed target, or None to return ``Xt`` alone.
 
         Returns:
-            Restored X, y (or just X if y is None).
+            ``Xt`` when ``yt`` is None, the pair ``(Xt, yt)`` otherwise.
         """
         # Vérification que la structure de DataFrame doit être préservée
         if not self.preserve_dataframe:
-            return (X, y) if y is not None else X
+            return Xt if yt is None else (Xt, yt)
 
-        # Initialisation des output à transformer
-        X_out = X
-        y_out = y
+        # Entrées appariées par l'index : les étiquettes de y sont celles de X
+        aligned = (
+            isinstance(X, pd.DataFrame)
+            and isinstance(y, (pd.Series, pd.DataFrame))
+            and y.index.equals(X.index)
+        )
 
-        # Restauration de X comme DataFrame si l'original l'était
-        if restore_X and self._X_is_dataframe and isinstance(X, np.ndarray):
-            X_out = pd.DataFrame(X)
-            # Restauration de l'index si la taille correspond
-            if self._X_index is not None and len(X) == len(self._X_index):
-                X_out.index = self._X_index
-            # Restauration des colonnes si la taille correspond
-            if self._X_columns is not None and X.shape[1] == len(self._X_columns):
-                X_out.columns = self._X_columns
+        # Restauration de X comme DataFrame si l'entrée l'était
+        X_out = Xt
+        if isinstance(X, pd.DataFrame) and isinstance(Xt, np.ndarray) and Xt.ndim == 2:
+            partner = yt if aligned and isinstance(yt, (pd.Series, pd.DataFrame)) else None
+            X_out = pd.DataFrame(
+                Xt,
+                index=self._row_labels(X.index, len(Xt), partner),
+                columns=self._output_columns(X, Xt.shape[1]),
+            )
 
-        # Restauration de y comme Series si l'original l'était
-        if restore_y and y is not None and self._y_is_series:
-            if isinstance(y, np.ndarray) and y.ndim == 1:
-                y_out = pd.Series(y, name=self._y_name)
-                if self._y_index is not None and len(y) == len(self._y_index):
-                    y_out.index = self._y_index
-        # Retourne X et y si y est spécifié
-        if y is not None:
-            return X_out, y_out
-        # Retourne X sinon
-        return X_out
+        # Restauration de y comme Series si l'entrée l'était
+        y_out = yt
+        if isinstance(y, pd.Series) and isinstance(yt, np.ndarray) and yt.ndim == 1:
+            partner = X_out if aligned and isinstance(X_out, pd.DataFrame) else None
+            y_out = pd.Series(yt, index=self._row_labels(y.index, len(yt), partner), name=y.name)
+
+        # Retourne X et y si y est spécifié, X sinon
+        if yt is None:
+            return X_out
+        return X_out, y_out
+
+    # Étiquettes de lignes d'une sortie restaurée
+    @staticmethod
+    def _row_labels(index: pd.Index, n_rows: int, partner: Optional[Any] = None) -> Optional[pd.Index]:
+        """Row labels of a restored output.
+
+        Args:
+            index: Index of the matching input.
+            n_rows: Row count of the output.
+            partner: Other pandas output of the call, whose index is borrowed
+                when ``index`` no longer fits (rows dropped), or None.
+
+        Returns:
+            ``index`` when the row count is unchanged, the index of ``partner``
+            when its length fits, None (positions) otherwise.
+        """
+        # Restitution d'un index sur la base de l'égalité des nombres de lignes
+        if len(index) == n_rows:
+            return index
+        if partner is not None and len(partner) == n_rows:
+            return partner.index
+        return None
+
+    # Noms de colonnes d'une sortie restaurée
+    def _output_columns(self, X: pd.DataFrame, n_columns: int) -> Optional[list]:
+        """Column names of a restored ``X`` output.
+
+        Args:
+            X: Features given to the call.
+            n_columns: Width of the output.
+
+        Returns:
+            The names given by ``get_feature_names_out`` when every step
+            provides them, the columns of ``X`` when the width is unchanged,
+            None (positions) otherwise.
+        """
+        # Noms produits par les étapes, quand toutes savent les donner
+        try:
+            names = list(self.get_feature_names_out())
+        except (AttributeError, NotFittedError, TypeError, ValueError):
+            names = None
+        if names is not None and len(names) == n_columns:
+            return names
+        # Repli : largeur inchangée, colonnes d'entrée conservées
+        if X.shape[1] == n_columns:
+            return list(X.columns)
+        return None
 
     # Méthode d'entrainement de l'estimateur et de transformation des données
     def _fit(self, X, y=None, routed_params=None, raw_params=None):
@@ -247,12 +322,6 @@ class XYPipeline(Pipeline):
 
         # Instanciation du cache mémoire
         memory = check_memory(self.memory)
-
-        # Sauvegarde des métadonnées pandas
-        self._save_pandas_metadata(X, y)
-
-        if routed_params is None:
-            routed_params = {}
 
         # Initialisation des X et y transformés à leurs valeurs initiales
         Xt, yt = X, y
@@ -285,7 +354,6 @@ class XYPipeline(Pipeline):
                 cloned_transformer,
                 Xt,
                 yt,
-                weight=None,
                 message_clsname="Pipeline",
                 message=self._log_message(step_idx),
                 params=step_params,
@@ -303,17 +371,13 @@ class XYPipeline(Pipeline):
         return Xt, yt
 
     # Fit et transformation d'un step individuel
-    def _fit_transform_step(
-        self, transformer, X, y, weight=None,
-        message_clsname="", message=None, params=None
-    ):
+    def _fit_transform_step(self, transformer, X, y, message_clsname, message, params):
         """Fit and transform a single step, handling XY transformers.
 
         Args:
             transformer: The transformer to fit.
             X: Input features.
             y: Input targets.
-            weight: Weight to apply to result (for FeatureUnion compatibility).
             message_clsname: Class name for timing message.
             message: Timing message.
             params: Routed parameters dict with keys 'fit', 'transform', 'fit_transform'.
@@ -321,10 +385,6 @@ class XYPipeline(Pipeline):
         Returns:
             Tuple (result, transformer) where result is X_t or (X_t, y_t).
         """
-        # Initialisation des paramètres
-        if params is None:
-            params = {}
-
         with _print_elapsed_time(message_clsname, message):
             if hasattr(transformer, "fit_transform"):
                 # Utilisation de fit_transform avec y si supporté
@@ -347,17 +407,10 @@ class XYPipeline(Pipeline):
                     transformer, X, y, params.get("transform", {})
                 )
 
-        # Gestion du poids (compatibilité FeatureUnion)
-        if weight is not None:
-            if isinstance(result, tuple):
-                result = (result[0] * weight, result[1])
-            else:
-                result = result * weight
-
         return result, transformer
 
     # Transformation d'un step individuel
-    def _transform_step(self, transformer, X, y, transform_params=None):
+    def _transform_step(self, transformer, X, y, transform_params):
         """Transform a single step, handling XY transformers.
 
         Args:
@@ -369,10 +422,6 @@ class XYPipeline(Pipeline):
         Returns:
             X_transformed or (X_transformed, y_transformed).
         """
-        # Initialisation des paramètres
-        if transform_params is None:
-            transform_params = {}
-
         # Transformation avec y si supporté
         if _accepts_y_param(transformer, "transform") and y is not None:
             return transformer.transform(X, y, **transform_params)
@@ -380,8 +429,43 @@ class XYPipeline(Pipeline):
         # Transformation standard (X seulement)
         return transformer.transform(X, **transform_params)
 
+    # Transformation par les étapes ajustées, avec la cible quand elle est fournie
+    def _transform_steps(self, X, y, routed_params, with_final):
+        """Transform ``X`` (and ``y``) through the fitted steps, in order.
+
+        ``'passthrough'`` and None steps are skipped by ``_iter``.
+
+        Args:
+            X: Features to transform.
+            y: Targets to transform, or None: the steps then receive ``X`` only.
+            routed_params: Routed parameters of the method, or None (no routing).
+            with_final: Whether the last step is a transformer to apply too.
+
+        Returns:
+            Tuple ``(X_t, y_t, y_was_transformed)``, the flag telling whether a
+            step returned a pair.
+        """
+        # Initialisation des éléments transformés
+        Xt, yt, y_was_transformed = X, y, False
+
+        # Itération sur les steps ajustés
+        for _, name, transformer in self._iter(with_final=with_final):
+            # Extraction des paramètres de transformation
+            params = {} if routed_params is None else routed_params[name].transform
+            # Transformation
+            result = self._transform_step(transformer, Xt, yt, params)
+
+            # Gestion du résultat
+            if isinstance(result, tuple) and len(result) == 2:
+                Xt, yt = result
+                y_was_transformed = True
+            else:
+                Xt = result
+
+        return Xt, yt, y_was_transformed
+
     # Transformation inverse d'un step individuel
-    def _inverse_transform_step(self, transformer, X, y, params=None):
+    def _inverse_transform_step(self, transformer, X, y, params):
         """Inverse transform a single step, handling XY transformers.
 
         Args:
@@ -393,10 +477,6 @@ class XYPipeline(Pipeline):
         Returns:
             X_original or (X_original, y_original).
         """
-        # Initialisation des paramètres
-        if params is None:
-            params = {}
-
         # Transformation inverse avec y si supporté
         if _accepts_y_param(transformer, "inverse_transform") and y is not None:
             return transformer.inverse_transform(X, y, **params)
@@ -460,6 +540,12 @@ class XYPipeline(Pipeline):
     def fit_transform(self, X, y=None, **params):
         """Fit and transform the data.
 
+        An array output of a pandas input gets the pandas structure back when
+        ``preserve_dataframe`` is True: the index of the input while the row
+        count is unchanged, else the index of the pandas target returned (for
+        an ``X`` and a ``y`` given with the same index), so that ``X_t`` and
+        ``y_t`` stay aligned once rows are dropped.
+
         Args:
             X: Training data of shape (n_samples, n_features).
             y: Training targets of shape (n_samples,) or (n_samples, n_targets).
@@ -486,12 +572,11 @@ class XYPipeline(Pipeline):
         # Suivi de la transformation de y
         y_was_transformed = (y is not None) and (yt is not y)
 
-        # Traitement du dernier step
+        # Traitement du dernier step : transformateur ou 'passthrough'
+        # (la méthode n'est disponible que dans ces deux cas)
         last_step = self._final_estimator
         with _print_elapsed_time("Pipeline", self._log_message(len(self.steps) - 1)):
-            if last_step == "passthrough":
-                pass
-            elif hasattr(last_step, "fit_transform") or hasattr(last_step, "transform"):
+            if last_step != "passthrough":
                 # Extraction des paramètres de la dernière étape
                 last_step_params = self._get_metadata_for_step(
                     step_idx=len(self) - 1,
@@ -499,8 +584,7 @@ class XYPipeline(Pipeline):
                     all_params=params,
                 )
 
-                # Fit et transformation du dernier step (timing déjà géré dans _fit_transform_step)
-                # Mais ici on utilise le timing externe pour cohérence avec l'original
+                # Fit et transformation du dernier step
                 if _accepts_y_param(last_step, "fit_transform") and yt is not None:
                     result = last_step.fit_transform(
                         Xt, yt, **last_step_params.get("fit_transform", {})
@@ -525,27 +609,20 @@ class XYPipeline(Pipeline):
                     y_was_transformed = True
                 else:
                     Xt = result
-            else:
-                # Estimateur final sans transform (fit seulement)
-                last_step_params = self._get_metadata_for_step(
-                    step_idx=len(self) - 1,
-                    step_params=routed_params[self.steps[-1][0]],
-                    all_params=params,
-                )
-                if _accepts_y_param(last_step, "fit") and yt is not None:
-                    last_step.fit(Xt, yt, **last_step_params.get("fit", {}))
-                else:
-                    last_step.fit(Xt, **last_step_params.get("fit", {}))
 
         # Restauration de la structure pandas si nécessaire
         if y_was_transformed and yt is not None:
-            return self._restore_pandas_output(Xt, yt)
-        return self._restore_pandas_output(Xt, None)
+            return self._restore_pandas_output(X, y, Xt, yt)
+        return self._restore_pandas_output(X, y, Xt)
 
     # Transformation des données
     @available_if(Pipeline._can_transform)
     def transform(self, X, y=None, **params):
         """Transform the data.
+
+        An array output of a pandas input gets the pandas structure back when
+        ``preserve_dataframe`` is True, with the labels of this call's ``X`` and
+        ``y`` (see ``fit_transform``).
 
         Args:
             X: Data to transform of shape (n_samples, n_features).
@@ -563,32 +640,13 @@ class XYPipeline(Pipeline):
         # Routage des paramètres via process_routing
         routed_params = process_routing(self, "transform", **params)
 
-        # Initialisation des éléments transformés
-        Xt = X
-        yt = y
-        y_was_transformed = False
-
-        # Itération sur tous les steps
-        for _, name, transformer in self._iter():
-            # Vérification que le transformer est spécifié
-            if transformer is None or transformer == "passthrough":
-                continue
-            # Extraction des paramètres de transformation
-            transform_params = routed_params[name].transform
-            # Transformation
-            result = self._transform_step(transformer, Xt, yt, transform_params)
-
-            # Gestion du résultat
-            if isinstance(result, tuple) and len(result) == 2:
-                Xt, yt = result
-                y_was_transformed = True
-            else:
-                Xt = result
+        # Transformation par tous les steps
+        Xt, yt, y_was_transformed = self._transform_steps(X, y, routed_params, with_final=True)
 
         # Restauration de la structure pandas
         if y is not None and y_was_transformed:
-            return self._restore_pandas_output(Xt, yt)
-        return self._restore_pandas_output(Xt, None)
+            return self._restore_pandas_output(X, y, Xt, yt)
+        return self._restore_pandas_output(X, y, Xt)
 
     # Transformation inverse des données
     @available_if(Pipeline._can_inverse_transform)
@@ -615,15 +673,8 @@ class XYPipeline(Pipeline):
         yt = y
         y_was_transformed = False
 
-        # Itération sur les steps en ordre inverse
-        reverse_steps = reversed(list(self._iter()))
-
-        # Parcours des transformers
-        for step_idx, name, transformer in reverse_steps:
-            # Vérification que le transformer est spécifié
-            if transformer is None or transformer == "passthrough":
-                continue
-
+        # Parcours des transformers en ordre inverse
+        for _, name, transformer in reversed(list(self._iter())):
             # Extraction des paramètres de la transformation inverse
             inv_params = routed_params[name].inverse_transform
             # Transformation inverse
@@ -642,43 +693,31 @@ class XYPipeline(Pipeline):
 
     # Transformation et prédiction
     @available_if(_final_estimator_has("predict"))
-    def predict(self, X, y=None, **params):
+    def predict(self, X, **params):
         """Transform and predict.
+
+        The steps receive ``X`` only: a step that drops the rows without target
+        keeps every row, so there is one prediction per row of ``X``.
 
         Args:
             X: Data to transform and predict.
-            y: Optional y for XY transformers during transform.
             **params: Parameters passed to predict of the final estimator.
 
         Returns:
             Predictions from the final estimator.
+
+        Raises:
+            TypeError: If a target ``y`` is passed.
         """
-        # Vérification que le pipeline est fitted
+        # Refus de la cible, puis vérification que le pipeline est fitted
+        _refuse_target("predict", params)
         check_is_fitted(self)
 
         # Routage des paramètres via process_routing
         routed_params = process_routing(self, "predict", **params)
 
-        # Initialisation des éléments transformés
-        Xt = X
-        yt = y
-
-        # Transformation des steps intermédiaires
-        for step_idx, name, transformer in self._iter(with_final=False):
-            # Vérification que le transformer est spécifié
-            if transformer is None or transformer == "passthrough":
-                continue
-
-            # Extraction des paramètres de transformation
-            transform_params = routed_params[name].transform
-            # Transformation
-            result = self._transform_step(transformer, Xt, yt, transform_params)
-
-            # Gestion du résultat
-            if isinstance(result, tuple) and len(result) == 2:
-                Xt, yt = result
-            else:
-                Xt = result
+        # Transformation des steps intermédiaires, sans la cible
+        Xt, _, _ = self._transform_steps(X, None, routed_params, with_final=False)
 
         # Prédiction avec l'estimateur final
         return self.steps[-1][1].predict(
@@ -687,42 +726,28 @@ class XYPipeline(Pipeline):
 
     # Prédiction de probabilités
     @available_if(_final_estimator_has("predict_proba"))
-    def predict_proba(self, X, y=None, **params):
+    def predict_proba(self, X, **params):
         """Transform and predict_proba.
 
         Args:
             X: Data to transform and predict.
-            y: Optional y for XY transformers during transform.
             **params: Parameters passed to predict_proba of the final estimator.
 
         Returns:
             Probability predictions from the final estimator.
+
+        Raises:
+            TypeError: If a target ``y`` is passed.
         """
-        # Vérification que le pipeline est fitted
+        # Refus de la cible, puis vérification que le pipeline est fitted
+        _refuse_target("predict_proba", params)
         check_is_fitted(self)
 
         # Routage des paramètres via process_routing
         routed_params = process_routing(self, "predict_proba", **params)
 
-        # Initialisation des éléments transformés
-        Xt = X
-        yt = y
-
-        # Transformation des steps intermédiaires
-        for step_idx, name, transformer in self._iter(with_final=False):
-            # Vérification que le transformer est spécifié
-            if transformer is None or transformer == "passthrough":
-                continue
-            # Extraction des paramètres de transformation
-            transform_params = routed_params[name].transform
-            # Transformation
-            result = self._transform_step(transformer, Xt, yt, transform_params)
-
-            # Gestion du résultat
-            if isinstance(result, tuple) and len(result) == 2:
-                Xt, yt = result
-            else:
-                Xt = result
+        # Transformation des steps intermédiaires, sans la cible
+        Xt, _, _ = self._transform_steps(X, None, routed_params, with_final=False)
 
         # Prédiction avec l'estimateur final
         return self.steps[-1][1].predict_proba(
@@ -731,42 +756,28 @@ class XYPipeline(Pipeline):
 
     # Fonction de décision
     @available_if(_final_estimator_has("decision_function"))
-    def decision_function(self, X, y=None, **params):
+    def decision_function(self, X, **params):
         """Transform and decision_function.
 
         Args:
             X: Data to transform.
-            y: Optional y for XY transformers during transform.
             **params: Parameters passed to decision_function of the final estimator.
 
         Returns:
             Decision function output from the final estimator.
+
+        Raises:
+            TypeError: If a target ``y`` is passed.
         """
-        # Vérification que le pipeline est fitted
+        # Refus de la cible, puis vérification que le pipeline est fitted
+        _refuse_target("decision_function", params)
         check_is_fitted(self)
 
         # Routage des paramètres via process_routing
         routed_params = process_routing(self, "decision_function", **params)
 
-        # Initialisation des éléments transformés
-        Xt = X
-        yt = y
-
-        # Transformation des steps intermédiaires
-        for step_idx, name, transformer in self._iter(with_final=False):
-            # Vérification que le transformer est spécifié
-            if transformer is None or transformer == "passthrough":
-                continue
-            # Extraction des paramètres de transformation
-            transform_params = routed_params[name].transform
-            # Transformation
-            result = self._transform_step(transformer, Xt, yt, transform_params)
-
-            # Gestion du résultat
-            if isinstance(result, tuple) and len(result) == 2:
-                Xt, yt = result
-            else:
-                Xt = result
+        # Transformation des steps intermédiaires, sans la cible
+        Xt, _, _ = self._transform_steps(X, None, routed_params, with_final=False)
 
         # Fonction de décision avec l'estimateur final
         return self.steps[-1][1].decision_function(
@@ -777,6 +788,9 @@ class XYPipeline(Pipeline):
     @available_if(_final_estimator_has("score"))
     def score(self, X, y=None, sample_weight=None, **params):
         """Transform and score.
+
+        ``y`` goes through the XY steps: a step dropping the rows without
+        target drops them before scoring.
 
         Args:
             X: Data to transform and score.
@@ -795,26 +809,8 @@ class XYPipeline(Pipeline):
             self, "score", sample_weight=sample_weight, **params
         )
 
-        # Initialisation des éléments transformés
-        Xt = X
-        yt = y
-
-        # Transformation des steps intermédiaires
-        for step_idx, name, transformer in self._iter(with_final=False):
-            # Vérification que le transformer est spécifié
-            if transformer is None or transformer == "passthrough":
-                continue
-
-            # Extraction des paramètres de transformation
-            transform_params = routed_params[name].transform
-            # Transformation
-            result = self._transform_step(transformer, Xt, yt, transform_params)
-
-            # Gestion du résultat
-            if isinstance(result, tuple) and len(result) == 2:
-                Xt, yt = result
-            else:
-                Xt = result
+        # Transformation des steps intermédiaires, avec la cible
+        Xt, yt, _ = self._transform_steps(X, y, routed_params, with_final=False)
 
         # Scoring avec l'estimateur final
         return self.steps[-1][1].score(
@@ -823,42 +819,28 @@ class XYPipeline(Pipeline):
 
     # Prédiction des log-probabilités
     @available_if(_final_estimator_has("predict_log_proba"))
-    def predict_log_proba(self, X, y=None, **params):
+    def predict_log_proba(self, X, **params):
         """Transform and predict_log_proba.
 
         Args:
             X: Data to transform and predict.
-            y: Optional y for XY transformers during transform.
             **params: Parameters passed to predict_log_proba of the final estimator.
 
         Returns:
             Log probability predictions from the final estimator.
+
+        Raises:
+            TypeError: If a target ``y`` is passed.
         """
-        # Vérification que le pipeline est fitted
+        # Refus de la cible, puis vérification que le pipeline est fitted
+        _refuse_target("predict_log_proba", params)
         check_is_fitted(self)
 
         # Routage des paramètres via process_routing
         routed_params = process_routing(self, "predict_log_proba", **params)
 
-        # Initialisation des éléments transformés
-        Xt = X
-        yt = y
-
-        # Transformation des steps intermédiaires
-        for step_idx, name, transformer in self._iter(with_final=False):
-            # Vérification que le transformer est spécifié
-            if transformer is None or transformer == "passthrough":
-                continue
-            # Extraction des paramètres de transformation
-            transform_params = routed_params[name].transform
-            # Transformation
-            result = self._transform_step(transformer, Xt, yt, transform_params)
-
-            # Gestion du résultat
-            if isinstance(result, tuple) and len(result) == 2:
-                Xt, yt = result
-            else:
-                Xt = result
+        # Transformation des steps intermédiaires, sans la cible
+        Xt, _, _ = self._transform_steps(X, None, routed_params, with_final=False)
 
         # Prédiction avec l'estimateur final
         return self.steps[-1][1].predict_log_proba(
@@ -906,12 +888,11 @@ class XYPipeline(Pipeline):
 
     # Score des échantillons
     @available_if(_final_estimator_has("score_samples"))
-    def score_samples(self, X, y=None):
+    def score_samples(self, X):
         """Transform and score_samples with the final estimator.
 
         Args:
             X: Data to transform and score.
-            y: Optional y for XY transformers during transform.
 
         Returns:
             Score samples from the final estimator.
@@ -919,23 +900,8 @@ class XYPipeline(Pipeline):
         # Vérification que le pipeline est fitted
         check_is_fitted(self)
 
-        # Initialisation des éléments transformés
-        Xt = X
-        yt = y
-
-        # Transformation des steps intermédiaires
-        for step_idx, name, transformer in self._iter(with_final=False):
-            # Vérification que le transformer est spécifié
-            if transformer is None or transformer == "passthrough":
-                continue
-            # Transformation
-            result = self._transform_step(transformer, Xt, yt, {})
-
-            # Gestion du résultat
-            if isinstance(result, tuple) and len(result) == 2:
-                Xt, yt = result
-            else:
-                Xt = result
+        # Transformation des steps intermédiaires, sans la cible
+        Xt, _, _ = self._transform_steps(X, None, None, with_final=False)
 
         # Score des échantillons avec l'estimateur final
         return self._final_estimator.score_samples(Xt)

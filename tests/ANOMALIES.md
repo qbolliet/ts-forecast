@@ -6320,3 +6320,95 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Statut** : corrigée (2026-10-17)
 
 ## XY
+
+### ANO-XY-001 — `transform` de nouvelles données : index (et colonnes) de l'apprentissage réappliqués
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/pipeline.py::XYPipeline._restore_pandas_output` (appelée par `transform`, `fit_transform`)
+- **Sévérité** : majeure
+- **Observé** : l'index et les colonnes de `X` sont mémorisés **au fit** seulement (`_save_pandas_metadata`, appelée par `_fit`). Quand une étape rend un ndarray (StandardScaler), la sortie de `transform(X_new)` reçoit l'index **d'apprentissage** dès que le nombre de lignes coïncide : `transform` de 6 dates postérieures sort avec les 6 dates du fit. Si le nombre diffère, la sortie a un `RangeIndex` au lieu des dates de `X_new`. Même mécanisme pour les colonnes : une PCA à 2 composantes sur 2 colonnes reprend les noms des colonnes d'entrée.
+- **Attendu** : la sortie de `transform` porte l'index du `X` reçu par cet appel (le nombre de lignes est inchangé) ; les noms de colonnes sont ceux de l'étape (`get_feature_names_out`) ou numérotés, jamais ceux de l'entrée si l'étape en a fabriqué d'autres.
+- **Reproduction** :
+  ```python
+  X = pd.DataFrame({'a': [1., 2, 3, 4, 5, 6]}, index=pd.date_range('2024-01-31', periods=6, freq='ME'))
+  pipe = XYPipeline([('s', StandardScaler())]).fit(X, X['a'])
+  X_new = X.set_axis(pd.date_range('2024-07-31', periods=6, freq='ME'))
+  pipe.transform(X_new).index[0]   # Timestamp('2024-01-31') au lieu de 2024-07-31
+  ```
+- **Test** : `tests/unit/xy/pipeline/test_core.py::TestPandasPreservation::test_transform_of_new_data_keeps_its_index` (`same_length`, `shorter`), `::test_new_features_are_named_by_the_steps`, `::test_step_without_feature_names_keeps_the_input_columns`
+- **Correctif** (2026-10-17) : la restauration pandas ne garde plus d'état du fit : elle lit les entrées de l'appel en cours. Lignes : l'index du `X` reçu tant que le nombre de lignes est inchangé. Colonnes : les noms de `get_feature_names_out` quand toutes les étapes savent les donner (`pca0`, `pca1`), les colonnes d'entrée si la largeur est inchangée, et des positions sinon.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-XY-002 — Lignes retirées derrière une étape ndarray : X et y ne s'alignent plus par l'index
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/pipeline.py::XYPipeline._restore_pandas_output`
+- **Sévérité** : majeure
+- **Observé** : `XYPipeline([StandardScaler(), DropNaNTarget()]).fit_transform(X, y)` (y NaN à la 2ᵉ date) rend `X'` en DataFrame d'index `RangeIndex(0..4)` (la longueur ne correspond plus à l'index mémorisé) et `y'` en Series indexée par les 5 dates conservées : les deux sorties ne se joignent plus par l'index. Même résultat avec `transform(X, y)`. L'estimateur final, lui, reçoit des lignes correctement appariées par position (test `TestRowAlignment::test_estimator_rows_stay_paired_after_an_array_step`).
+- **Attendu** : `X'.index.equals(y'.index)` : après un retrait de lignes, `X'` porte les étiquettes des lignes gardées, comme `y'`.
+- **Reproduction** :
+  ```python
+  idx = pd.date_range('2024-01-31', periods=3, freq='ME')
+  X = pd.DataFrame({'a': [1., 2, 3]}, index=idx); y = pd.Series([1., np.nan, 3], index=idx)
+  X_t, y_t = XYPipeline([('s', StandardScaler()), ('d', DropNaNTarget())]).fit_transform(X, y)
+  X_t.index.tolist(), y_t.index.tolist()   # [0, 1] contre [2024-01-31, 2024-03-31]
+  ```
+- **Test** : `tests/unit/xy/pipeline/test_y_propagation.py::TestRowAlignment::test_fit_transform_aligns_x_and_y[array_step_then_drop]`, `::test_transform_aligns_x_and_y[array_step_then_drop]`
+- **Correctif** (2026-10-17) : une fois des lignes retirées, `X'` reprend l'index de la cible pandas rendue par les étapes, à condition que `X` et `y` aient été passés avec le même index. Sinon les deux sorties sont numérotées par positions, et `y'` emprunte de même l'index de `X'`.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-XY-004 — Docstrings de `xy` : exemples non exécutables, classe non exportée
+- **Type** : [DOC] docstring ≠ code
+- **Composant** : `tsforecast/xy/pipeline.py::XYPipeline`, `tsforecast/xy/transformers.py::XYTransformerMixin`, `::XYPanelTimeSeriesTransformer`
+- **Sévérité** : mineure
+- **Observé** : l'exemple de la classe `XYPipeline` utilise `X`, `y`, `np`, `BaseEstimator` et `TransformerMixin` sans les définir ; celui de `XYTransformerMixin` utilise `BaseEstimator` et `np` sans import (et ne fait que définir une classe). `XYPanelTimeSeriesTransformer` est publique (sans `_`), utilisée par `HighFrequencyImputer`, mais absente de `tsforecast.xy.__all__` et de CLAUDE.md ; son en-tête de commentaire porte une coquille (« XYSur »).
+- **Attendu** : doctests autonomes qui passent ; `XYPanelTimeSeriesTransformer` exportée par `tsforecast.xy` (ou rendue privée) et décrite dans CLAUDE.md.
+- **Test** : `pytest --doctest-modules tsforecast/xy`
+- **Correctif** (2026-10-17) : les exemples de `XYPipeline`, `XYTransformerMixin` et `XYPanelTimeSeriesTransformer` sont des doctests autonomes qui passent ; `XYPanelTimeSeriesTransformer` est exportée par `tsforecast.xy` (classe de base publique, comme celles de `tsforecast.base`), a sa page `docs/api/xy/` et figure dans CLAUDE.md ; la coquille est corrigée.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-XY-005 — `XYTransformerMixin.fit` marque l'état ajusté par `_is_fitted`, ignoré par sklearn
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/transformers.py::XYTransformerMixin.fit`
+- **Sévérité** : majeure
+- **Observé** : `fit` pose `self._is_fitted = True`. `check_is_fitted` ne lit que les attributs finissant par `_` (ou `__sklearn_is_fitted__`) : une sous-classe minimale (seuls `_fit` / `_transform`, comme le décrit la docstring) est déclarée **non ajustée** après `fit`. Placée en dernière étape d'un `XYPipeline`, elle fait lever `NotFittedError: This XYPipeline instance is not fitted yet` à `transform`, **après** un `fit` réussi (`Pipeline.__sklearn_is_fitted__` interroge la dernière étape).
+- **Attendu** : une sous-classe ajustée est reconnue comme telle : le mixin définit `__sklearn_is_fitted__` (renvoyant `getattr(self, '_is_fitted', False)`) ou pose un attribut à suffixe `_`.
+- **Reproduction** :
+  ```python
+  class K(BaseEstimator, XYTransformerMixin):
+      def _fit(self, X, y): return self
+      def _transform(self, X, y=None): return X if y is None else (X, y)
+  check_is_fitted(K().fit(X, y))                      # NotFittedError
+  XYPipeline([('k', K())]).fit(X, y).transform(X)     # NotFittedError
+  ```
+- **Test** : `tests/unit/xy/test_transformers.py::TestXYTransformerMixin` (`test_fitted_subclass_passes_check_is_fitted`, `test_unfitted_subclass_fails_check_is_fitted`, `test_subclass_overriding_fit_is_fitted_by_its_learnt_attributes`, `test_last_step_of_a_fitted_pipeline_transforms`, `test_clone_is_not_fitted`)
+- **Correctif** (2026-10-17) : `XYTransformerMixin.__sklearn_is_fitted__` renvoie True après `fit`. Il renvoie aussi True dès qu'un attribut appris (suffixe `_`) est présent, pour qu'une sous-classe qui surcharge `fit` sans appeler celui du mixin reste reconnue comme ajustée.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-XY-006 — `predict(X, y)` retire des lignes : une prédiction perd des lignes
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/pipeline.py::XYPipeline.predict` (et `predict_proba`, `predict_log_proba`, `decision_function`, `score_samples`, même boucle)
+- **Sévérité** : majeure
+- **Observé** : `predict` accepte un `y` optionnel « for XY transformers during transform » et le transmet aux étapes XY. Avec `DropNaNTarget` dans le pipeline, `predict(X, y)` retire les lignes à cible NaN : 5 prédictions pour 6 lignes de `X`, sans erreur.
+- **Attendu** : `DropNaNTarget` s'applique « au fit et au score, jamais au predict » (CLAUDE.md) et sa docstring promet qu'« a prediction never loses a row » : `predict` rend une prédiction par ligne de `X`, qu'on lui passe `y` ou non (par exemple en ne transmettant pas `y` aux étapes, ou en refusant un `y` qui change le nombre de lignes).
+- **Reproduction** :
+  ```python
+  pipe = XYPipeline([('d', DropNaNTarget()), ('m', LinearRegression())]).fit(X, y)  # y : 1 NaN sur 6
+  len(pipe.predict(X, y))   # 5
+  ```
+- **Test** : `tests/unit/xy/pipeline/test_y_propagation.py::TestPasses` (`test_predict_refuses_a_positional_target`, `test_prediction_methods_refuse_a_keyword_target`, `test_score_samples_refuses_a_target`, `test_prediction_methods_keep_every_row`, `test_score_samples_keeps_every_row`)
+- **Correctif** (2026-10-17) : décision de l'auteur : les méthodes de prédiction refusent `y`. `predict`, `predict_proba`, `predict_log_proba` et `decision_function` ont la signature `(X, **params)` de `Pipeline`. Un `y` positionnel lève la `TypeError` de Python ; `y=` lève « XYPipeline.predict does not take y: a prediction never depends on the target; use score(X, y) to evaluate the pipeline ». `score_samples(X)` ne prend que `X`. `score` garde son `y`.
+- **Statut** : corrigée (2026-10-17)
+
+### ANO-XY-007 — Branches inatteignables (code mort) dans `XYPipeline`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/pipeline.py::XYPipeline`
+- **Sévérité** : cosmétique
+- **Observé** : branches que la voie publique ne peut pas atteindre :
+  - `_fit_transform_step` : la branche `weight is not None` (`_fit` passe toujours `weight=None`) et `params is None` (toujours un dict) ;
+  - `_fit` : `routed_params is None` (`fit`, `fit_transform`, `fit_predict` passent toujours le résultat de `_check_method_params`) ;
+  - `_transform_step`, `_inverse_transform_step` : `params is None` (toujours un dict) ;
+  - `fit_transform` : le `else` final « estimateur final sans transform » ; `available_if(Pipeline._can_fit_transform)` rend la méthode indisponible dans ce cas (`AttributeError` avant d'entrer) ;
+  - `transform`, `inverse_transform`, `predict`, `predict_proba`, `decision_function`, `score`, `predict_log_proba`, `score_samples` : la garde `transformer is None or transformer == "passthrough"`, car `self._iter()` filtre déjà ces étapes (`filter_passthrough=True` par défaut).
+- **Attendu** : suppression de ces branches (ou appel de `_iter(filter_passthrough=False)` si la garde doit rester).
+- **Test** : aucun (lignes non couvertes justifiées dans le rapport de B6)
+- **Correctif** (2026-10-17) : branches supprimées ; les boucles de `transform`, `score` et des méthodes de prédiction passent par une méthode commune (`_transform_steps`) ; la garde `passthrough` ne reste que dans `_fit`, dont l'itération ne filtre pas ces étapes.
+- **Statut** : corrigée (2026-10-17)

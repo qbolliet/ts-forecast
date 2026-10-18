@@ -322,6 +322,29 @@ livrée. Pour **B8** : une entité inconnue lève désormais `ValueError` (et no
 - ANO-XY-004 [DOC] : l'exemple de la docstring de classe utilise `X`, `y`, `np` et `BaseEstimator`
   sans les définir ; `XYPanelTimeSeriesTransformer` n'est pas exporté.
 
+**Bilan B6 (2026-10-17)** : `tests/unit/xy/test_transformers.py` étendu (DropNaNTarget, `XYTransformerMixin`,
+`XYPanelTimeSeriesTransformer`), `tests/unit/xy/pipeline/test_core.py` réécrit sur valeurs d'or, `test_y_propagation.py`
+et `test_equivalence.py` créés ; `xy/transformers.py` 79 % → 98 % (seul le `pass` abstrait reste), `pipeline.py` 70 % → 82 %.
+Support livré (`tests/support/estimators.py` + `test_estimators.py`) : `SpyTransformer` (étape sklearn ordinaire, identité),
+`SpyXYTransformer(y_offset)` (XY par le mixin, `y + y_offset`), journal `calls_` de `SpyCall(method, X_index, X_shape, y)`
+créé au premier appel (un clone repart vide) ; `MixinScaleXY(k)` (sous-classe minimale, **sans** attribut ajusté :
+voir ANO-XY-005) ; `FailingTransformer(fail_on=<méthode>, error=...)`, interface de la doublure de B5, désormais
+importée par `tests/unit/panel/transformers/conftest.py`. Fixtures `frame_xy` / `linear_xy` dans le `conftest.py` du
+paquet `pipeline/`. Anomalies **001, 002** consignées, **004** [DOC], nouvelles **005** (état ajusté du mixin invisible
+pour sklearn), **006** (`predict(X, y)` retire des lignes) et **007** (code mort) ; **003 reste à B7**. Pour **B7** :
+après un retrait de lignes, `sample_weight` routé vers l'estimateur n'est pas filtré
+(`fit(X, y, m__sample_weight=w)` → « sample_weight.shape == (4,), expected (3,) ») ; tests douteux de
+`test_sklearn_surface.py` non retouchés (section 4) ; lignes de `pipeline.py` laissées à B7 : `predict_log_proba`,
+`score_samples`, `predict_proba` / `decision_function` derrière une étape XY, `transform_input` de `fit_transform` /
+`fit_predict`, `_accepts_y_param` (signature illisible, `y` mot-clé seul).
+**Puis, sur décision de l'auteur, 001, 002, 004, 005, 006 et 007 corrigées le même jour** dans `tsforecast/xy/` :
+restauration pandas sans état, lue sur les entrées de l'appel (index de l'appel, index de la cible après un retrait de lignes
+quand `X` et `y` sont alignés, noms de `get_feature_names_out`) ; `XYTransformerMixin.__sklearn_is_fitted__` ; les méthodes de
+prédiction refusent `y` (signature `(X, **params)` de `Pipeline`, `TypeError` explicite pour `y=`) ; code mort supprimé
+(boucles mutualisées dans `_transform_steps`) ; doctests autonomes et `XYPanelTimeSeriesTransformer` exportée par
+`tsforecast.xy`. `pipeline.py` passe à 98 %. Pour **B7** : il reste `transform_input` (`fit_transform`, `fit_predict`) et
+`_accepts_y_param` (ANO-XY-003).
+
 ## 6. Scénarios attendus par prompt
 
 Pour chaque composant, les cas limites de CLAUDE.md s'appliquent : non trié, doublons, entité
