@@ -19,7 +19,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.cluster import KMeans
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.neighbors import KernelDensity
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
@@ -38,8 +37,8 @@ from tests.support.estimators import (
 # ==============================================================================
 
 
-class _FitThenTransformXY(BaseEstimator):
-    """XY step without ``fit_transform``: the pipeline must call ``fit`` then ``transform``.
+class _FitThenTransformXY(BaseEstimator, XYTransformerMixin):
+    """XY step without its own ``fit_transform``: the one of the mixin calls ``fit`` then ``transform``.
 
     ``transform(X, y)`` returns ``(X, y + y_offset)``; ``fit`` logs the target it got.
     """
@@ -339,9 +338,9 @@ class TestTargetKinds:
         assert [call.y for name in ('sk', 'xy') for call in pipeline.named_steps[name].calls_] == [None] * 4
 
     def test_unsupervised_final_estimator_is_fitted_without_target(self, frame_xy):
-        """``KMeans`` last, no ``y``: the upstream spy is fitted with ``y=None``."""
+        """``KernelDensity`` last, no ``y``: the upstream spy is fitted with ``y=None``."""
         X, _y = frame_xy
-        pipeline = XYPipeline([('sk', SpyTransformer()), ('km', KMeans(n_clusters=2, n_init=1, random_state=0))])
+        pipeline = XYPipeline([('sk', SpyTransformer()), ('density', KernelDensity())])
 
         pipeline.fit(X)
 

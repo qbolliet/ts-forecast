@@ -22,29 +22,31 @@ Pipeline([("log", FunctionTransformer(np.log1p))]).fit_transform(X, y)  # y inta
 ## 2. Un transformateur XY
 
 ```python
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator
+from tsforecast.xy import XYTransformerMixin
 
-class LogXY(BaseEstimator, TransformerMixin):
+class LogXY(BaseEstimator, XYTransformerMixin):
     """Passe X et y en log1p, réversible."""
 
-    def fit(self, X, y=None):
+    def _fit(self, X, y):
         return self
 
-    def transform(self, X, y=None):
+    def _transform(self, X, y=None):
         X_t = np.log1p(X)
         if y is not None:
             return X_t, np.log1p(y)
         return X_t
 
-    def fit_transform(self, X, y=None):   # obligatoire pour propager y
-        return self.fit(X, y).transform(X, y)
-
-    def inverse_transform(self, X, y=None):
+    def _inverse_transform(self, X, y=None):
         X_o = np.expm1(X)
         if y is not None:
             return X_o, np.expm1(y)
         return X_o
 ```
+
+L'héritage de `XYTransformerMixin` **déclare** l'étape XY ; le mixin fournit
+`fit`, `transform`, `fit_transform` et `inverse_transform` à partir des trois
+méthodes privées.
 
 ## 3. Dans un `XYPipeline`
 
@@ -63,8 +65,10 @@ pipe.fit(X, y)
 pipe.predict(X.iloc[-6:])
 ```
 
-`XYPipeline` détecte automatiquement `LogXY` comme XY (il accepte `y` et renvoie
-un tuple), et passe `StandardScaler` en mode standard.
+`XYPipeline` traite `LogXY` comme XY parce qu'il hérite de `XYTransformerMixin`
+(`is_xy_transformer(LogXY())` vaut `True`) : il lui passe `y` et lit sa sortie
+comme la paire `(X, y)`. `StandardScaler`, étape sklearn ordinaire, est traité
+exactement comme par `Pipeline`.
 
 ## 4. Transformation seule et inversion
 
@@ -87,6 +91,21 @@ grid = GridSearchCV(
 )
 grid.fit(X, y)
 ```
+
+## 6. Poids d'échantillon derrière un retrait de lignes
+
+```python
+from tsforecast.xy import DropNaNTarget
+
+y_gaps = y.copy()
+y_gaps.iloc[[3, 10]] = np.nan
+weights = np.linspace(0.5, 1.5, len(X))
+
+pipe = XYPipeline([("drop", DropNaNTarget()), ("model", Ridge())])
+pipe.fit(X, y_gaps, model__sample_weight=weights)   # 46 poids pour 46 lignes gardées
+```
+
+Les poids suivent les lignes gardées, localisées sur l'index de `y` (ou de `X`).
 
 ## Voir aussi
 

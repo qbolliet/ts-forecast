@@ -250,11 +250,11 @@ class SpyXYTransformer(BaseEstimator, XYTransformerMixin):
 
 
 # ==============================================================================
-# Transformateurs XY
+# Transformateurs XY : déclarés par XYTransformerMixin, méthodes publiques surchargées
 # ==============================================================================
 
 
-class LogTransformXY(BaseEstimator, TransformerMixin):
+class LogTransformXY(BaseEstimator, XYTransformerMixin):
     """XY transformer applying ``log1p(|.|)`` to ``X`` and ``y``.
 
     The absolute value is taken first: the transform accepts negative values,
@@ -294,7 +294,7 @@ class LogTransformXY(BaseEstimator, TransformerMixin):
         return X_inv
 
 
-class ScaleXY(BaseEstimator, TransformerMixin):
+class ScaleXY(BaseEstimator, XYTransformerMixin):
     """XY transformer multiplying ``X`` and ``y`` by ``scale_factor``.
 
     Args:
@@ -327,7 +327,7 @@ class ScaleXY(BaseEstimator, TransformerMixin):
         return self.fit(X, y).transform(X, y)
 
 
-class DropRowsXY(BaseEstimator, TransformerMixin):
+class DropRowsXY(BaseEstimator, XYTransformerMixin):
     """XY transformer dropping the rows whose target is negative.
 
     Rows are selected with the boolean mask ``y >= 0``: on pandas inputs,

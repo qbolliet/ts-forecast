@@ -139,6 +139,7 @@ nav:
     - XYTransformerMixin: api/xy/XYTransformerMixin.md
     - XYPanelTimeSeriesTransformer: api/xy/XYPanelTimeSeriesTransformer.md
     - DropNaNTarget: api/xy/DropNaNTarget.md
+    - is_xy_transformer: api/xy/is_xy_transformer.md
   - panel:
     - PanelwiseTransformer: api/panel/PanelwiseTransformer.md
     - Utilitaires panel: api/panel/utils.md

@@ -7,11 +7,12 @@ les features (X) et les targets (y).
 # Importation des modules
 # Modules de base
 from abc import ABC, abstractmethod
+from typing import Any
 # Manipulation de données
 import numpy as np
 # Sklearn
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.utils.validation import check_is_fitted
+from sklearn.base import BaseEstimator, OneToOneFeatureMixin, TransformerMixin
+from sklearn.utils.validation import check_is_fitted, validate_data
 # Module du package
 from ..base.transformers import PanelTimeSeriesTransformer
 
@@ -312,8 +313,9 @@ class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
             f"{self.__class__.__name__} does not implement _inverse_transform"
         )
 
-# Étape XY de retrait des lignes sans cible, placée juste avant l'estimateur
-class DropNaNTarget(BaseEstimator, XYTransformerMixin):
+# Étape XY de retrait des lignes sans cible, placée juste avant l'estimateur ;
+# sorties rendues dans les types d'entrée, d'où l'absence d'enveloppe set_output
+class DropNaNTarget(OneToOneFeatureMixin, BaseEstimator, XYTransformerMixin, auto_wrap_output_keys=None):
     """Drop the rows whose target is missing, right before an estimator.
 
     A training set augmented upstream (``HighFrequencyImputer.fit_transform``,
@@ -324,7 +326,10 @@ class DropNaNTarget(BaseEstimator, XYTransformerMixin):
     passes ``y`` (``transform(X, y)``); without ``y`` — ``predict`` — ``X``
     goes through untouched: a prediction never loses a row.
 
-    Stateless: ``fit`` learns nothing.
+    The columns are kept: ``fit`` only records ``n_features_in_`` (and
+    ``feature_names_in_`` for a ``DataFrame``), so that
+    ``get_feature_names_out`` gives back the input names. The outputs keep the
+    types of the inputs: ``set_output`` is accepted and has no effect.
 
     Examples:
         >>> import numpy as np
@@ -336,16 +341,20 @@ class DropNaNTarget(BaseEstimator, XYTransformerMixin):
         ([1.0, 3.0], [10.0, 30.0])
         >>> DropNaNTarget().fit(X, y).transform(X).shape
         (3, 1)
+        >>> DropNaNTarget().fit(X, y).get_feature_names_out().tolist()
+        ['x']
     """
 
-    # Étape sans état : toujours ajustée au sens de sklearn
+    # Étape sans paramètre appris : toujours ajustée au sens de sklearn
     def __sklearn_is_fitted__(self) -> bool:
-        """Report the step as fitted: it learns nothing."""
+        """Report the step as fitted: it learns no parameter."""
         return True
 
-    # Apprentissage : rien à apprendre
+    # Apprentissage : colonnes d'entrée seulement, pour les noms de sortie
     def _fit(self, X, y):
-        """Learn nothing.
+        """Record the number (and names) of the input columns.
+
+        A one-dimensional ``X`` (``Series``) has no columns to record.
 
         Args:
             X: Features.
@@ -353,6 +362,30 @@ class DropNaNTarget(BaseEstimator, XYTransformerMixin):
 
         Returns:
             self
+        """
+        if np.ndim(X) == 2:
+            validate_data(self, X, reset=True, skip_check_array=True)
+        return self
+
+    # Sorties dans les types d'entrée : configuration de sortie sans effet
+    def set_output(self, *, transform: Any = None) -> 'DropNaNTarget':
+        """Accept an output configuration and ignore it.
+
+        The step returns its inputs, rows dropped, in their own types; it
+        accepts ``set_output`` so that ``XYPipeline.set_output`` can configure
+        the other steps.
+
+        Args:
+            transform: Output container requested (``'pandas'``,
+                ``'default'``...), ignored.
+
+        Returns:
+            self
+
+        Examples:
+            >>> step = DropNaNTarget()
+            >>> step.set_output(transform='pandas') is step
+            True
         """
         return self
 
@@ -398,3 +431,28 @@ class DropNaNTarget(BaseEstimator, XYTransformerMixin):
     def _take(data, keep: np.ndarray):
         """Select the rows of ``data`` flagged by ``keep``, by position."""
         return data.iloc[keep] if hasattr(data, 'iloc') else np.asarray(data)[keep]
+
+
+# Reconnaissance d'une étape XY par déclaration : héritage d'une des deux classes de base XY
+def is_xy_transformer(estimator: Any) -> bool:
+    """Tell whether ``estimator`` is declared as an XY transformer.
+
+    A step is XY when it inherits :class:`XYTransformerMixin` or
+    :class:`XYPanelTimeSeriesTransformer`. ``XYPipeline`` gives such a step the
+    target (``fit_transform(X, y)``, ``transform(X, y)``,
+    ``inverse_transform(X, y)``) and reads its output as the pair ``(X, y)``;
+    any other step is handled as by ``sklearn.pipeline.Pipeline``, whatever
+    its signature or output.
+
+    Args:
+        estimator: Step to classify.
+
+    Returns:
+        True for an instance of one of the two XY base classes.
+
+    Examples:
+        >>> from sklearn.preprocessing import StandardScaler
+        >>> is_xy_transformer(DropNaNTarget()), is_xy_transformer(StandardScaler())
+        (True, False)
+    """
+    return isinstance(estimator, (XYTransformerMixin, XYPanelTimeSeriesTransformer))

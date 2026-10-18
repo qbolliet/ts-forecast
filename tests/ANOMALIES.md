@@ -6355,6 +6355,27 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Correctif** (2026-10-17) : une fois des lignes retirées, `X'` reprend l'index de la cible pandas rendue par les étapes, à condition que `X` et `y` aient été passés avec le même index. Sinon les deux sorties sont numérotées par positions, et `y'` emprunte de même l'index de `X'`.
 - **Statut** : corrigée (2026-10-17)
 
+### ANO-XY-003 — Une étape est reconnue XY par sa signature et par la forme de son résultat
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/pipeline.py::_accepts_y_param`, `::XYPipeline._fit`, `::XYPipeline._transform_steps`
+- **Sévérité** : à arbitrer
+- **Observé** : aucune déclaration de l'étape n'est lue. `y` est passé à une méthode dès que sa signature a un paramètre `y` positionnel, et **tout** résultat qui est un tuple de longueur 2 est lu comme `(X, y)`. Or `TransformerMixin.fit_transform(X, y=None)` accepte toujours `y` : la reconnaissance repose en pratique sur la seule forme du résultat. Conséquences épinglées :
+  - une étape ordinaire dont `transform(X)` rend une paire `(X, aux)` **remplace silencieusement la cible** par `aux` (l'estimateur final est ajusté sur des zéros) ; sous `Pipeline`, la paire deviendrait le `X` de l'étape suivante et échouerait bruyamment ;
+  - une étape qui prend `y` en mot-clé seul (`transform(self, X, *, y=None)`) n'est jamais traitée comme XY : la cible ne la traverse pas ;
+  - une méthode dont `inspect.signature` ne lit pas la signature (`ValueError` / `TypeError`) est traitée comme ordinaire, sans avertissement.
+- **Attendu** : à arbitrer. Pistes : reconnaître une étape XY par une déclaration explicite (`isinstance(step, XYTransformerMixin)`, une étiquette `__sklearn_tags__` ou un attribut de classe) plutôt que par la signature ; à défaut, ne lire une paire comme `(X, y)` que si l'étape a reçu `y`, et vérifier que la seconde composante a la longueur de la première.
+- **Reproduction** :
+  ```python
+  class PairOutput(BaseEstimator, TransformerMixin):
+      def fit(self, X, y=None): self.fitted_ = True; return self
+      def transform(self, X): return X, np.zeros(len(X))
+  pipe = XYPipeline([('pair', PairOutput()), ('m', SpyEstimator())]).fit(X, y)
+  pipe['m'].fit_y_.tolist()   # [0.0, 0.0, ...] : y remplacé sans erreur
+  ```
+- **Test** : `tests/unit/xy/pipeline/test_errors.py::TestStepRecognition` (étape déclarée, paire d'une étape ordinaire transmise comme `X` comme sous `Pipeline`, étape non déclarée sans cible, paire exigée d'une étape XY), `tests/unit/xy/test_transformers.py::TestIsXYTransformer`
+- **Correctif** (2026-10-18) : décision de l'auteur : déclaration explicite. Une étape est XY si et seulement si elle hérite de `XYTransformerMixin` ou de `XYPanelTimeSeriesTransformer` (`tsforecast.xy.is_xy_transformer`) ; `_accepts_y_param` est supprimée. Une étape XY reçoit `y` et doit rendre la paire `(X, y)` (`TypeError: XY step '<nom>' must return the pair (X, y) when it is given a target, got <type>` sinon) ; toute autre étape est appelée comme par `Pipeline` (`fit_transform(X, y)`, `transform(X)`), sa sortie transmise telle quelle. Les doublures XY de `tests/support/estimators.py` (`LogTransformXY`, `ScaleXY`, `DropRowsXY`), l'exemple de la docstring de `XYPipeline` et le tutoriel héritent désormais du mixin.
+- **Statut** : corrigée (2026-10-18)
+
 ### ANO-XY-004 — Docstrings de `xy` : exemples non exécutables, classe non exportée
 - **Type** : [DOC] docstring ≠ code
 - **Composant** : `tsforecast/xy/pipeline.py::XYPipeline`, `tsforecast/xy/transformers.py::XYTransformerMixin`, `::XYPanelTimeSeriesTransformer`
@@ -6412,3 +6433,100 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : aucun (lignes non couvertes justifiées dans le rapport de B6)
 - **Correctif** (2026-10-17) : branches supprimées ; les boucles de `transform`, `score` et des méthodes de prédiction passent par une méthode commune (`_transform_steps`) ; la garde `passthrough` ne reste que dans `_fit`, dont l'itération ne filtre pas ces étapes.
 - **Statut** : corrigée (2026-10-17)
+
+### ANO-XY-008 — Une tranche `pipe[:-1]` perd `preserve_dataframe`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/pipeline.py::XYPipeline` (`__getitem__` hérité de `Pipeline`)
+- **Sévérité** : mineure
+- **Observé** : `Pipeline.__getitem__` reconstruit une tranche par `self.__class__(self.steps[ind], memory=self.memory, verbose=self.verbose)` : `preserve_dataframe` n'est pas transmis et revient à `True`. `XYPipeline(steps, preserve_dataframe=False)[:-1].preserve_dataframe` vaut `True`, et `transform` de la tranche rend un `DataFrame` là où le pipeline complet rend des tableaux. Même chemin pour `transform_input` (qui n'est pas transmis non plus par `Pipeline` lui-même), et pour les métadonnées de `transform_input`, transformées par `self[:step_idx].transform(...)`.
+- **Attendu** : une tranche garde tous les paramètres du constructeur qui ne dépendent pas des étapes : `XYPipeline.__getitem__` surchargé pour transmettre `preserve_dataframe`.
+- **Reproduction** :
+  ```python
+  pipe = XYPipeline([('s', StandardScaler()), ('m', Ridge())], preserve_dataframe=False).fit(X, y)
+  pipe[:-1].preserve_dataframe          # True
+  type(pipe[:-1].transform(X))          # DataFrame au lieu de ndarray
+  ```
+- **Test** : `tests/unit/xy/pipeline/test_introspection.py::TestSlicing::test_slice_keeps_preserve_dataframe`, `::test_slice_output_follows_preserve_dataframe`
+- **Correctif** (2026-10-18) : `XYPipeline.__getitem__` transmet `preserve_dataframe` à la tranche (même `memory`, `verbose` et `transform_input` que `Pipeline`).
+- **Statut** : corrigée (2026-10-18)
+
+### ANO-XY-009 — `memory=` ne met aucune étape en cache
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/pipeline.py::XYPipeline._fit`
+- **Sévérité** : majeure
+- **Observé** : `_fit` appelle `self._fit_transform_step(...)` directement. `Pipeline._fit` passe par `memory.cache(_fit_transform_one)`, qui charge le résultat d'une étape déjà ajustée sur les mêmes données. Avec `XYPipeline`, `check_memory(self.memory)` crée bien le répertoire de cache et les étapes sont bien clonées (l'objet donné reste non ajusté, comme sous `Pipeline`), mais rien n'est jamais écrit ni relu : deux ajustements identiques ajustent deux fois chaque étape, étapes ordinaires comme étapes XY, que `memory` soit un chemin ou un `joblib.Memory`. Le paramètre documenté « Used to cache fitted transformers » est sans effet, et les tests `test_memory_caching_*` existants ne le voyaient pas (ils ne vérifiaient qu'une forme de prédiction).
+- **Attendu** : comme `Pipeline`, le second ajustement identique charge l'étape depuis le cache (une seule exécution de `fit`). Le cache doit couvrir les étapes XY : le résultat mis en cache est alors la paire `(X_t, y_t)` et l'étape ajustée.
+- **Reproduction** :
+  ```python
+  for _ in range(2):
+      XYPipeline([('c', CountingTransformer()), ('m', LinearRegression())], memory=cache_dir).fit(X, y)
+  CountingTransformer.n_fits   # 2 ; 1 avec sklearn.pipeline.Pipeline
+  ```
+- **Test** : `tests/unit/xy/pipeline/test_memory.py::TestCaching` (`test_second_fit_reuses_the_cached_step[path|joblib_memory]`, `test_second_fit_reuses_the_cached_xy_step`, `test_pandas_inputs_are_cached[ordinary|xy]`, `test_other_index_is_another_cache_entry`), `::TestCachingWithoutTarget`
+- **Remarque** : le contrôle positif sur `Pipeline` passe des tableaux numpy : avec un `DataFrame` daté, le hash joblib de `X` change après un premier ajustement (caches internes de l'index entrés dans le pickle), si bien que le cache de `Pipeline` lui-même ne sert jamais sur ces entrées.
+- **Correctif** (2026-10-18) : `_fit` passe par `memory.cache(_fit_transform_one, ignore=['X', 'y', ...])` : fonction de module, étapes XY comprises. La clé de cache lit une empreinte du contenu des données (valeurs, niveaux d'index, colonnes, types) au lieu de `X` et `y` : le pickle d'un objet pandas daté inclut les caches internes de son index, remplis à la première lecture, si bien qu'un hachage direct ne retrouvait jamais l'entrée (limite qui touche aussi `sklearn.pipeline.Pipeline`).
+- **Statut** : corrigée (2026-10-18)
+
+### ANO-XY-010 — Poids d'échantillon non filtrés après un retrait de lignes
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/pipeline.py::XYPipeline.fit` (routage des paramètres d'ajustement)
+- **Sévérité** : à arbitrer
+- **Observé** : les paramètres d'ajustement (`model__sample_weight=w`, ou `sample_weight=w` routé par le *metadata routing*) sont transmis tels quels. Derrière `DropNaNTarget`, l'estimateur final reçoit les 6 poids pour 5 lignes d'entraînement. Une régression sklearn le détecte (`ValueError: sample_weight.shape == (6,), expected (5,)!`) ; un estimateur qui ne vérifie pas la longueur reçoit des poids **décalés** sans erreur. `score(X, y, sample_weight=w)` a le même défaut une fois le routage activé.
+- **Attendu** : à arbitrer. Le pipeline ne sait pas en général quelles lignes une étape XY a retirées (sortie ndarray) ; pistes : filtrer les métadonnées alignées sur les lignes par l'index de la cible rendue quand `y` est pandas, laisser une étape XY transformer elle-même les métadonnées qu'elle déclare, ou refuser explicitement un paramètre d'ajustement de la longueur de `X` dès qu'une étape a changé le nombre de lignes.
+- **Reproduction** :
+  ```python
+  pipe = XYPipeline([('d', DropNaNTarget()), ('m', LinearRegression())])
+  pipe.fit(X, y, m__sample_weight=np.ones(6))   # y : 1 NaN sur 6 -> ValueError (6,) contre (5,)
+  ```
+- **Test** : `tests/unit/xy/pipeline/test_routing.py::TestWeightsFollowTheKeptRows`, `::TestParamsNotAlignedOnRows`
+- **Correctif** (2026-10-18) : décision de l'auteur : filtrage. Un paramètre qui compte une valeur par ligne d'entrée (règle de sklearn en validation croisée) suit les lignes gardées par les étapes XY, localisées sur l'index de `y` puis de `X` (`_RowTracker`) : `fit`, `fit_transform`, `fit_predict`, `score(sample_weight=...)`, avec ou sans routage ; les paramètres de `transform_input` ne sont jamais découpés. Quand le nombre de lignes change sans index lisible (tableaux numpy, étiquettes dupliquées), un tel paramètre est refusé : `ValueError: The parameter 'sample_weight' of step 'model' has one value per input row, but the rows kept by step 'drop' cannot be located: give X or y a unique pandas index so that XYPipeline can align it`.
+- **Statut** : corrigée (2026-10-18)
+
+### ANO-XY-011 — Sans *metadata routing*, les paramètres de `predict` / `score` ne parviennent pas à l'estimateur final
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/pipeline.py::XYPipeline.predict`, `::predict_proba`, `::predict_log_proba`, `::decision_function`, `::score`, `::transform`, `::inverse_transform`
+- **Sévérité** : majeure
+- **Observé** : ces méthodes appellent toujours `process_routing(self, <méthode>, **params)`, routage activé ou non. Sans routage (configuration par défaut), `Pipeline` transmet les paramètres de `predict`, `predict_proba` et `predict_log_proba` à l'estimateur final et `sample_weight` à son `score`. `XYPipeline` les refuse :
+  - `pipe.predict(X, return_std=True)` (BayesianRidge, GaussianProcessRegressor) lève `UnsetMetadataPassedError: [return_std] are passed but are not explicitly set as requested or not requested for BayesianRidge.predict, which is used within XYPipeline.predict` ;
+  - `pipe.score(X, y, sample_weight=w)` lève la même erreur pour `LinearRegression.score` ;
+  - pour `transform` et `decision_function`, où `Pipeline` lève `ValueError: Passing extra keyword arguments to Pipeline.<méthode> is only supported if enable_metadata_routing=True`, `XYPipeline` lève une `UnsetMetadataPassedError` (`transform`) ou une `TypeError` « got unexpected argument(s) » (`decision_function`), sans indiquer qu'il faut activer le routage.
+  La branche « routage désactivé » existait avant le commit `63412cf` (« ensure coherence with initial pipeline implementation »), dont l'intention déclarée est la cohérence avec `Pipeline` : sa disparition n'est pas un changement d'API délibéré. Les docstrings (« Parameters passed to predict of the final estimator ») décrivent le comportement de `Pipeline`.
+- **Attendu** : comportement de `Pipeline` : sans routage, transformation par les étapes puis `final.predict(Xt, **params)` (idem `predict_proba`, `predict_log_proba`), `final.score(Xt, yt, sample_weight=...)` si `sample_weight` est donné, et `ValueError` « only supported if enable_metadata_routing=True » pour les paramètres de `transform`, `inverse_transform` et `decision_function` ; avec routage, le chemin actuel.
+- **Reproduction** :
+  ```python
+  pipe = XYPipeline([('s', StandardScaler()), ('m', BayesianRidge())]).fit(X, y)
+  pipe.predict(X, return_std=True)       # UnsetMetadataPassedError ; Pipeline rend (moyenne, écart-type)
+  ```
+- **Test** : `tests/unit/xy/pipeline/test_routing.py::TestPredictionParamsWithoutRouting`
+- **Correctif** (2026-10-18) : branche « routage désactivé » de `Pipeline` reproduite : paramètres de `predict`, `predict_proba`, `predict_log_proba` transmis à l'estimateur final, `sample_weight` à son `score` ; `_raise_for_params` pour `transform`, `inverse_transform` et `decision_function` (message « only supported if enable_metadata_routing=True »).
+- **Statut** : corrigée (2026-10-18)
+
+### ANO-XY-012 — `DropNaNTarget` n'expose ni `get_feature_names_out` ni `n_features_in_`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/transformers.py::DropNaNTarget`
+- **Sévérité** : mineure
+- **Observé** : `DropNaNTarget` filtre des lignes et garde les colonnes, mais ne définit ni `get_feature_names_out`, ni `n_features_in_`, ni `feature_names_in_`. Sur le pipeline type `[… → DropNaNTarget → estimateur]` : `pipe[:-1].get_feature_names_out()` lève `AttributeError: Estimator drop does not provide get_feature_names_out` ; la restauration pandas de `XYPipeline` (qui lit `get_feature_names_out`) retombe sur des positions dès que la largeur change en amont (`[PolynomialFeatures, DropNaNTarget]` sort des colonnes `0..5` au lieu de `1, a, b, a^2, a b, b^2`) ; un pipeline qui commence par `DropNaNTarget` n'a pas de `n_features_in_` / `feature_names_in_`.
+- **Attendu** : comme les transformateurs sklearn qui conservent les colonnes (`OneToOneFeatureMixin`) : `get_feature_names_out` identité, `n_features_in_` et `feature_names_in_` posés au `fit`.
+- **Reproduction** :
+  ```python
+  pipe = XYPipeline([('s', StandardScaler()), ('drop', DropNaNTarget()), ('m', Ridge())]).fit(X, y)
+  pipe[:-1].get_feature_names_out()   # AttributeError
+  ```
+- **Test** : `tests/unit/xy/pipeline/test_delegation.py::TestFeatureNamesOut::test_names_go_through_drop`, `::test_new_features_keep_their_names_through_drop`, `::TestFittedAttributes::test_first_step_drop_exposes_the_feature_names`, `tests/unit/xy/test_transformers.py::TestSklearnContract`
+- **Correctif** (2026-10-18) : `DropNaNTarget` hérite de `OneToOneFeatureMixin` (`get_feature_names_out` identité) et pose `n_features_in_` / `feature_names_in_` au `fit` (`X` à deux dimensions). Ses sorties gardent les types d'entrée : `auto_wrap_output_keys=None`, et `set_output` est accepté sans effet, ce qui rend `XYPipeline.set_output` utilisable à travers l'étape.
+- **Statut** : corrigée (2026-10-18)
+
+### ANO-XY-013 — La sortie `DataFrame` d'une tranche fait avertir l'estimateur final ajusté sur des tableaux
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/xy/pipeline.py::XYPipeline._restore_pandas_output` (via une tranche `pipe[:-1]`)
+- **Sévérité** : à arbitrer
+- **Observé** : dans le pipeline, la sortie ndarray d'une étape (`StandardScaler`) reste un tableau jusqu'à l'estimateur final, qui n'apprend donc aucun nom de colonne. La tranche `pipe[:-1]`, pipeline à part entière, rend cette même sortie sous forme de `DataFrame` (`preserve_dataframe=True`). L'idiome sklearn `pipe[-1].predict(pipe[:-1].transform(X))` (inspection, SHAP…) émet alors `UserWarning: X has feature names, but Ridge was fitted without feature names`, ce que `Pipeline` ne fait pas. Les valeurs sont justes.
+- **Attendu** : à arbitrer : soit l'estimateur final reçoit lui aussi la structure pandas restaurée (cohérence entre l'intérieur et l'extérieur du pipeline, mais écart avec `Pipeline`), soit l'avertissement est documenté comme conséquence de `preserve_dataframe`.
+- **Reproduction** :
+  ```python
+  pipe = XYPipeline([('s', StandardScaler()), ('m', Ridge())]).fit(X, y)   # X DataFrame
+  pipe[-1].predict(pipe[:-1].transform(X))   # UserWarning feature names
+  ```
+- **Test** : `tests/unit/xy/pipeline/test_introspection.py::TestSlicing::test_slice_output_warns_the_array_fitted_final_step`, `::test_pandas_output_end_to_end_names_the_final_features`, `::test_pandas_output_end_to_end_does_not_warn`
+- **Correctif** (2026-10-18) : arbitrage : le flux interne de `Pipeline` est conservé (une sortie en tableau reste un tableau jusqu'à l'estimateur final). L'avertissement est documenté (docstring de `XYPipeline`, `docs/concepts/xy_pipeline.md`) avec la solution native de sklearn, `pipe.set_output(transform='pandas')`, désormais utilisable à travers `DropNaNTarget` (voir ANO-XY-012).
+- **Statut** : corrigée (2026-10-18)

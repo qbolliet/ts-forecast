@@ -6,9 +6,15 @@ Ce module fournit :
   (séries temporelles et panels)
 - XYPipeline : pipeline compatible avec les transformateurs XY
 - DropNaNTarget : étape de retrait des lignes sans cible, avant l'estimateur
+- is_xy_transformer : reconnaissance d'une étape XY déclarée
 """
 # Importation des éléments d'intérêt du module
-from .transformers import DropNaNTarget, XYPanelTimeSeriesTransformer, XYTransformerMixin
+from .transformers import (
+    DropNaNTarget,
+    XYPanelTimeSeriesTransformer,
+    XYTransformerMixin,
+    is_xy_transformer,
+)
 from .pipeline import XYPipeline
 
 # Ré-exports des éléments du module
@@ -17,4 +23,5 @@ __all__ = [
     "XYPanelTimeSeriesTransformer",
     "XYPipeline",
     "DropNaNTarget",
+    "is_xy_transformer",
 ]

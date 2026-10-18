@@ -345,6 +345,25 @@ prédiction refusent `y` (signature `(X, **params)` de `Pipeline`, `TypeError` e
 `tsforecast.xy`. `pipeline.py` passe à 98 %. Pour **B7** : il reste `transform_input` (`fit_transform`, `fit_predict`) et
 `_accepts_y_param` (ANO-XY-003).
 
+**Bilan B7 (2026-10-18)** : `test_sklearn_surface.py` (17 tests, assertions de forme) réparti et réécrit sur valeurs d'or dans
+`test_introspection.py`, `test_delegation.py`, `test_routing.py`, `test_memory.py`, `test_model_selection.py`,
+`test_serialization.py`, `test_errors.py` (281 tests, dont 13 xfail strict ; `TestParallel` marqué `slow`), puis supprimé ;
+`conftest.py` du paquet : fixtures à graine globale retirées, ajout de `gapped_linear_xy`, `classification_xy` et `routing`
+(`sklearn.config_context`). `pipeline.py` 98 % → **100 %** (lignes et branches). Anomalies : **003** consignée (à arbitrer,
+épinglée), nouvelles **008** (tranche sans `preserve_dataframe`), **009** (`memory=` sans effet), **010** (poids non filtrés
+après retrait de lignes, à arbitrer), **011** (paramètres de `predict` / `score` refusés sans routage), **012** (`DropNaNTarget`
+sans `get_feature_names_out` / `n_features_in_`), **013** (avertissement de noms de colonnes sur une tranche, à arbitrer).
+Pour **B8** : un `scoring='r2'` (scorer qui prédit) reçoit les cibles NaN des plis de test (seul `scoring=None` les retire) ;
+le premier `KMeans` ajusté dans un processus coûte ~3 s sous Windows
+(`test_y_propagation.py::TestTargetKinds::test_unsupervised_final_estimator_is_fitted_without_target` dépasse 2 s).
+**Puis, sur décision de l'auteur, 003 et 008 à 013 corrigées le 2026-10-18** dans `tsforecast/xy/` : étape XY reconnue par
+déclaration (`is_xy_transformer` : héritage de `XYTransformerMixin` ou `XYPanelTimeSeriesTransformer`), les autres étapes traitées
+comme par `Pipeline` ; tranches avec `preserve_dataframe` ; `memory=` effectif (clé lue sur une empreinte du contenu, entrées pandas
+datées comprises) ; paramètres par ligne alignés sur les lignes gardées (index de `y` puis de `X`, `ValueError` explicite sinon) ;
+branche sans routage de `Pipeline` reproduite ; `DropNaNTarget` avec `get_feature_names_out`, `n_features_in_` et `set_output`
+sans effet ; avertissement de 013 documenté (`set_output(transform='pandas')`). Le test lent de B6 utilise `KernelDensity`.
+`pipeline.py` : 100 %.
+
 ## 6. Scénarios attendus par prompt
 
 Pour chaque composant, les cas limites de CLAUDE.md s'appliquent : non trié, doublons, entité

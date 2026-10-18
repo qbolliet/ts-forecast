@@ -5,11 +5,13 @@ and by ``transform(X, y)`` for ``Series``, ``DataFrame`` (multi-output) and
 array targets, the prediction pass without ``y`` (no row lost), edge cases (no
 NaN, all NaN, empty input, NaN in ``X``, panel ``MultiIndex``, unsorted rows,
 length mismatch), non-mutation of the inputs, the sklearn contract of a
-stateless step and its place in an ``XYPipeline`` —; the contract of
+step without learnt parameter (input columns recorded, output names,
+``set_output``) and its place in an ``XYPipeline`` —; the contract of
 ``XYTransformerMixin`` seen from a minimal subclass (``fit_transform(X, y)``
 gives ``(X', y')``, unimplemented methods, ``get_params`` / ``clone``, fitted
 state seen by ``check_is_fitted`` and by ``XYPipeline``); and ``XYPanelTimeSeriesTransformer`` (abstract methods, validation of
-``X``, fitted-state checks, ``y`` propagation).
+``X``, fitted-state checks, ``y`` propagation); and ``is_xy_transformer``
+(declaration by inheritance, not by signature).
 """
 # Modules de base
 import numpy as np
@@ -18,10 +20,11 @@ import pytest
 from sklearn.base import clone
 from sklearn.exceptions import NotFittedError
 from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
 # Objets testés
-from tsforecast.xy import DropNaNTarget, XYPipeline, XYTransformerMixin
+from tsforecast.xy import DropNaNTarget, XYPipeline, XYTransformerMixin, is_xy_transformer
 from tsforecast.xy.transformers import XYPanelTimeSeriesTransformer
 from tests.support.estimators import MixinScaleXY, SpyEstimator
 
@@ -244,10 +247,10 @@ class TestEdgeCases:
 
 
 # =============================================================================
-# DropNaNTarget : contrat sklearn d'une étape sans état
+# DropNaNTarget : contrat sklearn d'une étape sans paramètre appris
 # =============================================================================
 class TestSklearnContract:
-    """Stateless step: fitted from the start, no parameter, clonable."""
+    """Step without learnt parameter: fitted from the start, no parameter, clonable, input columns recorded."""
 
     def test_reported_fitted_without_fit(self):
         """``check_is_fitted`` passes on a fresh instance: there is nothing to learn."""
@@ -266,6 +269,50 @@ class TestSklearnContract:
     def test_clone_keeps_the_class(self):
         """The clone is a ``DropNaNTarget``."""
         assert type(clone(DropNaNTarget())) is DropNaNTarget
+
+    def test_records_the_input_columns(self, frame_xy):
+        """``fit`` records the width and the names of the columns of ``X``."""
+        step = DropNaNTarget().fit(*frame_xy)
+
+        assert (step.n_features_in_, list(step.feature_names_in_)) == (2, ['x', 'z'])
+
+    def test_feature_names_out_are_the_input_names(self, frame_xy):
+        """The rows are filtered, the columns kept: the output names are the input ones."""
+        assert list(DropNaNTarget().fit(*frame_xy).get_feature_names_out()) == ['x', 'z']
+
+    def test_feature_names_out_of_an_array_follow_input_features(self, frame_xy):
+        """Fitted on an array, the output names are the ``input_features`` given."""
+        X, y = frame_xy
+        step = DropNaNTarget().fit(X.to_numpy(), y.to_numpy())
+
+        assert list(step.get_feature_names_out(['u', 'v'])) == ['u', 'v']
+
+    def test_series_features_record_no_width(self, frame_xy):
+        """A one-dimensional ``X`` has no columns to record."""
+        X, y = frame_xy
+
+        assert not hasattr(DropNaNTarget().fit(X['x'], y), 'n_features_in_')
+
+    def test_feature_names_out_need_a_fit(self):
+        """Before ``fit``, the output names are unknown."""
+        with pytest.raises(NotFittedError):
+            DropNaNTarget().get_feature_names_out()
+
+    def test_set_output_keeps_the_input_types(self, frame_xy):
+        """``set_output(transform='default')`` is accepted: a ``DataFrame`` input stays a ``DataFrame``."""
+        X, y = frame_xy
+
+        X_kept, _y_kept = DropNaNTarget().set_output(transform='default').fit_transform(X, y)
+
+        assert isinstance(X_kept, pd.DataFrame)
+
+    def test_set_output_keeps_the_kept_labels(self, frame_xy):
+        """With ``set_output(transform='pandas')``, the kept rows keep their dates."""
+        X, y = frame_xy
+
+        X_kept, _y_kept = DropNaNTarget().set_output(transform='pandas').fit_transform(X, y)
+
+        assert X_kept.index.equals(X.index[[0, 2, 3]])
 
 
 # =============================================================================
@@ -522,3 +569,39 @@ class TestXYPanelTimeSeriesTransformer:
         pipeline = XYPipeline([('centre', _CentreXY()), ('model', SpyEstimator())]).fit(X, y)
 
         assert pipeline.named_steps['model'].fit_y_.tolist() == [2.0, 4.0, 6.0, 8.0]
+
+
+# =============================================================================
+# is_xy_transformer : déclaration par héritage
+# =============================================================================
+class _SignatureOnlyXY:
+    """Object with XY-like methods that inherits no XY base class."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        return X if y is None else (X, y)
+
+
+class TestIsXYTransformer:
+    """A step is XY exactly when it inherits ``XYTransformerMixin`` or ``XYPanelTimeSeriesTransformer``."""
+
+    @pytest.mark.parametrize(
+        'make, expected',
+        [
+            (DropNaNTarget, True),
+            (MixinScaleXY, True),
+            (_CentreXY, True),
+            (StandardScaler, False),
+            (_SignatureOnlyXY, False),
+        ],
+        ids=['drop_nan_target', 'mixin_subclass', 'panel_xy_subclass', 'sklearn_transformer', 'signature_only'],
+    )
+    def test_declaration(self, make, expected):
+        """The declaration, not the signature, makes a step XY."""
+        assert is_xy_transformer(make()) is expected
+
+    def test_strings_are_not_xy(self):
+        """``'passthrough'`` is not an XY step."""
+        assert is_xy_transformer('passthrough') is False
