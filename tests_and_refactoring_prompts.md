@@ -140,9 +140,24 @@ Constats établis par exécution avant rédaction — ne pas les redécouvrir en
 | `data_manager.py` | 101 | 30 | 66 % | `test_data_manager.py` (48, ne s'importe pas) |
 | `transformers.py` (1 935 lignes) | 432 | 140 | **64 %** | `test_transformers.py` (77) + `test_integration.py` (19) |
 
-**Hors campagne A / U / D / F** (traité par la partie B) : `panel/transformers.py` 58 %,
-`panel/utils.py` 45 %, `base/transformers.py` 69 %, `xy/pipeline.py` 70 %, `crossvals/base.py`
-84 % (mesures du 2026-10-16, branches incluses).
+**Hors campagne A / U / D / F** (traité par la partie B, **clos par B8 le 2026-10-18**) — tests
+`tests/unit/{base,crossvals,panel,xy}` + `tests/integration/{crossvals,pipeline}` (2 101 tests, slow
+compris, 0 xfail), lignes et branches :
+
+| Module | Avant B (2026-10-16) | Après B8 (2026-10-18) | Lignes non couvertes |
+|---|---:|---:|---|
+| `base/transformers.py` | 69 % | **100 %** | — |
+| `crossvals/base.py` | 84 % | **100 %** | — |
+| `crossvals/time_series.py` | 100 % | **100 %** | — |
+| `crossvals/panel.py` | 92 % | **100 %** | — |
+| `panel/utils.py` | 45 % | **100 %** | — |
+| `panel/transformers.py` | 58 % | **98 %** | corps de `fit_single_entity` dans `_fit_parallel` : exécuté dans les processus joblib, invisibles à coverage (comportement vérifié par `tests/unit/panel/transformers/test_parallel.py`) |
+| `xy/pipeline.py` | 70 % | **100 %** | — |
+| `xy/transformers.py` | 90 % | **99 %** | `pass` de la méthode abstraite `XYTransformerMixin._transform` |
+
+Groupe « hors campagne » de `tests/legacy_failures.txt` vide ; les 79 anomalies `ANO-BASE` / `CV` /
+`PANEL` / `XY` sont corrigées (aucun xfail dans ces paquets). `run_tests.py --mode coverage` n'applique
+encore aucun seuil (C1).
 
 ### 2.3 Sources de vérité
 

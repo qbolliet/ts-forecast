@@ -6530,3 +6530,47 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/xy/pipeline/test_introspection.py::TestSlicing::test_slice_output_warns_the_array_fitted_final_step`, `::test_pandas_output_end_to_end_names_the_final_features`, `::test_pandas_output_end_to_end_does_not_warn`
 - **Correctif** (2026-10-18) : arbitrage : le flux interne de `Pipeline` est conservé (une sortie en tableau reste un tableau jusqu'à l'estimateur final). L'avertissement est documenté (docstring de `XYPipeline`, `docs/concepts/xy_pipeline.md`) avec la solution native de sklearn, `pipe.set_output(transform='pandas')`, désormais utilisable à travers `DropNaNTarget` (voir ANO-XY-012).
 - **Statut** : corrigée (2026-10-18)
+
+---
+
+## Préalables au refactoring — `base`, `crossvals`, `panel`, `xy` (clôture B8, 2026-10-18)
+
+**État.** Les 79 anomalies `ANO-BASE` (15), `ANO-CV` (25), `ANO-PANEL` (26) et `ANO-XY` (13) sont
+**corrigées** dans `tsforecast/` ; ces quatre paquets n'ont plus aucun `xfail` (contrôle automatique :
+aucun `xfail` ne cite un identifiant de ces préfixes, aucune entrée ouverte). Couverture lignes et
+branches : 100 % pour `base/transformers.py`, `crossvals/{base,time_series,panel}.py`, `panel/utils.py`,
+`xy/pipeline.py` ; 98 % pour `panel/transformers.py` (corps exécuté dans les processus joblib) ; 99 % pour
+`xy/transformers.py` (`pass` abstrait). Aucune ne bloque N, P ou R ; les points suivants en conditionnent
+l'exécution.
+
+- **N (normalisation).** Le code des quatre paquets ne cite plus aucun identifiant ni historique
+  (`grep` de `ANO-`, « désormais », « auparavant », « corrig… » : vide) et leurs 81 doctests passent
+  (`pytest --doctest-modules tsforecast/{base,crossvals,panel,xy}`) : les 22 échecs mesurés le 2026-10-16
+  dans `base` et `crossvals` sont résorbés par ANO-BASE-013, ANO-CV-020, ANO-PANEL-008 / 020 et
+  ANO-XY-004. N7 se réduit, pour ces paquets, à rejouer les doctests après P1. Les tests de ces paquets
+  ne citent aucun `ANO-…` et aucun fichier ne dépasse 752 lignes.
+- **P (pandas ≥ 3).** Garde-fous déjà en place : non-mutation des entrées (ANO-BASE-002) vérifiée dans
+  `base`, `panel`, `xy` et par `tests/integration/pipeline/test_panel_workflow.py` (`cross_validate`,
+  `fit` / `predict` / `score`), ce qui couvre Copy-on-Write. À surveiller : (1) les clés d'entité, dont
+  la normalisation distingue `'FR'` de `('FR',)` par le type (ANO-PANEL-010, 015, 017, ANO-CV-024) et
+  l'ordre stable des colonnes (ANO-PANEL-018), sous le dtype `str` ; (2) les index de libellés (ANO-CV-022 :
+  un index de chaînes non trié n'est jamais lu comme chronologique) et les formes de `test_indices`
+  (ANO-CV-011) ; (3) l'empreinte de `XYPipeline(memory=…)` (ANO-XY-009) inclut `repr(dtype)` : la
+  résolution des dates (`datetime64[us]`) change les clés de cache, pas les résultats. Aucune conversion
+  dépendante de la résolution (`datetime64[ns]`, `asi8`, `view('i8')`) dans ces quatre paquets.
+- **R (refactoring de `HighFrequencyImputer`).** (1) Depuis ANO-XY-003, `XYPipeline` ne reconnaît une
+  étape XY **que par héritage** (`is_xy_transformer` : `XYTransformerMixin` ou
+  `XYPanelTimeSeriesTransformer`) : l'orchestrateur issu de R doit garder `XYPanelTimeSeriesTransformer`
+  comme base, sinon il devient une étape ordinaire de `Pipeline`, sans erreur à la construction.
+  (2) La validation héritée de la base a changé de comportement (ANO-BASE-009 : colonnes du `transform`
+  identiques à celles du `fit`, même ordre ; ANO-BASE-010 : `convert_cols_to_index=False` laisse les
+  colonnes en place ; ANO-PANEL-021 : `time_col` absent des colonnes d'un `MultiIndex` lit le panel dans
+  l'index) : le golden master de R0 doit être produit sur le code actuel. (3) Les utilitaires de clé
+  d'entité ont durci leurs règles (ANO-PANEL-010, 014 à 017 : liste lue comme tuple, étiquette manquante
+  et notations en conflit refusées par `ValueError`) ; `normalize_entity_key` est appelée 13 fois par
+  `high_frequency_imputer.py` et dans six composants : les extraits `_engine/` doivent continuer de passer
+  par `tsforecast.panel.utils` plutôt que réimplémenter la normalisation. (4) Les paramètres par ligne
+  (`sample_weight`) suivent les lignes gardées par les étapes XY (ANO-XY-010) ; d'après
+  `_RowTracker`, une étape qui **ajoute** des lignes, comme `HighFrequencyImputer.fit_transform`, les
+  rend non alignables et `XYPipeline` les refuse (`ValueError` explicite) — comportement non testé avec
+  l'imputeur, à épingler en R9.
