@@ -682,9 +682,9 @@ class TestNoStrictWindow:
     def test_panel_without_window_behaves_like_a_time_series(self):
         """On a panel, no strict window for any entity gives all-False masks, as on a time series.
 
-        Ce cas ne lève pas « No imputation window found for any entity in the
-        panel » : l'imputeur n'en déduit pas des masques tout-vrais qui
-        imputeraient tout le panel.
+        This case does not raise "No imputation window found for any entity in the
+        panel": the imputer does not deduce all-True masks from it, which would
+        impute the whole panel.
         """
         _, df = _make_df_without_strict_window()
         panel = pd.concat({'A': df, 'B': df}, names=['entity', 'date'])
@@ -728,8 +728,8 @@ class TestNoStrictWindow:
     def test_entities_without_strict_window_are_named_by_one_warning(self):
         """Two entities without strict window next to one with: ONE message naming both.
 
-        Le message est émis une seule fois, nomme les entités et ne parle pas
-        du « DataFrame » entier.
+        The message is emitted once, names the entities and does not talk about
+        the whole "DataFrame".
         """
         _, without = _make_df_without_strict_window()
         with_window = without.fillna(1.0)
@@ -894,8 +894,9 @@ class TestEntitiesWithoutWindow:
     def test_entity_reduced_to_one_row_has_no_window_and_costs_the_others_nothing(self):
         """An entity of a single row joins the entities without window.
 
-        Sa fréquence d'index est indétectable (une seule date) : la détection
-        de l'index entier levait, et le calcul échouait pour tout le panel.
+        Its index frequency is undetectable (a single date): the detection
+        on the whole index does not raise, and the computation does not fail for
+        the whole panel.
         """
         panel = _make_panel([('A',), ('B',)])
         single_row = pd.DataFrame(

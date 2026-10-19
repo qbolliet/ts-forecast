@@ -695,10 +695,10 @@ class TestTransformState:
 
 
     def test_fit_and_replay_provenances_agree_on_a_panel(self, panel_f_without_it_v):
-        """Sur panel, la matrice du fit est celle du rejeu, cellules muettes comprises.
+        """On a panel, the fit matrix is the replay matrix, mute cells included.
 
-        Les 36 cellules de ``v`` d'``IT``, jamais observées ni imputées, sont
-        non marquées des deux côtés.
+        The 36 cells of ``v`` of ``IT``, never observed nor imputed, are
+        unmarked on both sides.
         """
         imputer = fit_quietly(
             make_imputer(keep_lower_frequencies=False), panel_f_without_it_v

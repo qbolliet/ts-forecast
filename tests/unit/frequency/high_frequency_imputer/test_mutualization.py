@@ -39,7 +39,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 
 
 class TestMutualizedTrainingSet:
-    """Mutualisation inter-entités et ajustement unique."""
+    """Inter-entity pooling and single fit."""
 
     @staticmethod
     def _variable_steps(imputer: HighFrequencyImputer) -> list:
@@ -47,7 +47,7 @@ class TestMutualizedTrainingSet:
         return [step for step in imputer.imputation_plan_ if step.var_name == 'v']
 
     def test_pooled_training_set_on_panel_f(self, mixed_freq_panel_multifrequency):
-        """51 lignes (3 FR + 12 DE + 36 IT), toutes à l'échelle de l'étape."""
+        """51 rows (3 FR + 12 DE + 36 IT), all on the stage scale."""
         imputer = fit_with_spy(mixed_freq_panel_multifrequency)
         step = self._variable_steps(imputer)[0]
         y_train = step.model.fit_y_
@@ -78,10 +78,10 @@ class TestMutualizedTrainingSet:
         assert y_train.min() > 9.0 and y_train.max() < 14.0
 
     def test_pooled_training_set_at_stage_q(self, mixed_freq_panel_multifrequency):
-        """À l'étape Q, 51 lignes : FR divisé par 4, IT par 1/3, DE brut.
+        """At stage Q, 51 rows: FR divided by 4, IT by 1/3, DE raw.
 
-        Les blocs ne dépendent pas de l'étape : IT garde ses 36 lignes
-        mensuelles, ramenées à l'échelle trimestrielle (diviseur 1/3).
+        The blocks do not depend on the stage: IT keeps its 36 monthly
+        rows, brought back to the quarterly scale (divisor 1/3).
         """
         _, fits = capture_variable_fits(
             mixed_freq_panel_multifrequency,
@@ -105,7 +105,7 @@ class TestMutualizedTrainingSet:
     def test_single_fit_shared_between_source_frequency_groups(
         self, mixed_freq_panel_multifrequency
     ):
-        """Un seul ajustement, un seul objet modèle, deux recalages distincts."""
+        """A single fit, a single model object, two distinct rescalings."""
         imputer = fit_with_spy(mixed_freq_panel_multifrequency)
         steps = self._variable_steps(imputer)
 
@@ -166,7 +166,7 @@ class TestMutualizedTrainingSet:
 
 
 class TestUnobservedEntities:
-    """Imputation complète d'une entité qui n'observe jamais la colonne."""
+    """Complete imputation of an entity that never observes the column."""
 
     @staticmethod
     def _v_steps(imputer: HighFrequencyImputer) -> list:
@@ -177,10 +177,10 @@ class TestUnobservedEntities:
     def _imputed(
         imputer: HighFrequencyImputer, data: pd.DataFrame, entity: str
     ) -> pd.Series:
-        """Cellules de 'v' imputées pour une entité, lues sur la sortie publique.
+        """Cells of 'v' imputed for an entity, read on the public output.
 
-        Le rejeu réécrit "imputation_provenance_" : "_provenance" la lit donc
-        au niveau cible, identique avant et après le transform.
+        The replay rewrites "imputation_provenance_": "_provenance" therefore reads
+        it at the target level, identical before and after the transform.
         """
         values, provenance = replay(imputer, data)
         store = imputed_cells(values, provenance, 'v')
@@ -190,16 +190,16 @@ class TestUnobservedEntities:
 
     @staticmethod
     def _provenance(imputer: HighFrequencyImputer, entity: str) -> pd.Series:
-        """Provenance de 'v' pour une entité, au niveau cible.
+        """Provenance of 'v' for an entity, at the target level.
 
-        Lue au niveau cible, la matrice est la même après le fit et après un
-        transform des mêmes données : l'ordre des lectures est indifférent.
+        Read at the target level, the matrix is the same after the fit and after a
+        transform of the same data: the order of the reads does not matter.
         """
         provenance = target_level(imputer, imputer.imputation_provenance_)
         return entity_block(provenance['v'], entity)
 
     def test_unobserved_entity_is_left_alone_by_default(self, panel_f_without_it_v):
-        """Sous le défaut False, IT n'est ni imputée ni nommée par le plan."""
+        """Under the default False, IT is neither imputed nor named by the plan."""
         imputer = fit_quietly(make_imputer(), panel_f_without_it_v)
 
         # Les 36 cellules restent vides et non imputées : la matrice de
@@ -223,7 +223,7 @@ class TestUnobservedEntities:
         assert imputer.unanchored_pairs_ == ()
 
     def test_unobserved_entity_is_imputed_on_demand(self, panel_f_without_it_v):
-        """Sous True, les 36 cellules sont produites et marquées sans ancre."""
+        """Under True, the 36 cells are produced and marked as unanchored."""
         imputer = fit_quietly(
             make_imputer(impute_unobserved_entities=True), panel_f_without_it_v
         )
@@ -366,7 +366,7 @@ class TestUnobservedEntities:
     def test_model_unanchored_is_never_emitted_by_default(
         self, panel_f_without_it_v, mixed_freq_panel_multifrequency
     ):
-        """L'ajout est additif, aucune cellule ne change de marque."""
+        """The addition is additive, no cell changes its mark."""
         for data in (panel_f_without_it_v, mixed_freq_panel_multifrequency):
             imputer = fit_with_spy(data)
             emitted = {
@@ -388,13 +388,12 @@ class TestUnobservedEntities:
     def test_adding_the_unanchored_group_leaves_the_others_intact(
         self, panel_f_without_it_v, modality
     ):
-        """X_train, y_train et les voies des groupes ancrés.
+        """X_train, y_train and the ways of the anchored groups.
 
-        Sous ``True``, la mesure porte aussi ce que la règle promet : les
-        passes intermédiaires de l'entité sans ancre ne changent PAS le
-        modèle de l'étape cible, R1 la tenant hors du jeu mutualisé qu'elle
-        porte ou non des cellules imputées. Même jeu, même modèle, donc mêmes
-        valeurs finales.
+        Under ``True``, the measurement also carries what the rule promises: the
+        intermediate passes of the unanchored entity do NOT change the model of
+        the target stage, since it stays out of the pooled set whether or not it
+        carries imputed cells. Same set, same model, hence same final values.
         """
         without = fit_with_spy(
             panel_f_without_it_v, impute_intermediate_frequencies=modality
@@ -510,11 +509,11 @@ class TestUnobservedEntities:
         }
 
     def test_stage_not_binding_the_entity_leaves_it_out(self, panel_f_without_it_v):
-        """Une étape qui ne lie pas l'entité ne lui crée aucune étape sans ancre.
+        """A stage that does not bind the entity creates no unanchored stage for it.
 
-        Cible ``{FR: M, DE: M, IT: Q}`` sous ``True`` : la progression est
-        ``[{FR: Q, DE: Q, IT: Q}, {FR: M, DE: M}]``. IT est liée à l'étape Q
-        seulement : une étape sans ancre l'y sert, aucune à l'étape M.
+        Target ``{FR: M, DE: M, IT: Q}`` under ``True``: the progression is
+        ``[{FR: Q, DE: Q, IT: Q}, {FR: M, DE: M}]``. IT is bound at stage Q
+        only: an unanchored stage serves it there, none at stage M.
         """
         imputer = fit_with_spy(
             panel_f_without_it_v,
@@ -533,10 +532,10 @@ class TestUnobservedEntities:
     def test_column_observed_by_no_entity_is_never_imputed_unanchored(
         self, mixed_freq_panel_multifrequency
     ):
-        """Une colonne qu'aucune entité n'observe n'a pas de modèle à partager.
+        """A column that no entity observes has no model to share.
 
-        Sans aucune ligne d'entraînement possible, la capacité ne joue pas :
-        aucune étape, aucune cellule, aucun couple sans ancre.
+        With no possible training row, the capacity does not apply:
+        no stage, no cell, no unanchored pair.
         """
         data = mixed_freq_panel_multifrequency.copy()
         data['empty'] = np.nan
@@ -573,12 +572,12 @@ class TestUnobservedEntities:
     def test_entity_without_window_is_predicted_on_its_whole_grid(
         self, panel_f_without_it_v
     ):
-        """Entité sans ancre ET sans fenêtre : grille de l'étape sans restriction.
+        """Entity with no anchor AND no window: stage grid without restriction.
 
-        m1 n'est observée chez IT qu'en 2021 et q1 qu'en 2023 : la fenêtre
-        d'IT est vide. Son étape sans ancre lève la restriction et prédit sur
-        les 36 mois ; l'estimateur espion, tolérant aux NaN, rend une valeur
-        partout. Les étapes ancrées de FR et DE ne sont pas élargies.
+        m1 is observed for IT only in 2021 and q1 only in 2023: the window
+        of IT is empty. Its unanchored stage lifts the restriction and predicts on
+        the 36 months; the spy estimator, tolerant to NaN, returns a value
+        everywhere. The anchored stages of FR and DE are not widened.
         """
         data = panel_f_without_it_v.copy()
         italy = data.index.get_level_values(0) == 'IT'
@@ -598,11 +597,11 @@ class TestUnobservedEntities:
     def test_unanchored_step_predicting_nan_writes_nothing_and_warns_once(
         self, panel_f_without_it_v
     ):
-        """Des prédictions entièrement NaN laissent IT vide, nommée par UN avertissement.
+        """Entirely NaN predictions leave IT empty, named by ONE warning.
 
-        Une ligne que les covariables ne nourrissent pas rend un NaN, jamais
-        écrit ; un estimateur qui ne rend que des NaN
-        en est le cas limite.
+        A row that the covariates do not feed returns a NaN, never
+        written; an estimator returning only NaN
+        is the limit case.
         """
         imputer = make_imputer(
             estimator=ConstantEstimator(constant=np.nan), impute_unobserved_entities=True
@@ -619,12 +618,12 @@ class TestUnobservedEntities:
     def test_unanchored_prediction_failure_announces_no_fallback(
         self, panel_f_with_a_mute_entity
     ):
-        """L'échec de prédiction d'une étape sans ancre n'annonce aucun repli.
+        """The prediction failure of an unanchored stage announces no fallback.
 
-        Sans ancre, l'interpolation ne peut pas servir de repli : les
-        cellules restent NaN et un avertissement agrégé nomme le couple.
-        Le message des étapes dégradées n'annonce pas « interpolation fallback »
-        pour l'étape (v, M) d'IT, qui n'écrit rien.
+        Without an anchor, interpolation cannot serve as a fallback: the
+        cells stay NaN and an aggregated warning names the pair.
+        The message of degraded stages does not announce an "interpolation fallback"
+        for the (v, M) stage of IT, which writes nothing.
         """
         imputer = make_imputer(impute_unobserved_entities=True)
         with warnings.catch_warnings(record=True) as caught:

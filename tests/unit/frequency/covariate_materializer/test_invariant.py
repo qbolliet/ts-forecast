@@ -69,10 +69,9 @@ class TestCentralInvariant:
     ):
         """``TS``: the dates filled in X_pred CONTAIN those of X_train.
 
-        Formulation par inclusion des dates, et non une comparaison de pourcentages : sous
-        'tolerate_nan' la grille d'entraînement (annuelle) et la grille de
-        prédiction (trimestrielle) n'ont pas le même pas, et le taux brut
-        diffère légitimement.
+        The formulation is an inclusion of dates, not a comparison of percentages:
+        under 'tolerate_nan' the training grid (annual) and the prediction grid
+        (quarterly) have different steps, so the raw NaN rates legitimately differ.
         """
         columns = ['m1', 'q1', 'a2']
         materializer = CovariateMaterializer(covariate_strategy=strategy)
@@ -101,8 +100,8 @@ class TestCentralInvariant:
     def test_invariant_nan_by_entity(self, mixed_freq_panel_heterogeneous):
         """``PANEL``: the inclusion holds PER ENTITY; IT's empty column is no exception to it.
 
-        L'entité sans la colonne est l'unique exception à l'invariant :
-        elle est vide des deux côtés, jamais dégradée d'un seul.
+        The entity without the column is the single exception to the invariant:
+        it is empty on both sides, never degraded on one side only.
         """
         data = mixed_freq_panel_heterogeneous
         panel_columns = ['m1', 'q1', 'a2', 'climat_affaires']
@@ -188,10 +187,10 @@ class TestRealisticPanelInvariant:
     ):
         """Across frequencies: training at the target's anchors (Q), prediction at M.
 
-        La grille d'entraînement est celle des ancres trimestrielles de la
-        cible, à l'étape Q ; la grille de prédiction, tout l'index à l'étape
-        M. Les voies, décidées sur la prédiction, sont rejouées à
-        l'entraînement et ramenées aux fréquences de chaque entité.
+        The training grid is that of the quarterly anchors of the target, at stage
+        Q; the prediction grid is the whole index, at stage M. The ways, decided
+        on the prediction, are replayed at training and brought back to the
+        frequencies of each entity.
         """
         data = heterogeneous_coverage_panel
         materializer = CovariateMaterializer(covariate_strategy=strategy, covariate_fallback=fallback)
@@ -237,8 +236,8 @@ class TestRealisticPanelInvariant:
     def test_interpolate_leaves_no_nan_inside_an_observed_span(self, heterogeneous_coverage_panel, entity):
         """Within [first, last observation] of each (entity, column), X_pred has no NaN.
 
-        Seuls restent permis les bords (avant la première, après la dernière
-        observation) et l'entité dépourvue de la colonne.
+        Only the edges (before the first and after the last observation) and the
+        entity without the column remain allowed.
         """
         data = heterogeneous_coverage_panel
         x_pred, _ways = self._predict(CovariateMaterializer(covariate_strategy='interpolate'), data)

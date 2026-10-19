@@ -1,8 +1,9 @@
 """Tests for tsforecast.frequency.variable_orderer.
 
-Ordres 'frequency' et 'cv', tie-break alphabétique déterministe (indépendant
-de l'ordre d'insertion / des colonnes d'entrée), paramètre ``cv`` polymorphe
-sklearn (remplaçant ``cv_n_splits``), résolution de ``cv`` au seul ``fit``.
+'frequency' and 'cv' orders, deterministic alphabetical tie-break
+(independent of insertion order / input columns), polymorphic sklearn
+``cv`` parameter (replacing ``cv_n_splits``), ``cv`` resolved at ``fit``
+only.
 """
 # Modules de base
 from unittest.mock import patch
@@ -94,19 +95,19 @@ class _FailsOnFirstFold(ConstantEstimator):
 
 
 class TestFrequencyOrder:
-    """Ordre 'frequency' : fréquence la plus basse d'abord."""
+    """'frequency' order: lowest frequency first."""
 
     def test_frequency_order_on_reference_ts(self, reference_timeseries):
-        """L'ordre est a1, a2, q1 (Y avant Q, tie-break alphabétique)."""
+        """The order is a1, a2, q1 (Y before Q, alphabetical tie-break)."""
         del reference_timeseries  # les fréquences suffisent, données non lues
         orderer = VariableOrderer(fit_predict_order='frequency').fit()
         assert orderer.order(_reference_variables()) == ['a1', 'a2', 'q1']
 
     def test_entity_count_breaks_frequency_ties_ascending(self):
-        """À fréquence égale, le groupe avec le MOINS d'entités passe en premier.
+        """At equal frequency, the group with the FEWEST entities comes first.
 
-        Comportement inversé par rapport à hfi (qui triait par nombre
-        d'entités décroissant).
+        Behaviour opposite to hfi (which sorted by decreasing number of
+        entities).
         """
         orderer = VariableOrderer(fit_predict_order='frequency').fit()
         variables = {
@@ -138,7 +139,7 @@ class TestCVOrder:
 
 
 class TestAlphabeticalTiebreak:
-    """Déterminisme intra-étape : jamais l'ordre des colonnes/clés d'entrée."""
+    """Intra-stage determinism: never the order of the input columns / keys."""
 
     def test_alphabetical_tiebreak_ignores_column_order_frequency(self, reference_timeseries):
         """Permuter les clés de "variables" ne change pas l'ordre sous 'frequency'."""
@@ -176,7 +177,7 @@ class TestAlphabeticalTiebreak:
 
 
 class TestCVParameter:
-    """Paramètre ``cv`` polymorphe sklearn, remplaçant ``cv_n_splits``."""
+    """Polymorphic sklearn ``cv`` parameter, replacing ``cv_n_splits``."""
 
     def test_cv_accepts_int_splitter_and_iterable(self):
         """Un entier, un splitter, et un itérable de splits sont tous acceptés."""
@@ -222,7 +223,7 @@ class TestCVParameter:
         assert orderer.cv_.get_n_splits() == 5
 
     def test_cv_n_splits_is_gone(self):
-        """Aucun paramètre nommé "cv_n_splits" n'est accepté (absorbé par "cv")."""
+        """No parameter named "cv_n_splits" is accepted (absorbed by "cv")."""
         assert 'cv_n_splits' not in VariableOrderer().get_params()
         with pytest.raises(TypeError):
             VariableOrderer(cv_n_splits=5)
@@ -365,7 +366,7 @@ class TestPrebuiltScoringSets:
 
 
 class TestCVFallbacksAndLogging:
-    """Cas limites du CV : sentinelles -inf, journalisation des plis en échec."""
+    """CV edge cases: -inf sentinels, logging of failed folds."""
 
     def test_unscorable_variables_sorted_last(self, reference_timeseries):
         """Une variable sans estimateur résolu (-inf) passe après les variables scorées."""
@@ -612,7 +613,7 @@ class TestCVResolution:
 
 
 class TestCVScoresAndSplitters:
-    """'cv' sur cross_val_score réel : scores_ exacts, tous splitters."""
+    """'cv' on a real cross_val_score: exact scores_, all splitters."""
 
     def test_scores_are_negated_errors_best_first(self):
         """Greater is better: the smaller error (b) ranks first, whatever the alphabet."""
@@ -820,7 +821,7 @@ class TestEstimatorResolution:
 
 
 class TestFallbackGroup:
-    """Groupe de repli : jamais fusionné au groupe scoré, diagnostics exacts."""
+    """Fallback group: never merged with the scored group, exact diagnostics."""
 
     @staticmethod
     def _sets(n_rows=12):
@@ -941,7 +942,7 @@ class TestFallbackGroup:
 
 
 class TestFailingFolds:
-    """Plis en échec : sentinelle -inf, journal, moyenne des plis réussis."""
+    """Failed folds: -inf sentinel, log, mean of the successful folds."""
 
     def test_partial_failure_averages_successful_folds(self):
         """One failed fold of four: score = mean of the three others, with a sklearn warning."""

@@ -165,9 +165,9 @@ class TestEmptyAndSingle:
     def test_empty_panel_grid(self, mixed_freq_panel_heterogeneous, method):
         """An empty panel grid behaves like an empty series grid.
 
-        Sans entité, la décision se prend pour l'entité dégénérée ``()``,
-        comme sur une série vide : une voie par colonne, et une frame vide aux
-        colonnes demandées.
+        Without an entity, the decision is taken for the degenerate entity ``()``,
+        as on an empty series: one way per column, and an empty frame with the
+        requested columns.
         """
         empty_grid = pd.MultiIndex.from_tuples([], names=['country', 'date'])
         materializer = CovariateMaterializer()

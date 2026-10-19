@@ -38,11 +38,11 @@ from tests.unit.frequency.training_set_builder.helpers import (
 
 
 class TestFrequencyProgression:
-    """Construction de la progression, identique au fit et au transform."""
+    """Construction of the progression, identical at fit and at transform."""
 
     @pytest.mark.slow
     def test_frequency_progression_on_reference_ts(self, reference_timeseries):
-        """Les trois modalités sur le jeu TS, valeurs exactes."""
+        """The three modalities on the TS dataset, exact values."""
         # F = {Q, Y, M} : sous False, la cible seule
         imputer = fit_with_spy(reference_timeseries, impute_intermediate_frequencies=False)
         assert imputer.frequency_progression_ == ['M']
@@ -56,7 +56,7 @@ class TestFrequencyProgression:
             assert imputer.frequency_progression_ == ['Q', 'M']
 
     def test_imputable_variables_of_each_stage_on_reference_ts(self, reference_timeseries):
-        """Étape Q : {a1, a2} ; étape M : {q1, a1, a2}."""
+        """Stage Q: {a1, a2}; stage M: {q1, a1, a2}."""
         imputer = fit_with_spy(
             reference_timeseries, impute_intermediate_frequencies='covariates_only'
         )
@@ -68,7 +68,7 @@ class TestFrequencyProgression:
     def test_progression_on_panel_f_uses_per_entity_frequencies(
         self, mixed_freq_panel_multifrequency
     ):
-        """Sur PANEL-F, F est lu par couple (entité, colonne)."""
+        """On PANEL-F, F is read per (entity, column) pair."""
         imputer = fit_with_spy(
             mixed_freq_panel_multifrequency,
             impute_intermediate_frequencies='covariates_only',
@@ -96,7 +96,7 @@ class TestFrequencyProgression:
     def test_progression_per_target_frequency_group_on_panel(
         self, mixed_freq_panel_multifrequency
     ):
-        """Un dict de cibles produit une progression par groupe, fusionnée."""
+        """A dict of targets produces one progression per group, merged."""
         imputer = fit_with_spy(
             mixed_freq_panel_multifrequency,
             target_frequency={FR: 'M', DE: 'Q', IT: 'M'},
@@ -115,7 +115,7 @@ class TestFrequencyProgression:
     def test_entity_stopping_early_still_feeds_the_finer_stage(
         self, mixed_freq_panel_multifrequency
     ):
-        """DE, cible Q, contribue au ``y_train`` de l'étape M sans y être écrite."""
+        """DE, target Q, contributes to the ``y_train`` of stage M without being written there."""
         data = mixed_freq_panel_multifrequency
         imputer, fits = capture_variable_fits(
             data,
@@ -137,11 +137,11 @@ class TestFrequencyProgression:
 
 
 class TestStagePlanAxis2:
-    """Le plan d'étapes complet sur le jeu TS."""
+    """The complete stage plan on the TS dataset."""
 
     @pytest.mark.slow
-    def test_stage_plan_of_spec_5_5(self, reference_timeseries):
-        """2 étapes, 5 modèles, y_train filtré par l'origine."""
+    def test_reference_stage_plan(self, reference_timeseries):
+        """2 stages, 5 models, y_train filtered by origin."""
         expected_pairs = [
             ('Q', 'a1'), ('Q', 'a2'), ('M', 'a1'), ('M', 'a2'), ('M', 'q1'),
         ]
@@ -181,7 +181,7 @@ class TestStagePlanAxis2:
             ]
 
     def test_carried_model_rank_reached_under_covariates_only(self, reference_timeseries):
-        """Le rang 3 — report d'étape — devient atteignable."""
+        """Rank 3 — stage carry-over — becomes reachable."""
         imputer = fit_with_spy(
             reference_timeseries,
             covariate_strategy='model',
@@ -207,12 +207,12 @@ class TestStagePlanAxis2:
 
 
     def test_x_train_is_full_on_the_quarterly_rows(self, reference_timeseries):
-        """Sous True, à l'étape M de ``a1``, ``X_train`` est plein sur les lignes Q.
+        """Under True, at stage M of ``a1``, ``X_train`` is full on the Q rows.
 
-        ``y_train`` porte des lignes Y et Q, ``target_taint`` vaut
-        ``'imputed'``, et ``m1`` vaut sur chaque ligne trimestrielle la somme du
-        trimestre — ramenée à l'échelle de l'étape (diviseur 3) —, jamais celle
-        de l'année, jamais NaN.
+        ``y_train`` holds Y and Q rows, ``target_taint`` is
+        ``'imputed'``, and ``m1`` is on each quarterly row the sum of the
+        quarter — brought back to the stage scale (divisor 3) —, never that
+        of the year, never NaN.
         """
         imputer, fits = capture_variable_fits(
             reference_timeseries, impute_intermediate_frequencies=True
@@ -234,7 +234,7 @@ class TestStagePlanAxis2:
 
 
 class TestOriginFilter:
-    """Le filtre d'origine de y_train, et son piège."""
+    """The origin filter of y_train, and its trap."""
 
     @pytest.mark.slow
     def test_covariates_only_differs_from_true_on_panel(self, mixed_freq_panel_heterogeneous):
@@ -277,7 +277,7 @@ class TestOriginFilter:
 
     @pytest.mark.slow
     def test_covariates_only_differs_from_true(self, reference_timeseries):
-        """Même plan, filtre différent, valeurs différentes."""
+        """Same plan, different filter, different values."""
         # Sous 'model', aucune ligne d'origine 'model' n'entre dans y_train
         _, covariates_only = capture_variable_fits(
             reference_timeseries,
@@ -331,12 +331,12 @@ class TestOriginFilter:
             )
 
     def test_y_train_filter_reads_origin_store_not_provenance(self, reference_timeseries):
-        """Le filtre lit origin_store, jamais la provenance publique.
+        """The filter reads origin_store, never the public provenance.
 
-        Composants publics assemblés comme l'imputeur les assemble : un
-        constructeur de jeu sur un matérialiseur réel, et la table publique
-        "ELIGIBLE_ORIGINS" de l'imputeur, qui fixe les origines admises par
-        modalité de l'axe 2.
+        Public components assembled the way the imputer assembles them: a
+        set builder on a real materializer, and the public table
+        "ELIGIBLE_ORIGINS" of the imputer, which fixes the admitted origins per
+        modality of axis 2.
         """
         builder = make_builder()
         materializer = builder.materializer
@@ -371,7 +371,7 @@ class TestOriginFilter:
 
     @pytest.mark.slow
     def test_target_taint_families(self, reference_timeseries):
-        """Les deux familles de souillure de cible n'existent que sous True."""
+        """The two target taint families exist only under True."""
         tainted = {
             ProvenanceType.MODEL_ON_IMPUTED_TARGET,
             ProvenanceType.MODEL_ON_IMPUTED_BOTH,
@@ -396,7 +396,7 @@ class TestOriginFilter:
 
 
 class TestCoincidentCells:
-    """Cellules coïncidentes et niveau de fréquence de l'index."""
+    """Coincident cells and the frequency level of the index."""
 
     # Fabrique privée : les paramètres communs des mesures
     @staticmethod
@@ -414,12 +414,12 @@ class TestCoincidentCells:
     # Fabrique privée : la même capture, sous un estimateur RÉEL
     @staticmethod
     def _capture_with_regression(data, **overrides):
-        """Capte les contextes d'un fit mené par une régression linéaire.
+        """Captures the contexts of a fit driven by a linear regression.
 
-        Les valeurs mesurées supposent un modèle réel : l'estimateur
-        espion des autres tests ne prédit rien d'exploitable. L'enveloppe
-        "RecordingEstimator" délègue à la régression et retient le jeu ajusté,
-        lu ensuite sur le modèle de chaque étape du plan.
+        The measured values assume a real model: the spy estimator of the other
+        tests predicts nothing usable. The "RecordingEstimator" wrapper delegates
+        to the regression and keeps the fitted set, read afterwards on the model
+        of each stage of the plan.
         """
         _imputer, fits = capture_fits(
             lambda: fit_quietly(
@@ -431,7 +431,7 @@ class TestCoincidentCells:
 
     @pytest.mark.slow
     def test_coincident_cells_kept_only_without_constraint(self, reference_timeseries):
-        """12 lignes sous 'sum', 15 sous None, à l'étape M."""
+        """12 rows under 'sum', 15 under None, at stage M."""
         _, under_sum = self._cascade(reference_timeseries, 'sum')
         _, under_none = self._cascade(reference_timeseries, None)
         for column in ('a1', 'a2'):
@@ -549,13 +549,13 @@ class TestCoincidentCells:
 
 
 class TestPerRowScale:
-    """Le diviseur d'échelle est par ligne, jamais par étape."""
+    """The scale divisor is per row, never per stage."""
 
     @pytest.mark.slow
     def test_row_frequency_mixes_block_and_store_sources(
         self, mixed_freq_panel_multifrequency
     ):
-        """Les deux sources de la fréquence de ligne coexistent."""
+        """The two sources of the row frequency coexist."""
         _, fits = capture_variable_fits(
             mixed_freq_panel_multifrequency,
             covariate_strategy='interpolate',
@@ -591,7 +591,7 @@ class TestPerRowScale:
     def test_target_taint_of_a_contributing_entity_propagates(
         self, mixed_freq_panel_multifrequency
     ):
-        """Une cellule 'model' d'une entité dégrade toute l'étape."""
+        """A 'model' cell of an entity degrades the whole stage."""
         imputer = fit_with_spy(
             mixed_freq_panel_multifrequency,
             covariate_strategy='interpolate',

@@ -589,7 +589,7 @@ class TestRescaleSumInvariant:
 class TestRescaleGoldenValues:
     """Hand-computed rescaling, for each frequency pair and position."""
 
-    def test_reference_example_of_spec_6_5(self, reference_timeseries):
+    def test_reference_example_a1_120_in_2021(self, reference_timeseries):
         """Reference example: a1 = 120 in 2021, stage M, raw predictions summing to 112.5."""
         # Grille et observations tirées du jeu de référence
         grid = reference_timeseries.loc['2021'].index

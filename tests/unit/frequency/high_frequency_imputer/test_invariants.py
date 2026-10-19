@@ -41,7 +41,7 @@ Column order               ``test_invariants::TestOrderInvariance::
                            three strategies each.
 Aggregation additivity     ``test_invariants::TestAggregationAdditivity`` (TS,
                            PANEL-F),
-                           ``TestReferenceExamples::test_reference_provenance_of_spec_6_5``,
+                           ``TestReferenceExamples::test_reference_provenance_of_a1``,
                            ``test_fit_phases::TestPhaseFiveEdgeCases::
                            test_incomplete_leading_and_trailing_periods``,
                            ``test_transform::TestIrregularIndexExtendedWindow::
@@ -187,7 +187,7 @@ Training window layers     Component level only,
                            per layer, layers ``[{FR: Y, DE: Q, IT: M}, {FR: Q}]``);
                            partially at stage level:
                            ``test_frequency_progression::TestStagePlanAxis2::
-                           test_stage_plan_of_spec_5_5`` (Y and Q rows,
+                           test_reference_stage_plan`` (Y and Q rows,
                            origins) and
                            ``TestOriginFilter::test_target_taint_families``
                            (``'imputed'``),
@@ -650,9 +650,9 @@ class TestAggregationAdditivity:
     def test_carried_covariate_sums_to_the_period_total(self, reference_timeseries):
         """A covariate CARRIED from an earlier stage sums to the observed total.
 
-        Sous 'model' et 'covariates_only', ``a2`` imputée à l'étape Q est
-        reportée sur la grille mensuelle de ``a1`` (voie ``'carried_model'``,
-        rang 3) : ses douze mois somment au total annuel observé.
+        Under 'model' and 'covariates_only', ``a2`` imputed at stage Q is
+        carried onto the monthly grid of ``a1`` (way ``'carried_model'``,
+        rank 3): its twelve months sum to the observed annual total.
         """
         imputer = fit_with_spy(
             reference_timeseries,
@@ -726,7 +726,7 @@ class TestTrainPredictScale:
 class TestReferenceExamples:
     """Les exemples chiffrés du document, repris comme cas d'or."""
 
-    def test_reference_plan_of_spec_5_5_under_false(self, reference_timeseries):
+    def test_reference_plan_under_false(self, reference_timeseries):
         """Under False, the reference plan has one stage M with three models, in the order a1, a2, q1."""
         imputer = fit_with_spy(reference_timeseries, covariate_strategy='model')
         plan = list(imputer.imputation_plan_)
@@ -756,7 +756,7 @@ class TestReferenceExamples:
             'm1': 'identity', 'a1': 'stage_model', 'a2': 'stage_model'
         }
 
-    def test_reference_provenance_of_spec_6_5(self, reference_timeseries):
+    def test_reference_provenance_of_a1(self, reference_timeseries):
         """The twelve months, anchor included, are MODEL_ON_INTERPOLATED and sum to 120."""
         imputer = fit_with_spy(reference_timeseries)
         provenance = imputer.imputation_provenance_['a1'].loc['2021']

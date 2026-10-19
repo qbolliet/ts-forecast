@@ -488,10 +488,10 @@ class TestUniquenessOfTheWay:
     ):
         """On PANEL-F, one way per column, each block at its own frequency.
 
-        La voie décidée sur la grille de prédiction mensuelle — q1
-        'interpolate', m1 'identity' — est rejouée sur la grille mutualisée
-        des blocs de v (FR annuel, DE trimestriel, IT mensuel) : la même voie
-        y devient agrégation, identité ou interpolation selon le bloc.
+        The way decided on the monthly prediction grid — q1 'interpolate', m1
+        'identity' — is replayed on the pooled grid of the blocks of v (FR annual,
+        DE quarterly, IT monthly): the same way becomes aggregation, identity or
+        interpolation depending on the block.
         """
         features, _ways, _origins = CovariateMaterializer().materialize(
             columns=['q1', 'm1'],
@@ -537,8 +537,8 @@ class TestUniquenessOfTheWay:
     ):
         """``'identity'`` replayed on a grid coarser than the column sums it.
 
-        Sans cette normalisation, la cellule porterait la valeur ponctuelle de
-        mars (102), une quantité mensuelle sur une ligne trimestrielle.
+        Without this normalization, the cell would carry the point value of March
+        (102), a monthly quantity on a quarterly row.
         """
         features, _ways, _origins = CovariateMaterializer().materialize(
             columns=['m1'],
@@ -594,8 +594,8 @@ class TestRecordFlag:
     def test_default_writes_nothing_and_keeps_the_way(self, reference_timeseries):
         """By default, ``materialize`` produces the features and leaves the three stores empty.
 
-        Défaut ``record=False`` : une matérialisation de covariable n'est pas
-        une imputation, et deux appels successifs décident la même voie.
+        Default ``record=False``: materializing a covariate is not an
+        imputation, and two successive calls decide the same way.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         _features, first_ways, _origins = self._materialize(materializer, reference_timeseries)
@@ -642,8 +642,8 @@ class TestRawAnchorsPerEntity:
     def test_finer_entity_is_aggregated_under_tolerate_nan(self, mixed_freq_panel_multifrequency):
         """PANEL-F at Q under ``'tolerate_nan'``: IT's monthly v is summed per quarter.
 
-        Valeurs d'or : trimestres de 30, 33 et 37,5, et non la valeur
-        ponctuelle du mois de fin de trimestre (10, 11, 12,5).
+        Golden values: quarters of 30, 33 and 37.5, not the point value of
+        the quarter-end month (10, 11, 12.5).
         """
         features, _ways, _origins = CovariateMaterializer(covariate_strategy='tolerate_nan').materialize(
             columns=['v'],
@@ -659,10 +659,9 @@ class TestRawAnchorsPerEntity:
     def test_rank_one_entities_survive_an_entity_without_frequency(self, mixed_freq_panel_multifrequency):
         """c is monthly for DE, quarterly for FR, never observed by IT: DE is summed.
 
-        IT, sans fréquence, ne vote plus ; et quand bien même la
-        voie de colonne serait 'raw_anchors', DE la ramènerait à l'agrégation
-        exacte : la somme du trimestre (303), jamais m1 de mars
-        (102).
+        IT, without a frequency, does not vote; and even if the column way were
+        'raw_anchors', DE would bring it back to the exact aggregation: the
+        sum of the quarter (303), never the m1 of March (102).
         """
         data = mixed_freq_panel_multifrequency[['m1', 'q1']].copy()
         data['c'] = np.nan
@@ -692,7 +691,7 @@ class TestRawAnchorsPerEntity:
         )
 
 
-class TestReferenceExampleSpec47:
+class TestReferenceExampleTable:
     """The four rows of the reference table, golden values included."""
 
     # Colonnes et grilles de l'exemple : imputation de a1 à l'étape Q
@@ -721,7 +720,7 @@ class TestReferenceExampleSpec47:
         assert ways_pred == ways
         return x_train, x_pred, ways, origins
 
-    def test_reference_example_of_spec_4_7(self, reference_timeseries):
+    def test_reference_example_four_rows(self, reference_timeseries):
         """The four configurations of the table: way of a2 and NaN rates."""
         data = reference_timeseries
 
@@ -875,10 +874,10 @@ class TestAggregationConstraintApplier:
     ):
         """``a2`` seen at fit is the sum of ``a2`` seen at predict.
 
-        ``TS``, cible Q : la voie de a2, décidée sur la grille de prédiction
-        trimestrielle, est 'interpolate' ; rejouée sur le bloc annuel de a1,
-        elle redonne les observations 60 / 66 / 72. Sous 'sum', la grille Q
-        est recalée sur ces mêmes totaux (somme 2021 = 60).
+        ``TS``, target Q: the way of a2, decided on the quarterly prediction grid,
+        is 'interpolate'; replayed on the annual block of a1, it gives back the
+        observations 60 / 66 / 72. Under 'sum', the Q grid is rescaled to those
+        same totals (2021 sum = 60).
         """
         materializer = CovariateMaterializer(aggregation_constraint_applier=AggregationConstraint('sum'))
         x_pred, ways, _ = self._materialize(materializer, reference_timeseries, columns=['a2'])

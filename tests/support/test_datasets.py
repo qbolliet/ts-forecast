@@ -50,7 +50,7 @@ class TestHeterogeneousPanel:
 class TestReferenceTimeseries:
     """``TS`` dataset: annual golden values."""
 
-    def test_reference_timeseries_matches_spec_anchors(
+    def test_reference_timeseries_matches_golden_anchors(
         self, reference_timeseries: pd.DataFrame
     ) -> None:
         """The six golden values of ``a1`` and ``a2`` are the documented ones, at the three anchors."""

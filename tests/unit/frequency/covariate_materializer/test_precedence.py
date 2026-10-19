@@ -96,9 +96,9 @@ class TestPrecedenceRanks:
     def test_rank_two_trigger_ignores_the_origin(self, origin):
         """Rank 2 fires on the mere presence of cells produced at ``f``.
 
-        « Le repli matérialise » : une étape servie par repli est
-        relue comme une autre. Le code et la docstring de ``classify`` le
-        disent ; la docstring de classe, qui exige ``origin == 'model'``, non.
+        "Fallback materializes": a stage served by the fallback is read back like
+        any other. The code and the docstring of ``classify`` say so; the class
+        docstring, which requires ``origin == 'model'``, does not.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(7.0, index=monthly_grid()), 'M', origin)
@@ -399,9 +399,9 @@ class TestRankOnePerEntity:
     ):
         """PANEL-F at M: IT observes v monthly and keeps 10 / 11 / 12.5, never 999.
 
-        Le miroir porte 999 pour les trois entités au pas M ; la voie de la
-        colonne est 'stage_model' (verdicts de FR et DE), qu'IT ramène à
-        l'identité. Valeurs d'or.
+        The mirror carries 999 for the three entities at step M; the column way is
+        'stage_model' (verdicts of FR and DE), which IT brings back to identity.
+        Golden values.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         for entity in ('FR', 'DE', 'IT'):
@@ -467,9 +467,9 @@ class TestModelWaysPerEntity:
     ):
         """DE listed first makes the column way ``'carried_model'``; FR still reads its stage.
 
-        Les valeurs servies ne dépendent que du miroir de chaque entité ; la
-        voie de colonne, elle, dépend de l'ordre des entités et
-        n'est donc pas assertée ici.
+        The served values depend only on the mirror of each entity; the column
+        way, however, depends on the entity order and is therefore not asserted
+        here.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(1.0, index=entity_grid(['FR'], monthly_grid())), 'M', 'model')

@@ -132,7 +132,7 @@ class _EveryOtherNaNEstimator(BaseEstimator):
 # Phases 0 à 4 du fit
 # =============================================================================
 class TestFitPhases:
-    """Les phases 0 à 4 renseignent les attributs ajustés."""
+    """Phases 0 to 4 fill in the fitted attributes."""
 
     @pytest.mark.parametrize('fixture_name', ['reference_timeseries', 'mixed_freq_panel_heterogeneous'])
     @pytest.mark.slow
@@ -236,7 +236,7 @@ class TestFitPhases:
 
     @pytest.mark.slow
     def test_three_window_masks_are_set(self, mixed_freq_panel_heterogeneous):
-        """Les trois masques sont des Series booléennes à MultiIndex sur panel."""
+        """The three masks are boolean Series with a MultiIndex on a panel."""
         imputer = fit_quietly(make_imputer(), mixed_freq_panel_heterogeneous)
         for mask_name in ('strict_window_mask_', 'imputation_window_mask_',
                           'training_window_mask_'):
@@ -246,7 +246,7 @@ class TestFitPhases:
             assert isinstance(mask.index, pd.MultiIndex), mask_name
 
     def test_widening_training_scope_adds_rows_not_columns(self, reference_timeseries):
-        """Élargir training_scope change le masque d'entraînement, jamais les colonnes."""
+        """Widening training_scope changes the training mask, never the columns."""
         strict = fit_quietly(
             make_imputer(training_scope='strict'), reference_timeseries
         )
@@ -264,7 +264,7 @@ class TestFitPhases:
         )
 
     def test_cv_attribute_only_under_cv_order(self, reference_timeseries):
-        """cv_ n'existe que sous fit_predict_order='cv'."""
+        """cv_ exists only under fit_predict_order='cv'."""
         by_frequency = fit_quietly(make_imputer(), reference_timeseries)
         assert not hasattr(by_frequency, 'cv_')
 
@@ -293,7 +293,7 @@ class TestFitPhases:
 
     @pytest.mark.slow
     def test_intermediate_frequencies_modalities_all_fit(self, reference_timeseries):
-        """Les trois modalités de l'axe 2 ajustent, aucune ne lève."""
+        """The three modalities of axis 2 all fit, none raises."""
         for modality in (False, 'covariates_only', True):
             imputer = make_imputer(impute_intermediate_frequencies=modality)
             fit_quietly(imputer, reference_timeseries)
@@ -369,7 +369,7 @@ class TestFitPhases:
             fit_quietly(make_imputer(), reduce(reference_timeseries))
 
     def test_refit_under_the_frequency_order_purges_cv_(self, reference_timeseries):
-        """Un second fit sous l'ordre 'frequency' efface le cv_ du premier."""
+        """A second fit under the 'frequency' order clears the cv_ of the first."""
         imputer = fit_quietly(
             make_imputer(fit_predict_order='cv', cv=3), reference_timeseries
         )
@@ -402,7 +402,7 @@ class TestFitPhases:
     def test_entity_never_observing_a_column_is_left_out(
         self, mixed_freq_panel_heterogeneous
     ):
-        """Un couple (entité, colonne) jamais observé sort de la classification."""
+        """An (entity, column) pair never observed drops out of the classification."""
         imputer = fit_quietly(make_imputer(), mixed_freq_panel_heterogeneous)
         # IT n'observe jamais climat_affaires : le couple n'a pas de fréquence
         assert (IT + ('climat_affaires',)) not in imputer.detected_frequencies_
@@ -475,12 +475,12 @@ class TestPerEntityFrequencies:
         assert by_column['m1'] == 'M'
 
     def test_composite_stage_label_when_entities_diverge(self, mixed_freq_panel_multifrequency):
-        """Une étape liant des fréquences différentes porte un libellé composite.
+        """A stage binding different frequencies carries a composite label.
 
-        Sous ``impute_intermediate_frequencies=False``, l'unique étape est la
-        liaison ``{FR: M, DE: Q, IT: M}`` elle-même. DE a pour cible Q, où q1
-        et v sont déjà : rien ne lui est imputé ; FR reçoit q1 et v, IT q1
-        seulement (v y est mensuelle).
+        Under ``impute_intermediate_frequencies=False``, the single stage is the
+        binding ``{FR: M, DE: Q, IT: M}`` itself. DE targets Q, where q1
+        and v already are: nothing is imputed to it; FR receives q1 and v, IT q1
+        only (v is monthly there).
         """
         imputer = fit_quietly(
             make_imputer(target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'}),
@@ -492,7 +492,7 @@ class TestPerEntityFrequencies:
         assert plan_groups(imputer, label) == {('q1', 'Q'): (FR, IT), ('v', 'Y'): (FR,)}
 
     def test_hyperparameter_dicts_stay_keyed_by_column(self, mixed_freq_panel_multifrequency):
-        """Les dicts d'hyperparamètres restent indexés par colonne, jamais par couple."""
+        """Hyperparameter dicts stay keyed by column, never by pair."""
         imputer = fit_quietly(
             make_imputer(
                 scale_features={'v': 'calendar'},
@@ -518,7 +518,7 @@ class TestPerEntityFrequencies:
 # test_widening_training_scope_adds_rows_not_columns
 @pytest.mark.internal
 class TestWiring:
-    """Les composants de l'imputeur sont instanciés et câblés au fit."""
+    """The components of the imputer are instantiated and wired at fit."""
 
     def test_training_set_builder_is_wired(self, mixed_freq_panel_multifrequency, monkeypatch):
         """Le callable de masque du builder appelle get_mask_at_frequency(kind='training')."""
@@ -567,7 +567,7 @@ class TestWiring:
         assert not hasattr(imputer._training_set_builder, 'aggregation_constraint')
 
     def test_window_calculator_receives_the_four_window_parameters(self, reference_timeseries):
-        """Le calculateur de fenêtre reçoit les quatre paramètres de fenêtre."""
+        """The window calculator receives the four window parameters."""
         imputer = fit_quietly(
             make_imputer(
                 imputation_scope='extended_forward',
@@ -590,7 +590,7 @@ class TestFallbackPath:
     def test_estimator_failure_falls_back_and_marks_interpolated(
         self, reference_timeseries
     ):
-        """is_fallback=True, cellules INTERPOLATED, registres alimentés."""
+        """is_fallback=True, INTERPOLATED cells, registers fed."""
         imputer = make_imputer(estimator=FailingEstimator())
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
@@ -629,12 +629,12 @@ class TestFallbackPath:
         assert values['a1'].loc['2022'].sum() == pytest.approx(132.0)
 
     def test_fallback_feeds_the_origin_register(self, reference_timeseries):
-        """« Le repli matérialise » : une étape repliée nourrit l'étape suivante.
+        """"Fallback materializes": a fallen-back stage feeds the next stage.
 
-        Sous ``impute_intermediate_frequencies=True``, les cellules que le repli
-        écrit à l'étape Q entrent dans le ``y_train`` de l'étape M avec
-        l'origine ``'interpolated'`` : c'est l'effet public du registre
-        d'origine alimenté par le repli.
+        Under ``impute_intermediate_frequencies=True``, the cells that the fallback
+        writes at stage Q enter the ``y_train`` of stage M with the origin
+        ``'interpolated'``: this is the public effect of the origin register fed
+        by the fallback.
         """
         origins = {}
         original = TrainingSetBuilder.build
@@ -666,11 +666,11 @@ class TestPhaseFiveEdgeCases:
     """Cas limites de l'exécution des étapes."""
 
     def test_unsorted_index_is_refused_explicitly(self, reference_timeseries):
-        """Un index désordonné est refusé par le contrat d'entrée, sans imputer à faux.
+        """An unsorted index is refused by the input contract, without imputing wrongly.
 
-        La classe fige ``auto_sort=False`` et ``strict_validation=True``
-        : trier en silence changerait les fenêtres et les
-        agrégats sans que l'appelant le sache.
+        The class fixes ``auto_sort=False`` and ``strict_validation=True``:
+        sorting silently would change the windows and the aggregates without the
+        caller knowing.
         """
         with pytest.raises(ValueError, match='not sorted'):
             fit_with_spy(reference_timeseries.iloc[::-1])
@@ -679,14 +679,13 @@ class TestPhaseFiveEdgeCases:
         'fixture_name', ['reference_timeseries', 'mixed_freq_panel_multifrequency']
     )
     def test_duplicated_index_is_refused(self, fixture_name, request):
-        """Un index dupliqué est refusé explicitement, sur série comme sur panel.
+        """A duplicated index is refused explicitly, on a series as on a panel.
 
-        Une date (ou un couple (entité, date)) présente deux fois compterait
-        double dans les agrégations exactes et dans les totaux de période
-        : la validation stricte du contrat
-        d'entrée la refuse avant tout calcul. Le doublon est trié à
-        sa place, pour que le refus porte sur la duplication et non sur le
-        désordre.
+        A date (or an (entity, date) pair) present twice would count double in the
+        exact aggregations and in the period totals: the strict validation of the
+        input contract refuses it before any computation. The duplicate is sorted
+        into place, so that the refusal is about the duplication and not about the
+        disorder.
         """
         data = request.getfixturevalue(fixture_name)
         duplicated = pd.concat([data, data.iloc[[5]]]).sort_index()
@@ -713,13 +712,13 @@ class TestPhaseFiveEdgeCases:
         assert imputed_cells(values, provenance, 'empty').empty
 
     def test_incomplete_leading_and_trailing_periods(self, reference_timeseries):
-        """Une période que les bornes du jeu tronquent n'est pas recalée.
+        """A period truncated by the bounds of the dataset is not rescaled.
 
-        Deux gardes distinctes se relaient : celle des sous-périodes NaN, et
-        celle de la troncature CALENDAIRE, dont les sous-périodes manquantes
-        sont absentes de la grille plutôt que vides. Sans la seconde, le total
-        annuel de 2021 serait réparti sur les dix mois présents, soit une
-        sur-attribution de 20 % à chacun.
+        Two distinct guards relay each other: the one on NaN sub-periods, and
+        the one on CALENDAR truncation, whose missing sub-periods are absent from
+        the grid rather than empty. Without the second, the 2021 annual total
+        would be spread over the ten months present, an over-attribution of 20 %
+        to each.
         """
         truncated = reference_timeseries.loc['2021-03-31':'2023-08-31']
         imputer = fit_with_spy(truncated)
@@ -758,12 +757,12 @@ class TestPhaseFiveEdgeCases:
 
 
     def test_all_nan_predictions_fall_back_and_warn(self, reference_timeseries):
-        """Un modèle qui ne prédit que des NaN est traité comme un échec de prédiction.
+        """A model predicting only NaN is treated as a prediction failure.
 
-        Rien n'étant produit, l'étape est dégradée en repli
-        d'interpolation — le plan dit ce qui a réellement été fait — et
-        l'avertissement agrégé des étapes dégradées le nomme, comme pour une
-        exception. Valeur d'or : les 36 mois de chaque colonne interpolés.
+        Since nothing is produced, the stage is degraded to an interpolation
+        fallback — the plan says what was actually done — and the aggregated
+        warning of degraded stages names it, as for an exception. Golden value:
+        the 36 months of each column interpolated.
         """
         imputer = make_imputer(estimator=ConstantEstimator(constant=np.nan))
 
@@ -779,12 +778,11 @@ class TestPhaseFiveEdgeCases:
         assert degraded[0].count('the model predicted only NaN, interpolation fallback') == 3
 
     def test_partly_nan_predictions_are_left_unwritten_and_named(self, reference_timeseries):
-        """Des prédictions NaN éparses restent non écrites, et l'avertissement agrégé le dit.
+        """Sparse NaN predictions stay unwritten, and the aggregated warning says so.
 
-        L'estimateur ne prédit NaN qu'une ligne sur deux : l'étape reste un
-        modèle, ses autres cellules sont écrites ; l'année dont une
-        sous-période manque n'est pas recalée. Valeur d'or pour a1 :
-        18 cellules NaN sur 36, 18 écrites.
+        The estimator predicts NaN on one row out of two: the stage stays a
+        model, its other cells are written; the year with a missing sub-period is
+        not rescaled. Golden value for a1: 18 NaN cells out of 36, 18 written.
         """
         imputer = make_imputer(estimator=_EveryOtherNaNEstimator())
 
@@ -835,14 +833,14 @@ class TestWindowWithoutTraining:
         ]
 
     def test_panel_without_any_strict_window_imputes_nothing(self, panel_reference_full):
-        """Un panel sans fenêtre stricte nulle part n'impute rien, comme la série temporelle.
+        """A panel with no strict window anywhere imputes nothing, like the time series.
 
-        Mêmes couvertures disjointes que ci-dessus, pour les trois entités.
-        Le calculateur ne trouve aucune fenêtre (« No imputation window found
-        for any entity ») : l'imputeur ne retombe pas sur des masques tout-vrais
-        qui imputeraient les 108 cellules de q1 et de a1, mais pose des masques
-        tout-faux, n'écrit rien, émet un message au fit qui nomme les trois
-        entités et un seul au transform.
+        Same disjoint coverages as above, for the three entities.
+        The calculator finds no window ("No imputation window found
+        for any entity"): the imputer does not fall back on all-True masks
+        that would impute the 108 cells of q1 and a1, but sets all-False masks,
+        writes nothing, emits one message at fit naming the three entities and
+        a single one at transform.
         """
         data = panel_reference_full[['m1', 'q1', 'a1']].copy()
         dates = data.index.get_level_values(-1)
@@ -883,17 +881,16 @@ class TestWindowWithoutTraining:
         assert "'a1' at stage M: empty training set (0 row(s), 0 covariate(s))" in degraded[0]
 
     def test_finer_rows_alone_keep_their_covariates(self, reference_timeseries):
-        """Sous True, des lignes d'entraînement toutes plus fines que le bloc gardent m1.
+        """Under True, training rows all finer than the block keep m1.
 
-        Même fenêtre que ci-dessus, avec q1 pour créer l'étape Q. À l'étape
-        Q, a1 n'a aucune ancre dans la fenêtre : repli, qui écrit T1 à T3
-        2021 (origine 'interpolated'). À l'étape M, ces trois trimestres sont
-        les SEULES lignes de a1 — couche Q, la couche Y étant vide — et m1 y
-        vaut la somme de chaque trimestre. La sélection des
-        covariables lit chaque couche à sa fréquence : lue à
-        la fréquence du bloc (Y) sur ces dates trimestrielles, m1 y
-        paraîtrait vide, serait écartée, et a1 retomberait en repli avec trois
-        lignes exploitables.
+        Same window as above, with q1 to create stage Q. At stage Q, a1 has no
+        anchor in the window: fallback, which writes Q1 to Q3 2021 (origin
+        'interpolated'). At stage M, these three quarters are the ONLY rows of
+        a1 — layer Q, layer Y being empty — and m1 there is the sum of each
+        quarter. The selection of covariates reads each layer at its own
+        frequency: read at the frequency of the block (Y) on these quarterly
+        dates, m1 would look empty, would be discarded, and a1 would fall back
+        with three usable rows.
         """
         data = reference_timeseries[['m1', 'q1', 'a1']].copy()
         data.loc['2021-12-31':, 'm1'] = np.nan
@@ -915,14 +912,14 @@ class TestWindowWithoutTraining:
     def test_covariate_absent_from_the_training_grid_is_not_selected(
         self, reference_timeseries
     ):
-        """Une covariable vide sur la grille d'entraînement n'est jamais retenue.
+        """A covariate that is empty on the training grid is never retained.
 
-        ``late`` reprend m1 à partir de février 2023 seulement. Sous
-        ``training_scope='unrestricted'``, a1 s'entraîne sur ses trois ancres
-        annuelles, où ``late`` — aucune année complète — ne s'agrège nulle
-        part ; la grille de prédiction (février-décembre 2023) la porte
-        pourtant. Une covariable non vide sur une seule des deux grilles
-        entraînerait un coefficient sans support : elle est écartée.
+        ``late`` takes m1 up only from February 2023. Under
+        ``training_scope='unrestricted'``, a1 trains on its three annual
+        anchors, where ``late`` — no complete year — aggregates nowhere;
+        yet the prediction grid (February-December 2023) carries it.
+        A covariate non-empty on only one of the two grids would
+        give a coefficient without support: it is discarded.
         """
         data = reference_timeseries.copy()
         data['late'] = data['m1'].where(data.index >= '2023-02-01')
@@ -967,15 +964,15 @@ class TestAggregatedWarnings:
     def test_flipped_profiles_of_two_columns_over_two_stages_warn_once(
         self, negative_annual_totals
     ):
-        """Deux colonnes à signe inversé sur deux étapes : UN avertissement « flipped ».
+        """Two columns with a flipped sign over two stages: ONE "flipped" warning.
 
-        L'estimateur constant prédit +1 sur chaque sous-période : l'agrégat de
-        chaque année est positif face à un total négatif, aux étapes Q ET M,
-        pour a1 comme pour a2 — quatre recalages dégénérés, regroupés en
-        un seul message. Valeur d'or : 2 colonnes × 3
-        années = 6 périodes observées ; une année inversée aux deux étapes
-        compte une fois, le message dénombrant des périodes observées et non
-        des recalages.
+        The constant estimator predicts +1 on each sub-period: the aggregate of
+        each year is positive against a negative total, at stages Q AND M,
+        for a1 as for a2 — four degenerate rescalings, grouped into
+        a single message. Golden value: 2 columns × 3
+        years = 6 observed periods; a year flipped at both stages
+        counts once, the message counting observed periods and not
+        rescalings.
         """
         imputer = make_imputer(
             estimator=ConstantEstimator(constant=1.0),

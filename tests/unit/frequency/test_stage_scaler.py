@@ -381,9 +381,9 @@ class TestConstantGoldenValues:
     def test_feature_divisor_gold(self, carried, stage, expected):
         """A covariate divides by the stage sub-periods held by the period its cell spans.
 
-        La cellule couvre une période de sa grille (voie 'identity') : une
-        grille de bloc à la fréquence ``carried`` porte des cellules de cette
-        période, plus grossière ou plus fine que l'étape.
+        The cell spans a period of its grid ('identity' way): a block grid at
+        the ``carried`` frequency carries cells of that period, coarser or
+        finer than the stage.
         """
         divisors = StageScaler().feature_divisors(
             columns=['x'],
@@ -459,8 +459,8 @@ class TestCalendarGoldenValues:
     def test_fractional_feature_divisor_under_calendar(self):
         """A monthly cell at a quarterly stage divides by its share of days: 31 / 29 / 31 of 91.
 
-        Grille de bloc mensuelle, étape trimestrielle : chaque cellule couvre
-        un mois.
+        Monthly block grid, quarterly stage: each cell spans one
+        month.
         """
         index = pd.date_range('2024-01-31', periods=3, freq='ME')
         divisors = StageScaler(scale_features='calendar').feature_divisors(
@@ -806,10 +806,10 @@ class TestCarriedPeriodRule:
     ):
         """Under 'raw_anchors', a column at least as fine as the grid spans one grid period.
 
-        Le matérialiseur ramène une telle colonne à l'identité ou à l'agrégation
-        exacte (rang 1) : sur une grille trimestrielle à l'étape
-        Q, une colonne mensuelle ou trimestrielle divise par 1 ; seule la
-        colonne annuelle, lue à ses ancres, couvre sa propre période (4).
+        The materializer brings such a column back to identity or to exact
+        aggregation (rank 1): on a quarterly grid at stage
+        Q, a monthly or quarterly column divides by 1; only the
+        annual column, read at its anchors, spans its own period (4).
         """
         divisors = StageScaler().feature_divisors(
             columns=['x'],
@@ -964,7 +964,7 @@ class TestScaleFeaturesFalse:
 class TestPerRowTargetDivisor:
     """Per-row scale: each row of y carries its production frequency."""
 
-    def test_spec_table_of_5_4(self):
+    def test_per_row_divisors_table(self):
         """Per-row divisors: 120 / Y -> 10.0, 28 / Q -> 9.33, 30 / Q -> 10.0."""
         scaler = StageScaler()
         index = pd.to_datetime(['2021-12-31', '2021-03-31', '2021-06-30'])
@@ -1346,7 +1346,7 @@ class TestPerEntityFrequencies:
     def test_plain_entity_keys_behave_like_tuple_keys(self, parameter, expected, form):
         """``{'FR': ...}`` and ``{('FR',): ...}`` are the same binding, in every parameter.
 
-        Clés scalaires normalisées, comme dans ``CovariateMaterializer`` : les deux composants lisent les mêmes liaisons.
+        Scalar keys are normalized, as in ``CovariateMaterializer``: both components read the same bindings.
         """
         index = _panel_grid()
         fr, de = ('FR', 'DE') if form == 'plain' else (('FR',), ('DE',))

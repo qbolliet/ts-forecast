@@ -81,7 +81,7 @@ class TestInitValidation:
         assert materializer.interpolation_method is setting
         assert materializer.aggregation_constraint_applier is None
 
-    def test_defaults_follow_the_spec(self):
+    def test_defaults_are_the_documented_ones(self):
         """Defaults of the constructor parameters."""
         materializer = CovariateMaterializer()
         # Valeurs par défaut documentées, paramètre par paramètre
@@ -150,7 +150,7 @@ class TestPerFeatureResolution:
 
         The default of ``interpolation_method`` is ``'linear'`` —
         the default of ``HighFrequencyImputer`` too — and the rule is:
-        "features non couvertes et pas de ``'__default__'`` -> défaut".
+        uncovered features without a ``'__default__'`` get the default.
         The imputer hands its dict over unchanged, so the materializer's own
         fallback is what every uncovered column receives.
         """

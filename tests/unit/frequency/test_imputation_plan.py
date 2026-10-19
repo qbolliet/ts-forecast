@@ -1,10 +1,10 @@
 """Tests for tsforecast.frequency.imputation_plan.
 
-Étape immuable, couverture exacte de feature_cols par la voie de
-matérialisation, invariant de repli, facteur d'échelle par ligne (pd.Series),
-égalité Series-safe, provenance émise (souillures, repli, étape sans ancre),
-plan immuable, vues (by_stage, models), sérialisation de diagnostic,
-append_step, to_entity_tuple, INTERPOLATE_FALLBACK et MaterializationWay.
+Immutable step, exact coverage of feature_cols by the materialization
+way, fallback invariant, per-row scale factor (pd.Series),
+Series-safe equality, emitted provenance (taints, fallback, unanchored step),
+immutable plan, views (by_stage, models), diagnostic serialization,
+append_step, to_entity_tuple, INTERPOLATE_FALLBACK and MaterializationWay.
 """
 # Modules de base
 import copy
@@ -77,7 +77,7 @@ class TestImputationStep:
             )
 
     def test_unknown_materialization_way_raises(self):
-        """Une voie hors des six littéraux lève ValueError."""
+        """A way outside the six literals raises ValueError."""
         with pytest.raises(ValueError, match=r"inconnues"):
             _make_step(materialization={'m1': 'identity', 'q1': 'teleport'})
 
@@ -102,13 +102,13 @@ class TestImputationStep:
         assert step.emitted_provenance is ProvenanceType.INTERPOLATED
 
     def test_is_fallback_allowed_without_sentinel(self):
-        """is_fallback=True reste permis avec un vrai estimateur."""
+        """is_fallback=True remains allowed with a real estimator."""
         step = _make_step(is_fallback=True)
         assert step.is_fallback is True
         assert step.emitted_provenance is ProvenanceType.INTERPOLATED
 
     def test_scale_factor_accepts_series(self):
-        """Construction et égalité avec un scale_factor pd.Series."""
+        """Construction and equality with a pd.Series scale_factor."""
         idx = pd.date_range('2021-01-31', periods=3, freq='ME')
         scale = pd.Series([12.0, 3.0, 3.0], index=idx)
 
@@ -188,7 +188,7 @@ class TestImputationPlan:
         assert by_stage['M'] == (m_q1, m_a1)
 
     def test_models_view(self):
-        """models() est la vue {stage_key: estimateur}."""
+        """models() is the {stage_key: estimator} view."""
         step = _make_step(pred_freq_label='M', var_key='gdp')
         plan = ImputationPlan((step,))
         assert plan.models() == {('M', 'gdp'): step.model}

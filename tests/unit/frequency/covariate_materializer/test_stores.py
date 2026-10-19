@@ -1,10 +1,9 @@
 """Tests of the three stores held by ``CovariateMaterializer``.
 
-The mirror of the
-values produced (``imputed_store``), their production frequency
-(``imputed_freq_store``) and their cell origin (``origin_store``) are written
-together, NaN cells excluded, by ``new.combine_first(existing)`` (cells a
-production does not cover survive). « Le repli matérialise »: the
+The mirror of the values produced (``imputed_store``), their production
+frequency (``imputed_freq_store``) and their cell origin (``origin_store``)
+are written together, NaN cells excluded, by ``new.combine_first(existing)``
+(cells a production does not cover survive). "Fallback materializes": the
 fallback interpolation feeds the stores like a model prediction. ``reset``
 separates two passes — a transform never reads the fit's mirror — and
 ``snapshot`` returns an independent deep copy.
@@ -172,8 +171,8 @@ class TestInterpolateColumn:
     def test_each_entity_records_the_origin_of_its_own_way(self, mixed_freq_panel_multifrequency):
         """PANEL-F at M: FR and DE interpolated, IT brought back to its rank 1.
 
-        Sur sa propre grille, l'interpolation d'une colonne EST l'identité :
-        IT, mensuelle, est lue à ses observations, d'origine 'observed'.
+        On its own grid, the interpolation of a column IS the identity:
+        IT, monthly, is read at its observations, with origin 'observed'.
         """
         materializer = CovariateMaterializer()
         materializer.interpolate_column(

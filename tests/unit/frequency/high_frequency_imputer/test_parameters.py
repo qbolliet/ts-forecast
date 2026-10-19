@@ -47,7 +47,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 # Validations d'__init__
 # =============================================================================
 class TestParameterValidation:
-    """Validation ligne à ligne des paramètres, sans transformation."""
+    """Line-by-line validation of the parameters, without transformation."""
 
     # Un cas par ligne de littéral du tableau : le message énumère les valeurs
     @pytest.mark.parametrize(
@@ -175,7 +175,7 @@ class TestParameterValidation:
             make_imputer(min_cv_train_size=0)
 
     def test_min_cv_train_size_one_is_accepted(self):
-        """La borne basse est 1, et non 2 comme dans hfi."""
+        """The lower bound is 1, not 2 as in hfi."""
         assert make_imputer(min_cv_train_size=1).min_cv_train_size == 1
 
     def test_min_cv_train_size_wrong_type_raises(self):
@@ -209,7 +209,7 @@ class TestParameterValidation:
 
     @pytest.mark.parametrize('value', ['mean', 'last'])
     def test_aggregation_constraint_refuses_mean_and_last(self, value):
-        """'mean' et 'last' sont retirés de l'API, le message nommant l'échappatoire."""
+        """'mean' and 'last' are removed from the API, the message naming the way out."""
         with pytest.raises(ValueError) as excinfo:
             make_imputer(aggregation_constraint=value)
         message = str(excinfo.value)
@@ -446,7 +446,7 @@ class TestRejectedValues:
 # __init__ valide sans transformer (B3)
 # =============================================================================
 # Défauts documentés, recopiés pour comparaison avec la signature
-_SPEC_DEFAULTS = {
+_DOCUMENTED_DEFAULTS = {
     'estimator': None,
     'additive_transformer': None,
     'covariate_strategy': 'interpolate',
@@ -479,7 +479,7 @@ _SPEC_DEFAULTS = {
 class TestInitDoesNotTransform:
     """``__init__`` validates, stores, and does nothing else."""
 
-    def test_signature_defaults_are_those_of_the_spec(self):
+    def test_signature_defaults_are_the_documented_ones(self):
         """Every default of the signature is the documented one; ``target_frequency`` has none."""
         signature = inspect.signature(HighFrequencyImputer.__init__)
         defaults = {
@@ -488,7 +488,7 @@ class TestInitDoesNotTransform:
             if name != 'self'
         }
         assert defaults.pop('target_frequency') is inspect.Parameter.empty
-        assert defaults == _SPEC_DEFAULTS
+        assert defaults == _DOCUMENTED_DEFAULTS
 
     def test_minimal_imputer_reports_the_defaults(self):
         """``get_params`` of a minimal imputer is the defaults, typed as sklearn wants.
@@ -499,7 +499,7 @@ class TestInitDoesNotTransform:
         """
         params = HighFrequencyImputer(target_frequency='M').get_params()
         assert params.pop('target_frequency') == 'M'
-        assert params == _SPEC_DEFAULTS
+        assert params == _DOCUMENTED_DEFAULTS
         for name, value in params.items():
             assert value is None or isinstance(value, (str, int, float, bool)), name
 

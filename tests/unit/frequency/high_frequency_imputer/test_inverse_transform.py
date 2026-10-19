@@ -39,7 +39,7 @@ class TestInverseTransform:
     """Aller-retour transform / inverse_transform."""
 
     def test_inverse_transform_roundtrip(self, reference_timeseries):
-        """L'index et les noms sont restitués, les valeurs sous demande."""
+        """The index and names are given back, the values on request."""
         imputer = make_imputer(restore_original_values=True)
         transformed = fit_transform_quietly(imputer, reference_timeseries)
         restored = imputer.inverse_transform(transformed)
@@ -59,7 +59,7 @@ class TestInverseTransform:
     def test_inverse_transform_preserves_multilevel_entity_names(
         self, panel_two_level_dataset
     ):
-        """Un panel à deux niveaux d'entité garde ses trois noms."""
+        """A panel with two entity levels keeps its three names."""
         imputer = HighFrequencyImputer(
             target_frequency='M',
             estimator=LinearRegression(),

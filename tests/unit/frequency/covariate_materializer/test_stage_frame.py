@@ -246,10 +246,9 @@ class TestStageFramePanel:
     def test_finer_entity_is_aggregated_exactly(self, mixed_freq_panel_multifrequency):
         """PANEL-F ``v`` at stage Q: IT's months are summed — 30 / 33 / 37.5.
 
-        La voie de colonne 'interpolate' n'est pas plafonnée en bloc : chaque
-        entité suit sa propre voie, et IT, plus fine que l'étape, reçoit
-        l'agrégation exacte — jamais la valeur ponctuelle du mois (10 / 11 /
-        12,5).
+        The 'interpolate' column way is not capped as a whole: each entity
+        follows its own way, and IT, finer than the stage, receives the exact
+        aggregation — never the point value of the month (10 / 11 / 12.5).
         """
         frame = CovariateMaterializer().stage_frame(
             grid_index=entity_grid(['FR', 'DE', 'IT'], quarterly_grid()),
@@ -276,7 +275,7 @@ class TestStageFramePanel:
     def test_unanimous_stage_binding_covers_an_unbound_grid_entity(self, mixed_freq_panel_heterogeneous):
         """The grid holds IT, the binding names FR and DE only.
 
-        Valeur d'or : m1 de IT sommée au T1 2021, 100 + 101 + 102 = 303.
+        Golden value: m1 of IT summed over Q1 2021, 100 + 101 + 102 = 303.
         """
         frame = CovariateMaterializer().stage_frame(
             grid_index=entity_grid(['FR', 'DE', 'IT'], quarterly_grid()),

@@ -343,8 +343,7 @@ class TestStageBindingResolution:
     def test_plain_entity_keys_are_normalized(self, mapping):
         """``{'FR': ...}`` behaves like ``{('FR',): ...}``, as the entity argument does.
 
-        Normalisation des clés scalaires, comme les
-        autres fonctions du package.
+        Scalar keys are normalized, like in the other functions of the package.
         """
         materializer = CovariateMaterializer()
         grid = entity_grid(['FR', 'DE'], quarterly_grid())
@@ -369,10 +368,10 @@ class TestReductionOrder:
     def test_entity_without_frequency_never_dictates_the_column_way(self):
         """IT never observes ``v``: listed first, it must not strip FR / DE of interpolation.
 
-        IT, sans fréquence, n'a aucune conversion définissable : son verdict
-        ('raw_anchors', de même rang que 'interpolate') n'entre pas dans la
-        réduction. Sous 'interpolate', les seuls NaN résiduels sont
-        ceux d'une entité sans la colonne.
+        IT, without a frequency, has no definable conversion: its verdict
+        ('raw_anchors', of the same rank as 'interpolate') does not enter the
+        reduction. Under 'interpolate', the only residual NaN are those of an
+        entity without the column.
         """
         frequencies = {'v': {('FR',): 'Y', ('DE',): 'Q'}}
         materializer = CovariateMaterializer(covariate_strategy='interpolate')

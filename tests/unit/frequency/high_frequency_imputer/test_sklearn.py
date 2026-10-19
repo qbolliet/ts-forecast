@@ -65,7 +65,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 # Contrat de paramètres : B3, paramètres supprimés, NotFittedError
 # =============================================================================
 class TestParameterContract:
-    """Conformité sklearn de l'espace de paramètres."""
+    """sklearn conformance of the parameter space."""
 
     def test_impute_intermediate_frequencies_covariates_only_is_not_true(self):
         """'covariates_only' est accepté et n'est jamais confondu avec True."""
@@ -172,7 +172,7 @@ class TestParameterContract:
 
 
 class TestSklearnConformance:
-    """Conformité sklearn de bout en bout."""
+    """End-to-end sklearn conformance."""
 
     # Cible de panel par entité, forme dict
     _TARGET = {('FR',): 'M', ('DE',): 'M', ('IT',): 'M'}
@@ -199,11 +199,11 @@ class TestSklearnConformance:
     def test_grid_search_on_panel_with_target_frequency_dict(
         self, mixed_freq_panel_multifrequency
     ):
-        """`GridSearchCV` explore l'imputeur sur un panel à cible par entité.
+        """`GridSearchCV` explores the imputer on a panel with a per-entity target.
 
-        La cible `v` est basse fréquence pour FR et DE : la passe d'entraînement
-        l'impute, la passe de prédiction la rend telle quelle, avec ses NaN
-        hors ancres ; `DropNaNTarget` les retire avant le régresseur.
+        The target `v` is low frequency for FR and DE: the training pass
+        imputes it, the prediction pass returns it as is, with its NaN
+        outside the anchors; `DropNaNTarget` removes them before the regressor.
         """
         panel = mixed_freq_panel_multifrequency
         X = panel[['m1', 'q1']]

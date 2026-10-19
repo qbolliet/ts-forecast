@@ -16,7 +16,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 
 
 class TestProvenanceFamilies:
-    """Les cinq familles MODEL_* sont émises exactement dans les cas documentés."""
+    """The five MODEL_* families are emitted exactly in the documented cases."""
 
     @staticmethod
     def _families(imputer: HighFrequencyImputer, column: str) -> set:
@@ -61,7 +61,7 @@ class TestProvenanceFamilies:
         assert not emitted & {'model_on_imputed_target', 'model_on_imputed_both'}
 
     def test_no_disaggregated_cell_is_ever_emitted(self, reference_timeseries):
-        """DISAGGREGATED n'est jamais émis par l'imputeur, recalage compris."""
+        """DISAGGREGATED is never emitted by the imputer, rescaling included."""
         imputer = fit_with_spy(reference_timeseries)
         emitted = {
             str(value) for value in imputer.imputation_provenance_.to_numpy().ravel()

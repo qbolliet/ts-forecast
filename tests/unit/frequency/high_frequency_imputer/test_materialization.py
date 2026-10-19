@@ -24,7 +24,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 
 
 class TestMaterializationWays:
-    """La voie de matérialisation est enregistrée et conforme à la précédence."""
+    """The materialization way is recorded and follows the precedence."""
 
     def test_materialization_way_recorded_per_step(self, reference_timeseries):
         """Une entrée par feature_col, et la voie attendue par la précédence."""
@@ -198,11 +198,11 @@ class TestTrueValuesOnTheTrainingGrid:
     def test_the_step_is_nonetheless_marked_as_having_read_an_interpolation(
         self, reference_timeseries
     ):
-        """La souillure est le MAX sur les deux grilles : la prédiction commande.
+        """The taint is the MAX over the two grids: the prediction rules.
 
-        Garder les vraies valeurs au fit ne blanchit pas l'étape : la souillure
-        se calcule sur ``X_train ∪ X_pred``, et la grille de prédiction
-        y apporte de l'interpolé. La provenance émise reste
+        Keeping the true values at fit does not whiten the stage: the taint
+        is computed on ``X_train ∪ X_pred``, and the prediction grid
+        brings interpolated values to it. The emitted provenance stays
         ``MODEL_ON_INTERPOLATED``.
         """
         imputer = fit_with_spy(reference_timeseries, target_frequency='Q')
@@ -237,12 +237,12 @@ class TestTrueValuesOnTheTrainingGrid:
 
 
 class TestMaterializationReplay:
-    """La voie de matérialisation et ses valeurs sont celles du fit."""
+    """The materialization way and its values are those of the fit."""
 
     def test_materialization_identical_fit_and_transform_on_panel(
         self, mixed_freq_panel_multifrequency
     ):
-        """Sur PANEL-F, mêmes voies et mêmes trames de prédiction au rejeu."""
+        """On PANEL-F, same ways and same prediction frames at replay."""
         imputer = fit_with_spy(mixed_freq_panel_multifrequency, covariate_strategy='model')
         ways_before = {
             (step.pred_freq_label, step.var_key): dict(step.materialization)
@@ -267,7 +267,7 @@ class TestMaterializationReplay:
                 pd.testing.assert_frame_equal(before, after)
 
     def test_materialization_identical_fit_and_transform(self, reference_timeseries):
-        """Mêmes voies et mêmes valeurs produites au fit et au transform."""
+        """Same ways and same values produced at fit and at transform."""
         imputer = fit_with_spy(reference_timeseries, covariate_strategy='model')
 
         # Voies figées, relevées avant le rejeu
