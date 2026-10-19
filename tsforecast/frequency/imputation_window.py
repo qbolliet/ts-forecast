@@ -541,7 +541,7 @@ class ImputationWindowCalculator:
         ``column_coverage_`` are aggregated into dicts keyed by entity tuple.
         The three boolean masks and ``coverage_by_date_`` are instead
         assembled into a single ``pd.Series`` on a MultiIndex
-        ``(entity..., date)`` (spec §7.2): an entity whose window cannot be
+        ``(entity..., date)``: an entity whose window cannot be
         determined (index frequency not identified, or empty coverage grid)
         contributes its frame rows as ``False`` and is recorded in
         ``entities_without_window_``.
@@ -1634,7 +1634,7 @@ class ImputationWindowCalculator:
         if source is None or not isinstance(source.index, pd.MultiIndex):
             return None
 
-        # Sélection des lignes de l'entité (clés d'entité = tuples, cf. §3.4)
+        # Sélection des lignes de l'entité (les clés d'entité sont des tuples)
         rows = np.ones(len(source), dtype=bool)
         for level, wanted in enumerate(entity_key):
             rows &= (source.index.get_level_values(level) == wanted)
@@ -1779,7 +1779,7 @@ class ImputationWindowCalculator:
         if self._is_panel:
             if entity is not None:
                 # Normalisation de la clé fournie par l'appelant : les clés
-                # internes sont des tuples, y compris à un seul niveau (§3.4)
+                # internes sont des tuples, y compris à un seul niveau
                 col_coverage = self.column_coverage_[normalize_entity_key(entity)]
                 return self._columns_with_coverage(col_coverage, start, end)
             return {

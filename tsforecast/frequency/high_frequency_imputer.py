@@ -277,17 +277,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
       the training window then follows ``imputation_scope`` and
       ``coverage_threshold``.
 
-    **What the parameter space no longer expresses**: the legacy mode "one
-    single fit, reused at the following stages with that stage's scale
-    factor" — the ``False`` branch of a cascade refitting switch — is
-    **abandoned**, switch included. It bought compute
-    at the price of a fit/predict asymmetry that was never mastered. Should
-    the need come back it returns as an **internal optimization** —
-    memoizing a model whose training set and materialization ways have not
-    changed between two stages — never as public semantics. It is not to be
-    confused with the single fit per (stage, variable) already in place,
-    which shares a model between the plan steps of **one** stage only and
-    never across stages.
+    **What the parameter space does not express**: a mode "one single fit,
+    reused at the following stages with that stage's scale factor". Every
+    stage fits its own models; there is no switch to refit the cascade or not.
+    Such a reuse would introduce a fit/predict asymmetry. It is not to be
+    confused with the single fit per (stage, variable), which shares a model
+    between the plan steps of **one** stage only and never across stages.
 
     ``keep_lower_frequencies`` is a **pure display parameter**: it governs how
     the frequency levels of the output are stacked, never the logic — the
@@ -1296,9 +1291,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """Resolve the column name used for ``y`` once merged into a frame.
 
         Single naming rule shared by ``_fit``, ``_transform`` and
-        ``_inverse_transform``. Two independent rules previously let the
-        fit-time name and the transform-time name diverge, so the target was
-        never found among the stage columns and silently skipped imputation.
+        ``_inverse_transform``. The fit-time name and the transform-time name
+        must be identical: otherwise the target is not found among the stage
+        columns and silently skips imputation.
 
         Args:
             y: Target series, possibly unnamed.
@@ -4560,7 +4555,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Parcours des étapes de la progression, rejouée telle quelle
         for stage_freq in self.frequency_progression_:
             stage_label = self._stage_frequency_label(stage_freq)
-            # Liaison de fréquence, étendue aux entités nouvelles (D34)
+            # Liaison de fréquence, étendue aux entités nouvelles
             binding = self._extend_stage_binding(stage_freq, new_entities, stage_label)
 
             # Étapes du plan de l'étape, complétées pour les couples que le fit
@@ -5446,8 +5441,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         reindex on the input of the last pass, invert the additive
         transformer last, then optionally restore the exact original values.
 
-        The result is indexed like the input of the last pass, in its order
-        (I8): the rows the target grid added — a densified irregular index —
+        The result is indexed like the input of the last pass, in its order:
+        the rows the target grid added — a densified irregular index —
         are dropped, and the input rows the grid does not carry — a target
         coarser than the index — come back empty, or with their observed
         values under ``restore_original_values=True``.

@@ -30,8 +30,10 @@ class ProvenanceType(str, Enum):
             values over a complete period. An exact additive aggregation of
             observations is not an approximation, so it never taints a model
             that only ever saw such values.
-        DISAGGREGATED: LEGACY of ``HighFrequencyImputer``, kept only as long
-            as that class exists: the cell sits in a sub-period of an observed
+        DISAGGREGATED: Never written by ``HighFrequencyImputer`` (its
+            aggregation constraint leaves provenance untouched), but available
+            through :meth:`ImputationProvenanceTracker.mark_disaggregated`:
+            the cell sits in a sub-period of an observed
             lower-frequency total spread over its whole period, either because
             its period was rescaled so its sub-periods sum back to the total
             (``enforce_period_totals=True``) or because it is an ANCHOR DATE
@@ -512,8 +514,8 @@ class ImputationProvenanceTracker:
         date re-expressed at the stage frequency merely sits where a real
         observation was. It must therefore NEVER be used as a filter to
         compose ``y_train`` nor to compute a taint level — those read the
-        origin store, never the provenance matrix. LEGACY mark: the current
-        imputer never calls it, the aggregation constraint leaving provenance
+        origin store, never the provenance matrix. ``HighFrequencyImputer``
+        never calls it, its aggregation constraint leaving provenance
         untouched.
 
         Args:

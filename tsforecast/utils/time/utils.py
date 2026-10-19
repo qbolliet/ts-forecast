@@ -318,8 +318,8 @@ def _subdaily_bounds(
         Tuple ``(start, end)`` in the time zone of ``date``; ``end`` is exclusive.
 
     Examples:
-        >>> spec = _PeriodSpec('h', 2, None, None)
-        >>> _subdaily_bounds(pd.Timestamp('2023-06-15 14:35'), spec, None)
+        >>> period = _PeriodSpec('h', 2, None, None)
+        >>> _subdaily_bounds(pd.Timestamp('2023-06-15 14:35'), period, None)
         (Timestamp('2023-06-15 14:00:00'), Timestamp('2023-06-15 16:00:00'))
     """
     length = spec.multiplier * SUBDAILY_NS[spec.base]
@@ -352,8 +352,8 @@ def _day_bounds(
         Tuple ``(start, end)`` of naive midnights; ``end`` is exclusive.
 
     Examples:
-        >>> spec = _PeriodSpec('W', 1, None, None)
-        >>> _day_bounds(pd.Timestamp('2023-06-15'), spec, None)
+        >>> period = _PeriodSpec('W', 1, None, None)
+        >>> _day_bounds(pd.Timestamp('2023-06-15'), period, None)
         (Timestamp('2023-06-12 00:00:00'), Timestamp('2023-06-19 00:00:00'))
     """
     days_per_unit = 7 if spec.base == 'W' else 1
@@ -389,8 +389,8 @@ def _month_bounds(
         Tuple ``(start, end)`` of naive first days; ``end`` is exclusive.
 
     Examples:
-        >>> spec = _PeriodSpec('Q', 1, None, None)
-        >>> _month_bounds(pd.Timestamp('2023-06-15'), spec, None)
+        >>> period = _PeriodSpec('Q', 1, None, None)
+        >>> _month_bounds(pd.Timestamp('2023-06-15'), period, None)
         (Timestamp('2023-04-01 00:00:00'), Timestamp('2023-07-01 00:00:00'))
     """
     month_index = date.year * 12 + date.month - 1

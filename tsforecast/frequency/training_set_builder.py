@@ -71,7 +71,7 @@ def split_training_index(
 
     Under ``keep_coincident_cells`` the training grid carries an extra
     frequency level placed on the entity side — ``(entity..., freq, date)`` —
-    so the entity of a row is ``key[:-2]`` and no longer ``key[:-1]``. This is
+    so the entity of a row is ``key[:-2]`` (``key[:-1]`` without that level). This is
     the single decomposition every consumer goes through, so the two shapes
     are read in exactly one place. The level is read by POSITION, never by
     name: a level named :data:`FREQUENCY_LEVEL_NAME` without the flag is an

@@ -1206,7 +1206,7 @@ class FrequencyConverter(TemporalConverter):
         2021, 366 in 2024, 28 days in February — not an average duration, so
         the anchor of a short period is not pushed outside of it.
 
-        The result no longer depends on the position of the source index: a
+        The result does not depend on the position of the source index: a
         yearly value stamped 2021-01-01 (``YS``) and one stamped 2021-12-31
         (``YE``) both anchor at the same fraction of 2021.
 
