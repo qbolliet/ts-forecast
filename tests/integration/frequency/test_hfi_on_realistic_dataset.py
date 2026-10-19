@@ -10,33 +10,30 @@ never observed for ``Italie``), under every ``covariate_strategy`` x
 output (``keep_lower_frequencies=True``).
 
 No gold value exists on these datasets: the tests check **properties** whose
-expected value is derived from the input or from the spec
-(``high_frequency_imputer2_architecture.md``), never from the output:
+expected value is derived from the input or from the documented behaviour,
+never from the output:
 
 - observed values are never lost: untouched at the target level for the pairs
-  that are not imputed, restored by ``inverse_transform`` for all (§11.2, I8);
-- complete periods sum to their observed total under ``'sum'`` (I4, §11.1);
+  that are not imputed, restored by ``inverse_transform`` for all;
+- complete periods sum to their observed total under ``'sum'``;
 - every filled cell carries a provenance, no empty cell does, ``ORIGINAL`` only
-  on input observations (§6.4, §12.4, D44);
-- residual NaN only where the spec announces them: rows outside the imputation
-  window, and (``Italie``, ``climat_affaires``) (§3, §4.5, §7.2);
+  on input observations;
+- residual NaN only where they are documented: rows outside the imputation
+  window, and (``Italie``, ``climat_affaires``);
 - no (entity, column) is filled outside the periods its own observations
-  cover: a short entity is never stretched (§7.1, I7);
+  cover: a short entity is never stretched;
 - the ``impute_intermediate_frequencies`` axis: ``'covariates_only'`` equals
-  ``False`` under ``'interpolate'`` (I12); ``*_TARGET`` / ``*_BOTH`` marks only
-  under ``True`` (I6);
-- one warning per family at most, at fit as at transform (§12.5);
-- a transform beyond the fit never stretches the short entity (I7).
+  ``False`` under ``'interpolate'``; ``*_TARGET`` / ``*_BOTH`` marks only
+  under ``True``;
+- one warning per family at most, at fit as at transform;
+- a transform beyond the fit never stretches the short entity.
 
 The panel cases fit in 2.5-6 s each and are marked ``slow``; the time-series
-cases stay in the fast run. Formerly unit tests, moved here because they run
-one component on the realistic datasets (§3 of
-``tests_and_refactoring_prompts.md``):
-``test_robustness.py::TestRealisticDatasets`` - its observed-cells and
-period-total tests are subsumed by :class:`TestObservedValuesAreKept` and
-:class:`TestPeriodTotals` (same checks, whole matrix, same 1e-9 precision),
-its warning test became :class:`TestAggregatedWarnings` - and
-``test_transform.py::TestShortEntityCoverage``, moved as is.
+cases stay in the fast run. These tests run one component on the realistic
+datasets: observed cells are checked by :class:`TestObservedValuesAreKept`,
+period totals by :class:`TestPeriodTotals` (whole matrix, 1e-9 precision),
+warnings by :class:`TestAggregatedWarnings` and the coverage of a short
+entity by :class:`TestShortEntityCoverage`.
 """
 # Modules de base
 import re
@@ -58,13 +55,13 @@ from tsforecast.utils.frequency import normalize_frequency
 # =============================================================================
 # Matrice des scénarios (realistic_runs.py) et attentes propres aux jeux
 # =============================================================================
-# Familles de provenance réservées à la modalité True (I6)
+# Familles de provenance réservées à la modalité True
 _TRUE_ONLY_MARKS = {
     ProvenanceType.MODEL_ON_IMPUTED_TARGET,
     ProvenanceType.MODEL_ON_IMPUTED_BOTH,
 }
 
-# Unique couple structurellement vide des jeux réalistes (§4.5)
+# Unique couple structurellement vide des jeux réalistes
 _STRUCTURALLY_EMPTY = {(('Italie',), 'climat_affaires')}
 
 # Cellules du panel seulement (couple structurellement vide, entité courte)
@@ -148,7 +145,7 @@ class TestObservedValuesAreKept:
         """Every observation of a pair that is not imputed keeps its value and ``ORIGINAL``.
 
         The anchors of the imputed pairs are excluded: by construction their
-        row receives a sub-period value (§11.2), and their totals are checked
+        row receives a sub-period value, and their totals are checked
         by :class:`TestPeriodTotals`.
         """
         data = record['data']
@@ -178,7 +175,7 @@ class TestObservedValuesAreKept:
     def test_inverse_transform_restores_the_input_index(
         self, record, dataset, strategy, modality
     ):
-        """``inverse_transform`` drops the grid rows and restores the input index, in order (I8)."""
+        """``inverse_transform`` drops the grid rows and restores the input index, in order."""
 
         assert record['inverse'].index.equals(record['data'].index)
 
@@ -186,7 +183,7 @@ class TestObservedValuesAreKept:
     def test_inverse_transform_restores_every_observation(
         self, record, dataset, strategy, modality
     ):
-        """With ``restore_original_values=True``, every observed cell comes back exactly (I8).
+        """With ``restore_original_values=True``, every observed cell comes back exactly.
 
         Covers the anchors of the imputed pairs too, whose total the stacked
         output only keeps as the sum of the period.
@@ -240,7 +237,7 @@ def _period_gaps(record: dict) -> List[tuple]:
                 first, last = period.start_time.to_period('M'), period.end_time.to_period('M')
                 expected = (last - first).n + 1
                 in_period = (months >= first) & (months <= last)
-                # Période tronquée par la grille ou la fenêtre : hors contrôle (§11.1)
+                # Période tronquée par la grille ou la fenêtre : hors contrôle
                 if in_period.sum() != expected or not written[in_period].all():
                     continue
                 gap = abs(float(entity_values[in_period].sum()) - float(total))
@@ -250,7 +247,7 @@ def _period_gaps(record: dict) -> List[tuple]:
 
 
 class TestPeriodTotals:
-    """I4 — under ``aggregation_constraint='sum'``, complete periods keep their total."""
+    """Under ``aggregation_constraint='sum'``, complete periods keep their total."""
 
     @pytest.mark.parametrize('dataset, strategy, modality', CASES)
     def test_complete_periods_sum_to_their_observed_total(
@@ -259,7 +256,7 @@ class TestPeriodTotals:
         """Each complete period of an imputed pair sums to its observed total (1e-9).
 
         True of model predictions and of interpolation fallbacks alike, both
-        rescaled (§11.1). Periods the grid or the window truncates - the
+        rescaled. Periods the grid or the window truncates - the
         isolated annual anchors before the monthly grid - are not constrained.
         """
 
@@ -290,7 +287,7 @@ class TestProvenanceCoverage:
 
     @pytest.mark.parametrize('dataset, strategy, modality', CASES)
     def test_every_filled_cell_has_a_provenance(self, record, dataset, strategy, modality):
-        """On every frequency level, a non-NaN value always carries a mark (§6.4)."""
+        """On every frequency level, a non-NaN value always carries a mark."""
         output, provenance = record['output'], record['provenance']
 
         unmarked = int((output.notna() & provenance.isna()).sum().sum())
@@ -299,7 +296,7 @@ class TestProvenanceCoverage:
 
     @pytest.mark.parametrize('dataset, strategy, modality', CASES)
     def test_no_empty_cell_is_marked(self, record, dataset, strategy, modality):
-        """On every frequency level, a NaN value never carries a mark (§12.4)."""
+        """On every frequency level, a NaN value never carries a mark."""
         output, provenance = record['output'], record['provenance']
 
         marked_empty = int((output.isna() & provenance.notna()).sum().sum())
@@ -328,7 +325,7 @@ class TestProvenanceCoverage:
 # P4 — NaN résiduels seulement là où la spec les annonce
 # =============================================================================
 class TestResidualNaN:
-    """§3 / §4.5 / §7.2 — where the output may still hold NaN, measured per entity."""
+    """Where the output may still hold NaN, measured per entity."""
 
     @pytest.mark.parametrize('dataset, strategy, modality', CASES)
     def test_window_rows_are_filled_except_structurally_empty_pairs(
@@ -336,8 +333,8 @@ class TestResidualNaN:
     ):
         """Inside the imputation window, the only NaN left are those of (``Italie``, ``climat_affaires``).
 
-        The structurally empty pair is the single exception of §3, measured per
-        entity (§4.5, ``covariate_eligibility='any_entity'``).
+        The structurally empty pair is the single exception, measured per
+        entity (``covariate_eligibility='any_entity'``).
         """
         values = _target_level(record, record['output'])
         mask = record['imputer'].imputation_window_mask_
@@ -356,7 +353,7 @@ class TestResidualNaN:
     def test_structurally_empty_pair_stays_entirely_nan(
         self, record, dataset, strategy, modality
     ):
-        """No strategy fabricates values for an entity that never observes a column (§4.5)."""
+        """No strategy fabricates values for an entity that never observes a column."""
 
         filled = int(record['output'].xs('Italie', level='country')['climat_affaires'].notna().sum())
 
@@ -366,12 +363,12 @@ class TestResidualNaN:
     def test_input_rows_outside_the_window_are_left_as_is(
         self, record, dataset, strategy, modality
     ):
-        """Input rows outside the imputation window keep their input values, NaN included (§7.2).
+        """Input rows outside the imputation window keep their input values, NaN included.
 
-        I7: no input observation is ever destroyed, under every strategy.
+        No input observation is ever destroyed, under every strategy.
         Under ``'model'`` the stage frame serves an imputed column from the
         mirror of the produced cells, which overlays its raw anchors without
-        replacing them (formerly ANO-FREQ-083: anchors erased outside the window).
+        replacing them.
         """
         data = record['data']
         values = _target_level(record, record['output'])
@@ -401,7 +398,7 @@ class TestResidualNaN:
 # P5 — Couverture courte jamais prolongée
 # =============================================================================
 class TestCoverageIsNotStretched:
-    """§7.1 / I7 — no (entity, column) is filled outside the periods its observations cover."""
+    """No (entity, column) is filled outside the periods its observations cover."""
 
     @pytest.mark.parametrize('dataset, strategy, modality', CASES)
     def test_no_cell_is_filled_outside_its_own_coverage(
@@ -456,7 +453,7 @@ class TestCoverageIsNotStretched:
 # =============================================================================
 # P6 — Axe impute_intermediate_frequencies
 # =============================================================================
-# Paires (False, 'covariates_only') comparables : stratégie 'interpolate' (I12)
+# Paires (False, 'covariates_only') comparables : stratégie 'interpolate'
 _INTERPOLATE_PAIRS = [
     pytest.param(dataset, marks=[pytest.mark.slow] if dataset == 'panel' else [], id=dataset)
     for dataset in DATASET_FIXTURES
@@ -464,11 +461,11 @@ _INTERPOLATE_PAIRS = [
 
 
 class TestIntermediateFrequencyAxis:
-    """I12 / I6 — what the ``impute_intermediate_frequencies`` modality changes."""
+    """What the ``impute_intermediate_frequencies`` modality changes."""
 
     @pytest.mark.parametrize('dataset', _INTERPOLATE_PAIRS)
     def test_covariates_only_equals_false_under_interpolate(self, realistic_run, dataset):
-        """Under ``'interpolate'``, ``'covariates_only'`` changes no target value (I12, §5.6)."""
+        """Under ``'interpolate'``, ``'covariates_only'`` changes no target value."""
         direct = realistic_run(dataset, 'interpolate', False)
         walked = realistic_run(dataset, 'interpolate', 'covariates_only')
 
@@ -492,7 +489,7 @@ class TestIntermediateFrequencyAxis:
 
     @pytest.mark.parametrize('dataset, strategy, modality', CASES)
     def test_imputed_target_marks_only_under_true(self, record, dataset, strategy, modality):
-        """``MODEL_ON_IMPUTED_TARGET`` / ``_BOTH`` appear only when ``y_train`` holds imputed cells (I6)."""
+        """``MODEL_ON_IMPUTED_TARGET`` / ``_BOTH`` appear only when ``y_train`` holds imputed cells."""
         marks = set(pd.unique(record['provenance'].to_numpy().ravel()))
 
         # Sous True, ces familles sont permises ; ailleurs, interdites
@@ -510,7 +507,7 @@ class TestIntermediateFrequencyAxis:
 
 
 # =============================================================================
-# Avertissements agrégés (§12.5) — déplacé de tests/unit/.../test_robustness.py
+# Avertissements agrégés
 # =============================================================================
 def _family(message: str) -> str:
     """Reduce a warning message to its family.
@@ -533,15 +530,13 @@ def _family(message: str) -> str:
 
 
 class TestAggregatedWarnings:
-    """§12.5 — one warning per family at most, at fit as at transform."""
+    """One warning per family at most, at fit as at transform."""
 
     @pytest.mark.parametrize('dataset, strategy, modality', CASES)
     def test_one_warning_per_family_at_most(self, record, dataset, strategy, modality):
-        """No warning family is emitted twice by one pass (ANO-FREQ-059).
+        """No warning family is emitted twice by one pass.
 
-        Formerly ``test_robustness.py::TestRealisticDatasets`` (three
-        strategies, ``impute_intermediate_frequencies=False``), now on the
-        whole matrix.
+        Checked on the whole matrix of strategies and modalities.
         """
         repeated = {
             phase: [
@@ -558,12 +553,11 @@ class TestAggregatedWarnings:
 
 
 # =============================================================================
-# Transform au-delà du fit sur le panel hétérogène (I7)
-# — déplacé de tests/unit/.../test_transform.py
+# Transform au-delà du fit sur le panel hétérogène
 # =============================================================================
 @pytest.mark.slow
 class TestShortEntityCoverage:
-    """I7 on the realistic panel — a short entity is never stretched past its coverage.
+    """On the realistic panel, a short entity is never stretched past its coverage.
 
     ``heterogeneous_coverage_panel``: France and Italie run to 2024-07,
     Allemagne stops at 2024-04. The imputer is fitted on the data up to

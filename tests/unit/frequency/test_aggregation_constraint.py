@@ -2,10 +2,9 @@
 
 The aggregation constraint rescales the sub-periods predicted for one period
 of a lower-frequency variable by ``observed total / predicted aggregate``, so
-that the column carries a genuine disaggregation of the observation (spec
-``high_frequency_imputer2_architecture.md`` §11.1). The aggregate is always
-the sum: ``'mean'`` and ``'last'`` are withdrawn (decision D20), additivity
-being the contract of the whole imputer.
+that the column carries a genuine disaggregation of the observation. The
+aggregate is always the sum: ``'mean'`` and ``'last'`` are not accepted,
+additivity being the contract of the whole imputer.
 
 Contracts pinned here:
 
@@ -17,20 +16,20 @@ Contracts pinned here:
 - ``rescale``: the invariant "rescaled sub-periods sum to the observed total"
   checked as a PROPERTY (random predictions, totals of both signs) on Y→M,
   Y→Q and Q→M, start and end positions, to ``1e-9``; hand-computed golden
-  values; the guards of §11.1 (NaN sub-period, period without observation,
+  values; the guards (NaN sub-period, period without observation,
   calendar truncation at both edges, zero aggregate) and the degenerate
   totals (zero, NEGATIVE — the trade balance of ``irregular_index_timeseries``
   —, all-zero sub-periods); panels whose source frequency differs per
   entity, three-level index, shuffled rows;
 - ``anchor_cells_mask``: exactly the anchor cells, whatever the constraint
-  and the rescaling outcome (§11.2);
+  and the rescaling outcome;
 - sklearn protocol: ``clone``, ``get_params`` / ``set_params``,
   ``fit_transform == fit().transform()``, ``NotFittedError``, metadata errors;
 - warnings: aggregated and unique per degenerate case, never one per period
   nor per column; ``deferred_warnings`` gathers a chain of calls (several
   columns, stages, covariates of the materializer) into one warning per case,
-  each period counted once (ANO-FREQ-059);
-- corrections of ANO-FREQ-021 to 027: numerically zero aggregate (rounding
+  each period counted once;
+- edge cases: numerically zero aggregate (rounding
   bound of the summation), duplicated dates rejected, setting validated again
   after ``set_params``, ``grid_freq`` validated (readable, covering every
   entity), ``NaT`` rows outside any period, ``transform`` restricted to the
@@ -88,7 +87,7 @@ from tests.support.perturbations import (
 _EXACT = 1e-9
 
 # Prédictions brutes des douze mois de 2021 : somme 112.5, décembre 10.5.
-# Valeurs de l'exemple de référence du §6.5 — ratio 120 / 112.5, donc
+# Valeurs de l'exemple de référence — ratio 120 / 112.5, donc
 # janvier 9.6, février 10.1333… et l'ancre 11.2
 _RAW_2021 = [9.0, 9.5, 9.5, 9.5, 9.0, 9.5, 9.0, 9.5, 9.0, 9.5, 9.0, 10.5]
 
@@ -126,7 +125,7 @@ def _raw_predictions(year: int = 2021, values=None) -> pd.Series:
 
     Args:
         year: Calendar year of the grid.
-        values: Values to carry; defaults to the §6.5 reference vector.
+        values: Values to carry; defaults to the reference vector.
 
     Returns:
         ``Series`` named ``'a1'`` on the twelve month-end dates of ``year``.
@@ -249,10 +248,10 @@ def _record_warnings(function, *args, **kwargs):
 # Vocabulaire public
 # =============================================================================
 class TestPublicVocabulary:
-    """Public constants of the module (§11.1, D20)."""
+    """Public constants of the module."""
 
     def test_constraint_kind_admits_only_sum(self):
-        """ConstraintKind is Literal['sum']: 'mean' and 'last' are gone (D20)."""
+        """ConstraintKind is Literal['sum']: 'mean' and 'last' are gone."""
         assert typing.get_args(ConstraintKind) == ('sum',)
 
     def test_default_constraint_key(self):
@@ -260,7 +259,7 @@ class TestPublicVocabulary:
         assert DEFAULT_CONSTRAINT_KEY == '__default__'
 
     def test_default_setting_is_sum(self):
-        """The constructor defaults to 'sum' (§11.1: '= 'sum'')."""
+        """The constructor defaults to 'sum'."""
         assert AggregationConstraint().aggregation_constraint == 'sum'
 
 
@@ -280,7 +279,7 @@ _ACCEPTED_SETTINGS = {
     'numpy-str': np.str_('sum'),
 }
 
-# Réglages refusés à la forme scalaire : agrégateurs retirés (D20), casse et
+# Réglages refusés à la forme scalaire : agrégateurs retirés, casse et
 # espaces, types non textuels — True / 0 ne doivent pas passer pour 'sum' / None
 _REJECTED_SCALARS = {
     'mean': 'mean',
@@ -313,7 +312,7 @@ _REJECTED_DICTS = {
 
 
 class TestValidateAggregationConstraint:
-    """Admissible forms of ``aggregation_constraint`` (§11.1, §13.1, D20)."""
+    """Admissible forms of ``aggregation_constraint``."""
 
     @pytest.mark.parametrize(
         'setting', list(_ACCEPTED_SETTINGS.values()), ids=list(_ACCEPTED_SETTINGS)
@@ -349,9 +348,9 @@ class TestValidateAggregationConstraint:
     def test_withdrawn_aggregator_message_lists_admissible_forms(self, setting):
         """The message of a withdrawn aggregator lists the forms and names additive_transformer.
 
-        §13.1: the message lists the admissible forms ('sum', None, the dict
+        The message lists the admissible forms ('sum', None, the dict
         form with its '__default__' key) and names ``additive_transformer`` as
-        the answer to a non-additive column (D20), and repeats the value.
+        the answer to a non-additive column, and repeats the value.
         """
         with pytest.raises(ValueError) as error:
             AggregationConstraint(setting)
@@ -387,7 +386,7 @@ class TestValidateAggregationConstraint:
     def test_covariate_materializer_rejects_the_same_settings(self, setting):
         """CovariateMaterializer shares the validation: same error, same message.
 
-        §11.1: both components carry the parameter, a single implementation
+        Both components carry the parameter, a single implementation
         keeps them from drifting.
         """
         with pytest.raises(ValueError) as reference:
@@ -430,7 +429,7 @@ class TestResolveAggregationConstraint:
 
 
 class TestValidateConstraintColumns:
-    """Dict keys checked against the real columns (§13.1: 'clés vérifiées au fit')."""
+    """Dict keys are checked against the real columns at fit."""
 
     @pytest.mark.parametrize('setting', ['sum', None], ids=['sum', 'none'])
     def test_scalar_form_has_no_key_to_check(self, setting):
@@ -466,9 +465,9 @@ class TestValidateConstraintColumns:
 
 
 class TestValidationThroughSetParams:
-    """Settings injected by set_params are validated again (ANO-FREQ-023).
+    """Settings injected by set_params are validated again.
 
-    D20 withdraws 'mean' from the API. ``set_params`` (GridSearchCV,
+    'mean' is not accepted by the API. ``set_params`` (GridSearchCV,
     pipelines) skips ``__init__``: every public entry point validates again,
     so that 'mean' is never silently treated as an active constraint.
     """
@@ -521,7 +520,7 @@ class TestValidationThroughSetParams:
 # Recalage : invariant d'additivité par propriété
 # =============================================================================
 class TestRescaleSumInvariant:
-    """Rescaled sub-periods sum to the observed total (§11.1, invariant I4)."""
+    """Rescaled sub-periods sum to the observed total."""
 
     @pytest.mark.filterwarnings('ignore:Aggregation constraint flipped')
     @pytest.mark.parametrize('seed', range(5), ids=lambda seed: f'seed{seed}')
@@ -591,7 +590,7 @@ class TestRescaleGoldenValues:
     """Hand-computed rescaling, for each frequency pair and position."""
 
     def test_reference_example_of_spec_6_5(self, reference_timeseries):
-        """§6.5: a1 = 120 in 2021, stage M, raw predictions summing to 112.5."""
+        """Reference example: a1 = 120 in 2021, stage M, raw predictions summing to 112.5."""
         # Grille et observations tirées du jeu de référence
         grid = reference_timeseries.loc['2021'].index
         observations = reference_timeseries.loc['2021', 'a1']
@@ -662,7 +661,7 @@ class TestRescaleGoldenValues:
 # Recalage : gardes et totaux dégénérés
 # =============================================================================
 class TestRescaleGuards:
-    """Guards of §11.1 and degenerate totals."""
+    """Guards against degenerate periods and totals."""
 
     def test_nan_sub_period_leaves_the_period_raw(self):
         """One NaN sub-period forbids the constraint: raw predictions kept, NaN kept."""
@@ -718,7 +717,7 @@ class TestRescaleGuards:
 
         Grid March 2020 - October 2022: 2020 holds ten months, 2022 ten
         months, 2021 twelve. Spreading an annual total over ten months would
-        over-attribute 20 % to each (§11.1, note on truncation).
+        over-attribute 20 % to each.
         """
         alias = _GRID_ALIASES[('M', position)]
         grid = pd.date_range('2020-03-01', '2022-10-31', freq=alias)
@@ -727,7 +726,7 @@ class TestRescaleGuards:
         anchor_dates = pd.date_range('2020-01-01', periods=3, freq=_GRID_ALIASES[('Y', position)])
         observations = pd.Series([100.0, 120.0, 140.0], index=anchor_dates)
 
-        # Les deux années tronquées sont nommées par un avertissement unique (D46)
+        # Les deux années tronquées sont nommées par un avertissement unique
         with pytest.warns(UserWarning, match=r'not enforced.*2 observed period\(s\)'):
             rescaled, mask = AggregationConstraint('sum').rescale(
                 values, observations, 'Y', grid_freq=alias
@@ -743,7 +742,7 @@ class TestRescaleGuards:
         """Without grid_freq, a truncated period still receives its whole total.
 
         The count of expected sub-periods cannot be read off the values: the
-        missing ones are ABSENT from the grid, not empty (§11.1).
+        missing ones are ABSENT from the grid, not empty.
         """
         grid = pd.date_range('2021-03-31', periods=10, freq='ME')
         values = pd.Series(1.0, index=grid)
@@ -828,7 +827,7 @@ class TestRescaleGuards:
             values, _annual_observations(total=-120.0), 'Y',
         )
 
-        # Valeur d'or : même ratio qu'au §6.5, 120 / 112.5, signes conservés
+        # Valeur d'or : même ratio que l'exemple de référence, 120 / 112.5, signes conservés
         assert rescaled.sum() == pytest.approx(-120.0, abs=_EXACT)
         assert rescaled.loc['2021-12-31'] == pytest.approx(-11.2)
         assert mask.all() and messages == []
@@ -846,11 +845,11 @@ class TestRescaleGuards:
         assert (rescaled < 0).all() and mask.all()
 
     def test_numerically_zero_aggregate_is_zero(self):
-        """A float sum that is zero up to rounding takes the zero guard (ANO-FREQ-021).
+        """A float sum that is zero up to rounding takes the zero guard.
 
         0.1 + 0.2 - 0.3 is mathematically zero but evaluates to 5.55e-17: the
-        ratio 12 / 5.55e-17 used to multiply the predictions by 2e17 and the
-        rescaled sum came back as 16, not 12. Below the rounding bound of the
+        ratio 12 / 5.55e-17 would multiply the predictions by 2e17 and the
+        rescaled sum would come back as 16, not 12. Below the rounding bound of the
         summation (n * eps * sum|x| = 3 * 2.2e-16 * 0.6, about 4e-16), the
         aggregate counts as zero: raw values kept, zero warning.
         """
@@ -879,11 +878,10 @@ class TestRescaleGuards:
         assert mask.all()
 
     def test_duplicated_observation_dates_are_rejected(self):
-        """A duplicated anchor raises instead of doubling the observed total (ANO-FREQ-022).
+        """A duplicated anchor raises instead of doubling the observed total.
 
-        The two copies of the December anchor used to be summed: the year was
-        rescaled to 240 instead of 120, silently (same defect as ANO-FREQ-010
-        on FrequencyAligner).
+        The two copies of the December anchor are never summed: that would
+        rescale the year to 240 instead of 120, silently.
         """
         grid = _monthly_grid()
         values = pd.Series(1.0, index=grid)
@@ -915,7 +913,7 @@ class TestRescaleGuards:
     def test_nat_rows_never_form_a_period(self):
         """A row dated NaT belongs to no period: neither rescaled nor used as a total.
 
-        It used to form a block of its own, its observation becoming a
+        It forms no block of its own: its observation never becomes a
         "total" imposed on itself.
         """
         index = pd.DatetimeIndex(list(_monthly_grid()) + [pd.NaT])
@@ -942,7 +940,7 @@ class TestRescaleGuards:
 
         pd.testing.assert_series_equal(rescaled, values)
         assert not mask.any()
-        # Le total observé n'est plus reconstitué : 112.5 et non 120
+        # Le total observé n'est pas reconstitué : 112.5 et non 120
         assert rescaled.sum() == pytest.approx(112.5)
 
     def test_dict_form_selects_the_column(self):
@@ -979,10 +977,10 @@ class TestRescaleGuards:
 
 
 class TestGridFrequencyValidation:
-    """grid_freq is validated once per call, never silently ignored (ANO-FREQ-024).
+    """grid_freq is validated once per call, never silently ignored.
 
     The truncation guard only exists through ``grid_freq``; an unreadable
-    frequency or a forgotten entity used to switch it off and hand a
+    frequency or a forgotten entity would switch it off and hand a
     truncated period its whole total.
     """
 
@@ -1073,7 +1071,7 @@ class TestRescalePanel:
     """Rescaling on a panel: one block per (entity, period)."""
 
     def test_each_entity_is_rescaled_on_its_own_total(self):
-        """§6.5 on a panel: FR observes 120, DE 240, blocks never mix."""
+        """On a panel, FR observes 120, DE 240, blocks never mix."""
         values = _to_panel(_raw_predictions())
         observations = _to_panel(_annual_observations())
         observations.loc[('DE', pd.Timestamp('2021-12-31'))] = 240.0
@@ -1097,7 +1095,7 @@ class TestRescalePanel:
         assert rescaled.loc['FR'].sum() == pytest.approx(120.0, abs=_EXACT)
 
     def test_entity_without_observation_is_left_raw(self):
-        """An entity that never observes the column keeps free predictions (D33)."""
+        """An entity that never observes the column keeps free predictions."""
         values = _to_panel(_raw_predictions())
         observations = _to_panel(_annual_observations())
         observations.loc['DE'] = np.nan
@@ -1256,7 +1254,7 @@ class TestRescaleRealisticDatasets:
 
         The years the grid holds in part — the isolated anchors before the
         monthly history, the last one after it — are named by their own
-        single warning (D46), whatever the sign.
+        single warning, whatever the sign.
         """
         values, observations = self._balance_case(irregular_index_timeseries, sign)
 
@@ -1305,7 +1303,7 @@ class TestRescaleRealisticDatasets:
 # Masque des ancres
 # =============================================================================
 class TestAnchorCellsMask:
-    """Anchor rows re-expressed at the stage frequency (§11.2).
+    """Anchor rows re-expressed at the stage frequency.
 
     A DIAGNOSTIC mask: it locates the observed totals overwritten by a
     sub-period value, it qualifies no provenance.
@@ -1325,7 +1323,7 @@ class TestAnchorCellsMask:
     @pytest.mark.parametrize('setting', ['sum', None, {'a1': None}],
                              ids=['sum', 'none', 'dict'])
     def test_independent_of_the_constraint(self, reference_timeseries, setting):
-        """Same mask under every setting (§11.2): the three annual anchors of a1."""
+        """Same mask under every setting: the three annual anchors of a1."""
         grid = reference_timeseries.index
         observations = reference_timeseries['a1']
 
@@ -1421,7 +1419,7 @@ def two_column_stage(reference_timeseries):
 
 
 class TestSklearnProtocol:
-    """``fit`` / ``transform`` and sklearn conventions (§12.5, B3, B20)."""
+    """``fit`` / ``transform`` and sklearn conventions."""
 
     def test_get_params_returns_the_constructor_arguments_untouched(self, two_column_stage):
         """B3: the four parameters come back as the very objects received."""
@@ -1649,7 +1647,7 @@ class TestSklearnProtocol:
 # Avertissements agrégés et uniques
 # =============================================================================
 class TestWarnings:
-    """One warning per degenerate case and per operation (§11.1, §12.5)."""
+    """One warning per degenerate case and per operation."""
 
     def test_nominal_rescaling_is_silent(self, two_column_stage):
         """No warning when every period is rescaled normally."""
@@ -1692,10 +1690,10 @@ class TestWarnings:
         assert kinds == ['flipped', 'zero']
 
     def test_truncated_periods_are_named_once(self):
-        """D46 — observed totals the grid holds in part: ONE warning, their count, the column.
+        """Observed totals the grid holds in part: ONE warning, their count, the column.
 
         Grid March 2020 - October 2022: 2020 and 2022 hold ten months each and
-        stay raw (D25); their totals are lost in the values, which the warning
+        stay raw; their totals are lost in the values, which the warning
         says. The whole year 2021 is rescaled and counts for nothing.
         """
         grid = pd.date_range('2020-03-31', '2022-10-31', freq='ME')
@@ -1787,12 +1785,12 @@ def _within_deferred_block(constraint: AggregationConstraint, *calls) -> None:
 
 
 class TestDeferredWarnings:
-    """``deferred_warnings``: one warning per case for a whole chain of calls (ANO-FREQ-059).
+    """``deferred_warnings``: one warning per case for a whole chain of calls.
 
     ``HighFrequencyImputer`` rescales every (stage, column) and every
-    interpolated covariate; §12.5 asks for one warning per family, "never one
-    per variable × stage: accumulation then an aggregated message at the end of
-    the phase".
+    interpolated covariate; one warning per family is wanted, never one
+    per variable × stage: the warnings accumulate, then an aggregated message
+    is emitted at the end of the phase.
     """
 
     def test_several_rescale_calls_give_one_warning(self):

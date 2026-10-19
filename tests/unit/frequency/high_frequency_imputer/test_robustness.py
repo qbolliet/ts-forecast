@@ -1,4 +1,4 @@
-"""Robustness of ``HighFrequencyImputer.fit`` to its inputs (prompt F11).
+"""Robustness of ``HighFrequencyImputer.fit`` to its inputs.
 
 Covers the edge cases of ``CLAUDE.md`` on the imputer as a whole — unsorted
 panel, entity of X absent from y and conversely, all-NaN column, all-NaN
@@ -7,8 +7,8 @@ NaN target, no low-frequency column (empty plan), panel of a single entity —;
 the invariance of the fit to the index perturbations of
 ``tests/support/perturbations.py`` on ``PANEL-X`` (reversed entities, special
 column names, non-standard index names, three-level index; shuffled rows are
-refused, §12.5); and the start-of-period position (§10.2), including the extra
-row an ``MS`` grid was suspected to carry. The realistic datasets of notebook 3
+refused); and the start-of-period position, including the absence of an extra
+row on an ``MS`` grid. The realistic datasets of notebook 3
 are integration tests: ``tests/integration/frequency/test_hfi_on_realistic_dataset.py``.
 
 The duplicated index and the unsorted time series are pinned in
@@ -79,7 +79,7 @@ class TestInputEdgeCases:
         ids=['shuffled_rows', 'dates_reversed_within_entities'],
     )
     def test_unsorted_panel_is_refused(self, panel_reference_full, perturb):
-        """Un panel non trié est refusé explicitement, jamais trié en silence (§12.5).
+        """Un panel non trié est refusé explicitement, jamais trié en silence.
 
         Le pendant série temporelle est épinglé par
         ``test_fit_phases.py::TestPhaseFiveEdgeCases::test_unsorted_index_is_refused_explicitly``.
@@ -121,7 +121,7 @@ class TestInputEdgeCases:
         """Une colonne entièrement NaN n'est ni imputée, ni marquée, ni influente.
 
         Exclue des covariables (vide partout) et du dénominateur de couverture
-        (D39), elle laisse les imputations des autres colonnes rigoureusement
+        , elle laisse les imputations des autres colonnes rigoureusement
         identiques à celles du même jeu sans elle.
         """
         data = mixed_freq_panel_multifrequency.copy()
@@ -174,7 +174,7 @@ class TestInputEdgeCases:
 
         messages = _caught_messages(lambda: make_imputer().fit(data))
 
-        # ANO-FREQ-062 : aucun message ne la dit absente ; celui de la
+        # Aucun message ne la dit absente ; celui de la
         # fenêtre la nomme, une fois
         assert [message for message in messages if 'not in data' in message] == []
         assert [message for message in messages if "[('IT',)]" in message] == [
@@ -203,9 +203,9 @@ class TestInputEdgeCases:
 
         m1 de DE s'arrête fin 2022 : sa fenêtre d'imputation aussi. L'entité
         LU, réduite à une ligne, n'a pas de fréquence d'index détectable ;
-        elle rejoint les entités sans fenêtre (ANO-FREQ-020) et laisse
-        intacts les masques des trois autres — elle faisait échouer le calcul
-        pour tout le panel (ANO-FREQ-061).
+        elle rejoint les entités sans fenêtre et laisse
+        intacts les masques des trois autres, sans faire échouer le calcul
+        pour tout le panel.
         """
         base = mixed_freq_panel_multifrequency.copy()
         germany = base.index.get_level_values(0) == 'DE'
@@ -231,7 +231,7 @@ class TestInputEdgeCases:
         """Une cible observée une seule fois n'est pas imputée, et ne fait rien échouer.
 
         Sa fréquence est indétectable (moins de deux observations) : le
-        couple rejoint les couples non détectés (§12.5), aucune étape ne
+        couple rejoint les couples non détectés, aucune étape ne
         l'impute, et sa valeur unique ressort telle quelle.
         """
         features = reference_timeseries[['m1', 'q1', 'a2']]
@@ -252,13 +252,12 @@ class TestInputEdgeCases:
         )
 
     def test_undetectable_column_is_not_used_as_a_covariate(self, reference_timeseries):
-        """Un couple inutilisable ne fait pas échouer l'ajustement des autres (§12.5).
+        """Un couple inutilisable ne fait pas échouer l'ajustement des autres.
 
         La cible a1, observée une seule fois, n'a pas de fréquence : elle ne
-        peut être ni agrégée ni interpolée. Retenue comme covariable de q1 et
-        de a2, elle n'apportait que des NaN à ``X_train`` et l'estimateur, qui
-        ne les tolère pas, échouait : q1 et a2 retombaient en repli
-        (ANO-FREQ-060). Elle n'est plus candidate.
+        peut être ni agrégée ni interpolée. Elle n'est pas candidate comme covariable de q1 et
+        de a2 : elle n'apporterait que des NaN à ``X_train`` et l'estimateur, qui
+        ne les tolère pas, échouerait, q1 et a2 retombant en repli.
         """
         features = reference_timeseries[['m1', 'q1', 'a2']]
         target = reference_timeseries['a1'].where(
@@ -276,7 +275,7 @@ class TestInputEdgeCases:
     def test_entirely_nan_target_changes_nothing_else(self, reference_timeseries):
         """Une cible entièrement NaN reste NaN ; les imputations de X sont celles d'un fit sans y.
 
-        Colonne structurellement absente (D39) et vide sur toutes les
+        Colonne structurellement absente et vide sur toutes les
         grilles, elle n'entre ni dans la fenêtre, ni dans les covariables.
         """
         features = reference_timeseries[['m1', 'q1', 'a2']]
@@ -318,7 +317,7 @@ class TestInputEdgeCases:
     def test_single_entity_panel_matches_the_time_series(
         self, panel_reference_full, reference_timeseries
     ):
-        """Un panel d'une seule entité donne exactement les imputations de la série (§5.8, I16).
+        """Un panel d'une seule entité donne exactement les imputations de la série.
 
         La série temporelle est le cas dégénéré à une entité : le jeu
         mutualisé se réduit au bloc unique, valeurs et provenances au bit
@@ -428,7 +427,7 @@ class TestPerturbationInvariance:
     """fit_transform(perturbé) == perturbation(fit_transform(original)), sur PANEL-X."""
 
     def test_shuffled_rows_are_refused(self, panel_reference_full):
-        """Des lignes mélangées ne sont pas invariantes : elles sont refusées (§12.5).
+        """Des lignes mélangées ne sont pas invariantes : elles sont refusées.
 
         L'invariance à shuffle_rows supposerait un tri implicite, que la
         classe s'interdit : le tri déplacerait fenêtres et agrégats sans que
@@ -468,8 +467,8 @@ class TestPerturbationInvariance:
     def test_diagnostic_frame_is_unchanged_up_to_renaming(self, panel_x_fits, name):
         """Le diagnostic du plan est identique, au renommage des colonnes et entités près.
 
-        Sous reverse_entities, ``training_blocks`` suivait l'ordre d'entrée des
-        entités (ANO-FREQ-067) ; il est désormais trié par clé d'entité.
+        Sous reverse_entities, ``training_blocks`` est trié par clé d'entité,
+        non par ordre d'entrée des entités.
         """
         _values, _provenance, diagnostic, names = panel_x_fits(name)
         _v, _p, original, _n = panel_x_fits('original')
@@ -478,7 +477,7 @@ class TestPerturbationInvariance:
 
 
 # =============================================================================
-# Position des dates dans la période (§10.2)
+# Position des dates dans la période
 # =============================================================================
 # Décalage d'un index fin de mois au début du même mois
 def _to_month_start(frame: pd.DataFrame) -> pd.DataFrame:
@@ -523,7 +522,7 @@ class TestPeriodPositions:
         des ancres : ces sommes ne dépendent pas de la position, ni donc le
         modèle, ni les prédictions recalées. Une covariable INTERPOLÉE, elle,
         dépend de la position par construction sous ``interpolation_anchor=None``
-        (§10.2 : la valeur s'applique à la date où elle est référencée).
+        (la valeur s'applique à la date où elle est référencée).
         """
         end_anchored = panel_reference_full[columns]
         start_anchored = to_period_start_by_column(end_anchored)
@@ -593,13 +592,13 @@ class TestPeriodPositions:
     ):
         """Ancres hors des bornes calendaires de leur fréquence : couple écarté, un avertissement.
 
-        ANO-FREQ-065. ``to_period_start`` appliqué tel quel date l'ancre
+        ``to_period_start`` appliqué tel quel date l'ancre
         annuelle au 1er décembre (et l'ancre trimestrielle au premier jour du
         dernier mois du trimestre) ; un exercice clos fin juin la date au 30
         juin. Aucune lecture calendaire n'en est cohérente : le masque
         d'entraînement en écartait toutes les ancres, le recalage les
         rattachait à l'année civile, et la colonne retombait sur un repli
-        partiel. Le couple est désormais écarté — ni imputé, ni covariable —,
+        partiel. Le couple est écarté — ni imputé, ni covariable —,
         ses observations ressortent telles quelles, et un avertissement
         unique le nomme.
         """

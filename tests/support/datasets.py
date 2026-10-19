@@ -1,10 +1,8 @@
 """Pure builders of the reference datasets of the tests.
 
-Gathers the builders historically private to
-``tests/frequency/conftest.py`` (code replicas, without reading the
-notebook, of notebook 2 ``notebooks/2 - QB - Mixed frequencies.ipynb``
-and of the unified ``PANEL-X`` dataset of
-``high_frequency_imputer2_architecture.md`` §2.6), made public to be
+Gathers the builders (code replicas, without reading the notebook, of
+notebook 2 ``notebooks/2 - QB - Mixed frequencies.ipynb`` and of the
+unified ``PANEL-X`` dataset), made public to be
 imported directly by tests and notebooks
 (``from tests.support.datasets import build_panel_reference``).
 ``build_staggered_panel`` adds a hand-sized panel whose entities cover
@@ -28,7 +26,7 @@ def build_mixed_frequency_timeseries(
 
     Code replica (without reading the notebook) of ``df_timeseries`` in
     ``notebooks/2 - QB - Mixed frequencies.ipynb``, used as empirical
-    reference in ``high_frequency_imputer_review.md``. Generalized to also
+    reference. Generalized to also
     cover the more realistic dataset of ``create_timeseries_dataset`` in
     ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb``: an
     ``annual_start_date`` earlier than ``start_date`` (default parameters
@@ -326,7 +324,7 @@ def build_mixed_frequency_panel(
         # existe pour toutes les entités de ``HETEROGENEOUS_PANEL_COUNTRIES``
         # mais reste entièrement NaN pour celles dont
         # ``climat_affaires_observe`` vaut ``False`` (support de
-        # ``covariate_eligibility``, §4.5 de la spec HFI2).
+        # ``covariate_eligibility``).
         if 'climat_affaires_observe' in params:
             df_country['climat_affaires'] = np.nan
             if params['climat_affaires_observe']:
@@ -479,9 +477,8 @@ def build_panel_two_level(seed: int = 7) -> pd.DataFrame:
 def build_panel_reference(seed: int = 42) -> pd.DataFrame:
     """Build the unified ``PANEL-X`` reference dataset.
 
-    Single source of truth behind the three frozen reference datasets of
-    the spec (``high_frequency_imputer2_architecture.md`` §2.6): ``TS``
-    (§2.2), ``PANEL`` (§2.3) and ``PANEL-F`` (§2.5) are strict projections
+    Single source of truth behind the three frozen reference datasets:
+    ``TS``, ``PANEL`` and ``PANEL-F`` are strict projections
     of it (fixtures ``reference_timeseries``,
     ``mixed_freq_panel_heterogeneous``, ``mixed_freq_panel_multifrequency``).
     Three entities ``FR`` / ``DE`` / ``IT`` share a month-end index
@@ -494,17 +491,17 @@ def build_panel_reference(seed: int = 42) -> pd.DataFrame:
     - ``q1`` (quarterly: non-NaN only at quarter-end months 3/6/9/12):
       ``10 * k``, identical across entities.
     - ``a1`` (annual: non-NaN only at the three year-end anchors) - golden
-      values §2.2 120 / 132 / 150, identical across entities.
-    - ``a2`` (annual, same anchors) - golden values §2.2 60 / 66 / 72.
+      values 120 / 132 / 150, identical across entities.
+    - ``a2`` (annual, same anchors) - golden values 60 / 66 / 72.
     - ``climat_affaires`` (monthly survey): observed for ``FR`` and ``DE``
       (level ~100 with reproducible noise), entirely NaN for ``IT`` (the
       column exists for each entity, only ``IT`` never observes it) -
-      support of ``covariate_eligibility`` (§4.5).
+      support of ``covariate_eligibility``.
     - ``v`` (frequency heterogeneous across entities): annual for ``FR``
       (3 anchors), quarterly for ``DE`` (12 anchors), monthly for ``IT``
       (36 values), chosen so that the three entities carry the same
       annual total (120 / 132 / 150) - support of cross-entity pooling
-      (§5.8) and of invariants I14 to I16 (§16).
+      and of the pooled training set.
 
     Args:
         seed: Base seed for the ``climat_affaires`` noise; each entity
@@ -535,7 +532,7 @@ def build_panel_reference(seed: int = 42) -> pd.DataFrame:
     quarter_end_dates = dates[quarter_end_mask]
     annual_anchors = pd.to_datetime(['2021-12-31', '2022-12-31', '2023-12-31'])
 
-    # ----- Valeurs d'or de v, par entité (§2.5) : même total annuel pour les trois -----
+    # ----- Valeurs d'or de v, par entité : même total annuel pour les trois -----
     v_by_entity = {
         'FR': pd.Series([120.0, 132.0, 150.0], index=annual_anchors),
         'DE': pd.Series(
@@ -562,7 +559,7 @@ def build_panel_reference(seed: int = 42) -> pd.DataFrame:
         df_entity['q1'] = np.nan
         df_entity.loc[quarter_end_mask, 'q1'] = 10.0 * np.arange(1, quarter_end_mask.sum() + 1)
 
-        # ----- a1 / a2 : annuelles, valeurs d'or du document (§2.2) -----
+        # ----- a1 / a2 : annuelles, valeurs d'or -----
         df_entity['a1'] = np.nan
         df_entity['a2'] = np.nan
         df_entity.loc[annual_anchors, 'a1'] = [120.0, 132.0, 150.0]
@@ -570,7 +567,7 @@ def build_panel_reference(seed: int = 42) -> pd.DataFrame:
 
         # ----- climat_affaires : mensuelle pour FR et DE, jamais observée pour IT -----
         # La colonne existe pour les trois entités ; seule l'Italie ne l'observe
-        # jamais (cas d'usage de covariate_eligibility, §4.5).
+        # jamais (cas d'usage de covariate_eligibility).
         df_entity['climat_affaires'] = np.nan
         if entity != 'IT':
             climat_noise = np.random.normal(0, 2.0, len(dates))

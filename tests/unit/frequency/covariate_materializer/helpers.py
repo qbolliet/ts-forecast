@@ -14,16 +14,16 @@ import pandas as pd
 from tsforecast.frequency.covariate_materializer import CovariateMaterializer
 
 
-# Fréquences détectées du jeu TS (§2.2)
+# Fréquences détectées du jeu TS
 TS_FREQUENCIES: Dict[str, Any] = {'m1': 'M', 'q1': 'Q', 'a1': 'Y', 'a2': 'Y'}
 
-# Fréquences du jeu PANEL (§2.3) : celles de TS, plus l'enquête mensuelle.
+# Fréquences du jeu PANEL : celles de TS, plus l'enquête mensuelle.
 # climat_affaires est mensuelle pour FR et DE et jamais observée par IT : la
 # forme scalaire est celle que rend l'adaptateur de l'imputeur quand toutes
 # les entités qui observent la colonne s'accordent
 PANEL_FREQUENCIES: Dict[str, Any] = {**TS_FREQUENCIES, 'climat_affaires': 'M'}
 
-# Fréquences du jeu PANEL-F (§2.5) : v annuelle pour FR, trimestrielle pour DE,
+# Fréquences du jeu PANEL-F : v annuelle pour FR, trimestrielle pour DE,
 # mensuelle pour IT
 PANEL_F_FREQUENCIES: Dict[str, Any] = {
     'm1': 'M',

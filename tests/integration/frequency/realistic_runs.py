@@ -87,7 +87,7 @@ def build_record(data: pd.DataFrame, strategy: str, modality: Union[bool, str]) 
     ``keep_lower_frequencies=True``, ``aggregation_constraint='sum'``,
     ``imputation_scope='strict'``), plus ``restore_original_values=True``,
     which only affects ``inverse_transform``. ``fit`` and ``transform`` are
-    called separately - ``fit_transform`` is ``fit(X).transform(X)`` (I1) -
+    called separately - ``fit_transform`` is ``fit(X).transform(X)`` -
     so that the warnings of each pass are recorded apart.
 
     Args:

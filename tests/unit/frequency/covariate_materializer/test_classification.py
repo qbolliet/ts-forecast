@@ -1,19 +1,17 @@
 """Tests of the classification of covariates against a stage grid.
 
-Covers ``classify`` — the classification of §4.1 made entity by entity, and
-the four-rank precedence of §4.4 as one entity sees it — and ``decide_ways``
-— §4.6: one way per column, the most degraded of the per-entity verdicts,
+Covers ``classify`` — the classification made entity by entity, and
+the four-rank precedence as one entity sees it — and ``decide_ways``
+— one way per column, the most degraded of the per-entity verdicts,
 decided without producing nor recording anything. Both read the per-entity
-forms of ``detected_frequencies`` (§2.1: a frequency belongs to the
-``(entity, column)`` pair) and of ``stage_freq`` (layer and stage bindings,
-§5.4bis, D31).
+forms of ``detected_frequencies`` (a frequency belongs to the
+``(entity, column)`` pair) and of ``stage_freq`` (layer and stage bindings).
 
-Corrections of ANO-FREQ-037 (stage bindings resolved like ``StageScaler``:
+Also covered: stage bindings resolved like ``StageScaler``:
 a unanimous binding stands for the whole panel, a disagreeing one leaving a
-grid entity unnamed is rejected; plain entity keys normalized) and
-ANO-FREQ-038 (the reduction never depends on the entity order: verdicts
-without a definable conversion left out, equal ranks broken by a fixed order)
-— ``tests/ANOMALIES.md``.
+grid entity unnamed is rejected; plain entity keys normalized; the
+reduction never depends on the entity order: verdicts without a definable
+conversion left out, equal ranks broken by a fixed order.
 
 Covered symbols: ``CovariateMaterializer.classify``, ``decide_ways``.
 """
@@ -54,7 +52,7 @@ CONFIG_IDS = ['tolerate_nan', 'interpolate', 'model-interpolate', 'model-tolerat
 
 
 class TestClassifyTable:
-    """§4.1: rank 1 whatever the strategy, the strategy below the grid."""
+    """Rank 1 whatever the strategy, the strategy below the grid."""
 
     @pytest.mark.parametrize('strategy, fallback', CONFIGS, ids=CONFIG_IDS)
     @pytest.mark.parametrize(
@@ -79,7 +77,7 @@ class TestClassifyTable:
         ids=CONFIG_IDS,
     )
     def test_coarser_covariate_follows_the_strategy(self, strategy, fallback, expected):
-        """A covariate coarser than the grid is served by the strategy (§4.2-§4.4)."""
+        """A covariate coarser than the grid is served by the strategy."""
         materializer = CovariateMaterializer(
             covariate_strategy=strategy, covariate_fallback=fallback
         )
@@ -118,7 +116,7 @@ class TestClassifyTable:
 
 
 class TestClassifyPerEntity:
-    """§2.1 / §4.6: the classification is made for one entity at a time."""
+    """The classification is made for one entity at a time."""
 
     @pytest.mark.parametrize(
         'entity, stage, expected',
@@ -133,7 +131,7 @@ class TestClassifyPerEntity:
         ids=['FR-M', 'DE-M', 'IT-M', 'FR-Q', 'DE-Q', 'IT-Q'],
     )
     def test_per_entity_detected_frequency(self, entity, stage, expected):
-        """PANEL-F: v annual for FR, quarterly for DE, monthly for IT (§2.5)."""
+        """PANEL-F: v annual for FR, quarterly for DE, monthly for IT."""
         materializer = CovariateMaterializer()
         assert materializer.classify('v', stage, PANEL_F_FREQUENCIES, entity) == expected
 
@@ -157,7 +155,7 @@ class TestClassifyPerEntity:
 
         Its own verdict is the raw anchors — which, for an entity without any
         observation, means NaN rows. Whether that verdict may weigh on the
-        column's way is the object of ANO-FREQ-038.
+        column's way is decided by the reduction of the verdicts.
         """
         frequencies = {'v': {('FR',): 'Y', ('DE',): 'Q'}}
         assert CovariateMaterializer().classify('v', 'M', frequencies, ('IT',)) == 'raw_anchors'
@@ -188,7 +186,7 @@ class TestClassifyPerEntity:
 
 
 class TestDecideWays:
-    """§4.6: one way per column, decided once, without producing anything."""
+    """One way per column, decided once, without producing anything."""
 
     def test_one_way_per_column_in_column_order(self):
         """One entry per column, in the order of ``columns``, never one per entity."""
@@ -270,13 +268,13 @@ class TestDecideWays:
 
 
 class TestStageBindingResolution:
-    """A stage binding is resolved like ``StageScaler`` resolves it (ANO-FREQ-037).
+    """A stage binding is resolved like ``StageScaler`` resolves it.
 
-    ``StageScaler._stage_freq_for`` (ANO-FREQ-031, arbitrated 2026-10-11): an
+    ``StageScaler._stage_freq_for``: an
     own entry, a single-entry binding, then a UNANIMOUS binding stands for the
     whole panel; only a disagreeing binding leaving a grid entity uncovered
     raises, naming the entity. ``HighFrequencyImputer`` hands such partial
-    bindings over (D31) on grids covering every entity (D38).
+    bindings over on grids covering every entity.
     """
 
     def test_unanimous_stage_binding_covers_an_unbound_grid_entity(
@@ -345,8 +343,8 @@ class TestStageBindingResolution:
     def test_plain_entity_keys_are_normalized(self, mapping):
         """``{'FR': ...}`` behaves like ``{('FR',): ...}``, as the entity argument does.
 
-        Arbitrage de l'auteur : normalisation des clés scalaires, comme les
-        autres fonctions du package (précédent ANO-FREQ-011).
+        Normalisation des clés scalaires, comme les
+        autres fonctions du package.
         """
         materializer = CovariateMaterializer()
         grid = entity_grid(['FR', 'DE'], quarterly_grid())
@@ -366,14 +364,14 @@ class TestStageBindingResolution:
 
 
 class TestReductionOrder:
-    """The reduction of the verdicts never depends on the entity order (ANO-FREQ-038)."""
+    """The reduction of the verdicts never depends on the entity order."""
 
     def test_entity_without_frequency_never_dictates_the_column_way(self):
         """IT never observes ``v``: listed first, it must not strip FR / DE of interpolation.
 
         IT, sans fréquence, n'a aucune conversion définissable : son verdict
         ('raw_anchors', de même rang que 'interpolate') n'entre pas dans la
-        réduction. §4.3 : sous 'interpolate', les seuls NaN résiduels sont
+        réduction. Sous 'interpolate', les seuls NaN résiduels sont
         ceux d'une entité sans la colonne.
         """
         frequencies = {'v': {('FR',): 'Y', ('DE',): 'Q'}}

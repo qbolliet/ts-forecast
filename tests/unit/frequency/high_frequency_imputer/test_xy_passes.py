@@ -7,9 +7,9 @@ and the prediction pass (``transform(X, y=None)`` after ``fit(X, y)``: the
 columns of ``X`` alone, on the input rows, flat, ``y`` handed back unchanged,
 provenance and statistics describing that output, inversion, additive
 transformer, refusal of a model that needs the target). Without ``y`` at
-``fit`` nothing changes (I1, I7: ``test_invariants.py``, ``test_transform.py``).
+``fit`` nothing changes (see ``test_invariants.py``, ``test_transform.py``).
 
-Data: the ``TS`` reference dataset (spec §2.2), target ``y = a2`` — annual,
+Data: the ``TS`` reference dataset, target ``y = a2`` — annual,
 gold totals 60 / 66 / 72 —, features ``m1`` (monthly), ``q1`` (quarterly),
 ``a1`` (annual).
 """
@@ -101,7 +101,7 @@ class TestTrainingPass:
     """``fit_transform(X, y)`` augments the training set: ``X`` and ``y`` on the grid."""
 
     def test_imputed_target_sums_to_its_annual_totals(self, xy):
-        """Valeur d'or du §2.2 : 60 / 66 / 72, recalage exact sous 'sum'."""
+        """Valeur d'or : 60 / 66 / 72, recalage exact sous 'sum'."""
         _X_out, y_out = _quietly(make_imputer(keep_lower_frequencies=False).fit_transform, *xy)
 
         totals = y_out.groupby(y_out.index.year).sum().round(9).tolist()
@@ -232,7 +232,7 @@ class TestPredictionPass:
         ).all()
 
     def test_inverse_transform_restores_the_input(self, xy):
-        """I8 holds after a prediction pass: index and observed values come back."""
+        """After a prediction pass, index and observed values come back."""
         X, y = xy
         imputer = _fitted(X, y, restore_original_values=True)
 
@@ -295,7 +295,7 @@ class TestWithoutTarget:
         assert out.index.names == ['frequency', 'date']
 
     def test_fit_transform_equals_fit_then_transform(self, reference_timeseries):
-        """I1 holds without ``y``: the two calls give the same values."""
+        """Without ``y``, the two calls give the same values."""
         first = _quietly(make_imputer().fit_transform, reference_timeseries)
         imputer = _quietly(make_imputer().fit, reference_timeseries)
 

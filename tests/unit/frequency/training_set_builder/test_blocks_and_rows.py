@@ -1,22 +1,20 @@
-"""Tests of the six rules of the mutualization on ``PANEL-F`` (§5.8).
+"""Tests of the six rules of the mutualization on ``PANEL-F``.
 
-Spec ``high_frequency_imputer2_architecture.md`` §5.8 (R1-R6, D17-D19) and
-§2.5: blocks ``{FR: Y, DE: Q, IT: M}`` and the 51 raw golden rows (3 + 12 +
+Blocks ``{FR: Y, DE: Q, IT: M}`` and the 51 raw golden rows (3 + 12 +
 36) at EVERY stage — ``Y``, ``Q``, ``M`` and a per-entity stage —, the target
 handed over raw (never aggregated, even for the monthly ``IT`` block at stage
 ``Q``), golden scaled targets through ``StageScaler`` (12 / 3 / 1 at ``M``,
 4 / 1 / 1/3 at ``Q``, 1 / 1/4 / 1/12 at ``Y``), one single call to the
 materializer writing no store, one covariate materialized three ways (one per
-block), the R1 perimeter (truncated entity, entity never observing the
+block), the perimeter rule (truncated entity, entity never observing the
 column, own target frequency, entity without detected frequency — absent
 from a disagreeing mapping or mapped to None explicitly), the degenerate
-cases of I16 and the way contract of §4.6.
+cases of a single entity and the way contract.
 
 End to end through ``HighFrequencyImputer``: the entity finer than the stage
 (``IT`` at stage ``Q``) trains the model of ``v`` but no plan step of ``v``
-ever predicts it (R2); an entity observing ``v`` once (undetectable
-frequency) never borrows the frequency of the others, unanimous or not
-(correction of ANO-FREQ-046).
+ever predicts it; an entity observing ``v`` once (undetectable
+frequency) never borrows the frequency of the others, unanimous or not.
 
 Covered symbols: ``TrainingSetBuilder.build``, ``TrainingSetBuilder.blocks_of``.
 """
@@ -69,7 +67,7 @@ from tests.unit.frequency.training_set_builder.helpers import (
 # R1, R2, R3 : blocs et lignes sur PANEL-F
 # =============================================================================
 class TestBlocksAndRows:
-    """R1, R2 and R3: scope, block frequency and rows (§5.8)."""
+    """Scope, block frequency and rows."""
 
     def test_blocks_on_panel_f_at_monthly_stage(self, mixed_freq_panel_multifrequency):
         """Each entity contributes at ITS frequency for the column (R2)."""
@@ -95,12 +93,12 @@ class TestBlocksAndRows:
         ids=['Y', 'Q', 'M', 'per_entity'],
     )
     def test_golden_rows_at_every_stage(self, mixed_freq_panel_multifrequency, stage_freq):
-        """Same blocks and same 51 raw golden rows at every stage (D18)."""
+        """Same blocks and same 51 raw golden rows at every stage."""
         training = build_panel_f(
             make_builder(), mixed_freq_panel_multifrequency, stage_freq=stage_freq
         )
 
-        # Valeur d'or : les ancres brutes du §2.5, entité par entité, jamais
+        # Valeur d'or : les ancres brutes, entité par entité, jamais
         # agrégées ni mises à l'échelle
         assert dict(training.blocks) == PANEL_F_BLOCKS
         assert len(training) == 51
@@ -135,11 +133,11 @@ class TestBlocksAndRows:
         np.testing.assert_allclose(scaled.loc['IT'].to_numpy(), expected_it, rtol=1e-12)
 
     def test_scaled_target_on_panel_f_at_monthly_stage(self, mixed_freq_panel_multifrequency):
-        """The §5.8 table: 9.333 for the first German quarter at stage ``M``."""
+        """9.333 for the first German quarter at stage ``M``."""
         training = build_panel_f(make_builder(), mixed_freq_panel_multifrequency)
         scaled = scaled_target(training, 'M')
 
-        # Valeur d'or : 28 / 3 = 9.333 (§5.8, tableau de l'étape M)
+        # Valeur d'or : 28 / 3 = 9.333 (tableau de l'étape M)
         assert round(float(scaled.loc[('DE', '2021-03-31')]), 3) == 9.333
 
     def test_row_frequency_and_origin_of_observed_rows(self, mixed_freq_panel_multifrequency):
@@ -174,10 +172,10 @@ class TestBlocksAndRows:
 
 
 # =============================================================================
-# D18 : étape trimestrielle, bloc plus fin que l'étape
+# Étape trimestrielle, bloc plus fin que l'étape
 # =============================================================================
 class TestQuarterlyStage:
-    """D18: the blocks do not depend on the stage, the divisors do (§5.8)."""
+    """The blocks do not depend on the stage, the divisors do."""
 
     def test_italian_rows_stay_monthly_at_quarterly_stage(
         self, mixed_freq_panel_multifrequency, monkeypatch
@@ -208,7 +206,7 @@ class TestQuarterlyStage:
         assert 'v' not in aggregated_columns
 
     def test_blocks_are_stage_independent(self, mixed_freq_panel_multifrequency):
-        """Same blocks and same grid at stages ``Q`` and ``M`` (D18)."""
+        """Same blocks and same grid at stages ``Q`` and ``M``."""
         builder = make_builder()
         monthly = build_panel_f(
             builder, mixed_freq_panel_multifrequency, stage_freq='M'
@@ -327,7 +325,7 @@ class TestSingleMaterialization:
         assert training.X.loc[('IT', '2021-01-31'), 'm1'] == 100.0
         # q1 (10 × k) : identité chez DE, interpolée sur la grille mensuelle
         # d'IT — rang inférieur, l'entraînement est plus dégradé que la
-        # prédiction, ce que l'invariant du §3 autorise
+        # prédiction, ce que la règle de non-dégradation autorise
         assert training.X.loc[('DE', '2021-03-31'), 'q1'] == 10.0
         assert training.ways['q1'] == 'interpolate'
         assert training.column_origins['q1'] == 'interpolated'
@@ -342,7 +340,7 @@ class TestScopeOfContributors:
     def test_truncated_entity_keeps_all_its_observations(
         self, mixed_freq_panel_multifrequency
     ):
-        """An incomplete quarter costs NO row (R3, §4.1)."""
+        """An incomplete quarter costs NO row."""
         data = mixed_freq_panel_multifrequency.copy()
         # Troncature des deux derniers mois d'IT : le dernier trimestre est
         # incomplet, ce que `full_periods_only` sanctionnerait sur une agrégation
@@ -357,7 +355,7 @@ class TestScopeOfContributors:
     def test_entity_without_the_column_contributes_nothing(
         self, mixed_freq_panel_multifrequency
     ):
-        """An entity never observing the column raises nothing (§4.5)."""
+        """An entity never observing the column raises nothing."""
         data = mixed_freq_panel_multifrequency.copy()
         data.loc['DE', 'v'] = np.nan
 
@@ -422,7 +420,7 @@ class TestScopeOfContributors:
     def test_single_entry_mapping_stands_for_the_whole_panel(
         self, mixed_freq_panel_multifrequency
     ):
-        """A single-entry mapping reads like the scalar form (ANO-FREQ-037 arbitration)."""
+        """A single-entry mapping reads like the scalar form."""
         frequencies = {**PANEL_F_FREQUENCIES, 'v': {('FR',): 'Y'}}
 
         training = build_panel_f(
@@ -461,9 +459,9 @@ class TestScopeOfContributors:
     ):
         """End to end: IT observing ``v`` once never gets a block, whatever FR / DE do.
 
-        Before the explicit binding, FR and DE both annual folded ``v`` into
-        the scalar ``'Y'``, lent to IT: its single MONTHLY value 10.0 entered
-        the training set as a yearly total divided by 12 (ANO-FREQ-046).
+        FR and DE both annual must not fold ``v`` into the scalar ``'Y'``
+        lent to IT: its single MONTHLY value 10.0 would enter the training set
+        as a yearly total divided by 12.
         """
         data = mixed_freq_panel_multifrequency.copy()
         # IT : une seule observation de `v`, fréquence indétectable
@@ -507,13 +505,13 @@ class TestScopeOfContributors:
 
 
 # =============================================================================
-# I16 : cas dégénérés
+# Cas dégénérés
 # =============================================================================
 class TestDegenerateCases:
-    """I16 and one-entity panel: the mutualization is neutral in the singular."""
+    """One-entity panel: the mutualization is neutral in the singular."""
 
     def test_timeseries_is_the_degenerate_case(self, reference_timeseries):
-        """On ``TS``, the mutualized set is the original one (I16)."""
+        """On ``TS``, the mutualized set is the original one."""
         training = build_ts(make_builder(), reference_timeseries, eligible_origins=('observed',))
 
         assert dict(training.blocks) == {(): 'Y'}
@@ -521,7 +519,7 @@ class TestDegenerateCases:
         assert training.y.tolist() == [120.0, 132.0, 150.0]
         assert isinstance(training.y.index, pd.DatetimeIndex)
 
-        # Diviseur 12 à l'étape M : tous les chiffres des §4.7, §5.4 et §5.5
+        # Diviseur 12 à l'étape M : tous les chiffres de l'exemple de référence
         # restent vrais
         scaler = StageScaler()
         divisors = scaler.target_divisor(
@@ -562,10 +560,10 @@ class TestDegenerateCases:
 
 
 # =============================================================================
-# §4.6 : unicité de la voie
+# Unicité de la voie
 # =============================================================================
 class TestWayContract:
-    """§4.6: the ways handed back are those imposed on the prediction grid."""
+    """The ways handed back are those imposed on the prediction grid."""
 
     def test_way_uniqueness_contract(self, mixed_freq_panel_multifrequency):
         """The ways cover exactly ``feature_cols`` and can be replayed."""

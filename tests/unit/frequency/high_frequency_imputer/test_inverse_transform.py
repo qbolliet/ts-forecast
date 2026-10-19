@@ -1,10 +1,10 @@
-"""``HighFrequencyImputer.inverse_transform`` (§12.4, I8).
+"""``HighFrequencyImputer.inverse_transform``.
 
 Covers the transform / inverse round trip — index, level names and observed
 values given back on perturbed panels (three-level index, non-standard
 names, special column names), the ``(X, y)`` pair, a pass on new data, the
 input index and order given back whatever rows the target grid added or
-left out (D43) —, multi-level entity names (B4), the provenance-driven reset
+left out —, multi-level entity names, the provenance-driven reset
 of imputed cells, the choice of the stacked level to keep — read on the data
 to invert, a level the last pass never produced being refused —, and the
 columns the last pass never saw.
@@ -36,10 +36,10 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 
 
 class TestInverseTransform:
-    """I8 — aller-retour transform / inverse_transform."""
+    """Aller-retour transform / inverse_transform."""
 
     def test_inverse_transform_roundtrip(self, reference_timeseries):
-        """I8 — l'index et les noms sont restitués, les valeurs sous demande."""
+        """L'index et les noms sont restitués, les valeurs sous demande."""
         imputer = make_imputer(restore_original_values=True)
         transformed = fit_transform_quietly(imputer, reference_timeseries)
         restored = imputer.inverse_transform(transformed)
@@ -59,7 +59,7 @@ class TestInverseTransform:
     def test_inverse_transform_preserves_multilevel_entity_names(
         self, panel_two_level_dataset
     ):
-        """I8, B4 — un panel à deux niveaux d'entité garde ses trois noms."""
+        """Un panel à deux niveaux d'entité garde ses trois noms."""
         imputer = HighFrequencyImputer(
             target_frequency='M',
             estimator=LinearRegression(),
@@ -67,7 +67,7 @@ class TestInverseTransform:
         )
         transformed = fit_transform_quietly(imputer, panel_two_level_dataset)
 
-        # Le niveau de fréquence s'insère du côté de l'entité (§5.9)
+        # Le niveau de fréquence s'insère du côté de l'entité
         assert list(transformed.index.names) == [
             'country', 'sector', 'frequency', 'date'
         ]
@@ -75,7 +75,7 @@ class TestInverseTransform:
         restored = imputer.inverse_transform(transformed)
         assert list(restored.index.names) == ['country', 'sector', 'date']
         # L'index d'entrée exactement, avec ses valeurs d'origine : les lignes
-        # que la grille cible porte au-delà des données n'y reviennent pas (D43)
+        # que la grille cible porte au-delà des données n'y reviennent pas
         pd.testing.assert_index_equal(restored.index, panel_two_level_dataset.index)
         source = panel_two_level_dataset['indicateur_mensuel']
         assert np.allclose(restored['indicateur_mensuel'].to_numpy(), source.to_numpy())
@@ -105,7 +105,7 @@ class TestInverseTransform:
         """``restore_original_values=True`` inverts right after a fit, like after a transform.
 
         Inverting right after a fit is licit (the fit writes its own provenance
-        matrix and snapshots its own input, ANO-FREQ-051); the exact restoration
+        matrix and snapshots its own input); the exact restoration
         then refills the cells observed in the input of the fit.
         """
         imputer = fit_quietly(
@@ -128,7 +128,7 @@ class TestInverseTransform:
         restored = imputer.inverse_transform(transformed)
         # m1 est observée partout : elle traverse intacte
         assert restored['m1'].notna().all()
-        # a1 était imputée : elle ne peut pas être plus renseignée qu'à l'entrée
+        # a1 est imputée : elle ne peut pas être plus renseignée qu'à l'entrée
         assert restored['a1'].notna().sum() <= reference_timeseries['a1'].notna().sum()
 
 
@@ -155,7 +155,7 @@ PERTURBATIONS = ['three_level_index', 'non_standard_index_names', 'special_colum
 
 
 class TestRoundTripRestoresObservations:
-    """I8 — ``inverse_transform(transform(X))`` gives X back: index, names, observations."""
+    """``inverse_transform(transform(X))`` gives X back: index, names, observations."""
 
     @pytest.mark.slow
     @pytest.mark.parametrize('perturbation', PERTURBATIONS)
@@ -173,7 +173,7 @@ class TestRoundTripRestoresObservations:
     def test_without_restoration_nothing_is_invented(self, mixed_freq_panel_multifrequency, keep):
         """Without exact restoration, every value given back is an input observation.
 
-        The anchors re-expressed by the imputation are no longer ``ORIGINAL``
+        The anchors re-expressed by the imputation are not ``ORIGINAL``
         and come back NaN; nothing imputed may leak through, and the fully
         observed ``m1`` comes back whole.
         """
@@ -217,7 +217,7 @@ class TestRoundTripRestoresObservations:
 
         pd.testing.assert_index_equal(X_back.index, X.index)
         assert y_back.name == 'a1'
-        # Valeurs d'or du §2.2 : ancres 120 / 132 / 150
+        # Valeurs d'or : ancres 120 / 132 / 150
         np.testing.assert_allclose(y_back.dropna().to_numpy(), [120.0, 132.0, 150.0])
 
     def test_columns_unknown_to_the_last_pass_go_through_untouched(self, reference_timeseries):
@@ -231,10 +231,10 @@ class TestRoundTripRestoresObservations:
         pd.testing.assert_frame_equal(restored, renamed)
 
     def test_inverse_restores_the_row_order(self, mixed_freq_panel_multifrequency):
-        """Per-entity targets (D43): the inversion gives the rows back in X's order.
+        """Per-entity targets: the inversion gives the rows back in X's order.
 
         ``DE``'s months off the quarter ends are not in the output; the
-        inversion gives them back, each observation restored (ANO-FREQ-075).
+        inversion gives them back, each observation restored.
         """
         imputer = make_imputer(
             target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'}, restore_original_values=True
@@ -252,7 +252,7 @@ class TestRoundTripRestoresObservations:
     def test_inverse_drops_the_rows_the_grid_added(self, irregular_index_timeseries, restore):
         """On the realistic irregular index, X's index comes back, not the densified grid.
 
-        82 rows in, 115 on the target grid (ANO-FREQ-076): the 33 months the
+        82 rows in, 115 on the target grid: the 33 months the
         grid adds before the monthly history carry nothing once inverted.
         """
         imputer = make_imputer(restore_original_values=restore)
@@ -272,7 +272,7 @@ class TestInverseLevelSelection:
     ):
         """A quarterly target on a monthly index: the Q level is kept, silently.
 
-        Its quarter ends are read back onto the monthly index of X (D43).
+        Its quarter ends are read back onto the monthly index of X.
         """
         imputer = make_imputer(target_frequency='Q')
         transformed = fit_transform_quietly(imputer, reference_timeseries)

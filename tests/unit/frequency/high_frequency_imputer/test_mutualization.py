@@ -1,12 +1,10 @@
-"""Inter-entity mutualization of the training set (§5.8, §5.10).
+"""Inter-entity mutualization of the training set.
 
-Covers the pooled training set and the single fit per (stage, variable)
-(I14, I15, D17-D19), and entities never observing the imputed column
-(``impute_unobserved_entities``, D33, I21): every stage binding the entity and
+Covers the pooled training set and the single fit per (stage, variable), and entities never observing the imputed column
+(``impute_unobserved_entities``): every stage binding the entity and
 only those, a column no entity observes, a column whose only group is
 unanchored under the ``'model'`` order, an entity without window predicted on
-its whole grid, NaN predictions, and the warnings of a failed unanchored step
-(ANO-FREQ-063).
+its whole grid, NaN predictions, and the warnings of a failed unanchored step.
 """
 
 # Modules de base
@@ -41,7 +39,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 
 
 class TestMutualizedTrainingSet:
-    """I14 et I15 — mutualisation inter-entités et ajustement unique."""
+    """Mutualisation inter-entités et ajustement unique."""
 
     @staticmethod
     def _variable_steps(imputer: HighFrequencyImputer) -> list:
@@ -49,7 +47,7 @@ class TestMutualizedTrainingSet:
         return [step for step in imputer.imputation_plan_ if step.var_name == 'v']
 
     def test_pooled_training_set_on_panel_f(self, mixed_freq_panel_multifrequency):
-        """I14 — 51 lignes (3 FR + 12 DE + 36 IT), toutes à l'échelle de l'étape."""
+        """51 lignes (3 FR + 12 DE + 36 IT), toutes à l'échelle de l'étape."""
         imputer = fit_with_spy(mixed_freq_panel_multifrequency)
         step = self._variable_steps(imputer)[0]
         y_train = step.model.fit_y_
@@ -61,7 +59,7 @@ class TestMutualizedTrainingSet:
         assert counts == {'IT': 36, 'DE': 12, 'FR': 3}
         assert dict(step.training_blocks) == {('FR',): 'Y', ('DE',): 'Q', ('IT',): 'M'}
 
-        # Valeurs d'or du §5.8 : FR et IT à 10.0 / 11.0 / 12.5, DE aux tiers
+        # Valeurs d'or : FR et IT à 10.0 / 11.0 / 12.5, DE aux tiers
         france = entity_block(y_train, 'FR')
         assert [round(value, 6) for value in france] == [10.0, 11.0, 12.5]
 
@@ -80,9 +78,9 @@ class TestMutualizedTrainingSet:
         assert y_train.min() > 9.0 and y_train.max() < 14.0
 
     def test_pooled_training_set_at_stage_q(self, mixed_freq_panel_multifrequency):
-        """I14 — à l'étape Q, 51 lignes : FR divisé par 4, IT par 1/3, DE brut.
+        """À l'étape Q, 51 lignes : FR divisé par 4, IT par 1/3, DE brut.
 
-        Les blocs ne dépendent pas de l'étape (D18) : IT garde ses 36 lignes
+        Les blocs ne dépendent pas de l'étape : IT garde ses 36 lignes
         mensuelles, ramenées à l'échelle trimestrielle (diviseur 1/3).
         """
         _, fits = capture_variable_fits(
@@ -107,7 +105,7 @@ class TestMutualizedTrainingSet:
     def test_single_fit_shared_between_source_frequency_groups(
         self, mixed_freq_panel_multifrequency
     ):
-        """I15 — un seul ajustement, un seul objet modèle, deux recalages distincts."""
+        """Un seul ajustement, un seul objet modèle, deux recalages distincts."""
         imputer = fit_with_spy(mixed_freq_panel_multifrequency)
         steps = self._variable_steps(imputer)
 
@@ -168,7 +166,7 @@ class TestMutualizedTrainingSet:
 
 
 class TestUnobservedEntities:
-    """I21 — imputation complète d'une entité qui n'observe jamais la colonne."""
+    """Imputation complète d'une entité qui n'observe jamais la colonne."""
 
     @staticmethod
     def _v_steps(imputer: HighFrequencyImputer) -> list:
@@ -182,7 +180,7 @@ class TestUnobservedEntities:
         """Cellules de 'v' imputées pour une entité, lues sur la sortie publique.
 
         Le rejeu réécrit "imputation_provenance_" : "_provenance" la lit donc
-        au niveau cible, identique avant et après le transform (I1).
+        au niveau cible, identique avant et après le transform.
         """
         values, provenance = replay(imputer, data)
         store = imputed_cells(values, provenance, 'v')
@@ -195,19 +193,19 @@ class TestUnobservedEntities:
         """Provenance de 'v' pour une entité, au niveau cible.
 
         Lue au niveau cible, la matrice est la même après le fit et après un
-        transform des mêmes données (I1) : l'ordre des lectures est indifférent.
+        transform des mêmes données : l'ordre des lectures est indifférent.
         """
         provenance = target_level(imputer, imputer.imputation_provenance_)
         return entity_block(provenance['v'], entity)
 
     def test_unobserved_entity_is_left_alone_by_default(self, panel_f_without_it_v):
-        """I21 — sous le défaut False, IT n'est ni imputée ni nommée par le plan."""
+        """Sous le défaut False, IT n'est ni imputée ni nommée par le plan."""
         imputer = fit_quietly(make_imputer(), panel_f_without_it_v)
 
         # Les 36 cellules restent vides et non imputées : la matrice de
         # provenance du FIT laisse une cellule NaN sans marque, aucune ne
         # portant donc la moindre provenance de modèle. Lue AVANT le rejeu, qui
-        # la réécrit (et la marque à tort ORIGINAL, ANO-FREQ-050)
+        # la réécrit (et la marque à tort ORIGINAL)
         provenance = self._provenance(imputer, 'IT')
         assert len(provenance) == 36
         assert provenance.isna().all()
@@ -225,7 +223,7 @@ class TestUnobservedEntities:
         assert imputer.unanchored_pairs_ == ()
 
     def test_unobserved_entity_is_imputed_on_demand(self, panel_f_without_it_v):
-        """I21 — sous True, les 36 cellules sont produites et marquées sans ancre."""
+        """Sous True, les 36 cellules sont produites et marquées sans ancre."""
         imputer = fit_quietly(
             make_imputer(impute_unobserved_entities=True), panel_f_without_it_v
         )
@@ -266,7 +264,7 @@ class TestUnobservedEntities:
         assert unanchored.fit_scale_factor == 1.0
 
         # MÊME objet modèle que les deux étapes ancrées de la même étape de
-        # fréquence (§5.8 R6, D19)
+        # fréquence
         assert unanchored.model is steps['Y'].model
         assert unanchored.model is steps['Q'].model
 
@@ -313,7 +311,7 @@ class TestUnobservedEntities:
         italy = self._imputed(imputer, panel_f_without_it_v, 'IT')
         assert italy.loc['2021'].sum() != pytest.approx(120.0)
 
-        # Le recalage des groupes ANCRÉS, lui, reste celui du §11.1
+        # Le recalage des groupes ANCRÉS, lui, reste celui de la contrainte d'agrégation
         if constraint == 'sum':
             france = self._imputed(imputer, panel_f_without_it_v, 'FR')
             assert france.loc['2021'].sum() == pytest.approx(120.0)
@@ -368,7 +366,7 @@ class TestUnobservedEntities:
     def test_model_unanchored_is_never_emitted_by_default(
         self, panel_f_without_it_v, mixed_freq_panel_multifrequency
     ):
-        """I6 non-régression — l'ajout est additif, aucune cellule ne change de marque."""
+        """L'ajout est additif, aucune cellule ne change de marque."""
         for data in (panel_f_without_it_v, mixed_freq_panel_multifrequency):
             imputer = fit_with_spy(data)
             emitted = {
@@ -390,7 +388,7 @@ class TestUnobservedEntities:
     def test_adding_the_unanchored_group_leaves_the_others_intact(
         self, panel_f_without_it_v, modality
     ):
-        """I15 non-régression — X_train, y_train et les voies des groupes ancrés.
+        """X_train, y_train et les voies des groupes ancrés.
 
         Sous ``True``, la mesure porte aussi ce que la règle promet : les
         passes intermédiaires de l'entité sans ancre ne changent PAS le
@@ -512,7 +510,7 @@ class TestUnobservedEntities:
         }
 
     def test_stage_not_binding_the_entity_leaves_it_out(self, panel_f_without_it_v):
-        """Une étape qui ne lie pas l'entité ne lui crée aucune étape sans ancre (D31).
+        """Une étape qui ne lie pas l'entité ne lui crée aucune étape sans ancre.
 
         Cible ``{FR: M, DE: M, IT: Q}`` sous ``True`` : la progression est
         ``[{FR: Q, DE: Q, IT: Q}, {FR: M, DE: M}]``. IT est liée à l'étape Q
@@ -535,7 +533,7 @@ class TestUnobservedEntities:
     def test_column_observed_by_no_entity_is_never_imputed_unanchored(
         self, mixed_freq_panel_multifrequency
     ):
-        """Une colonne qu'aucune entité n'observe n'a pas de modèle à partager (§5.10).
+        """Une colonne qu'aucune entité n'observe n'a pas de modèle à partager.
 
         Sans aucune ligne d'entraînement possible, la capacité ne joue pas :
         aucune étape, aucune cellule, aucun couple sans ancre.
@@ -575,7 +573,7 @@ class TestUnobservedEntities:
     def test_entity_without_window_is_predicted_on_its_whole_grid(
         self, panel_f_without_it_v
     ):
-        """Entité sans ancre ET sans fenêtre : grille de l'étape sans restriction (§5.10, 6).
+        """Entité sans ancre ET sans fenêtre : grille de l'étape sans restriction.
 
         m1 n'est observée chez IT qu'en 2021 et q1 qu'en 2023 : la fenêtre
         d'IT est vide. Son étape sans ancre lève la restriction et prédit sur
@@ -603,7 +601,7 @@ class TestUnobservedEntities:
         """Des prédictions entièrement NaN laissent IT vide, nommée par UN avertissement.
 
         Une ligne que les covariables ne nourrissent pas rend un NaN, jamais
-        écrit (§5.10, conséquence 5) ; un estimateur qui ne rend que des NaN
+        écrit ; un estimateur qui ne rend que des NaN
         en est le cas limite.
         """
         imputer = make_imputer(
@@ -624,10 +622,9 @@ class TestUnobservedEntities:
         """L'échec de prédiction d'une étape sans ancre n'annonce aucun repli.
 
         Sans ancre, l'interpolation ne peut pas servir de repli : les
-        cellules restent NaN et un avertissement agrégé nomme le couple
-        (§5.10, conséquence 5). Le message des étapes dégradées annonçait en
-        outre « interpolation fallback » pour l'étape (v, M) d'IT, qui
-        n'écrit rien (ANO-FREQ-063).
+        cellules restent NaN et un avertissement agrégé nomme le couple.
+        Le message des étapes dégradées n'annonce pas « interpolation fallback »
+        pour l'étape (v, M) d'IT, qui n'écrit rien.
         """
         imputer = make_imputer(impute_unobserved_entities=True)
         with warnings.catch_warnings(record=True) as caught:

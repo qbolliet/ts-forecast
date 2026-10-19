@@ -1,10 +1,10 @@
 """Tests of the central invariant: never a degradation from fit to predict.
 
-Spec ``high_frequency_imputer2_architecture.md`` §3: a model never sees, at
+A model never sees, at
 prediction time, a feature-availability pattern more degraded than at
 training time, nor features of a different nature; the single exception,
-measured PER ENTITY, is the entity structurally deprived of the column (§4.5).
-§4.7 / D14 give the testable formulation: for each (stage, column), the dates
+measured PER ENTITY, is the entity structurally deprived of the column.
+The testable formulation is: for each (stage, column), the dates
 filled in ``X_pred`` contain the image of the dates filled in ``X_train`` —
 not a naive comparison of NaN rates, the two grids having different steps.
 
@@ -14,12 +14,12 @@ irregular index, ``depenses_publiques_pib`` at a per-entity frequency,
 ``climat_affaires`` absent for Italie), under every strategy:
 
 - same stage on both sides: ``X_train`` is ``X_pred`` restricted to the
-  training rows — "the same routine on both sides" (§3, corollary);
+  training rows — "the same routine on both sides";
 - training grid at the target's own frequency, prediction grid at the stage,
-  ways decided on the prediction grid and replayed (D21): inclusion of the
-  filled dates (D14);
+  ways decided on the prediction grid and replayed: inclusion of the
+  filled dates;
 - under ``'interpolate'``: no NaN left inside the observed span of any
-  (entity, column) (§4.3).
+  (entity, column).
 
 Covered symbol: ``CovariateMaterializer.materialize``.
 """
@@ -61,7 +61,7 @@ COVARIATES = [column for column in HETEROGENEOUS_FREQUENCIES if column != TARGET
 
 
 class TestCentralInvariant:
-    """§3 and §4.7: the NaN invariant, in its testable formulation D14."""
+    """The NaN invariant, in its testable formulation."""
 
     @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate'])
     def test_filled_training_dates_are_included_in_the_prediction_ones(
@@ -69,7 +69,7 @@ class TestCentralInvariant:
     ):
         """``TS``: the dates filled in X_pred CONTAIN those of X_train.
 
-        Formulation D14 du §4.7, et non une comparaison de pourcentages : sous
+        Formulation par inclusion des dates, et non une comparaison de pourcentages : sous
         'tolerate_nan' la grille d'entraînement (annuelle) et la grille de
         prédiction (trimestrielle) n'ont pas le même pas, et le taux brut
         diffère légitimement.
@@ -101,7 +101,7 @@ class TestCentralInvariant:
     def test_invariant_nan_by_entity(self, mixed_freq_panel_heterogeneous):
         """``PANEL``: the inclusion holds PER ENTITY; IT's empty column is no exception to it.
 
-        L'entité sans la colonne est l'unique exception à l'invariant (§4.5) :
+        L'entité sans la colonne est l'unique exception à l'invariant :
         elle est vide des deux côtés, jamais dégradée d'un seul.
         """
         data = mixed_freq_panel_heterogeneous
@@ -186,12 +186,12 @@ class TestRealisticPanelInvariant:
     def test_filled_training_dates_are_included_in_the_prediction_ones(
         self, heterogeneous_coverage_panel, strategy, fallback, entity
     ):
-        """D14 across frequencies: training at the target's anchors (Q), prediction at M.
+        """Across frequencies: training at the target's anchors (Q), prediction at M.
 
         La grille d'entraînement est celle des ancres trimestrielles de la
         cible, à l'étape Q ; la grille de prédiction, tout l'index à l'étape
         M. Les voies, décidées sur la prédiction, sont rejouées à
-        l'entraînement et ramenées aux fréquences de chaque entité (D21, D22).
+        l'entraînement et ramenées aux fréquences de chaque entité.
         """
         data = heterogeneous_coverage_panel
         materializer = CovariateMaterializer(covariate_strategy=strategy, covariate_fallback=fallback)
@@ -215,7 +215,7 @@ class TestRealisticPanelInvariant:
     def test_structurally_absent_column_is_nan_on_both_sides(
         self, heterogeneous_coverage_panel, strategy, fallback
     ):
-        """climat_affaires / Italie: empty at fit AND at predict, the only exception (§4.5)."""
+        """climat_affaires / Italie: empty at fit AND at predict, the only exception."""
         data = heterogeneous_coverage_panel
         materializer = CovariateMaterializer(covariate_strategy=strategy, covariate_fallback=fallback)
         x_pred, ways = self._predict(materializer, data)
@@ -235,7 +235,7 @@ class TestRealisticPanelInvariant:
 
     @pytest.mark.parametrize('entity', HETEROGENEOUS_ENTITIES)
     def test_interpolate_leaves_no_nan_inside_an_observed_span(self, heterogeneous_coverage_panel, entity):
-        """§4.3: within [first, last observation] of each (entity, column), X_pred has no NaN.
+        """Within [first, last observation] of each (entity, column), X_pred has no NaN.
 
         Seuls restent permis les bords (avant la première, après la dernière
         observation) et l'entité dépourvue de la colonne.

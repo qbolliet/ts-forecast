@@ -1,7 +1,7 @@
 """Shared builders of the ``TrainingSetBuilder`` tests (not a test module).
 
 Detected frequencies and golden values of the frozen reference datasets
-(``PANEL-F`` §2.5, ``TS`` §2.2) and of ``heterogeneous_coverage_panel``,
+(``PANEL-F``, ``TS``) and of ``heterogeneous_coverage_panel``,
 builder and call factories, public-path seeding of the three stores (as an
 earlier stage would have done), a ``'training'`` mask provider shaped like
 ``ImputationWindowCalculator.get_mask_at_frequency``, the target scaling
@@ -25,22 +25,22 @@ from tsforecast.frequency.covariate_materializer import CovariateMaterializer
 from tsforecast.frequency.stage_scaler import StageScaler
 
 
-# Fréquences détectées du jeu PANEL-F (§2.5) : `v` est une propriété du couple
+# Fréquences détectées du jeu PANEL-F : `v` est une propriété du couple
 # (entité, colonne), jamais de la seule colonne
 PANEL_F_FREQUENCIES = {
     'm1': 'M',
     'q1': 'Q',
     'v': {('FR',): 'Y', ('DE',): 'Q', ('IT',): 'M'},
 }
-# Blocs attendus de `v` sur PANEL-F, quelle que soit l'étape (R2, D18)
+# Blocs attendus de `v` sur PANEL-F, quelle que soit l'étape
 PANEL_F_BLOCKS = {('FR',): 'Y', ('DE',): 'Q', ('IT',): 'M'}
-# Fréquences détectées du jeu TS (§2.2)
+# Fréquences détectées du jeu TS
 TS_FREQUENCIES = {'m1': 'M', 'q1': 'Q', 'a1': 'Y', 'a2': 'Y'}
 
 # Covariables des jeux d'entraînement testés
 FEATURES = ['m1', 'q1']
 
-# Valeurs d'or brutes de `v` (§2.5) : ancres annuelles de FR, trimestrielles de
+# Valeurs d'or brutes de `v` : ancres annuelles de FR, trimestrielles de
 # DE, mensuelles d'IT (constantes dans l'année)
 V_FR = [120.0, 132.0, 150.0]
 V_DE = [28.0, 30.0, 31.0, 31.0, 31.0, 33.0, 34.0, 34.0, 36.0, 37.0, 38.0, 39.0]
@@ -48,7 +48,7 @@ V_IT = [10.0] * 12 + [11.0] * 12 + [12.5] * 12
 
 # Imputations trimestrielles de `a1` / `a2` posées à la main dans le miroir,
 # comme les aurait produites l'étape Q sous 'sum' : chaque année somme à son
-# ancre (120 / 132 / 150 et 60 / 66 / 72, §2.2)
+# ancre (120 / 132 / 150 et 60 / 66 / 72)
 QUARTERLY_MIRROR = {
     'a1': [28.0, 30.0, 31.0, 31.0, 31.0, 33.0, 34.0, 34.0, 36.0, 37.0, 38.0, 39.0],
     'a2': [14.0, 15.0, 15.5, 15.5, 15.5, 16.5, 17.0, 17.0, 18.0, 18.0, 18.0, 18.0],

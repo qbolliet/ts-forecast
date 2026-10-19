@@ -4,17 +4,15 @@ The stage frame carries the input values, the EXACT aggregations of the finer
 columns onto the stage grid and the mirror of the earlier stages; it
 fabricates no interpolated value — the cap is applied entity by entity, after
 the precedence: any entity whose own way lands on the interpolation stays at
-its raw anchors — and writes no store. Spec
-``high_frequency_imputer2_architecture.md`` D37: the mirror is read under
-``covariate_strategy='model'`` only (§4.4 precedence), filtered by production
+its raw anchors — and writes no store. The mirror is read under
+``covariate_strategy='model'`` only (by precedence), filtered by production
 frequency so that a value produced at a coarser stage never lands, raw, on a
 finer grid.
 
-Corrections of ANO-FREQ-037 (unbound entity of a unanimous stage binding) and
-ANO-FREQ-042 (a finer entity is aggregated exactly, never given point values),
-both reachable through step 5a of ``HighFrequencyImputer`` (D38 grid), and of
-item 3 of ANO-FREQ-041 (the per-entity cap replaces the documented exception)
-— ``tests/ANOMALIES.md``.
+An unbound entity of a unanimous stage binding is covered, and a finer entity
+is aggregated exactly, never given point values — both reachable through the
+stage step of ``HighFrequencyImputer``; the per-entity cap applies entity by
+entity.
 
 Covered symbol: ``CovariateMaterializer.stage_frame``.
 """
@@ -136,7 +134,7 @@ class TestStageFrameContent:
 
 
 class TestStageFrameMirror:
-    """D37: the mirror is read under ``'model'`` only, filtered by production frequency."""
+    """The mirror is read under ``'model'`` only, filtered by production frequency."""
 
     @pytest.mark.parametrize(
         'strategy, expected',
@@ -160,7 +158,7 @@ class TestStageFrameMirror:
 
         The mirror holds nothing for 2021 at M: the frame keeps the raw
         observation of 2021 at its anchor — the mirror overlays the anchors
-        without replacing them (ANO-FREQ-083) —, never the quarterly
+        without replacing them —, never the quarterly
         production (99).
         """
         grid, quarters = monthly_grid(), quarterly_grid()
@@ -174,7 +172,7 @@ class TestStageFrameMirror:
             detected_frequencies=TS_FREQUENCIES,
             source_data=reference_timeseries,
         )
-        # Valeur d'or (§2.2) : seule l'observation annuelle de 2021, 120, à sa date
+        # Valeur d'or : seule l'observation annuelle de 2021, 120, à sa date
         assert frame['a1'].loc['2021'].dropna().to_dict() == {pd.Timestamp('2021-12-31'): 120.0}
 
     @pytest.mark.parametrize('fallback', ['interpolate', 'tolerate_nan'])
@@ -228,7 +226,7 @@ class TestStageFramePanel:
         [
             # FR, annuelle, plus grossière que Q : ses 3 ancres de décembre
             ('FR', [np.nan] * 3 + [120.0] + [np.nan] * 3 + [132.0] + [np.nan] * 3 + [150.0]),
-            # DE, trimestrielle : ses 12 ancres (§2.5)
+            # DE, trimestrielle : ses 12 ancres
             ('DE', [28.0, 30.0, 31.0, 31.0, 31.0, 33.0, 34.0, 34.0, 36.0, 37.0, 38.0, 39.0]),
         ],
         ids=['FR-raw-anchors', 'DE-identity'],
@@ -246,9 +244,9 @@ class TestStageFramePanel:
         np.testing.assert_allclose(frame.loc[entity, 'v'].to_numpy(), expected)
 
     def test_finer_entity_is_aggregated_exactly(self, mixed_freq_panel_multifrequency):
-        """PANEL-F ``v`` at stage Q: IT's months are summed — 30 / 33 / 37.5 (§2.5).
+        """PANEL-F ``v`` at stage Q: IT's months are summed — 30 / 33 / 37.5.
 
-        La voie de colonne 'interpolate' n'est plus plafonnée en bloc : chaque
+        La voie de colonne 'interpolate' n'est pas plafonnée en bloc : chaque
         entité suit sa propre voie, et IT, plus fine que l'étape, reçoit
         l'agrégation exacte — jamais la valeur ponctuelle du mois (10 / 11 /
         12,5).
@@ -264,7 +262,7 @@ class TestStageFramePanel:
         )
 
     def test_entity_without_the_column_stays_nan(self, mixed_freq_panel_heterogeneous):
-        """climat_affaires: NaN for IT, observed for FR and DE (§4.5)."""
+        """climat_affaires: NaN for IT, observed for FR and DE."""
         data = mixed_freq_panel_heterogeneous
         frame = CovariateMaterializer().stage_frame(
             grid_index=panel_grid(data, monthly_grid()),
@@ -276,7 +274,7 @@ class TestStageFramePanel:
         assert filled == {'DE': 36, 'FR': 36, 'IT': 0}
 
     def test_unanimous_stage_binding_covers_an_unbound_grid_entity(self, mixed_freq_panel_heterogeneous):
-        """Step 5a: the grid holds IT (D38), the binding names FR and DE only (D31).
+        """The grid holds IT, the binding names FR and DE only.
 
         Valeur d'or : m1 de IT sommée au T1 2021, 100 + 101 + 102 = 303.
         """

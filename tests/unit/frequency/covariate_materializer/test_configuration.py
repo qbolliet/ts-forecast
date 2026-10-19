@@ -1,14 +1,13 @@
 """Tests of the configuration surface of ``CovariateMaterializer``.
 
-Covers the validation at ``__init__`` (spec
-``high_frequency_imputer2_architecture.md`` §13.1: validate without
-transforming, B3), the defaults of §4.1, §10.1, §10.2 and §11.1, the
-resolution of the per-feature dict form (``'__default__'`` key, §9.1 rule
-applied by §10.1), the per-column key check run once at ``fit``, and the
+Covers the validation at ``__init__`` (validate without
+transforming), the defaults, the
+resolution of the per-feature dict form (``'__default__'`` key, an uncovered
+column receiving the parameter default), the per-column key check run once at ``fit``, and the
 readable representation.
 
-Correction of ANO-FREQ-044 (``'linear'`` default, also for the columns a
-dict form leaves uncovered) — ``tests/ANOMALIES.md``.
+The ``'linear'`` default also applies to the columns a dict form leaves
+uncovered.
 
 Covered symbols: ``CovariateMaterializer.__init__``, ``resolve_method``,
 ``resolve_anchor``, ``resolve_aggregation_constraint``, ``validate_columns``,
@@ -26,7 +25,7 @@ from tsforecast.frequency.covariate_materializer import (
 
 
 class TestInitValidation:
-    """``__init__`` validates every setting without transforming it (§13.1, B3)."""
+    """``__init__`` validates every setting without transforming it."""
 
     @pytest.mark.parametrize(
         'kwargs, message',
@@ -83,9 +82,9 @@ class TestInitValidation:
         assert materializer.aggregation_constraint_applier is None
 
     def test_defaults_follow_the_spec(self):
-        """Defaults of §4.1, §4.5, §10.2 and §11.1."""
+        """Defaults of the constructor parameters."""
         materializer = CovariateMaterializer()
-        # Valeurs par défaut documentées par la spec, paramètre par paramètre
+        # Valeurs par défaut documentées, paramètre par paramètre
         assert (
             materializer.covariate_strategy,
             materializer.covariate_fallback,
@@ -123,7 +122,7 @@ class TestPerFeatureResolution:
     """Resolution of the scalar-or-dict settings, column by column."""
 
     def test_public_constants(self):
-        """The fallback key of the dict forms, and the default method of §10.1."""
+        """The fallback key of the dict forms, and the default method."""
         assert (DEFAULT_MATERIALIZATION_KEY, DEFAULT_INTERPOLATION_METHOD) == ('__default__', 'linear')
 
     @pytest.mark.parametrize(
@@ -147,11 +146,11 @@ class TestPerFeatureResolution:
         'setting', [{'a1': 'cubic'}, 'linear'], ids=['dict-without-default-key', 'default-setting'],
     )
     def test_uncovered_column_falls_back_to_the_parameter_default(self, setting):
-        """An uncovered column without ``'__default__'`` is interpolated ``'linear'`` (ANO-FREQ-044).
+        """An uncovered column without ``'__default__'`` is interpolated ``'linear'``.
 
-        §10.1 fixes the default of ``interpolation_method`` to ``'linear'`` —
-        the default of ``HighFrequencyImputer`` too — and applies the rule of
-        §9.1: "features non couvertes et pas de ``'__default__'`` -> défaut".
+        The default of ``interpolation_method`` is ``'linear'`` —
+        the default of ``HighFrequencyImputer`` too — and the rule is:
+        "features non couvertes et pas de ``'__default__'`` -> défaut".
         The imputer hands its dict over unchanged, so the materializer's own
         fallback is what every uncovered column receives.
         """
@@ -175,7 +174,7 @@ class TestPerFeatureResolution:
         ids=['scalar', 'scalar-none', 'own-zero', 'default-key', 'no-entry', 'global-no-default'],
     )
     def test_resolve_anchor(self, setting, column, expected):
-        """Own entry, else ``'__default__'``, else None (§10.2)."""
+        """Own entry, else ``'__default__'``, else None."""
         materializer = CovariateMaterializer(interpolation_anchor=setting)
         assert materializer.resolve_anchor(column) == expected
 
@@ -192,7 +191,7 @@ class TestPerFeatureResolution:
         ids=['scalar-sum', 'scalar-none', 'own-none', 'default-key', 'no-entry', 'default-none'],
     )
     def test_resolve_aggregation_constraint(self, setting, column, expected):
-        """Own entry, else ``'__default__'``, else ``'sum'`` (§11.1)."""
+        """Own entry, else ``'__default__'``, else ``'sum'``."""
         materializer = CovariateMaterializer(aggregation_constraint=setting)
         assert materializer.resolve_aggregation_constraint(column) == expected
 

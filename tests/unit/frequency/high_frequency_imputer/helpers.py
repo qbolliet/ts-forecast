@@ -31,7 +31,7 @@ from tsforecast.utils.frequency import normalize_frequency
 # Estimateurs factices partagés
 from tests.support.estimators import SpyEstimator
 
-# Clés d'entité du jeu PANEL-F, sous forme de tuples (§2.5)
+# Clés d'entité du jeu PANEL-F, sous forme de tuples
 FR, DE, IT = ('FR',), ('DE',), ('IT',)
 
 # Les six combinaisons significatives des deux axes : 'tolerate_nan' est
@@ -323,7 +323,7 @@ def replay(imputer: HighFrequencyImputer, data: pd.DataFrame) -> tuple:
     """Transform data with a fitted imputer, at the target level.
 
     The public counterpart of the imputer's internal mirror: the output
-    lays the imputations over the input, imputation first (D37).
+    lays the imputations over the input, imputation first.
 
     Args:
         imputer: Fitted imputer.
@@ -386,7 +386,7 @@ def has_frequency_level_in_output(frame: pd.DataFrame) -> bool:
     )
 
 
-# Attributs publics que chaque passe réécrit par contrat (§13.2, D45) : la
+# Attributs publics que chaque passe réécrit par contrat : la
 # matrice de provenance et ses statistiques décrivent toujours la DERNIÈRE
 # passe, fit ou transform
 PER_PASS_ATTRIBUTES: Tuple[str, ...] = ('imputation_provenance_', 'provenance_statistics_')

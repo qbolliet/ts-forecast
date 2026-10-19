@@ -30,8 +30,7 @@ class TestStepByStepNotebook:
         """Every cell executes and none produces an ``error`` output.
 
         The notebook deliberately reads private methods (it audits the
-        internals): a deliberate change of their signature breaks it, as
-        ``_check_transform_frequencies`` did with D42 (ANO-FREQ-084, fixed).
+        internals): a deliberate change of their signature breaks it.
         """
         nbformat = pytest.importorskip('nbformat')
         nbclient = pytest.importorskip('nbclient')

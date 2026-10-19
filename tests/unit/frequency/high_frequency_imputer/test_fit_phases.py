@@ -1,14 +1,12 @@
-"""Phases 0 to 6 of ``HighFrequencyImputer.fit``.
+"""Fit phases of ``HighFrequencyImputer``: fitted attributes, input contract, wiring.
 
-Covers the fitted attributes of §13.2, the input contract (B14, B15, B16,
-B19), the per-(entity, column) frequencies and classification (§2.5), the
-wiring of the §12.2 components, the interpolation fallback (D6), the edge
-cases of step execution, the public scenarios reaching the branches of the
-fit that the rest of the package leaves uncovered (prompt F11: window that
-cannot be computed or holds no anchor, composite stage label, additive
-transformer returning a pair, target on the pre-conversion index, refit
-purging ``cv_``) and the aggregated warnings of phase 5 (§12.5,
-ANO-FREQ-059).
+Covers the fitted attributes, the input contract, the per-(entity, column)
+frequencies and classification, the wiring of the components, the
+interpolation fallback, the edge cases of step execution, the public scenarios
+reaching the branches of the fit that the rest of the package leaves uncovered
+(window that cannot be computed or holds no anchor, composite stage label,
+additive transformer returning a pair, target on the pre-conversion index,
+refit purging ``cv_``) and the aggregated warnings of phase 5.
 """
 
 # Modules de base
@@ -131,10 +129,10 @@ class _EveryOtherNaNEstimator(BaseEstimator):
 
 
 # =============================================================================
-# Phases 0 à 4 du fit (§12.3)
+# Phases 0 à 4 du fit
 # =============================================================================
 class TestFitPhases:
-    """Les phases 0 à 4 renseignent les attributs ajustés du §13.2."""
+    """Les phases 0 à 4 renseignent les attributs ajustés."""
 
     @pytest.mark.parametrize('fixture_name', ['reference_timeseries', 'mixed_freq_panel_heterogeneous'])
     @pytest.mark.slow
@@ -156,7 +154,7 @@ class TestFitPhases:
             for key in imputer.variable_categories_['impute']
         }
         assert 'a1' in imputable_columns
-        # Ordre d'imputation VIDE hors covariate_strategy='model' (§13.2)
+        # Ordre d'imputation VIDE hors covariate_strategy='model'
         assert not imputer.imputation_order_
 
         # PHASE 1 : les trois masques et les deux bornes
@@ -238,7 +236,7 @@ class TestFitPhases:
 
     @pytest.mark.slow
     def test_three_window_masks_are_set(self, mixed_freq_panel_heterogeneous):
-        """Les trois masques sont des Series booléennes à MultiIndex sur panel (§7.2)."""
+        """Les trois masques sont des Series booléennes à MultiIndex sur panel."""
         imputer = fit_quietly(make_imputer(), mixed_freq_panel_heterogeneous)
         for mask_name in ('strict_window_mask_', 'imputation_window_mask_',
                           'training_window_mask_'):
@@ -248,7 +246,7 @@ class TestFitPhases:
             assert isinstance(mask.index, pd.MultiIndex), mask_name
 
     def test_widening_training_scope_adds_rows_not_columns(self, reference_timeseries):
-        """Élargir training_scope change le masque d'entraînement, jamais les colonnes (§7.2)."""
+        """Élargir training_scope change le masque d'entraînement, jamais les colonnes."""
         strict = fit_quietly(
             make_imputer(training_scope='strict'), reference_timeseries
         )
@@ -266,7 +264,7 @@ class TestFitPhases:
         )
 
     def test_cv_attribute_only_under_cv_order(self, reference_timeseries):
-        """cv_ n'existe que sous fit_predict_order='cv' (§13.2)."""
+        """cv_ n'existe que sous fit_predict_order='cv'."""
         by_frequency = fit_quietly(make_imputer(), reference_timeseries)
         assert not hasattr(by_frequency, 'cv_')
 
@@ -295,7 +293,7 @@ class TestFitPhases:
 
     @pytest.mark.slow
     def test_intermediate_frequencies_modalities_all_fit(self, reference_timeseries):
-        """Les trois modalités de l'axe 2 ajustent, aucune ne lève (§5.1)."""
+        """Les trois modalités de l'axe 2 ajustent, aucune ne lève."""
         for modality in (False, 'covariates_only', True):
             imputer = make_imputer(impute_intermediate_frequencies=modality)
             fit_quietly(imputer, reference_timeseries)
@@ -371,7 +369,7 @@ class TestFitPhases:
             fit_quietly(make_imputer(), reduce(reference_timeseries))
 
     def test_refit_under_the_frequency_order_purges_cv_(self, reference_timeseries):
-        """Un second fit sous l'ordre 'frequency' efface le cv_ du premier (§13.2)."""
+        """Un second fit sous l'ordre 'frequency' efface le cv_ du premier."""
         imputer = fit_quietly(
             make_imputer(fit_predict_order='cv', cv=3), reference_timeseries
         )
@@ -404,7 +402,7 @@ class TestFitPhases:
     def test_entity_never_observing_a_column_is_left_out(
         self, mixed_freq_panel_heterogeneous
     ):
-        """Un couple (entité, colonne) jamais observé sort de la classification (§4.5)."""
+        """Un couple (entité, colonne) jamais observé sort de la classification."""
         imputer = fit_quietly(make_imputer(), mixed_freq_panel_heterogeneous)
         # IT n'observe jamais climat_affaires : le couple n'a pas de fréquence
         assert (IT + ('climat_affaires',)) not in imputer.detected_frequencies_
@@ -420,7 +418,7 @@ class TestFitPhases:
 
 
 # =============================================================================
-# Fréquences et classification PAR (entité, colonne) — jeu PANEL-F (§2.5)
+# Fréquences et classification PAR (entité, colonne) — jeu PANEL-F
 # =============================================================================
 class TestPerEntityFrequencies:
     """Sur un panel, une même colonne peut porter une fréquence par entité."""
@@ -477,7 +475,7 @@ class TestPerEntityFrequencies:
         assert by_column['m1'] == 'M'
 
     def test_composite_stage_label_when_entities_diverge(self, mixed_freq_panel_multifrequency):
-        """Une étape liant des fréquences différentes porte un libellé composite (§5.2).
+        """Une étape liant des fréquences différentes porte un libellé composite.
 
         Sous ``impute_intermediate_frequencies=False``, l'unique étape est la
         liaison ``{FR: M, DE: Q, IT: M}`` elle-même. DE a pour cible Q, où q1
@@ -494,7 +492,7 @@ class TestPerEntityFrequencies:
         assert plan_groups(imputer, label) == {('q1', 'Q'): (FR, IT), ('v', 'Y'): (FR,)}
 
     def test_hyperparameter_dicts_stay_keyed_by_column(self, mixed_freq_panel_multifrequency):
-        """Les dicts d'hyperparamètres restent indexés par colonne, jamais par couple (D10)."""
+        """Les dicts d'hyperparamètres restent indexés par colonne, jamais par couple."""
         imputer = fit_quietly(
             make_imputer(
                 scale_features={'v': 'calendar'},
@@ -515,12 +513,12 @@ class TestPerEntityFrequencies:
 # Câblage des composants
 # =============================================================================
 # Interne : tests de câblage par nature. Pendants publics :
-# test_scoring_rows_follow_the_training_window_not_the_strict_one (I17),
+# test_scoring_rows_follow_the_training_window_not_the_strict_one,
 # test_per_column_constraint_is_read_per_column,
 # test_widening_training_scope_adds_rows_not_columns
 @pytest.mark.internal
 class TestWiring:
-    """Les composants du §12.2 sont instanciés et câblés au fit."""
+    """Les composants de l'imputeur sont instanciés et câblés au fit."""
 
     def test_training_set_builder_is_wired(self, mixed_freq_panel_multifrequency, monkeypatch):
         """Le callable de masque du builder appelle get_mask_at_frequency(kind='training')."""
@@ -545,7 +543,7 @@ class TestWiring:
 
         # Blocs de la colonne v sur PANEL-F, exactement la forme que le
         # TrainingSetBuilder passe : IT y est à la fréquence de la grille, cas
-        # que le calculateur traite en identité (§5.8 R2)
+        # que le calculateur traite en identité
         blocks = {FR: 'Y', DE: 'Q', IT: 'M'}
         mask = imputer._training_set_builder.training_mask(blocks)
 
@@ -565,11 +563,11 @@ class TestWiring:
             make_imputer(aggregation_constraint=constraint), reference_timeseries
         )
         assert imputer._covariate_materializer.aggregation_constraint is constraint
-        # Le builder n'en porte aucune : la cible n'est jamais agrégée (§5.8 R3)
+        # Le builder n'en porte aucune : la cible n'est jamais agrégée
         assert not hasattr(imputer._training_set_builder, 'aggregation_constraint')
 
     def test_window_calculator_receives_the_four_window_parameters(self, reference_timeseries):
-        """Le calculateur de fenêtre reçoit les quatre paramètres du §7."""
+        """Le calculateur de fenêtre reçoit les quatre paramètres de fenêtre."""
         imputer = fit_quietly(
             make_imputer(
                 imputation_scope='extended_forward',
@@ -592,7 +590,7 @@ class TestFallbackPath:
     def test_estimator_failure_falls_back_and_marks_interpolated(
         self, reference_timeseries
     ):
-        """D6 — is_fallback=True, cellules INTERPOLATED, registres alimentés."""
+        """is_fallback=True, cellules INTERPOLATED, registres alimentés."""
         imputer = make_imputer(estimator=FailingEstimator())
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
@@ -636,7 +634,7 @@ class TestFallbackPath:
         Sous ``impute_intermediate_frequencies=True``, les cellules que le repli
         écrit à l'étape Q entrent dans le ``y_train`` de l'étape M avec
         l'origine ``'interpolated'`` : c'est l'effet public du registre
-        d'origine alimenté par le repli (§5.3, §12.3 5c).
+        d'origine alimenté par le repli.
         """
         origins = {}
         original = TrainingSetBuilder.build
@@ -671,7 +669,7 @@ class TestPhaseFiveEdgeCases:
         """Un index désordonné est refusé par le contrat d'entrée, sans imputer à faux.
 
         La classe fige ``auto_sort=False`` et ``strict_validation=True``
-        ([SPEC] §12.5) : trier en silence changerait les fenêtres et les
+        : trier en silence changerait les fenêtres et les
         agrégats sans que l'appelant le sache.
         """
         with pytest.raises(ValueError, match='not sorted'):
@@ -685,8 +683,8 @@ class TestPhaseFiveEdgeCases:
 
         Une date (ou un couple (entité, date)) présente deux fois compterait
         double dans les agrégations exactes et dans les totaux de période
-        (ANO-FREQ-022, ANO-FREQ-039) : la validation stricte du contrat
-        d'entrée (§12.5) la refuse avant tout calcul. Le doublon est trié à
+        : la validation stricte du contrat
+        d'entrée la refuse avant tout calcul. Le doublon est trié à
         sa place, pour que le refus porte sur la duplication et non sur le
         désordre.
         """
@@ -715,7 +713,7 @@ class TestPhaseFiveEdgeCases:
         assert imputed_cells(values, provenance, 'empty').empty
 
     def test_incomplete_leading_and_trailing_periods(self, reference_timeseries):
-        """Une période que les bornes du jeu tronquent n'est pas recalée (§11.1).
+        """Une période que les bornes du jeu tronquent n'est pas recalée.
 
         Deux gardes distinctes se relaient : celle des sous-périodes NaN, et
         celle de la troncature CALENDAIRE, dont les sous-périodes manquantes
@@ -762,7 +760,7 @@ class TestPhaseFiveEdgeCases:
     def test_all_nan_predictions_fall_back_and_warn(self, reference_timeseries):
         """Un modèle qui ne prédit que des NaN est traité comme un échec de prédiction.
 
-        ANO-FREQ-064 : rien n'étant produit, l'étape est dégradée en repli
+        Rien n'étant produit, l'étape est dégradée en repli
         d'interpolation — le plan dit ce qui a réellement été fait — et
         l'avertissement agrégé des étapes dégradées le nomme, comme pour une
         exception. Valeur d'or : les 36 mois de chaque colonne interpolés.
@@ -785,7 +783,7 @@ class TestPhaseFiveEdgeCases:
 
         L'estimateur ne prédit NaN qu'une ligne sur deux : l'étape reste un
         modèle, ses autres cellules sont écrites ; l'année dont une
-        sous-période manque n'est pas recalée (§11.1). Valeur d'or pour a1 :
+        sous-période manque n'est pas recalée. Valeur d'or pour a1 :
         18 cellules NaN sur 36, 18 écrites.
         """
         imputer = make_imputer(estimator=_EveryOtherNaNEstimator())
@@ -840,11 +838,11 @@ class TestWindowWithoutTraining:
         """Un panel sans fenêtre stricte nulle part n'impute rien, comme la série temporelle.
 
         Mêmes couvertures disjointes que ci-dessus, pour les trois entités.
-        Le calculateur levait « No imputation window found for any entity »,
-        l'imputeur retombait sur des masques tout-vrais (« Using all available
-        data ») et imputait les 108 cellules de q1 et de a1 (ANO-FREQ-072).
-        Désormais : masques tout-faux, rien d'écrit, un message au fit qui
-        nomme les trois entités, un seul au transform.
+        Le calculateur ne trouve aucune fenêtre (« No imputation window found
+        for any entity ») : l'imputeur ne retombe pas sur des masques tout-vrais
+        qui imputeraient les 108 cellules de q1 et de a1, mais pose des masques
+        tout-faux, n'écrit rien, émet un message au fit qui nomme les trois
+        entités et un seul au transform.
         """
         data = panel_reference_full[['m1', 'q1', 'a1']].copy()
         dates = data.index.get_level_values(-1)
@@ -891,11 +889,11 @@ class TestWindowWithoutTraining:
         Q, a1 n'a aucune ancre dans la fenêtre : repli, qui écrit T1 à T3
         2021 (origine 'interpolated'). À l'étape M, ces trois trimestres sont
         les SEULES lignes de a1 — couche Q, la couche Y étant vide — et m1 y
-        vaut la somme de chaque trimestre (§5.4bis, I18 b). La sélection des
-        covariables lit chaque couche à sa fréquence (ANO-FREQ-066) : lue à
-        la fréquence du bloc (Y) sur ces dates trimestrielles, m1 y paraissait
-        vide, était écartée, et a1 retombait en repli avec trois lignes
-        exploitables.
+        vaut la somme de chaque trimestre. La sélection des
+        covariables lit chaque couche à sa fréquence : lue à
+        la fréquence du bloc (Y) sur ces dates trimestrielles, m1 y
+        paraîtrait vide, serait écartée, et a1 retomberait en repli avec trois
+        lignes exploitables.
         """
         data = reference_timeseries[['m1', 'q1', 'a1']].copy()
         data.loc['2021-12-31':, 'm1'] = np.nan
@@ -917,7 +915,7 @@ class TestWindowWithoutTraining:
     def test_covariate_absent_from_the_training_grid_is_not_selected(
         self, reference_timeseries
     ):
-        """Une covariable vide sur la grille d'entraînement n'est jamais retenue (§7.2).
+        """Une covariable vide sur la grille d'entraînement n'est jamais retenue.
 
         ``late`` reprend m1 à partir de février 2023 seulement. Sous
         ``training_scope='unrestricted'``, a1 s'entraîne sur ses trois ancres
@@ -936,7 +934,7 @@ class TestWindowWithoutTraining:
 
 
 # =============================================================================
-# Avertissements agrégés de la phase 5 (§12.3 PHASE 6, §12.5)
+# Avertissements agrégés de la phase 5
 # =============================================================================
 # Messages d'une famille d'avertissements, relevés pendant un appel
 def _messages_of_family(call, family: str) -> list:
@@ -973,8 +971,8 @@ class TestAggregatedWarnings:
 
         L'estimateur constant prédit +1 sur chaque sous-période : l'agrégat de
         chaque année est positif face à un total négatif, aux étapes Q ET M,
-        pour a1 comme pour a2 — quatre recalages dégénérés, qui donnaient
-        chacun leur message (ANO-FREQ-059). Valeur d'or : 2 colonnes × 3
+        pour a1 comme pour a2 — quatre recalages dégénérés, regroupés en
+        un seul message. Valeur d'or : 2 colonnes × 3
         années = 6 périodes observées ; une année inversée aux deux étapes
         compte une fois, le message dénombrant des périodes observées et non
         des recalages.

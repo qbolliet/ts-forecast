@@ -1,17 +1,14 @@
 """Tests of ``CovariateMaterializer.materialize``, the single producer of features.
 
-Covers, against spec ``high_frequency_imputer2_architecture.md``: rank 1
-(§4.1: identity, exact aggregation always by SUM, D20), ``'tolerate_nan'``
-(§4.2), ``'interpolate'`` (§4.3), the uniqueness rule (§4.6: the way decided
-once on the prediction grid, replayed as-is — D21 — and brought back to each
-entity's frequencies, D22), the ``record`` flag (D24), the reference example
-of §4.7, the empty columns of §4.5, and the ``AggregationConstraintApplier``
-injection point (§4.3, §11) through a minimal double and once through the real
-``AggregationConstraint``.
+Covers rank 1 (identity, exact aggregation always by SUM), ``'tolerate_nan'``,
+``'interpolate'``, the uniqueness rule (the way decided once on the
+prediction grid, replayed as-is and brought back to each entity's
+frequencies), the ``record`` flag, the reference example, the empty columns,
+and the ``AggregationConstraintApplier`` injection point through a minimal
+double and once through the real ``AggregationConstraint``.
 
-Corrections of ANO-FREQ-040 (a column absent from the source is a
-``KeyError``) and ANO-FREQ-042 (the ``'raw_anchors'`` way goes through the
-per-entity rank-1 normalization) — ``tests/ANOMALIES.md``.
+A column absent from the source is a ``KeyError``; the ``'raw_anchors'`` way
+goes through the per-entity rank-1 normalization.
 
 Covered symbols: ``CovariateMaterializer.materialize``,
 ``AggregationConstraintApplier``.
@@ -51,7 +48,7 @@ from tests.unit.frequency.covariate_materializer.helpers import (
 
 
 class TestRankOneClassification:
-    """Rank 1 of §4.1: identity and exact aggregation, ``'observed'`` origins."""
+    """Rank 1: identity and exact aggregation, ``'observed'`` origins."""
 
     def test_identity_and_aggregate_ranks(self, reference_timeseries):
         """``f_c == f`` gives ``'identity'``, a finer ``f_c`` gives ``'aggregate'``."""
@@ -85,10 +82,10 @@ class TestRankOneClassification:
             assert set(materializer.origin_store[column].unique()) == {'observed'}
 
     def test_rank1_aggregation_is_always_a_sum(self, reference_timeseries):
-        """A finer covariate is aggregated by SUM even under None (D20).
+        """A finer covariate is aggregated by SUM even under None.
 
         ``aggregation_constraint`` only governs the rescaling of INTERPOLATED
-        covariates (§4.3): the exact aggregation of rank 1 never obeys it.
+        covariates: the exact aggregation of rank 1 never obeys it.
         """
         materializer = CovariateMaterializer(aggregation_constraint=None)
 
@@ -131,7 +128,7 @@ class TestRankOneClassification:
 
 
 class TestTolerateNan:
-    """``'tolerate_nan'`` strategy (§4.2): no materialization at all."""
+    """``'tolerate_nan'`` strategy: no materialization at all."""
 
     def test_tolerate_nan_keeps_anchors_only(self, reference_timeseries):
         """a1 is 120 on 2021-12-31 and NaN on the 11 other months, on both sides."""
@@ -144,7 +141,7 @@ class TestTolerateNan:
             detected_frequencies=TS_FREQUENCIES,
             source_data=reference_timeseries,
         )
-        # La voie est imposée à la seconde grille (§4.6)
+        # La voie est imposée à la seconde grille
         x_pred, ways_pred, _ = materializer.materialize(
             columns=['a1'],
             grid_index=monthly_grid('2022-01-31', 12),
@@ -167,12 +164,12 @@ class TestTolerateNan:
 
 
 class TestInterpolate:
-    """``'interpolate'`` strategy (§4.3), the default."""
+    """``'interpolate'`` strategy, the default."""
 
     def test_interpolate_removes_all_nan_except_empty_entity(
         self, mixed_freq_panel_heterogeneous
     ):
-        """Only the entity without any observation keeps NaN (§4.5)."""
+        """Only the entity without any observation keeps NaN."""
         data = mixed_freq_panel_heterogeneous
         materializer = CovariateMaterializer(covariate_strategy='interpolate')
 
@@ -243,7 +240,7 @@ class TestInterpolate:
 
 
 class TestEmptyColumns:
-    """§4.5: nothing can be fabricated where nothing is observed."""
+    """Nothing can be fabricated where nothing is observed."""
 
     @pytest.mark.parametrize(
         'strategy, fallback',
@@ -306,7 +303,7 @@ class TestEmptyColumns:
 
 
 class TestColumnAbsentFromSource:
-    """An unknown column is an error, as in ``interpolate_column`` (ANO-FREQ-040)."""
+    """An unknown column is an error, as in ``interpolate_column``."""
 
     @pytest.mark.parametrize('method', ['materialize', 'stage_frame'])
     def test_column_absent_from_the_source_raises(self, reference_timeseries, method):
@@ -329,7 +326,7 @@ class TestColumnAbsentFromSource:
 
 
 class TestUniquenessOfTheWay:
-    """§4.6: the way is chosen once and replayed as-is (ground of I11)."""
+    """The way is chosen once and replayed as-is."""
 
     def test_replayed_materialization_is_identical(self, mixed_freq_panel_heterogeneous):
         """Choosing then replaying gives exactly the same values and ways."""
@@ -403,7 +400,7 @@ class TestUniquenessOfTheWay:
         )
 
     def test_way_unicity_fit_and_pred(self, reference_timeseries):
-        """§4.6: under ``'model'``, the fallback applies at fit TOO.
+        """Under ``'model'``, the fallback applies at fit TOO.
 
         ``TS`` dataset, stage ``Q``, order ``a1`` before ``a2``: when ``a1``
         is imputed, ``a2`` is materialized by no higher rank, so it falls
@@ -489,12 +486,12 @@ class TestUniquenessOfTheWay:
     def test_replayed_way_is_applied_per_entity_on_mutualized_blocks(
         self, mixed_freq_panel_multifrequency, column, entity, expected
     ):
-        """§4.6 table on PANEL-F: one way per column, each block at its own frequency.
+        """On PANEL-F, one way per column, each block at its own frequency.
 
         La voie décidée sur la grille de prédiction mensuelle — q1
         'interpolate', m1 'identity' — est rejouée sur la grille mutualisée
         des blocs de v (FR annuel, DE trimestriel, IT mensuel) : la même voie
-        y devient agrégation, identité ou interpolation selon le bloc (D22).
+        y devient agrégation, identité ou interpolation selon le bloc.
         """
         features, _ways, _origins = CovariateMaterializer().materialize(
             columns=['q1', 'm1'],
@@ -507,7 +504,7 @@ class TestUniquenessOfTheWay:
         np.testing.assert_allclose(features.loc[entity, column].to_numpy(), expected)
 
     def test_interpolated_block_passes_through_its_anchors(self, mixed_freq_panel_multifrequency):
-        """§4.6 table, IT block: q1 interpolated monthly keeps its quarter-end anchors."""
+        """IT block: q1 interpolated monthly keeps its quarter-end anchors."""
         features, _ways, _origins = CovariateMaterializer().materialize(
             columns=['q1'],
             grid_index=block_grid({'FR': annual_grid(), 'DE': quarterly_grid(), 'IT': monthly_grid()}),
@@ -538,7 +535,7 @@ class TestUniquenessOfTheWay:
     def test_rank_one_way_imposed_on_a_coarser_grid_becomes_an_aggregation(
         self, reference_timeseries
     ):
-        """D22: ``'identity'`` replayed on a grid coarser than the column sums it.
+        """``'identity'`` replayed on a grid coarser than the column sums it.
 
         Sans cette normalisation, la cellule porterait la valeur ponctuelle de
         mars (102), une quantité mensuelle sur une ligne trimestrielle.
@@ -566,7 +563,7 @@ class TestUniquenessOfTheWay:
     def test_rank_one_way_imposed_on_a_finer_grid_falls_back_to_rank_four(
         self, reference_timeseries, strategy, fallback, filled, origin
     ):
-        """D22: ``'identity'`` replayed on a grid finer than the column is the rank 4."""
+        """``'identity'`` replayed on a grid finer than the column is the rank 4."""
         materializer = CovariateMaterializer(covariate_strategy=strategy, covariate_fallback=fallback)
         features, _ways, origins = materializer.materialize(
             columns=['a1'],
@@ -580,7 +577,7 @@ class TestUniquenessOfTheWay:
 
 
 class TestRecordFlag:
-    """D24: the stores hold what was IMPUTED; replay is what keeps the way fixed."""
+    """The stores hold what was IMPUTED; replay is what keeps the way fixed."""
 
     @staticmethod
     def _materialize(materializer, data, **kwargs):
@@ -598,7 +595,7 @@ class TestRecordFlag:
         """By default, ``materialize`` produces the features and leaves the three stores empty.
 
         Défaut ``record=False`` : une matérialisation de covariable n'est pas
-        une imputation (D24), et deux appels successifs décident la même voie.
+        une imputation, et deux appels successifs décident la même voie.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         _features, first_ways, _origins = self._materialize(materializer, reference_timeseries)
@@ -633,11 +630,11 @@ class TestRecordFlag:
 
 
 class TestRawAnchorsPerEntity:
-    """``'raw_anchors'`` is brought back to each entity's rank 1 (ANO-FREQ-042).
+    """``'raw_anchors'`` is brought back to each entity's rank 1.
 
-    §4.1 classifies entity by entity: a covariate at least as fine as the
-    grid is ALWAYS available, by identity or exact aggregation. §4.6 / D22:
-    the column's way is applied per entity, ``_applicable_way`` bringing it
+    The classification is made entity by entity: a covariate at least as fine as the
+    grid is ALWAYS available, by identity or exact aggregation.
+    The column's way is applied per entity, ``_applicable_way`` bringing it
     back to what the entity's frequencies allow — ``'raw_anchors'`` included,
     so that a finer entity never receives the point value of the grid date.
     """
@@ -645,7 +642,7 @@ class TestRawAnchorsPerEntity:
     def test_finer_entity_is_aggregated_under_tolerate_nan(self, mixed_freq_panel_multifrequency):
         """PANEL-F at Q under ``'tolerate_nan'``: IT's monthly v is summed per quarter.
 
-        Valeurs d'or du §2.5 : trimestres de 30, 33 et 37,5, et non la valeur
+        Valeurs d'or : trimestres de 30, 33 et 37,5, et non la valeur
         ponctuelle du mois de fin de trimestre (10, 11, 12,5).
         """
         features, _ways, _origins = CovariateMaterializer(covariate_strategy='tolerate_nan').materialize(
@@ -662,9 +659,9 @@ class TestRawAnchorsPerEntity:
     def test_rank_one_entities_survive_an_entity_without_frequency(self, mixed_freq_panel_multifrequency):
         """c is monthly for DE, quarterly for FR, never observed by IT: DE is summed.
 
-        IT, sans fréquence, ne vote plus (ANO-FREQ-038) ; et quand bien même la
+        IT, sans fréquence, ne vote plus ; et quand bien même la
         voie de colonne serait 'raw_anchors', DE la ramènerait à l'agrégation
-        exacte (ANO-FREQ-042) : la somme du trimestre (303), jamais m1 de mars
+        exacte : la somme du trimestre (303), jamais m1 de mars
         (102).
         """
         data = mixed_freq_panel_multifrequency[['m1', 'q1']].copy()
@@ -696,7 +693,7 @@ class TestRawAnchorsPerEntity:
 
 
 class TestReferenceExampleSpec47:
-    """§4.7: the four rows of the reference table, golden values included."""
+    """The four rows of the reference table, golden values included."""
 
     # Colonnes et grilles de l'exemple : imputation de a1 à l'étape Q
     COLUMNS = ['m1', 'q1', 'a2']
@@ -762,12 +759,12 @@ class TestReferenceExampleSpec47:
         assert origins['a2'] == 'interpolated'
         assert x_train['a2'].isna().mean() == pytest.approx(0.0)
         assert x_pred['a2'].isna().mean() == pytest.approx(0.0)
-        # Valeurs d'or de a2 aux trois ancres annuelles (§2.2)
+        # Valeurs d'or de a2 aux trois ancres annuelles
         np.testing.assert_allclose(x_train['a2'].to_numpy(), [60.0, 66.0, 72.0])
 
 
 class TestAggregationConstraintApplier:
-    """The injection point of the rescaling (§4.3, §11): a minimal double suffices."""
+    """The injection point of the rescaling: a minimal double suffices."""
 
     @staticmethod
     def _materialize(materializer, data, columns=('m1', 'q1', 'a1'), grid=None, stage='Q'):
@@ -795,7 +792,7 @@ class TestAggregationConstraintApplier:
     def test_applier_is_called_for_interpolated_columns_only(
         self, reference_timeseries, strategy, prime_mirror, expected
     ):
-        """Identity, exact aggregation, raw anchors and mirror reads are never rescaled (D20)."""
+        """Identity, exact aggregation, raw anchors and mirror reads are never rescaled."""
         applier = SpyApplier()
         materializer = CovariateMaterializer(
             covariate_strategy=strategy, aggregation_constraint_applier=applier
@@ -876,7 +873,7 @@ class TestAggregationConstraintApplier:
     def test_training_value_is_the_exact_aggregate_of_the_prediction_values(
         self, reference_timeseries
     ):
-        """§4.6, consequence 2: a2 seen at fit is the sum of a2 seen at predict.
+        """``a2`` seen at fit is the sum of ``a2`` seen at predict.
 
         ``TS``, cible Q : la voie de a2, décidée sur la grille de prédiction
         trimestrielle, est 'interpolate' ; rejouée sur le bloc annuel de a1,

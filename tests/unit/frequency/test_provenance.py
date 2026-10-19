@@ -1,8 +1,5 @@
 """Tests for tsforecast.frequency.provenance.
 
-Reference: §6 of ``high_frequency_imputer2_architecture.md`` (provenance, taint
-scale) and its table of §6.3.
-
 Covered symbols: ``ProvenanceType`` (members, ``str`` serialization),
 ``resolve_model_provenance`` (full 3 x 3 truth table), ``origin_to_taint``,
 ``max_origin``, ``provenance_statistics`` and ``ImputationProvenanceTracker`` (``initialize``,
@@ -31,7 +28,7 @@ from tsforecast.frequency.provenance import (
 
 P = ProvenanceType
 
-# Les cinq libellés MODEL_* de l'échelle de souillure (§6.1)
+# Les cinq libellés MODEL_* de l'échelle de souillure
 _MODEL_SCALE = (
     P.MODEL_ON_TRUE,
     P.MODEL_ON_INTERPOLATED,
@@ -64,8 +61,8 @@ class TestProvenanceType:
     """Members, partition and ``str`` serialization of the enumeration."""
 
     def test_exactly_ten_members_with_expected_values(self):
-        """The enumeration holds the ten members of §6.1, values in snake_case."""
-        # Valeurs d'or : copie littérale du §6.1 de la spec
+        """The enumeration holds the ten members, values in snake_case."""
+        # Valeurs d'or : copie littérale des valeurs documentées
         expected = {
             'ORIGINAL': 'original',
             'AGGREGATED': 'aggregated',
@@ -126,7 +123,7 @@ class TestProvenanceType:
         assert 'ProvenanceType' not in rendered
 
     def test_model_on_mixed_is_gone(self):
-        """D6 break: MODEL_ON_MIXED is no longer a member, with no alias."""
+        """MODEL_ON_MIXED is not a member, and has no alias."""
         with pytest.raises(AttributeError):
             P.MODEL_ON_MIXED  # noqa: B018
         assert 'model_on_mixed' not in {m.value for m in P}
@@ -136,9 +133,9 @@ class TestProvenanceType:
 # resolve_model_provenance / origin_to_taint / max_origin
 # =============================================================================
 class TestResolveModelProvenance:
-    """Truth table 3 x 3 -> 5 of §6.3."""
+    """Truth table 3 x 3 -> 5."""
 
-    # Valeurs d'or écrites une à une depuis la table du §6.3 (pas de boucle
+    # Valeurs d'or écrites une à une depuis la table de vérité (pas de boucle
     # rejouant l'implémentation)
     @pytest.mark.parametrize(
         'covariate_taint, target_taint, expected',
@@ -160,7 +157,7 @@ class TestResolveModelProvenance:
         ],
     )
     def test_truth_table(self, covariate_taint, target_taint, expected):
-        """Each of the nine (covariate_taint, target_taint) pairs of §6.3."""
+        """Each of the nine (covariate_taint, target_taint) pairs."""
         assert resolve_model_provenance(covariate_taint, target_taint) is expected
 
     @pytest.mark.parametrize(
@@ -191,7 +188,7 @@ class TestResolveModelProvenance:
         ids=['typo-covariate', 'case-target', 'both-unknown', 'none-object'],
     )
     def test_unknown_taint_raises(self, covariate_taint, target_taint, culprit):
-        """ANO-FREQ-003: a mistyped taint raises instead of reading as clean."""
+        """A mistyped taint raises instead of reading as clean."""
         with pytest.raises(ValueError, match=culprit):
             resolve_model_provenance(covariate_taint, target_taint)
 
@@ -204,7 +201,7 @@ class TestResolveModelProvenance:
 
 
 class TestOriginToTaint:
-    """Origin -> taint correspondence of §6.2."""
+    """Origin -> taint correspondence."""
 
     @pytest.mark.parametrize(
         'origin, expected',
@@ -564,7 +561,7 @@ class TestMarks:
         assert tracker.get_provenance('a', dates[1]) is P.MODEL_ON_TRUE
 
     def test_mark_model_imputed_has_no_trained_on_imputed_argument(self):
-        """§6.6: the ``trained_on_imputed`` boolean is gone."""
+        """``mark_model_imputed`` takes no ``trained_on_imputed`` boolean."""
         tracker, dates = _tracker()
         with pytest.raises(TypeError):
             tracker.mark_model_imputed('a', dates[1], trained_on_imputed=True)
@@ -619,7 +616,7 @@ class TestMarks:
         'method', ['mark_aggregated', 'mark_disaggregated', 'mark_interpolated', 'mark_model_imputed'],
     )
     def test_scalar_timestamp_outside_the_matrix_raises_key_error(self, method):
-        """ANO-FREQ-001: an absent scalar raises like a list-like, adding no row."""
+        """An absent scalar raises like a list-like, adding no row."""
         tracker, _ = _tracker()
         with pytest.raises(KeyError):
             getattr(tracker, method)('a', pd.Timestamp('2030-01-01'))
@@ -665,7 +662,7 @@ class TestMarks:
             ImputationProvenanceTracker().mark_imputed('a', pd.Timestamp('2023-01-01'), P.ORIGINAL)
 
     # Priorité d'écrasement : aucune. La dernière écriture l'emporte, y compris
-    # sur ORIGINAL (§6.4 : une date-ancre ré-exprimée ne porte plus l'observation)
+    # sur ORIGINAL (une date-ancre ré-exprimée ne porte plus l'observation)
     # et y compris vers une provenance « plus propre » (pas de max de souillure :
     # la souillure se calcule dans le plan, jamais dans la matrice).
     @pytest.mark.parametrize(
@@ -687,7 +684,7 @@ class TestMarks:
         assert tracker.get_provenance('a', dates[0]) is second
 
     def test_marking_an_original_cell_overwrites_original(self):
-        """§6.4: an anchor date overwritten by a prediction is no longer ORIGINAL."""
+        """An anchor date overwritten by a prediction is not ORIGINAL."""
         tracker, dates = _tracker()
         assert tracker.get_provenance('a', dates[0]) is P.ORIGINAL
         tracker.mark_model_imputed('a', dates[0])
@@ -730,7 +727,7 @@ class TestClearProvenance:
             tracker.clear_provenance('zz', dates[0])
 
     def test_scalar_timestamp_outside_the_matrix_raises_key_error(self):
-        """ANO-FREQ-001: clearing an absent scalar adds no row either."""
+        """Clearing an absent scalar adds no row either."""
         tracker, _ = _tracker()
         with pytest.raises(KeyError):
             tracker.clear_provenance('a', pd.Timestamp('2030-01-01'))
@@ -763,7 +760,7 @@ class TestGetProvenance:
         assert len(tracker.get_provenance('a', slice(dates[1], dates[3]))) == 3
 
     def test_unfilled_cell_is_none(self):
-        """A NaN input cell reads back as a null (NaN after ``initialize``, ANO-FREQ-004)."""
+        """A NaN input cell reads back as a null (NaN after ``initialize``)."""
         tracker, dates = _tracker()
         assert pd.isna(tracker.get_provenance('a', dates[1]))
 
@@ -937,7 +934,7 @@ class TestComputeStatistics:
         """``provenance_statistics`` on the tracker's matrix gives the very same census.
 
         The function serves the matrices ``HighFrequencyImputer.transform``
-        assembles stage by stage, which no tracker holds (D45).
+        assembles stage by stage, which no tracker holds.
         """
         tracker = self._all_types_tracker()
         expected = tracker.compute_statistics()
@@ -1154,7 +1151,7 @@ class TestMerge:
             base.merge(ImputationProvenanceTracker())
 
     def test_same_shape_but_other_columns_raises(self):
-        """ANO-FREQ-002: same shape is not enough, unmatched columns raise."""
+        """Same shape is not enough, unmatched columns raise."""
         base, dates = _tracker()
         other = ImputationProvenanceTracker().initialize(
             pd.DataFrame({'x': [1.0] * 4, 'y': [2.0] * 4}, index=dates)
@@ -1165,7 +1162,7 @@ class TestMerge:
         pd.testing.assert_frame_equal(base.provenance_matrix_, before)
 
     def test_same_shape_but_other_index_raises(self):
-        """ANO-FREQ-002: same shape but other row labels raises."""
+        """Same shape but other row labels raises."""
         base, _ = _tracker()
         shifted = pd.date_range('2030-01-01', periods=4, freq='MS')
         other = ImputationProvenanceTracker().initialize(

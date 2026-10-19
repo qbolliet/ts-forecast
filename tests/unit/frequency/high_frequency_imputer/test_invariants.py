@@ -1,210 +1,252 @@
-"""Cross-cutting invariants of ``HighFrequencyImputer`` (§16).
+"""Cross-cutting invariants of ``HighFrequencyImputer``.
 
-Covers I1, I2, I3, I4, I5, I10, I13, I16, I17 and the worked examples of
-§5.5 and §6.5. The module also holds the traceability of the twenty-one
-invariants of §16 to the tests of the whole package, checked against the tests
-as they are (prompt F10, 2026-10-12; gaps filled the same day; tests of prompt
-F11 added 2026-10-13, of prompt F12 on 2026-10-14). Paths are relative to
-``tests/unit/frequency/high_frequency_imputer/``; §16 asks each invariant on the
-time series AND on the panel, and every one is now measured on both where §16
-names a dataset. A test marked *xfail* measures the invariant against an open
-anomaly.
+Covers transform symmetry, the NaN availability pattern, column and processing
+order invariance, aggregation additivity, train / predict scale, the absence of
+boolean tests on ``impute_intermediate_frequencies``, pooling on a single
+entity, and the ordering of variables on the fitted sets, plus the worked
+examples of the stage plan and of the provenance of the reference time series.
+The module also holds the map from each cross-cutting property to the tests of
+the whole package. Paths are relative to
+``tests/unit/frequency/high_frequency_imputer/``; each property is measured on
+the time series AND on the panel wherever a panel dataset applies. A test
+marked *xfail* measures the property against a known anomaly.
 
-======  =====================================================================
-Code    Tests (``module::Class::test``) — coverage notes
-======  =====================================================================
-I1      ``test_invariants::TestTransformSymmetry`` (TS and PANEL-F, six axis
-        combinations; ``::test_symmetry_on_panel_x``: PANEL-X, the nine
-        (strategy × modality) pairs, ``'tolerate_nan'`` included — values,
-        provenances, plan, and fit matrix == target level of the replay
-        matrix), ``test_transform::TestSharedModelReplay``,
-        ``test_transform::TestTransformState::
-        test_never_imputed_cells_stay_unmarked_after_transform`` (TS) and
-        ``::test_fit_and_replay_provenances_agree_on_a_panel`` (fit matrix ==
-        replay matrix, never-imputed cells unmarked, ANO-FREQ-050). The
-        replay never fits nor mutates the fit (§12.1):
-        ``test_transform::TestTransformLeavesTheFitIntact`` (no
-        ``TrainingSetBuilder.build`` call, no estimator fit, public fitted
-        state deep-equal before / after on TS and panel, a transform depends
-        on its own input only); fit-period values unchanged by a transform on
-        later dates: ``TestTransformOnLaterDates::test_fit_period_is_unchanged``.
-I2      ``test_invariants::TestNaNInvariant`` — TS and PANEL (entity without
-        feature included), three strategies.
-I3      ``test_invariants::TestOrderInvariance::test_column_order_invariance``
-        (TS) and ``::test_column_order_invariance_on_panel`` (PANEL), three
-        strategies each.
-I4      ``test_invariants::TestAggregationAdditivity`` (TS, PANEL-F),
-        ``TestReferenceExamples::test_reference_provenance_of_spec_6_5``,
-        ``test_fit_phases::TestPhaseFiveEdgeCases::
-        test_incomplete_leading_and_trailing_periods``,
-        ``test_transform::TestIrregularIndexExtendedWindow::
-        test_additivity_holds_on_the_isolated_years``, and the interpolated
-        covariate of ``test_materialization::TestPerEntityMaterialization::
-        test_one_covariate_takes_three_ways_on_the_pooled_grid``, and the
-        covariate carried from an earlier stage (rank 3):
-        ``TestAggregationAdditivity::
-        test_carried_covariate_sums_to_the_period_total``. Realistic
-        datasets, three strategies, predictions and fallbacks alike:
-        ``tests/integration/frequency/test_hfi_on_realistic_dataset.py::
-        TestPeriodTotals`` (irregular TS, heterogeneous panel, three
-        modalities). At transform: the new 2023 periods
-        (``test_transform::TestTransformOnLaterDates``, TS and PANEL-F), the
-        fit frequency kept for the rescaling under a divergence
-        (``TestTransformFrequencyControl::
-        test_fit_frequencies_drive_the_rescaling``), each stacked level
-        (``TestKeepLowerFrequencies::
-        test_each_level_carries_the_imputations_of_its_own_stage``), the
-        observed totals of an entity born at transform time and of a column a
-        known entity left empty at fit time (D42, ``TestNewEntityAtTransform::
-        test_observations_of_a_new_entity_are_never_overwritten`` and
-        ``::test_column_empty_at_fit_and_observed_at_transform_is_anchored``).
-        A truncated period is not rescaled and is warned about (D25, D46):
-        ``TestTransformInputContract::
-        test_truncated_period_is_reported_and_restorable``,
-        ``test_aggregation_constraint::TestWarnings``.
-I5      ``test_invariants::TestTrainPredictScale`` (TS, both mixed cases of
-        §16), ``test_materialization::TestPerEntityMaterialization::
-        test_the_three_ways_land_on_the_same_scale`` (PANEL-F).
-I6      ``test_provenance::TestProvenanceFamilies``,
-        ``test_frequency_progression::TestOriginFilter::
-        test_target_taint_families``, ``test_fit_phases::TestFallbackPath::
-        test_estimator_failure_falls_back_and_marks_interpolated``,
-        ``test_mutualization::TestUnobservedEntities::
-        test_model_unanchored_is_never_emitted_by_default`` (panel),
-        ``test_frequency_progression::TestPerRowScale::
-        test_target_taint_of_a_contributing_entity_propagates`` (panel).
-I7      ``test_transform::TestTransformOutsideWindow`` (TS, and
-        ``test_transform_outside_fit_window_on_panel``),
-        ``TestTransformOnLaterDates`` (new periods imputed, TS and PANEL-F),
-        ``tests/integration/frequency/test_hfi_on_realistic_dataset.py::
-        TestShortEntityCoverage`` (realistic heterogeneous panel fitted to
-        2023-12: Allemagne never stretched past 2024-04, no cell filled past
-        its column's coverage, every filled cell marked),
-        ``TestKeepLowerFrequencies::
-        test_entity_left_out_of_the_last_stage_keeps_its_last_passage``
-        (D38, D43), ``::test_no_empty_cell_of_the_output_is_marked`` (D44),
-        ``TestTargetCoarserThanTheIndex`` (an input row off the target grid
-        aggregated on its period's row, marked ``AGGREGATED``),
-        ``TestNewEntityAtTransform::
-        test_observations_of_a_new_entity_are_never_overwritten`` (D42).
-I8      ``test_inverse_transform::TestInverseTransform`` (TS and two-level
-        panel), ``test_transform::TestReservedFrequencyLevel::
-        test_inverse_reads_the_level_by_position``. Right after a fit under
-        ``restore_original_values=True``: ``TestInverseTransform::
-        test_restoring_inverse_right_after_a_fit`` (ANO-FREQ-051).
-        ``test_inverse_transform::TestRoundTripRestoresObservations`` (PANEL-X
-        under a three-level index, non-standard index names and special
-        column names; nothing invented without restoration, PANEL-F; a pass
-        on new data; the ``(X, y)`` pair; columns unknown to the last pass),
-        ``TestInverseLevelSelection`` (level read on the data, a level the
-        last pass never produced refused), ``test_transform::
-        TestTransformInputContract`` (additive transformer inverted last,
-        unnamed ``y``). The input index and order given back (D43): row
-        order under per-entity targets
-        (``TestRoundTripRestoresObservations::
-        test_inverse_restores_the_row_order``), rows added by the grid of an
-        irregular index (``::test_inverse_drops_the_rows_the_grid_added``),
-        input rows a coarser target leaves out
-        (``test_transform::TestTargetCoarserThanTheIndex``); a refused
-        transform leaves the last pass invertible (D45,
-        ``test_transform::TestTransformFrequencyControl::
-        test_failed_transform_leaves_the_last_pass_intact``).
-I9      ``test_sklearn`` — ``TestParameterContract`` (clone, get_params,
-        set_params, NotFittedError), ``TestSklearnConformance`` (Pipeline,
-        GridSearchCV on a panel with a dict target), ``TestEstimatorChecks``,
-        ``TestCloneAndNestedParams``, ``TestNotFitted``, ``TestPersistence``,
-        ``TestFeaturesSeenAtFit``. §16 credits
-        ``TestParameterValidation`` with clone / get_params / NotFittedError:
-        they live in ``TestParameterContract``.
-I10     ``test_invariants::TestOrderInvariance::
-        test_processing_order_indifferent_outside_model`` (TS) and
-        ``::test_processing_order_indifferent_outside_model_on_panel``.
-I11     ``test_materialization::TestMaterializationReplay`` (fit vs replay
-        frames one by one, TS and PANEL-F), ``TestMaterializationWays``.
-I12     ``test_frequency_progression::TestOriginFilter::
-        test_covariates_only_differs_from_true`` (TS) and
-        ``::test_covariates_only_differs_from_true_on_panel`` (PANEL; final
-        values equal to False under ``'interpolate'``).
-I13     ``test_invariants::TestStaticInvariants::
-        test_no_boolean_test_on_impute_intermediate_frequencies``,
-        ``test_sklearn::TestParameterContract::
-        test_impute_intermediate_frequencies_covariates_only_is_not_true``.
-I14     ``test_mutualization::TestMutualizedTrainingSet::
-        test_pooled_training_set_on_panel_f`` (stage M: 51 rows, gold values),
-        ``test_invariants::TestOrderingSeesTheFittedSets::
-        test_panel_scored_target_is_brought_back_to_the_stage_scale``, and
-        stage Q: ``test_mutualization::TestMutualizedTrainingSet::
-        test_pooled_training_set_at_stage_q`` (FR divisor 4, IT divisor 1/3 on
-        its 36 monthly rows, DE raw).
-I15     ``test_mutualization::TestMutualizedTrainingSet::
-        test_single_fit_shared_between_source_frequency_groups``,
-        ``test_contributing_entity_is_never_rewritten``,
-        ``TestUnobservedEntities::
-        test_adding_the_unanchored_group_leaves_the_others_intact``,
-        ``test_transform::TestSharedModelReplay``.
-I16     ``test_invariants::TestReferenceExamples::
-        test_timeseries_results_unchanged_by_pooling`` (and
-        ``training_set_builder/test_blocks_and_rows.py``, component level);
-        panel side: ``test_robustness::TestInputEdgeCases::
-        test_single_entity_panel_matches_the_time_series`` (a one-entity
-        panel gives the time series' values and provenances bit for bit).
-I17     ``test_invariants::TestOrderingSeesTheFittedSets`` (5 tests, TS and
-        PANEL-F, ``training_scope='unrestricted'``, ``'frequency'`` order).
-I18     (a) and (c): component level only,
-        ``training_set_builder/test_origins_and_layers.py::TestTrainingWindow``
-        (mask read once per layer, materializer called once per layer, layers
-        ``[{FR: Y, DE: Q, IT: M}, {FR: Q}]``). (b) partial:
-        ``test_frequency_progression::TestStagePlanAxis2::
-        test_stage_plan_of_spec_5_5`` (Y and Q rows, origins) and
-        ``TestOriginFilter::test_target_taint_families`` (``'imputed'``),
-        ``TestStagePlanAxis2::test_x_train_is_full_on_the_quarterly_rows``
-        (Y and Q rows, ``'imputed'``, ``m1`` = quarter sum at stage scale).
-        Finer rows alone (empty Y layer): ``test_fit_phases::
-        TestWindowWithoutTraining::test_finer_rows_alone_keep_their_covariates``
-        (covariate selection read layer by layer, ANO-FREQ-066).
-I19     ``test_frequency_progression::TestFrequencyProgression::
-        test_progression_per_target_frequency_group_on_panel``,
-        ``::test_entity_stopping_early_still_feeds_the_finer_stage`` (``DE``
-        feeds the ``y_train`` of stage M, no ``DE`` cell imputed at M),
-        ``test_mutualization::TestUnobservedEntities::
-        test_stage_not_binding_the_entity_leaves_it_out`` (no M stage binds
-        ``IT``, target ``{FR: M, DE: M, IT: Q}``), ``test_fit_phases::
-        TestPerEntityFrequencies::test_composite_stage_label_when_entities_diverge``
-        (single stage binding diverging targets under ``False``).
-I20     ``test_frequency_progression::TestCoincidentCells`` (6 tests).
-I21     ``test_mutualization::TestUnobservedEntities`` (17 tests: every stage
-        binding the entity and only those, a column no entity observes, an
-        entity without window predicted on its whole grid, NaN predictions,
-        the failed-step warnings, ANO-FREQ-063), ``test_robustness::
-        TestInputEdgeCases::test_all_nan_entity_is_left_alone_and_costs_the_others_nothing``
-        (default ``False``: cells NaN and unmarked, other entities unchanged).
-        At transform (D34, D42): ``test_transform::TestNewEntityAtTransform``
-        (default untouched — observed columns included —, imputed on demand,
-        same cells as when present at fit, derived steps never in the plan, a
-        stage of diverging frequencies skipping the entity, observed pairs
-        anchored, never ``MODEL_UNANCHORED``). A pair observed at fit keeps
-        its replayed step when the transformed data never observe it
-        (``TestColumnWithoutAnchorAtTransform``: ``MODEL_*`` under both
-        values of the parameter, ANO-FREQ-074 closed).
-======  =====================================================================
+=========================  ====================================================
+Property                   Tests (``module::Class::test``) — coverage notes
+=========================  ====================================================
+Transform symmetry         ``test_invariants::TestTransformSymmetry`` (TS and
+                           PANEL-F, six axis combinations;
+                           ``::test_symmetry_on_panel_x``: PANEL-X, the nine
+                           (strategy × modality) pairs, ``'tolerate_nan'``
+                           included — values, provenances, plan, and fit matrix
+                           == target level of the replay matrix),
+                           ``test_transform::TestSharedModelReplay``,
+                           ``test_transform::TestTransformState::
+                           test_never_imputed_cells_stay_unmarked_after_transform``
+                           (TS) and ``::test_fit_and_replay_provenances_agree_on_a_panel``
+                           (fit matrix == replay matrix, never-imputed cells
+                           unmarked). The replay never fits nor mutates the fit:
+                           ``test_transform::TestTransformLeavesTheFitIntact``
+                           (no ``TrainingSetBuilder.build`` call, no estimator
+                           fit, public fitted state deep-equal before / after
+                           on TS and panel, a transform depends on its own
+                           input only); fit-period values unchanged by a
+                           transform on later dates:
+                           ``TestTransformOnLaterDates::test_fit_period_is_unchanged``.
+NaN availability           ``test_invariants::TestNaNInvariant`` — TS and PANEL
+                           (entity without feature included), three strategies.
+Column order               ``test_invariants::TestOrderInvariance::
+                           test_column_order_invariance`` (TS) and
+                           ``::test_column_order_invariance_on_panel`` (PANEL),
+                           three strategies each.
+Aggregation additivity     ``test_invariants::TestAggregationAdditivity`` (TS,
+                           PANEL-F),
+                           ``TestReferenceExamples::test_reference_provenance_of_spec_6_5``,
+                           ``test_fit_phases::TestPhaseFiveEdgeCases::
+                           test_incomplete_leading_and_trailing_periods``,
+                           ``test_transform::TestIrregularIndexExtendedWindow::
+                           test_additivity_holds_on_the_isolated_years``, the
+                           interpolated covariate of
+                           ``test_materialization::TestPerEntityMaterialization::
+                           test_one_covariate_takes_three_ways_on_the_pooled_grid``,
+                           and the covariate carried from an earlier stage:
+                           ``TestAggregationAdditivity::
+                           test_carried_covariate_sums_to_the_period_total``.
+                           Realistic datasets, three strategies, predictions
+                           and fallbacks alike:
+                           ``tests/integration/frequency/test_hfi_on_realistic_dataset.py::
+                           TestPeriodTotals`` (irregular TS, heterogeneous
+                           panel, three modalities). At transform: the new 2023
+                           periods (``test_transform::TestTransformOnLaterDates``,
+                           TS and PANEL-F), the fit frequency kept for the
+                           rescaling under a divergence
+                           (``TestTransformFrequencyControl::
+                           test_fit_frequencies_drive_the_rescaling``), each
+                           stacked level (``TestKeepLowerFrequencies::
+                           test_each_level_carries_the_imputations_of_its_own_stage``),
+                           the observed totals of an entity born at transform
+                           time and of a column a known entity left empty at fit
+                           time (``TestNewEntityAtTransform::
+                           test_observations_of_a_new_entity_are_never_overwritten``
+                           and ``::test_column_empty_at_fit_and_observed_at_transform_is_anchored``).
+                           A truncated period is not rescaled and is warned
+                           about: ``TestTransformInputContract::
+                           test_truncated_period_is_reported_and_restorable``,
+                           ``test_aggregation_constraint::TestWarnings``.
+Train / predict scale      ``test_invariants::TestTrainPredictScale`` (TS, both
+                           mixed cases), ``test_materialization::
+                           TestPerEntityMaterialization::
+                           test_the_three_ways_land_on_the_same_scale``
+                           (PANEL-F).
+Provenance families        ``test_provenance::TestProvenanceFamilies``,
+                           ``test_frequency_progression::TestOriginFilter::
+                           test_target_taint_families``,
+                           ``test_fit_phases::TestFallbackPath::
+                           test_estimator_failure_falls_back_and_marks_interpolated``,
+                           ``test_mutualization::TestUnobservedEntities::
+                           test_model_unanchored_is_never_emitted_by_default``
+                           (panel), ``test_frequency_progression::TestPerRowScale::
+                           test_target_taint_of_a_contributing_entity_propagates``
+                           (panel).
+No stretching past the     ``test_transform::TestTransformOutsideWindow`` (TS,
+observed coverage          and ``test_transform_outside_fit_window_on_panel``),
+                           ``TestTransformOnLaterDates`` (new periods imputed,
+                           TS and PANEL-F),
+                           ``tests/integration/frequency/test_hfi_on_realistic_dataset.py::
+                           TestShortEntityCoverage`` (realistic heterogeneous
+                           panel fitted to 2023-12: Allemagne never stretched
+                           past 2024-04, no cell filled past its column's
+                           coverage, every filled cell marked),
+                           ``TestKeepLowerFrequencies::
+                           test_entity_left_out_of_the_last_stage_keeps_its_last_passage``,
+                           ``::test_no_empty_cell_of_the_output_is_marked``,
+                           ``TestTargetCoarserThanTheIndex`` (an input row off
+                           the target grid aggregated on its period's row,
+                           marked ``AGGREGATED``),
+                           ``TestNewEntityAtTransform::
+                           test_observations_of_a_new_entity_are_never_overwritten``.
+Inverse transform          ``test_inverse_transform::TestInverseTransform`` (TS
+                           and two-level panel), ``test_transform::
+                           TestReservedFrequencyLevel::
+                           test_inverse_reads_the_level_by_position``. Right
+                           after a fit under ``restore_original_values=True``:
+                           ``TestInverseTransform::
+                           test_restoring_inverse_right_after_a_fit``.
+                           ``test_inverse_transform::TestRoundTripRestoresObservations``
+                           (PANEL-X under a three-level index, non-standard
+                           index names and special column names; nothing
+                           invented without restoration, PANEL-F; a pass on new
+                           data; the ``(X, y)`` pair; columns unknown to the
+                           last pass), ``TestInverseLevelSelection`` (level read
+                           on the data, a level the last pass never produced
+                           refused), ``test_transform::TestTransformInputContract``
+                           (additive transformer inverted last, unnamed ``y``).
+                           The input index and order given back: row order under
+                           per-entity targets
+                           (``TestRoundTripRestoresObservations::
+                           test_inverse_restores_the_row_order``), rows added by
+                           the grid of an irregular index
+                           (``::test_inverse_drops_the_rows_the_grid_added``),
+                           input rows a coarser target leaves out
+                           (``test_transform::TestTargetCoarserThanTheIndex``);
+                           a refused transform leaves the last pass invertible
+                           (``test_transform::TestTransformFrequencyControl::
+                           test_failed_transform_leaves_the_last_pass_intact``).
+sklearn conformance        ``test_sklearn`` — ``TestParameterContract`` (clone,
+                           get_params, set_params, NotFittedError),
+                           ``TestSklearnConformance`` (Pipeline, GridSearchCV on
+                           a panel with a dict target), ``TestEstimatorChecks``,
+                           ``TestCloneAndNestedParams``, ``TestNotFitted``,
+                           ``TestPersistence``, ``TestFeaturesSeenAtFit``.
+                           clone / get_params / NotFittedError live in
+                           ``TestParameterContract``.
+Processing order           ``test_invariants::TestOrderInvariance::
+                           test_processing_order_indifferent_outside_model``
+                           (TS) and ``::test_processing_order_indifferent_outside_model_on_panel``.
+Materialization replay     ``test_materialization::TestMaterializationReplay``
+                           (fit vs replay frames one by one, TS and PANEL-F),
+                           ``TestMaterializationWays``.
+``covariates_only``        ``test_frequency_progression::TestOriginFilter::
+                           test_covariates_only_differs_from_true`` (TS) and
+                           ``::test_covariates_only_differs_from_true_on_panel``
+                           (PANEL; final values equal to False under
+                           ``'interpolate'``).
+No boolean test on         ``test_invariants::TestStaticInvariants::
+``impute_intermediate_     test_no_boolean_test_on_impute_intermediate_frequencies``,
+frequencies``              ``test_sklearn::TestParameterContract::
+                           test_impute_intermediate_frequencies_covariates_only_is_not_true``.
+Pooled training set        ``test_mutualization::TestMutualizedTrainingSet::
+                           test_pooled_training_set_on_panel_f`` (stage M: 51
+                           rows, gold values),
+                           ``test_invariants::TestOrderingSeesTheFittedSets::
+                           test_panel_scored_target_is_brought_back_to_the_stage_scale``,
+                           and stage Q: ``test_mutualization::TestMutualizedTrainingSet::
+                           test_pooled_training_set_at_stage_q`` (FR divisor 4,
+                           IT divisor 1/3 on its 36 monthly rows, DE raw).
+Shared fit                 ``test_mutualization::TestMutualizedTrainingSet::
+                           test_single_fit_shared_between_source_frequency_groups``,
+                           ``test_contributing_entity_is_never_rewritten``,
+                           ``TestUnobservedEntities::
+                           test_adding_the_unanchored_group_leaves_the_others_intact``,
+                           ``test_transform::TestSharedModelReplay``.
+Pooling on one entity      ``test_invariants::TestReferenceExamples::
+                           test_timeseries_results_unchanged_by_pooling`` (and
+                           ``training_set_builder/test_blocks_and_rows.py``,
+                           component level); panel side:
+                           ``test_robustness::TestInputEdgeCases::
+                           test_single_entity_panel_matches_the_time_series``
+                           (a one-entity panel gives the time series' values and
+                           provenances bit for bit).
+Ordering on fitted sets    ``test_invariants::TestOrderingSeesTheFittedSets`` (5
+                           tests, TS and PANEL-F,
+                           ``training_scope='unrestricted'``, ``'frequency'``
+                           order).
+Training window layers     Component level only,
+                           ``training_set_builder/test_origins_and_layers.py::TestTrainingWindow``
+                           (mask read once per layer, materializer called once
+                           per layer, layers ``[{FR: Y, DE: Q, IT: M}, {FR: Q}]``);
+                           partially at stage level:
+                           ``test_frequency_progression::TestStagePlanAxis2::
+                           test_stage_plan_of_spec_5_5`` (Y and Q rows,
+                           origins) and
+                           ``TestOriginFilter::test_target_taint_families``
+                           (``'imputed'``),
+                           ``TestStagePlanAxis2::test_x_train_is_full_on_the_quarterly_rows``
+                           (Y and Q rows, ``'imputed'``, ``m1`` = quarter sum at
+                           stage scale). Finer rows alone (empty Y layer):
+                           ``test_fit_phases::TestWindowWithoutTraining::
+                           test_finer_rows_alone_keep_their_covariates``
+                           (covariate selection read layer by layer).
+Frequency progression      ``test_frequency_progression::TestFrequencyProgression::
+                           test_progression_per_target_frequency_group_on_panel``,
+                           ``::test_entity_stopping_early_still_feeds_the_finer_stage``
+                           (``DE`` feeds the ``y_train`` of stage M, no ``DE``
+                           cell imputed at M),
+                           ``test_mutualization::TestUnobservedEntities::
+                           test_stage_not_binding_the_entity_leaves_it_out`` (no
+                           M stage binds ``IT``, target ``{FR: M, DE: M, IT: Q}``),
+                           ``test_fit_phases::TestPerEntityFrequencies::
+                           test_composite_stage_label_when_entities_diverge``
+                           (single stage binding diverging targets under
+                           ``False``).
+Coincident cells           ``test_frequency_progression::TestCoincidentCells``
+                           (6 tests).
+Unobserved entities        ``test_mutualization::TestUnobservedEntities`` (17
+                           tests: every stage binding the entity and only those,
+                           a column no entity observes, an entity without window
+                           predicted on its whole grid, NaN predictions, the
+                           failed-step warnings), ``test_robustness::
+                           TestInputEdgeCases::
+                           test_all_nan_entity_is_left_alone_and_costs_the_others_nothing``
+                           (default ``False``: cells NaN and unmarked, other
+                           entities unchanged). At transform:
+                           ``test_transform::TestNewEntityAtTransform`` (default
+                           untouched — observed columns included —, imputed on
+                           demand, same cells as when present at fit, derived
+                           steps never in the plan, a stage of diverging
+                           frequencies skipping the entity, observed pairs
+                           anchored, never ``MODEL_UNANCHORED``). A pair
+                           observed at fit keeps its replayed step when the
+                           transformed data never observe it
+                           (``TestColumnWithoutAnchorAtTransform``: ``MODEL_*``
+                           under both values of the parameter).
+=========================  ====================================================
 
-Outside the table — robustness of the fit to its inputs (prompt F11),
-``test_robustness``: edge cases of ``CLAUDE.md`` (``TestInputEdgeCases``),
-invariance to the index perturbations on ``PANEL-X`` — reversed entities,
-special column names, non-standard index names, three-level index; shuffled
-rows refused (``TestPerturbationInvariance``) —, start-of-period positions
-(``TestPeriodPositions``) — the realistic datasets of notebook 3 moved to
-``tests/integration/frequency/test_hfi_on_realistic_dataset.py`` —; aggregated warnings of phase 5
-(§12.5, ANO-FREQ-059): ``test_fit_phases::TestAggregatedWarnings``.
-Transform side (prompt F12), ``test_transform``: frequency control (D11:
-one warning naming the pair, fit frequencies kept, a missing column — even
-one entirely empty at fit time — raising), multi-frequency output (D35 levels
-in progression order on the entity side, D37 imputations laid over every
-level, D38 last passage, D43 output in input order), input contract
-(``Series`` refused, one-row input, ``(X, y)`` pair, additive transformer);
-``provenance_statistics_`` of the last pass, on its target level (D45). The
-corrections of the anomalies 073-079 (2026-10-14) are decisions D42-D46 of
-§14.10.
+Outside the table — robustness of the fit to its inputs, ``test_robustness``:
+edge cases of ``CLAUDE.md`` (``TestInputEdgeCases``), invariance to the index
+perturbations on ``PANEL-X`` — reversed entities, special column names,
+non-standard index names, three-level index; shuffled rows refused
+(``TestPerturbationInvariance``) —, start-of-period positions
+(``TestPeriodPositions``); the realistic datasets live in
+``tests/integration/frequency/test_hfi_on_realistic_dataset.py``; aggregated
+warnings of phase 5: ``test_fit_phases::TestAggregatedWarnings``.
+Transform side, ``test_transform``: frequency control (one warning naming the
+pair, fit frequencies kept, a missing column — even one entirely empty at fit
+time — raising), multi-frequency output (levels in progression order on the
+entity side, imputations laid over every level, last passage, output in input
+order), input contract (``Series`` refused, one-row input, ``(X, y)`` pair,
+additive transformer); ``provenance_statistics_`` of the last pass, on its
+target level.
 """
 
 # Modules de base
@@ -243,10 +285,10 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 # Invariants statiques
 # =============================================================================
 class TestStaticInvariants:
-    """Invariants vérifiables sur le source du module (§16)."""
+    """Properties checked on the source text of the module."""
 
     def test_no_boolean_test_on_impute_intermediate_frequencies(self):
-        """Aucun test de vérité booléenne sur l'axe 2 : invariant I13."""
+        """The source never tests ``impute_intermediate_frequencies`` for truthiness."""
         module_path = (
             Path(__file__).resolve().parents[4]
             / 'tsforecast' / 'frequency' / 'high_frequency_imputer.py'
@@ -287,7 +329,7 @@ class TestStaticInvariants:
 
 
 class TestNaNInvariant:
-    """I2 — le motif de disponibilité de X_pred contient celui de X_train."""
+    """The availability pattern of X_pred contains that of X_train."""
 
     @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate', 'model'])
     @pytest.mark.parametrize(
@@ -295,7 +337,7 @@ class TestNaNInvariant:
     )
     @pytest.mark.slow
     def test_nan_invariant_by_stage_and_column(self, strategy, fixture_name, request):
-        """Formulation D14 : inclusion des dates, par étape, colonne ET entité."""
+        """Per stage, column AND entity, the training dates are included in the predicted dates."""
         data = request.getfixturevalue(fixture_name)
         imputer = fit_with_spy(data, covariate_strategy=strategy)
 
@@ -312,7 +354,7 @@ class TestNaNInvariant:
                     for entity, dates in trained.items():
                         # Image des dates d'entraînement SUR la grille de
                         # prédiction : le taux brut de NaN ne dit rien quand
-                        # les deux grilles n'ont pas le même pas (§4.7)
+                        # les deux grilles n'ont pas le même pas
                         image = dates & grid.get(entity, set())
                         assert image <= predicted.get(entity, set())
                         checked += 1
@@ -320,7 +362,7 @@ class TestNaNInvariant:
 
 
 class TestOrderInvariance:
-    """I3 et I10 — les valeurs ne dépendent ni de l'ordre des colonnes ni du traitement."""
+    """Values depend neither on the column order nor on the processing order."""
 
     @staticmethod
     def _outputs(imputer: HighFrequencyImputer, data: pd.DataFrame, columns) -> dict:
@@ -336,7 +378,7 @@ class TestOrderInvariance:
 
     @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate', 'model'])
     def test_column_order_invariance(self, reference_timeseries, strategy):
-        """I3 — permuter les colonnes d'entrée ne change ni valeurs ni provenances."""
+        """Permuting the input columns changes neither values nor provenances."""
         columns = ['q1', 'a1', 'a2']
         permuted_data = reference_timeseries[['a2', 'a1', 'q1', 'm1']]
         straight = fit_with_spy(reference_timeseries, covariate_strategy=strategy)
@@ -355,7 +397,7 @@ class TestOrderInvariance:
     def test_processing_order_indifferent_outside_model(
         self, reference_timeseries, strategy
     ):
-        """I10 — hors 'model', deux ordres de traitement donnent la MÊME sortie."""
+        """Outside 'model', two processing orders give the SAME output."""
         columns = ['q1', 'a1', 'a2']
         forward = fit_with_spy(reference_timeseries, covariate_strategy=strategy)
         # Ordre de traitement inversé : il suit l'ordre des colonnes d'entrée
@@ -374,7 +416,7 @@ class TestOrderInvariance:
     @pytest.mark.slow
     @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate', 'model'])
     def test_column_order_invariance_on_panel(self, mixed_freq_panel_heterogeneous, strategy):
-        """I3 sur PANEL — permuter les colonnes ne change ni valeurs ni provenances."""
+        """On a panel, permuting the columns changes neither values nor provenances."""
         data = mixed_freq_panel_heterogeneous
         columns = ['q1', 'a1', 'a2']
         permuted_data = data[['a2', 'climat_affaires', 'a1', 'q1', 'm1']]
@@ -395,7 +437,7 @@ class TestOrderInvariance:
     def test_processing_order_indifferent_outside_model_on_panel(
         self, mixed_freq_panel_heterogeneous, strategy
     ):
-        """I10 sur PANEL — hors 'model', deux ordres de traitement, une même sortie."""
+        """On a panel, outside 'model', two processing orders give the same output."""
         data = mixed_freq_panel_heterogeneous
         columns = ['q1', 'a1', 'a2']
         forward = fit_with_spy(data, covariate_strategy=strategy)
@@ -517,7 +559,7 @@ class TestOrderingSeesTheFittedSets:
         )
         _X_scored, y_scored = recorded['v']
 
-        # Les 51 lignes du jeu mutualisé (§5.8), une seule échelle
+        # Les 51 lignes du jeu mutualisé, une seule échelle
         assert len(y_scored) == 51
         counts = pd.Series(
             [key[0] for key in y_scored.index]
@@ -570,7 +612,7 @@ class TestOrderingSeesTheFittedSets:
 
 
 class TestAggregationAdditivity:
-    """I4 — chaque période complète somme au total observé."""
+    """Every complete period sums to its observed total."""
 
     def test_period_totals_additivity(self, reference_timeseries):
         """Sous 'sum', les 12 mois d'une année somment à son total annuel."""
@@ -580,9 +622,9 @@ class TestAggregationAdditivity:
             assert values['a1'].loc[year].sum() == pytest.approx(total)
 
     def test_anchor_row_no_longer_carries_the_total(self, reference_timeseries):
-        """La ligne d'ancre porte une valeur de sous-période, jamais le total (§11.2)."""
+        """The anchor row carries a sub-period value, never the total."""
         imputer = fit_with_spy(reference_timeseries)
-        # La sortie pose l'imputation par-dessus l'ancre brute (D37)
+        # La sortie pose l'imputation par-dessus l'ancre brute
         values, _provenance = replay(imputer, reference_timeseries)
         anchor = float(values['a1']['2021-12-31'])
         assert anchor != pytest.approx(120.0)
@@ -591,7 +633,7 @@ class TestAggregationAdditivity:
     def test_group_totals_are_those_of_the_source_frequency(
         self, mixed_freq_panel_multifrequency
     ):
-        """Les totaux recalés sont annuels pour FR et trimestriels pour DE (§5.8)."""
+        """Rescaled totals are annual for FR and quarterly for DE."""
         imputer = fit_with_spy(mixed_freq_panel_multifrequency)
         values, _provenance = replay(imputer, mixed_freq_panel_multifrequency)
         store = values['v']
@@ -606,7 +648,7 @@ class TestAggregationAdditivity:
         assert germany.loc['2021-04':'2021-06'].sum() == pytest.approx(30.0)
 
     def test_carried_covariate_sums_to_the_period_total(self, reference_timeseries):
-        """I4 — une covariable PORTÉE d'une étape antérieure somme au total observé.
+        """A covariate CARRIED from an earlier stage sums to the observed total.
 
         Sous 'model' et 'covariates_only', ``a2`` imputée à l'étape Q est
         reportée sur la grille mensuelle de ``a1`` (voie ``'carried_model'``,
@@ -631,7 +673,7 @@ class TestAggregationAdditivity:
 
 
 class TestTrainPredictScale:
-    """I5 — les features de X_train et de X_pred sont à la même échelle."""
+    """The features of X_train and X_pred are on the same scale."""
 
     @staticmethod
     def _means(step) -> list:
@@ -657,7 +699,7 @@ class TestTrainPredictScale:
                 )
 
     def test_mixed_calendar_feature_and_constant_target(self, reference_timeseries):
-        """Cas mixte : feature en 'calendar', cible en 'constant' (D15)."""
+        """Mixed case: feature scaled by 'calendar', target by 'constant'."""
         imputer = fit_with_spy(
             reference_timeseries,
             scale_features={'m1': 'calendar', '__default__': 'constant'},
@@ -685,7 +727,7 @@ class TestReferenceExamples:
     """Les exemples chiffrés du document, repris comme cas d'or."""
 
     def test_reference_plan_of_spec_5_5_under_false(self, reference_timeseries):
-        """§5.5 « Sous False » : une étape M, trois modèles, dans l'ordre a1, a2, q1."""
+        """Under False, the reference plan has one stage M with three models, in the order a1, a2, q1."""
         imputer = fit_with_spy(reference_timeseries, covariate_strategy='model')
         plan = list(imputer.imputation_plan_)
 
@@ -704,7 +746,7 @@ class TestReferenceExamples:
             'm1': 'identity', 'q1': 'interpolate', 'a2': 'interpolate'
         }
         # 'a2' ensuite : seule 'a1' est imputée, donc seule 'a1' est lue dans
-        # le miroir — les registres ne portent que ce qui a été IMPUTÉ (D24),
+        # le miroir — les registres ne portent que ce qui a été IMPUTÉ,
         # jamais la matérialisation d'une covariable
         assert ways['a2'] == {
             'm1': 'identity', 'q1': 'interpolate', 'a1': 'stage_model'
@@ -715,7 +757,7 @@ class TestReferenceExamples:
         }
 
     def test_reference_provenance_of_spec_6_5(self, reference_timeseries):
-        """§6.5 : MODEL_ON_INTERPOLATED sur les douze mois, ancre comprise, somme 120."""
+        """The twelve months, anchor included, are MODEL_ON_INTERPOLATED and sum to 120."""
         imputer = fit_with_spy(reference_timeseries)
         provenance = imputer.imputation_provenance_['a1'].loc['2021']
         assert len(provenance) == 12
@@ -730,7 +772,7 @@ class TestReferenceExamples:
     def test_provenance_unchanged_without_aggregation_constraint(
         self, reference_timeseries
     ):
-        """Sous aggregation_constraint=None, seules les VALEURS changent (D16)."""
+        """Under aggregation_constraint=None, only the VALUES change."""
         constrained = fit_with_spy(reference_timeseries)
         free = fit_with_spy(reference_timeseries, aggregation_constraint=None)
 
@@ -743,7 +785,7 @@ class TestReferenceExamples:
         assert free_sum != pytest.approx(120.0)
 
     def test_timeseries_results_unchanged_by_pooling(self, reference_timeseries):
-        """I16 — à une entité, le jeu mutualisé est le jeu d'origine."""
+        """With a single entity, the pooled training set is the original one."""
         imputer = fit_with_spy(reference_timeseries)
         for step in imputer.imputation_plan_:
             assert dict(step.training_blocks) == {
@@ -758,7 +800,7 @@ class TestReferenceExamples:
 
 
 class TestTransformSymmetry:
-    """I1 — `fit_transform(X)` est strictement `fit(X).transform(X)`."""
+    """``fit_transform(X)`` is strictly ``fit(X).transform(X)``."""
 
     @pytest.mark.parametrize('strategy, intermediate', AXIS_COMBINATIONS)
     @pytest.mark.parametrize(
@@ -768,7 +810,7 @@ class TestTransformSymmetry:
     def test_fit_transform_equals_fit_then_transform(
         self, strategy, intermediate, fixture_name, request
     ):
-        """I1 — valeurs, provenances et attributs de sortie strictement égaux."""
+        """Values, provenances and output attributes are strictly equal."""
         data = request.getfixturevalue(fixture_name)
         params = dict(
             covariate_strategy=strategy,
@@ -791,7 +833,7 @@ class TestTransformSymmetry:
     )
     @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate', 'model'])
     def test_symmetry_on_panel_x(self, strategy, intermediate, panel_reference_full):
-        """I1 on PANEL-X, the nine (strategy × modality) pairs: values, provenances, plan.
+        """Symmetry on PANEL-X, the nine (strategy × modality) pairs: values, provenances, plan.
 
         Every kind of column at once — monthly, quarterly, annual, a covariate
         ``IT`` never observes, a column whose frequency differs per entity.
@@ -834,7 +876,7 @@ class TestTransformSymmetry:
     def test_output_attributes_are_identical_too(
         self, strategy, intermediate, reference_timeseries
     ):
-        """I1 — la provenance et les attributs ajustés coïncident aussi."""
+        """Provenance and fitted attributes coincide as well."""
         params = dict(
             covariate_strategy=strategy,
             impute_intermediate_frequencies=intermediate,
@@ -860,7 +902,7 @@ class TestTransformSymmetry:
         )
 
     def test_transform_never_rebuilds_the_training_set(self, reference_timeseries):
-        """Le TrainingSetBuilder n'est pas sur le chemin du transform (§12.1)."""
+        """The TrainingSetBuilder is not on the transform path."""
         imputer = fit_quietly(make_imputer(), reference_timeseries)
         # Patch de la classe publique : toute instance, quel que soit son
         # chemin d'accès dans l'imputeur, lève si elle est appelée

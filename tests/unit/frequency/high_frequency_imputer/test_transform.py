@@ -1,14 +1,13 @@
-"""``HighFrequencyImputer.transform`` and its multi-frequency output (§12.4).
+"""``HighFrequencyImputer.transform`` and its multi-frequency output.
 
-Covers the transform outside the fit window (I7), the extended window on
-an irregular index, the frequency control (D11), ``keep_lower_frequencies``
-and the stacked output (D35, D37, D38, D43), a target coarser than the index
-(D43, D44), the transform state (B19, D45) — the replay never fits and never
-mutates the fitted state (§12.1) —, the transform on dates after the fit, the
-shared-model replay (§5.8 R6), new entities and pairs unknown to the fit
-(D34, D42), columns without any observation in the transformed data (§12.1,
-§5.10), the input contract of ``transform`` (``y``, additive transformer, one-row
-input, truncated period — D46) and the reserved ``'frequency'`` level name.
+Covers the transform outside the fit window, the extended window on an
+irregular index, the frequency control, ``keep_lower_frequencies`` and the
+stacked output, a target coarser than the index, the transform state — the
+replay never fits and never mutates the fitted state —, the transform on dates
+after the fit, the shared-model replay, new entities and pairs unknown to the
+fit, columns without any observation in the transformed data, the input
+contract of ``transform`` (``y``, additive transformer, one-row input,
+truncated period) and the reserved ``'frequency'`` level name.
 """
 
 # Modules de base
@@ -40,7 +39,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 )
 
 
-# Panel augmenté d'une entité inconnue du fit (D34)
+# Panel augmenté d'une entité inconnue du fit
 def _with_new_entity(
     data: pd.DataFrame,
     source: str = 'IT',
@@ -102,7 +101,7 @@ def _fit_transform_pair(imputer, X: pd.DataFrame, y: pd.Series) -> tuple:
 
 
 class TestTransformOutsideWindow:
-    """I7 — le transform hors fenêtre impute au lieu de vider."""
+    """A transform outside the fit window imputes instead of emptying."""
 
     # Fixture privée d'un jeu dont la fin sort de la fenêtre stricte
     @staticmethod
@@ -114,7 +113,7 @@ class TestTransformOutsideWindow:
         return frame
 
     def test_transform_outside_fit_window(self, reference_timeseries):
-        """I7 — impute, ne détruit aucune observation, avertit UNE fois."""
+        """Imputes, destroys no observation, warns ONCE."""
         data = self._truncated(reference_timeseries)
         imputer = fit_quietly(make_imputer(), data)
 
@@ -150,7 +149,7 @@ class TestTransformOutsideWindow:
 
 
     def test_transform_outside_fit_window_on_panel(self, mixed_freq_panel_heterogeneous):
-        """I7 sur PANEL — impute, ne détruit aucune observation, avertit UNE fois."""
+        """On a panel, imputes, destroys no observation, warns ONCE."""
         data = mixed_freq_panel_heterogeneous.copy()
         tail = data.index.get_level_values('date') >= pd.Timestamp('2023-01-31')
         data.loc[tail, ['q1', 'a1', 'a2']] = np.nan
@@ -165,7 +164,7 @@ class TestTransformOutsideWindow:
         assert len(window_warnings) == 1
 
         # Aucune ligne d'entrée perdue, aucune observation à la fréquence cible
-        # détruite ; les ancres basses fréquences sont, elles, ré-exprimées (D37)
+        # détruite ; les ancres basses fréquences sont, elles, ré-exprimées
         flat = result.droplevel('frequency').reindex(data.index)
         assert len(result.droplevel('frequency')) == len(data)
         for column in ['m1', 'climat_affaires']:
@@ -247,7 +246,7 @@ class TestIrregularIndexExtendedWindow:
 
 
 class TestTransformFrequencyControl:
-    """D11 — contrôle des fréquences détectées au transform (§12.1)."""
+    """Frequencies detected at transform are checked against those of the fit."""
 
     def test_transform_diverging_frequency_warns_once_and_uses_fit_frequencies(
         self, reference_timeseries
@@ -372,7 +371,7 @@ class TestTransformFrequencyControl:
         """A transform refused by the frequency check leaves the inversion of the last pass intact.
 
         The inversion reads the input snapshot of the last pass. A call that
-        raises is not a pass (D45, ANO-FREQ-078): it must leave that snapshot,
+        raises is not a pass: it must leave that snapshot,
         the matrix and its statistics as it found them, or the exact
         restoration silently restores the refused data.
         """
@@ -392,7 +391,7 @@ class TestTransformFrequencyControl:
         )
         restored = imputer.inverse_transform(transformed)
 
-        # Valeurs d'or du §2.2 : les ancres 120 / 132 / 150 de la dernière passe
+        # Valeurs d'or : les ancres 120 / 132 / 150 de la dernière passe
         observed = reference_timeseries['a1'].notna()
         np.testing.assert_allclose(
             restored.loc[observed, 'a1'].to_numpy(), [120.0, 132.0, 150.0]
@@ -400,7 +399,7 @@ class TestTransformFrequencyControl:
 
 
 class TestKeepLowerFrequencies:
-    """`keep_lower_frequencies` est un paramètre d'AFFICHAGE pur (§12.4)."""
+    """``keep_lower_frequencies`` is a pure DISPLAY parameter."""
 
     def test_keep_lower_frequencies_is_display_only(self, reference_timeseries):
         """Les valeurs du niveau cible sont identiques sous True et sous False."""
@@ -450,12 +449,12 @@ class TestKeepLowerFrequencies:
         pd.testing.assert_frame_equal(stacked.xs('M', level='frequency'), flat)
 
     def test_stacked_index_shape_on_a_panel(self, mixed_freq_panel_multifrequency):
-        """§5.9 — the frequency level sits on the entity side, levels in progression order."""
+        """The frequency level sits on the entity side, levels in progression order."""
         imputer = make_imputer(impute_intermediate_frequencies=True)
         stacked = fit_transform_quietly(imputer, mixed_freq_panel_multifrequency)
 
         assert list(stacked.index.names) == ['country', 'frequency', 'date']
-        # Une étape de la progression, un niveau : Q puis M (D35)
+        # Une étape de la progression, un niveau : Q puis M
         assert list(pd.unique(stacked.index.get_level_values('frequency'))) == ['Q', 'M']
         assert len(imputer.frequency_progression_) == 2
 
@@ -471,11 +470,11 @@ class TestKeepLowerFrequencies:
     def test_each_level_carries_the_imputations_of_its_own_stage(
         self, reference_timeseries, strategy
     ):
-        """D37 — each stacked level holds what its stage produced, under every strategy.
+        """Each stacked level holds what its stage produced, under every strategy.
 
         ``stage_frame`` reads the mirror under ``'model'`` only: under
         ``'interpolate'`` a level built from it alone would show no imputation
-        at all. Gold values of §2.2: ``a1`` totals 120 in 2021, whether split
+        at all. Gold values: ``a1`` totals 120 in 2021, whether split
         into four quarters at the Q level or into twelve months at the M one —
         and the monthly level never reuses a quarterly value.
         """
@@ -497,13 +496,13 @@ class TestKeepLowerFrequencies:
     def test_entity_left_out_of_the_last_stage_keeps_its_last_passage(
         self, mixed_freq_panel_multifrequency
     ):
-        """D38 / D43 — an entity no later stage concerns keeps the rows of its last stage.
+        """An entity no later stage concerns keeps the rows of its last stage.
 
         Targets ``{FR: M, DE: Q, IT: M}`` under axis 2: ``DE`` stops at the
         quarterly stage. At the monthly level it holds its quarter-end rows
         only, with its quarterly values: its other months would carry
         nothing, their values being aggregated on the row of their quarter
-        (D43). The inversion gives them back (I8).
+        The inversion gives them back.
         """
         imputer = make_imputer(
             target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'},
@@ -526,11 +525,11 @@ class TestKeepLowerFrequencies:
     def test_no_empty_cell_of_the_output_is_marked(
         self, mixed_freq_panel_multifrequency, keep
     ):
-        """D44 — the provenance describes the output: an empty cell is never marked.
+        """The provenance describes the output: an empty cell is never marked.
 
-        Under ``{FR: M, DE: Q, IT: M}`` the final frame used to be completed
-        with the 24 months of ``DE`` its quarterly grid lacks: empty rows whose
-        ``m1`` cells kept the ``ORIGINAL`` mark of the input (ANO-FREQ-079).
+        Under ``{FR: M, DE: Q, IT: M}`` the final frame is completed
+        with the 24 months of ``DE`` its quarterly grid lacks: these empty rows
+        carry no mark, ``m1`` cells included.
         """
         imputer = make_imputer(
             target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'}, keep_lower_frequencies=keep
@@ -548,9 +547,8 @@ class TestKeepLowerFrequencies:
     def test_output_index_stays_sorted(self, mixed_freq_panel_multifrequency, keep):
         """The output index is sorted, entity blocks contiguous, like the input it came from.
 
-        §12.5 refuses an unsorted input; an output the class itself would
-        refuse cannot be fed back to it, nor to any strict component
-        (ANO-FREQ-075).
+        An unsorted input is refused; an output the class itself would
+        refuse cannot be fed back to it, nor to any strict component.
         """
         result = fit_transform_quietly(
             make_imputer(
@@ -563,7 +561,7 @@ class TestKeepLowerFrequencies:
 
 
 class TestTargetCoarserThanTheIndex:
-    """D43 / D44 — a target coarser than the index: one row per period, aggregations marked.
+    """A target coarser than the index: one row per period, aggregations marked.
 
     ``TS`` is monthly, the target quarterly: ``m1`` is aggregated on each
     quarter end, ``q1`` is already at target, ``a1`` and ``a2`` are imputed.
@@ -593,7 +591,7 @@ class TestTargetCoarserThanTheIndex:
 
     @pytest.mark.parametrize('restore', [False, True], ids=['mask', 'restore'])
     def test_inverse_gives_back_the_monthly_index(self, reference_timeseries, restore):
-        """I8 — the 36 months come back; a quarterly sum is never handed back as a month.
+        """The 36 months come back; a quarterly sum is never handed back as a month.
 
         Without ``restore_original_values`` only the ``ORIGINAL`` cells
         return: ``q1`` at its quarter ends, nothing of ``m1``. With it, every
@@ -617,7 +615,7 @@ class TestTargetCoarserThanTheIndex:
 
 
 class TestTransformState:
-    """B19 et §13.2 — l'état de transform est écrasé puis purgé."""
+    """The transform state is overwritten by each pass, then purged."""
 
     def test_transform_state_purged_at_fit(self, reference_timeseries):
         """B19 — un fit efface l'état laissé par le transform précédent.
@@ -643,7 +641,7 @@ class TestTransformState:
         )
 
     def test_provenance_is_overwritten_by_each_transform(self, reference_timeseries):
-        """§13.2 — l'attribut porte la provenance du DERNIER transform."""
+        """The attribute carries the provenance of the LAST transform."""
         imputer = fit_quietly(make_imputer(), reference_timeseries)
         after_fit = imputer.imputation_provenance_.copy()
         transform_quietly(imputer, reference_timeseries)
@@ -654,11 +652,11 @@ class TestTransformState:
 
     @pytest.mark.parametrize('keep', [True, False], ids=['stacked', 'flat'])
     def test_provenance_statistics_describe_the_last_pass(self, reference_timeseries, keep):
-        """D45 — ``provenance_statistics_`` follows the last pass, counted on its target level.
+        """``provenance_statistics_`` follows the last pass, counted on its target level.
 
         After a transform of 2021 alone, the statistics count its twelve rows,
         whatever ``keep_lower_frequencies`` stacks — a display parameter
-        changes no figure (ANO-FREQ-077).
+        changes no figure.
         """
         imputer = make_imputer(impute_intermediate_frequencies=True, keep_lower_frequencies=keep)
         fit_quietly(imputer, reference_timeseries)
@@ -678,8 +676,9 @@ class TestTransformState:
     def test_never_imputed_cells_stay_unmarked_after_transform(self, reference_timeseries):
         """A NaN cell no stage imputes stays unmarked after ``transform``, as after ``fit``.
 
-        §5.10 and §6.4: ``ORIGINAL`` marks the cells non-null in the input only;
-        a NaN cell never imputed is unmarked (``isna``). I1 demands the same
+        ``ORIGINAL`` marks the cells non-null in the input only;
+        a NaN cell never imputed is unmarked (``isna``). The fit and its replay
+        must give the same
         provenance from the fit and from its replay.
         """
         # Jeu TS dont les trois colonnes basses fréquences s'arrêtent en 2022 :
@@ -696,10 +695,10 @@ class TestTransformState:
 
 
     def test_fit_and_replay_provenances_agree_on_a_panel(self, panel_f_without_it_v):
-        """I1 sur PANEL — la matrice du fit est celle du rejeu, cellules muettes comprises.
+        """Sur panel, la matrice du fit est celle du rejeu, cellules muettes comprises.
 
         Les 36 cellules de ``v`` d'``IT``, jamais observées ni imputées, sont
-        non marquées des deux côtés (ANO-FREQ-050).
+        non marquées des deux côtés.
         """
         imputer = fit_quietly(
             make_imputer(keep_lower_frequencies=False), panel_f_without_it_v
@@ -717,7 +716,7 @@ class TestTransformState:
 
 
 class TestTransformLeavesTheFitIntact:
-    """§12.1 — the transform replays the frozen plan: it never fits, never mutates.
+    """The transform replays the frozen plan: it never fits, never mutates.
 
     Public counterpart of the former internal test
     ``TestTransformState::test_fit_state_is_restored_after_a_transform``
@@ -734,13 +733,13 @@ class TestTransformLeavesTheFitIntact:
             data = request.getfixturevalue('reference_timeseries')
             return data.loc[:'2022-12-31'], data, False
         if name == 'timeseries_diverging_frequency':
-            # q1 publiée en décembre seulement : divergence de fréquence (D11)
+            # q1 publiée en décembre seulement : divergence de fréquence
             data = request.getfixturevalue('reference_timeseries')
             diverging = data.copy()
             diverging['q1'] = np.nan
             diverging.loc[diverging.index.month == 12, 'q1'] = [30.0, 90.0, 150.0]
             return data, diverging, False
-        # Entité ES inconnue du fit, imputée sans ancre (D34) : étapes dérivées
+        # Entité ES inconnue du fit, imputée sans ancre : étapes dérivées
         data = request.getfixturevalue('mixed_freq_panel_multifrequency')
         return data, _with_new_entity(data), True
 
@@ -749,7 +748,7 @@ class TestTransformLeavesTheFitIntact:
         """No training set is built and no estimator is fitted during a transform.
 
         The richest replay: ``'model'`` cascade, intermediate stages, and an
-        entity born at transform time served by derived steps (D34). The
+        entity born at transform time served by derived steps. The
         public ``TrainingSetBuilder.build`` is patched at class level, so
         whatever path reaches it raises — and every call is recorded, so a
         caller swallowing the ``AssertionError`` still shows.
@@ -782,9 +781,9 @@ class TestTransformLeavesTheFitIntact:
 
         A deep copy of the public ``_`` attributes is taken right after the
         fit and compared structurally after the transform (the fitted imputer
-        copies since ANO-FREQ-049). ``imputation_provenance_`` and
-        ``provenance_statistics_`` alone are left out: §13.2 and D45 make
-        them describe the LAST pass, rewritten by design.
+        copies). ``imputation_provenance_`` and
+        ``provenance_statistics_`` alone are left out: they
+        describe the LAST pass, rewritten by design.
         """
         fit_data, transform_data, unobserved = self._replay_inputs(scenario, request)
         imputer = fit_quietly(
@@ -801,7 +800,7 @@ class TestTransformLeavesTheFitIntact:
     def test_transform_depends_on_its_own_input_only(self, mixed_freq_panel_multifrequency):
         """A transform of A gives the same result before and after a transform of B.
 
-        B carries an entity unknown to the fit (D34): its replay installs
+        B carries an entity unknown to the fit: its replay installs
         derived steps and extended bindings, none of which may leak into the
         next call.
         """
@@ -819,7 +818,7 @@ class TestTransformLeavesTheFitIntact:
 
 
 class TestTransformOnLaterDates:
-    """I7 — a transform on dates after the fit imputes the new periods only.
+    """A transform on dates after the fit imputes the new periods only.
 
     The fit sees 2021-2022, the transform 2021-2023: the 2023 anchors are new
     totals the frozen models disaggregate, while the cells of the fit period
@@ -839,7 +838,7 @@ class TestTransformOnLaterDates:
         # Cellules 2023 de a1 et a2 toutes produites par un modèle
         for column in ('a1', 'a2'):
             assert provenance[column].map(lambda mark: mark.value.startswith('model_')).all()
-        # Valeurs d'or du §2.2 : totaux 2023 de 150 (a1) et 72 (a2)
+        # Valeurs d'or : totaux 2023 de 150 (a1) et 72 (a2)
         assert result.loc['2023', 'a1'].sum() == pytest.approx(150.0)
         assert result.loc['2023', 'a2'].sum() == pytest.approx(72.0)
 
@@ -866,7 +865,7 @@ class TestTransformOnLaterDates:
     def test_new_periods_on_a_panel(self, mixed_freq_panel_multifrequency):
         """On PANEL-F, each 2023 period of ``v`` adds up to its new observation, per entity.
 
-        ``FR`` publishes ``v`` once a year (gold value 150.0, §2.5), ``DE``
+        ``FR`` publishes ``v`` once a year (gold value 150.0), ``DE``
         once a quarter; ``IT`` observes it monthly and is never rewritten.
         """
         dates = mixed_freq_panel_multifrequency.index.get_level_values('date')
@@ -877,7 +876,7 @@ class TestTransformOnLaterDates:
         result = transform_quietly(imputer, mixed_freq_panel_multifrequency)
         source = mixed_freq_panel_multifrequency['v']
 
-        # FR : total annuel 2023 de 150, valeur d'or du §2.5
+        # FR : total annuel 2023 de 150, valeur d'or
         assert result.loc['FR', 'v'].loc['2023'].sum() == pytest.approx(150.0)
         # DE : chaque trimestre 2023 somme à son observation trimestrielle
         de_months = result.loc['DE', 'v'].loc['2023']
@@ -891,7 +890,7 @@ class TestTransformOnLaterDates:
 
 
 class TestSharedModelReplay:
-    """§5.8 R6 — un modèle partagé est rejoué par chacune de ses étapes."""
+    """A shared model is replayed by each of its stages."""
 
     @pytest.mark.slow
     def test_shared_model_replayed_by_each_step(
@@ -905,7 +904,7 @@ class TestSharedModelReplay:
         ]
         assert len(monthly) == 2
 
-        # Un seul objet modèle, partagé (§5.8 R6)
+        # Un seul objet modèle, partagé
         assert monthly[0].model is monthly[1].model
         # Des entités et des recalages distincts
         assert set(monthly[0].entities) != set(monthly[1].entities)
@@ -930,7 +929,7 @@ class TestSharedModelReplay:
 
 
 class TestNewEntityAtTransform:
-    """D34 — une entité absente du fit, rencontrée au transform."""
+    """An entity absent from the fit, met at transform."""
 
     # Fixture privée d'une entité ajoutée après le fit
     @staticmethod
@@ -995,20 +994,20 @@ class TestNewEntityAtTransform:
 
     @pytest.mark.slow
     def test_new_entity_is_imputed_as_if_present_at_fit(self, mixed_freq_panel_multifrequency):
-        """D34 is the mechanism of §5.10, not a second one: same values, same provenance.
+        """A new entity is served like an unobserved pair at fit: same values, same provenance.
 
         ``ES`` copies ``IT`` without ``v``. Present at fit time, it is an
-        unobserved pair of §5.10; born at transform time, it is served by
+        unobserved pair; born at transform time, it is served by
         derived steps. Since it contributes nothing to the pooled training
         set either way (R1), both routes give it the very same 36 cells.
         """
         extended = _with_new_entity(mixed_freq_panel_multifrequency)
         params = dict(impute_unobserved_entities=True, keep_lower_frequencies=False)
 
-        # Voie du §5.10 : ES présente au fit
+        # Voie de la paire non observée : ES présente au fit
         at_fit = make_imputer(**params)
         expected = fit_transform_quietly(at_fit, extended).loc['ES', 'v']
-        # Voie D34 : ES née au transform
+        # Voie des étapes dérivées : ES née au transform
         at_transform = fit_quietly(make_imputer(**params), mixed_freq_panel_multifrequency)
         actual = transform_quietly(at_transform, extended).loc['ES', 'v']
 
@@ -1018,7 +1017,7 @@ class TestNewEntityAtTransform:
         }
 
     def test_derived_steps_never_enter_the_plan(self, mixed_freq_panel_multifrequency):
-        """D34 — the plan and ``unanchored_pairs_`` stay those of the fit after serving ES."""
+        """The plan and ``unanchored_pairs_`` stay those of the fit after serving ES."""
         imputer = fit_quietly(
             make_imputer(impute_unobserved_entities=True), mixed_freq_panel_multifrequency
         )
@@ -1035,7 +1034,7 @@ class TestNewEntityAtTransform:
     def test_stage_with_diverging_frequencies_cannot_bind_a_new_entity(
         self, mixed_freq_panel_multifrequency
     ):
-        """D34 — a stage whose entities disagree on its frequency leaves the new entity out.
+        """A stage whose entities disagree on its frequency leaves the new entity out.
 
         Targets ``{FR: M, DE: Q, IT: M}`` without axis 2: the single stage
         binds diverging frequencies, nothing departs them for ``ES``. One
@@ -1064,10 +1063,10 @@ class TestNewEntityAtTransform:
     def test_observations_of_a_new_entity_are_never_overwritten(
         self, mixed_freq_panel_multifrequency
     ):
-        """I4 / I7 / D42 — the periods a new entity observes keep their observed totals.
+        """The periods a new entity observes keep their observed totals.
 
         ``ES`` copies ``DE``, ``v`` and ``q1`` included: it observes both
-        quarterly. It is served by anchored steps (ANO-FREQ-073): the months
+        quarterly. It is served by anchored steps: the months
         of each observed quarter sum to the observation — under ``'sum'`` an
         anchor is re-expressed, never lost — and its cells carry the
         ``MODEL_*`` of the column's step, never ``MODEL_UNANCHORED``.
@@ -1093,7 +1092,7 @@ class TestNewEntityAtTransform:
         assert ProvenanceType.MODEL_UNANCHORED not in set(marks.stack())
 
     def test_new_entity_copy_is_imputed_like_its_model(self, mixed_freq_panel_multifrequency):
-        """D42 — same covariates, same frozen model, same totals: ``ES`` gets ``DE``'s cells.
+        """Same covariates, same frozen model, same totals: ``ES`` gets ``DE``'s cells.
 
         ``ES`` copies ``DE`` at transform time. Its anchored steps share the
         model of ``DE``'s and rescale on the same quarterly totals: the two
@@ -1114,7 +1113,7 @@ class TestNewEntityAtTransform:
     def test_column_empty_at_fit_and_observed_at_transform_is_anchored(
         self, panel_f_without_it_v, mixed_freq_panel_multifrequency
     ):
-        """D42 — a known entity's column the fit never observed is anchored once observed.
+        """A known entity's column the fit never observed is anchored once observed.
 
         ``IT`` leaves ``v`` empty at fit time: under ``True`` its pair is
         unanchored in the plan. At transform it publishes ``v`` quarterly,
@@ -1142,7 +1141,7 @@ class TestNewEntityAtTransform:
     def test_new_pair_already_at_the_stage_frequency_is_left_as_given(
         self, mixed_freq_panel_multifrequency
     ):
-        """D42 — a pair a new entity observes at the stage frequency has nothing to impute.
+        """A pair a new entity observes at the stage frequency has nothing to impute.
 
         ``ES`` copies ``IT``, which observes ``v`` monthly: at the monthly
         stage the pair is at target, as it would have been at fit time, and
@@ -1166,7 +1165,7 @@ class TestNewEntityAtTransform:
     def test_new_pair_observed_off_its_calendar_is_left_as_given(
         self, mixed_freq_panel_multifrequency
     ):
-        """D42 — a new pair dated off the bounds of its period is left out, as at fit.
+        """A new pair dated off the bounds of its period is left out, as at fit.
 
         ``ES`` publishes ``v`` one month before each quarter end: a quarterly
         reading would attach each value to the wrong quarter. Neither
@@ -1195,7 +1194,7 @@ class TestNewEntityAtTransform:
     def test_pairs_unknown_to_the_fit_stay_as_given_by_default(
         self, mixed_freq_panel_multifrequency
     ):
-        """D34 — under ``False`` a new entity is left as given, observed columns included."""
+        """Under ``False`` a new entity is left as given, observed columns included."""
         imputer = fit_quietly(
             make_imputer(keep_lower_frequencies=False), mixed_freq_panel_multifrequency
         )
@@ -1210,17 +1209,16 @@ class TestNewEntityAtTransform:
 
 
 class TestColumnWithoutAnchorAtTransform:
-    """§12.1 / §5.10 — a column observed at fit keeps its replayed, anchored step.
+    """A column observed at fit keeps its replayed, anchored step.
 
     ``a1`` is unpublished for 2023. Transformed together with its history,
     the 2023 rows fall outside the recomputed strict window and stay empty.
     Alone, the same rows see ``a1`` without any observation: the column
-    leaves the coverage denominator (D39, warned), the window spans them, and
+    leaves the coverage denominator (with a warning), the window spans them, and
     the frozen step predicts every month without rescaling — the very cells
-    the extended window of §7.3 produces with the history. The pair being
+    the extended window produces with the history. The pair being
     observed at fit, its classification is replayed: ``MODEL_*``, never
     ``MODEL_UNANCHORED``, whatever ``impute_unobserved_entities`` says
-    (ANO-FREQ-074, closed by the author).
     """
 
     # Jeu TS dont l'année 2023 de a1 n'est pas publiée
@@ -1243,7 +1241,7 @@ class TestColumnWithoutAnchorAtTransform:
     def test_unpublished_year_alone_is_predicted_by_its_replayed_step(
         self, reference_timeseries, unobserved
     ):
-        """Alone, the twelve months are predicted, ``MODEL_*``, the D39 warning naming ``a1``."""
+        """Alone, the twelve months are predicted, ``MODEL_*``, with a warning naming ``a1``."""
         imputer = fit_quietly(
             make_imputer(keep_lower_frequencies=False, impute_unobserved_entities=unobserved),
             reference_timeseries,
@@ -1261,7 +1259,7 @@ class TestColumnWithoutAnchorAtTransform:
         assert any('a1' in m and 'without any observation' in m for m in messages)
 
     def test_extended_window_predicts_it_with_its_history(self, reference_timeseries):
-        """§7.3 — under ``'extended_forward'`` the history no longer hides the year."""
+        """Under ``'extended_forward'``, the history does not hide the year."""
         imputer = fit_quietly(
             make_imputer(keep_lower_frequencies=False, imputation_scope='extended_forward'),
             reference_timeseries,
@@ -1275,7 +1273,7 @@ class TestColumnWithoutAnchorAtTransform:
 
 
 # =============================================================================
-# Nom réservé du niveau de fréquence et lecture positionnelle (§5.9, §12.4)
+# Nom réservé du niveau de fréquence et lecture positionnelle
 # =============================================================================
 class TestReservedFrequencyLevel:
     """The ``'frequency'`` level name is reserved, the level read by position."""
@@ -1402,11 +1400,11 @@ class TestTransformInputContract:
         assert result['m1'].iloc[0] == one_row['m1'].iloc[0]
 
     def test_truncated_period_is_reported_and_restorable(self, reference_timeseries):
-        """D46 — one month of a quarter cannot carry its total: warned once, restorable.
+        """One month of a quarter cannot carry its total: warned once, restorable.
 
         The row 2021-06-30 holds ``q1 = 20``, the total of a quarter the
-        call truncates to one month. It is not rescaled (D25): the month gets
-        a third of it, and the quarterly total is no longer readable in the
+        call truncates to one month. It is not rescaled: the month gets
+        a third of it, and the quarterly total cannot be read in the
         output — which one warning says. ``restore_original_values`` brings
         the observation back.
         """
@@ -1442,7 +1440,7 @@ class TestTransformInputContract:
     def test_transform_with_y_returns_the_named_pair(self, reference_timeseries):
         """B14 — ``(X, y)`` comes back as a pair, ``y`` under its own name, imputed like a column.
 
-        Gold value of §2.2: the twelve months of ``a1`` in 2021 sum to 120.
+        Gold value: the twelve months of ``a1`` in 2021 sum to 120.
         """
         X = reference_timeseries[['m1', 'q1', 'a2']]
         y = reference_timeseries['a1']

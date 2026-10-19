@@ -7,9 +7,9 @@ index names, special column names, and period start / end positions — the
 four materialization ways must land on a start-anchored grid exactly as on an
 end-anchored one, with the same golden values.
 
-Corrections of ANO-FREQ-039 (duplicated source dates rejected alike by the
-four ways, the exact aggregation included) and ANO-FREQ-043 (an empty panel
-grid decides like an empty time series grid) — ``tests/ANOMALIES.md``.
+Duplicated source dates are rejected alike by the four ways, the exact
+aggregation included; an empty panel grid decides like an empty time series
+grid.
 
 Covered symbols: ``CovariateMaterializer.materialize``, ``decide_ways``,
 ``stage_frame``.
@@ -121,7 +121,7 @@ class TestDuplicates:
     def test_duplicated_source_dates_are_rejected_by_every_way(
         self, reference_timeseries, column, grid, stage, strategy
     ):
-        """The four ways refuse duplicated source dates alike, naming them (ANO-FREQ-039)."""
+        """The four ways refuse duplicated source dates alike, naming them."""
         # Doublon de la dernière ligne (2023-12-31, ancre de q1 et de a1)
         duplicated = with_duplicated_rows(reference_timeseries.iloc[::-1], n=1)
         with pytest.raises(ValueError, match=r"Duplicate dates in source_data: \[Timestamp\('2023-12-31"):
@@ -163,7 +163,7 @@ class TestEmptyAndSingle:
 
     @pytest.mark.parametrize('method', ['decide_ways', 'materialize', 'stage_frame'])
     def test_empty_panel_grid(self, mixed_freq_panel_heterogeneous, method):
-        """An empty panel grid behaves like an empty series grid (ANO-FREQ-043).
+        """An empty panel grid behaves like an empty series grid.
 
         Sans entité, la décision se prend pour l'entité dégénérée ``()``,
         comme sur une série vide : une voie par colonne, et une frame vide aux

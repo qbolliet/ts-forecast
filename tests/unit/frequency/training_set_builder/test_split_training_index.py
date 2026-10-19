@@ -2,8 +2,7 @@
 
 ``split_training_index`` is the single place reading the two shapes of a
 training grid — ``(entity..., date)`` and, under ``keep_coincident_cells``,
-``(entity..., frequency, date)`` (spec ``high_frequency_imputer2_architecture.md``
-§5.9). Pinned here: round trip with and without the frequency level (the
+``(entity..., frequency, date)``. Pinned here: round trip with and without the frequency level (the
 real grid, the entity keys and the row frequencies rebuild the stamped grid
 exactly), three-level entities, empty grids, and the flag deciding alone —
 an entity level NAMED ``'frequency'`` is never sniffed, a frequency level
@@ -210,7 +209,7 @@ class TestTrainingSet:
     """The immutable container handed back by ``build``."""
 
     def test_fields(self):
-        """The fields are exactly those of the spec (§5.8, §5.9), in order."""
+        """The fields are exactly the documented ones, in order."""
         assert [field.name for field in dataclasses.fields(TrainingSet)] == [
             'X', 'y', 'row_frequency', 'row_origin', 'blocks', 'ways',
             'column_origins', 'has_frequency_level',

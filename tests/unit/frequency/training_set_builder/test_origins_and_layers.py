@@ -1,4 +1,4 @@
-"""Tests of the origin filter (§5.3) and of the layers (§5.4bis, D30).
+"""Tests of the origin filter and of the layers.
 
 The origin filter decides WHICH cells of an entity are eligible, the
 mutualization WHICH entities contribute: the two compose without knowing each
@@ -9,12 +9,12 @@ row, NaN mirror cells ignored.
 
 Layers: the ``'training'`` window is read once per layer —
 ``[{FR: Y, DE: Q, IT: M}, {FR: Q}]`` on ``PANEL-F`` once ``FR`` was imputed at
-stage ``Q`` (§5.4bis table) —, each layer reading its own window; the
+stage ``Q`` —, each layer reading its own window; the
 materializer is called once per layer on its sub-grid; a layer emptied by the
 window costs no call; the reduction keeps the most degraded way and origin;
 an entity absent from the mask, a date absent from it and a provider
-answering None follow §7.2; ``blocks`` stays the R1 perimeter when the window
-drops every row.
+answering None are left unrestricted; ``blocks`` stays the perimeter of the
+contributing entities when the window drops every row.
 
 Covered symbol: ``TrainingSetBuilder.build`` (``eligible_origins``,
 ``training_mask``).
@@ -48,10 +48,10 @@ from tests.unit.frequency.training_set_builder.helpers import (
 
 
 # =============================================================================
-# §5.3 : filtre d'origine
+# Filtre d'origine
 # =============================================================================
 class TestOriginFilter:
-    """§5.3: the origin filter, orthogonal to the mutualization."""
+    """The origin filter, orthogonal to the mutualization."""
 
     def test_eligible_origins_filter(self, mixed_freq_panel_multifrequency):
         """``{'observed'}`` excludes the imputed cells, a widened set admits them."""
@@ -91,7 +91,7 @@ class TestOriginFilter:
     def test_eligible_origins_of_each_modality(
         self, mixed_freq_panel_multifrequency, modality, expected_rows, expected_origins
     ):
-        """``False`` and ``'covariates_only'`` share LITERALLY the same filter (§5.3)."""
+        """``False`` and ``'covariates_only'`` share LITERALLY the same filter."""
         # Miroir de FR : trois cellules 'model' (étape Q) et deux cellules
         # 'interpolated' (repli d'un modèle en échec), hors fins d'année
         builder = seed_panel_mirror(make_builder(), [
@@ -128,7 +128,7 @@ class TestOriginFilter:
     def test_imputed_rows_scale_by_their_own_production_frequency(
         self, mixed_freq_panel_multifrequency
     ):
-        """The divisor of an imputed row is that of ITS frequency (§5.4)."""
+        """The divisor of an imputed row is that of ITS frequency."""
         builder = seed_panel_mirror(make_builder(), [('2021-03-31', 28.0, 'model')])
 
         training = build_panel_f(
@@ -181,10 +181,10 @@ class TestOriginFilter:
 
 
 # =============================================================================
-# §5.4bis : couches et fenêtre 'training'
+# Couches et fenêtre 'training'
 # =============================================================================
 class TestTrainingWindow:
-    """§5.3 point 5 and §5.4bis: the ``'training'`` window, read per layer."""
+    """The ``'training'`` window, read per layer."""
 
     def test_window_restricts_each_block_at_its_own_frequency(
         self, mixed_freq_panel_multifrequency
@@ -204,7 +204,7 @@ class TestTrainingWindow:
         }
 
     def test_window_is_read_once_per_layer(self, mixed_freq_panel_multifrequency):
-        """Axis 2 on: layers ``[{FR: Y, DE: Q, IT: M}, {FR: Q}]`` (§5.4bis table)."""
+        """Axis 2 on: layers ``[{FR: Y, DE: Q, IT: M}, {FR: Q}]``."""
         # FR a été imputée à l'étape Q : quatre trimestres hors fins d'année
         builder = seed_panel_mirror(make_builder(), [
             ('2021-03-31', 28.0, 'model'),
@@ -286,7 +286,7 @@ class TestTrainingWindow:
     def test_entity_absent_from_the_mask_is_unrestricted(
         self, mixed_freq_panel_multifrequency
     ):
-        """An entity without a fitted mask is not restricted (§7.2)."""
+        """An entity without a fitted mask is not restricted."""
         def _mask(_frequencies):
             # Masque ne couvrant que FR, comme le calculateur le rend lorsque
             # les autres entités n'ont pas de masque valide

@@ -1,12 +1,11 @@
 """Tests for tsforecast.frequency.stage_scaler.
 
 ``StageScaler`` holds the scale arithmetic of one imputation stage of
-``HighFrequencyImputer`` (spec ``high_frequency_imputer2_architecture.md``
-§9): every divisor is a pure function of the configuration and of the
+``HighFrequencyImputer``: every divisor is a pure function of the configuration and of the
 frequencies handed to it, never of the data. ``'constant'`` divides by
 ``FrequencyConverter.get_conversion_factor`` (M -> Y = 12), ``'calendar'`` by
 the real calendar count, one value per row (February 28 or 29, quarters of 90
-to 92 days), ``False`` divides nothing, the target included (D15).
+to 92 days), ``False`` divides nothing, the target included.
 
 Contracts pinned here:
 
@@ -20,21 +19,21 @@ Contracts pinned here:
 - the shape rule: the return type (scalar / ``Series`` / ``DataFrame``)
   follows the configuration — mode, form of ``grid_freq`` / ``source_freq``,
   frequencies resolved per entity, ``produced_freq`` — never the divisor
-  values, divisors all equal to ``1.0`` included (defect B12);
-- the carried-period rule of §9.2 (``'raw_anchors'`` spans one period of a
+  values, divisors all equal to ``1.0`` included;
+- the carried-period rule (``'raw_anchors'`` spans one period of a
   column coarser than the grid, every other way — and ``'raw_anchors'`` on a
   column at least as fine as the grid, read by the materializer's rank 1,
-  ANO-FREQ-042 — one period of the grid), the fallbacks
+  — one period of the grid), the fallbacks
   (incomparable frequency -> default divisor for a covariate, error for the
-  target), the per-row target divisor of §5.4 and the dict form;
+  target), the per-row target divisor and the dict form;
 - ``inverse_transform(transform(X)) == X`` to ``1e-12`` on features and
   target, ``transform`` telling them apart by type alone;
-- per-entity frequencies (§5.8 R5): ``PANEL-F`` golden values of the stage
+- per-entity frequencies: ``PANEL-F`` golden values of the stage
   ``Q`` table (fractional divisor ``1/3`` of the monthly ``IT`` block) and
   the realistic ``heterogeneous_coverage_panel`` (``depenses_publiques_pib``
   annual for France / Italie, quarterly for Allemagne) and
   ``irregular_index_timeseries``;
-- per-entity modes (D41): ``{column: {entity: mode}}`` closed on itself,
+- per-entity modes: ``{column: {entity: mode}}`` closed on itself,
   ``False`` refused within it, full entity keys only (a partial key of a
   two-level panel matches none), golden divisors 31 / 28 against 30 on the
   target, the baked factor and the covariates;
@@ -43,9 +42,6 @@ Contracts pinned here:
 - sklearn protocol: ``clone``, ``get_params`` / ``set_params``,
   ``NotFittedError``, ``fit_transform``, divisor methods usable without
   ``fit``.
-
-Corrections of ANO-FREQ-028 to ANO-FREQ-036, the ``'raw_anchors'`` side of
-ANO-FREQ-042 and the plain entity keys of ANO-FREQ-037 (``tests/ANOMALIES.md``).
 
 Covered symbols: ``StageScaler`` (``feature_divisors``, ``target_divisor``,
 ``fit_scale_factor``, ``apply``, ``invert``, ``resolve_mode``,
@@ -89,7 +85,7 @@ from tests.support.perturbations import (
 # une anomalie, jamais une tolérance à élargir
 _EXACT = 1e-12
 
-# Fréquences de bloc du jeu PANEL-F (§2.5) : v annuelle, trimestrielle, mensuelle
+# Fréquences de bloc du jeu PANEL-F : v annuelle, trimestrielle, mensuelle
 _PANEL_F_BLOCKS = {('FR',): 'Y', ('DE',): 'Q', ('IT',): 'M'}
 
 # Fréquence de publication de depenses_publiques_pib par entité (jeu du notebook 3)
@@ -116,7 +112,7 @@ def _make_scaler(**overrides) -> StageScaler:
     return StageScaler(**params)
 
 
-# Grille mensuelle de fin de mois, calquée sur le jeu TS du §2.2
+# Grille mensuelle de fin de mois, calquée sur le jeu TS de référence
 def _monthly_grid(start: str = '2021-01-31', periods: int = 12) -> pd.DatetimeIndex:
     """Build a month-end grid.
 
@@ -200,7 +196,7 @@ def _days_in_quarter(year: int, quarter: int) -> int:
 # Validation de la configuration
 # =============================================================================
 class TestValidation:
-    """``scale_features`` validation, dict keys and mode resolution (§9.1)."""
+    """``scale_features`` validation, dict keys and mode resolution."""
 
     @pytest.mark.parametrize(
         'setting',
@@ -233,7 +229,7 @@ class TestValidation:
     @pytest.mark.parametrize('form', ['scalar', 'dict'])
     @pytest.mark.parametrize('setting', [0, 0.0, np.False_], ids=['int-0', 'float-0', 'numpy-false'])
     def test_values_merely_equal_to_false_are_rejected(self, setting, form):
-        """0, 0.0 and np.False_ are rejected: only False itself divides nothing (ANO-FREQ-034).
+        """0, 0.0 and np.False_ are rejected: only False itself divides nothing.
 
         The resolution reads ``mode is False``; a value merely equal to False
         would otherwise pass the validation and then act as 'constant'.
@@ -287,13 +283,13 @@ class TestValidation:
         assert StageScaler(scale_features=setting).resolve_mode(column) == expected
 
     def test_default_scale_mode_is_constant(self):
-        """The documented default of the module and of __init__ is 'constant' (§9.1)."""
+        """The documented default of the module and of __init__ is 'constant'."""
         assert DEFAULT_SCALE_MODE == 'constant'
         assert StageScaler().scale_features == 'constant'
 
 
 class TestValidationThroughSetParams:
-    """``set_params`` does not bypass the ``__init__`` validation (ANO-FREQ-032)."""
+    """``set_params`` does not bypass the ``__init__`` validation."""
 
     @pytest.mark.parametrize(
         'entry_point', ['fit', 'target_divisor', 'fit_scale_factor', 'feature_divisors', 'resolve_mode']
@@ -301,7 +297,7 @@ class TestValidationThroughSetParams:
     def test_inadmissible_setting_raises_after_set_params(self, entry_point):
         """fit and the divisor methods usable without fit revalidate scale_features.
 
-        Same arbitration as ANO-FREQ-023 (``AggregationConstraint``): the
+        As in ``AggregationConstraint``, the
         components are usable alone, ``set_params`` (``GridSearchCV``,
         pipelines) included.
         """
@@ -338,7 +334,7 @@ _CONSTANT_GOLD = [
 
 
 class TestConstantGoldenValues:
-    """'constant' : one invariant factor per (source, prediction) pair (§9.1)."""
+    """'constant' : one invariant factor per (source, prediction) pair."""
 
     @pytest.mark.parametrize('position', ['', 'S', 'E'], ids=['base', 'start', 'end'])
     @pytest.mark.parametrize(
@@ -349,7 +345,7 @@ class TestConstantGoldenValues:
         """target_divisor counts the pred sub-periods of one source period, any position.
 
         A coarser stage than the variable (a monthly block at a quarterly
-        stage) yields a fractional divisor, never floored at 1.0 (§5.8 R5).
+        stage) yields a fractional divisor, never floored at 1.0.
         """
         divisor = StageScaler().target_divisor(
             'v', source_freq=source + position, pred_freq=pred + position
@@ -387,7 +383,7 @@ class TestConstantGoldenValues:
 
         La cellule couvre une période de sa grille (voie 'identity') : une
         grille de bloc à la fréquence ``carried`` porte des cellules de cette
-        période, plus grossière ou plus fine que l'étape (§5.8 R5).
+        période, plus grossière ou plus fine que l'étape.
         """
         divisors = StageScaler().feature_divisors(
             columns=['x'],
@@ -423,7 +419,7 @@ _CALENDAR_DAYS = [
 
 
 class TestCalendarGoldenValues:
-    """'calendar' : real calendar count, one divisor per row (§9.1)."""
+    """'calendar' : real calendar count, one divisor per row."""
 
     @pytest.mark.parametrize('grid_freq', ['MS', 'ME'], ids=['start', 'end'])
     @pytest.mark.parametrize(
@@ -446,9 +442,9 @@ class TestCalendarGoldenValues:
     def test_fractional_divisor_under_calendar(self, source, pred, stage_period):
         """A block finer than the stage divides by a fraction, < 1, summing to 1 per stage period.
 
-        §5.8 R5: the divisor is "> 1 for a block coarser than the stage and
-        < 1 for a finer one", and §9.2 applies the mode to every divisor
-        (ANO-FREQ-028). The shares of one stage period sum to 1 exactly.
+        The divisor is "> 1 for a block coarser than the stage and
+        < 1 for a finer one", and the mode applies to every divisor.
+        The shares of one stage period sum to 1 exactly.
         """
         index = pd.date_range('2024-01-31', periods=12, freq='ME')
         if source == 'Q':
@@ -464,7 +460,7 @@ class TestCalendarGoldenValues:
         """A monthly cell at a quarterly stage divides by its share of days: 31 / 29 / 31 of 91.
 
         Grille de bloc mensuelle, étape trimestrielle : chaque cellule couvre
-        un mois (§5.8 R5).
+        un mois.
         """
         index = pd.date_range('2024-01-31', periods=3, freq='ME')
         divisors = StageScaler(scale_features='calendar').feature_divisors(
@@ -499,7 +495,7 @@ class TestCalendarGoldenValues:
     def test_calendar_share_of_days_gold(self, source, pred, starts, ends, expected, position):
         """'calendar' fractional divisor = real share of days of the stage period, any position.
 
-        Arbitration of ANO-FREQ-028: 'constant' keeps the uniform ratio
+        'constant' keeps the uniform ratio
         (1/3 for every month), 'calendar' weighs each block period by its
         days (January 31/91, February 29/91 in 2024).
         """
@@ -701,7 +697,7 @@ class TestShapeRule:
         ids=['agreeing-blocks', 'single-entry'],
     )
     def test_per_entity_grid_freq_always_gives_a_dataframe(self, grid_freq, entities):
-        """§9.2: a per-entity grid_freq returns a per-row DataFrame, whatever the divisors (ANO-FREQ-029)."""
+        """A per-entity grid_freq returns a per-row DataFrame, whatever the divisors."""
         divisors = StageScaler().feature_divisors(
             columns=['m1'],
             column_frequencies={'m1': 'M'},
@@ -713,7 +709,7 @@ class TestShapeRule:
         assert isinstance(divisors, pd.DataFrame)
 
     def test_homogeneous_stage_binding_keeps_the_compact_form(self):
-        """A stage binding whose entities agree on one frequency stays compact (ANO-FREQ-030).
+        """A stage binding whose entities agree on one frequency stays compact.
 
         Arbitration: a stage / prediction binding is compact as long as its
         entities agree on the frequency — the configuration, not the
@@ -773,7 +769,7 @@ class TestShapeRule:
 # Règle de la période couverte et replis
 # =============================================================================
 class TestCarriedPeriodRule:
-    """A covariate divides by the period its cell SPANS on its grid (§9.2)."""
+    """A covariate divides by the period its cell SPANS on its grid."""
 
     @pytest.mark.parametrize('way', ['identity', 'aggregate', 'interpolate', 'mirror'])
     def test_every_materialized_way_spans_one_grid_period(self, way):
@@ -811,7 +807,7 @@ class TestCarriedPeriodRule:
         """Under 'raw_anchors', a column at least as fine as the grid spans one grid period.
 
         Le matérialiseur ramène une telle colonne à l'identité ou à l'agrégation
-        exacte (rang 1, ANO-FREQ-042) : sur une grille trimestrielle à l'étape
+        exacte (rang 1) : sur une grille trimestrielle à l'étape
         Q, une colonne mensuelle ou trimestrielle divise par 1 ; seule la
         colonne annuelle, lue à ses ancres, couvre sa propre période (4).
         """
@@ -843,7 +839,7 @@ class TestCarriedPeriodRule:
         assert divisors['v'].tolist() == [1.0] * 4 + [4.0] * 4 + [1.0] * 4
 
     def test_training_and_prediction_grids_are_comparable(self):
-        """I5 on TS at stage M: q1 aggregated yearly divides by 12, interpolated monthly by 1.
+        """On a time series at stage M, q1 aggregated yearly divides by 12, interpolated monthly by 1.
 
         The yearly mean of the training feature equals the mean of the
         monthly prediction feature exactly.
@@ -870,7 +866,7 @@ class TestCarriedPeriodRule:
 
 
 class TestFallbacks:
-    """Incomparable frequencies: default divisor for a covariate, error for the target (§9.2)."""
+    """Incomparable frequencies: default divisor for a covariate, error for the target."""
 
     @pytest.mark.parametrize(
         'column_frequencies',
@@ -901,7 +897,7 @@ class TestFallbacks:
 
 
 class TestScaleFeaturesFalse:
-    """``False`` divides nothing: neither the features, nor the target (D15)."""
+    """``False`` divides nothing: neither the features, nor the target."""
 
     def test_false_spares_features_target_and_baked_factor(self):
         """The target is a column like any other: False leaves it at its own scale."""
@@ -929,7 +925,7 @@ class TestScaleFeaturesFalse:
         assert divisor == 1.0
 
     def test_false_on_y_only_through_the_dict_form(self):
-        """I5: a dict may spare the target alone, the features staying divided."""
+        """A dict may spare the target alone, the features staying divided."""
         scaler = _make_scaler(scale_features={'a1': False, DEFAULT_SCALE_KEY: 'constant'})
         divisors = scaler.feature_divisors(
             columns=['m1'], column_frequencies={'m1': 'M'}, ways={'m1': 'aggregate'},
@@ -938,7 +934,7 @@ class TestScaleFeaturesFalse:
         assert (divisors['m1'], scaler.target_divisor('a1', 'Y', 'M')) == (12.0, 1.0)
 
     def test_calendar_feature_with_constant_target(self):
-        """I5: 'calendar' on a feature, 'constant' on y — each divisor follows its own mode."""
+        """'calendar' on a feature, 'constant' on y — each divisor follows its own mode."""
         scaler = _make_scaler(scale_features={'d1': 'calendar', DEFAULT_SCALE_KEY: 'constant'})
         index = pd.date_range('2024-01-31', periods=2, freq='ME')
         divisors = scaler.feature_divisors(
@@ -963,13 +959,13 @@ class TestScaleFeaturesFalse:
 
 
 # =============================================================================
-# Échelle par ligne de la cible (§5.4)
+# Échelle par ligne de la cible
 # =============================================================================
 class TestPerRowTargetDivisor:
-    """§5.4 per-row scale: each row of y carries its production frequency."""
+    """Per-row scale: each row of y carries its production frequency."""
 
     def test_spec_table_of_5_4(self):
-        """§5.4 table: 120 / Y -> 10.0, 28 / Q -> 9.33, 30 / Q -> 10.0."""
+        """Per-row divisors: 120 / Y -> 10.0, 28 / Q -> 9.33, 30 / Q -> 10.0."""
         scaler = StageScaler()
         index = pd.to_datetime(['2021-12-31', '2021-03-31', '2021-06-30'])
         y_train = pd.Series([120.0, 28.0, 30.0], index=index)
@@ -985,8 +981,7 @@ class TestPerRowTargetDivisor:
     def test_unit_per_row_divisors_are_not_short_circuited(self):
         """B12: under 'constant', per-row divisors all equal to 1.0 stay a Series.
 
-        Moved from the ``HighFrequencyImputer`` test package (prompt F10): a
-        pure ``StageScaler`` case.
+        A pure ``StageScaler`` case.
         """
         index = pd.to_datetime(['2021-01-31', '2021-02-28'])
         divisors = StageScaler(scale_features='constant').target_divisor(
@@ -1180,7 +1175,7 @@ class TestTransformSymmetry:
     @pytest.mark.parametrize('method', ['transform', 'inverse_transform'])
     @pytest.mark.parametrize('case', ['calendar-daily', 'panel-fractional', 'produced-freq'])
     def test_name_of_y_is_kept_under_per_row_divisors(self, case, method):
-        """The name of y designates the imputed column: scaling never erases it (ANO-FREQ-036).
+        """The name of y designates the imputed column: scaling never erases it.
 
         pandas drops the name of a Series divided by an unnamed per-row
         divisor; the scaler restores it.
@@ -1224,7 +1219,7 @@ class TestTransformSymmetry:
 
     @pytest.mark.parametrize('method', ['transform', 'inverse_transform'])
     def test_transform_rejects_other_columns_than_fit(self, method):
-        """sklearn convention (as ANO-FREQ-026): missing and unexpected columns are named (ANO-FREQ-033)."""
+        """sklearn convention: missing and unexpected columns are named."""
         index = _monthly_grid(periods=3)
         X = pd.DataFrame({'m1': [1.0, 2.0, 3.0], 'a2': [12.0, 24.0, 36.0]}, index=index)
         scaler = _make_scaler(materialization={'a2': 'raw_anchors'}).fit(X)
@@ -1287,7 +1282,7 @@ class TestPerEntityFrequencies:
 
     @pytest.mark.parametrize('method', ['feature_divisors', 'target_divisor'])
     def test_grid_entity_uncovered_by_the_stage_binding_raises(self, method):
-        """The scale of a block is never guessed: an uncovered grid entity is an error naming it (ANO-FREQ-031)."""
+        """The scale of a block is never guessed: an uncovered grid entity is an error naming it."""
         index = _panel_grid(('DE', 'FR', 'IT'))
         binding = {('FR',): 'M', ('DE',): 'Q'}
         scaler = StageScaler()
@@ -1351,8 +1346,7 @@ class TestPerEntityFrequencies:
     def test_plain_entity_keys_behave_like_tuple_keys(self, parameter, expected, form):
         """``{'FR': ...}`` and ``{('FR',): ...}`` are the same binding, in every parameter.
 
-        Clés scalaires normalisées, comme dans ``CovariateMaterializer``
-        (ANO-FREQ-037) : les deux composants lisent les mêmes liaisons.
+        Clés scalaires normalisées, comme dans ``CovariateMaterializer`` : les deux composants lisent les mêmes liaisons.
         """
         index = _panel_grid()
         fr, de = ('FR', 'DE') if form == 'plain' else (('FR',), ('DE',))
@@ -1433,15 +1427,15 @@ class TestPerEntityFrequencies:
 
 
 # =============================================================================
-# Jeu mutualisé PANEL-F (§5.8 R5)
+# Jeu mutualisé PANEL-F
 # =============================================================================
 class TestMutualizedTrainingSet:
-    """§5.8 R5: per-entity source_freq / grid_freq, one block frequency per entity."""
+    """Per-entity source_freq / grid_freq, one block frequency per entity."""
 
     @pytest.mark.parametrize(
         'stage, expected',
         [
-            # Valeur d'or du tableau de l'étape Q du §5.8 : FR / 4, DE / 1, IT / (1/3)
+            # Valeur d'or du tableau de l'étape Q : FR / 4, DE / 1, IT / (1/3)
             ('Q', {'FR': [30.0, 33.0, 37.5], 'DE': [28, 30, 31, 31, 31, 33, 34, 34, 36, 37, 38, 39],
                    'IT': [30.0] * 12 + [33.0] * 12 + [37.5] * 12}),
             # Étape M : FR / 12, DE / 3, IT / 1
@@ -1501,9 +1495,9 @@ class TestMutualizedTrainingSet:
         assert per_entity == {'DE': [3.0], 'FR': [12.0], 'IT': [1.0]}
 
     def test_fractional_divisor_for_a_block_finer_than_the_stage(self, mixed_freq_panel_multifrequency):
-        """A monthly block at a quarterly stage (D18) divides by 1/3, by every route.
+        """A monthly block at a quarterly stage divides by 1/3, by every route.
 
-        Block divisor, production frequency (§5.4) and covariate finer than
+        Block divisor, production frequency and covariate finer than
         the block all give 1/3 — never floored at 1.0.
         """
         index = mixed_freq_panel_multifrequency.index
@@ -1863,7 +1857,7 @@ class TestSklearnProtocol:
 
 
 # =============================================================================
-# Modalités par entité (D41)
+# Modalités par entité
 # =============================================================================
 # Réglage de référence : 'v' brute pour DE, CVS pour toutes les autres entités
 _DE_RAW = {'v': {'DE': 'calendar', DEFAULT_SCALE_KEY: 'constant'}}
@@ -1887,7 +1881,7 @@ def _two_level_grid(periods: int = 2) -> pd.MultiIndex:
 
 
 class TestPerEntityModes:
-    """``scale_features`` as ``{column: {entity: mode}}`` (D41).
+    """``scale_features`` as ``{column: {entity: mode}}``.
 
     Golden values: a monthly variable at a daily stage divides by 30.0 under
     ``'constant'`` and by the real days of each month under ``'calendar'``

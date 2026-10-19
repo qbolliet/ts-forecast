@@ -32,10 +32,9 @@ Contracts checked:
   observation by the imputer grid, with a NaN target;
 - ``GridSearchCV`` explores a parameter of the imputer.
 
-Formerly ``ANO-FREQ-080`` (no ``predict`` without ``y``, hence no string
-scorer), ``ANO-FREQ-081`` (``y`` covariate of the imputation of ``X``) and
-``ANO-FREQ-082`` (a test fold cutting a period failed at scoring), corrected
-in ``tests/ANOMALIES.md``.
+Also covered: ``predict`` without ``y`` (so string scorers work), ``y`` not
+being a covariate of the imputation of ``X``, and a test fold cutting a period
+being scored.
 """
 # Modules de base
 import warnings
@@ -95,8 +94,8 @@ def _make_pipeline(**imputer_params) -> XYPipeline:
     Returns:
         Unfitted ``XYPipeline``.
     """
-    # Délai de 20 jours sur l'inflation, masque trimestriel : recette de D5
-    # (le décalage désaligne X et y, ANO-DELAYS-044)
+    # Délai de 20 jours sur l'inflation, masque trimestriel : le décalage
+    # désaligne X et y
     delays = PublicationDelayTransformer(
         delays={'inflation_ipc': 20.0},
         prediction_date='2024-08-15',
@@ -375,7 +374,7 @@ class TestNoLeakage:
         assert len(targets) > 0 and targets.isna().all()
 
     def test_test_fold_cutting_a_period_is_scored(self, series_xy):
-        """A 7-month test fold, which cuts a quarter, is scored (formerly ANO-FREQ-082).
+        """A 7-month test fold, which cuts a quarter, is scored.
 
         The prediction pass imputes ``X`` on its input rows only: no
         completion row, hence no NaN target reaches the scorer.
@@ -480,7 +479,7 @@ class TestXYContract:
 
 
 # =============================================================================
-# Prédire sans y (anciennement ANO-FREQ-080)
+# Prédire sans y
 # =============================================================================
 @pytest.fixture(scope='module')
 def series_split(series_xy):
@@ -490,7 +489,7 @@ def series_split(series_xy):
 
 
 class TestPredictWithoutTarget:
-    """I9 — a fitted pipeline predicts from ``X`` alone, as any sklearn pipeline."""
+    """A fitted pipeline predicts from ``X`` alone, as any sklearn pipeline."""
 
     def test_fitted_pipeline_predicts_from_x_alone(self, series_split):
         """``pipeline.predict(X_test)`` returns one prediction per test row."""
@@ -523,7 +522,7 @@ class TestPredictWithoutTarget:
 
 
 # =============================================================================
-# Rôle de y : imputé, jamais covariable par défaut (anciennement ANO-FREQ-081)
+# Rôle de y : imputé, jamais covariable par défaut
 # =============================================================================
 class TestTargetRole:
     """``y`` is imputed at the training pass, never read by the prediction pass."""

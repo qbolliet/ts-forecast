@@ -130,7 +130,7 @@ class TestRealisticDatasets:
     def test_features_and_target_share_the_stage_scale(
         self, heterogeneous_coverage_panel, stage
     ):
-        """Feature divisors equal the target divisor on every row (§9.2)."""
+        """Feature divisors equal the target divisor on every row."""
         training = self._build_depenses(make_builder(), heterogeneous_coverage_panel, stage)
         scaler = StageScaler()
 

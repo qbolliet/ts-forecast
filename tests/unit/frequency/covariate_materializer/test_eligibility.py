@@ -1,8 +1,8 @@
 """Tests of ``covariate_eligibility``: a feature absent for a whole entity.
 
-Spec ``high_frequency_imputer2_architecture.md`` §4.5: no strategy can
+No strategy can
 fabricate values for an entity holding NO observation of a feature
-(``climat_affaires`` for ``IT``, §2.3). ``'any_entity'`` keeps the column as
+(``climat_affaires`` for ``IT``). ``'any_entity'`` keeps the column as
 soon as one entity observes it — the empty entity's rows stay NaN, the unique
 residual NaN under ``'interpolate'``; ``'all_entities'`` drops it. A column
 observed by no entity at all, or absent from the frame, is never retained.

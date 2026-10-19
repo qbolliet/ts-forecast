@@ -1,16 +1,16 @@
-"""Tests of the coincident cells and of the frequency level (§5.9, D32).
+"""Tests of the coincident cells and of the frequency level.
 
 The 31st of December is both a year end and a quarter end. The builder never
 reads ``aggregation_constraint``: the imputer translates ``'sum'`` into
 ``keep_coincident_cells=False`` (the observation wins) and ``None`` into
 ``True`` (both cells kept, distinguished by a ``'frequency'`` level on the
-entity side). Pinned here: the §5.5 table — 12 vs 15 rows of ``a1`` / ``a2``
+entity side). Pinned here: 12 vs 15 rows of ``a1`` / ``a2``
 at stage ``M`` on ``TS`` —, the level stamped only when a coincidence
 SURVIVES the origin filter and the window, never for two entities sharing a
 date, stamped after the materialization (the materializer only sees real
 grids), covariates materialized at the frequency of each layer. Under
 ``'sum'`` the observation wins only where it is itself retained: a produced
-cell whose anchor the window excludes stays (correction of ANO-FREQ-045).
+cell whose anchor the window excludes stays.
 End to end through ``HighFrequencyImputer`` under
 ``impute_intermediate_frequencies=True``.
 
@@ -51,10 +51,10 @@ from tests.unit.frequency.training_set_builder.helpers import (
 
 
 # =============================================================================
-# §5.9 : cellules coïncidentes
+# Cellules coïncidentes
 # =============================================================================
 class TestCoincidentCells:
-    """§5.9 and D32 — the component, unaware of ``aggregation_constraint``."""
+    """The component, unaware of ``aggregation_constraint``."""
 
     @pytest.mark.parametrize('column', ['a1', 'a2'])
     @pytest.mark.parametrize(
@@ -65,7 +65,7 @@ class TestCoincidentCells:
     def test_twelve_vs_fifteen_rows_at_monthly_stage(
         self, reference_timeseries, column, keep_coincident_cells, expected_rows, stamped
     ):
-        """§5.5: 3 anchors + 9 imputations under 'sum', + 12 under None."""
+        """3 anchors + 9 imputations under 'sum', + 12 under None."""
         builder = seed_quarterly_mirror(make_builder(), column)
 
         training = build_ts(
@@ -126,7 +126,7 @@ class TestCoincidentCells:
 
     @pytest.mark.parametrize('column', ['a1', 'a2'])
     def test_coincidence_must_survive_the_origin_filter(self, reference_timeseries, column):
-        """Mirror cells filtered out: no coincidence left, no level (§5.9)."""
+        """Mirror cells filtered out: no coincidence left, no level."""
         # 'covariates_only' : le miroir porte bien la coïncidence, mais le
         # filtre d'origine l'écarte AVANT le constat
         builder = seed_quarterly_mirror(make_builder(), column)
@@ -161,7 +161,7 @@ class TestCoincidentCells:
 
         The window excludes the 2021 anchor (its year is not fully covered)
         but keeps the fourth quarter of 2021: the quarterly imputation of
-        2021-12-31 is then redundant with nothing, and stays (ANO-FREQ-045).
+        2021-12-31 is then redundant with nothing, and stays.
         """
         builder = seed_quarterly_mirror(make_builder(), 'a1')
         builder.training_mask = layer_mask_provider(
@@ -259,7 +259,7 @@ class TestCoincidentCells:
         # Les entités sans coïncidence portent leur fréquence de bloc
         assert ('DE', 'Q', pd.Timestamp('2021-12-31')) in training.X.index
         assert ('IT', 'M', pd.Timestamp('2021-12-31')) in training.X.index
-        # Les 51 lignes du §5.8, plus la cellule coïncidente conservée
+        # Les 51 lignes du jeu mutualisé, plus la cellule coïncidente conservée
         assert len(training) == 52
 
     def test_materializer_never_sees_the_frequency_level(self, reference_timeseries):
@@ -308,7 +308,7 @@ class TestCoincidentCells:
         )
         imputer.fit(reference_timeseries)
 
-        # Jeu complet de a1 à l'étape M (tableau du §5.5, étape 4)
+        # Jeu complet de a1 à l'étape M (tableau de l'étape M)
         monthly = [training for stage, training in captured if stage == 'M']
         assert monthly
         assert {len(training) for training in monthly} == {expected_rows}

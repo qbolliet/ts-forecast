@@ -22,7 +22,7 @@ from tests.support.datasets import (
 
 
 # =============================================================================
-# Fixtures génériques (anciennement tests/conftest.py)
+# Fixtures génériques
 # =============================================================================
 
 
@@ -262,7 +262,7 @@ def staggered_panel() -> pd.DataFrame:
 
 
 # =============================================================================
-# Fixtures de fréquences mixtes (anciennement tests/frequency/conftest.py)
+# Fixtures de fréquences mixtes
 # =============================================================================
 
 
@@ -366,15 +366,14 @@ def _panel_reference_full_session() -> pd.DataFrame:
 
 @pytest.fixture
 def panel_reference_full(_panel_reference_full_session: pd.DataFrame) -> pd.DataFrame:
-    """Unified ``PANEL-X`` reference dataset (``high_frequency_imputer2_architecture.md`` §2.6).
+    """Unified ``PANEL-X`` reference dataset.
 
     The single frame all three frozen reference datasets project from:
-    ``TS`` (:func:`reference_timeseries`, §2.2), ``PANEL``
-    (:func:`mixed_freq_panel_heterogeneous`, §2.3) and ``PANEL-F``
-    (:func:`mixed_freq_panel_multifrequency`, §2.5) are strict column (and,
+    ``TS`` (:func:`reference_timeseries`), ``PANEL``
+    (:func:`mixed_freq_panel_heterogeneous`) and ``PANEL-F``
+    (:func:`mixed_freq_panel_multifrequency`) are strict column (and,
     for ``TS``, entity) projections of this dataset — the projection status
-    changes none of their values, §2.2 / §2.3 / §2.5 stay normative and
-    frozen.
+    changes none of their values, which stay frozen.
 
     ``MultiIndex`` (``country``, ``date``) with 3 entities (``FR``, ``DE``,
     ``IT``), each sharing the same 36 month-end (``ME``) dates from
@@ -388,9 +387,9 @@ def panel_reference_full(_panel_reference_full_session: pd.DataFrame) -> pd.Data
 
 @pytest.fixture
 def reference_timeseries(_panel_reference_full_session: pd.DataFrame) -> pd.DataFrame:
-    """``TS`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.2.
+    """``TS`` reference dataset.
 
-    Strict projection of ``PANEL-X`` (§2.6, :func:`panel_reference_full`):
+    Strict projection of ``PANEL-X`` (:func:`panel_reference_full`):
     ``panel_x.loc['FR', ['m1', 'q1', 'a1', 'a2']]``. ``DatetimeIndex`` named
     ``date``, month-end anchored (``ME``), 36 rows from 2021-01-31 to
     2023-12-31. Columns:
@@ -401,21 +400,21 @@ def reference_timeseries(_panel_reference_full_session: pd.DataFrame) -> pd.Data
       values 120 / 132 / 150.
     - ``a2`` (annual, same anchors) — gold values 60 / 66 / 72.
 
-    The annual gold values match §2.2 verbatim and are reused as gold cases
-    by later implementation lots; they must not change.
+    The annual gold values are reused as gold cases across the tests; they
+    must not change.
     """
     df = _panel_reference_full_session.loc['FR', ['m1', 'q1', 'a1', 'a2']].copy()
     # Restauration de la fréquence d'index, perdue au découpage du MultiIndex :
-    # la projection reste identique bit à bit à l'ancien constructeur dédié.
+    # la projection reste identique bit à bit à un constructeur dédié.
     df.index.freq = df.index.inferred_freq
     return df
 
 
 @pytest.fixture
 def mixed_freq_panel_heterogeneous(_panel_reference_full_session: pd.DataFrame) -> pd.DataFrame:
-    """``PANEL`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.3.
+    """``PANEL`` reference dataset.
 
-    Strict projection of ``PANEL-X`` (§2.6, :func:`panel_reference_full`):
+    Strict projection of ``PANEL-X`` (:func:`panel_reference_full`):
     ``panel_x[['m1', 'q1', 'a1', 'a2', 'climat_affaires']]``. ``MultiIndex``
     (``country``, ``date``) with 3 entities (``FR``, ``DE``, ``IT``), each
     sharing the same 36 month-end (``ME``) dates from 2021-01-31 to
@@ -425,17 +424,17 @@ def mixed_freq_panel_heterogeneous(_panel_reference_full_session: pd.DataFrame) 
     - ``climat_affaires`` (monthly business survey): observed for ``FR`` and
       ``DE`` (level ~100 with reproducible noise), entirely NaN for ``IT``.
       The column exists for every entity; only the Italian entity never
-      observes it — the support of ``covariate_eligibility`` (§4.5) and of
-      the per-entity NaN invariant (§3).
+      observes it — the support of ``covariate_eligibility`` and of
+      the per-entity NaN invariant.
     """
     return _panel_reference_full_session[['m1', 'q1', 'a1', 'a2', 'climat_affaires']].copy()
 
 
 @pytest.fixture
 def mixed_freq_panel_multifrequency(_panel_reference_full_session: pd.DataFrame) -> pd.DataFrame:
-    """``PANEL-F`` reference dataset of ``high_frequency_imputer2_architecture.md`` §2.5.
+    """``PANEL-F`` reference dataset.
 
-    Strict projection of ``PANEL-X`` (§2.6, :func:`panel_reference_full`):
+    Strict projection of ``PANEL-X`` (:func:`panel_reference_full`):
     ``panel_x[['m1', 'q1', 'v']]``. ``MultiIndex`` (``country``, ``date``)
     with 3 entities (``FR``, ``DE``, ``IT``), each sharing the same 36
     month-end (``ME``) dates as :func:`mixed_freq_panel_heterogeneous` (108
@@ -447,7 +446,7 @@ def mixed_freq_panel_multifrequency(_panel_reference_full_session: pd.DataFrame)
       anchors), monthly for ``IT`` (36 observations, constant per year).
       Chosen so the three entities carry the same annual total (120.0 /
       132.0 / 150.0) — the support of inter-entity mutualisation of the
-      training set (§5.8) and of the ``B29`` defect it measures (§1.5).
+      training set.
 
     No ``climat_affaires`` column: this dataset is not ``PANEL`` and does
     not replace it.

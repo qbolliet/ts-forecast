@@ -1,10 +1,10 @@
-"""Tests of the reference datasets of ``high_frequency_imputer2_architecture.md``.
+"""Tests of the reference datasets of ``HighFrequencyImputer``.
 
-The ``PANEL`` (§2.3) and ``TS`` (§2.2) datasets support every test and
+The ``PANEL`` and ``TS`` datasets support every test and
 notebook of ``HighFrequencyImputer``. Their structure and golden values
 are locked here: they must not move anymore once this batch is delivered.
 
-Since batch L13-0b (§2.6), the three datasets are PROJECTIONS of a
+The three datasets are PROJECTIONS of a
 single ``PANEL-X`` dataset (fixture ``panel_reference_full``). The
 projection identities are tested by ``TestPanelXProjections``: they
 guarantee that the factorization does not drift.
@@ -28,7 +28,7 @@ from tests.support.datasets import (
 
 
 class TestHeterogeneousPanel:
-    """``PANEL`` dataset: covariate structurally absent for one entity (§2.3, §4.5)."""
+    """``PANEL`` dataset: covariate structurally absent for one entity."""
 
     def test_heterogeneous_panel_it_has_no_climat_affaires(
         self, mixed_freq_panel_heterogeneous: pd.DataFrame
@@ -48,12 +48,12 @@ class TestHeterogeneousPanel:
 
 
 class TestReferenceTimeseries:
-    """``TS`` dataset: annual golden values of the document (§2.2)."""
+    """``TS`` dataset: annual golden values."""
 
     def test_reference_timeseries_matches_spec_anchors(
         self, reference_timeseries: pd.DataFrame
     ) -> None:
-        """The six golden values of ``a1`` and ``a2`` are those of §2.2, at the three anchors."""
+        """The six golden values of ``a1`` and ``a2`` are the documented ones, at the three anchors."""
         df = reference_timeseries
         anchors = pd.to_datetime(['2021-12-31', '2022-12-31', '2023-12-31'])
 
@@ -62,7 +62,7 @@ class TestReferenceTimeseries:
 
 
 class TestMultiFrequencyPanel:
-    """``PANEL-F`` dataset: one column with three detected frequencies across entities (§2.5, §5.8)."""
+    """``PANEL-F`` dataset: one column with three detected frequencies across entities."""
 
     def test_shape_and_index(self, mixed_freq_panel_multifrequency: pd.DataFrame) -> None:
         """108 rows, sorted ``MultiIndex`` (``country``, ``date``), 36 dates per entity."""
@@ -89,7 +89,7 @@ class TestMultiFrequencyPanel:
         assert n_obs['IT'] == 36
 
     def test_v_gold_values(self, mixed_freq_panel_multifrequency: pd.DataFrame) -> None:
-        """The golden values of ``v`` of §2.5, copied as is per entity."""
+        """The golden values of ``v``, copied as is per entity."""
         df = mixed_freq_panel_multifrequency
 
         assert df.loc['FR', 'v'].dropna().tolist() == [120.0, 132.0, 150.0]
@@ -141,7 +141,7 @@ class TestMultiFrequencyPanel:
     def test_detected_frequencies_disagree_across_entities(
         self, mixed_freq_panel_multifrequency: pd.DataFrame
     ) -> None:
-        """``v`` carries three different detected frequencies depending on the entity (§2.1)."""
+        """``v`` carries three different detected frequencies depending on the entity."""
         df = mixed_freq_panel_multifrequency
 
         detected = detect_frequency(data=df)
@@ -156,7 +156,7 @@ class TestMultiFrequencyPanel:
 
 
 class TestPanelXProjections:
-    """§2.6 - ``TS``, ``PANEL`` and ``PANEL-F`` are projections of ``PANEL-X``."""
+    """``TS``, ``PANEL`` and ``PANEL-F`` are projections of ``PANEL-X``."""
 
     def test_reference_timeseries_is_the_fr_projection(
         self,
@@ -168,7 +168,7 @@ class TestPanelXProjections:
 
         # ``check_freq=False`` : le découpage d'un MultiIndex perd l'attribut
         # ``freq`` de l'index ; la fixture ``reference_timeseries`` le restaure
-        # pour rester un remplacement exact de l'ancien constructeur dédié.
+        # pour rester identique à un constructeur dédié.
         pd.testing.assert_frame_equal(
             reference_timeseries, projection, check_freq=False
         )
@@ -211,7 +211,7 @@ class TestPanelXProjections:
 
 
 class TestRealisticMixedFrequencyDatasets:
-    """Realistic dataset of notebook 3 (§2.4 of ``tests_and_refactoring_prompts.md``).
+    """Realistic dataset of notebook 3.
 
     ``irregular_index_timeseries`` / ``heterogeneous_coverage_panel`` are
     not dedicated builders: they are specific calls of
@@ -228,7 +228,7 @@ class TestRealisticMixedFrequencyDatasets:
     def test_panel_entities_have_their_own_monthly_grid_coverage(
         self, heterogeneous_coverage_panel: pd.DataFrame
     ) -> None:
-        """Each entity covers its own monthly grid (§2.2 of the notebook)."""
+        """Each entity covers its own monthly grid."""
         df = heterogeneous_coverage_panel
 
         # Valeurs d'or : dates de couverture mensuelle du dictionnaire

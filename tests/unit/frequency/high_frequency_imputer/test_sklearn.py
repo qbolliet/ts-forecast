@@ -1,7 +1,7 @@
-"""sklearn conformance of ``HighFrequencyImputer`` (§12.5, I9).
+"""sklearn conformance of ``HighFrequencyImputer``.
 
 Covers ``clone``, ``get_params`` / ``set_params`` and nested parameters,
-``NotFittedError`` and ``__sklearn_is_fitted__`` (B3, B20), the end-to-end
+``NotFittedError`` and ``__sklearn_is_fitted__``, the end-to-end
 ``Pipeline`` / ``GridSearchCV`` use, the validation of values reaching the
 imputer through ``set_params``, the parameters left untouched by ``fit``, its
 idempotence, and the persistence of a fitted imputer (pickle, deepcopy).
@@ -17,7 +17,7 @@ Checks of ``sklearn.utils.estimator_checks`` run as such:
   level for a panel) — the first three are rewritten by hand below, on the
   reference datasets;
 - ``check_parameters_default_constructible``: ``target_frequency`` is required
-  by design (§13) and the class declares no ``_required_parameters``; checked by
+  by design and the class declares no ``_required_parameters``; checked by
   hand in ``test_parameters.py::TestInitDoesNotTransform``;
 - ``check_n_features_in``: fits on a bare array too; its contract —
   ``n_features_in_`` / ``feature_names_in_`` written by ``fit`` — is checked by
@@ -65,7 +65,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 # Contrat de paramètres : B3, paramètres supprimés, NotFittedError
 # =============================================================================
 class TestParameterContract:
-    """Conformité sklearn de l'espace de paramètres (§12.5, B3 et B20)."""
+    """Conformité sklearn de l'espace de paramètres."""
 
     def test_impute_intermediate_frequencies_covariates_only_is_not_true(self):
         """'covariates_only' est accepté et n'est jamais confondu avec True."""
@@ -172,9 +172,9 @@ class TestParameterContract:
 
 
 class TestSklearnConformance:
-    """I9 — conformité sklearn de bout en bout (§12.5)."""
+    """Conformité sklearn de bout en bout."""
 
-    # Cible de panel par entité, forme dict du §13.1
+    # Cible de panel par entité, forme dict
     _TARGET = {('FR',): 'M', ('DE',): 'M', ('IT',): 'M'}
 
     def test_pipeline_fit_transform(self, mixed_freq_panel_multifrequency):
@@ -202,15 +202,15 @@ class TestSklearnConformance:
         """`GridSearchCV` explore l'imputeur sur un panel à cible par entité.
 
         La cible `v` est basse fréquence pour FR et DE : la passe d'entraînement
-        l'impute, la passe de prédiction la rend telle quelle (D47), avec ses NaN
-        hors ancres ; `DropNaNTarget` les retire avant le régresseur (D48).
+        l'impute, la passe de prédiction la rend telle quelle, avec ses NaN
+        hors ancres ; `DropNaNTarget` les retire avant le régresseur.
         """
         panel = mixed_freq_panel_multifrequency
         X = panel[['m1', 'q1']]
         y = panel['v']
 
         # Découpage par DATE, pour que les deux plis restent des panels
-        # complets : un pli privé d'entité relèverait de D34, pas d'ici
+        # complets : un pli privé d'entité ne relèverait pas de ce test
         dates = panel.index.get_level_values(-1)
         cutoff = pd.Timestamp('2022-12-31')
         split = [(
@@ -347,7 +347,7 @@ _THROUGH_SET_PARAMS = [
     ('interpolation_anchor', 1.5),
     ('target_frequency', 12),
 ]
-# Paramètres que seul l'imputeur valide (ANO-FREQ-052, corrigée) : aucun
+# Paramètres que seul l'imputeur valide : aucun
 # composant reconstruit au fit ne les revalide à sa place
 _THROUGH_SET_PARAMS += [
     ('impute_intermediate_frequencies', 'yes'),
@@ -364,9 +364,9 @@ class TestValidationThroughSetParams:
     """A value ``__init__`` refuses is refused at ``fit`` too when set by ``set_params``.
 
     ``set_params`` writes attributes without calling ``__init__``: the
-    validation must therefore hold again at ``fit``, where B3 places every
-    normalization — the arbitration of ANO-FREQ-023 / 032 for the components,
-    ``set_params`` included.
+    validation must therefore hold again at ``fit``, where every
+    normalization takes place — for the components too, ``set_params``
+    included.
     """
 
     @pytest.mark.parametrize(

@@ -446,7 +446,7 @@ class TestAggregationContract:
         pd.testing.assert_series_equal(result.loc['B', 'x'], panel.loc['B', 'x'])
 
     def test_duplicated_dates_are_rejected(self, aligner):
-        """Duplicated dates raise instead of being summed twice (ANO-FREQ-010)."""
+        """Duplicated dates raise instead of being summed twice."""
         # Doublon de janvier ajouté en queue : la somme de T1 deviendrait 1+2+3+1 = 7
         df = with_duplicated_rows(_frame(np.arange(1, 7), '2023-01-01', 'MS'), n=1)
 
@@ -556,7 +556,7 @@ class TestInterpolationGoldenValues:
         # Zone intérieure : aucun prolongement après la dernière observation
         pytest.param({'interp_limit_area': 'inside'},
                      [100, 110, 120, 130, 140, 150, 160, np.nan, np.nan], id='limit-area-inside'),
-        # Direction arrière : la queue d'août et septembre n'est plus comblée
+        # Direction arrière : la queue d'août et septembre n'est pas comblée
         pytest.param({'interp_limit_direction': 'backward'},
                      [100, 110, 120, 130, 140, 150, 160, np.nan, np.nan],
                      id='limit-direction-backward'),
@@ -975,7 +975,7 @@ class TestConvertToTargetRouting:
         pd.testing.assert_frame_equal(result, df)
 
     def test_plain_column_name_on_a_panel_converts_every_entity(self, aligner):
-        """A bare column name on a panel designates the column of every entity (ANO-FREQ-011)."""
+        """A bare column name on a panel designates the column of every entity."""
         panel = _panel({'A': _frame(np.arange(1, 7), '2023-01-01', 'MS'),
                         'B': _frame(np.arange(1, 7) * 2, '2023-01-01', 'MS')})
 
@@ -1315,7 +1315,7 @@ class TestPrivateGuards:
         pytest.param([100.0, np.nan, np.nan], id='single-observation'),
     ])
     def test_interpolating_a_column_without_frequency_leaves_it_unchanged(self, aligner, values):
-        """Fewer than two observations: the column is left as is (ANO-FREQ-012)."""
+        """Fewer than two observations: the column is left as is."""
         df = _frame(values, '2023-01-01', 'QS')
 
         result = aligner._interpolate_to_target(df, ['x'], 'MS')

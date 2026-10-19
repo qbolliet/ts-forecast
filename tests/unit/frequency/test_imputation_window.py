@@ -3,7 +3,7 @@
 ``ImputationWindowCalculator`` builds, per entity, a boolean coverage matrix
 on the highest detected frequency (a quarterly observation covers its three
 months), derives the coverage ratio of each grid date and exposes three
-window masks (spec ``high_frequency_imputer2_architecture.md`` §7.1):
+window masks:
 
 - ``'strict'``: coverage == 1.0, no extension (diagnostics only);
 - ``'imputation'``: the strict window extended per ``imputation_scope`` /
@@ -15,11 +15,11 @@ window masks (spec ``high_frequency_imputer2_architecture.md`` §7.1):
 Contracts pinned here: strict ⊆ imputation, training relation per
 ``training_scope``; contiguous extensions stopping at the first date under
 the threshold; ``coverage_threshold`` 0 and 1; unified return type on a panel
-(§7.2: one ``pd.Series`` on a MultiIndex ``(entity..., date)``, never a dict,
+(one ``pd.Series`` on a MultiIndex ``(entity..., date)``, never a dict,
 while window bounds stay dicts keyed by entity tuples);
-``entities_without_window_``; decision D39 (commit ``a3f5783``: columns with
+``entities_without_window_``; columns with
 no observation are excluded from the coverage denominator, reported by
-``structurally_absent_columns_`` and a single ``UserWarning``); D40 (observed
+``structurally_absent_columns_`` and a single ``UserWarning``; observed
 columns of undetectable frequency excluded from the grid and the denominator,
 ``undetected_frequency_columns_``, a ``UserWarning`` of their own); grid
 anchoring following the data when no column sits at the grid frequency;
@@ -56,7 +56,7 @@ from tests.support.perturbations import (
     to_three_level_index,
 )
 
-# Les trois masques exposés par le calculateur (spec §7.1)
+# Les trois masques exposés par le calculateur
 _KINDS = ('strict', 'imputation', 'training')
 
 # Attributs de masque correspondant à chaque kind
@@ -239,8 +239,8 @@ class TestConstructorValidation:
     def test_imputation_scope_rejects_unrestricted(self):
         """'unrestricted' is a training scope only: refused as a prediction scope.
 
-        Imputing dates without any data has no meaning; spec §7 restricts
-        'unrestricted' to ``TrainingScope`` (ANO-FREQ-016, spec corrected).
+        Imputing dates without any data has no meaning; 'unrestricted'
+        is restricted to ``TrainingScope``.
         """
         with pytest.raises(ValueError, match='imputation_scope'):
             ImputationWindowCalculator(imputation_scope='unrestricted')
@@ -299,10 +299,9 @@ class TestFitInputValidation:
         """Disjoint observation ranges in every entity: no strict window anywhere, no error.
 
         Both columns exist (none is excluded from the denominator), but their
-        joint coverage never reaches 1.0. Like a time series (B23), the panel
-        gets all-False masks and one warning naming the entities; it used to
-        raise, which sent ``HighFrequencyImputer`` to all-True masks
-        (ANO-FREQ-072).
+        joint coverage never reaches 1.0. Like a time series, the panel
+        gets all-False masks and one warning naming the entities; it does not
+        raise, so ``HighFrequencyImputer`` never falls back to all-True masks.
         """
         dates = pd.date_range('2020-01-01', periods=12, freq='MS')
         index = pd.MultiIndex.from_product([['A', 'B'], dates], names=['entity', 'date'])
@@ -557,7 +556,7 @@ class TestScopeExtensions:
 # Les trois masques
 # =============================================================================
 class TestThreeMasks:
-    """Relations between the strict, imputation and training masks (spec §7.1)."""
+    """Relations between the strict, imputation and training masks."""
 
     @pytest.mark.parametrize('scope', ['strict', 'extended_backward', 'extended_forward', 'extended_both'])
     def test_strict_is_included_in_imputation(self, scope):
@@ -683,9 +682,9 @@ class TestNoStrictWindow:
     def test_panel_without_window_behaves_like_a_time_series(self):
         """On a panel, no strict window for any entity gives all-False masks, as on a time series.
 
-        Ce cas levait « No imputation window found for any entity in the
-        panel » ; l'imputeur en déduisait des masques tout-vrais et imputait
-        tout le panel (ANO-FREQ-072).
+        Ce cas ne lève pas « No imputation window found for any entity in the
+        panel » : l'imputeur n'en déduit pas des masques tout-vrais qui
+        imputeraient tout le panel.
         """
         _, df = _make_df_without_strict_window()
         panel = pd.concat({'A': df, 'B': df}, names=['entity', 'date'])
@@ -729,7 +728,7 @@ class TestNoStrictWindow:
     def test_entities_without_strict_window_are_named_by_one_warning(self):
         """Two entities without strict window next to one with: ONE message naming both.
 
-        Le message était émis une fois par entité, sans la nommer, et parlait
+        Le message est émis une seule fois, nomme les entités et ne parle pas
         du « DataFrame » entier.
         """
         _, without = _make_df_without_strict_window()
@@ -747,7 +746,7 @@ class TestNoStrictWindow:
 
 
 # =============================================================================
-# Types de retour sur un panel (spec §7.2)
+# Types de retour sur un panel
 # =============================================================================
 class TestPanelReturnTypes:
     """Masks are one MultiIndex Series, bounds are dicts keyed by entity tuples."""
@@ -797,7 +796,7 @@ class TestPanelReturnTypes:
         """Every per-entity dict uses the keys of ``get_unique_panel_entities``.
 
         Tuples even with a single entity level: ``('A',)``, never ``'A'``
-        (§3.4 of the review), so a KeyError genuinely signals a bug.
+        so a KeyError genuinely signals a bug.
         """
         df = _make_panel(entities)
         calc = ImputationWindowCalculator().fit(df)
@@ -868,7 +867,7 @@ class TestEntitiesWithoutWindow:
 
         The attributes are only meaningful for an entity with a coverage grid:
         ``B``'s columns were never weighed against one another (documented
-        rule, ANO-FREQ-017).
+        rule).
         """
         calc = _fit_quietly(ImputationWindowCalculator(), _make_panel_with_empty_entity())
 
@@ -893,7 +892,7 @@ class TestEntitiesWithoutWindow:
         assert (len(named), "[('B',)]" in named[0]) == (1, True)
 
     def test_entity_reduced_to_one_row_has_no_window_and_costs_the_others_nothing(self):
-        """An entity of a single row joins the entities without window (ANO-FREQ-061).
+        """An entity of a single row joins the entities without window.
 
         Sa fréquence d'index est indétectable (une seule date) : la détection
         de l'index entier levait, et le calcul échouait pour tout le panel.
@@ -951,7 +950,7 @@ class TestEntitiesWithoutWindow:
         Absent means "no window", unlike ``False`` ("outside the window"):
         the imputer and ``TrainingSetBuilder`` read an absent entity as
         unrestricted. An entity with a known frequency but no observation
-        used to be converted to all-False rows instead.
+        is read as unrestricted too, not converted to all-False rows.
         """
         calc = _fit_quietly(ImputationWindowCalculator(min_columns=2), builder())
 
@@ -973,10 +972,10 @@ class TestEntitiesWithoutWindow:
 
 
 # =============================================================================
-# D39 : colonnes structurellement absentes
+# Colonnes structurellement absentes
 # =============================================================================
 class TestStructurallyAbsentColumns:
-    """D39: a column never observed (per entity) is left out of the coverage denominator.
+    """A column never observed (per entity) is left out of the coverage denominator.
 
     It says nothing about the temporal extent of its entity: kept in the
     denominator, it would cap coverage at (n-1)/n, hence an empty strict
@@ -1009,7 +1008,7 @@ class TestStructurallyAbsentColumns:
         )
 
     def test_empty_column_of_a_time_series_is_absent(self):
-        """On a time series, an empty column is structurally absent too (ANO-UTILS-042).
+        """On a time series, an empty column is structurally absent too.
 
         It is excluded from the denominator without shrinking the strict
         window of the two other columns.
@@ -1043,7 +1042,7 @@ class TestStructurallyAbsentColumns:
 
 
 class TestStructurallyAbsentOnHeterogeneousPanel:
-    """D39 on the realistic panel: ``climat_affaires`` is never observed for Italie."""
+    """On the realistic panel, ``climat_affaires`` is never observed for Italie."""
 
     def test_absent_columns_are_exact(self, heterogeneous_coverage_panel):
         """Only (Italie, climat_affaires) is structurally absent."""
@@ -1063,7 +1062,7 @@ class TestStructurallyAbsentOnHeterogeneousPanel:
         assert (len(denominator), "('Italie',): ['climat_affaires']" in denominator[0]) == (1, True)
 
     def test_italy_keeps_a_strict_window(self, heterogeneous_coverage_panel):
-        """Without D39, Italie's coverage would never exceed 6/7: its strict window exists."""
+        """Without the exclusion, Italie's coverage would never exceed 6/7: its strict window exists."""
         calc = _fit_quietly(ImputationWindowCalculator(), heterogeneous_coverage_panel)
 
         # Valeur d'or : production industrielle dès 2019-06 ; dépenses et balance jusqu'en 2023-12
@@ -1545,11 +1544,10 @@ class TestGridAnchoring:
         [pytest.param('2020-01-01', 'MS', id='month_start'), pytest.param('2020-01-31', 'ME', id='month_end')],
     )
     def test_grid_follows_the_index_when_every_column_is_coarser(self, start, freq):
-        """No column at the grid frequency: the grid is anchored like the index (ANO-FREQ-014).
+        """No column at the grid frequency: the grid is anchored like the index.
 
         Both columns cover every month of 2020-2021, so the strict window is
-        the whole frame and every aligned row is True. The grid used to fall
-        back on 'E': with a month-start index, every aligned row was False.
+        the whole frame and every aligned row is True.
         """
         df = self._coarse_columns_only(start, freq)
         calc = ImputationWindowCalculator().fit(df)
@@ -1569,11 +1567,11 @@ class TestGridAnchoring:
 
 
 class TestUndetectedFrequencyColumns:
-    """D40: an observed column without detectable frequency leaves the grid and the denominator.
+    """An observed column without detectable frequency leaves the grid and the denominator.
 
-    Detection maps such a column to ``None`` (ANO-UTILS-042): observed once,
+    Detection maps such a column to ``None``: observed once,
     or on unrecognized spacing. Its period being unknown, it can neither
-    veto nor stretch the window (ANO-FREQ-015: ``fit`` used to crash).
+    veto nor stretch the window.
     """
 
     @staticmethod

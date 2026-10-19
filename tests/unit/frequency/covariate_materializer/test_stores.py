@@ -1,10 +1,10 @@
 """Tests of the three stores held by ``CovariateMaterializer``.
 
-Spec ``high_frequency_imputer2_architecture.md`` §6.2: the mirror of the
+The mirror of the
 values produced (``imputed_store``), their production frequency
 (``imputed_freq_store``) and their cell origin (``origin_store``) are written
-together, NaN cells excluded, by ``new.combine_first(existing)`` (B5: cells a
-production does not cover survive). « Le repli matérialise » (§4.4): the
+together, NaN cells excluded, by ``new.combine_first(existing)`` (cells a
+production does not cover survive). « Le repli matérialise »: the
 fallback interpolation feeds the stores like a model prediction. ``reset``
 separates two passes — a transform never reads the fit's mirror — and
 ``snapshot`` returns an independent deep copy.
@@ -151,7 +151,7 @@ class TestInterpolateColumn:
             )
 
     def test_duplicated_source_dates_raise(self, reference_timeseries):
-        """The fallback interpolation refuses duplicated dates like ``materialize`` (ANO-FREQ-039)."""
+        """The fallback interpolation refuses duplicated dates like ``materialize``."""
         duplicated = pd.concat([reference_timeseries, reference_timeseries.iloc[-1:]])
         with pytest.raises(ValueError, match='Duplicate dates in source_data'):
             CovariateMaterializer().interpolate_column(
@@ -170,7 +170,7 @@ class TestInterpolateColumn:
         assert set(materializer.origin_store['a1'].index.get_level_values(0)) == {'DE', 'FR'}
 
     def test_each_entity_records_the_origin_of_its_own_way(self, mixed_freq_panel_multifrequency):
-        """PANEL-F at M: FR and DE interpolated, IT brought back to its rank 1 (§4.6).
+        """PANEL-F at M: FR and DE interpolated, IT brought back to its rank 1.
 
         Sur sa propre grille, l'interpolation d'une colonne EST l'identité :
         IT, mensuelle, est lue à ses observations, d'origine 'observed'.
@@ -255,7 +255,7 @@ class TestCombineFirst:
         assert len(materializer.imputed_freq_store['a1']) == 2
 
     def test_origin_store_values(self, reference_timeseries):
-        """The origin rules of §6.2."""
+        """The origin rules of the stores."""
         grid = quarterly_grid()
         materializer = CovariateMaterializer(covariate_strategy='interpolate')
 
@@ -360,7 +360,7 @@ class TestReset:
         assert (list(held), materializer.origin_store is held) == (['a1'], False)
 
     def test_transform_after_reset_never_reads_the_fit_mirror(self):
-        """The fit's imputation of a1 at M no longer grants rank 2 after ``reset``."""
+        """The fit's imputation of a1 at M does not grant rank 2 after ``reset``."""
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(7.0, index=monthly_grid()), 'M', 'model')
         materializer.reset()

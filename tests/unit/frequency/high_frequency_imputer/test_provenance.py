@@ -1,7 +1,6 @@
-"""Provenance families emitted by ``HighFrequencyImputer`` (§6, I6).
+"""Provenance families emitted by ``HighFrequencyImputer``.
 
-Covers the five ``MODEL_*`` families and the absence of ``DISAGGREGATED``
-(D6, D16).
+Covers the five ``MODEL_*`` families and the absence of ``DISAGGREGATED``.
 """
 
 # Modules de base
@@ -17,7 +16,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 
 
 class TestProvenanceFamilies:
-    """I6 — les cinq familles MODEL_* sont émises exactement dans les cas du §6.3."""
+    """Les cinq familles MODEL_* sont émises exactement dans les cas documentés."""
 
     @staticmethod
     def _families(imputer: HighFrequencyImputer, column: str) -> set:
@@ -62,7 +61,7 @@ class TestProvenanceFamilies:
         assert not emitted & {'model_on_imputed_target', 'model_on_imputed_both'}
 
     def test_no_disaggregated_cell_is_ever_emitted(self, reference_timeseries):
-        """DISAGGREGATED n'est jamais émis par hfi2, recalage compris (D16)."""
+        """DISAGGREGATED n'est jamais émis par l'imputeur, recalage compris."""
         imputer = fit_with_spy(reference_timeseries)
         emitted = {
             str(value) for value in imputer.imputation_provenance_.to_numpy().ravel()

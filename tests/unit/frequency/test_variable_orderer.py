@@ -1,7 +1,6 @@
 """Tests for tsforecast.frequency.variable_orderer.
 
-Focus §8 (§8.1 à §8.4) de [SPEC] high_frequency_imputer2_architecture.md :
-ordres 'frequency' et 'cv', tie-break alphabétique déterministe (indépendant
+Ordres 'frequency' et 'cv', tie-break alphabétique déterministe (indépendant
 de l'ordre d'insertion / des colonnes d'entrée), paramètre ``cv`` polymorphe
 sklearn (remplaçant ``cv_n_splits``), résolution de ``cv`` au seul ``fit``.
 """
@@ -95,10 +94,10 @@ class _FailsOnFirstFold(ConstantEstimator):
 
 
 class TestFrequencyOrder:
-    """Ordre 'frequency' : fréquence la plus basse d'abord (§8.1, §8.4)."""
+    """Ordre 'frequency' : fréquence la plus basse d'abord."""
 
     def test_frequency_order_on_reference_ts(self, reference_timeseries):
-        """[SPEC] §8.4 : l'ordre est a1, a2, q1 (Y avant Q, tie-break alphabétique)."""
+        """L'ordre est a1, a2, q1 (Y avant Q, tie-break alphabétique)."""
         del reference_timeseries  # les fréquences suffisent, données non lues
         orderer = VariableOrderer(fit_predict_order='frequency').fit()
         assert orderer.order(_reference_variables()) == ['a1', 'a2', 'q1']
@@ -107,7 +106,7 @@ class TestFrequencyOrder:
         """À fréquence égale, le groupe avec le MOINS d'entités passe en premier.
 
         Comportement inversé par rapport à hfi (qui triait par nombre
-        d'entités décroissant) : voir [SPEC] §8.1, prompt point 1.
+        d'entités décroissant).
         """
         orderer = VariableOrderer(fit_predict_order='frequency').fit()
         variables = {
@@ -118,10 +117,10 @@ class TestFrequencyOrder:
 
 
 class TestCVOrder:
-    """Ordre 'cv' : meilleur score en premier (§8.1, §8.4)."""
+    """Ordre 'cv' : meilleur score en premier."""
 
     def test_cv_order_on_reference_ts(self, reference_timeseries):
-        """[SPEC] §8.4 : scores q1=-0.08, a2=-0.15, a1=-0.15 -> ordre q1, a1, a2."""
+        """Scores q1=-0.08, a2=-0.15, a1=-0.15 -> ordre q1, a1, a2."""
         orderer = VariableOrderer(
             fit_predict_order='cv', cv=2, min_cv_train_size=2,
         ).fit()
@@ -139,7 +138,7 @@ class TestCVOrder:
 
 
 class TestAlphabeticalTiebreak:
-    """Déterminisme intra-étape : jamais l'ordre des colonnes/clés d'entrée (§8.1)."""
+    """Déterminisme intra-étape : jamais l'ordre des colonnes/clés d'entrée."""
 
     def test_alphabetical_tiebreak_ignores_column_order_frequency(self, reference_timeseries):
         """Permuter les clés de "variables" ne change pas l'ordre sous 'frequency'."""
@@ -177,7 +176,7 @@ class TestAlphabeticalTiebreak:
 
 
 class TestCVParameter:
-    """Paramètre ``cv`` polymorphe sklearn, remplaçant ``cv_n_splits`` (§8.3, D4)."""
+    """Paramètre ``cv`` polymorphe sklearn, remplaçant ``cv_n_splits``."""
 
     def test_cv_accepts_int_splitter_and_iterable(self):
         """Un entier, un splitter, et un itérable de splits sont tous acceptés."""
@@ -223,7 +222,7 @@ class TestCVParameter:
         assert orderer.cv_.get_n_splits() == 5
 
     def test_cv_n_splits_is_gone(self):
-        """Aucun paramètre nommé "cv_n_splits" n'est accepté (absorbé par "cv", D4)."""
+        """Aucun paramètre nommé "cv_n_splits" n'est accepté (absorbé par "cv")."""
         assert 'cv_n_splits' not in VariableOrderer().get_params()
         with pytest.raises(TypeError):
             VariableOrderer(cv_n_splits=5)
@@ -366,7 +365,7 @@ class TestPrebuiltScoringSets:
 
 
 class TestCVFallbacksAndLogging:
-    """Correctifs CV §8.2 : sentinelles -inf, journalisation des plis en échec."""
+    """Cas limites du CV : sentinelles -inf, journalisation des plis en échec."""
 
     def test_unscorable_variables_sorted_last(self, reference_timeseries):
         """Une variable sans estimateur résolu (-inf) passe après les variables scorées."""
@@ -587,7 +586,7 @@ class TestCVResolution:
         assert (cv_.n_splits, cv_.shuffle, cv_.random_state) == (7, True, 42)
 
     def test_numpy_int_cv_is_an_int(self):
-        """A numpy integer (grid built by np.arange) resolves like an int (ANO-FREQ-057)."""
+        """A numpy integer (grid built by np.arange) resolves like an int."""
         cv_ = VariableOrderer(cv=np.int64(4), min_cv_train_size=4).fit().cv_
         assert (cv_.n_splits, cv_.shuffle, cv_.random_state) == (4, True, 42)
 
@@ -613,7 +612,7 @@ class TestCVResolution:
 
 
 class TestCVScoresAndSplitters:
-    """'cv' sur cross_val_score réel : scores_ exacts, tous splitters (§8.1, §8.3)."""
+    """'cv' sur cross_val_score réel : scores_ exacts, tous splitters."""
 
     def test_scores_are_negated_errors_best_first(self):
         """Greater is better: the smaller error (b) ranks first, whatever the alphabet."""
@@ -821,7 +820,7 @@ class TestEstimatorResolution:
 
 
 class TestFallbackGroup:
-    """Groupe de repli : jamais fusionné au groupe scoré, diagnostics exacts (§8.2, D28)."""
+    """Groupe de repli : jamais fusionné au groupe scoré, diagnostics exacts."""
 
     @staticmethod
     def _sets(n_rows=12):
@@ -942,7 +941,7 @@ class TestFallbackGroup:
 
 
 class TestFailingFolds:
-    """Plis en échec : sentinelle -inf, journal, moyenne des plis réussis (§8.2)."""
+    """Plis en échec : sentinelle -inf, journal, moyenne des plis réussis."""
 
     def test_partial_failure_averages_successful_folds(self):
         """One failed fold of four: score = mean of the three others, with a sklearn warning."""
@@ -1009,7 +1008,7 @@ class TestFailingFolds:
         assert (ordered, messages) == (['b', 'a', 'c'], [expected.format('a'), expected.format('c')])
 
     def test_failing_estimator_scores_minus_inf_and_logs(self):
-        """A fit that always fails gives -inf and one log line, never an exception (§8.2)."""
+        """A fit that always fails gives -inf and one log line, never an exception."""
         messages = []
         orderer = _mae_orderer(cv=2, min_cv_train_size=2)
         ordered = orderer.order(

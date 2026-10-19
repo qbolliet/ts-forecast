@@ -1,8 +1,8 @@
-"""Covariate materialization ways of ``HighFrequencyImputer`` (§4).
+"""Covariate materialization ways of ``HighFrequencyImputer``.
 
-Covers the way recorded per plan step (§4.6), its per-entity degradation on
-the pooled grid (D22), the true values kept on the training grid, and the
-replay of the ways at ``transform`` (I11).
+Covers the way recorded per plan step, its per-entity degradation on
+the pooled grid, the true values kept on the training grid, and the
+replay of the ways at ``transform``.
 """
 
 # Modules de base
@@ -24,7 +24,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 
 
 class TestMaterializationWays:
-    """I11 — la voie de matérialisation est enregistrée et conforme à la précédence."""
+    """La voie de matérialisation est enregistrée et conforme à la précédence."""
 
     def test_materialization_way_recorded_per_step(self, reference_timeseries):
         """Une entrée par feature_col, et la voie attendue par la précédence."""
@@ -93,7 +93,7 @@ class TestPerEntityMaterialization:
 
         # Bloc mensuel d'IT : q1 y est plus basse, donc INTERPOLÉE, puis recalée
         # sous 'sum' : les trois mois de chaque trimestre somment à son
-        # observation (I4, covariable matérialisée comprise)
+        # observation (covariable matérialisée comprise)
         italy = entity_block(X_train['q1'], 'IT')
         by_quarter = italy.groupby(italy.index.to_period('Q')).sum()
         assert by_quarter.tolist() == pytest.approx(list(range(10, 130, 10)))
@@ -192,7 +192,7 @@ class TestTrueValuesOnTheTrainingGrid:
 
         yearly = predicted.groupby(predicted.index.year).sum()
         assert yearly.tolist() == pytest.approx([60.0, 66.0, 72.0])
-        # Même niveau des deux côtés, une fois l'échelle appliquée (I5)
+        # Même niveau des deux côtés, une fois l'échelle appliquée
         assert step.model.fit_X_['a2'].mean() == pytest.approx(predicted.mean())
 
     def test_the_step_is_nonetheless_marked_as_having_read_an_interpolation(
@@ -201,7 +201,7 @@ class TestTrueValuesOnTheTrainingGrid:
         """La souillure est le MAX sur les deux grilles : la prédiction commande.
 
         Garder les vraies valeurs au fit ne blanchit pas l'étape : la souillure
-        se calcule sur ``X_train ∪ X_pred`` (§6.2), et la grille de prédiction
+        se calcule sur ``X_train ∪ X_pred``, et la grille de prédiction
         y apporte de l'interpolé. La provenance émise reste
         ``MODEL_ON_INTERPOLATED``.
         """
@@ -237,12 +237,12 @@ class TestTrueValuesOnTheTrainingGrid:
 
 
 class TestMaterializationReplay:
-    """I11 — la voie de matérialisation et ses valeurs sont celles du fit."""
+    """La voie de matérialisation et ses valeurs sont celles du fit."""
 
     def test_materialization_identical_fit_and_transform_on_panel(
         self, mixed_freq_panel_multifrequency
     ):
-        """I11 sur PANEL-F — mêmes voies et mêmes trames de prédiction au rejeu."""
+        """Sur PANEL-F, mêmes voies et mêmes trames de prédiction au rejeu."""
         imputer = fit_with_spy(mixed_freq_panel_multifrequency, covariate_strategy='model')
         ways_before = {
             (step.pred_freq_label, step.var_key): dict(step.materialization)
@@ -267,7 +267,7 @@ class TestMaterializationReplay:
                 pd.testing.assert_frame_equal(before, after)
 
     def test_materialization_identical_fit_and_transform(self, reference_timeseries):
-        """I11 — mêmes voies et mêmes valeurs produites au fit et au transform."""
+        """Mêmes voies et mêmes valeurs produites au fit et au transform."""
         imputer = fit_with_spy(reference_timeseries, covariate_strategy='model')
 
         # Voies figées, relevées avant le rejeu

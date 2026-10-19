@@ -1,17 +1,17 @@
 """Tests of the four-rank materialization precedence.
 
-Spec ``high_frequency_imputer2_architecture.md`` §4.4: when a covariate must
+When a covariate must
 be materialized on the grid of stage ``f``, the precedence applies in order
 and stops at the FIRST applicable rank — rank 1 identity / exact aggregation,
 rank 2 the covariate's own production at ``f`` read from the mirror, rank 3
 its production at an earlier stage ``f'`` carried onto ``f``, rank 4
 ``covariate_fallback``. Ranks 2 and 3 read the stores, hence exist under
-``covariate_strategy='model'`` only (§8.1).
+``covariate_strategy='model'`` only.
 
 Each rank is first pinned on its own, then opposed to a lower rank that is
 ALSO applicable, so that only the precedence decides — including rank 1
-against the mirror, entity by entity (§4.6: "une imputation ne recouvre
-jamais une mesure").
+against the mirror, entity by entity (an imputation never
+overwrites a measurement).
 
 Covered symbols: ``CovariateMaterializer.classify``, ``materialize`` (model
 ways), ``record_production`` (mirror priming).
@@ -44,7 +44,7 @@ from tests.unit.frequency.covariate_materializer.helpers import (
 
 
 class TestPrecedenceRanks:
-    """§4.4: the four ranks, each on its own."""
+    """The four ranks, each on its own."""
 
     def test_rank_two_reads_stage_mirror(self, reference_timeseries):
         """Rank 2: the values come from the stage mirror, not from the source."""
@@ -96,10 +96,9 @@ class TestPrecedenceRanks:
     def test_rank_two_trigger_ignores_the_origin(self, origin):
         """Rank 2 fires on the mere presence of cells produced at ``f``.
 
-        « Le repli matérialise » (§4.4) : une étape servie par repli est
+        « Le repli matérialise » : une étape servie par repli est
         relue comme une autre. Le code et la docstring de ``classify`` le
-        disent ; la docstring de classe, qui exige ``origin == 'model'``, non
-        (ANO-FREQ-041, [DOC]).
+        disent ; la docstring de classe, qui exige ``origin == 'model'``, non.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(7.0, index=monthly_grid()), 'M', origin)
@@ -108,8 +107,7 @@ class TestPrecedenceRanks:
     def test_rank_three_carries_from_previous_stage(self, reference_timeseries):
         """Rank 3: the quarterly imputation of a1 is CARRIED onto the M grid.
 
-        Answer to the first cause of B28: a1 is no longer left NaN two months
-        out of three at the monthly stage.
+        a1 is never left NaN two months out of three at the monthly stage.
         """
         quarterly = pd.Series(20.0 + np.arange(12), index=quarterly_grid())
         materializer = CovariateMaterializer(covariate_strategy='model')
@@ -125,7 +123,7 @@ class TestPrecedenceRanks:
         )
 
         assert ways == {'a1': 'carried_model'}
-        # Aucune cellule NaN : c'est exactement le défaut corrigé
+        # Aucune cellule NaN : deux mois sur trois ne restent pas vides
         assert features['a1'].notna().all()
         # L'interpolation d'une valeur de modèle RESTE de modèle
         assert origins == {'a1': 'model'}
@@ -201,7 +199,7 @@ class TestPrecedenceRanks:
     def test_precedence_stops_at_first_applicable_rank(self, reference_timeseries):
         """Present at ``f`` AND at an earlier stage, the covariate takes rank 2.
 
-        D37 as well: a value produced at the coarser stage never lands, raw,
+        A value produced at the coarser stage never lands, raw,
         on the finer grid — the 2021 quarterly cells stay out of it.
         """
         grid = monthly_grid()
@@ -262,7 +260,7 @@ class TestPrecedenceRanks:
         ids=['tolerate_nan', 'interpolate'],
     )
     def test_ranks_two_and_three_unreachable_outside_model(self, strategy, expected):
-        """§8.1: outside ``'model'``, no strategy ever reads the stores."""
+        """Outside ``'model'``, no strategy ever reads the stores."""
         grid = monthly_grid()
         materializer = CovariateMaterializer(covariate_strategy=strategy)
         # Registres amorcés aux deux rangs : rien ne doit les lire
@@ -279,12 +277,12 @@ class TestPrecedenceRanks:
 
 
 class TestTwoCandidateRanks:
-    """§4.4: two ranks applicable at once — only the higher one applies."""
+    """Two ranks applicable at once — only the higher one applies."""
 
     def test_rank_one_identity_beats_the_stage_mirror(self, reference_timeseries):
         """q1 observed at the stage frequency is read, never its mirror at ``f``.
 
-        Valeurs d'or : q1 vaut 10 · k aux 12 fins de trimestre (§2.2).
+        Valeurs d'or : q1 vaut 10 · k aux 12 fins de trimestre.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'q1', pd.Series(999.0, index=quarterly_grid()), 'Q', 'model')
@@ -394,7 +392,7 @@ class TestTwoCandidateRanks:
 
 
 class TestRankOnePerEntity:
-    """§4.6: ``_applicable_way`` tests rank 1 before reading the stores, per entity."""
+    """``_applicable_way`` tests rank 1 before reading the stores, per entity."""
 
     def test_entity_observing_at_the_stage_reads_its_observations(
         self, mixed_freq_panel_multifrequency
@@ -403,7 +401,7 @@ class TestRankOnePerEntity:
 
         Le miroir porte 999 pour les trois entités au pas M ; la voie de la
         colonne est 'stage_model' (verdicts de FR et DE), qu'IT ramène à
-        l'identité. Valeurs d'or du §2.5.
+        l'identité. Valeurs d'or.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         for entity in ('FR', 'DE', 'IT'):
@@ -423,7 +421,7 @@ class TestRankOnePerEntity:
     @pytest.mark.parametrize(
         'entity, expected',
         [
-            # IT, plus fine que l'étape : sommes trimestrielles exactes (§2.5)
+            # IT, plus fine que l'étape : sommes trimestrielles exactes
             ('IT', [30.0] * 4 + [33.0] * 4 + [37.5] * 4),
             # DE, à la fréquence de l'étape : ses 12 ancres
             ('DE', [28.0, 30.0, 31.0, 31.0, 31.0, 33.0, 34.0, 34.0, 36.0, 37.0, 38.0, 39.0]),
@@ -452,7 +450,7 @@ class TestRankOnePerEntity:
 
 
 class TestModelWaysPerEntity:
-    """§4.4 per entity: a model way is brought back to what the entity's mirror holds."""
+    """Per entity, a model way is brought back to what the entity's mirror holds."""
 
     @pytest.mark.parametrize(
         'entity, expected',
@@ -470,7 +468,7 @@ class TestModelWaysPerEntity:
         """DE listed first makes the column way ``'carried_model'``; FR still reads its stage.
 
         Les valeurs servies ne dépendent que du miroir de chaque entité ; la
-        voie de colonne, elle, dépend de l'ordre des entités (ANO-FREQ-038) et
+        voie de colonne, elle, dépend de l'ordre des entités et
         n'est donc pas assertée ici.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')

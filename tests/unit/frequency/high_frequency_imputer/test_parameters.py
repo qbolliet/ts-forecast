@@ -1,15 +1,15 @@
-"""Parameter space of ``HighFrequencyImputer.__init__`` (spec §13, §13.1).
+"""Parameter space of ``HighFrequencyImputer.__init__``.
 
-Covers, parameter by parameter, the admissible values (stored untouched, B3),
-the rejected values and their messages, the per-feature dict forms (D10) and
-their unknown keys (§9.1, §10.1, §11.1), the inert combinations documented and
-never warned about (D9, §5.6), the defaults of the signature against §13, and a
+Covers, parameter by parameter, the admissible values (stored untouched),
+the rejected values and their messages, the per-feature dict forms and
+their unknown keys, the inert combinations documented and
+never warned about, the defaults of the signature against the documented ones, and a
 minimal observable effect of the admitted values not exercised elsewhere
 (``verbose``, ``additive_transformer``, ``on_frequency_mismatch``,
 ``covariate_eligibility``).
 
 ``sklearn.utils.estimator_checks.check_parameters_default_constructible`` is
-not applicable as such: ``target_frequency`` is required by design (§13) and the
+not applicable as such: ``target_frequency`` is required by design and the
 class declares no ``_required_parameters``. Its contract is checked by hand in
 :class:`TestInitDoesNotTransform`.
 """
@@ -44,10 +44,10 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
 
 
 # =============================================================================
-# Validations d'__init__ (§13.1)
+# Validations d'__init__
 # =============================================================================
 class TestParameterValidation:
-    """Validation ligne à ligne du tableau §13.1, sans transformation (B3)."""
+    """Validation ligne à ligne des paramètres, sans transformation."""
 
     # Un cas par ligne de littéral du tableau : le message énumère les valeurs
     @pytest.mark.parametrize(
@@ -170,12 +170,12 @@ class TestParameterValidation:
             make_imputer(cv_scoring=value)
 
     def test_min_cv_train_size_below_one_raises(self):
-        """min_cv_train_size doit valoir au moins 1 (§13.1)."""
+        """min_cv_train_size doit valoir au moins 1."""
         with pytest.raises(ValueError, match='min_cv_train_size'):
             make_imputer(min_cv_train_size=0)
 
     def test_min_cv_train_size_one_is_accepted(self):
-        """La borne basse du §13.1 est 1, et non 2 comme dans hfi."""
+        """La borne basse est 1, et non 2 comme dans hfi."""
         assert make_imputer(min_cv_train_size=1).min_cv_train_size == 1
 
     def test_min_cv_train_size_wrong_type_raises(self):
@@ -209,7 +209,7 @@ class TestParameterValidation:
 
     @pytest.mark.parametrize('value', ['mean', 'last'])
     def test_aggregation_constraint_refuses_mean_and_last(self, value):
-        """'mean' et 'last' sont retirés de l'API (D20), le message nommant l'échappatoire."""
+        """'mean' et 'last' sont retirés de l'API, le message nommant l'échappatoire."""
         with pytest.raises(ValueError) as excinfo:
             make_imputer(aggregation_constraint=value)
         message = str(excinfo.value)
@@ -234,7 +234,7 @@ class TestParameterValidation:
 
 
 # =============================================================================
-# Valeurs admises, stockées telles que reçues (§13.1, B3)
+# Valeurs admises, stockées telles que reçues
 # =============================================================================
 # Doublures minimales : un callable de score et deux formes de "cv"
 def _custom_scorer(estimator, X, y):
@@ -246,7 +246,7 @@ _SPLITS = [(np.array([0, 1]), np.array([2]))]
 _LOG_TRANSFORMER = FunctionTransformer(np.log1p, np.expm1)
 _NAN_TOLERANT = Pipeline([('fill', SimpleImputer()), ('model', LinearRegression())])
 
-# Une ligne par (paramètre, forme admise) du §13.1. Les littéraux de fenêtre
+# Une ligne par (paramètre, forme admise). Les littéraux de fenêtre
 # sont lus sur les types publics du module de fenêtre, pour ne jamais diverger
 # de ce que le collaborateur accepte
 _ADMITTED = (
@@ -314,7 +314,7 @@ class TestAdmittedValues:
 
 
 # =============================================================================
-# Valeurs refusées et messages (§13.1)
+# Valeurs refusées et messages
 # =============================================================================
 # Doublures incomplètes : une méthode requise manque à chacune
 class _PredictOnly:
@@ -380,7 +380,7 @@ _REJECTED = [
 
 
 class TestRejectedValues:
-    """Values outside §13.1 are refused at ``__init__``, the message naming the culprit."""
+    """Values outside the admissible set are refused at ``__init__``, the message naming the culprit."""
 
     @pytest.mark.parametrize(
         'param, value, error, fragment', _REJECTED,
@@ -427,11 +427,11 @@ class TestRejectedValues:
         ids=['unknown_method', 'unknown_scorer', 'non_str_time_col', 'str_panel_cols'],
     )
     def test_values_checked_later_pass_init(self, param, value):
-        """Values §13.1 does not check at ``__init__`` pass it untouched.
+        """Values not checked at ``__init__`` pass it untouched.
 
         The method name is checked by the interpolation itself at ``fit``, the
-        scorer by ``cross_val_score``; ``time_col`` and ``panel_cols`` are not in
-        the §13.1 table at all.
+        scorer by ``cross_val_score``; ``time_col`` and ``panel_cols`` are not
+        checked at all.
         """
         assert make_imputer(**{param: value}).get_params()[param] is value
 
@@ -445,7 +445,7 @@ class TestRejectedValues:
 # =============================================================================
 # __init__ valide sans transformer (B3)
 # =============================================================================
-# Défauts du §13 de la spec, recopiés de la signature normative
+# Défauts documentés, recopiés pour comparaison avec la signature
 _SPEC_DEFAULTS = {
     'estimator': None,
     'additive_transformer': None,
@@ -477,10 +477,10 @@ _SPEC_DEFAULTS = {
 
 
 class TestInitDoesNotTransform:
-    """``__init__`` validates, stores, and does nothing else (B3, §12.5)."""
+    """``__init__`` validates, stores, and does nothing else."""
 
     def test_signature_defaults_are_those_of_the_spec(self):
-        """Every default of the signature is the one §13 fixes; ``target_frequency`` has none."""
+        """Every default of the signature is the documented one; ``target_frequency`` has none."""
         signature = inspect.signature(HighFrequencyImputer.__init__)
         defaults = {
             name: parameter.default
@@ -520,7 +520,7 @@ class TestInitDoesNotTransform:
         The single ``estimator=None`` warning comes at the head of ``fit``,
         before any training (see ``test_estimator_none_warns_once``): ``clone``
         calls ``__init__`` and would repeat it, and ``set_params(estimator=None)``
-        would escape it (ANO-FREQ-055, arbitrated).
+        would escape it.
         """
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
@@ -545,7 +545,7 @@ class TestInitDoesNotTransform:
 
 
 # =============================================================================
-# Combinaisons inertes : silence documenté (D9, §5.6)
+# Combinaisons inertes : silence documenté
 # =============================================================================
 class TestInertCombinations:
     """Inert combinations change nothing, warn about nothing, and are documented."""
@@ -564,7 +564,7 @@ class TestInertCombinations:
 
     @pytest.mark.parametrize('overrides', _SILENT_CASES)
     def test_inert_combination_is_silent(self, reference_timeseries, overrides):
-        """No warning mentions an inert parameter (D9)."""
+        """No warning mentions an inert parameter."""
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
             make_imputer(**overrides).fit(reference_timeseries)
@@ -617,7 +617,7 @@ class TestInertCombinations:
          'training_coverage_threshold'],
     )
     def test_inert_combinations_are_documented(self, fragment):
-        """The class docstring names each inert combination of §5.6 and §13.1."""
+        """The class docstring names each inert combination."""
         docstring = HighFrequencyImputer.__doc__
         section = docstring[
             docstring.index('Inert combinations'):docstring.index('What the parameter space')
@@ -626,12 +626,12 @@ class TestInertCombinations:
 
 
 # =============================================================================
-# Dictionnaires par feature : clés de colonne seulement (D10, §9.1)
+# Dictionnaires par feature : clés de colonne seulement
 # =============================================================================
 class TestPerFeatureDictUnknownColumn:
     """Per-feature dicts are keyed by column; an unknown key is ignored with one warning.
 
-    Arbitration of ANO-FREQ-053 (2026-10-12): an error would break a dict
+    An error would break a dict
     shared by datasets whose columns differ; silence would hide a typo. The
     key is ignored — the column falls back to ``'__default__'`` or to the
     default — and a single ``UserWarning`` at ``fit`` lists every such key.
@@ -710,13 +710,13 @@ class TestPerFeatureDictUnknownColumn:
     def test_entity_column_key_warns_with_the_d10_hint(
         self, mixed_freq_panel_multifrequency, param
     ):
-        """D10: an ``(entity, column)`` key is no column name; the message says so."""
+        """An ``(entity, column)`` key is no column name; the message says so."""
         imputer = make_imputer(**{param: {('FR', 'v'): self._UNKNOWN[param]}})
         messages = self._warnings_of(imputer, mixed_freq_panel_multifrequency)
         assert len(messages) == 1
         assert "('FR', 'v')" in messages[0]
         assert 'never (entity, column) pairs' in messages[0]
-        # Orientation vers la forme imbriquée de scale_features (D41)
+        # Orientation vers la forme imbriquée de scale_features
         assert '{column: {entity: mode}}' in messages[0]
 
     def test_estimator_dict_unknown_column_falls_back_to_the_default(
@@ -733,7 +733,7 @@ class TestPerFeatureDictUnknownColumn:
 
 
 # =============================================================================
-# Modalités d'échelle par entité (D41)
+# Modalités d'échelle par entité
 # =============================================================================
 # Panel journalier : 'v' mensuelle (300 en fin de mois), 'd1' journalière
 def _daily_panel(entities=('DE', 'FR')) -> pd.DataFrame:
@@ -757,7 +757,7 @@ def _daily_panel(entities=('DE', 'FR')) -> pd.DataFrame:
 
 
 class TestPerEntityScaleFeatures:
-    """``scale_features={column: {entity: mode}}`` through the imputer (D41).
+    """``scale_features={column: {entity: mode}}`` through the imputer.
 
     Golden values of ``y_train`` at the daily stage: 300 divided by the real
     days of each month of 2024 under ``'calendar'`` (31, 29, 31, 30, 31, 30),
@@ -823,7 +823,7 @@ class TestPerEntityScaleFeatures:
             make_imputer(scale_features=setting)
 
     def test_false_within_a_nested_dict_raises_at_fit_after_set_params(self):
-        """set_params bypasses __init__: the check is replayed at fit (ANO-FREQ-052)."""
+        """set_params bypasses __init__: the check is replayed at fit."""
         imputer = make_imputer(target_frequency='D').set_params(
             scale_features={'v': {'DE': False}}
         )
@@ -941,7 +941,7 @@ class TestAdmittedValuesTakeEffect:
     def test_all_entities_drops_a_covariate_absent_for_one_entity(
         self, mixed_freq_panel_heterogeneous
     ):
-        """``'all_entities'`` drops ``climat_affaires``, never observed by IT (§4.5)."""
+        """``'all_entities'`` drops ``climat_affaires``, never observed by IT."""
         def _features(eligibility):
             imputer = fit_with_spy(
                 mixed_freq_panel_heterogeneous, covariate_eligibility=eligibility

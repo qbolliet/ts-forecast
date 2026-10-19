@@ -1,7 +1,6 @@
 """Tests for tsforecast.frequency.imputation_plan.
 
-Focus §12.1 / §12.2 / §4.6 / §6.2 / §6.4 de [SPEC] high_frequency_imputer2_architecture.md :
-étape immuable, couverture exacte de feature_cols par la voie de
+Étape immuable, couverture exacte de feature_cols par la voie de
 matérialisation, invariant de repli, facteur d'échelle par ligne (pd.Series),
 égalité Series-safe, provenance émise (souillures, repli, étape sans ancre),
 plan immuable, vues (by_stage, models), sérialisation de diagnostic,
@@ -78,7 +77,7 @@ class TestImputationStep:
             )
 
     def test_unknown_materialization_way_raises(self):
-        """Une voie hors des six littéraux du §4.6 lève ValueError."""
+        """Une voie hors des six littéraux lève ValueError."""
         with pytest.raises(ValueError, match=r"inconnues"):
             _make_step(materialization={'m1': 'identity', 'q1': 'teleport'})
 
@@ -103,13 +102,13 @@ class TestImputationStep:
         assert step.emitted_provenance is ProvenanceType.INTERPOLATED
 
     def test_is_fallback_allowed_without_sentinel(self):
-        """is_fallback=True reste permis avec un vrai estimateur (§6.4)."""
+        """is_fallback=True reste permis avec un vrai estimateur."""
         step = _make_step(is_fallback=True)
         assert step.is_fallback is True
         assert step.emitted_provenance is ProvenanceType.INTERPOLATED
 
     def test_scale_factor_accepts_series(self):
-        """Construction et égalité avec un scale_factor pd.Series (§5.4)."""
+        """Construction et égalité avec un scale_factor pd.Series."""
         idx = pd.date_range('2021-01-31', periods=3, freq='ME')
         scale = pd.Series([12.0, 3.0, 3.0], index=idx)
 
@@ -189,7 +188,7 @@ class TestImputationPlan:
         assert by_stage['M'] == (m_q1, m_a1)
 
     def test_models_view(self):
-        """models() est la vue {stage_key: estimateur} du §13.2."""
+        """models() est la vue {stage_key: estimateur}."""
         step = _make_step(pred_freq_label='M', var_key='gdp')
         plan = ImputationPlan((step,))
         assert plan.models() == {('M', 'gdp'): step.model}
@@ -248,7 +247,7 @@ class TestImputationPlan:
         assert 'emitted_provenance' in frame.columns
 
 
-# Les neuf couples de souillures, avec la provenance attendue (table du §6.3)
+# Les neuf couples de souillures, avec la provenance attendue (table de vérité)
 _TAINT_TABLE = [
     ('none', 'none', ProvenanceType.MODEL_ON_TRUE),
     ('none', 'interpolated', ProvenanceType.MODEL_ON_INTERPOLATED),
@@ -271,7 +270,7 @@ class TestEmittedProvenance:
 
     @pytest.mark.parametrize('covariate_taint, target_taint, expected', _TAINT_TABLE, ids=_TAINT_IDS)
     def test_model_step_follows_the_taint_table(self, covariate_taint, target_taint, expected):
-        """A model step emits the MODEL_* label of its two taints (§6.3)."""
+        """A model step emits the MODEL_* label of its two taints."""
         step = _make_step(covariate_taint=covariate_taint, target_taint=target_taint)
         assert step.emitted_provenance is expected
 
@@ -288,7 +287,7 @@ class TestEmittedProvenance:
 
     @pytest.mark.parametrize('covariate_taint, target_taint, expected', _TAINT_TABLE, ids=_TAINT_IDS)
     def test_fallback_is_interpolated_whatever_the_taints(self, covariate_taint, target_taint, expected):
-        """D6: a fallback step emits INTERPOLATED, never a MODEL_* label."""
+        """A fallback step emits INTERPOLATED, never a MODEL_* label."""
         step = _make_step(
             covariate_taint=covariate_taint, target_taint=target_taint, is_fallback=True
         )
@@ -379,7 +378,7 @@ class TestImputationStepFields:
 # ImputationStep — égalité et hachage
 # =============================================================================
 class TestImputationStepSerialization:
-    """A step — and therefore a plan — survives ``pickle`` and ``deepcopy`` (ANO-FREQ-049)."""
+    """A step — and therefore a plan — survives ``pickle`` and ``deepcopy``."""
 
     @pytest.mark.parametrize('copier', [
         lambda step: pickle.loads(pickle.dumps(step)),
@@ -554,7 +553,7 @@ class TestFallbackSentinelAndWays:
             )
 
     def test_six_ways_in_rank_order(self):
-        """The literal lists the six ways of §4.6, ordered by precedence rank."""
+        """The literal lists the six ways, ordered by precedence rank."""
         assert typing.get_args(MaterializationWay) == (
             'identity', 'aggregate', 'stage_model', 'carried_model', 'interpolate', 'raw_anchors',
         )
@@ -720,12 +719,12 @@ class TestDiagnosticFrame:
         row = ImputationPlan((self._panel_step(),)).to_diagnostic_frame().iloc[0]
         assert row['entities'] == 'FR, DE'
         assert row['n_entities'] == 2
-        # Blocs triés par clé d'entité, quel que soit l'ordre du dict (ANO-FREQ-067)
+        # Blocs triés par clé d'entité, quel que soit l'ordre du dict
         assert row['training_blocks'] == 'DE=Q, FR=M'
         assert row['emitted_provenance'] is ProvenanceType.MODEL_ON_IMPUTED_TARGET
 
     def test_training_blocks_rendering_ignores_the_entity_order(self):
-        """Two orders of the same blocks give the same rendering (ANO-FREQ-067)."""
+        """Two orders of the same blocks give the same rendering."""
         forward = self._panel_step(training_blocks={('FR',): 'M', ('DE',): 'Q', ('IT',): 'M'})
         backward = self._panel_step(training_blocks={('IT',): 'M', ('DE',): 'Q', ('FR',): 'M'})
 
@@ -796,7 +795,7 @@ class TestDiagnosticFrame:
 
     @pytest.mark.parametrize('covariate_taint, target_taint, expected', _TAINT_TABLE, ids=_TAINT_IDS)
     def test_emitted_provenance_column_follows_the_taint_table(self, covariate_taint, target_taint, expected):
-        """The column reproduces the §6.3 table for each of the nine pairs."""
+        """The column reproduces the truth table for each of the nine pairs."""
         step = _make_step(covariate_taint=covariate_taint, target_taint=target_taint)
         frame = ImputationPlan((step,)).to_diagnostic_frame()
         assert frame.loc[0, 'emitted_provenance'] is expected
