@@ -718,7 +718,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `restore_original_structure` n'affecte plus `original_index` quand `rows_reordered` est
   vrai (ni quand le nombre de lignes a changé) : les lignes restent triées, avec l'index
   qu'elles ont (chemin colonnes : étiquettes `0..n-1` neuves). Chaque valeur garde sa date.
-- **Test** : `tests/unit/utils/validation/test_utils.py::TestRestoreOriginalStructure::test_index_path_restoration_after_sort_keeps_each_value_on_its_date`,
+- **Test** : `tests/unit/utils/validation/utils/test_restore.py::TestRestoreOriginalStructure::test_index_path_restoration_after_sort_keeps_each_value_on_its_date`,
   `::test_column_path_restoration_after_sort_gives_the_sorted_rows`,
   `::TestReturnedMetadata::test_rows_reordered_flag`,
   `::TestRoundTripOnPerturbedDatasets::test_round_trip_of_unsorted_data_gives_the_sorted_frame`
@@ -747,7 +747,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```
 - **Correctif** : après `reset_index()`, les colonnes sont réordonnées selon
   `metadata['original_columns']` ; les colonnes ajoutées depuis restent en fin.
-- **Test** : `tests/unit/utils/validation/test_utils.py::TestRestoreOriginalStructure::test_columns_are_restored_at_their_original_positions`,
+- **Test** : `tests/unit/utils/validation/utils/test_restore.py::TestRestoreOriginalStructure::test_columns_are_restored_at_their_original_positions`,
   `::test_columns_added_after_validation_stay_last`, `::test_missing_column_record_leaves_the_reset_order`
 - **Statut** : corrigée
 
@@ -774,7 +774,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   récupère son index d'origine (sous les mêmes conditions qu'en ANO-024) ; les dates, portées
   par l'index validé seul, sont abandonnées quand l'index est remplacé. Après un tri, la
   `Series` garde son index temporel.
-- **Test** : `tests/unit/utils/validation/test_utils.py::TestRestoreOriginalStructure::test_a_series_of_the_column_path_gets_its_original_index_back`,
+- **Test** : `tests/unit/utils/validation/utils/test_restore.py::TestRestoreOriginalStructure::test_a_series_of_the_column_path_gets_its_original_index_back`,
   `::test_a_reordered_series_keeps_its_time_index`
 - **Statut** : corrigée
 
@@ -795,7 +795,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```
 - **Correctif** : `validate_temporal_data` réaffecte `data.name` à la `Series` renvoyée ;
   `restore_original_structure` ne convertit plus la `Series` en frame.
-- **Test** : `tests/unit/utils/validation/test_utils.py::TestValidateTemporalDataInputContract::test_unnamed_series_stays_unnamed`,
+- **Test** : `tests/unit/utils/validation/utils/test_validate_input.py::TestValidateTemporalDataInputContract::test_unnamed_series_stays_unnamed`,
   `::TestRestoreOriginalStructure::test_unnamed_series_round_trips_unnamed`
 - **Statut** : corrigée
 
@@ -830,7 +830,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `delays` `TestShiftTransformerEdgeCases::test_non_datetime_index` (« rejet des index
   non-datetime ») passe, retiré de `tests/legacy_failures.txt`.
 - **Test** : `tests/unit/base/transformers/test_time_index.py::TestValidateTimeIndex` (numérique rejeté, `Period`, `MultiIndex`, `time_col`),
-  `tests/unit/utils/validation/test_utils.py::TestIndexBasedValidation::test_numeric_index_is_rejected_when_strict`,
+  `tests/unit/utils/validation/utils/test_validate_input.py::TestIndexBasedValidation::test_numeric_index_is_rejected_when_strict`,
   `::test_default_range_index_is_rejected_when_strict`, `::test_numeric_index_warns_and_returns_data_when_not_strict`,
   `::TestMultiIndexValidation::test_integer_last_level_is_rejected_when_strict`,
   `::TestColumnBasedValidation::test_numeric_time_col_is_rejected`
@@ -872,7 +872,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `TestMaskTransformerWithPanelwise`, `TestPerformance::test_large_panel_performance`), qui
   échouaient sur ce message avec un panel `MultiIndex`, passent ; retirés de
   `tests/legacy_failures.txt` (groupe D5).
-- **Test** : `tests/unit/utils/validation/test_utils.py::TestIndexBasedValidation::test_period_index_is_converted_to_first_instants`,
+- **Test** : `tests/unit/utils/validation/utils/test_validate_input.py::TestIndexBasedValidation::test_period_index_is_converted_to_first_instants`,
   `::test_unsorted_period_index_is_sorted`, `::TestMultiIndexValidation::test_period_last_level_is_converted_to_first_instants`,
   `::TestColumnBasedValidation::test_period_time_col_is_converted_to_first_instants`,
   `::TestRestoreOriginalStructure::test_period_index_is_restored_after_conversion`,
@@ -909,7 +909,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Correctif** : la conversion porte sur les **valeurs** du dernier niveau ; l'index est
   reconstruit par `MultiIndex.from_arrays`. Le `try / except` de conversion, devenu
   inatteignable, est supprimé (voir ANO-UTILS-032).
-- **Test** : `tests/unit/utils/validation/test_utils.py::TestMultiIndexValidation::test_day_first_string_dates_convert_like_a_flat_index`
+- **Test** : `tests/unit/utils/validation/utils/test_validate_input.py::TestMultiIndexValidation::test_day_first_string_dates_convert_like_a_flat_index`
 - **Statut** : corrigée
 
 ### ANO-UTILS-031 — Docstring de `validate_temporal_data` : `strict=False` ne « corrige » pas une colonne temporelle illisible
@@ -926,7 +926,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `time_col` (le code est juste).
 - **Correctif** : docstring de `validate_temporal_data` (`strict`, types de dates acceptés)
   précisé ; code inchangé.
-- **Test** : `tests/unit/utils/validation/test_utils.py::TestColumnBasedValidation::test_non_convertible_time_col_raises_in_both_modes`
+- **Test** : `tests/unit/utils/validation/utils/test_validate_columns.py::TestColumnBasedValidation::test_non_convertible_time_col_raises_in_both_modes`
   (suit le code, pas de `xfail`)
 - **Statut** : corrigée
 
@@ -947,7 +947,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Correctif** : les trois `try / except` de conversion et les branches `if time_col:`
   sont supprimés ; `_validate_column_based` exige `time_col` (`str`). `utils.py` : 100 %
   de couverture (lignes et branches).
-- **Test** : couverture 100 % de `utils.py` par les tests de `tests/unit/utils/validation/test_utils.py`
+- **Test** : couverture 100 % de `utils.py` par les tests de `tests/unit/utils/validation/utils/`
 - **Statut** : corrigée
 
 ### ANO-UTILS-033 — Avertissement « Index replaced » émis à chaque appel du chemin colonnes
@@ -959,7 +959,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `return_metadata=True` était déjà passé.
 - **Attendu** : pas d'avertissement quand l'appelant a demandé les métadonnées de restauration.
 - **Correctif** : l'avertissement n'est émis que sans `return_metadata`.
-- **Test** : `tests/unit/utils/validation/test_utils.py::TestColumnBasedValidation::test_replacement_of_the_index_is_announced_without_metadata`,
+- **Test** : `tests/unit/utils/validation/utils/test_validate_columns.py::TestColumnBasedValidation::test_replacement_of_the_index_is_announced_without_metadata`,
   `::test_replacement_of_the_index_is_silent_with_metadata`
 - **Statut** : corrigée
 
@@ -976,7 +976,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   unique in data`) dans les deux fonctions ; le `try / except` est supprimé.
   Des dates incomparables (chaîne et entier) donnent toujours `False`
   (`is_monotonic_increasing`), sans exception.
-- **Test** : `tests/unit/utils/validation/test_utils.py::TestValidateSortedWithinGroups::test_ambiguous_time_col_is_rejected`,
+- **Test** : `tests/unit/utils/validation/utils/test_order_predicates.py::TestValidateSortedWithinGroups::test_ambiguous_time_col_is_rejected`,
   `::TestValidateEntitiesGrouped::test_ambiguous_panel_col_is_rejected`
 - **Statut** : corrigée
 
@@ -1191,7 +1191,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   d'exception : il compte les valeurs non nulles et renvoie `None` sous `min_observations`, toute autre erreur
   (index non temporel, `return_format` inconnu) remonte. Effets de bord : `ImputationWindowCalculator` traite
   désormais une colonne vide de série temporelle comme en panel (structurellement absente, exclue du
-  dénominateur, avertissement) — le test `tests/unit/frequency/test_imputation_window.py::TestStructurallyAbsentColumns::test_notion_is_panel_only_on_a_time_series`,
+  dénominateur, avertissement) — le test `tests/unit/frequency/imputation_window/test_panel.py::TestStructurallyAbsentColumns::test_notion_is_panel_only_on_a_time_series`,
   qui épinglait l'ancienne exception, est réécrit en `::test_empty_column_of_a_time_series_is_absent` (catégorie
   (a)) ; `delays/data_manager.py::compare_and_detect_delays` ne passe plus `None` à `to_literal`.
 - **Statut** : corrigée
@@ -1938,7 +1938,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   # deux lignes (FR, DE) de l'indicateur GDP : delay=[45, 3888000], unit=['day', 'second']
   calculate_applicable_delay(delays, 'start', 'M')  # delay=3240037.5, unit='day'
   ```
-- **Test** : `tests/unit/delays/test_calculator.py::TestTargetUnit::test_mixed_input_units_are_refused_without_target_unit`,
+- **Test** : `tests/unit/delays/calculator/test_units_and_selection.py::TestTargetUnit::test_mixed_input_units_are_refused_without_target_unit`,
   `::test_mixed_input_units_are_accepted_when_aggregated_per_couple`, `::test_day_name_and_code_are_the_same_unit`,
   `::test_mixed_input_units_are_converted_with_a_target_unit`.
 - **Correctif** : décision de l'auteur (2026-10-05) : `ValueError` quand les lignes agrégées ensemble (par indicateur, ou par couple avec `aggregate_by_panel`) n'ont pas la même unité, `'day'` et `'D'` étant une même unité ; le message nomme les groupes et demande une `unit` commune.
@@ -1956,7 +1956,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```python
   calculate_applicable_delay(delays, 'start', {'GDP': 'M'})  # avec un indicateur CPI dans les données
   ```
-- **Test** : `tests/unit/delays/test_calculator.py::TestTargetFrequencyDictionary::test_uncovered_indicator_is_named`,
+- **Test** : `tests/unit/delays/calculator/test_frequency_conversion.py::TestTargetFrequencyDictionary::test_uncovered_indicator_is_named`,
   `::test_uncovered_couple_is_named`.
 - **Correctif** : le dictionnaire est résolu ligne par ligne (`_resolve_target_frequencies`) ; les clés non couvertes sont nommées dans la `ValueError` (`'frequency' does not give a target frequency for: ['CPI']`). Le dictionnaire accepte désormais aussi des clés `(entité, ..., indicateur)` (décision de l'auteur, 2026-10-05 : une fréquence cible par couple), voir `TestTargetFrequencyDictionary`.
 - **Statut** : corrigée
@@ -1983,7 +1983,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   compare_and_detect_delays(data, None, dl, delay_unit='us')['delay'].iloc[0]   # 146942336578904.0
   (dl - datetime(2023, 4, 1)) // timedelta(microseconds=1)                      # 146942336578903
   ```
-- **Test** : `tests/unit/delays/test_data_manager.py::TestReferencePointAndUnit::test_microsecond_delay_is_exact`
+- **Test** : `tests/unit/delays/data_manager/test_delay_measure.py::TestReferencePointAndUnit::test_microsecond_delay_is_exact`
 - **Correctif** : le délai est calculé en entiers de nanosecondes (`as_unit('ns')`, division entière par excès
   `-(-n // u)`), avec la durée de chaque unité en nanosecondes (`get_duration_nanoseconds`, alimentée par `utils/_constants.py` ;
   anciennement la table locale `_DELAY_UNITS`) : plus aucun produit flottant, arrondi
@@ -2018,7 +2018,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   compare_and_detect_delays(pd.DataFrame(index=idx), None, '2023-06-15')                          # IndexError
   compare_and_detect_delays(pd.DataFrame({'PIB': []}, index=pd.DatetimeIndex([])), None, '2023-06-15')  # TypeError
   ```
-- **Test** : `tests/unit/delays/test_data_manager.py::TestEmptyAndDegenerateInputs::test_all_null_data_on_first_download_gives_an_empty_frame`,
+- **Test** : `tests/unit/delays/data_manager/test_inputs.py::TestEmptyAndDegenerateInputs::test_all_null_data_on_first_download_gives_an_empty_frame`,
   `::test_all_null_panel_on_first_download_gives_an_empty_frame`, `::test_dataset_without_rows_raises_a_clear_error`,
   `::test_panel_without_rows_raises_a_clear_error`, `::test_frame_without_columns_gives_an_empty_frame`
 - **Correctif** : décision de l'auteur (2026-10-04) : règle d'ANO-UTILS-070. `compare_and_detect_delays` lève
@@ -2050,7 +2050,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   data = pd.DataFrame({'PIB': [100.0]}, index=pd.date_range('2023-01-01', periods=1, freq='MS'))
   compare_and_detect_delays(data, None, '2023-02-15')   # ValueError: Frequency must be a string, got <class 'NoneType'>
   ```
-- **Test** : `tests/unit/delays/test_data_manager.py::TestFrequencyAndPeriodBoundaries::test_undetectable_frequency_gives_a_row_without_period_or_delay`,
+- **Test** : `tests/unit/delays/data_manager/test_delay_measure.py::TestFrequencyAndPeriodBoundaries::test_undetectable_frequency_gives_a_row_without_period_or_delay`,
   `::test_undetectable_frequency_warning_names_the_column`, `::test_one_undetectable_entity_does_not_spoil_the_panel`,
   `::test_undetectable_frequency_in_comparison`
 - **Correctif** : décision de l'auteur (2026-10-04) : le couple indétectable est **renvoyé** avec `frequency=None`,
@@ -2079,7 +2079,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   old = new.copy(); old.iloc[3] = np.nan
   compare_and_detect_delays(new, old, '2023-06-15')   # ValueError: value_name (has_changes) cannot match ...
   ```
-- **Test** : `tests/unit/delays/test_data_manager.py::TestInputLayout::test_column_named_has_changes_in_comparison`
+- **Test** : `tests/unit/delays/data_manager/test_inputs.py::TestInputLayout::test_column_named_has_changes_in_comparison`
 - **Correctif** : `pd.melt` est remplacé par une construction par colonne (`_flag_observations`) : aucun nom de
   colonne de données ne peut plus entrer en collision avec `has_changes`.
 - **Statut** : corrigée
@@ -2102,7 +2102,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   warnings.simplefilter('error', FutureWarning)
   compare_and_detect_delays(panel, None, '2023-06-15')   # FutureWarning
   ```
-- **Test** : `tests/unit/delays/test_data_manager.py::TestWarnings::test_panel_call_is_silent`
+- **Test** : `tests/unit/delays/data_manager/test_inputs.py::TestWarnings::test_panel_call_is_silent`
 - **Correctif** : le premier téléchargement est réécrit sans boucle de groupes : `dropna()` puis
   `groupby(level=...).tail(1)` par colonne, avec un niveau scalaire quand il n'y en a qu'un ; l'index d'origine
   (noms de niveaux compris) est conservé sans reconstruction par tuples.
@@ -2125,7 +2125,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   d'un `download_date` aware avec des données naïves (et l'inverse), et le `ValueError` de `resolve_date` pour un type
   inattendu (`datetime.date`) ; (8) `download_date` est annoncé `Union[str, datetime]` mais sa valeur par défaut est `None`.
 - **Correctif** : docstring et pages à réécrire d'après le comportement observé (le test suit le code).
-- **Test** : `tests/unit/delays/test_data_manager.py::TestOutputContract` (colonnes, ordre, index),
+- **Test** : `tests/unit/delays/data_manager/test_modes.py::TestOutputContract` (colonnes, ordre, index),
   `::TestFrequencyAndPeriodBoundaries` (littéraux de fréquence, bornes), `::TestDownloadDate`
 - **Correctif** : docstrings de `compare_and_detect_delays` et `_calculate_publication_delays` réécrites d'après le
   comportement (colonnes et ordre, index, littéraux de fréquence, borne de fin exclusive, délai des révisions, fuseaux,
@@ -2146,7 +2146,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   lignes (308-311, 319, 322) restent non couvertes (couverture du module : 93 %).
 - **Attendu** : supprimer ces branches, ou accepter réellement une `Series` (le type annoncé est `pd.DataFrame`) ;
   à défaut, un `TypeError` explicite plutôt que l'`AttributeError`.
-- **Test** : `tests/unit/delays/test_data_manager.py::TestEmptyAndDegenerateInputs::test_series_instead_of_frame_raises` ; couverture du module : 100 %.
+- **Test** : `tests/unit/delays/data_manager/test_inputs.py::TestEmptyAndDegenerateInputs::test_series_instead_of_frame_raises` ; couverture du module : 100 %.
 - **Correctif** : branches mortes supprimées (`detect_frequency` d'un `DataFrame` est toujours un `dict`) ; un
   `new_data` ou `existing_data` qui n'est pas un `DataFrame` lève `TypeError: new_data must be a pandas DataFrame, got Series`.
 - **Statut** : corrigée
@@ -2172,7 +2172,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   Le même échec survient pour une ligne dont le délai est `NaN` alors que sa fréquence est valide
   (`ValueError: cannot convert float NaN to integer`, levée par `pd.Timedelta(seconds=nan)` dans
   `_calculate_converted_delay`) : le chemin « délai inconnu » n'est géré nulle part.
-- **Test** : `tests/unit/delays/test_calculator.py::TestContractWithDataManager::test_undetectable_frequency_does_not_break_the_chain`,
+- **Test** : `tests/unit/delays/calculator/test_units_and_selection.py::TestContractWithDataManager::test_undetectable_frequency_does_not_break_the_chain`,
   `::test_undetectable_couple_is_kept_with_a_nan_delay`, `::TestDelayMagnitudes::test_unknown_delay_row_is_kept_with_a_nan_delay`,
   `::test_unknown_delay_row_is_ignored_by_the_aggregation`, `::test_group_of_unknown_delays_has_a_nan_delay`,
   `::test_unknown_delay_survives_the_unit_conversion_and_the_reference_change`.
@@ -2205,7 +2205,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
       'delay': [8_183_426_019_070], 'unit': ['microsecond']}, index=pd.Index(['PIB'], name='indicator'))
   calculate_applicable_delay(delays, 'end', 'M')['delay'].iloc[0]   # 8183426019069.0
   ```
-- **Test** : `tests/unit/delays/test_calculator.py::TestTargetUnit::test_microsecond_delay_is_exact` (trois cas)
+- **Test** : `tests/unit/delays/calculator/test_units_and_selection.py::TestTargetUnit::test_microsecond_delay_is_exact` (trois cas)
 - **Correctif** : délais reconstruits et reconvertis en nanosecondes **entières** (`_nanoseconds_per_unit`, `_to_nanoseconds` via `Fraction`, division entière par excès), y compris pour le changement d'unité (`_convert_delay_unit`) ; plus aucune seconde flottante. Vérifié sur 1 200 délais tirés au hasard (0 écart).
 - **Statut** : corrigée
 
@@ -2225,7 +2225,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   cols = ['observation_date', 'download_date', 'frequency', 'period_start', 'period_end', 'reference_point', 'delay', 'unit']
   calculate_applicable_delay(pd.DataFrame(columns=cols, index=pd.Index([], name='indicator')), 'end', 'M')   # KeyError
   ```
-- **Test** : `tests/unit/delays/test_calculator.py::TestDelayMagnitudes::test_empty_frame_raises_a_clear_error`
+- **Test** : `tests/unit/delays/calculator/test_contract.py::TestDelayMagnitudes::test_empty_frame_raises_a_clear_error`
 - **Correctif** : `ValueError: Cannot calculate applicable delays on empty data: publication_delays has no row`, comme `compare_and_detect_delays` (ANO-DELAYS-005).
 - **Statut** : corrigée
 
@@ -2252,7 +2252,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
       'delay': [14], 'unit': ['day']}, index=['PIB'])                  # index sans nom
   calculate_applicable_delay(delays, 'end', 'M')                       # TypeError
   ```
-- **Test** : `tests/unit/delays/test_calculator.py::TestIndicatorsAndPanel::test_unnamed_index_levels` (deux cas),
+- **Test** : `tests/unit/delays/calculator/test_units_and_selection.py::TestIndicatorsAndPanel::test_unnamed_index_levels` (deux cas),
   `::test_unnamed_index_levels_stay_unnamed_in_the_panel_result`, `::test_duplicated_level_names_are_read_by_position`
 - **Correctif** : les niveaux de l'index sont repérés par leur **position** (`nlevels - 1` pour l'indicateur, `range(nlevels)` pour le panel) ; les noms sont libres, absents ou dupliqués, et conservés dans la sortie.
 - **Statut** : corrigée
@@ -2270,7 +2270,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```python
   calculate_applicable_delay(delays, 'end', 'M', aggregation_method='nope')   # AttributeError
   ```
-- **Test** : `tests/unit/delays/test_calculator.py::TestAggregation::test_unknown_method_name_raises_a_value_error_naming_the_argument`,
+- **Test** : `tests/unit/delays/calculator/test_frequency_conversion.py::TestAggregation::test_unknown_method_name_raises_a_value_error_naming_the_argument`,
   `::test_non_callable_method_raises_a_type_error_naming_the_argument`, `::test_method_is_validated_before_the_computation`,
   `::test_callable_without_a_name_is_reported_by_its_type`
 - **Correctif** : décision de l'auteur (2026-10-05) : `aggregation_method` est validé avant tout calcul (`_validate_aggregation_method`, essai sur un groupe minimal) ; un nom inconnu lève `ValueError: Unsupported aggregation_method 'nope': ...`. Un objet ni chaîne ni appelable lève `TypeError: 'aggregation_method' should be a string or a callable, got a int` (choix du TypeError : même convention que `frequency`). Un appelable sans `__name__` (`functools.partial`) est nommé par son type.
@@ -2580,7 +2580,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   from tsforecast.delays.transformers import PublicationDelayTransformer
   PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point={'GDP': 'end'})  # ValueError
   ```
-- **Test** : `tests/unit/delays/transformers/test_publication_delay_transformer.py::TestReferencePoint::test_params_with_dict_reference_point`,
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_delays_resolution.py::TestReferencePoint::test_params_with_dict_reference_point`,
   `tests/unit/delays/transformers/test_factories.py::TestCreateDelayTransformerFactory::test_reference_point_varying_by_variable`
 - **Correctif** : `__init__` valide un `reference_point` en dictionnaire valeur par valeur (`ValueError ... for variable 'CPI' got 'middle'`) ; `fit` résout le point de référence variable par variable (`_resolve_parameter`).
 - **Statut** : corrigée
@@ -2606,7 +2606,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                               delay_unit='D', reference_point='start', target_frequency={'CPI': 'Q'},
                               prediction_date='2023-12-15').fit(X)   # ValueError: too many values to unpack
   ```
-- **Test** : `test_publication_delay_transformer.py::TestStrategy` (`test_strategy_per_variable*`, `test_delayed_column_without_strategy_is_left_unchanged`, `test_masked_variable_needs_a_target_frequency`),
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_shift_mask.py::TestStrategy` (`test_strategy_per_variable*`, `test_delayed_column_without_strategy_is_left_unchanged`, `test_masked_variable_needs_a_target_frequency`),
   `test_factories.py::TestPanelwiseIntegration::test_per_variable_strategy`
 - **Correctif** : itération sur `self.strategy.items()` (`_split_columns_by_strategy`) ; une variable retardée absente du dictionnaire est laissée telle quelle avec un avertissement ; `default_values` n'est plus imputé avec une stratégie par variable, comme annoncé (une variable masquée sans fréquence cible lève alors la `ValueError` d'ANO-DELAYS-033).
 - **Statut** : corrigée
@@ -2631,7 +2631,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   panel = pd.concat({'FR': X, 'DE': X}, names=['country', 'date'])
   PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start').fit(panel)  # KeyError
   ```
-- **Test** : `test_publication_delay_transformer.py::TestInputTypes::test_panel_gets_the_shift_of_each_column`
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_init_fit.py::TestInputTypes::test_panel_gets_the_shift_of_each_column`
 - **Correctif** : arbitrage de l'auteur (2026-10-08) : panel accepté, avec l'avertissement « Panel data: the same publication delays are applied to every entity. Use create_delay_transformer_factory (or prepare_entity_kwargs_from_delays) with a PanelwiseTransformer to apply per-entity delays. » La fréquence d'une colonne est celle que partagent ses entités (`_detect_column_frequencies`, une entité où la colonne est vide est ignorée) ; des fréquences différentes pour une colonne retardée, ou des fréquences d'index différentes pour le masque, lèvent une `ValueError` qui renvoie vers la fabrique. `transform` / `inverse_transform` passent par `PanelwiseTransformer` (branche panel désormais atteinte).
 - **Statut** : corrigée
 
@@ -2654,7 +2654,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                                   target_frequency='Q', prediction_date='2023-12-15').fit(X)
   t.shift_params   # {'GDP': {'n_periods': 3, ...}}, attendu -3
   ```
-- **Test** : `test_publication_delay_transformer.py::TestMaskParams::test_fallback_shift_moves_values_to_later_dates`,
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_shift_mask.py::TestMaskParams::test_fallback_shift_moves_values_to_later_dates`,
   `test_publication_delay_transformer_transform.py::TestRoundTrip::test_fallback_never_shows_a_value_before_its_date`
 - **Correctif** : le repli calcule le décalage de la stratégie 'shift' (`_compute_shift_periods` : périodes de la colonne, signe négatif).
 - **Statut** : corrigée
@@ -2677,7 +2677,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start', prediction_date='2023-12-15',
                               default_values={'delay': 20.0, 'unit': 'D', 'reference_point': 'start'}).fit(X)  # KeyError: 'CPI'
   ```
-- **Test** : `test_publication_delay_transformer.py::TestDefaultValues::test_default_delay_for_a_column_without_delay`,
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_delays_resolution.py::TestDefaultValues::test_default_delay_for_a_column_without_delay`,
   `::test_default_unit`
 - **Correctif** : `_build_delays_dict` donne `default_values['delay']` aux colonnes de `X` sans délai connu (avertissement « Imputed default delay value ... ») ; l'unité par défaut est lue sous la clé `'unit'`. Le rapport porte l'origine du délai (`ColumnDelayRecord.delay_source`, `'explicit'` / `'default'`) et `defaults_imputed` liste `(colonne, 'delay')`.
 - **Statut** : corrigée
@@ -2693,7 +2693,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   d'un dictionnaire ; aucun renommage en cause, la signature est inchangée depuis `d16b0b2`).
 - **Attendu** : `ValueError` nommant le paramètre et les colonnes concernées.
 - **Reproduction** : `PublicationDelayTransformer(delays={'GDP': 45.0}, reference_point='start').fit(X)` → `KeyError: 'GDP'`.
-- **Test** : `test_publication_delay_transformer.py::TestMissingDelays::test_unresolved_unit_raises_a_clear_error`
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_delays_resolution.py::TestMissingDelays::test_unresolved_unit_raises_a_clear_error`
 - **Correctif** : `_check_resolved` lève `ValueError: No 'delay_unit' for the delayed columns ['GDP']: give it to the constructor, in the delays table, or in 'default_values'` (idem pour `reference_point` et, en masque, `target_frequency`). Seules les colonnes retardées doivent avoir ces paramètres.
 - **Statut** : corrigée
 
@@ -2707,7 +2707,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : `'error'` → `ValueError` nommant les colonnes sans délai ; `'warn'` → avertissement ; `'ignore'` → rien.
 - **Reproduction** : `PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
   handle_missing_delays='error').fit(X.assign(Z=1.0))` → aucun effet.
-- **Test** : `test_publication_delay_transformer.py::TestMissingDelays::test_handle_missing_delays_error`
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_delays_resolution.py::TestMissingDelays::test_handle_missing_delays_error`
 - **Correctif** : `_handle_missing_delays` : `'warn'` (défaut) → « No publication delay for the columns [...]: they are left unchanged », `'error'` → `ValueError` avec le même message, `'ignore'` → silence.
 - **Statut** : corrigée
 
@@ -2720,7 +2720,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : un délai inconnu traité comme un délai manquant (colonne laissée intacte, signalée selon
   `handle_missing_delays`).
 - **Reproduction** : `PublicationDelayTransformer(delays={'GDP': float('nan')}, delay_unit='D', reference_point='start').fit(X)`.
-- **Test** : `test_publication_delay_transformer.py::TestMissingDelays::test_unknown_delay_is_treated_as_missing`
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_delays_resolution.py::TestMissingDelays::test_unknown_delay_is_treated_as_missing`
 - **Correctif** : un délai `NaN` (ou `None`) est un délai inconnu (`_is_missing`) : colonne traitée comme sans délai (`handle_missing_delays`), ou complétée par `default_values['delay']`.
 - **Statut** : corrigée
 
@@ -2733,7 +2733,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : une `Series` nommée traitée comme un DataFrame d'une colonne (et restituée en `Series`), ou annotation
   restreinte au DataFrame avec une erreur explicite.
 - **Reproduction** : `PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start').fit(X['GDP'])`.
-- **Test** : `test_publication_delay_transformer.py::TestInputTypes::test_series_is_accepted`
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_init_fit.py::TestInputTypes::test_series_is_accepted`
 - **Correctif** : `_as_frame` / `_restore_series` : une `Series` (nommée ou non) est traitée comme un DataFrame d'une colonne et restituée en `Series` par `transform` / `inverse_transform` ; tout autre type lève `TypeError`.
 - **Statut** : corrigée
 
@@ -2747,7 +2747,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   cellules masquées mémorisées par `MaskTransformer`).
 - **Attendu** : `NotFittedError` explicite (« call transform first ») — arbitrage de l'auteur.
 - **Reproduction** : `t = PublicationDelayTransformer(...).fit(X); t.inverse_transform(X)` → `AttributeError`.
-- **Test** : `test_publication_delay_transformer.py::TestSklearnProtocol::test_inverse_transform_before_transform`
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_init_fit.py::TestSklearnProtocol::test_inverse_transform_before_transform`
 - **Correctif** : arbitrage de l'auteur (2026-10-08) : l'inversion ne sert qu'après un `transform`. `inverse_transform` sans `transform` depuis le dernier `fit` lève `NotFittedError: inverse_transform reverses the last transform: call transform before inverse_transform` ; `fit` oublie les auxiliaires d'un `transform` précédent.
 - **Statut** : corrigée
 
@@ -2763,7 +2763,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : à trancher — accepter la variable dans l'index (niveau `column` ou dernier niveau, comme les fabriques),
   ou documenter `reset_index()`.
 - **Reproduction** : `PublicationDelayTransformer(delays=calculate_applicable_delay(detected, 'start', 'M')).fit(X)`.
-- **Test** : `test_publication_delay_transformer.py::TestDelaysFormat::test_raw_output_of_calculate_applicable_delay`
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_delays_resolution.py::TestDelaysFormat::test_raw_output_of_calculate_applicable_delay`
 - **Correctif** : arbitrage de l'auteur (2026-10-08) : la variable est lue dans la colonne `column`, à défaut dans le niveau d'index `'column'`, à défaut dans le dernier niveau (convention des fabriques) — la sortie de `calculate_applicable_delay` est acceptée telle quelle. Une variable listée plusieurs fois (délais par entité) lève une `ValueError` qui renvoie vers la fabrique ; un tableau sans colonne `delay` aussi.
 - **Statut** : corrigée
 
@@ -2780,7 +2780,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   une fréquence cible qu'elle n'a pas choisie.
 - **Reproduction** : `PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D', reference_point='start').fit(X)`
   → 2 avertissements.
-- **Test** : `test_publication_delay_transformer.py::TestWarnings::test_fully_resolved_fit_emits_no_warning`,
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_init_fit.py::TestWarnings::test_fully_resolved_fit_emits_no_warning`,
   `test_factories.py::TestCreateDelayTransformerFactory::test_shift_factory_emits_no_warning`
 - **Correctif** : (1) les avertissements « Could not impute ... » ont disparu : un paramètre manquant d'une colonne retardée lève l'erreur d'ANO-DELAYS-033, une colonne sans délai n'a besoin d'aucun paramètre ; (2) la fabrique et `prepare_entity_kwargs_from_delays` ne passent `target_frequency` qu'aux entités dont la stratégie n'est pas 'shift' (`_entity_kwargs`).
 - **Statut** : corrigée
@@ -2855,7 +2855,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   t = PublicationDelayTransformer(delays={'a': 69.0}, prediction_date='2023-04-10', delay_unit='D', reference_point='start')
   t.fit_transform(X).loc['2023-04-01', 'a']   # 1.0 (février, publié le 11 avril) ; attendu 0.0 (janvier)
   ```
-- **Test** : `tests/unit/delays/transformers/test_publication_delay_transformer.py::TestCalendarBoundaries`
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_shift_mask.py::TestCalendarBoundaries`
   (`test_value_published_after_the_prediction_date_is_hidden`, `test_value_published_on_the_prediction_date_is_visible`),
   `::test_business_days_skip_the_weekend`, `::test_negative_delay_on_business_days`,
   `::test_end_of_a_quarter_counts_from_the_next_quarter`,
@@ -2995,7 +2995,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   tracker.mark_interpolated('a', pd.Timestamp('2030-01-01'))
   tracker.provenance_matrix_.shape   # (2, 1) au lieu d'un KeyError
   ```
-- **Test** : `tests/unit/frequency/test_provenance.py::TestMarks::test_scalar_timestamp_outside_the_matrix_raises_key_error`
+- **Test** : `tests/unit/frequency/provenance/test_tracker_writes.py::TestMarks::test_scalar_timestamp_outside_the_matrix_raises_key_error`
 - **Statut** : corrigé (2026-10-09)
 - **Correction** : `_check_labels_exist` (appelée par `mark_imputed` et `clear_provenance`) fait lever `KeyError` pour une étiquette scalaire ou une clé de `MultiIndex` absente ; plus de test `xfail` (`TestMarks`, `TestClearProvenance`).
 
@@ -3010,7 +3010,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   incompatibles », ce qui peut se lire comme « étiquettes incompatibles ». `merge` n'est appelé nulle part
   dans `tsforecast/` : aucune source ne tranche. Comportement actuel épinglé.
 - **Reproduction** : `a.merge(b)` avec `a` de colonnes `['a', 'b']` et `b` de colonnes `['x', 'y']`, mêmes dates.
-- **Test** : `tests/unit/frequency/test_provenance.py::TestMerge::test_same_shape_but_disjoint_columns_is_a_silent_no_op`
+- **Test** : `tests/unit/frequency/provenance/test_tracker_reads.py::TestMerge::test_same_shape_but_disjoint_columns_is_a_silent_no_op`
   et `::test_same_shape_but_disjoint_index_is_a_silent_no_op`
 - **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
 - **Correction** : `merge(other, overwrite=True)` s'appuie sur `DataFrame.update` (le paramètre `how` disparaît : `'update'` → `overwrite=True`, `'preserve'` → `overwrite=False`) ; il lève `ValueError('Incompatible labels')` si l'index (ordre compris) ou l'ensemble des colonnes diffèrent, et n'ajoute jamais de cellule. Tests : `TestMerge`.
@@ -3027,7 +3027,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   Comportement actuel épinglé.
 - **Reproduction** : `resolve_model_provenance('interpolate', 'none')` (faute de frappe pour `'interpolated'`)
   renvoie `MODEL_ON_TRUE`.
-- **Test** : `tests/unit/frequency/test_provenance.py::TestResolveModelProvenance::test_unknown_taint_is_silently_treated_as_clean`
+- **Test** : `tests/unit/frequency/provenance/test_types_and_taint.py::TestResolveModelProvenance::test_unknown_taint_is_silently_treated_as_clean`
 - **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
 - **Correction** : `ValueError` nommant l'argument fautif (plutôt que `None`, qui serait écrit tel quel comme « non renseigné » dans la matrice par `mark_model_imputed`). Test : `TestResolveModelProvenance::test_unknown_taint_raises`.
 
@@ -3043,7 +3043,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : le test suit le code (anomalie [DOC], pas de `xfail`) : les tests de lecture d'une cellule
   issue d'`initialize` utilisent `pd.isna`.
 - **Reproduction** : `ImputationProvenanceTracker().initialize(df).get_provenance('a', ts_nan) is None` → `False`.
-- **Test** : `tests/unit/frequency/test_provenance.py::TestGetProvenance::test_unfilled_cell_is_none`
+- **Test** : `tests/unit/frequency/provenance/test_tracker_reads.py::TestGetProvenance::test_unfilled_cell_is_none`
 - **Statut** : corrigé (2026-10-09)
 - **Correction** : docstrings d'`initialize`, `extend_index` et `clear_provenance` alignées sur le code (cellule non renseignée = nulle, à tester avec `pd.isna`) ; le code n'a pas changé.
 
@@ -3144,7 +3144,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   df = pd.concat([df, df.iloc[:1]])
   FrequencyAligner().convert_to_target(df, ['x'], 'QS')['x'].iloc[0]   # 7.0
   ```
-- **Test** : `tests/unit/frequency/test_frequency_aligner.py::TestAggregationContract::test_duplicated_dates_are_rejected`
+- **Test** : `tests/unit/frequency/frequency_aligner/test_aggregation.py::TestAggregationContract::test_duplicated_dates_are_rejected`
 - **Statut** : corrigé (2026-10-10)
 - **Correction** : `_iter_variable_series` (voie commune à l'agrégation et à l'interpolation) lève `ValueError('Duplicate dates[ for entity …]: …')` dès qu'une entité portant une colonne à convertir a des dates dupliquées ; les entités sans clé ne sont pas contrôlées. Tests : `TestAggregationContract::test_duplicated_dates_are_rejected`, `::test_duplicated_dates_of_a_panel_entity_name_the_entity`, `::test_duplicates_of_an_entity_without_key_are_tolerated`, `TestConvertToTargetRouting::test_duplicated_dates_raise_on_interpolation`.
 
@@ -3160,7 +3160,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   colonnes aux séries temporelles ; le no-op silencieux n'est conforme à aucune des deux lectures. Le test `xfail` accepte
   l'une ou l'autre résolution.
 - **Reproduction** : `convert_to_target(panel_mensuel_A_B, ['x'], 'QS').equals(panel_mensuel_A_B)` → `True`.
-- **Test** : `tests/unit/frequency/test_frequency_aligner.py::TestConvertToTargetRouting::test_plain_column_name_on_a_panel_converts_every_entity`
+- **Test** : `tests/unit/frequency/frequency_aligner/test_convert_to_target.py::TestConvertToTargetRouting::test_plain_column_name_on_a_panel_converts_every_entity`
 - **Statut** : corrigé (2026-10-10) — arbitrage de l'auteur : conversion de toutes les entités, comme les autres fonctions du package
 - **Correction** : `_expand_keys` remplace un nom de colonne seul par une clé `(entité..., colonne)` par entité du panel (dédoublonnée avec les clés tuples), avant l'orientation agrégation / interpolation : chaque entité garde sa propre fréquence source. Tests : `TestConvertToTargetRouting::test_plain_column_name_on_a_panel_converts_every_entity`, `::test_plain_and_tuple_keys_are_equivalent`, `::test_several_plain_column_names_on_a_panel`, `::test_plain_and_tuple_keys_for_the_same_column_are_merged`.
 
@@ -3182,7 +3182,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   df = pd.DataFrame({'x': [np.nan] * 3}, index=pd.date_range('2023-01-01', periods=3, freq='QS'))
   FrequencyAligner()._interpolate_to_target(df, ['x'], 'MS')   # AttributeError
   ```
-- **Test** : `tests/unit/frequency/test_frequency_aligner.py::TestPrivateGuards::test_interpolating_a_column_without_frequency_leaves_it_unchanged`
+- **Test** : `tests/unit/frequency/frequency_aligner/test_convert_to_target.py::TestPrivateGuards::test_interpolating_a_column_without_frequency_leaves_it_unchanged`
 - **Statut** : corrigé (2026-10-10)
 - **Correction** : `_interpolate_series` renvoie `None` sous deux observations (annotation `Optional[pd.Series]`) et `_interpolate_to_target` laisse alors la colonne telle quelle ; `_observed_series`, sans effet observable, est supprimée (le convertisseur restreint lui-même aux lignes observées).
 
@@ -3198,7 +3198,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `_interpolate_to_target`) plutôt que `convert_to_target`.
 - **Attendu** : outil autonome d'alignement, exemples sur `convert_to_target` / `build_densified_index`. Pas de `xfail`
   (le code est juste).
-- **Test** : `tests/unit/frequency/test_frequency_aligner.py` (docstring de module)
+- **Test** : `tests/unit/frequency/frequency_aligner/` (docstring de module)
 - **Statut** : corrigé (2026-10-10)
 - **Correction** : docstrings du module, de la classe et de `convert_to_target` réécrites (outil autonome, exemples sur `convert_to_target` / `build_densified_index`), docstring de module de `converter.py`, ligne du tableau de `docs/concepts/mixed_frequency_imputation.md` et `CLAUDE.md`. Restent périmés (non modifiés) : `notebooks/utils/frequency_aligner.ipynb` (appels privés avec l'argument `is_panel` supprimé en `6db1ca7`), textes de `notebooks/0 - QB - Utils.ipynb` et `notebooks/explore_frequency_converter.ipynb`.
 
@@ -3238,7 +3238,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   calc.imputation_strict_window_start_          # Timestamp('2020-01-31')
   calc.get_imputation_window_mask(df).sum()     # 0
   ```
-- **Test** : `tests/unit/frequency/test_imputation_window.py::TestGridAnchoring::test_grid_follows_the_index_when_every_column_is_coarser`
+- **Test** : `tests/unit/frequency/imputation_window/test_robustness.py::TestGridAnchoring::test_grid_follows_the_index_when_every_column_is_coarser`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : nouvelle méthode `_detect_grid_position` : la position est lue sur les dates observées des colonnes à la
   fréquence de la grille, puis sur l'index de l'entité, puis sur les dates observées des autres colonnes de fréquence
@@ -3265,7 +3265,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                      'c': [np.nan] * 5 + [1.0] + [np.nan] * 6}, index=dates)
   ImputationWindowCalculator().fit(df)   # ValueError: Frequency must be a string, got <class 'NoneType'>
   ```
-- **Test** : `tests/unit/frequency/test_imputation_window.py::TestUndetectedFrequencyColumns`
+- **Test** : `tests/unit/frequency/imputation_window/test_validation.py::TestUndetectedFrequencyColumns`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : exclusion (décision D40, spec §14.8)
 - **Correction** : `_compute_window` recense les colonnes observées de fréquence `None` ; `_build_index_freq_grid` et
   `_build_coverage_matrix` les ignorent (plus de repli sur la fréquence de l'index), le dénominateur les écarte. Nouvel
@@ -3286,7 +3286,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   donnée) a peu de sens : la spec est probablement à corriger plutôt que le code. Comportement actuel épinglé,
   sans `xfail`.
 - **Reproduction** : `ImputationWindowCalculator(imputation_scope='unrestricted')` → `ValueError`.
-- **Test** : `tests/unit/frequency/test_imputation_window.py::TestConstructorValidation::test_imputation_scope_rejects_unrestricted`
+- **Test** : `tests/unit/frequency/imputation_window/test_validation.py::TestConstructorValidation::test_imputation_scope_rejects_unrestricted`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : `'unrestricted'` n'a d'intérêt que pour `TrainingScope`
 - **Correction** : la spec est corrigée (§7 : `ImputationScope` à quatre valeurs, `TrainingScope` explicite, paragraphe de
   motif) ; le code, déjà conforme, est inchangé. Le test épingle désormais le contrat.
@@ -3311,7 +3311,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   calc = ImputationWindowCalculator().fit(pd.DataFrame({'a': values, 'b': values}, index=idx, dtype=float))
   calc.structurally_absent_columns_   # {('A',): (), ('B',): ()}
   ```
-- **Test** : `tests/unit/frequency/test_imputation_window.py::TestEntitiesWithoutWindow::test_empty_entity_reports_no_excluded_column`
+- **Test** : `tests/unit/frequency/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_empty_entity_reports_no_excluded_column`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : docstring précisée, code inchangé
 - **Correction** : la docstring de `structurally_absent_columns_` (et de `undetected_frequency_columns_`) énonce la règle :
   l'attribut n'a de sens que pour une entité dotée d'une grille ; une entité de `entities_without_window_` porte toujours un
@@ -3331,7 +3331,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   mask — is left unrestricted ») désignent l'absence.
 - **Reproduction** : panel `A` complet, `B` entièrement NaN sur un index mensuel régulier ;
   `calc.get_mask_at_frequency('QS').loc['B']` → 4 × `False`.
-- **Test** : `tests/unit/frequency/test_imputation_window.py::TestEntitiesWithoutWindow::test_entity_without_window_is_absent_from_mask_at_frequency`
+- **Test** : `tests/unit/frequency/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_entity_without_window_is_absent_from_mask_at_frequency`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : la boucle par entité saute toute entité de `entities_without_window_` ; un `frequency` en dict n'a plus à
   nommer ces entités (`::test_dict_target_need_not_name_an_entity_without_window`). Les masques ajustés gardent leurs lignes
@@ -3345,7 +3345,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `data` manque à la grille : `FutureWarning: Downcasting object dtype arrays on .fillna ... is deprecated`.
 - **Attendu** : aucun avertissement de dépréciation ; résultat booléen identique.
 - **Reproduction** : `calc.get_imputation_window_mask(pd.DataFrame(index=index_avec_une_date_hors_grille))`.
-- **Test** : `tests/unit/frequency/test_imputation_window.py::TestGetImputationWindowMask::test_alignment_emits_no_pandas_deprecation`
+- **Test** : `tests/unit/frequency/imputation_window/test_accessors.py::TestGetImputationWindowMask::test_alignment_emits_no_pandas_deprecation`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `source.reindex(data.index, fill_value=False).astype(bool)`.
 
@@ -3358,7 +3358,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : un avertissement agrégé unique nommant ces entités (point de vigilance 5 du §17 de la spec : tout
   avertissement est agrégé et unique).
 - **Reproduction** : panel `A` complet, `B` entièrement NaN ; `fit` ne produit aucun avertissement.
-- **Test** : `tests/unit/frequency/test_imputation_window.py::TestEntitiesWithoutWindow::test_entities_without_window_are_named_by_one_warning`
+- **Test** : `tests/unit/frequency/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_entities_without_window_are_named_by_one_warning`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `_fit_panel` émet un `UserWarning` unique listant `entities_without_window_` ; un panel où toutes les
   entités ont une fenêtre reste silencieux (`::test_no_warning_when_every_entity_has_a_window`).
@@ -3384,7 +3384,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   rescaled, mask = AggregationConstraint('sum').rescale(values, observations, 'Q', grid_freq='M')
   rescaled.sum()   # 16.0, mask tout à True
   ```
-- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestRescaleGuards::test_numerically_zero_aggregate_is_zero`
+- **Test** : `tests/unit/frequency/aggregation_constraint/test_rescale_guards.py::TestRescaleGuards::test_numerically_zero_aggregate_is_zero`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur
 - **Correction** : `_rescale_one` traite comme nul tout agrégat dont la valeur absolue est inférieure à la borne d'erreur
   d'arrondi de la sommation, `n · ε · Σ|x|` (`np.finfo(float).eps`) : la période reste brute, avec l'avertissement agrégé
@@ -3413,7 +3413,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   observations = pd.Series(np.nan, index=dup); observations.iloc[-2:] = 120.0
   AggregationConstraint('sum').rescale(values, observations, 'Y', grid_freq='M')[0].sum()   # 240.0
   ```
-- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestRescaleGuards::test_duplicated_observation_dates_are_rejected`
+- **Test** : `tests/unit/frequency/aggregation_constraint/test_rescale_guards.py::TestRescaleGuards::test_duplicated_observation_dates_are_rejected`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `_check_unique_dates` lève `ValueError('Duplicate dates in observations|values: [...]')` dans
   `_rescale_one` (ancres non nulles des observations, et grille des valeurs : une sous-période dupliquée compterait deux
@@ -3440,7 +3440,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   c = AggregationConstraint('sum', 'Y', obs).set_params(aggregation_constraint='mean')
   c.fit(X).transform(X)['a'].sum()   # 78.0, aucune erreur
   ```
-- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestValidationThroughSetParams`
+- **Test** : `tests/unit/frequency/aggregation_constraint/test_validation.py::TestValidationThroughSetParams`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur (composants utilisables seuls, `set_params` compris)
 - **Correction** : `fit`, `transform` et `rescale` (utilisable sans `fit`) revalident `aggregation_constraint` par
   `validate_aggregation_constraint` ; la validation d'`__init__` est conservée (§13.1). Tests : `TestValidationThroughSetParams`.
@@ -3465,7 +3465,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   observations = pd.Series([np.nan, np.nan, 120.0], index=grid)
   AggregationConstraint('sum').rescale(values, observations, 'Y', grid_freq='zz')[1].all()   # True
   ```
-- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestGridFrequencyValidation`
+- **Test** : `tests/unit/frequency/aggregation_constraint/test_validation.py::TestGridFrequencyValidation`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur
 - **Correction** : `_resolve_grid_freq`, appelée une fois par appel en tête de `_rescale_one`, normalise `grid_freq` et lève
   `ValueError` sur une fréquence illisible (« grid_freq must be a readable frequency ») et sur un dictionnaire qui ne couvre
@@ -3484,7 +3484,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   du code mort (aucune clé `None` / NaN n'était jamais produite).
 - **Attendu** : une ligne `NaT` n'appartient à aucune période, ni recalée ni source de total.
 - **Reproduction** : grille de 12 mois + une ligne `NaT` portant 7 et une observation à 5 → la ligne `NaT` était recalée à 5.
-- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestRescaleGuards::test_nat_rows_never_form_a_period`
+- **Test** : `tests/unit/frequency/aggregation_constraint/test_rescale_guards.py::TestRescaleGuards::test_nat_rows_never_form_a_period`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `_period_membership` rend `None` pour une date `NaT` (série et panel) ; `_is_usable_key` écarte ces lignes
   dans `_observed_totals` et `_rescale_one`.
@@ -3497,7 +3497,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   dictionnaire ni ses métadonnées aient été contrôlées, une colonne manquante passe inaperçue.
 - **Attendu** : convention sklearn, `ValueError` nommant les colonnes manquantes et inattendues.
 - **Reproduction** : `AggregationConstraint('sum', 'Y', obs).fit(X).transform(X.assign(q1=1.0))` ne levait rien.
-- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestSklearnProtocol::test_transform_rejects_other_columns_than_fit`
+- **Test** : `tests/unit/frequency/aggregation_constraint/test_sklearn_protocol.py::TestSklearnProtocol::test_transform_rejects_other_columns_than_fit`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `ValueError('X has different columns than during fit: missing [...], unexpected [...]')` ; l'ordre des
   colonnes reste libre (`::test_transform_accepts_reordered_columns`).
@@ -3510,7 +3510,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   précédent, sur une autre grille.
 - **Attendu** : principe B19 (§12.5) — l'état du `transform` est purgé en tête de `fit`.
 - **Reproduction** : `c.fit_transform(X); c.fit(X2); c.rescaled_mask_.index` → index de `X`.
-- **Test** : `tests/unit/frequency/test_aggregation_constraint.py::TestSklearnProtocol::test_refit_purges_the_previous_rescaled_mask`
+- **Test** : `tests/unit/frequency/aggregation_constraint/test_sklearn_protocol.py::TestSklearnProtocol::test_refit_purges_the_previous_rescaled_mask`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `fit` supprime `rescaled_mask_` s'il existe.
 
@@ -3535,10 +3535,10 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   StageScaler(scale_features='calendar').target_divisor('v', 'M', 'Q', index=idx).tolist()
   # [1.0, 1.0, 1.0] ; 'constant' donne 1/3
   ```
-- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestCalendarGoldenValues::test_fractional_divisor_under_calendar`,
+- **Test** : `tests/unit/frequency/stage_scaler/test_golden_values.py::TestCalendarGoldenValues::test_fractional_divisor_under_calendar`,
   `::test_fractional_feature_divisor_under_calendar`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : part de jours en `'calendar'`, fraction uniforme en `'constant'`
-- **Correction** : `_pair_divisor` détecte une période portée plus fine que l'étape (`is_higher_frequency(f_to, f_from)`) et, sous `'calendar'`, calcule la part de temps réelle de la période d'étape (`_calendar_share` : durée de la période fine / durée de la période d'étape, en nanosecondes ; repli sur le facteur constant pour une fréquence sans `Period` pandas, ex. `SM`). `'constant'` est inchangé (1/3, 1/4, 1/12). Tests : `tests/unit/frequency/test_stage_scaler.py::TestCalendarGoldenValues::test_calendar_share_of_days_gold`, `::test_calendar_share_on_a_mutualized_block`, `::test_fractional_divisor_under_calendar`.
+- **Correction** : `_pair_divisor` détecte une période portée plus fine que l'étape (`is_higher_frequency(f_to, f_from)`) et, sous `'calendar'`, calcule la part de temps réelle de la période d'étape (`_calendar_share` : durée de la période fine / durée de la période d'étape, en nanosecondes ; repli sur le facteur constant pour une fréquence sans `Period` pandas, ex. `SM`). `'constant'` est inchangé (1/3, 1/4, 1/12). Tests : `tests/unit/frequency/stage_scaler/test_golden_values.py::TestCalendarGoldenValues::test_calendar_share_of_days_gold`, `::test_calendar_share_on_a_mutualized_block`, `::test_fractional_divisor_under_calendar`.
 
 ### ANO-FREQ-029 — `feature_divisors` : `grid_freq` par entité rend une `Series` quand les blocs coïncident
 - **Type** : [SPEC] code ≠ spec
@@ -3557,9 +3557,9 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   type(StageScaler().feature_divisors(columns=['m1'], column_frequencies={'m1': 'M'}, ways={},
        grid_freq={('DE',): 'Y', ('FR',): 'Y'}, stage_freq='M', index=idx))   # Series
   ```
-- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestShapeRule::test_per_entity_grid_freq_always_gives_a_dataframe`
+- **Test** : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestShapeRule::test_per_entity_grid_freq_always_gives_a_dataframe`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `feature_divisors` rend toujours une `DataFrame` par ligne pour un `grid_freq` par entité. Plus généralement, la forme ne dépend plus de la coïncidence des diviseurs : par ligne sous `'calendar'`, pour un `grid_freq` par entité, ou quand les fréquences effectivement lues (étape, colonnes en `'raw_anchors'`) se résolvent différemment d'une entité à l'autre ; compacte sinon. Tests : `tests/unit/frequency/test_stage_scaler.py::TestShapeRule`.
+- **Correction** : `feature_divisors` rend toujours une `DataFrame` par ligne pour un `grid_freq` par entité. Plus généralement, la forme ne dépend plus de la coïncidence des diviseurs : par ligne sous `'calendar'`, pour un `grid_freq` par entité, ou quand les fréquences effectivement lues (étape, colonnes en `'raw_anchors'`) se résolvent différemment d'une entité à l'autre ; compacte sinon. Tests : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestShapeRule`.
 
 ### ANO-FREQ-030 — Liaison d'étape par entité homogène : forme compacte, contrairement à `source_freq`
 - **Type** : [CODE] comportement
@@ -3579,10 +3579,10 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   StageScaler().target_divisor('a1', 'Y', {('DE',): 'M', ('FR',): 'M'}, index=idx)        # 12.0
   StageScaler().target_divisor('a1', {('DE',): 'Y', ('FR',): 'Y'}, 'M', index=idx)        # Series
   ```
-- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestShapeRule::test_homogeneous_stage_binding_keeps_the_compact_form`
+- **Test** : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestShapeRule::test_homogeneous_stage_binding_keeps_the_compact_form`
   (épingle le comportement actuel)
 - **Statut** : arbitré (2026-10-11) — forme compacte conservée
-- **Correction** : règle retenue : une liaison d'étape (`stage_freq` / `pred_freq`) dont les entités s'accordent sur une fréquence (aux alias de position près, `'M'` = `'ME'`) reste compacte ; les liaisons `grid_freq` / `source_freq` décrivent un jeu mutualisé et sont toujours par ligne. Motif : `HighFrequencyImputer` passe une liaison par entité à toute étape de panel ; la forme par ligne figerait chaque `fit_scale_factor` en `Series` sur la grille du fit (report d'échelle exposé au désalignement NaN déjà signalé sous `'calendar'`, plan illisible : `'per-row'` au lieu de 12.0) sans bénéfice. Tests : `tests/unit/frequency/test_stage_scaler.py::TestShapeRule::test_homogeneous_stage_binding_keeps_the_compact_form`, `::test_disagreeing_stage_binding_is_per_row_even_with_equal_divisors`.
+- **Correction** : règle retenue : une liaison d'étape (`stage_freq` / `pred_freq`) dont les entités s'accordent sur une fréquence (aux alias de position près, `'M'` = `'ME'`) reste compacte ; les liaisons `grid_freq` / `source_freq` décrivent un jeu mutualisé et sont toujours par ligne. Motif : `HighFrequencyImputer` passe une liaison par entité à toute étape de panel ; la forme par ligne figerait chaque `fit_scale_factor` en `Series` sur la grille du fit (report d'échelle exposé au désalignement NaN déjà signalé sous `'calendar'`, plan illisible : `'per-row'` au lieu de 12.0) sans bénéfice. Tests : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestShapeRule::test_homogeneous_stage_binding_keeps_the_compact_form`, `::test_disagreeing_stage_binding_is_per_row_even_with_equal_divisors`.
 
 ### ANO-FREQ-031 — Entité de la grille absente de la liaison d'étape : diviseur `NaN` en silence
 - **Type** : [CODE] comportement
@@ -3603,9 +3603,9 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   StageScaler().target_divisor('a1', 'Y', {('FR',): 'M', ('DE',): 'Q'}, index=idx).loc['IT'].tolist()
   # [nan, nan, nan]
   ```
-- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestPerEntityFrequencies::test_grid_entity_uncovered_by_the_stage_binding_raises`
+- **Test** : `tests/unit/frequency/stage_scaler/test_panel.py::TestPerEntityFrequencies::test_grid_entity_uncovered_by_the_stage_binding_raises`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : la fréquence d'étape d'une entité est résolue par `_stage_freq_for` : entrée propre, liaison à une seule entrée, puis **liaison unanime** (toutes les entrées s'accordent : c'est la fréquence de l'étape, elle vaut pour tout le panel) ; seule une liaison **discordante** qui omet une entité de la grille lève un `ValueError` nommant l'entité. Les entités servies sont celles de la grille dès qu'une liaison par entité est lue (`feature_divisors`, `_stage_divisor`, chemin `produced_freq` de `target_divisor`). Une colonne d'ancres sans fréquence pour une entité retombe sur le diviseur par défaut, jamais sur NaN. Tests : `tests/unit/frequency/test_stage_scaler.py::TestPerEntityFrequencies`.
+- **Correction** : la fréquence d'étape d'une entité est résolue par `_stage_freq_for` : entrée propre, liaison à une seule entrée, puis **liaison unanime** (toutes les entrées s'accordent : c'est la fréquence de l'étape, elle vaut pour tout le panel) ; seule une liaison **discordante** qui omet une entité de la grille lève un `ValueError` nommant l'entité. Les entités servies sont celles de la grille dès qu'une liaison par entité est lue (`feature_divisors`, `_stage_divisor`, chemin `produced_freq` de `target_divisor`). Une colonne d'ancres sans fréquence pour une entité retombe sur le diviseur par défaut, jamais sur NaN. Tests : `tests/unit/frequency/stage_scaler/test_panel.py::TestPerEntityFrequencies`.
 - **Effet sur `HighFrequencyImputer`** : le cas se produisait réellement. Avec `target_frequency={FR: 'M', DE: 'Q', IT: 'M'}` et `impute_intermediate_frequencies=True` sur PANEL-F, l'étape `M` lie `{FR: M, IT: M}` alors que le jeu mutualisé contient le bloc trimestriel de DE (R2) : ses lignes recevaient un diviseur NaN puis étaient retirées par `usable = y_train.notna()` (côté features, le diviseur par défaut). `n_training_rows` de l'étape `M` / `v` passe de 48 à 60 : les 12 ancres de DE entrent désormais dans l'entraînement, ramenées à l'échelle mensuelle.
 
 ### ANO-FREQ-032 — `set_params` contourne la validation de `scale_features`
@@ -3621,9 +3621,9 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```python
   StageScaler().set_params(scale_features='exact').target_divisor('a1', 'Y', 'M')   # 12.0, aucune erreur
   ```
-- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestValidationThroughSetParams::test_inadmissible_setting_raises_after_set_params`
+- **Test** : `tests/unit/frequency/stage_scaler/test_validation.py::TestValidationThroughSetParams::test_inadmissible_setting_raises_after_set_params`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `resolve_mode`, point de passage de `fit` et des trois méthodes de diviseur, revalide `scale_features` ; la validation d'`__init__` est conservée. Tests : `tests/unit/frequency/test_stage_scaler.py::TestValidationThroughSetParams`.
+- **Correction** : `resolve_mode`, point de passage de `fit` et des trois méthodes de diviseur, revalide `scale_features` ; la validation d'`__init__` est conservée. Tests : `tests/unit/frequency/stage_scaler/test_validation.py::TestValidationThroughSetParams`.
 
 ### ANO-FREQ-033 — `transform` accepte d'autres colonnes que celles du `fit`
 - **Type** : [CODE] comportement
@@ -3640,9 +3640,9 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   s = StageScaler(source_freq='Y', pred_freq='M', column_frequencies={'m1': 'M', 'a2': 'Y'}).fit(X)
   s.transform(X.rename(columns={'a2': 'q1'})).columns.tolist()   # ['a2', 'm1', 'q1'], a2 et q1 NaN
   ```
-- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestTransformSymmetry::test_transform_rejects_other_columns_than_fit`
+- **Test** : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_transform_rejects_other_columns_than_fit`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `transform` / `inverse_transform` d'une `DataFrame` lèvent `ValueError('X has different columns than during fit: missing [...], unexpected [...]')` ; l'ordre des colonnes reste libre. Tests : `tests/unit/frequency/test_stage_scaler.py::TestTransformSymmetry::test_transform_rejects_other_columns_than_fit`, `::test_transform_accepts_reordered_columns`.
+- **Correction** : `transform` / `inverse_transform` d'une `DataFrame` lèvent `ValueError('X has different columns than during fit: missing [...], unexpected [...]')` ; l'ordre des colonnes reste libre. Tests : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_transform_rejects_other_columns_than_fit`, `::test_transform_accepts_reordered_columns`.
 
 ### ANO-FREQ-034 — `0`, `0.0`, `np.False_` acceptés par la validation puis traités comme `'constant'`
 - **Type** : [CODE] comportement
@@ -3659,9 +3659,9 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```python
   StageScaler(scale_features=np.False_).target_divisor('a1', 'Y', 'M')   # 12.0, attendu 1.0 ou ValueError
   ```
-- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestValidation::test_values_equal_to_false_are_rejected_or_act_as_false`
+- **Test** : `tests/unit/frequency/stage_scaler/test_validation.py::TestValidation::test_values_equal_to_false_are_rejected_or_act_as_false`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `_is_admissible_setting` compare `False` par identité : `0`, `0.0`, `np.False_` sont rejetés, en forme scalaire comme en forme dict (validation partagée avec `HighFrequencyImputer.__init__`). Tests : `tests/unit/frequency/test_stage_scaler.py::TestValidation::test_values_merely_equal_to_false_are_rejected`.
+- **Correction** : `_is_admissible_setting` compare `False` par identité : `0`, `0.0`, `np.False_` sont rejetés, en forme scalaire comme en forme dict (validation partagée avec `HighFrequencyImputer.__init__`). Tests : `tests/unit/frequency/stage_scaler/test_validation.py::TestValidation::test_values_merely_equal_to_false_are_rejected`.
 
 ### ANO-FREQ-035 — `_feature_divisor` : ancienne règle B25 restée en code mort
 - **Type** : [SPEC] code ≠ spec
@@ -3673,7 +3673,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : §9.2 — « il n'existe **qu'une** méthode de diviseur de covariable » ; suppression du code mort, sans
   changement de comportement.
 - **Reproduction** : `git grep -n "_feature_divisor(" -- tsforecast` ne trouve que la définition.
-- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestSingleCovariateDivisorMethod::test_no_residual_covariate_divisor_method`
+- **Test** : `tests/unit/frequency/stage_scaler/::TestSingleCovariateDivisorMethod::test_no_residual_covariate_divisor_method`
   (`internal`)
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `StageScaler._feature_divisor` supprimée ; `feature_divisors` est la seule méthode de diviseur de covariable.
@@ -3695,9 +3695,9 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   s = StageScaler(scale_features='calendar', source_freq='M', pred_freq='D').fit(y.to_frame(), y)
   s.transform(y).name   # None
   ```
-- **Test** : `tests/unit/frequency/test_stage_scaler.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`
+- **Test** : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `apply` / `invert` redonnent au résultat le nom de la `Series` d'entrée (`_keep_name`). Tests : `tests/unit/frequency/test_stage_scaler.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`.
+- **Correction** : `apply` / `invert` redonnent au résultat le nom de la `Series` d'entrée (`_keep_name`). Tests : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`.
 
 ### ANO-FREQ-037 — Liaison d'étape unanime : une entité de la grille non nommée reste sans fréquence
 - **Type** : [CODE] comportement
@@ -3732,7 +3732,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Tests** : `tests/unit/frequency/covariate_materializer/test_classification.py::TestStageBindingResolution`
   (liaison unanime ; liaison discordante, sous `'model'` ; clés scalaires normalisées), `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : clés scalaires normalisées
-- **Correction** : `_stage_frequency` résout comme `StageScaler._stage_freq_for` : entrée propre, puis liaison **unanime** — aux alias de position près, une seule entrée comprise — valant pour tout le panel, sinon `None`. `_check_stage_coverage` lève une `ValueError` nommant les entités de la grille qu'une liaison discordante ne nomme pas, dans `decide_ways` et `_produce_column` (donc `materialize`, `stage_frame`, `interpolate_column`), avant toute lecture des registres. `_normalized_keys` normalise les clés des liaisons par entité (`detected_frequencies`, `stage_freq`) : `'FR'` vaut `('FR',)`, comme l'argument `entity` des méthodes publiques. Corollaire : sous `record=True`, plus aucune cellule n'est enregistrée avec une fréquence de production `None` (entité non liée). Même normalisation dans `StageScaler._freq_for` (arbitrage de l'auteur, 2026-10-12), par la fonction partagée `tsforecast.panel.utils.normalize_entity_mapping`, que le matérialiseur utilise aussi. Tests : `tests/unit/frequency/covariate_materializer/test_classification.py::TestStageBindingResolution`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`, `tests/unit/frequency/test_stage_scaler.py::TestPerEntityFrequencies::test_plain_entity_keys_behave_like_tuple_keys`, `tests/unit/panel/utils/test_entity_keys.py::TestNormalizeEntityMapping`.
+- **Correction** : `_stage_frequency` résout comme `StageScaler._stage_freq_for` : entrée propre, puis liaison **unanime** — aux alias de position près, une seule entrée comprise — valant pour tout le panel, sinon `None`. `_check_stage_coverage` lève une `ValueError` nommant les entités de la grille qu'une liaison discordante ne nomme pas, dans `decide_ways` et `_produce_column` (donc `materialize`, `stage_frame`, `interpolate_column`), avant toute lecture des registres. `_normalized_keys` normalise les clés des liaisons par entité (`detected_frequencies`, `stage_freq`) : `'FR'` vaut `('FR',)`, comme l'argument `entity` des méthodes publiques. Corollaire : sous `record=True`, plus aucune cellule n'est enregistrée avec une fréquence de production `None` (entité non liée). Même normalisation dans `StageScaler._freq_for` (arbitrage de l'auteur, 2026-10-12), par la fonction partagée `tsforecast.panel.utils.normalize_entity_mapping`, que le matérialiseur utilise aussi. Tests : `tests/unit/frequency/covariate_materializer/test_classification.py::TestStageBindingResolution`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`, `tests/unit/frequency/stage_scaler/test_panel.py::TestPerEntityFrequencies::test_plain_entity_keys_behave_like_tuple_keys`, `tests/unit/panel/utils/test_entity_keys.py::TestNormalizeEntityMapping`.
 
 ### ANO-FREQ-038 — `decide_ways` : les égalités de rang sont départagées par l'ordre des entités
 - **Type** : [SPEC] code ≠ spec
@@ -3878,7 +3878,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Tests** : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestRawAnchorsPerEntity` (trois tests),
   `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_finer_entity_is_aggregated_exactly`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : correction conjointe du matérialiseur et de `StageScaler`, plafonnement de `stage_frame` par entité
-- **Correction** : `_applicable_way` ne court-circuite plus `'raw_anchors'` : identité si `f_c == f`, agrégation exacte si `f_c` est plus fine, ancres brutes si elle est plus grossière. `stage_frame` plafonne entité par entité, APRÈS la précédence (`_produce_column(cap_interpolation=True)`) : seule une voie d'entité `'interpolate'` est ramenée aux ancres — y compris celle d'une entité dégradée au repli sous `'model'`, qui reste à ses ancres sous les deux replis ; les rangs 1 à 3 sont conservés. `StageScaler.feature_divisors` : une cellule `'raw_anchors'` ne couvre la période de la colonne que si celle-ci est strictement plus grossière que la grille (`_coarser_than`), une période de grille sinon ; sous `fit` (grille = étape), seules les colonnes plus fines que l'étape changent de diviseur. Deux tests de `tests/unit/frequency/test_stage_scaler.py` passaient par une ancre plus fine que la grille pour obtenir une cellule mensuelle à l'étape Q (`TestConstantGoldenValues::test_feature_divisor_gold[M-cell@Q]`, `TestCalendarGoldenValues::test_fractional_feature_divisor_under_calendar`) : ils l'obtiennent désormais d'une grille de bloc mensuelle (voie `'identity'`), mêmes valeurs d'or. Tests : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestRawAnchorsPerEntity`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_finer_entity_is_aggregated_exactly`, `::TestStageFrameMirror::test_carried_mirror_is_not_capped`, `tests/unit/frequency/test_stage_scaler.py::TestCarriedPeriodRule` (`test_raw_anchors_of_a_column_at_least_as_fine_as_the_grid_span_the_grid`, `test_raw_anchors_per_entity_follow_each_entity_column`).
+- **Correction** : `_applicable_way` ne court-circuite plus `'raw_anchors'` : identité si `f_c == f`, agrégation exacte si `f_c` est plus fine, ancres brutes si elle est plus grossière. `stage_frame` plafonne entité par entité, APRÈS la précédence (`_produce_column(cap_interpolation=True)`) : seule une voie d'entité `'interpolate'` est ramenée aux ancres — y compris celle d'une entité dégradée au repli sous `'model'`, qui reste à ses ancres sous les deux replis ; les rangs 1 à 3 sont conservés. `StageScaler.feature_divisors` : une cellule `'raw_anchors'` ne couvre la période de la colonne que si celle-ci est strictement plus grossière que la grille (`_coarser_than`), une période de grille sinon ; sous `fit` (grille = étape), seules les colonnes plus fines que l'étape changent de diviseur. Deux tests de `tests/unit/frequency/stage_scaler/` passaient par une ancre plus fine que la grille pour obtenir une cellule mensuelle à l'étape Q (`TestConstantGoldenValues::test_feature_divisor_gold[M-cell@Q]`, `TestCalendarGoldenValues::test_fractional_feature_divisor_under_calendar`) : ils l'obtiennent désormais d'une grille de bloc mensuelle (voie `'identity'`), mêmes valeurs d'or. Tests : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestRawAnchorsPerEntity`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_finer_entity_is_aggregated_exactly`, `::TestStageFrameMirror::test_carried_mirror_is_not_capped`, `tests/unit/frequency/stage_scaler/test_golden_values.py::TestCarriedPeriodRule` (`test_raw_anchors_of_a_column_at_least_as_fine_as_the_grid_span_the_grid`, `test_raw_anchors_per_entity_follow_each_entity_column`).
 
 ### ANO-FREQ-043 — Grille de panel vide : `ValueError: max() iterable argument is empty`
 - **Type** : [CODE] comportement
@@ -3997,7 +3997,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   out = imputer.fit_transform(reference_timeseries)
   imputer.inverse_transform(out.rename_axis(['pas', 'jour']))   # niveau de fréquence non retiré
   ```
-- **Tests** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestReservedFrequencyLevel`,
+- **Tests** : `tests/unit/frequency/high_frequency_imputer/test_transform_window.py::TestReservedFrequencyLevel`,
   `tests/unit/frequency/training_set_builder/test_robustness.py::TestIndexRobustness::test_reserved_level_name_is_rejected`
 - **Statut** : corrigé (2026-10-12) — arbitrage de l'auteur : l'option la plus robuste, appliquée partout
 - **Correction** : nom unique `FREQUENCY_LEVEL_NAME` dans `tsforecast/utils/_constants.py` (valeur `'frequency'`
@@ -4075,9 +4075,9 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   imputer.transform(data)
   imputer.imputation_provenance_.loc['2023', 'a1'].unique()        # ['original']
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestTransformState::test_never_imputed_cells_stay_unmarked_after_transform`
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_state.py::TestTransformState::test_never_imputed_cells_stay_unmarked_after_transform`
 - **Statut** : corrigé (2026-10-12)
-- **Correction** : `_replay_plan` ne pose `ORIGINAL` que sur les cellules de la grille absentes du tracker **et** porteuses d'une valeur (agrégations exactes) ; une cellule restée NaN est non marquée, au rejeu comme au fit. Le message de l'avertissement agrégé et les docstrings disent désormais « NaN and unmarked » au lieu de « NaN and ORIGINAL ». Tests : `test_transform.py::TestTransformState::test_never_imputed_cells_stay_unmarked_after_transform` (plus de `xfail`), `::test_fit_and_replay_provenances_agree_on_a_panel` (I1 sur `PANEL-F` sans `v` d'`IT`).
+- **Correction** : `_replay_plan` ne pose `ORIGINAL` que sur les cellules de la grille absentes du tracker **et** porteuses d'une valeur (agrégations exactes) ; une cellule restée NaN est non marquée, au rejeu comme au fit. Le message de l'avertissement agrégé et les docstrings disent désormais « NaN and unmarked » au lieu de « NaN and ORIGINAL ». Tests : `test_transform_state.py::TestTransformState::test_never_imputed_cells_stay_unmarked_after_transform` (plus de `xfail`), `::test_fit_and_replay_provenances_agree_on_a_panel` (I1 sur `PANEL-F` sans `v` d'`IT`).
 
 ### ANO-FREQ-051 — `inverse_transform(restore_original_values=True)` juste après un `fit` : `AttributeError`
 - **Type** : [CODE] comportement
@@ -4097,7 +4097,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```
 - **Test** : `tests/unit/frequency/high_frequency_imputer/test_inverse_transform.py::TestInverseTransform::test_restoring_inverse_right_after_a_fit`
 - **Statut** : corrigé (2026-10-12)
-- **Correction** : le `fit` écrit en phase 6 l'instantané de sa propre entrée (`_original_X_`, `_original_y_`), comme il écrit sa propre matrice de provenance : B19 purge l'état du transform en tête de `fit`, puis le `fit` décrit la dernière passe. Les deux tests B19 deviennent publics (`test_fit_phases.py::TestFitPhases::test_fit_purges_stale_transform_state`, `test_transform.py::TestTransformState::test_transform_state_purged_at_fit` : l'inversion exacte restitue les valeurs du dernier passage) et perdent `@pytest.mark.internal`.
+- **Correction** : le `fit` écrit en phase 6 l'instantané de sa propre entrée (`_original_X_`, `_original_y_`), comme il écrit sa propre matrice de provenance : B19 purge l'état du transform en tête de `fit`, puis le `fit` décrit la dernière passe. Les deux tests B19 deviennent publics (`test_fit_phases.py::TestFitPhases::test_fit_purges_stale_transform_state`, `test_transform_state.py::TestTransformState::test_transform_state_purged_at_fit` : l'inversion exacte restitue les valeurs du dernier passage) et perdent `@pytest.mark.internal`.
 
 ### ANO-FREQ-052 — `set_params` contourne la validation de cinq paramètres de l'imputeur
 - **Type** : [CODE] comportement
@@ -4273,7 +4273,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestAggregatedWarnings`
   (`test_flipped_profiles_of_two_columns_over_two_stages_warn_once`, `test_the_replay_warns_once_too`,
   `test_a_covariate_interpolated_for_several_variables_warns_once`, `test_zero_aggregates_of_two_columns_warn_once`),
-  `tests/unit/frequency/test_aggregation_constraint.py::TestDeferredWarnings`
+  `tests/unit/frequency/aggregation_constraint/test_warnings.py::TestDeferredWarnings`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : `AggregationConstraint.deferred_warnings()` (gestionnaire de contexte, réentrant) : dans le bloc,
   `rescale` et `transform` recensent les périodes dégénérées au lieu d'avertir, dédoublonnées par colonne ; à la
@@ -4336,7 +4336,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   # UserWarning: Could not calculate imputation window: Series has only 1 non-null observations ...
   ```
 - **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_entity_reduced_to_one_row_leaves_the_other_windows_intact`,
-  `tests/unit/frequency/test_imputation_window.py::TestEntitiesWithoutWindow::test_entity_reduced_to_one_row_has_no_window_and_costs_the_others_nothing`
+  `tests/unit/frequency/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_entity_reduced_to_one_row_has_no_window_and_costs_the_others_nothing`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : sur un panel, `ImputationWindowCalculator.fit` détecte la fréquence d'index entité par entité
   (`_detect_entity_index_frequencies`) ; une entité indéterminable vaut `None` et rejoint `entities_without_window_`,
@@ -4549,7 +4549,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   rien n'est écrit — puis le message des étapes dégradées annonçait un repli pour chaque variable.
 - **Attendu** : un message unique et exact (§12.5).
 - **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_disjoint_coverages_warn_once_and_impute_nothing`,
-  `tests/unit/frequency/test_imputation_window.py::TestNoStrictWindow::test_time_series_message_says_nothing_is_imputed`,
+  `tests/unit/frequency/imputation_window/test_windows.py::TestNoStrictWindow::test_time_series_message_says_nothing_is_imputed`,
   `::test_entities_without_strict_window_are_named_by_one_warning`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : `_compute_window` signale l'absence de fenêtre stricte (`no_strict_window`) sans avertir ;
@@ -4580,7 +4580,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   [step.n_written for step in imputer.imputation_plan_]   # [108, 108] ; sur data.loc['FR'] : [0, 0]
   ```
 - **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_panel_without_any_strict_window_imputes_nothing`,
-  `tests/unit/frequency/test_imputation_window.py::TestFitInputValidation::test_accepts_panel_where_no_entity_has_a_window`,
+  `tests/unit/frequency/imputation_window/test_validation.py::TestFitInputValidation::test_accepts_panel_where_no_entity_has_a_window`,
   `::TestNoStrictWindow::test_panel_without_window_behaves_like_a_time_series`,
   `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_all_nan_entity_is_named_once_at_transform`
 - **Statut** : corrigé (2026-10-13) — arbitrage de l'auteur : aligner le panel sur la série temporelle
@@ -4629,7 +4629,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   out = imputer.transform(extended).loc['ES', 'v']
   out.groupby(out.index.to_period('Q')).sum().head(2)   # 28.74, 29.61 ; observé : 28.0, 30.0
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestNewEntityAtTransform::test_observations_of_a_new_entity_are_never_overwritten`,
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_new_entity.py::TestNewEntityAtTransform::test_observations_of_a_new_entity_are_never_overwritten`,
   `::test_new_entity_copy_is_imputed_like_its_model`, `::test_column_empty_at_fit_and_observed_at_transform_is_anchored`,
   `::test_pairs_unknown_to_the_fit_stay_as_given_by_default`
 - **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : option (a), D34 inchangée sous `False`
@@ -4674,7 +4674,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   imputer.transform(data.loc['2023'])['a1'].notna().sum()        # 12
   imputer.imputation_provenance_['a1'].unique()                  # [MODEL_ON_INTERPOLATED]
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestColumnWithoutAnchorAtTransform::test_unpublished_year_alone_is_predicted_by_its_replayed_step`,
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_window.py::TestColumnWithoutAnchorAtTransform::test_unpublished_year_alone_is_predicted_by_its_replayed_step`,
   `::test_extended_window_predicts_it_with_its_history`, `::test_unpublished_year_stays_empty_with_its_history`
 - **Statut** : clos (2026-10-14) — arbitrage de l'auteur : le comportement est voulu
 - **Correction** : aucun changement de code. Le couple est **observé au fit** : §12.1 rejoue sa classification, et
@@ -4710,7 +4710,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   out.index.is_monotonic_increasing                             # False
   imputer.inverse_transform(out).index.equals(panel_f.index)    # False (même ensemble, autre ordre)
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestKeepLowerFrequencies::test_output_index_stays_sorted`,
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_output.py::TestKeepLowerFrequencies::test_output_index_stays_sorted`,
   `tests/unit/frequency/high_frequency_imputer/test_inverse_transform.py::TestRoundTripRestoresObservations::test_inverse_restores_the_row_order`
 - **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : la complétion est retirée
 - **Correction** : D43 (§14.10, D38 amendée). La complétion de la grille finale par `grid.append(absent)` est
@@ -4746,7 +4746,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```
 - **Test** : `tests/unit/frequency/high_frequency_imputer/test_inverse_transform.py::TestRoundTripRestoresObservations::test_inverse_drops_the_rows_the_grid_added`,
   `::TestInverseTransform::test_inverse_transform_preserves_multilevel_entity_names` (resserré : égalité d'index),
-  `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestTargetCoarserThanTheIndex::test_inverse_gives_back_the_monthly_index`
+  `tests/unit/frequency/high_frequency_imputer/test_transform_output.py::TestTargetCoarserThanTheIndex::test_inverse_gives_back_the_monthly_index`
 - **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : réindexer sur l'index d'entrée
 - **Correction** : D43 (§12.4, §14.10). `_inverse_transform` réindexe, après la remise à NaN, sur l'index de
   l'instantané d'entrée de la dernière passe (`_original_X_`), dans son ordre. Les lignes que la grille a ajoutées
@@ -4774,9 +4774,9 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   imputer.transform(ts.loc['2021'])
   imputer.provenance_statistics_ is stats, hasattr(imputer, 'provenance_statistics_fit_')   # True, False
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestTransformState::test_provenance_statistics_describe_the_last_pass`,
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_state.py::TestTransformState::test_provenance_statistics_describe_the_last_pass`,
   `tests/unit/tracking/test_metrics.py::test_imputation_metrics_describe_the_last_pass`,
-  `tests/unit/frequency/test_provenance.py::TestComputeStatistics::test_module_function_matches_the_tracker`
+  `tests/unit/frequency/provenance/test_tracker_reads.py::TestComputeStatistics::test_module_function_matches_the_tracker`
 - **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : changement de code, les statistiques suivent la
   dernière passe
 - **Correction** : D45 (§13.2, §14.10). Le calcul de `ImputationProvenanceTracker.compute_statistics` est extrait
@@ -4808,7 +4808,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   except ValueError: pass
   imputer.inverse_transform(out)['a1'].dropna().tolist()   # [240.0, 264.0, 300.0]
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestTransformFrequencyControl::test_failed_transform_leaves_the_last_pass_intact`
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_output.py::TestTransformFrequencyControl::test_failed_transform_leaves_the_last_pass_intact`
 - **Statut** : corrigé (2026-10-14)
 - **Correction** : D45. `_transform` copie son entrée dans des variables locales et ne publie l'état de la passe
   (`_original_X_`, `_original_y_`, `_stacked_index_nlevels`, `imputation_provenance_`, `provenance_statistics_`)
@@ -4841,7 +4841,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   out.loc[('DE', '2021-01-31')].tolist()                           # [nan, nan, nan]
   imputer.imputation_provenance_.loc[('DE', '2021-01-31'), 'm1']   # ProvenanceType.ORIGINAL
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestKeepLowerFrequencies::test_no_empty_cell_of_the_output_is_marked`
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_output.py::TestKeepLowerFrequencies::test_no_empty_cell_of_the_output_is_marked`
   (renommé et élargi : aucune cellule vide marquée, quelle que soit la marque)
 - **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : pas de mélange d'échelles ; les lignes ne sont plus
   ajoutées
@@ -5222,7 +5222,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `_check_feature_names` (sans effet) : sa spec fixe son propre contrat (colonne manquante refusée en la nommant,
   colonne supplémentaire ignorée silencieusement).
 - **Test** : `tests/unit/base/transformers/test_sklearn_contract.py::TestFeatureNamesAtTransform` (6 tests) ;
-  contrat de l'imputeur : `tests/unit/frequency/high_frequency_imputer/test_transform.py::TestTransformFrequencyControl`
+  contrat de l'imputeur : `tests/unit/frequency/high_frequency_imputer/test_transform_output.py::TestTransformFrequencyControl`
 - **Statut** : corrigée (2026-10-16)
 
 ### ANO-BASE-010 — `convert_cols_to_index=False` fait quand même passer les colonnes dans l'index

@@ -4,7 +4,7 @@ Covers the rendering of the two reports (``summary``, ``to_dict``, ``to_frame``)
 their immutability and the ``delay_statistics`` helper. The reports are built
 through the public API of the components (``compare_and_detect_delays`` and
 ``PublicationDelayTransformer.fit``); what they contain is checked in
-``test_data_manager.py`` and ``test_transformers.py``.
+the ``data_manager`` and ``transformers`` test packages.
 """
 import dataclasses
 import json

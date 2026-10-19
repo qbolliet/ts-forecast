@@ -7,7 +7,7 @@ and the prediction pass (``transform(X, y=None)`` after ``fit(X, y)``: the
 columns of ``X`` alone, on the input rows, flat, ``y`` handed back unchanged,
 provenance and statistics describing that output, inversion, additive
 transformer, refusal of a model that needs the target). Without ``y`` at
-``fit`` nothing changes (see ``test_invariants.py``, ``test_transform.py``).
+``fit`` nothing changes (see ``test_invariants.py``, ``test_transform_state.py``).
 
 Data: the ``TS`` reference dataset, target ``y = a2`` — annual,
 gold totals 60 / 66 / 72 —, features ``m1`` (monthly), ``q1`` (quarterly),

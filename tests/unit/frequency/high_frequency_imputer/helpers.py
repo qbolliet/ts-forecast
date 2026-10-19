@@ -488,3 +488,47 @@ def assert_same_state(expected: Any, actual: Any, path: str = 'state') -> None:
         assert pd.api.types.is_scalar(actual) and pd.isna(actual), f"{path}: {expected!r} != {actual!r}"
     else:
         assert expected == actual, f"{path}: {expected!r} != {actual!r}"
+
+
+# Panel augmenté d'une entité inconnue du fit
+def _with_new_entity(
+    data: pd.DataFrame,
+    source: str = 'IT',
+    name: str = 'ES',
+    clear: tuple = ('v',),
+) -> pd.DataFrame:
+    """Return a panel extended by a copy of one entity, renamed.
+
+    Args:
+        data: Panel with an ``(entity, date)`` MultiIndex.
+        source: Entity copied.
+        name: Name of the new entity.
+        clear: Columns emptied on the copy.
+
+    Returns:
+        The extended panel, sorted.
+    """
+    added = data.xs(source, level=0, drop_level=False).copy()
+    added.index = pd.MultiIndex.from_arrays(
+        [[name] * len(added), added.index.get_level_values(-1)],
+        names=data.index.names,
+    )
+    for column in clear:
+        added[column] = np.nan
+    return pd.concat([data, added]).sort_index()
+
+
+# Messages d'avertissement d'un appel, relevés sans filtre
+def _warning_messages(call) -> list:
+    """Run a callable and return the messages of every warning it emitted.
+
+    Args:
+        call: Callable without arguments.
+
+    Returns:
+        The messages, as strings, in emission order.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        call()
+    return [str(item.message) for item in caught]

@@ -7,12 +7,12 @@ Covers the application of the fitted parameters (``transform``,
 left untouched, column order, round trip, and the robustness cases of
 ``CLAUDE.md`` (unsorted rows, special column names, end-of-period labels,
 ``PeriodIndex``, duplicated dates, too few observations). Complements
-``test_publication_delay_transformer.py``, which covers the fit and the parameters.
+the ``publication_delay_transformer`` test package, which covers the fit and the
+parameters.
 
 Gold values: monthly series of 2023 (``GDP = 0, 1, ..., 11``, ``CPI = 0, 2, ...,
 22``), prediction date 2023-12-15. 45 days from the period start shift ``GDP``
-by two months, 20 days shift ``CPI`` by one month (see the module docstring of
-``test_publication_delay_transformer.py``). ``ShiftTransformer`` moves the dates
+by two months, 20 days shift ``CPI`` by one month. ``ShiftTransformer`` moves the dates
 without losing any value, so the output index is the union of the shifted
 indexes of the columns: it grows (and the dates no column occupies any more
 disappear); ``inverse_transform`` drops the rows ``transform`` added, so that a
