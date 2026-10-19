@@ -4,7 +4,7 @@ Covers the detection on a bare index (``DatetimeIndex``, or one frequency per en
 of an ``(entity, date)`` ``MultiIndex``) in every ``return_format``, with the
 ``FrequencyDetector`` fallback for gapped, unsorted or irregular indexes; and the
 target offset anchored like a source index (position of the source over the
-target's, fallbacks, lost multiplier and anchor ANO-UTILS-048).
+target's, fallbacks, lost multiplier and anchor).
 """
 from __future__ import annotations
 
@@ -63,15 +63,15 @@ class TestDetectIndexFrequency:
         ],
     )
     def test_decreasing_index_is_sorted(self, dates, expected):
-        """A decreasing index is detected as the sorted one (ANO-UTILS-069).
+        """A decreasing index is detected as the sorted one.
 
         pandas reads a reversed regular index as a negative frequency ('-1QE-DEC'),
-        which used to surface as an unsupported frequency.
+        which must not surface as an unsupported frequency.
         """
         assert detect_index_frequency(dates, return_format='with_position') == expected
 
     def test_irregular_index_is_none(self):
-        """An index without a dominant spacing gives ``None``, not an error (ANO-UTILS-050)."""
+        """An index without a dominant spacing gives ``None``, not an error."""
         # Écarts de 45 puis 50 jours
         dates = pd.DatetimeIndex(['2023-01-01', '2023-02-15', '2023-04-06'])
         assert detect_index_frequency(dates) is None
@@ -121,12 +121,12 @@ class TestDetectIndexFrequency:
             detect_index_frequency(index)
 
     def test_integer_index_raises_value_error(self):
-        """An integer index is rejected with a ``ValueError`` (ANO-UTILS-044)."""
+        """An integer index is rejected with a ``ValueError``."""
         with pytest.raises(ValueError, match='numeric labels are not dates'):
             detect_index_frequency(pd.Index([2020, 2021, 2022]))
 
     def test_period_index(self):
-        """A quarterly ``PeriodIndex`` is read at its quarter starts (ANO-UTILS-045)."""
+        """A quarterly ``PeriodIndex`` is read at its quarter starts."""
         index = pd.period_range('2024Q1', periods=4, freq='Q')
         assert detect_index_frequency(index, return_format='with_position') == 'QS'
 
@@ -207,7 +207,7 @@ class TestTargetOffsetForIndex:
         ],
     )
     def test_target_multiplier_is_kept(self, index, target, expected):
-        """A half-year target stays a half-year once anchored (ANO-UTILS-048)."""
+        """A half-year target stays a half-year once anchored."""
         assert target_offset_for_index(index, target) == expected
 
     @pytest.mark.parametrize(
@@ -229,7 +229,7 @@ class TestTargetOffsetForIndex:
         ],
     )
     def test_target_periods_are_kept(self, index, target, expected):
-        """Re-anchoring a target keeps its periods: only the position changes (ANO-UTILS-048)."""
+        """Re-anchoring a target keeps its periods: only the position changes."""
         assert target_offset_for_index(index, target) == expected
 
     @pytest.mark.parametrize('target', ['QE-NOV', 'YE-JUN', '2QE-NOV'])

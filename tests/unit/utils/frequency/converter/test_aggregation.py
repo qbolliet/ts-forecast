@@ -372,7 +372,7 @@ class TestSumAdditivity:
     The disaggregation spreads each low-frequency value over its sub-periods
     using ``count_subperiods_per_period``; aggregating it by ``'sum'`` with
     ``full_periods_only=True`` must return every value unchanged and mask no
-    period — the calendar count (B26 defect, spec §9.3) is exact on both sides.
+    period — the calendar count is exact on both sides.
     """
 
     @pytest.mark.parametrize('low_freq, low_period, high_freq, start, end', _ADDITIVITY_PAIRS)

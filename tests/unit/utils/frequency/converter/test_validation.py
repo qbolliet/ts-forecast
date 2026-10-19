@@ -216,10 +216,8 @@ class TestDurationConverterIntegration:
     def test_daily_to_business_daily_is_an_aggregation(self, converter):
         """Test que D → B agrège les week-ends dans le vendredi qui les précède.
 
-        Réécriture (catégorie c) de l'ancien ``test_unsupported_frequency_pair_returns_original`` :
         D → B n'est pas un sur-échantillonnage (un jour ouvré est moins fin qu'un jour
-        calendaire), l'extension d'index n'y intervient pas ; l'ancien test se bornait
-        à ``len(result) > 0``.
+        calendaire), l'extension d'index n'y intervient pas.
         """
         # Du lundi 1er au mercredi 10 janvier 2024, valeurs 0 … 9
         dates = pd.date_range('2024-01-01', periods=10, freq='D')
@@ -256,7 +254,7 @@ class TestDurationConverterIntegration:
 
 
 class TestModernizedResampleAliases:
-    """§4.6 : les alias bruts dépréciés par pandas ('Y', 'A', 'Q', 'M') sont
+    """Les alias bruts dépréciés par pandas ('Y', 'A', 'Q', 'M') sont
     modernisés ('YE', 'YE', 'QE', 'ME') avant tout resample/asfreq, sans
     changer l'ancrage ni le résultat."""
 

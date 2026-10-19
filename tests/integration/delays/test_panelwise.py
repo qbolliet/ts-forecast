@@ -10,10 +10,8 @@ every entity. Gold values are calendar arithmetic done by hand (dates moved by
 
 Also contains the performance check on a 50-entity daily panel.
 
-Migrated from ``tests/integration/delays/test_integration.py`` (prompt D5); the
-failures ``Cannot determine time index`` of these tests were fixed by
-``ANO-UTILS-029`` (``_validate_time_index`` reading the last level of a
-``MultiIndex``, prompt U5).
+Time index resolution is exercised on panels: ``_validate_time_index`` reads the
+last level of a ``MultiIndex``, so the entity level is not mistaken for the time index.
 """
 # Modules de base
 import time

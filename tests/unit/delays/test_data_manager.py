@@ -15,9 +15,6 @@ and 45 days from the period end (31 + 14).
 
 The realistic scenarios (notebook 3 datasets, successive downloads) live in
 ``tests/integration/delays/test_detect_delays_realistic.py``.
-
-Anomalies found while writing these tests are registered in
-``tests/ANOMALIES.md`` (``ANO-DELAYS-004`` to ``ANO-DELAYS-010``, all fixed).
 """
 # Modules de base
 import warnings
@@ -34,13 +31,13 @@ from tests.support import perturbations as perturb
 from tsforecast.delays.data_manager import compare_and_detect_delays
 
 # Le chemin « colonnes » (time_col / panel_cols) émet systématiquement un
-# avertissement de remplacement d'index (comportement de validate_temporal_data,
-# ANO-UTILS-033) : le bruit est masqué pour garder une sortie lisible.
+# avertissement de remplacement d'index (comportement de validate_temporal_data) :
+# le bruit est masqué pour garder une sortie lisible.
 pytestmark = pytest.mark.filterwarnings("ignore:Index replaced with")
 
 TS = pd.Timestamp
 
-# Colonnes de sortie, dans l'ordre (`has_changes` marque les observations détectées, ANO-DELAYS-009).
+# Colonnes de sortie, dans l'ordre (`has_changes` marque les observations détectées).
 OUTPUT_COLUMNS = [
     'observation_date', 'has_changes', 'download_date', 'frequency',
     'period_start', 'period_end', 'reference_point', 'delay', 'unit',
@@ -452,10 +449,10 @@ class TestDetectionModes:
 
 
 # =============================================================================
-# Exemple de la documentation (tutoriel, section 4.1.3)
+# Exemple de la documentation (tutoriel sur les délais de publication)
 # =============================================================================
 class TestDocumentedExample:
-    """The quarterly GDP example of ``docs/tutorials/publication_delays.md`` §4.1.3."""
+    """The quarterly GDP example of ``docs/tutorials/publication_delays.md``."""
 
     @staticmethod
     def _datasets() -> tuple:
@@ -1017,7 +1014,7 @@ class TestInputLayout:
         )
 
     def test_period_index_is_read_at_the_first_instant(self, monthly_series):
-        """A ``PeriodIndex`` is converted to the first instant of each period (ANO-UTILS-029)."""
+        """A ``PeriodIndex`` is converted to the first instant of each period."""
         data = monthly_series.copy()
         data.index = data.index.to_period('M')
 
@@ -1241,7 +1238,7 @@ class TestWarnings:
 
     @pytest.mark.parametrize('with_existing_data', [False, True], ids=['first-download', 'comparison'])
     def test_panel_call_is_silent(self, small_panel, with_existing_data):
-        """A two-level panel call emits no warning, pandas deprecation warnings included (ANO-DELAYS-008)."""
+        """A two-level panel call emits no warning, pandas deprecation warnings included."""
         existing = None
         if with_existing_data:
             existing = small_panel.copy()

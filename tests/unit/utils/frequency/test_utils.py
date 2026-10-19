@@ -8,15 +8,14 @@ normalizer, every code and position), ``is_higher_frequency`` and
 ``get_frequency_order`` (total order over the supported codes, antisymmetry and
 transitivity as properties, multipliers).
 
-Also covers the behaviours changed while fixing ``utils/position`` (prompt U3):
-``normalize_frequency(return_format='full')`` keeps a leading multiplier
-(``'2MS'``), and ``detect_index_frequency`` returns a canonical quarterly
-anchor (``'QS-JAN'`` rather than the equivalent ``'QS-OCT'`` reported by
+Also covers ``normalize_frequency(return_format='full')``, which keeps a leading
+multiplier (``'2MS'``), and ``detect_index_frequency``, which returns a canonical
+quarterly anchor (``'QS-JAN'`` rather than the equivalent ``'QS-OCT'`` reported by
 ``pd.infer_freq``), through ``canonicalize_frequency``.
 
 Detection itself (``detect_frequency``, ``detect_dataset_frequency``,
 ``detect_index_frequency``, ``target_offset_for_index``) is tested in
-the ``detector/`` test package (prompt U7).
+the ``detector/`` test package.
 """
 from __future__ import annotations
 
@@ -92,7 +91,7 @@ UNSUPPORTED_FREQUENCIES = ['xyz', 'foo', '', '2foo', 'A', 'AS-JAN', 'T', 'MONTHL
 
 
 # =============================================================================
-# normalize_frequency : multiplicateur, canonicalisation (existant, U3)
+# normalize_frequency : multiplicateur, canonicalisation
 # =============================================================================
 
 class TestNormalizeFrequencyFullMultiplier:
@@ -291,14 +290,14 @@ class TestNormalizeFrequencyReturnFormats:
     @pytest.mark.parametrize("return_format", ['base', 'with_position', 'full', 'components'])
     @pytest.mark.parametrize("frequency", NON_STRING_INPUTS)
     def test_non_string_raises_value_error_in_every_format(self, frequency, return_format):
-        """A non-string is rejected with the same ``ValueError`` in every format (ANO-UTILS-037)."""
+        """A non-string is rejected with the same ``ValueError`` in every format."""
         with pytest.raises(ValueError, match="must be a string"):
             normalize_frequency(frequency, return_format=return_format)
 
     @pytest.mark.parametrize("return_format", ['base', 'with_position', 'full', 'components'])
     @pytest.mark.parametrize("frequency", ['QS-XYZ', 'MS-JAN', 'D-MON', 'YE-FOO', 'W-XYZ', 'SMS-1', 'Q-'])
     def test_invalid_anchor_raises_in_every_format(self, frequency, return_format):
-        """An anchor that does not exist in pandas is rejected in every format (ANO-UTILS-040)."""
+        """An anchor that does not exist in pandas is rejected in every format."""
         with pytest.raises(ValueError, match="Invalid anchor|does not accept an anchor"):
             normalize_frequency(frequency, return_format=return_format)
 
@@ -431,7 +430,7 @@ class TestToPandasFreqEveryCodeAndPosition:
     def test_position_is_kept_only_where_pandas_defines_it(self, code, position):
         """``'MS'`` / ``'QE'`` / ``'YS'`` / ``'SME'`` keep their position; the other codes have none.
 
-        A code with start / end variants and no position gets its end variant (ANO-UTILS-039).
+        A code with start / end variants and no position gets its end variant.
         """
         # Valeur d'or : M / Q / Y / SM acceptent S ou E, la fin par défaut ; ns, us, ms, s, min,
         # h, D, B, W n'en ont pas
@@ -661,7 +660,7 @@ class TestIsHigherFrequencyWithMultipliers:
 
 
 class TestIsHigherFrequencyDayVersusBusinessDay:
-    """``kD`` is a higher frequency than ``kB``, like ``'D'`` than ``'B'`` (ANO-UTILS-038).
+    """``kD`` is a higher frequency than ``kB``, like ``'D'`` than ``'B'``.
 
     A business day skips the week-ends: 5 observations per week, hence 7/5 of a calendar day
     between two dates on average. The comparison of multiplied frequencies uses that duration.
@@ -700,8 +699,7 @@ class TestIsHigherFrequencyDayVersusBusinessDay:
     def test_incomparability_is_transitive(self):
         """Property: on multiplied frequencies, ``a ~ b`` and ``b ~ c`` (equal durations) imply ``a ~ c``.
 
-        This is what the ``'D'`` / ``'24h'`` / ``'B'`` triple used to break.
-        """
+               """
         higher = _order_matrix(MULTIPLIED_FREQUENCIES)
         tied = lambda a, b: not higher[a, b] and not higher[b, a]
         violations = [
@@ -748,9 +746,6 @@ class TestGetFrequencyOrder:
 
     @pytest.mark.parametrize("value", ['xyz', 'A', 'AS-JAN', '', 'T', 'MONTHLY', None, 5])
     def test_unsupported_frequency_raises(self, value):
-        """An unsupported frequency is rejected; it is never given the order 0.
-
-        The docstring says the function "returns 0 if frequency is not found": see ANO-UTILS-035.
-        """
+        """An unsupported frequency is rejected; it is never given the order 0."""
         with pytest.raises(ValueError):
             get_frequency_order(value)

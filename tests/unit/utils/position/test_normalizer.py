@@ -6,8 +6,8 @@ plus its place in the ``TemporalNormalizer`` hierarchy and the ``PositionType``
 / ``UserPositionType`` literals it relies on. The class only knows four exact
 spellings — codes ``'S'`` / ``'E'`` and literals ``'start'`` / ``'end'`` —
 and is strictly case sensitive. Offset handling (``'MS'``, ``'QE-DEC'``...)
-no longer belongs to the normalizer since the ``parse_frequency`` /
-``build_frequency_string`` consolidation: those strings are rejected here.
+belongs to ``parse_frequency`` / ``build_frequency_string``: those strings are
+rejected here.
 """
 from __future__ import annotations
 

@@ -4,8 +4,7 @@ Ce module épingle le contrat des deux méthodes de comptage :
 
 - `get_conversion_factor(high, low)` : comptage constant, indépendant de tout
   index, exact pour les paires calendaires emboîtées (12 mois dans une année,
-  et non les 12.17 d'un ratio de durées naïf) — remplaçant de l'ancien
-  `count_subperiods(low, high)`, dont il inverse l'ordre des arguments ;
+  et non les 12.17 d'un ratio de durées naïf) ;
 - `count_subperiods_per_period(index, low, high)` : comptage exact période par
   période, qui respecte les irrégularités calendaires (février compte 28 jours).
 
@@ -39,8 +38,7 @@ class TestCountSubperiods:
     """Tests du comptage constant `get_conversion_factor(high, low)`.
 
     L'appel se lit « combien de périodes hautes dans une période basse » :
-    l'ordre des arguments est donc l'inverse de celui de l'ancien
-    `count_subperiods(low, high)`, dont cette méthode reprend le contrat.
+    l'ordre des arguments est donc `(high, low)`.
     """
 
     @pytest.mark.parametrize(

@@ -10,9 +10,6 @@ Both validation paths are exercised (index-based and ``time_col`` /
 ``panel_cols`` column-based), with ``strict`` True and False, on plain time
 series, ``MultiIndex`` panels of 2 and 3 levels, and on the realistic
 datasets of ``tests/support`` perturbed by ``tests/support/perturbations.py``.
-
-Anomalies found while writing these tests are registered in
-``tests/ANOMALIES.md`` (``ANO-UTILS-024`` to ``ANO-UTILS-032``, all fixed).
 """
 # Modules de base
 import re
@@ -115,7 +112,7 @@ class TestValidateTemporalDataInputContract:
         assert validate_temporal_data(s).name == 'chiffre d\'affaires'
 
     def test_unnamed_series_stays_unnamed(self):
-        """An unnamed ``Series`` comes back unnamed, not named ``0`` (``ANO-UTILS-027``).
+        """An unnamed ``Series`` comes back unnamed, not named ``0``.
 
         The name ``0`` is the label of the temporary column created by
         ``Series.to_frame()``; the validation must not leak it.
@@ -262,7 +259,7 @@ class TestIndexBasedValidation:
         ids=['integer-years', 'range-like', 'floats'],
     )
     def test_numeric_index_is_rejected_when_strict(self, labels):
-        """Numeric labels are not dates and raise in strict mode (``ANO-UTILS-028``).
+        """Numeric labels are not dates and raise in strict mode.
 
         ``pandas.to_datetime`` would read ``2020`` as ``1970-01-01 00:00:00.000002020``.
         """
@@ -282,7 +279,7 @@ class TestIndexBasedValidation:
         assert list(out.index) == [2020, 2021]
 
     def test_period_index_is_converted_to_first_instants(self):
-        """A ``PeriodIndex`` is accepted and read at the start of each period (``ANO-UTILS-029``).
+        """A ``PeriodIndex`` is accepted and read at the start of each period.
 
         Golden value: monthly periods ``2023-01``, ``2023-02``, ``2023-03`` become
         ``2023-01-01``, ``2023-02-01``, ``2023-03-01``.
@@ -378,9 +375,8 @@ class TestMultiIndexValidation:
 
         Golden value: ``15/01/2023`` and ``02/02/2023`` (day first, inferred
         from the first value ``15/01``) are ``2023-01-15`` and ``2023-02-02``.
-        Regression of ``ANO-UTILS-030``: the ``MultiIndex`` path used to convert the
-        *sorted levels* (``02/02/2023`` first, read month first) and failed, while
-        the flat index accepted the same values.
+        The ``MultiIndex`` path does not convert the *sorted levels* (``02/02/2023``
+        first, read month first) and fail, whereas the flat index accepts the same values.
         """
         values = ['15/01/2023', '02/02/2023']
         flat = validate_temporal_data(pd.DataFrame({'v': [1, 2]}, index=values), strict=strict)
@@ -391,7 +387,7 @@ class TestMultiIndexValidation:
         assert list(out.index.get_level_values(-1)) == list(flat.index)
 
     def test_integer_last_level_is_rejected_when_strict(self):
-        """Integer labels on the last level are not dates (``ANO-UTILS-028``)."""
+        """Integer labels on the last level are not dates."""
         index = pd.MultiIndex.from_arrays([['A', 'A'], [2020, 2021]])
         with pytest.raises(ValueError, match='Last level of MultiIndex cannot be converted'):
             validate_temporal_data(pd.DataFrame({'v': [1, 2]}, index=index), strict=True)
@@ -404,7 +400,7 @@ class TestMultiIndexValidation:
         assert list(out.index.get_level_values(-1)) == [2020, 2021]
 
     def test_period_last_level_is_converted_to_first_instants(self):
-        """A ``PeriodIndex`` last level is read at the start of each period (``ANO-UTILS-029``)."""
+        """A ``PeriodIndex`` last level is read at the start of each period."""
         periods = pd.period_range('2023-01', periods=2, freq='M')
         index = pd.MultiIndex.from_arrays([['A', 'A'], periods], names=['entity', 'date'])
         out = validate_temporal_data(pd.DataFrame({'v': [1, 2]}, index=index), strict=True)
@@ -505,14 +501,14 @@ class TestColumnBasedValidation:
 
         Unlike the index path (which warns and returns the data), the column
         path has no fallback: without a usable time column no index can be
-        built. The ``strict`` docstring now says so (``ANO-UTILS-031``).
+        built.
         """
         df = pd.DataFrame({'date': ['a', 'b'], 'v': [1, 2]})
         with pytest.raises(ValueError, match="Column 'date' cannot be converted to datetime"):
             validate_temporal_data(df, time_col='date', strict=strict)
 
     def test_period_time_col_is_converted_to_first_instants(self):
-        """A ``Period`` time column is read at the start of each period (``ANO-UTILS-029``)."""
+        """A ``Period`` time column is read at the start of each period."""
         df = pd.DataFrame({'date': pd.period_range('2023-01', periods=2, freq='M'), 'v': [1, 2]})
         out = validate_temporal_data(df, time_col='date')
         assert list(out.index) == list(_months(2))
@@ -520,7 +516,7 @@ class TestColumnBasedValidation:
     @pytest.mark.parametrize('labels', [[2020, 2021], [2020.0, 2021.0]], ids=['integers', 'floats'])
     @pytest.mark.parametrize('strict', [True, False], ids=['strict', 'not-strict'])
     def test_numeric_time_col_is_rejected(self, labels, strict):
-        """A numeric time column is not a date and raises in both modes (``ANO-UTILS-028``)."""
+        """A numeric time column is not a date and raises in both modes."""
         df = pd.DataFrame({'date': labels, 'v': [1, 2]})
         with pytest.raises(ValueError, match="Column 'date' cannot be converted to datetime"):
             validate_temporal_data(df, time_col='date', strict=strict)
@@ -773,7 +769,7 @@ class TestRestoreOriginalStructure:
         pd.testing.assert_series_equal(restored, original, check_freq=False)
 
     def test_unnamed_series_round_trips_unnamed(self):
-        """An unnamed ``Series`` is restored unnamed (``ANO-UTILS-027``)."""
+        """An unnamed ``Series`` is restored unnamed."""
         original = pd.Series([1, 2, 3], index=_months(3))
         validated, meta = validate_temporal_data(original, return_metadata=True)
         assert restore_original_structure(validated, meta).name is None
@@ -812,12 +808,12 @@ class TestRestoreOriginalStructure:
         pd.testing.assert_frame_equal(restored, validated)
 
     def test_index_path_restoration_after_sort_keeps_each_value_on_its_date(self):
-        """After a sort, each value stays on its own date (index path, ``ANO-UTILS-024``).
+        """After a sort, each value stays on its own date (index path).
 
         Golden value: ``30`` sits on ``2023-03-01`` in the input, so it still sits on
         ``2023-03-01`` after ``validate → restore``. The original row order is not
-        restored (rows stay sorted): the code used to glue the unsorted original
-        index onto the sorted rows, so ``2023-03-01`` ended up with the value ``10``.
+        restored (rows stay sorted): the unsorted original index is not glued onto the
+        sorted rows, so ``2023-03-01`` keeps the value ``30``.
         """
         index = pd.to_datetime(['2023-03-01', '2023-01-01', '2023-02-01'])
         original = pd.Series([30, 10, 20], index=index, name='v')
@@ -830,7 +826,7 @@ class TestRestoreOriginalStructure:
     def test_column_path_restoration_after_sort_gives_the_sorted_rows(self):
         """After a sort, the rows come back sorted with fresh labels (column path).
 
-        The former ``RangeIndex`` labels no longer line up with the sorted rows, so
+        The original ``RangeIndex`` labels do not line up with the sorted rows, so
         they are not reassigned; each ``(date, value)`` pair stays intact.
         """
         original = pd.DataFrame({
@@ -858,7 +854,7 @@ class TestRestoreOriginalStructure:
         pd.testing.assert_series_equal(restored, original)
 
     def test_columns_are_restored_at_their_original_positions(self):
-        """Columns come back in their original order: ``['date', 'v', 'entity']`` (``ANO-UTILS-025``).
+        """Columns come back in their original order: ``['date', 'v', 'entity']``.
 
         ``reset_index()`` puts the former index columns first, in index order; the
         recorded ``original_columns`` puts them back where they were.
@@ -893,7 +889,7 @@ class TestRestoreOriginalStructure:
         assert list(restored.columns) == ['date', 'v']
 
     def test_a_series_of_the_column_path_gets_its_original_index_back(self):
-        """A value ``Series`` restored after the column path keeps its values (``ANO-UTILS-026``).
+        """A value ``Series`` restored after the column path keeps its values.
 
         The values come back on the original ``RangeIndex``; the dates, carried by the
         validated index only, are dropped (a ``Series`` has no column to put them in).
@@ -1011,7 +1007,7 @@ class TestRoundTripOnPerturbedDatasets:
     def test_round_trip_of_unsorted_data_gives_the_sorted_frame(
         self, request, kind, path, perturbation
     ):
-        """An unsorted frame comes back sorted, every row intact (``ANO-UTILS-024``).
+        """An unsorted frame comes back sorted, every row intact.
 
         The original row order is not restored. Index path: the sorted original.
         Column path: the rows sorted by ``(panel_cols, time_col)`` with fresh labels.
@@ -1309,7 +1305,7 @@ class TestValidateSortedWithinGroups:
         assert validate_sorted_within_groups(s) is False
 
     def test_plain_series_with_period_index(self):
-        """A ``PeriodIndex`` is a temporal index too: sorted ``True``, unsorted ``False`` (``ANO-UTILS-029``)."""
+        """A ``PeriodIndex`` is a temporal index too: sorted ``True``, unsorted ``False``."""
         periods = pd.period_range('2023-01', periods=3, freq='M')
         assert validate_sorted_within_groups(pd.Series([1, 2, 3], index=periods)) is True
         assert validate_sorted_within_groups(pd.Series([1, 2, 3], index=periods[[1, 0, 2]])) is False
@@ -1385,8 +1381,8 @@ class TestValidateSortedWithinGroups:
     def test_ambiguous_time_col_is_rejected(self):
         """A duplicated ``time_col`` label designates two columns: ``ValueError``, not ``False``.
 
-        Edge case: column names that are not unique. The check used to fail inside a
-        blanket ``except`` and answer ``False`` ("not sorted"), hiding the misuse.
+        Edge case: column names that are not unique. The check must not fail inside a
+        blanket ``except`` and answer ``False`` ("not sorted"), which would hide the misuse.
         """
         dates = _months(2)
         df = pd.DataFrame([['A', dates[0], dates[0]], ['A', dates[1], dates[1]]],

@@ -152,7 +152,6 @@ class TestFrequencyConverterPositions:
 
         # Valeur d'or : l'extension couvre les années ENTIÈRES de la première et de la
         # dernière observation (2023 et 2024), soit 8 trimestres de T1-2023 à T4-2024
-        # (et non 5 à partir de 2023-12-31, comme l'annonçait l'ancien commentaire)
         pd.testing.assert_index_equal(
             quarterly.index, pd.date_range('2023-03-31', '2024-12-31', freq='QE'), exact=False
         )
@@ -306,10 +305,8 @@ class TestExtendIndexForUpsampling:
     def test_pair_without_extension_returns_original_index(self, converter):
         """Test qu'une paire sans extension possible renvoie l'index d'origine, sans lever.
 
-        Réécriture (tri §4.4, catégorie a) de l'ancien
-        ``test_unsupported_frequency_pair_returns_original`` : sa paire ``'2D' → 'D'``
-        est supportée depuis ``469d37f`` ; le cas public ``'2D' → 'D'`` est désormais
-        ``test_interpolation.py::TestMultipliedPositionlessSource``.
+        Le cas ``'2D' → 'D'`` est supporté et couvert par les tests d'interpolation
+        (``TestMultipliedPositionlessSource``) ; il n'est pas traité ici.
         """
         # Cible moins fine que la source (ME → QE) : rapport 1/3 < 1, aucune extension
         index = pd.date_range('2024-01-31', periods=6, freq='ME')

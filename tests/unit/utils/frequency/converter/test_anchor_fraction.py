@@ -1,7 +1,7 @@
 """Tests unitaires pour `interpolate_to_higher_frequency(anchor_fraction=...)`.
 
 Ce module couvre la position d'ancrage de la valeur dans sa période (prérequis
-P2 de `HighFrequencyImputer`, §10.2 de la spécification d'architecture) : le
+de `HighFrequencyImputer`) : le
 décalage des ancres à une fraction de leur période source, l'interpolation sur
 l'union (ancres décalées ∪ grille cible), la restriction finale à la grille
 cible, et la non-régression stricte du chemin `anchor_fraction=None`.
@@ -22,7 +22,7 @@ class TestAnchorFraction:
 
     @pytest.fixture
     def yearly_series(self):
-        """Série annuelle de l'exemple §10.2 : 120 en 2021, 132 en 2022."""
+        """Série annuelle d'exemple : 120 en 2021, 132 en 2022."""
         return pd.Series(
             [120.0, 132.0],
             index=pd.date_range('2021-12-31', periods=2, freq='YE')
@@ -40,8 +40,8 @@ class TestAnchorFraction:
 
     def test_anchor_fraction_none_is_unchanged(self, converter, yearly_series,
                                                quarterly_series):
-        """Test que anchor_fraction=None reproduit strictement l'ancien comportement."""
-        # Valeurs figées, relevées sur l'implémentation antérieure au paramètre
+        """Test que anchor_fraction=None reproduit strictement le comportement sans ancrage."""
+        # Valeurs figées : comportement de référence sans ancrage
         expected = {
             'Y->Q': (yearly_series, 'Q', [120.0, 120.0, 120.0, 120.0,
                                           123.0, 126.0, 129.0, 132.0]),
@@ -102,7 +102,7 @@ class TestAnchorFraction:
 
     @pytest.mark.internal
     def test_anchor_fraction_half_uses_mid_period(self, converter, yearly_series):
-        """Test que anchor_fraction=0.5 ancre au milieu de l'année (exemple §10.2)."""
+        """Test que anchor_fraction=0.5 ancre au milieu de l'année."""
         # Positions d'ancre attendues : milieu de 2021 et de 2022
         shifted = converter._shift_index_to_anchor_fraction(
             index=yearly_series.index,

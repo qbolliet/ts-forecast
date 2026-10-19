@@ -20,10 +20,8 @@ days from the start, the last period published on December 15 is October
 months before December, hence -2. From the end, the delay runs from the first
 day of the next month (October ends on November 1).
 
-The tests were triaged and completed by prompt D4 (``tests_and_refactoring_prompts.md``);
-the anomalies found are registered in ``tests/ANOMALIES.md`` (``ANO-DELAYS-028`` to ``-041``, all fixed).
-``TestCalendarBoundaries`` (prompt D5) covers ``ANO-DELAYS-042`` (fixed): the former
-30-day month convention was one period off when the delay ended near a calendar
+``TestCalendarBoundaries`` covers the periods counted on the calendar: a 30-day
+month convention would be one period off when the delay ends near a calendar
 boundary.
 """
 # Modules de base
@@ -237,11 +235,9 @@ class TestPublicationDelayTransformerInit:
 class TestPublicationDelayTransformerFit:
     """``fit`` returns the transformer and sets the fitted attributes.
 
-    Triage (prompt D4): the inherited tests passed a delays dictionary without
-    ``delay_unit`` nor ``reference_point`` and failed with ``KeyError: 'GDP'``. No
-    rename is involved (the signature is unchanged since ``d16b0b2``): nothing can
-    infer the unit of a bare dictionary, so the tests were wrong (c) and now give
-    both parameters. The raw ``KeyError`` itself is ``ANO-DELAYS-033``.
+    A bare delays dictionary carries neither ``delay_unit`` nor ``reference_point``:
+    nothing can infer the unit of such a dictionary, so both parameters are given
+    explicitly. Without them, ``fit`` raises ``KeyError: 'GDP'``.
     """
 
     def test_fit_basic(self, sample_time_series, delays_dict_simple):
@@ -357,7 +353,7 @@ class TestShiftGoldValues:
 class TestCalendarBoundaries:
     """Near a calendar boundary, a value is visible at the prediction date if and only if it is published by then.
 
-    ``n_periods`` used to count periods of 30 days (``ANO-DELAYS-042``, fixed): when
+    ``n_periods`` counts calendar periods, not periods of 30 days: when
     the months between the delayed period and the prediction date did not last 30
     days each, the shift was one period off, in either direction.
     """
@@ -455,10 +451,9 @@ class TestReferencePoint:
     def test_params_with_dict_reference_point(self):
         """A per-variable reference point applies to each variable.
 
-        Triage (prompt D4): ``__init__`` rejected any non-string ``reference_point``
-        although its signature and the factories use a dictionary (b, ANO-DELAYS-028,
-        fixed). The former assertion (``a != b or |a - b| <= 1``) was always true; gold
-        values instead: 45 days from the end -> -3, from the start -> -2.
+        ``reference_point`` accepts a dictionary giving one reference per variable, as
+        its signature and the factories do. Gold values: 45 days from the end -> -3,
+        from the start -> -2.
         """
         transformer = _fit(_monthly(), delays={'GDP': 45.0, 'CPI': 45.0}, delay_unit='D',
                            reference_point={'GDP': 'end', 'CPI': 'start'})
@@ -621,9 +616,8 @@ class TestMaskParams:
     def test_fallback_shift_moves_values_to_later_dates(self):
         """The fallback shift is the one of the 'shift' strategy: 80 days from the start -> -3.
 
-        The fallback used to store the (positive) number of observations to mask as
-        ``n_periods``: the values moved three months **earlier**, before their
-        publication (ANO-DELAYS-031, fixed).
+        The fallback stores a negative ``n_periods``: a positive value would move the
+        values three months **earlier**, before their publication.
         """
         transformer = _fit(_monthly(('GDP',)), delays={'GDP': 80.0}, strategy='mask', delay_unit='D',
                            reference_point='start', target_frequency='Q')
@@ -670,7 +664,7 @@ class TestStrategy:
     def test_strategy_per_variable_ignores_default_values(self):
         """As announced by ``__init__``, ``default_values`` is ignored with a strategy dict: nothing is imputed.
 
-        ``_build_parameter_dict`` used to impute the default reference point to the
+        ``_build_parameter_dict`` must not impute the default reference point to the
         columns *outside* the strategy dict (``Z`` here), which are never delayed.
         """
         defaults = {'delay': 30.0, 'unit': 'D', 'reference_point': 'end', 'target_frequency': 'Q'}
@@ -739,14 +733,14 @@ class TestDelaysFormat:
 
         Gold values: October 1 -> December 15 = 75 days, October published on the prediction
         date, -2; November 1 -> December 15 = 44 days, -1. The shift brings each last
-        observation back onto December, the period of the prediction date (the 30-day
-        convention gave -3 for GDP, ANO-DELAYS-042).
+        observation back onto December, the period of the prediction date (counting
+        30-day months would give -3 for GDP).
         """
         transformer = _fit(_monthly(), delays=self._applicable_delays().reset_index())
         assert {col: p['n_periods'] for col, p in transformer.shift_params.items()} == {'GDP': -2, 'CPI': -1}
 
     def test_raw_output_of_calculate_applicable_delay(self):
-        """The variable in the index (level ``'column'``) is read as is (ANO-DELAYS-038, decided: accepted)."""
+        """The variable in the index (level ``'column'``) is read as is."""
         raw = _fit(_monthly(), delays=self._applicable_delays())
         flat = _fit(_monthly(), delays=self._applicable_delays().reset_index())
         assert raw.shift_params == flat.shift_params
@@ -1035,7 +1029,7 @@ class TestSklearnProtocol:
             getattr(transformer, method)(sample_time_series)
 
     def test_inverse_transform_before_transform(self):
-        """``inverse_transform`` reverses the last ``transform``: without one, ``NotFittedError`` (ANO-DELAYS-037)."""
+        """``inverse_transform`` reverses the last ``transform``: without one, ``NotFittedError``."""
         transformer = _fit(_monthly(('GDP',)), delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
         with pytest.raises(NotFittedError, match='call transform before inverse_transform'):
             transformer.inverse_transform(_monthly(('GDP',)))
@@ -1168,7 +1162,7 @@ class TestFitReport:
 
 
 # =============================================================================
-# Masques nuls ou négatifs (ajout D3 : contrat de MaskTransformer, n_obs >= 0)
+# Masques nuls ou négatifs (contrat de MaskTransformer : n_obs >= 0)
 # =============================================================================
 class TestZeroAndNegativeMasks:
     """A mask with nothing to mask leaves its column unchanged instead of building a ``MaskTransformer``.

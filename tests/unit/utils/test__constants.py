@@ -1,7 +1,7 @@
 """Unit tests for tsforecast.utils._constants.
 
-The module is the single source of truth for several tables that used to be
-duplicated across sub-packages: these tests lock the invariants that keep them
+The module is the single source of truth for several tables shared across
+sub-packages: these tests lock the invariants that keep them
 consistent with each other.
 """
 import pandas as pd

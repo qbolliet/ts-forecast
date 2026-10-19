@@ -37,7 +37,7 @@ from tsforecast.panel import PanelwiseTransformer
 # Calendrier de publication simulé, établi (et vérifié contre la fixture) par les tests de détection
 from tests.integration.delays.test_detect_delays_realistic import HIDDEN_DATES, SIMULATED_LAG_MONTHS
 
-# Le chemin « colonnes » émet systématiquement un avertissement de remplacement d'index (ANO-UTILS-033)
+# Le chemin « colonnes » émet systématiquement un avertissement de remplacement d'index
 pytestmark = pytest.mark.filterwarnings("ignore:Index replaced with")
 
 TS = pd.Timestamp

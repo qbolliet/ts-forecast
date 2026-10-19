@@ -14,8 +14,7 @@ recomputed independently with plain pandas (``groupby`` by year, ``reindex`` +
 ``interpolate`` on the observed grid) and the tests check properties —
 totals and means preserved, observations kept, no gap inside the observed
 range, sub-period counts consistent with the detected frequencies. The
-corrections of the DataFrame path (ANO-UTILS-054, 055, 065) are checked on
-both datasets.
+behaviour of the DataFrame path is checked on both datasets.
 """
 from typing import Dict, Tuple
 
@@ -30,7 +29,7 @@ from tsforecast.utils.frequency.utils import detect_dataset_frequency, detect_fr
 MONTHLY_COLUMNS = ['production_industrielle', 'inflation_ipc', 'taux_chomage']
 
 # Nombre d'observations attendu par année pleine, selon la fréquence détectée
-# (valeurs d'or de la détection du prompt U7, voir detector/test_realistic_datasets.py)
+# (valeurs d'or de la détection, voir detector/test_realistic_datasets.py)
 EXPECTED_YEARLY_FACTORS = {'MS': 12.0, 'QS-JAN': 4.0, 'YS-JAN': 1.0}
 
 

@@ -4,9 +4,9 @@ Covers ``FrequencyDetector.detect_frequency`` (simple series, or one frequency p
 entity of a ``MultiIndex`` series, keys always tuples since commit ``67529a5``) and
 ``FrequencyDetector.detect_dataset_frequency`` (one frequency per column of a time
 series, or per ``(entity..., column)`` pair of a panel, keys flattened; undetectable
-pairs mapped to ``None`` since commit ``906da2e``): 2 and 3-level indexes, panel
-columns, ``time_col``, unsorted dates, unnamed levels (ANO-UTILS-046), invalid
-``return_format`` (ANO-UTILS-047), undetectable time series columns (ANO-UTILS-042).
+pairs mapped to ``None``): 2 and 3-level indexes, panel
+columns, ``time_col``, unsorted dates, unnamed levels, invalid
+``return_format``, undetectable time series columns.
 """
 from __future__ import annotations
 
@@ -102,14 +102,14 @@ class TestDetectorDetectFrequencyPanelSeries:
             FrequencyDetector().detect_frequency(series)
 
     def test_invalid_return_format_raises(self):
-        """An unknown ``return_format`` is rejected on a panel as on a simple series (ANO-UTILS-047)."""
+        """An unknown ``return_format`` is rejected on a panel as on a simple series."""
         series = make_panel_series({'A': pd.date_range('2023-01-01', periods=3, freq='D')})
         with pytest.raises(ValueError, match='Invalid return_format'):
             FrequencyDetector().detect_frequency(series, 'bogus')
 
     def test_non_date_level_raises(self):
         """A date level that is not a time index raises instead of mapping entities to ``None``."""
-        # Dernier niveau entier (années) : refusé comme une série simple (ANO-UTILS-044)
+        # Dernier niveau entier (années) : refusé comme une série simple
         index = pd.MultiIndex.from_arrays([['A'] * 3, [2020, 2021, 2022]], names=['entity', 'year'])
         with pytest.raises(ValueError, match='cannot be converted to datetime'):
             FrequencyDetector().detect_frequency(make_series(index))
@@ -171,7 +171,7 @@ class TestDetectDatasetFrequencyTimeSeries:
             FrequencyDetector().detect_dataset_frequency(df, return_format='bogus')
 
     def test_column_with_too_few_observations_is_none(self):
-        """A column observed once is mapped to ``None``, as a panel pair is (ANO-UTILS-042)."""
+        """A column observed once is mapped to ``None``, as a panel pair is."""
         df = pd.DataFrame({'dense': np.arange(5.0), 'sparse': [np.nan] * 4 + [1.0]},
                           index=pd.date_range('2024-01-01', periods=5, freq='D'))
         assert FrequencyDetector().detect_dataset_frequency(df) == {'dense': 'D', 'sparse': None}
@@ -283,7 +283,7 @@ class TestDetectDatasetFrequencyPanel:
         ],
     )
     def test_unnamed_levels(self, names, expected):
-        """Unnamed index levels are read by position, as for a panel series (ANO-UTILS-046)."""
+        """Unnamed index levels are read by position, as for a panel series."""
         dates = pd.date_range('2023-01-01', periods=3, freq='D').tolist()
         arrays = [['A'] * 3 + ['B'] * 3, dates * 2]
         if len(names) == 3:
@@ -293,13 +293,13 @@ class TestDetectDatasetFrequencyPanel:
         assert FrequencyDetector().detect_dataset_frequency(df) == expected
 
     def test_period_dates(self):
-        """A monthly ``Period`` date level is monthly (ANO-UTILS-045, ANO-UTILS-029 decision)."""
+        """A monthly ``Period`` date level is monthly."""
         index = pd.MultiIndex.from_arrays(
             [['A'] * 4, pd.period_range('2024-01', periods=4, freq='M')], names=['entity', 'date'])
         df = pd.DataFrame({'v': range(4)}, index=index)
         assert FrequencyDetector().detect_dataset_frequency(df, return_format='with_position') == {('A', 'v'): 'MS'}
 
     def test_invalid_return_format_raises(self, two_entity_panel):
-        """An unknown ``return_format`` is rejected on a panel as on a time series (ANO-UTILS-047)."""
+        """An unknown ``return_format`` is rejected on a panel as on a time series."""
         with pytest.raises(ValueError, match='Invalid return_format'):
             FrequencyDetector().detect_dataset_frequency(two_entity_panel, return_format='bogus')

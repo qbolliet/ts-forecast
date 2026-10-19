@@ -11,7 +11,7 @@ grid; ``ns`` / ``ms`` precision, time zones and DST; ``Period`` / ``datetime64``
 inputs; invalid frequencies, anchors and dates; ``start <= date < end``
 properties).
 
-Fixes of ANO-UTILS-018 to ANO-UTILS-023 (see ``tests/ANOMALIES.md``) are covered
+Nanosecond, millisecond, time zone, ``Period`` input and anchor behaviours are covered
 by ``TestNanosecond``, ``TestMillisecond``, ``TestTimezone``, ``TestPeriodInput``,
 ``TestPeriodAnchorsAndMultipliers`` and ``TestResolveDate``.
 """
@@ -293,7 +293,7 @@ class TestResolveDate:
 
     @pytest.mark.parametrize("value", ["", pd.NaT], ids=["empty-string", "nat"])
     def test_unresolvable_value_raises_instead_of_returning_nat(self, value):
-        """An empty string or ``NaT`` is not a date: ``ValueError``, never ``NaT`` (ANO-UTILS-022)."""
+        """An empty string or ``NaT`` is not a date: ``ValueError``, never ``NaT``."""
         with pytest.raises(ValueError):
             resolve_date(value)
 
@@ -840,7 +840,7 @@ class TestPeriodProperties:
 
 
 class TestNanosecond:
-    """``'ns'`` periods (ANO-UTILS-018): one nanosecond, in a ``Timestamp``."""
+    """``'ns'`` periods: one nanosecond, in a ``Timestamp``."""
 
     def test_datetime_period_lasts_one_nanosecond(self):
         """A ``datetime`` (microsecond precision) yields a one-nanosecond period."""
@@ -864,7 +864,7 @@ class TestNanosecond:
 
 
 class TestMillisecond:
-    """``'ms'`` periods (ANO-UTILS-019): floored, contiguous, one millisecond long."""
+    """``'ms'`` periods: floored, contiguous, one millisecond long."""
 
     def test_end_is_floored(self):
         """The end is the start plus one millisecond."""
@@ -884,7 +884,7 @@ class TestMillisecond:
 
 
 class TestTimezone:
-    """Time zones (ANO-UTILS-023): preserved, wall-clock calendar, DST-aware."""
+    """Time zones: preserved, wall-clock calendar, DST-aware."""
 
     _FREQS = [
         "ns", "us", "ms", "s", "min", "h", "D", "B", "W", "SM", "M", "Q", "Y",
@@ -950,7 +950,7 @@ class TestTimezone:
 
 
 class TestPeriodInput:
-    """Inputs other than ``datetime``: ``Period`` (ANO-UTILS-020), ``datetime64``, invalid types."""
+    """Inputs other than ``datetime``: ``Period``, ``datetime64``, invalid types."""
 
     @pytest.mark.parametrize(
         "freq, start, end",

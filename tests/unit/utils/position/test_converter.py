@@ -522,9 +522,9 @@ class TestConvertDatetimeIndex:
     def test_short_index_with_duplicates_is_converted(self, converter):
         """A short monthly index with one duplicated date is still converted to month ends.
 
-        Spacings between unique dates: 31 then 29 days -> monthly. Before the
-        fix (ANO-UTILS-014), the zero spacing of the duplicate won as modal
-        spacing and the detected frequency was ``'ns'`` (silent no-op).
+        Spacings between unique dates: 31 then 29 days -> monthly. The zero spacing
+        of the duplicate is not a candidate for the modal spacing, which would give
+        the detected frequency ``'ns'`` (silent no-op).
         """
         source = _dates("2024-01-01", "2024-01-01", "2024-02-01", "2024-03-01")
         result = converter.convert(source, "S", "E")
@@ -562,7 +562,7 @@ class TestConvertDatetimeIndex:
 
         ``freq='Q'`` on monthly dates would send January, February and March
         to 03-31: January and February would leave their month
-        (ANO-UTILS-010). Aggregating to a lower frequency belongs to
+        Aggregating to a lower frequency belongs to
         ``groupby`` / ``resample``, not to a position change.
         """
         source = pd.date_range("2024-01-01", periods=3, freq="MS")
@@ -606,8 +606,8 @@ class TestConvertTimeSeries:
     def test_dataframe_keeps_mixed_dtypes(self, converter, monthly_series):
         """Integer, float, boolean and string columns keep their dtype.
 
-        Before the fix (ANO-UTILS-012), the result was rebuilt from
-        ``.values`` and every column became ``object``.
+        The result is not rebuilt from ``.values``, which would turn every column
+        into ``object``.
         """
         frame = pd.DataFrame(
             {"entier": [1, 2, 3], "réel": [1.5, 2.5, 3.5], "booléen": [True, False, True], "texte": list("abc")},
@@ -839,8 +839,8 @@ class TestConvertPanel:
     def test_empty_panel_with_explicit_frequency(self, converter, mixed_frequency_panel):
         """An empty panel converts to an empty panel with the same structure.
 
-        Before the fix (ANO-UTILS-013), ``pd.concat([])`` raised
-        ``No objects to concatenate``.
+        ``pd.concat([])`` is never called on an empty list of entities, which
+        would raise ``No objects to concatenate``.
         """
         result = converter.convert(empty_like(mixed_frequency_panel), "S", "E", freq="Q")
         assert (len(result), list(result.index.names)) == (0, ["entity", "date"])
@@ -853,7 +853,7 @@ class TestConvertPanel:
         """An explicit ``freq`` applied to every entity must not merge an entity's observations.
 
         ``freq='Q'`` forced on entity B (monthly) would send January, February
-        and March 2020 to 2020-03-31 (ANO-UTILS-010).
+        and March 2020 to 2020-03-31.
         """
         with pytest.raises(ValueError, match="coarser than the data"):
             converter.convert(mixed_frequency_panel, "S", "E", freq="Q")
@@ -862,8 +862,8 @@ class TestConvertPanel:
         """An entity with no detectable frequency raises the entity-specific error.
 
         Entity B is spaced by 45 then 50 days: neither its index nor its
-        columns reveal a frequency. Before the fix (ANO-UTILS-011), the
-        fallback returned a ``dict`` and the error was about its type.
+        columns reveal a frequency. The error names the entity, and is not an error
+        about the type of the fallback result.
         """
         dates = list(pd.date_range("2024-01-01", periods=3, freq="MS")) + list(
             _dates("2023-01-01", "2023-02-15", "2023-04-06")

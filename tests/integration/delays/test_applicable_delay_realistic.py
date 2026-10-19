@@ -33,7 +33,7 @@ from tsforecast.delays.calculator import calculate_applicable_delay
 from tsforecast.delays.data_manager import compare_and_detect_delays
 
 # Le chemin « colonnes » émet systématiquement un avertissement de remplacement
-# d'index (ANO-UTILS-033) : le bruit est masqué pour garder une sortie lisible.
+# d'index : le bruit est masqué pour garder une sortie lisible.
 pytestmark = pytest.mark.filterwarnings("ignore:Index replaced with")
 
 TS = pd.Timestamp

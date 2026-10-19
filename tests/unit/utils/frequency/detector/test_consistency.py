@@ -4,7 +4,7 @@ Covers ``FrequencyDetector.validate_frequency_consistency``, the ``check_consist
 ``consistency_mode`` / ``strict`` options of the ``detect_frequency`` and
 ``detect_dataset_frequency`` wrappers (``utils/frequency/utils.py``), the private
 ``_get_highest_frequency``, and the pinned treatment of undetectable (``None``)
-pairs (ANO-UTILS-049, to be arbitrated).
+pairs.
 """
 from __future__ import annotations
 
@@ -156,7 +156,7 @@ class TestDetectDatasetFrequencyFunction:
 
 
 class TestConsistencyWithUndetectablePairs:
-    """Undetectable (``None``) pairs are ignored by consistency checks (ANO-UTILS-049)."""
+    """Undetectable (``None``) pairs are ignored by consistency checks."""
 
     @pytest.fixture
     def one_undetectable_entity(self) -> pd.Series:

@@ -15,18 +15,10 @@ forecast would:
 - ``ShiftTransformer`` then ``MaskTransformer``, sequentially and in an sklearn
   ``Pipeline``.
 
-The tests migrated from ``tests/integration/delays/test_integration.py``
-(prompt D5) were rewritten on the current API: ``release_delay`` -> ``delay``
-(``4b3d3bc``), ``target_reference_point`` / ``target_frequency`` /
-``applicable_delay`` -> ``reference_point`` / ``frequency`` / ``delay``
-(``ae347b2``), and the variable read from the index level ``'column'`` of the
-detected delays (an index level since ``0dd824f``, ``ANO-DELAYS-009``).
-
-Anomalies exposed here, now fixed: ``ANO-DELAYS-042`` (periods of 30 / 91 / 365
-days in the conversion of a delay into a number of periods: a value published on
-the prediction date was pushed one month too far; now counted on the calendar)
-and ``ANO-DELAYS-043`` (panel output of ``PublicationDelayTransformer`` not ordered
-by date within each entity).
+The variable is read from the index level ``'column'`` of the detected delays.
+Periods are counted on the calendar: a value published on the prediction date is
+visible at that date, not one month later. The panel output of
+``PublicationDelayTransformer`` is ordered by date within each entity.
 """
 # Modules de base
 import itertools
@@ -48,7 +40,7 @@ from tsforecast.panel import PanelwiseTransformer
 # par les tests de détection réalistes
 from tests.integration.delays.test_detect_delays_realistic import HIDDEN_DATES
 
-# Le chemin « colonnes » émet systématiquement un avertissement de remplacement d'index (ANO-UTILS-033)
+# Le chemin « colonnes » émet systématiquement un avertissement de remplacement d'index
 pytestmark = pytest.mark.filterwarnings("ignore:Index replaced with")
 
 TS = pd.Timestamp
@@ -277,7 +269,7 @@ class TestCombinedTransformations:
         """In an sklearn ``Pipeline``, shift then mask gives the same frame as applying them in turn.
 
         Replaces ``test_pipeline_with_transformers``, which only checked the
-        presence of the methods (covered by the sklearn protocol tests of D3).
+        presence of the methods.
         """
         sequential = MaskTransformer(n_obs=3, mask_frequency='M', how='last').fit_transform(
             ShiftTransformer(n_periods=5, frequency='D').fit_transform(daily_time_series))
@@ -343,7 +335,7 @@ def _visible_couples():
 
     France and Italie, inflation and unemployment are the couples published on the
     prediction date itself (July + 76 days = September 15), which the former 30-day
-    convention pushed one month too far (ANO-DELAYS-042).
+    convention of 30 days per month would push one month too far.
     """
     return [pytest.param(couple, id=f'{couple[0]}-{couple[1]}')
             for couple in sorted(HIDDEN_DATES) if couple[1] in SHARED_FREQUENCY]

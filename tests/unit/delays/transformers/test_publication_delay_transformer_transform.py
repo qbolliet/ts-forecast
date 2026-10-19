@@ -6,9 +6,8 @@ Covers the application of the fitted parameters (``transform``,
 ``_active_params``): gold frames for the 'shift' and 'mask' strategies, columns
 left untouched, column order, round trip, and the robustness cases of
 ``CLAUDE.md`` (unsorted rows, special column names, end-of-period labels,
-``PeriodIndex``, duplicated dates, too few observations). Split from
-``test_publication_delay_transformer.py`` (mirror rule, theme of the
-``tests/unit/delays/transformers/`` package) by prompt D4.
+``PeriodIndex``, duplicated dates, too few observations). Complements
+``test_publication_delay_transformer.py``, which covers the fit and the parameters.
 
 Gold values: monthly series of 2023 (``GDP = 0, 1, ..., 11``, ``CPI = 0, 2, ...,
 22``), prediction date 2023-12-15. 45 days from the period start shift ``GDP``
@@ -96,10 +95,9 @@ class TestTransformGoldValues:
     def test_transform_basic(self):
         """Shifted columns keep their values and names; the index becomes the union of the shifted dates.
 
-        Triage (prompt D4): the inherited test expected the shape of the input. The
-        shift moves the dates without loss of data (deliberate, ``ShiftTransformer``
-        contract of prompt D3): 12 + 1 rows here (February 2023 to February 2024,
-        January 2023 holding no value any more), so the assertion was wrong (c).
+        The shift moves the dates without loss of data, as the ``ShiftTransformer``
+        contract states: 12 + 1 rows here (February 2023 to February 2024, January 2023
+        holding no value any more), not the shape of the input.
         """
         result = _fit_transform(_transformer(), _monthly())
         pd.testing.assert_frame_equal(result, _shifted_gold(), check_freq=False)
@@ -173,7 +171,7 @@ class TestRoundTrip:
     """``inverse_transform(transform(X))`` restores ``X`` exactly.
 
     The rows added by ``transform`` (dates outside its input), empty once inverted,
-    are dropped by ``inverse_transform`` (decision of the author, prompt D4).
+    are dropped by ``inverse_transform``.
     """
 
     @staticmethod
@@ -239,7 +237,7 @@ class TestRoundTrip:
 # Robustesse (cas limites de CLAUDE.md)
 # =============================================================================
 class TestPanelOutputOrder:
-    """A panel output is grouped by entity, in the input order, and sorted by date (ANO-DELAYS-043, fixed)."""
+    """A panel output is grouped by entity, in the input order, and sorted by date."""
 
     @staticmethod
     def _panel() -> pd.DataFrame:

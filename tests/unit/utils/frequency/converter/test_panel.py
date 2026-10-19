@@ -6,7 +6,7 @@ dictionaries keyed by entity, by ``(entity, column)`` or by column and their
 precedence, entities left untouched, panel Series, the column path
 (``time_col`` + ``panel_cols``), ``target_position``, the boolean methods and
 ``full_periods_only`` per entity, the empty panel (refused), and the source
-position and untargeted Series entities (ANO-UTILS-056 and 060, fixed).
+position and untargeted Series entities.
 
 The realistic heterogeneous panel of notebook 3 is covered by
 ``test_realistic_datasets.py``.

@@ -6,7 +6,7 @@ default ``limit='default'`` and default ``method='mean'``, ``target_position``
 in both its code and literal forms, Series edge cases (unsorted, duplicated,
 empty, single observation, ``PeriodIndex``, irregular index), column-wise
 conversion of DataFrames (special column names, ``time_col``), and the output
-contract of the DataFrame path, fixed after U8 (ANO-UTILS-055, 056, 058, 067):
+contract of the DataFrame path:
 unconverted columns keep their observed dates only, the source position is
 preserved, the index name survives an upsampling, the result does not depend
 on the order of the columns.
@@ -337,7 +337,7 @@ class TestDataFrameOutputContract:
         assert result.empty and list(result.columns) == ['a', 'b']
 
     def test_never_observed_series_gives_no_row(self, converter, monthly):
-        """Same rule for a Series: no observed value, no date (ANO-UTILS-070)."""
+        """Same rule for a Series: no observed value, no date."""
         result = converter.convert_frequency((monthly * np.nan).rename('a'), 'QE', method='sum')
         assert result.empty and result.name == 'a'
 

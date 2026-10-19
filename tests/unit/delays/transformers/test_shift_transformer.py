@@ -25,8 +25,6 @@ group of columns, as ``PublicationDelayTransformer`` does. The realistic
 scenario (notebook 3 datasets) lives in
 ``tests/integration/delays/test_shift_mask_realistic.py``.
 
-Anomalies found while writing these tests are registered in
-``tests/ANOMALIES.md`` (``ANO-DELAYS-021`` to ``-026``, all fixed).
 """
 # Modules de base
 import numpy as np
@@ -356,13 +354,13 @@ class TestShiftFrequency:
             ShiftTransformer(n_periods=1, frequency='foo').fit_transform(_series())
 
     def test_multiplied_shift_frequency_is_honoured(self):
-        """``frequency='2M'`` shifts by two months per period (ANO-DELAYS-025)."""
+        """``frequency='2M'`` shifts by two months per period."""
         shifted = ShiftTransformer(n_periods=1, frequency='2M').fit_transform(_series())
         # Valeur d'or : une période de deux mois avant 2024-01-01
         assert shifted.index[0] == TS('2023-11-01')
 
     def test_week_on_business_day_index_is_five_business_days(self):
-        """One week on a ``B`` index is five business days (ANO-DELAYS-024)."""
+        """One week on a ``B`` index is five business days."""
         original = _series('B', periods=10)
         shifted = ShiftTransformer(n_periods=1, frequency='W').fit_transform(original)
         # Valeur d'or : lundi 2024-01-01 - 5 jours ouvrés = lundi 2023-12-25
@@ -463,7 +461,7 @@ class TestIndexRobustness:
 
     @pytest.mark.parametrize('k', [pytest.param(2, id='positive'), pytest.param(-2, id='negative')])
     def test_index_name_is_preserved(self, k):
-        """A non-standard index name survives the shift (ANO-DELAYS-022)."""
+        """A non-standard index name survives the shift."""
         shifted = ShiftTransformer(n_periods=k, frequency='M').fit_transform(with_index_names(_series(), 'periode'))
         assert shifted.index.name == 'periode'
 
@@ -493,7 +491,7 @@ class TestIndexRobustness:
         [pytest.param([0, 1, 2], id='range'), pytest.param([2020, 2021, 2022], id='years')],
     )
     def test_non_datetime_index_is_rejected(self, index):
-        """An integer index is rejected with an explicit message (legacy ``test_non_datetime_index``)."""
+        """An integer index is rejected with an explicit message."""
         with pytest.raises(ValueError, match="Index cannot be converted to datetime"):
             ShiftTransformer(n_periods=1, frequency='D').fit_transform(pd.Series([1., 2., 3.], index=index))
 
@@ -542,7 +540,7 @@ class TestIndexRobustness:
         assert shifted.index.tolist() == [TS('2024-01-14 12:00')]
 
     def test_index_with_gaps_shifts_by_calendar_periods(self):
-        """A daily index missing 2024-01-03 is still shifted by one calendar day (ANO-DELAYS-021)."""
+        """A daily index missing 2024-01-03 is still shifted by one calendar day."""
         index = pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-04', '2024-01-05'])
         series = pd.Series([1., 2., 3., 4.], index=index)
         shifted = ShiftTransformer(n_periods=1, frequency='D').fit_transform(series)
@@ -566,7 +564,7 @@ class TestIndexRobustness:
         pd.testing.assert_series_equal(shifter.inverse_transform(shifter.fit_transform(series)), series, check_freq=False)
 
     def test_multiindex_input_raises_a_clear_error(self):
-        """A panel passed directly raises a ``ValueError`` pointing to ``PanelwiseTransformer`` (ANO-DELAYS-023)."""
+        """A panel passed directly raises a ``ValueError`` pointing to ``PanelwiseTransformer``."""
         index = pd.MultiIndex.from_product([['FR', 'DE'], pd.date_range('2024-01-01', periods=6, freq='MS')])
         panel = pd.DataFrame({'a': np.arange(12.)}, index=index)
         with pytest.raises(ValueError, match="wrap it in a PanelwiseTransformer"):

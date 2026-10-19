@@ -17,8 +17,8 @@ With the ``'mask'`` strategy the index is unchanged and the chain runs end to
 end. With the ``'shift'`` strategy, ``transform`` moves the dates of ``X`` (its
 output index is the union of the shifted dates, by design) while ``y`` goes
 through the pipeline unchanged: scoring needs a later XY step realigning ``y`` on
-``X``, not provided by ``PublicationDelayTransformer`` (``ANO-DELAYS-044``, decided:
-not a defect of the class). The absence of leakage at ``fit`` is checked fold by fold.
+``X``, not provided by ``PublicationDelayTransformer``, which leaves ``y`` unchanged by
+design. The absence of leakage at ``fit`` is checked fold by fold.
 """
 # Modules de base
 import warnings
@@ -144,7 +144,7 @@ class TestShiftedPipelineCrossValidation:
         """Without an XY step realigning ``y`` on the shifted ``X``, scoring meets two lengths.
 
         ``transform`` keeps its contract (``X`` in, ``X`` out, index grown by the
-        shift) and does not touch ``y`` (ANO-DELAYS-044, decided): a 6-month test
+        shift) and does not touch ``y``: a 6-month test
         fold gives 8 rows once inflation and unemployment are shifted by one and
         two months.
         """

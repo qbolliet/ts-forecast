@@ -21,9 +21,6 @@ from the calendar, never copied from the output of the code:
 
 The realistic scenario (notebook 3 datasets) lives in
 ``tests/integration/delays/test_applicable_delay_realistic.py``.
-
-Anomalies found while writing these tests are registered in
-``tests/ANOMALIES.md`` (``ANO-DELAYS-002``, ``-003``, ``-011`` to ``-015``, all fixed).
 """
 # Modules de base
 import doctest
@@ -691,7 +688,7 @@ class TestAggregation:
 
     @pytest.mark.parametrize('method', ['nope', 'Mean', ''], ids=['unknown', 'wrong-case', 'empty'])
     def test_unknown_method_name_raises_a_value_error_naming_the_argument(self, multi_observation_delays, method):
-        """A name that is not a pandas aggregation is a ``ValueError`` naming ``aggregation_method`` (ANO-DELAYS-015)."""
+        """A name that is not a pandas aggregation is a ``ValueError`` naming ``aggregation_method``."""
         with pytest.raises(ValueError, match=f"Unsupported aggregation_method {method!r}"):
             calculate_applicable_delay(multi_observation_delays, 'end', 'M', aggregation_method=method)
 
@@ -801,7 +798,7 @@ class TestTargetUnit:
             calculate_applicable_delay(_frame([_monthly(unit='days')]), 'end', 'M')
 
     def test_mixed_input_units_are_refused_without_target_unit(self):
-        """Without ``unit``, rows of one indicator in days and in seconds are refused, naming the group (ANO-DELAYS-002)."""
+        """Without ``unit``, rows of one indicator in days and in seconds are refused, naming the group."""
         delays = _frame([_monthly('2023-12', 14), _monthly('2023-12', 14 * 86_400, unit='second')],
                         [('France', 'GDP'), ('Germany', 'GDP')], names=('country', 'indicator'))
 
@@ -833,7 +830,7 @@ class TestTargetUnit:
     def test_microsecond_delay_is_exact(self, delay, target, expected):
         """A microsecond delay is converted exactly (31 d of December = 31 * 86 400 * 10^6 µs added from the start).
 
-        The conversion works on integer nanoseconds (ANO-DELAYS-012: float seconds used to lose 1 µs).
+        The conversion works on integer nanoseconds: float seconds would lose 1 µs.
         """
         delays = _frame([_monthly('2023-12', delay, unit='microsecond')])
 
@@ -949,7 +946,7 @@ class TestTargetFrequencyDictionary:
             calculate_applicable_delay(monthly_publication_delays, 'end', {'France': 'M', 'Germany': 'Q'})
 
     def test_uncovered_indicator_is_named(self, gdp_and_cpi):
-        """An indicator missing from the dictionary is named in the error message (ANO-DELAYS-003)."""
+        """An indicator missing from the dictionary is named in the error message."""
         with pytest.raises(ValueError, match="CPI"):
             calculate_applicable_delay(gdp_and_cpi, 'start', {'GDP': 'M'})
 
@@ -1076,7 +1073,7 @@ class TestIndicatorsAndPanel:
         ids=['unnamed-index', 'unnamed-multiindex'],
     )
     def test_unnamed_index_levels(self, keys, names):
-        """An index without level names is read by position: the last level is the indicator (ANO-DELAYS-014)."""
+        """An index without level names is read by position: the last level is the indicator."""
         delays = _frame([_monthly(delay=14), _monthly(delay=16)], keys, names=names)
 
         assert _delay(delays, 'end', 'M') == [15]
@@ -1158,7 +1155,7 @@ class TestDelayMagnitudes:
         assert _delay(delays, 'start', 'M') == [45]
 
     def test_empty_frame_raises_a_clear_error(self):
-        """A frame without any row (valid columns) is refused, saying so (ANO-DELAYS-013)."""
+        """A frame without any row (valid columns) is refused, saying so."""
         with pytest.raises(ValueError, match="publication_delays has no row"):
             calculate_applicable_delay(_frame([]), 'end', 'M')
 
@@ -1166,7 +1163,7 @@ class TestDelayMagnitudes:
     def test_unknown_delay_row_is_kept_with_a_nan_delay(self, rows):
         """A row whose delay is ``NaN`` or whose frequency is ``None`` gives a ``NaN`` delay, kept in the panel result.
 
-        ANO-DELAYS-011: the unknown row used to make the whole call fail. Here (France, PIB) is valid (14 d),
+        An unknown row does not make the whole call fail. Here (France, PIB) is valid (14 d),
         (Germany, PIB) is unknown.
         """
         unknown = _monthly('2023-12', np.nan) if rows == 'nan-delay' else _monthly('2023-12', 14, frequency=None)
@@ -1368,7 +1365,7 @@ class TestContractWithDataManager:
         return _detect(panel, None, download_date='2023-06-15')
 
     def test_undetectable_frequency_does_not_break_the_chain(self, panel_with_an_undetectable_couple):
-        """One entity observed once (frequency undetectable) does not prevent the delay of the others (ANO-DELAYS-011)."""
+        """One entity observed once (frequency undetectable) does not prevent the delay of the others."""
         result = calculate_applicable_delay(panel_with_an_undetectable_couple, 'start', 'M')
 
         assert (result['delay'].tolist(), result['n_observations'].tolist()) == ([75], [1])

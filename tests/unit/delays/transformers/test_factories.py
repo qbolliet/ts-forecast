@@ -4,9 +4,8 @@ Covers ``create_delay_transformer_factory`` and ``prepare_entity_kwargs_from_del
 and their helpers ``_build_entity_params``, ``_extract_param_by_variable`` and
 ``_resolve_strategy``, all exercised through the two public functions (the factory
 called with an entity key, or the ``entity_kwargs`` dictionary), then end to end
-with ``PanelwiseTransformer``. Also keeps ``_detect_index_components`` (index
-components read by ``ShiftTransformer`` / ``MaskTransformer``, moved here by
-prompt D3).
+with ``PanelwiseTransformer``. Also covers ``_detect_index_components`` (index
+components read by ``ShiftTransformer`` / ``MaskTransformer``).
 
 Gold values: panel of two entities (``FR``, ``DE``) of monthly 2023 data,
 prediction date 2023-12-15. Delays in days from the period start, shifts counted
@@ -15,10 +14,8 @@ on the calendar (last month published on December 15, moved onto December):
 (November 21), ``DE`` GDP 80 -> -3 (September 1 + 80 days = November 20, October
 1 + 80 days = December 20 is too late), ``DE`` CPI 20 -> -1.
 
-Triage (prompt D4): the former tests of ``_extract_param_by_variable`` and
-``_resolve_strategy`` called the private helpers directly although both are
-reachable through the public functions; they were rewritten on the public path
-with the same intentions (constant vs varying parameter, every form of strategy).
+The tests of ``_extract_param_by_variable`` and ``_resolve_strategy`` go through
+the public functions: constant versus varying parameter, every form of strategy.
 """
 # Modules de base
 import doctest
@@ -91,7 +88,7 @@ def _fit_transform(transformer, X: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
-# Composantes de l'index (déplacé tel quel par D3)
+# Composantes de l'index
 # =============================================================================
 class TestMultipliedIndexFrequency:
     """Les transformateurs décalent par périodes d'index entières : un index multiplié est rejeté."""

@@ -4,10 +4,9 @@ Covers the detection on a single series, through ``pd.infer_freq`` and the heuri
 fallback (``_extend_infer_freq`` and its helpers, reached through the public method):
 every frequency (``D``, ``B``, ``W``, ``SM``, ``M``, ``Q``, ``Y``, intraday, sub-second)
 with its start / end position in every ``return_format``; two observations; gaps;
-non-default anchors (ANO-UTILS-043); multiplied frequencies and the repeated-majority
-rule of the fallback (ANO-UTILS-051); too few observations (``min_observations``);
-unsorted and duplicated dates (ANO-UTILS-014); index types (strings, time zones,
-labels, integers ANO-UTILS-044, ``Period`` ANO-UTILS-045).
+non-default anchors; multiplied frequencies and the repeated-majority rule of the
+fallback; too few observations (``min_observations``); unsorted and duplicated
+dates; index types (strings, time zones, labels, integers, ``Period``).
 """
 from __future__ import annotations
 
@@ -144,7 +143,7 @@ class TestDetectTimeSeriesFrequencyTwoObservations:
 
     @pytest.mark.parametrize('spacing', ['10ms', '10us', '10ns'])
     def test_sub_second_multiple_on_gapped_grid(self, spacing):
-        """A repeated sub-second spacing keeps its multiplier (no longer rounded to its unit)."""
+        """A repeated sub-second spacing keeps its multiplier (not rounded to its unit)."""
         dates = pd.date_range('2024-01-01', periods=6, freq=spacing).delete([3])
         assert FrequencyDetector().detect_time_series_frequency(make_series(dates), 'full') == spacing
 
@@ -346,7 +345,7 @@ class TestFallbackWithoutCalendarPattern:
 
 
 class TestFallbackKeepsNonDefaultAnchors:
-    """The heuristic fallback reports an offset whose grid holds the observed dates (ANO-UTILS-043)."""
+    """The heuristic fallback reports an offset whose grid holds the observed dates."""
 
     @pytest.mark.parametrize(
         'freq, start', [pytest.param(*grid, id=grid[0]) for grid in NON_DEFAULT_ANCHOR_GRIDS]
@@ -449,7 +448,7 @@ class TestDetectTimeSeriesFrequencyUnsortedData:
 
 
 class TestFrequencyDetectorDuplicatedDates:
-    """Duplicated dates never yield a zero spacing (ANO-UTILS-014)."""
+    """Duplicated dates never yield a zero spacing."""
 
     def test_short_index_with_duplicate_is_monthly(self):
         """A duplicated date among few monthly dates does not turn the frequency into 'ns'.
@@ -530,7 +529,7 @@ class TestDetectTimeSeriesFrequencyIndexTypes:
          pytest.param(pd.Index([0.5, 1.5, 2.5]), id='floats')],
     )
     def test_numeric_index_is_rejected(self, index):
-        """A numeric index is not a time index (ANO-UTILS-044, ANO-UTILS-028 decision)."""
+        """A numeric index is not a time index."""
         with pytest.raises(ValueError, match='numeric labels are not dates'):
             FrequencyDetector().detect_time_series_frequency(make_series(index))
 
@@ -541,7 +540,7 @@ class TestDetectTimeSeriesFrequencyIndexTypes:
          pytest.param('Y', 'YS-JAN', id='annual')],
     )
     def test_period_index_is_read_at_period_start(self, freq, expected):
-        """Periods are read at their first instant (ANO-UTILS-045, ANO-UTILS-029 decision)."""
+        """Periods are read at their first instant."""
         series = make_series(pd.period_range('2024-01', periods=4, freq=freq))
         assert FrequencyDetector().detect_time_series_frequency(series, 'full') == expected
 

@@ -1,9 +1,8 @@
 """Tests unitaires des méthodes d'agrégation booléennes de FrequencyConverter.
 
-Ce module épingle le contrat des méthodes `'all'`/`'any'` introduites par le
-correctif §3.3 de `high_frequency_imputer_review.md`, qui remplacent le couple
-somme/comptage utilisé jusque là par `ImputationWindowCalculator._convert_mask_to_frequency`
-pour déterminer si une période basse fréquence est intégralement couverte par
+Ce module épingle le contrat des méthodes `'all'`/`'any'` de l'agrégation booléenne,
+utilisées par `ImputationWindowCalculator._convert_mask_to_frequency` pour
+déterminer si une période basse fréquence est intégralement couverte par
 une fenêtre d'imputation à plus haute fréquence :
 
 - `'all'` : une période cible est vraie ssi TOUTES ses sous-périodes à la
@@ -51,8 +50,8 @@ class TestAggregateAll:
 
     def test_partially_present_period_is_false_even_if_all_present_are_true(self, converter):
         """Bord de grille : une année incomplète (7 mois sur 12) est fausse,
-        même si les 7 mois présents sont tous vrais (coeur du correctif §3.3 :
-        empêche une lecture vacuously true de la partie présente)."""
+        même si les 7 mois présents sont tous vrais : la partie présente n'est
+        jamais lue comme vacuously true."""
         # Grille démarrant en juin : seuls 7 mois de l'année 2020 existent
         index = pd.date_range('2020-06-01', periods=7, freq='MS')
         mask = pd.Series(True, index=index)

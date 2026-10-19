@@ -312,7 +312,7 @@ class TestFrequencyNormalizerIntegration:
 
     def test_normalize_complex_then_is_higher_frequency(self, normalizer):
         """Test that normalized complex strings work with is_higher_frequency()."""
-        # This should work without manual split() workaround
+        # This should work without a manual split()
         assert normalizer.is_higher_frequency('MS', 'QE-DEC') is True
         assert normalizer.is_higher_frequency('QE-DEC', 'YS-JAN') is True
         assert normalizer.is_higher_frequency('D', 'MS') is True
@@ -379,8 +379,8 @@ REMOVED_YEAR_ALIASES = ['A', 'AS', 'AE', 'AS-JAN', 'AE-DEC', 'AS-MAR', 'A-DEC', 
 class TestRemovedAliasRejection:
     """The pandas aliases ``'A'`` / ``'AS'`` / ``'AE'`` are explicitly rejected.
 
-    Their abandon is deliberate: ``normalize`` stopped mapping ``'A'`` to ``'Y'`` in commit
-    ``9ce944e`` and ``'A'`` left ``FrequencyType`` in ``0ec1f29``. The year is written
+    Their abandon is deliberate: ``normalize`` does not map ``'A'`` to ``'Y'``, and
+    ``'A'`` is not a ``FrequencyType`` member. The year is written
     ``'Y'`` / ``'YS'`` / ``'YE'``. Every entry point must fail loudly rather than translate
     the old spelling.
     """
@@ -433,7 +433,7 @@ class TestRemovedAliasRejection:
         assert 'A' not in normalizer._literal_to_pandas.values()
 
     def test_alias_is_absent_from_the_declared_types(self):
-        """``FrequencyType`` no longer declares ``'A'`` (nor the ``'T'`` minute alias)."""
+        """``FrequencyType`` does not declare ``'A'`` (nor the ``'T'`` minute alias)."""
         assert 'A' not in get_args(FrequencyType)
         assert 'T' not in get_args(FrequencyType)
 
@@ -581,7 +581,7 @@ class TestRebuiltPandasStrings:
     )
     @pytest.mark.parametrize("method", ['to_pandas_freq', 'to_dateoffset'])
     def test_non_string_input_raises_value_error(self, normalizer, method, value):
-        """Like ``normalize`` / ``to_literal``, a non-string is a ``ValueError`` (ANO-UTILS-037)."""
+        """Like ``normalize`` / ``to_literal``, a non-string is a ``ValueError``."""
         with pytest.raises(ValueError, match="must be a string"):
             getattr(normalizer, method)(value)
 
@@ -615,7 +615,7 @@ PANDAS_ANCHOR_CANDIDATES = [
 
 
 class TestBareCodesGiveTheEndVariant:
-    """A code with start / end variants and no position gets its end variant (ANO-UTILS-039).
+    """A code with start / end variants and no position gets its end variant.
 
     ``'M'``, ``'Q'``, ``'Y'`` and ``'SM'`` are the aliases pandas 2.2 deprecates (removed in
     pandas 3); they designated the end of the period. ``to_pandas_freq`` therefore answers
@@ -675,7 +675,7 @@ class TestBareCodesGiveTheEndVariant:
 
 
 class TestAnchorValidation:
-    """The anchor after the dash is checked against the base frequency (ANO-UTILS-040).
+    """The anchor after the dash is checked against the base frequency.
 
     Rules of pandas: a month for ``Q`` / ``Y`` (``'QS-JAN'``, ``'Y-DEC'``), a weekday for ``W``
     (``'W-MON'``), a day of the month behind a position for ``SM`` (``'SMS-15'``: 2 to 27,

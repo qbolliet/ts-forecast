@@ -11,10 +11,7 @@ Calendar convention (documented in ``tsforecast/utils/abc/converter.py``,
 conventional counts (1 year = 12 months, 1 quarter = 3 months, 1 month = 30
 days, 1 year = 365 days, ...), looked up before falling back to a
 seconds-based ratio for any other pair. This makes ``Y -> M`` exactly ``12.0``
-(not ``365 / 30 = 12.1667``): a divergence from ``notebooks/utils/
-duration_converter.ipynb``, which predates this exact calendar table and is
-outdated on this specific point (§2.3 of the campaign: the code prevails
-over the notebooks when they disagree).
+(not ``365 / 30 = 12.1667``).
 """
 from __future__ import annotations
 
@@ -134,10 +131,8 @@ class TestConvert:
     def test_unrecognized_rounding_value_raises(self, converter):
         """An unrecognized ``rounding`` value raises an explicit ``ValueError``.
 
-        Hardening after ``ANO-UTILS-004`` (caveat raised in
-        ``notebooks/utils/duration_converter.ipynb`` §3.4, originally ignored
-        silently): a value other than ``'floor'``, ``'ceil'`` or ``None`` no
-        longer silently returns the unrounded value.
+        A value other than ``'floor'``, ``'ceil'`` or ``None`` is refused: it never
+        silently returns the unrounded value.
         """
         with pytest.raises(ValueError, match="Unsupported rounding mode"):
             converter.convert(37, "h", "D", rounding="round")
@@ -259,7 +254,7 @@ class TestGetConversionFactor:
             assert np.isclose(factor_ab * factor_ba, 1.0)
 
     def test_business_day_treated_as_calendar_day(self, converter):
-        """Documented limitation (notebook duration_converter §4.4): ``'B'`` is a calendar day.
+        """Documented limitation: ``'B'`` is treated as a calendar day.
 
         ``'B'`` (business day) is NOT in the nested calendar table and falls
         back on the seconds-based computation, identical to ``'D'``: no

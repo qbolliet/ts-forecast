@@ -9,10 +9,10 @@ gaps). No gold value per cell: the tests check properties derived from the
 calendar (round trip, masked positions, last masked date per entity, dates moved
 by exactly ``k`` periods).
 
-The genuinely irregular index exposed two anomalies, now fixed (``tests/ANOMALIES.md``):
-``ANO-DELAYS-021`` (shift by position on an index with gaps) and ``ANO-DELAYS-017``
-(positions counted on the available dates inside the data, so that a lone January
-observation was masked as the last month of its quarter).
+On the genuinely irregular index, positions are counted on the dates actually
+available inside the data: a shift by position on an index with gaps moves by the
+number of observed dates, and a lone January observation is not masked as the last
+month of its quarter.
 """
 # Modules de base
 import numpy as np
@@ -78,7 +78,7 @@ class TestIrregularIndexTimeseries:
         assert set(rows[rows >= MONTHLY_GRID_START].month) == {3, 6, 9, 12}
 
     def test_lone_annual_dates_are_not_masked(self, irregular_index_timeseries):
-        """Each January of 2015-2017, alone in its quarter, is not on the last position: kept (ANO-DELAYS-017)."""
+        """Each January of 2015-2017, alone in its quarter, is not on the last position: kept."""
         masked = MaskTransformer(n_obs=1, mask_frequency='Q', how='last').fit_transform(irregular_index_timeseries)
         rows = masked.index[masked.isna().all(axis=1) & irregular_index_timeseries.notna().any(axis=1)]
         assert rows[rows < MONTHLY_GRID_START].empty

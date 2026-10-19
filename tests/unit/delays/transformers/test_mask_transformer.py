@@ -6,7 +6,7 @@ Covers the public API of the class: ``__init__`` (``n_obs``, ``mask_frequency``,
 private helpers ``_mask_n_obs_per_period``, ``_extend_period_if_incomplete`` and
 ``_generate_periods`` are exercised through ``transform`` only.
 
-Masking semantics (author decision, 2026-10-06): the index is cut into the
+Masking semantics: the index is cut into the
 calendar periods of ``mask_frequency``; in each of them, ``how='last'`` masks the
 observations on the last ``n_obs`` **positions** of the regular grid of the
 index frequency detected at ``fit``, ``how='first'`` those on the first ones.
@@ -29,10 +29,6 @@ Per-entity parameters go through ``PanelwiseTransformer`` (the class itself
 rejects a ``MultiIndex``); per-variable parameters through one instance per
 group of columns. The realistic scenario (notebook 3 datasets) lives in
 ``tests/integration/delays/test_shift_mask_realistic.py``.
-
-Anomalies found while writing these tests are registered in
-``tests/ANOMALIES.md`` (``ANO-DELAYS-016`` to ``-020``, ``-023``, ``-026`` and ``-027``,
-all fixed).
 """
 # Modules de base
 import warnings
@@ -162,7 +158,7 @@ class TestSklearnProtocol:
         assert not hasattr(clone(masker), 'masked_values_')
 
     def test_unfitted_masker_is_reported_unfitted(self):
-        """``check_is_fitted`` raises ``NotFittedError`` before ``fit`` (ANO-DELAYS-018)."""
+        """``check_is_fitted`` raises ``NotFittedError`` before ``fit``."""
         with pytest.raises(NotFittedError):
             check_is_fitted(MaskTransformer(n_obs=1, mask_frequency='Q'))
 
@@ -226,7 +222,7 @@ class TestMaskGoldValues:
         ],
     )
     def test_weekly_index_masked_by_month(self, how, expected):
-        """A weekly index (``W-SUN``) is masked per month like any finer index (ANO-DELAYS-027)."""
+        """A weekly index (``W-SUN``) is masked per month like any finer index."""
         series = _series('W-SUN', periods=13, start='2024-01-07')
         masked = MaskTransformer(n_obs=1, mask_frequency='M', how=how).fit_transform(series)
         assert _masked_dates(masked) == expected
@@ -338,7 +334,7 @@ class TestRoundTrip:
         assert masker.inverse_transform(masked).isna().sum() == 4
 
     def test_inverse_transform_keeps_the_index_of_its_input(self):
-        """Inverting the first half of a masked series returns that half only (ANO-DELAYS-020)."""
+        """Inverting the first half of a masked series returns that half only."""
         masker = MaskTransformer(n_obs=1, mask_frequency='Q', how='last')
         first_half = masker.fit_transform(_series()).iloc[:6]
         pd.testing.assert_index_equal(masker.inverse_transform(first_half).index, first_half.index)
@@ -353,9 +349,9 @@ class TestBoundaries:
     def test_series_start_with_how_first(self):
         """Data starting on 10 January: the first days of January are absent, nothing is masked there.
 
-        Legacy test (category (c)): it expected 10-12 January masked, a position relative
-        to the data, which the extremities handling (commit ``76ed126``) deliberately
-        replaced by calendar positions. February is complete and masked on 1-3.
+        Positions are calendar positions: the first positions of January (1-3) are
+        absent from the data, so nothing is masked there. February is complete and
+        masked on 1-3.
         """
         series = _daily('2024-01-10', '2024-02-29')
         masked = MaskTransformer(n_obs=3, mask_frequency='M', how='first').fit_transform(series)
@@ -370,7 +366,7 @@ class TestBoundaries:
         assert _masked_dates(masked) == _days('2024-01', range(27, 32)) + _days('2024-02', range(25, 30))
 
     def test_series_end_with_how_first(self):
-        """Data ending on 10 March: 1-4 March are the first positions of March and are masked (ANO-DELAYS-016)."""
+        """Data ending on 10 March: 1-4 March are the first positions of March and are masked."""
         series = _daily('2024-01-01', '2024-03-10')
         masked = MaskTransformer(n_obs=4, mask_frequency='M', how='first').fit_transform(series)
         # Valeur d'or : 1-4 de chaque mois, mars inclus (les positions existent)
@@ -380,8 +376,8 @@ class TestBoundaries:
     def test_series_end_with_how_last(self):
         """Data ending on 15 March: the last positions of March (29-31) are absent, March is not masked.
 
-        Legacy test (category (c)): it expected 13-15 March masked, positions relative to
-        the data; see ``test_series_start_with_how_first``.
+        The last positions of March (29-31) are absent from the data, so nothing is
+        masked there.
         """
         series = _daily('2024-01-01', '2024-03-15')
         masked = MaskTransformer(n_obs=3, mask_frequency='M', how='last').fit_transform(series)
@@ -446,9 +442,8 @@ class TestBoundaries:
     def test_position_less_frequency_raises_no_pandas_deprecation(self, mask_frequency, expected):
         """A daily index has no position: ``'M'`` / ``'Q'`` must not reach pandas as bare aliases.
 
-        Moved from ``TestMaskTransformerPandasAliases``; its monthly gold value pinned
-        April as unmasked (ANO-DELAYS-016), while 29 April is a calendar position of
-        the two last days of April.
+        The monthly gold value keeps April unmasked, while 29 April is a calendar
+        position of the two last days of April.
         """
         series = pd.Series(range(120), index=pd.date_range('2024-01-01', periods=120, freq='D'), name='x', dtype=float)
         masker = MaskTransformer(n_obs=2, mask_frequency=mask_frequency, how='last')
@@ -464,7 +459,7 @@ class TestBoundaries:
         pd.testing.assert_series_equal(masker.inverse_transform(masker.fit_transform(series)), series, check_freq=False)
 
     def test_gap_inside_a_period_masks_nothing_on_the_missing_position(self):
-        """A missing 31 January: the last position of January is absent, 30 January stays (ANO-DELAYS-017)."""
+        """A missing 31 January: the last position of January is absent, 30 January stays."""
         index = pd.date_range('2024-01-01', '2024-02-29', freq='D').drop(TS('2024-01-31'))
         series = pd.Series(np.arange(len(index), dtype=float), index=index)
         masked = MaskTransformer(n_obs=1, mask_frequency='M', how='last').fit_transform(series)
@@ -506,9 +501,8 @@ class TestDataFrameAndVariables:
     def test_dataframe_inverse_transform_restores_the_values(self):
         """``inverse_transform`` restores every value of a frame.
 
-        Legacy ``test_mask_dataframe_inverse_transform`` (category (c) for
-        ``DatetimeIndex.freq``, a cached attribute not part of the contract); integer
-        columns recover their dtype.
+        Integer columns recover their dtype. The index frequency, a cached attribute
+        outside the contract, is not compared.
         """
         masker = MaskTransformer(n_obs=4, mask_frequency='M', how='first')
         recovered = masker.inverse_transform(masker.fit_transform(self._frame()))
@@ -614,12 +608,12 @@ class TestParameterValidation:
             MaskTransformer(n_obs=1, mask_frequency=mask_frequency).fit_transform(series)
 
     def test_unknown_how_raises(self):
-        """``how`` other than ``'first'`` / ``'last'`` is rejected (ANO-DELAYS-019)."""
+        """``how`` other than ``'first'`` / ``'last'`` is rejected."""
         with pytest.raises(ValueError, match="how must be 'first' or 'last', got 'middle'"):
             MaskTransformer(n_obs=1, mask_frequency='Q', how='middle').fit(_series())
 
     def test_negative_n_obs_raises(self):
-        """A negative number of observations to mask is rejected (ANO-DELAYS-019)."""
+        """A negative number of observations to mask is rejected."""
         with pytest.raises(ValueError, match="'n_obs' must be a non-negative integer, got -1"):
             MaskTransformer(n_obs=-1, mask_frequency='Q').fit(_series())
 
@@ -705,7 +699,7 @@ class TestIndexRobustness:
             getattr(masker, method)([1, 2, 3])
 
     def test_multiindex_input_raises_a_clear_error(self):
-        """A panel passed directly raises a ``ValueError`` pointing to ``PanelwiseTransformer`` (ANO-DELAYS-023)."""
+        """A panel passed directly raises a ``ValueError`` pointing to ``PanelwiseTransformer``."""
         index = pd.MultiIndex.from_product([['FR', 'DE'], pd.date_range('2024-01-01', periods=6, freq='MS')])
         panel = pd.DataFrame({'a': np.arange(12.)}, index=index)
         with pytest.raises(ValueError, match="wrap it in a PanelwiseTransformer"):

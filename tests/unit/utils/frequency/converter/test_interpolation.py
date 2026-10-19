@@ -6,7 +6,7 @@ Y → Q → M, ``limit`` (integer, ``None``, ``'default'``, invalid values),
 ``limit_area``, interior NaN, the interpolation methods (``time``, ``index``,
 ``nearest``, unsupported), the ``asfreq`` fallback when the source frequency
 cannot be detected, empty and unobserved inputs, and the target grid of the
-upsampling path, fixed after U8 (ANO-UTILS-052 to 068): non-integer frequency
+upsampling path: non-integer frequency
 ratio (M → W), semi-monthly frequencies, sub-daily frequencies, variables
 carried on a finer row grid, unsorted input, index name, multiplied
 position-less source frequencies ('2D').
@@ -316,7 +316,7 @@ class TestEmptyOrUnobservedInput:
 
 
 # =============================================================================
-# Grille cible du sur-échantillonnage (ANO-UTILS-052 à 058, 068 corrigées)
+# Grille cible du sur-échantillonnage
 # =============================================================================
 
 class TestUpsamplingTargetGrid:
@@ -391,7 +391,7 @@ class TestUpsamplingTargetGrid:
         ],
     )
     def test_sub_daily_target_keeps_the_time_of_day(self, converter, source_step, target, expected_head):
-        """Sub-daily stamps are not brought back to midnight (ANO-UTILS-068)."""
+        """Sub-daily stamps are not brought back to midnight."""
         # Valeur = nombre d'unités cibles écoulées depuis minuit : l'interpolation
         # linéaire redonne ce décompte à chaque pas de la grille cible
         steps = pd.date_range('2024-01-01', periods=4, freq=source_step)
@@ -445,11 +445,8 @@ class TestUpsamplingTargetGrid:
 class TestMultipliedPositionlessSource:
     """A multiplied tick frequency ('2D') stamps the start of its block, like pandas.
 
-    Triage of the inherited failure
-    ``test_positions.py::TestExtendIndexForUpsampling::test_unsupported_frequency_pair_returns_original``
-    ('2D' → 'D', supported since ``469d37f``): the author ruled on 2026-09-30 that a
-    position-less multiplied tick is read as the start of its block, as
-    ``pandas.resample`` labels it (ANO-UTILS-064, fixed).
+    A position-less multiplied tick is read as the start of its block, as
+    ``pandas.resample`` labels it.
     """
 
     @pytest.fixture

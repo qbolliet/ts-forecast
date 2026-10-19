@@ -150,7 +150,7 @@ class TestBuildFrequencyString:
             pytest.param("Y", "S", None, "YS", id="yearly-start"),
             pytest.param("Y", "E", None, "YE", id="yearly-end"),
             # Jour ouvré et semaine : pas de variante S/E en pandas ('BE', 'WS'
-            # n'existent pas), la position est ignorée (ANO-UTILS-009)
+            # n'existent pas), la position est ignorée
             pytest.param("B", "E", None, "B", id="business-daily-position-ignored"),
             pytest.param("W", "S", None, "W", id="weekly-position-ignored"),
             pytest.param("W", "E", "MON", "W-MON", id="weekly-anchor-position-ignored"),
@@ -160,7 +160,7 @@ class TestBuildFrequencyString:
             pytest.param("Q", "E", "DEC", "QE-DEC", id="quarterly-end-dec-anchor"),
             pytest.param("Q", "S", "JAN", "QS-JAN", id="quarterly-start-jan-anchor"),
             # Fréquences sous-journalières : non "position-aware", la position
-            # demandée est silencieusement ignorée (§ liste _POSITION_AWARE_FREQUENCIES)
+            # demandée est silencieusement ignorée (voir _POSITION_AWARE_FREQUENCIES)
             pytest.param("h", "S", None, "h", id="hourly-position-ignored"),
             pytest.param("min", "E", None, "min", id="minute-position-ignored"),
             pytest.param("s", None, None, "s", id="second-no-position"),
@@ -198,7 +198,7 @@ class TestBuildFrequencyString:
         """The suffix is always appended when given, even without a position.
 
         Required for anchors without an S/E position notion (e.g. a weekday,
-        ``'W-MON'``) - see ``ANO-UTILS-001``, fixed.
+        ``'W-MON'``).
         """
         assert build_frequency_string("Q", position=None, suffix="DEC") == "Q-DEC"
         assert build_frequency_string("W", position=None, suffix="MON") == "W-MON"
@@ -237,10 +237,9 @@ class TestBuildFrequencyString:
     def test_deprecated_annual_aliases_rejected(self, frequency):
         """Explicit and deliberate rejection of the pandas aliases 'A' / 'AS' / 'AE'.
 
-        Consolidation of ``parse_frequency`` / ``build_frequency_string`` as
-        the only frequency primitives, accepted by the author: the base
-        frequency goes through ``normalize_frequency``, which no longer
-        recognizes them.
+        ``parse_frequency`` / ``build_frequency_string`` are the only frequency
+        primitives: the base frequency goes through ``normalize_frequency``, which
+        does not recognize these aliases.
         """
         with pytest.raises(ValueError, match="Unsupported frequency"):
             build_frequency_string(frequency)
@@ -263,8 +262,7 @@ class TestParseBuildRoundTrip:
 
     Rebuilding from the parsed components reproduces the original string
     exactly for every supported frequency string, including anchors without
-    an S/E position such as a weekday anchor (``'W-MON'``, fixed by
-    ``ANO-UTILS-001``).
+    an S/E position such as a weekday anchor (``'W-MON'``).
     """
 
     @pytest.mark.parametrize(
@@ -290,8 +288,8 @@ class TestBuiltStringIsValidPandas:
     def test_every_base_and_position_gives_a_valid_offset(self, frequency, position):
         """Any supported base frequency combined with any position is a valid pandas offset.
 
-        Before the fix (ANO-UTILS-009), ``'W'`` and ``'B'`` received a position
-        suffix (``'WS'``, ``'BE'``) unknown to pandas.
+        ``'W'`` and ``'B'`` never receive a position suffix (``'WS'``, ``'BE'``),
+        which pandas does not know.
         """
         assert to_offset(build_frequency_string(frequency, position=position)) is not None
 
