@@ -9,6 +9,7 @@ couverture.
 import argparse
 import json
 import os
+import subprocess
 import sys
 
 import pytest
@@ -160,11 +161,32 @@ def run_path(path: str) -> int:
     ])
 
 
+def run_conventions() -> int:
+    """Run the convention checker on all its rules (only blocking ones fail).
+
+    Returns:
+        Exit code of ``scripts/check_conventions.py`` (0 = no blocking violation).
+    """
+    script = os.path.join(PROJECT_ROOT, "scripts", "check_conventions.py")
+    return subprocess.call(
+        [sys.executable, script, "--rule", "all", "--format", "summary"], cwd=PROJECT_ROOT
+    )
+
+
+def run_doctests() -> int:
+    """Run the doctests of the ``tsforecast`` package.
+
+    Returns:
+        Pytest exit code (0 = success).
+    """
+    return pytest.main(["--doctest-modules", "tsforecast", "-q"])
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Lance la suite de tests de tsforecast")
     parser.add_argument(
         "--mode",
-        choices=["all", "unit", "integration", "fast", "coverage"],
+        choices=["all", "unit", "integration", "fast", "coverage", "conventions", "doctest"],
         default="fast",
         help="Mode d'exécution des tests",
     )
@@ -187,5 +209,9 @@ if __name__ == "__main__":
         exit_code = run_fast_tests()
     elif args.mode == "coverage":
         exit_code = run_with_coverage()
+    elif args.mode == "conventions":
+        exit_code = run_conventions()
+    elif args.mode == "doctest":
+        exit_code = run_doctests()
 
     sys.exit(exit_code)

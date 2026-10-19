@@ -46,6 +46,8 @@ build-backend = "hatchling.build"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "--strict-markers"
+# Options des doctests lancés explicitement (--doctest-modules absent des addopts)
+doctest_optionflags = ["NORMALIZE_WHITESPACE", "ELLIPSIS"]
 markers = [
     "unit: test unitaire d'un composant isolé de tsforecast",
     "integration: test enchaînant plusieurs composants publics ou des jeux réalistes",
