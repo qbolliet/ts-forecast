@@ -1,0 +1,48 @@
+# Continuous integration: tests on pull requests to main; coverage (uploaded to Codecov)
+# and slow tests on pushes to main. Manual runs execute the slow tests too.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --group dev
+      - name: Run fast tests
+        if: github.event_name == 'pull_request'
+        run: uv run pytest tests/ -m "not slow"
+      - name: Run fast tests with coverage
+        if: github.event_name != 'pull_request'
+        run: >
+          uv run pytest tests/ -m "not slow"
+          --cov=tsforecast --cov-branch --cov-report=xml
+      - uses: codecov/codecov-action@v5
+        if: github.event_name != 'pull_request' && always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: false
+
+  slow-tests:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --group dev
+      - name: Run slow tests
+        run: uv run pytest tests/ -m slow

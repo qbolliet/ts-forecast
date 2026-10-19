@@ -1,0 +1,34 @@
+# Codecov configuration: an informational status, one component (with its own badge) per package.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+
+ignore:
+  - "tests/"
+  - "notebooks/"
+
+component_management:
+  individual_components:
+    - component_id: utils
+      name: utils
+      paths: ["tsforecast/utils/**"]
+    - component_id: delays
+      name: delays
+      paths: ["tsforecast/delays/**"]
+    - component_id: frequency
+      name: frequency
+      paths: ["tsforecast/frequency/**"]
+    - component_id: base
+      name: base
+      paths: ["tsforecast/base/**"]
+    - component_id: crossvals
+      name: crossvals
+      paths: ["tsforecast/crossvals/**"]
+    - component_id: panel
+      name: panel
+      paths: ["tsforecast/panel/**"]
+    - component_id: xy
+      name: xy
+      paths: ["tsforecast/xy/**"]

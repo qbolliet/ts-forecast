@@ -7,6 +7,7 @@ couverture.
 """
 # Importation des modules
 import argparse
+import json
 import os
 import sys
 
@@ -72,25 +73,73 @@ def run_fast_tests() -> int:
     ])
 
 
-def run_with_coverage() -> int:
-    """Run the full suite with a branch coverage report.
+# Paquets soumis au seuil de couverture, et seuil par module (lignes + branches)
+COVERED_PACKAGES = ("utils", "delays", "frequency", "base", "crossvals", "panel", "xy")
+COVERAGE_THRESHOLD = 90.0
 
-    Produces terminal (``term-missing``), HTML (``htmlcov/``) and XML
-    (``coverage.xml``) reports.
+
+def find_uncovered_modules(
+    coverage_json: str, threshold: float = COVERAGE_THRESHOLD
+) -> list[tuple[str, float]]:
+    """List the modules of the monitored packages below the coverage threshold.
+
+    Args:
+        coverage_json: Path to a ``coverage.json`` report produced with branch coverage.
+        threshold: Minimum percentage (lines and branches) required per module.
 
     Returns:
-        Pytest exit code (0 = success).
+        ``(module path, percentage)`` pairs below the threshold, sorted by path.
     """
-    return pytest.main([
+    with open(coverage_json, encoding="utf-8") as handle:
+        files = json.load(handle)["files"]
+    prefixes = tuple(f"tsforecast/{package}/" for package in COVERED_PACKAGES)
+    failing = []
+    for path, data in files.items():
+        normalized = path.replace("\\", "/")
+        if not normalized.startswith(prefixes):
+            continue
+        # Les fichiers sans instruction exécutable (ex. __init__ vides) sont ignorés
+        if data["summary"]["num_statements"] == 0:
+            continue
+        percent = data["summary"]["percent_covered"]
+        if percent < threshold:
+            failing.append((normalized, percent))
+    return sorted(failing)
+
+
+def run_with_coverage() -> int:
+    """Run the full suite with a branch coverage report and enforce the threshold.
+
+    Produces terminal (``term-missing``), HTML (``htmlcov/``), XML
+    (``coverage.xml``) and JSON (``coverage.json``) reports, then fails if a
+    module of the monitored packages is below ``COVERAGE_THRESHOLD`` percent.
+
+    Returns:
+        0 if tests pass and every monitored module reaches the threshold,
+        the pytest exit code or 1 otherwise.
+    """
+    exit_code = pytest.main([
         "tests/",
         "--cov=tsforecast",
         "--cov-branch",
         "--cov-report=term-missing",
         "--cov-report=html",
         "--cov-report=xml",
+        "--cov-report=json",
         "-v",
         "--tb=short",
     ])
+    if exit_code != 0:
+        return int(exit_code)
+
+    failing = find_uncovered_modules(os.path.join(PROJECT_ROOT, "coverage.json"))
+    if failing:
+        print(f"\nModules under {COVERAGE_THRESHOLD:.0f}% coverage:")
+        for path, percent in failing:
+            print(f"  {percent:6.2f}%  {path}")
+        return 1
+    print(f"\nAll monitored modules reach {COVERAGE_THRESHOLD:.0f}% coverage.")
+    return 0
 
 
 def run_path(path: str) -> int:

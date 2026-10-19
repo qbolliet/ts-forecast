@@ -1,4 +1,15 @@
 # ts-forecast
+
+[![tests](https://github.com/qbolliet/ts-forecast/actions/workflows/tests.yml/badge.svg)](https://github.com/qbolliet/ts-forecast/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg)](https://codecov.io/gh/qbolliet/ts-forecast)
+[![utils](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=utils&label=utils)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=utils)
+[![delays](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=delays&label=delays)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=delays)
+[![frequency](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=frequency&label=frequency)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=frequency)
+[![base](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=base&label=base)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=base)
+[![crossvals](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=crossvals&label=crossvals)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=crossvals)
+[![panel](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=panel&label=panel)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=panel)
+[![xy](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=xy&label=xy)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=xy)
+
 Tools for pseudo-real time forecasting on time series and panel data
 
 # Objectifs
@@ -12,24 +23,43 @@ Ce package poursuit les objectifs suivants :
 - Permettre l'utilisation de méthodes d'interprétabilité
 - L'agrégation sera traitée dans un package différent
 
-
 ## Test
 
-### Run all tests
+Les tests utilisent `pytest` ; la couverture (lignes et branches) est mesurée par `pytest-cov`
+et publiée par Codecov (badges ci-dessus : global, puis un badge par paquet). Seuil visé :
+90 % par module.
 
-python tests/run_tests.py --mode all
+### Commandes
 
-### Run unit tests only (tests/unit/ and tests/support/)
-python tests/run_tests.py --mode unit
+```bash
+python tests/run_tests.py --mode all          # tous les tests
+python tests/run_tests.py --mode unit         # tests unitaires (tests/unit/ et tests/support/)
+python tests/run_tests.py --mode integration  # tests d'intégration (tests/integration/)
+python tests/run_tests.py --mode fast         # tout sauf les tests marqués slow
+python tests/run_tests.py --mode coverage     # suite complète + rapports + contrôle du seuil de 90 %
+python tests/run_tests.py --path tests/unit/crossvals/base/   # cible libre (fichier, dossier, node id)
+```
 
-### Run integration tests only (tests/integration/)
-python tests/run_tests.py --mode integration
+Le mode `coverage` produit `coverage.xml`, `coverage.json` et `htmlcov/`, puis échoue en listant
+les modules de `tsforecast/{utils,delays,frequency,base,crossvals,panel,xy}` sous 90 %.
 
-### Run fast tests only (excluding tests marked slow)
-python tests/run_tests.py --mode fast
+### Arborescence
 
-### Run with coverage report
-python tests/run_tests.py --mode coverage
+```
+tests/
+├── unit/         # miroir exact de tsforecast/ : un composant, petites données à valeurs d'or
+├── integration/  # plusieurs composants publics enchaînés, ou jeux de données réalistes
+├── support/      # jeux de données, fixtures, perturbations et doublures partagés
+├── ANOMALIES.md  # registre des anomalies détectées par la campagne de tests
+└── run_tests.py  # lanceur
+```
 
-### Run a specific target (file, directory or node id)
-python tests/run_tests.py --path tests/unit/crossvals/base/
+Les anomalies de comportement du code constatées par les tests sont consignées dans
+[`tests/ANOMALIES.md`](tests/ANOMALIES.md).
+
+### Intégration continue
+
+`.github/workflows/tests.yml` vérifie que les tests (hors `slow`) passent sur chaque pull
+request vers `main`. Sur chaque push sur `main`, il mesure la couverture, l'envoie à Codecov
+(secret `CODECOV_TOKEN`) et lance les tests `slow` dans un job séparé. La configuration Codecov
+est dans `codecov.yml`.
