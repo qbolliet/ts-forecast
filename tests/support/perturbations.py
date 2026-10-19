@@ -669,7 +669,7 @@ def rename_entities(
         old_key, new_key = _as_entity_tuple(old), _as_entity_tuple(new)
         if len(new_key) != n_levels:
             raise ValueError(f"new key {new!r} has {len(new_key)} labels, expected {n_levels}")
-        # Contrôle de l'existence (et de l'arité) de l'ancienne clé
+        # Contrôle de l'existence (et de l'arité) de la clé d'origine
         _entity_row_mask(df, old_key)
         renames[old_key] = new_key
 

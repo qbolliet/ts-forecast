@@ -125,7 +125,7 @@ def test_imputation_metrics_unfitted_raises():
 
 
 def test_imputation_metrics_describe_the_last_pass(mixed_frequency_ts):
-    """Les métriques suivent la dernière passe : après un transform, sa sortie (D45)."""
+    """Les métriques décrivent la dernière passe : après un transform, la sortie de ce transform."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         imputer = HighFrequencyImputer(
