@@ -1,3 +1,6 @@
+"""Frequency string parsing package. Re-exports ``parse_frequency``,
+``build_frequency_string``, the ``ParsedFrequency`` container and
+``MONTH_ABBREVIATIONS``."""
 # Import des éléments du module
 from .._constants import MONTH_ABBREVIATIONS
 from .utils import (

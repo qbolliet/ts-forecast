@@ -1,3 +1,5 @@
+"""Literal type aliases for frequency codes (``FrequencyType``) and their user-facing names
+(``UserFrequencyType``)."""
 # Importation des modules
 from typing import Literal
 

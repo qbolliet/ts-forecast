@@ -1,3 +1,7 @@
+"""Module-level helpers for frequency strings: canonicalization and normalization,
+conversion to literal, code, pandas alias and DateOffset forms, comparison and ordering,
+and frequency detection for series, datasets and indexes (``detect_frequency``,
+``detect_dataset_frequency``, ``detect_index_frequency``)."""
 # Importation des modules
 # Modules de base
 from typing import Union, Literal, Tuple, Optional, Dict, List, TYPE_CHECKING

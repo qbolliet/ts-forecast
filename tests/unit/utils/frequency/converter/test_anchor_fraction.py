@@ -1,11 +1,8 @@
-"""Tests unitaires pour `interpolate_to_higher_frequency(anchor_fraction=...)`.
-
-Ce module couvre la position d'ancrage de la valeur dans sa période (prérequis
-de `HighFrequencyImputer`) : le
-décalage des ancres à une fraction de leur période source, l'interpolation sur
-l'union (ancres décalées ∪ grille cible), la restriction finale à la grille
-cible, et la non-régression stricte du chemin `anchor_fraction=None`.
-"""
+"""Unit tests for the ``anchor_fraction`` option of FrequencyConverter: anchor shifts
+inside the source period, interpolation on the union of shifted anchors and the target
+grid, final restriction to the target grid, rejection of out-of-range or non-numeric
+values, and fallback paths (non-linear methods, sub-daily targets, non-period sources).
+The default ``anchor_fraction=None`` path is also checked for unchanged behaviour."""
 import pytest
 import pandas as pd
 import numpy as np

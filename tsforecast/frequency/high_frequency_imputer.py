@@ -1,4 +1,7 @@
-"""Mixed-frequency imputer """
+"""Mixed-frequency imputer ``HighFrequencyImputer``, which imputes low-frequency columns
+onto a finer target grid in cascade and records the provenance of every imputed value.
+Also holds the private per-variable fit record and the integer-check helper it relies
+on."""
 # Importation des modules
 # Modules de base
 import numbers

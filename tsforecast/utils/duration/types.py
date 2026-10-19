@@ -1,3 +1,5 @@
+"""Literal type aliases for duration units: canonical codes (``DurationType``), user-facing
+names (``UserDurationType``) and the rounding modes (``RoundingType``)."""
 # Importation des modules
 from typing import Literal, Optional
 

@@ -1,10 +1,7 @@
-"""Tests du paquet ``tsforecast.tracking``.
-
-Vérifie que les trois constructeurs de métriques renvoient des dictionnaires
-plats de scalaires finis (contrat ``mlflow.log_metrics``), que les clés
-attendues sont stables, et que les cas dégénérés (imputeur sans modèle,
-splitter à un seul pli, transformateur de délais vide) ne lèvent pas.
-"""
+"""Unit tests for the tsforecast.tracking metric builders: imputation, delay and detection
+metrics and split summaries. Checks that the outputs are flat mappings of finite scalars
+with stable keys, gold values on detection metrics, and that degenerate inputs (unfitted
+components, single-fold splitters, empty delay transformers) are handled without error."""
 # Modules de base
 import math
 import warnings

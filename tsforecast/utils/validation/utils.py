@@ -1,3 +1,7 @@
+"""Validation of temporal data and panel structures. Provides ``validate_temporal_data``,
+the entity and ordering checks ``validate_entities_grouped`` and
+``validate_sorted_within_groups``, and ``restore_original_structure`` to rebuild the
+input layout."""
 # Importation des modules
 # Modules de base
 import numpy as np

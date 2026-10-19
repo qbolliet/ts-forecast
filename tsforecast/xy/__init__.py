@@ -1,13 +1,5 @@
-"""Module XY pour transformateurs qui transforment à la fois X et y.
-
-Ce module fournit :
-- XYTransformerMixin : classe mixin pour créer des transformateurs XY
-- XYPanelTimeSeriesTransformer : classe de base des transformateurs XY validés
-  (séries temporelles et panels)
-- XYPipeline : pipeline compatible avec les transformateurs XY
-- DropNaNTarget : étape de retrait des lignes sans cible, avant l'estimateur
-- is_xy_transformer : reconnaissance d'une étape XY déclarée
-"""
+"""Package for XY transformers, which process features and target together. Re-exports the
+transformer base classes, ``XYPipeline``, ``DropNaNTarget`` and ``is_xy_transformer``."""
 # Importation des éléments d'intérêt du module
 from .transformers import (
     DropNaNTarget,

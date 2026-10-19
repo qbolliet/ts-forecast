@@ -1,26 +1,6 @@
-"""Tests unitaires du comptage de sous-périodes de FrequencyConverter.
-
-Ce module épingle le contrat des deux méthodes de comptage :
-
-- `get_conversion_factor(high, low)` : comptage constant, indépendant de tout
-  index, exact pour les paires calendaires emboîtées (12 mois dans une année,
-  et non les 12.17 d'un ratio de durées naïf) ;
-- `count_subperiods_per_period(index, low, high)` : comptage exact période par
-  période, qui respecte les irrégularités calendaires (février compte 28 jours).
-
-Les deux sont la seule source de vérité du package en matière de comptage de
-sous-périodes : `ImputationWindowCalculator._convert_mask_to_frequency` et le
-constructeur du jeu d'entraînement de l'imputeur multi-fréquences les consomment
-toutes deux.
-
-`TestFullPeriodsOnlyUsesCalendarCounts` épingle le consommateur interne du
-comptage exact : le garde-fou `full_periods_only` d'`aggregate_to_lower_frequency`,
-aligné sur celui de `method='all'`. Avant cet alignement, un facteur constant
-(`get_duration_conversion_factor('M', 'D') == 30.0`) exigeait 30 jours par mois
-et écartait février toutes les années, ce qui cassait la régularité de la série
-mensuelle intermédiaire et faisait disparaître toute covariable journalière du
-jeu d'entraînement de l'imputeur multi-fréquences.
-"""
+"""Unit tests for sub-period counting in FrequencyConverter: calendar-exact counts for each
+frequency pair, leap years and days per period, and full-period-only aggregation that
+relies on calendar counts rather than constant durations."""
 import numpy as np
 import pandas as pd
 import pytest

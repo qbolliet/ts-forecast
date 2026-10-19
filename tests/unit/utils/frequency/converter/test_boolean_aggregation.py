@@ -1,18 +1,6 @@
-"""Tests unitaires des méthodes d'agrégation booléennes de FrequencyConverter.
-
-Ce module épingle le contrat des méthodes `'all'`/`'any'` de l'agrégation booléenne,
-utilisées par `ImputationWindowCalculator._convert_mask_to_frequency` pour
-déterminer si une période basse fréquence est intégralement couverte par
-une fenêtre d'imputation à plus haute fréquence :
-
-- `'all'` : une période cible est vraie ssi TOUTES ses sous-périodes à la
-  fréquence source sont présentes ET vraies. Une période vide, ou seulement
-  partiellement présente (bord de grille), est toujours fausse — même si les
-  valeurs présentes sont toutes vraies.
-- `'any'` : une période cible est vraie ssi au moins une sous-période présente
-  est vraie. Une période vide est fausse (comportement déjà natif de
-  `Series.any()` sur une entrée vide).
-"""
+"""Unit tests for boolean aggregation in FrequencyConverter: the ``all`` and ``any``
+aggregators over sub-periods, covering full and partial coverage, multi-year series, and
+independent evaluation of DataFrame columns."""
 import numpy as np
 import pandas as pd
 import pytest

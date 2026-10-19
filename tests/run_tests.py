@@ -1,10 +1,6 @@
-"""Lanceur de tests pour l'ensemble du package ``tsforecast``.
-
-Ce script fournit une manière pratique de lancer la suite complète avec
-différentes configurations : tous les tests, seulement les tests unitaires
-ou d'intégration, en excluant les tests lents, ou avec un rapport de
-couverture.
-"""
+"""Command-line runner for the tsforecast test suite. Selects all, unit, integration or
+fast tests, runs coverage with a per-module threshold check, runs a single path, the
+convention checker or the doctests."""
 # Importation des modules
 import argparse
 import json

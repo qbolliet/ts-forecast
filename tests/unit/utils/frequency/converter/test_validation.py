@@ -1,8 +1,7 @@
-"""Tests unitaires pour la validation des paramètres dans FrequencyConverter.
-
-Ce module teste la validation des fréquences et positions dans les méthodes
-de conversion, notamment la validation de freq_pos dans _validate_conversion_params.
-"""
+"""Unit tests for parameter validation in FrequencyConverter: valid and invalid position
+and frequency strings in series and dictionary targets, error handling for malformed
+targets and unknown columns, integration with DurationConverter, and modern resample
+aliases."""
 import pytest
 import pandas as pd
 from tsforecast.utils.frequency.converter import FrequencyConverter

@@ -1,8 +1,7 @@
-"""Tests unitaires pour les conversions de fréquence avec gestion des positions (S/E).
-
-Ce module teste la préservation des positions (start/end) lors des conversions
-de fréquence et l'extension de la plage temporelle lors de l'upsampling.
-"""
+"""Unit tests for period positions in FrequencyConverter: start and end positions preserved
+across quarter, month and year conversions, index extension for upsampling, cross-
+position upsampling with re-anchoring, and the mapping of positioned frequencies to
+pandas aliases."""
 import warnings
 
 import pytest

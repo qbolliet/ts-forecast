@@ -1,3 +1,5 @@
+# Package metadata, build system, dependency groups and tool settings (pytest, coverage)
+# for ts-forecast.
 [project]
 name = "ts-forecast"
 version = "0.1.0"

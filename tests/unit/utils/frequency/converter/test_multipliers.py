@@ -1,12 +1,7 @@
-"""Tests unitaires du FrequencyConverter avec des fréquences multipliées ('2MS', '3QS-FEB').
-
-La décomposition de ``target_freq`` passe par ``ParsedFrequency`` : le
-multiplicateur est conservé jusqu'à ``resample`` / ``date_range``, il entre dans
-le sens de la conversion (sur-échantillonnage ou agrégation) et dans les
-facteurs de conversion. Les opérations qui comptent des périodes de base
-(``full_periods_only``, ``method='all'``, ``anchor_fraction``) rejettent
-explicitement une fréquence multipliée.
-"""
+"""Unit tests for multiplied frequencies such as bimonthly grids in FrequencyConverter:
+down- and upsampling, DataFrame targets with mixed multipliers, conversion factors,
+rejection of operations unsupported for multiplied frequencies, and modernization of
+resample aliases."""
 import pandas as pd
 import pytest
 

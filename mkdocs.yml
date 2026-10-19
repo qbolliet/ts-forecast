@@ -1,3 +1,5 @@
+# MkDocs site configuration for ts-forecast: theme, navigation, and the mkdocstrings
+# plugin that generates the API reference pages.
 site_name: Time series forecast
 site_url: https://qbolliet.github.io/ts-forecast/
 repo_url: https://github.com/qbolliet/ts-forecast

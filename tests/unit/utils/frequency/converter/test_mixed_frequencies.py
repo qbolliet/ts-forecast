@@ -1,11 +1,7 @@
-"""Tests unitaires pour les conversions de fréquences mixtes (target_freq dict).
-
-Ce module épingle le contrat d'index de FrequencyConverter.convert_frequency
-lorsqu'un dictionnaire {colonne: fréquence} est fourni : l'index de sortie est
-l'union des index cibles des colonnes converties. L'index source disparaît dès
-que toutes les colonnes sont converties ; seules les colonnes absentes du
-dictionnaire (ou déjà à la fréquence cible) conservent leurs dates d'origine.
-"""
+"""Unit tests for mixed-frequency conversion in FrequencyConverter: the index contract of
+per-column target dictionaries, NaN patterns without alignment, partial dictionaries
+that keep unconverted columns, and the alignment methods of a yearly column against a
+quarterly union grid."""
 import numpy as np
 import pandas as pd
 import pytest

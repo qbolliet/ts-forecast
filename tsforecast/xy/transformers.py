@@ -1,9 +1,6 @@
-"""Mixin pour transformateurs XY qui transforment à la fois X et y.
-
-Ce module fournit XYTransformerMixin, une classe mixin qui standardise
-l'interface pour les transformateurs capables de transformer simultanément
-les features (X) et les targets (y).
-"""
+"""Base classes for transformers that process features and target together:
+``XYTransformerMixin``, the validated ``XYPanelTimeSeriesTransformer`` base, the
+``DropNaNTarget`` step and the ``is_xy_transformer`` recognition helper."""
 # Importation des modules
 # Modules de base
 from abc import ABC, abstractmethod
