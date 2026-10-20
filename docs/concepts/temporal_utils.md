@@ -71,7 +71,14 @@ Conventions de conversion :
     l'époque Unix, ou sur le paramètre optionnel `origin` ;
   - fuseau horaire conservé (jours de 23 h / 25 h aux changements d'heure) ;
     entrées `datetime`, `Timestamp`, `datetime64` ou `Period` (représentée par
-    son premier instant).
+    son premier instant) ;
+  - bornes dans l'unité de la date (`us` pour un `datetime` ou un `Period`), plus
+    fine si la borne l'exige (fin d'une période `'ns'` d'une date en secondes).
+- `as_exact_unit()` — exprime des dates (`Timestamp`, `DatetimeIndex`) dans une
+  unité de stockage (`s`, `ms`, `us`, `ns`) sans jamais arrondir : une date plus
+  fine passe à la plus grossière des unités plus fines qui la représente. Le
+  package rend ainsi toutes ses dates dans l'unité de l'entrée (`FrequencyConverter`,
+  `convert_position`, bornes de période, et les composants qui s'appuient sur eux).
 
 ## `utils/validation/` — validation de structure
 

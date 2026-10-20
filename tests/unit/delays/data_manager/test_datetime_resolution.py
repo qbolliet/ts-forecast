@@ -4,8 +4,9 @@ Series and panels whose dates are stored in seconds, milliseconds, microseconds
 or nanoseconds (``with_datetime_resolution``), the two downloads possibly at
 different resolutions: the detected observations and their delays (in days,
 seconds and microseconds, from the start or the end of the period) equal those
-of the nanosecond input; ``observation_date`` keeps the input resolution, the
-period bounds and the download date have one resolution whatever the input.
+of the nanosecond input; ``observation_date`` and the period bounds keep the
+input resolution, the download date given as a string has the default
+resolution of pandas (microseconds) whatever the input.
 """
 
 import numpy as np
@@ -68,12 +69,14 @@ class TestDatetimeResolution:
         )
 
         pd.testing.assert_frame_equal(result, reference, check_dtype=False)
-        # Date d'observation : résolution de l'entrée ; bornes de période et téléchargement :
-        # une seule résolution, quelle que soit l'entrée
-        units = datetime_units(result)
-        assert units.pop(('column', 'observation_date')) == unit
-        assert units == {key: value for key, value in datetime_units(reference).items()
-                         if key != ('column', 'observation_date')}
+        # Date d'observation et bornes de période : résolution de l'entrée ; date de
+        # téléchargement, donnée en chaîne : résolution par défaut de pandas
+        assert datetime_units(result) == {
+            ('column', 'observation_date'): unit,
+            ('column', 'download_date'): 'us',
+            ('column', 'period_start'): unit,
+            ('column', 'period_end'): unit,
+        }
 
     @pytest.mark.parametrize('new_unit', DATETIME_UNITS)
     @pytest.mark.parametrize('existing_unit', ['s', 'ns'])

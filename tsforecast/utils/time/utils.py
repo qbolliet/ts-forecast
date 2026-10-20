@@ -12,6 +12,8 @@ from ..parse import parse_frequency
 from .._constants import (
     MONTH_ABBREVIATIONS, WEEKDAY_ABBREVIATIONS, MONTH_BASED_FREQUENCIES, SUBDAILY_NS,
 )
+# Expression exacte des bornes dans l'unité de la date de référence
+from .resolution import as_exact_unit
 
 # Fonction de conversion d'une chaîne de caractères en date
 def resolve_date(date: Union[str, datetime], format: str = None) -> datetime:
@@ -461,6 +463,9 @@ def _period_bounds(
 
     Returns:
         Tuple ``(start, end)`` in the time zone of ``date``; ``end`` is exclusive.
+        The bounds carry the unit of their own computation (microseconds for
+        the calendar constructors, nanoseconds for sub-daily offsets): see
+        :func:`_at_date_unit`.
 
     Raises:
         ValueError: If the frequency or its anchor is unsupported, or if ``date``
@@ -491,6 +496,33 @@ def _period_bounds(
     else:
         start, end = _month_bounds(wall, spec, aligned_origin)
     return _localize(start, tz), _localize(end, tz)
+
+
+# Expression d'une borne dans l'unité de la date de référence
+def _at_date_unit(bound: pd.Timestamp, date: Union[pd.Timestamp, datetime, pd.Period]) -> pd.Timestamp:
+    """Express a period bound at the unit of the reference date.
+
+    The unit is that of ``pd.Timestamp(date)`` (microseconds for a
+    ``datetime`` or a ``Period``); a bound finer than it (the end of a
+    ``'ns'`` period of a date in seconds) moves to the coarsest finer unit
+    holding it exactly. Each bound is expressed on its own.
+
+    Args:
+        bound: Bound computed by :func:`_period_bounds`.
+        date: Reference date of the period, already validated.
+
+    Returns:
+        The same instant at the unit of ``date``, or finer.
+
+    Raises:
+        pandas.errors.OutOfBoundsDatetime: If ``date`` is in nanoseconds and
+            ``bound`` lies outside the nanosecond range.
+
+    Examples:
+        >>> _at_date_unit(pd.Timestamp('2023-07-01'), pd.Timestamp('2023-06-15').as_unit('s')).unit
+        's'
+    """
+    return as_exact_unit(bound, _to_timestamp(date).unit)
 
 
 # Fonction identifiant la date de début d'une période à partir d'une date et d'une fréquence
@@ -526,12 +558,16 @@ def get_period_start(
             the frequency is then ignored), sub-daily ones its instant.
 
     Returns:
-        Start of the period, in the time zone of ``date`` (naive if ``date`` is).
+        Start of the period, in the time zone of ``date`` (naive if ``date`` is),
+        at the unit of ``pd.Timestamp(date)`` (microseconds for a ``datetime``
+        or a ``Period``), or at the coarsest finer unit holding it exactly.
 
     Raises:
         ValueError: If the frequency or its anchor is unsupported, or if ``date``
             or ``origin`` is ``NaT``.
         TypeError: If ``date`` is not a datetime, Timestamp, datetime64 or Period.
+        pandas.errors.OutOfBoundsDatetime: If the start of the period of a
+            nanosecond ``date`` lies outside the nanosecond range.
 
     Examples:
         >>> import pandas as pd
@@ -545,7 +581,7 @@ def get_period_start(
         >>> get_period_start(datetime(2023, 6, 15), '2MS')
         Timestamp('2023-05-01 00:00:00')
     """
-    return _period_bounds(date, frequency, origin)[0]
+    return _at_date_unit(_period_bounds(date, frequency, origin)[0], date)
 
 
 # Fonction identifiant la date de fin (exclue) d'une période à partir d'une date et d'une fréquence
@@ -566,12 +602,17 @@ def get_period_end(
 
     Returns:
         First date outside the period (exclusive boundary), in the time zone of
-        ``date``. It is also the start of the next period.
+        ``date``. It is also the start of the next period. Same unit rule as
+        :func:`get_period_start`: the unit of ``pd.Timestamp(date)``, or the
+        coarsest finer unit holding the bound exactly (the end of a ``'ns'``
+        period of a date in seconds is in nanoseconds).
 
     Raises:
         ValueError: If the frequency or its anchor is unsupported, or if ``date``
             or ``origin`` is ``NaT``.
         TypeError: If ``date`` is not a datetime, Timestamp, datetime64 or Period.
+        pandas.errors.OutOfBoundsDatetime: If the end of the period of a
+            nanosecond ``date`` lies outside the nanosecond range.
 
     Examples:
         >>> import pandas as pd
@@ -585,7 +626,7 @@ def get_period_end(
         >>> get_period_end(datetime(2023, 6, 15, 1, 2, 3, 456789), 'ns')
         Timestamp('2023-06-15 01:02:03.456789001')
     """
-    return _period_bounds(date, frequency, origin)[1]
+    return _at_date_unit(_period_bounds(date, frequency, origin)[1], date)
 
 
 # Fonction retournant les bornes d'une période
@@ -607,12 +648,16 @@ def get_period_boundaries(
     Returns:
         Tuple containing (start_date, end_date) where start_date is included
         in the period [start_date, end_date) and end_date is excluded from it.
-        Both are ``pd.Timestamp`` (a ``datetime`` subclass) in the time zone of ``date``.
+        Both are ``pd.Timestamp`` (a ``datetime`` subclass) in the time zone of
+        ``date``, each identical, unit included, to the result of
+        :func:`get_period_start` / :func:`get_period_end`.
 
     Raises:
         ValueError: If the frequency or its anchor is unsupported, or if ``date``
             or ``origin`` is ``NaT``.
         TypeError: If ``date`` is not a datetime, Timestamp, datetime64 or Period.
+        pandas.errors.OutOfBoundsDatetime: If a bound of a nanosecond ``date``
+            lies outside the nanosecond range.
 
     Examples:
         >>> import pandas as pd
@@ -629,4 +674,5 @@ def get_period_boundaries(
         >>> get_period_boundaries(date, 'Q')  # Pandas quarterly frequency
         (Timestamp('2023-04-01 00:00:00'), Timestamp('2023-07-01 00:00:00'))
     """
-    return _period_bounds(date, frequency, origin)
+    start, end = _period_bounds(date, frequency, origin)
+    return _at_date_unit(start, date), _at_date_unit(end, date)

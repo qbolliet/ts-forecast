@@ -4,9 +4,8 @@ The ``TS`` and ``PANEL-F`` reference datasets with dates stored in seconds,
 milliseconds, microseconds or nanoseconds (``with_datetime_resolution``), under
 the ``interpolate`` and ``model`` covariate strategies, without and with ``y``:
 the stacked output, the provenance matrix, the replay of ``transform`` and the
-inversion equal those of the nanosecond input. The output grid has one
-resolution whatever the input (the grid is built by the imputer); the
-provenance matrix of a panel keeps the input resolution.
+inversion equal those of the nanosecond input, and all four keep the input
+resolution.
 """
 
 # Modules de base
@@ -53,7 +52,7 @@ class TestDatetimeResolution:
     @pytest.mark.parametrize('unit', DATETIME_UNITS)
     @pytest.mark.parametrize('strategy', ['interpolate', 'model'])
     def test_passes_do_not_depend_on_resolution(self, reference_dataset, nanosecond_passes, strategy, unit):
-        """Output, provenance, replay and inversion equal the nanosecond ones, one grid unit."""
+        """Output, provenance, replay and inversion equal the nanosecond ones, at the input unit."""
         name, data = reference_dataset
         key = (name, strategy)
         if key not in nanosecond_passes:
@@ -62,18 +61,11 @@ class TestDatetimeResolution:
 
         result = _passes(with_datetime_resolution(data, unit), strategy)
 
-        for output in ('output', 'provenance', 'replay'):
+        for output in ('output', 'provenance', 'replay', 'inverse'):
             pd.testing.assert_frame_equal(result[output], expected[output], check_index_type=False, obj=output)
-        pd.testing.assert_frame_equal(result['inverse'], expected['inverse'], check_index_type=False)
-        # Sortie empilée et rejeu sur la grille construite par l'imputeur : une unité fixe,
-        # celle obtenue depuis des nanosecondes ; matrice de provenance d'un panel, indexée
-        # sur les dates de l'entrée : résolution de l'entrée
-        assert datetime_units(result['output']) == datetime_units(expected['output'])
-        assert datetime_units(result['replay']) == datetime_units(expected['replay'])
-        provenance_units = set(datetime_units(result['provenance']).values())
-        assert provenance_units == (
-            set(datetime_units(expected['provenance']).values()) if name == 'TS' else {unit}
-        )
+        # Sortie empilée, provenance, rejeu et inversion : dates à la résolution de l'entrée
+        for output in ('output', 'provenance', 'replay', 'inverse'):
+            assert set(datetime_units(result[output]).values()) == {unit}, output
 
     @pytest.mark.parametrize('unit', DATETIME_UNITS)
     def test_training_pass_with_target(self, reference_timeseries, unit):

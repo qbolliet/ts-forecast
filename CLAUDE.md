@@ -128,7 +128,8 @@ Utilitaires transversaux, organisés en sous-paquets (chacun expose une classe
   `normalize_position()`, `flip_position()`, ...
 - `utils/time/` : `resolve_date()`, `timeseries_to_string()` /
   `string_to_timeseries()`, `get_period_start()` / `get_period_end()`,
-  `get_period_boundaries()`
+  `get_period_boundaries()`, `as_exact_unit()` (`resolution.py` : unité de stockage des
+  dates sans arrondi, source unique de la règle d'unité de sortie)
 - `utils/validation/` : `validate_temporal_data()`, `restore_original_structure()`,
   `validate_entities_grouped()`, `validate_sorted_within_groups()`
 - `utils/parse/` : `parse_frequency()`, `build_frequency_string()`
@@ -187,6 +188,17 @@ Le paquet requiert `pandas>=3.0,<4` et `scikit-learn>=1.9,<2` (pas de support de
   `astype('int64')` (ou par `.value` d'un `Timestamp` / `Timedelta`, toujours en ns) ; la durée
   d'une période est `(periods + 1).start_time - periods.start_time`, jamais
   `end_time - start_time + 1 ns` (`end_time` n'est pas à la nanoseconde).
+- **Unité des dates en sortie = unité de l'entrée** : toute date rendue par un composant public (index, niveau
+  temporel, colonne `datetime64`, `Timestamp`) est dans l'unité de l'entrée de référence, via
+  `tsforecast.utils.time.as_exact_unit(dates, unit)` appliqué à la sortie (les calculs internes gardent leur
+  unité exacte ; instants et valeurs ne changent jamais). Entrée de référence : l'axe temporel de la donnée
+  (index, dernier niveau d'un panel, colonne `time_col`) ; pour une date scalaire, l'unité de `pd.Timestamp(date)`
+  (`us` pour un `datetime`, un `Period` ou une chaîne) ; deux jeux comparés : le jeu principal (`new_data`) ;
+  `X` et `y` : celle de `X`. Un paramètre date scalaire (`download_date`, `prediction_date`, `origin`,
+  `test_indices`) ne fixe jamais l'unité. Date non représentable dans l'unité cible : jamais d'arrondi, la plus
+  grossière des unités plus fines qui la représente (une grille à `100ms` de dates en `s` passe en `ms`) ; hors de
+  la plage de l'unité (`ns` : 1677-09-21 – 2262-04-11) : `OutOfBoundsDatetime`. Les tests le vérifient par
+  `with_datetime_resolution` × `datetime_units` (`assert datetime_units(result) == {…: unit}`).
 - **Dtype chaîne** : libellés et colonnes de chaînes sont en dtype `str` (NaN comme manquant) ;
   ne pas tester `dtype == object` ; `dtype=object` explicite seulement pour des valeurs
   hétérogènes (énumérations, tuples, `None`).

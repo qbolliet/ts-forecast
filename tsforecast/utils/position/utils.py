@@ -129,7 +129,8 @@ def convert_position(
         freq: Frequency of the time series (if None, will attempt to infer)
 
     Returns:
-        Converted time series data with adjusted index
+        Converted time series data with adjusted index, its dates at the unit
+        of the source dates
 
     Examples:
         >>> dates = pd.date_range('2023-01-01', periods=3, freq='MS')

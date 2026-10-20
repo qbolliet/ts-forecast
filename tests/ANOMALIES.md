@@ -1927,7 +1927,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter` (`convert_frequency`,
   `aggregate_to_lower_frequency`, `interpolate_to_higher_frequency`), `tsforecast/utils/position/utils.py::convert_position`,
   `tsforecast/utils/time/utils.py::get_period_start` / `get_period_end`
-- **Sévérité** : à arbitrer
+- **Sévérité** : mineure (arbitrée le 2026-10-20)
 - **Observé** : les valeurs et les instants ne dépendent jamais de la résolution de l'entrée (`s`, `ms`, `us`, `ns`), mais
   l'unité des dates rendues, oui, et différemment selon le chemin (pandas 3.0.6) :
   - agrégation d'une série, descente d'un panel : **unité de l'entrée** ;
@@ -1939,9 +1939,18 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   Sous pandas 2.3, les chemins de montée rendaient toujours `ns`. Aucun impact sur les valeurs ; deux sorties de
   résolutions différentes s'alignent par instant (`Index.equals` et `reindex` comparent les instants sous pandas 3),
   mais un `assert_index_equal` ou une comparaison de dtypes chez l'utilisateur les distingue.
-- **Attendu** : à arbitrer — (1) statu quo (pandas décide, chemin par chemin) ; (2) restituer l'unité de l'entrée ;
-  (3) normaliser une unité documentée (`ns`, ou `us` par défaut de pandas 3).
-- **Reproduction** (pandas 3) :
+- **Attendu** : **arbitrage de l'auteur (2026-10-20) : option (2), unité de l'entrée** (écartées : (1) statu quo,
+  pandas décidant chemin par chemin ; (3) unité fixe documentée, `ns` ou `us`). Règle :
+  1. toute date rendue par un composant public (index, niveau temporel, colonne `datetime64`, `Timestamp`) est dans
+     l'unité de l'entrée de référence ; instants, valeurs et calculs internes inchangés ;
+  2. entrée de référence : axe temporel de la donnée (index, dernier niveau d'un panel, colonne `time_col`) ; pour une
+     date scalaire, l'unité de `pd.Timestamp(date)` (`us` pour un `datetime`, un `Period` ou une chaîne) ; deux jeux
+     comparés : `new_data` ; un paramètre date scalaire (`download_date`, `prediction_date`, `origin`) ne fixe jamais
+     l'unité ; `X` et `y` : celle de `X` ; `test_indices` : sans objet (positions rendues) ;
+  3. date non représentable dans l'unité cible : jamais d'arrondi, plus grossière des unités plus fines qui la
+     représente exactement (index entier, ou chaque borne d'une période) ;
+  4. date hors de la plage de l'unité cible (seul cas : `ns`, hors 1677-09-21 – 2262-04-11) : `OutOfBoundsDatetime`.
+- **Reproduction** (pandas 3, avant correctif) :
   ```python
   import pandas as pd
   from tsforecast.utils.frequency import FrequencyConverter
@@ -1949,9 +1958,22 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   FrequencyConverter().interpolate_to_higher_frequency(q, 'MS').index.unit                 # 'us'
   FrequencyConverter().aggregate_to_lower_frequency(q.asfreq('MS'), 'QS').index.unit        # 'ns'
   ```
-- **Test** : `tests/unit/utils/frequency/converter/test_datetime_resolution.py::TestDatetimeResolution` (unités épinglées),
-  `tests/unit/utils/time/test_utils.py::TestDatetimeResolution`
-- **Statut** : ouvert (à arbitrer)
+- **Correctif** : utilitaire `tsforecast/utils/time/resolution.py::as_exact_unit(dates, unit)` (unité demandée, ou la
+  plus grossière des unités plus fines qui représente exactement les dates ; constante `DATETIME_UNITS` dans
+  `utils/_constants.py`), appliqué à la sortie de `interpolate_to_higher_frequency` (couvre `convert_frequency` et
+  `FrequencyAligner`), de `PeriodPositionConverter._convert_datetime_index` (couvre `convert_position`) et de
+  `get_period_start` / `get_period_end` / `get_period_boundaries` (chaque borne). `aggregate_to_lower_frequency`
+  rendait déjà l'unité de l'entrée. Sorties de référence (1 228 cas : socle et composants en aval, perturbations de
+  `tests/support/perturbations.py` × 4 unités) : instants et valeurs identiques au bit près, unités conformes à la
+  règle ; seul changement de comportement, la règle 4 (`get_period_end(Timestamp('2262-04-01', unit='ns'), 'M')`
+  rendait un `Timestamp[us]`). Effets en aval : `HighFrequencyImputer` (sortie, provenance, rejeu, inversion),
+  `ImputationWindowCalculator`, l'index étendu de `FrequencyAligner` et les bornes de période de
+  `compare_and_detect_delays` suivent l'unité de l'entrée (voir ANO-DELAYS-045, ANO-FREQ-086).
+- **Test** : `tests/unit/utils/time/test_resolution.py`,
+  `tests/unit/utils/frequency/converter/test_datetime_resolution.py::TestDatetimeResolution` (un chemin par ligne de
+  `PATHS`, grille infra-seconde, aller-retour), `tests/unit/utils/time/test_utils.py::TestDatetimeResolution`,
+  `tests/unit/utils/position/test_converter.py::TestDatetimeResolution` (aller-retour compris)
+- **Statut** : corrigée
 
 ## DELAYS
 
@@ -3025,8 +3047,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   compare_and_detect_delays(data, None, '2023-03-10').dtypes          # observation_date [s], period_* [us]
   compare_and_detect_delays(data * np.nan, None, '2023-03-10').dtypes  # dates [ns], chaînes object
   ```
+- **Effet du socle (2026-10-20, ANO-UTILS-072 corrigée, règle de l'unité de l'entrée)** : `period_start` /
+  `period_end` suivent `observation_date` (bornes calculées par `get_period_boundaries` dans l'unité de la date).
+  Restent : `download_date` (`us` pour une chaîne, unité propre d'un `Timestamp` fourni ; attendu : unité de
+  `new_data`, plus fine si la date l'exige) ; `observation_date` à l'unité d'`existing_data` quand il est fourni
+  (`new_data` en `s`, `existing_data` en `ns` → `ns` ; attendu : `new_data`) ; résultat vide en `datetime64[ns]`
+  (attendu : unité de `new_data`) ; chaînes `object` du résultat vide (dtype des chaînes, arbitrage séparé).
 - **Test** : `tests/unit/delays/data_manager/test_datetime_resolution.py::TestDatetimeResolution::test_single_download`
-  (unités épinglées)
+  (observation et bornes à l'unité de l'entrée ; `download_date` épinglé à `us`)
 - **Statut** : ouvert (à arbitrer)
 
 ### Arbitrages de l'auteur (2026-10-04) sur `compare_and_detect_delays`
@@ -5139,8 +5167,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
   imputer.fit_transform(data).index.levels[-1].unit, imputer.imputation_provenance_.index.levels[-1].unit   # ('us', 's')
   ```
+- **Effet du socle (2026-10-20, ANO-UTILS-072 corrigée, règle de l'unité de l'entrée)** : la grille de l'imputeur
+  provenant de `FrequencyConverter`, sortie empilée, provenance, rejeu et inversion (TS et PANEL-F, stratégies
+  `interpolate` et `model`) et `fit_transform(X, y)` sont à l'unité de l'entrée, valeurs et provenance inchangées au
+  bit près. Restent à vérifier : l'état ajusté (plan, grilles, instantanés d'`inverse_transform`) d'un `fit` à un
+  `transform`, et l'empreinte de `XYPipeline(memory=…)` pour deux unités d'entrée.
 - **Test** : `tests/unit/frequency/high_frequency_imputer/test_datetime_resolution.py::TestDatetimeResolution`
-  (unités épinglées)
+  (sortie, provenance, rejeu et inversion à l'unité de l'entrée)
 - **Statut** : ouvert (à arbitrer)
 
 ## BASE

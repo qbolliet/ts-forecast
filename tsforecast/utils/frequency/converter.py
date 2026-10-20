@@ -222,7 +222,9 @@ class FrequencyConverter(TemporalConverter):
                 (``'inside'`` or ``'outside'``).
 
         Returns:
-            Converted time series data
+            Converted time series data, its dates at the unit of the input
+            dates (time axis of a panel or ``time_col`` column included), or
+            at the coarsest finer unit holding them exactly
 
         Raises:
             ValueError: If the data is empty, if conversion parameters are
@@ -555,7 +557,8 @@ class FrequencyConverter(TemporalConverter):
                 coverage guards are skipped.
 
         Returns:
-            Aggregated time series data
+            Aggregated time series data, its period labels at the unit of the
+            input dates
 
         Raises:
             ValueError: If ``data`` is empty, if ``target_freq`` is not a valid
@@ -905,7 +908,9 @@ class FrequencyConverter(TemporalConverter):
 
         Returns:
             Interpolated time series data; an empty object of the same type
-            when no value is observed
+            when no value is observed. The dates of the target grid are at
+            the unit of the input dates, or at the coarsest finer unit holding
+            them exactly (a sub-second grid of dates in seconds)
 
         Raises:
             ValueError: If ``data`` has no row, if
@@ -1088,6 +1093,17 @@ class FrequencyConverter(TemporalConverter):
 
         # Conservation du nom de l'index source (la grille étendue n'en porte pas)
         result.index.name = data.index.name
+
+        # Import local pour éviter les imports circulaires (tsforecast.utils.time
+        # importe tsforecast.utils.frequency)
+        from ..time.resolution import as_exact_unit
+
+        # Grille rendue dans l'unité des dates de l'entrée : date_range et
+        # Period.to_timestamp la construisent au moins en microsecondes ; une date
+        # de la grille plus fine que l'entrée (grille infra-seconde) passe à
+        # l'unité plus fine qui la représente exactement. Un index source sans
+        # unité (non daté) laisse la grille telle quelle
+        result.index = as_exact_unit(result.index, getattr(data.index, 'unit', result.index.unit))
 
         return result
 

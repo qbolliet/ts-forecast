@@ -17,9 +17,10 @@ period* to the other bound of that period, on the native pandas grid of the
 target offset (``MS`` -> exactly ``pd.date_range(freq='ME')``); it never
 merges two distinct dates (a frequency coarser than the data is rejected);
 frequencies without a start/end variant in pandas (``D``, ``B``, ``W``,
-``h``...) are left unchanged, consistently with ``convert_offset``. Golden
-dates are computed by hand (leap February 2024, anchored quarters, fiscal
-years).
+``h``...) are left unchanged, consistently with ``convert_offset``; the
+converted dates keep the unit of the source dates (``s`` to ``ns``, round
+trip included). Golden dates are computed by hand (leap February 2024,
+anchored quarters, fiscal years).
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ from pandas.tseries.frequencies import to_offset
 
 import tsforecast.utils.frequency as frequency_package
 from tests.support.perturbations import (
+    DATETIME_UNITS,
     empty_like,
     reverse_entities,
     shuffle_rows,
@@ -39,6 +41,7 @@ from tests.support.perturbations import (
     to_period_index,
     to_three_level_index,
     with_duplicated_rows,
+    with_datetime_resolution,
     with_index_names,
     with_special_column_names,
 )
@@ -965,6 +968,69 @@ class TestRealisticDatasets:
         pd.testing.assert_index_equal(
             result.index.droplevel("region"), two_level.index
         )
+
+
+# =============================================================================
+# Résolution des dates
+# =============================================================================
+
+
+def _with_unit(data, unit: str):
+    """Store the dates of an index, a series, a frame or a panel at ``unit``."""
+    return data.as_unit(unit) if isinstance(data, pd.Index) else with_datetime_resolution(data, unit)
+
+
+def _converted_dates(data) -> pd.DatetimeIndex:
+    """Dates of a converted index, series, frame or panel."""
+    return data if isinstance(data, pd.Index) else _date_level(data)
+
+
+# Chemins de conversion, une ligne par chemin : (données, position source, position cible, fréquence)
+_RESOLUTION_PATHS = {
+    "index-month": (pd.date_range("2024-01-01", periods=6, freq="MS"), "S", "E", "M"),
+    "index-anchored-quarter": (pd.date_range("2024-02-01", periods=4, freq="QS-FEB"), "S", "E", "QS-FEB"),
+    "series-end-to-start": (
+        pd.Series(np.arange(6.0), index=pd.date_range("2024-01-31", periods=6, freq="ME")), "E", "S", "M"
+    ),
+    "frame-inferred": (
+        pd.DataFrame({"v": np.arange(6.0)}, index=pd.date_range("2024-01-01", periods=6, freq="MS")), "S", "E", None
+    ),
+    "panel-per-entity": (
+        _panel(["A"] * 3 + ["B"] * 4, list(pd.date_range("2023-01-01", periods=3, freq="QS"))
+               + list(pd.date_range("2020-01-01", periods=4, freq="MS"))), "S", "E", None
+    ),
+    "time-zone": (pd.date_range("2024-01-01", periods=6, freq="MS", tz="Europe/Paris"), "S", "E", "M"),
+    "semi-monthly": (pd.date_range("2024-01-01", periods=4, freq="SMS"), "S", "E", "SMS"),
+    "no-position": (pd.date_range("2024-01-01", periods=4, freq="D"), "S", "E", "D"),
+}
+
+
+class TestDatetimeResolution:
+    """Converted dates keep the unit of the source dates; the instants equal those of nanoseconds."""
+
+    @pytest.mark.parametrize("unit", DATETIME_UNITS)
+    @pytest.mark.parametrize("path", list(_RESOLUTION_PATHS), ids=list(_RESOLUTION_PATHS))
+    def test_dates_keep_the_source_unit(self, converter, path, unit):
+        """Same converted instants as from nanoseconds, at the unit of the source dates."""
+        data, source, target, freq = _RESOLUTION_PATHS[path]
+        reference = _converted_dates(converter.convert(_with_unit(data, "ns"), source, target, freq=freq))
+
+        result = _converted_dates(converter.convert(_with_unit(data, unit), source, target, freq=freq))
+
+        assert result.as_unit("ns").asi8.tolist() == reference.as_unit("ns").asi8.tolist()
+        assert result.unit == unit
+
+    @pytest.mark.parametrize("unit", DATETIME_UNITS)
+    @pytest.mark.parametrize("path", ["series-end-to-start", "panel-per-entity"])
+    def test_round_trip_restores_the_source_data_unit_included(self, converter, path, unit):
+        """There and back gives the source data, dtype of the dates included."""
+        data, source, target, freq = _RESOLUTION_PATHS[path]
+        stored = _with_unit(data, unit)
+
+        roundtrip = converter.convert(converter.convert(stored, source, target, freq=freq), target, source, freq=freq)
+
+        pd.testing.assert_series_equal(roundtrip, stored, check_freq=False)
+        assert _date_level(roundtrip).unit == unit
 
 
 # =============================================================================

@@ -2,9 +2,9 @@
 
 This private module is the single source of truth for the temporal vocabulary
 (month and weekday anchors), the classification of frequency bases (which ones
-accept an ``S``/``E`` position, which ones mark the start of their period...)
-and the duration tables. It only depends on the standard library, so that any
-sub-package can import it without creating an import cycle.
+accept an ``S``/``E`` position, which ones mark the start of their period...),
+the duration tables and the storage units of dates. It only depends on the
+standard library, so that any sub-package can import it without an import cycle.
 
 Constants used by a single module (and meaningless elsewhere) stay in that module.
 """
@@ -75,6 +75,14 @@ CALENDAR_SUBPERIODS: Dict[Tuple[str, str], int] = {
     ('M', 'SM'): 2, ('M', 'D'): 30,
     ('W', 'D'): 7,
 }
+
+# ---------------------------------------------------------------------------
+# Résolution des dates
+# ---------------------------------------------------------------------------
+
+# Unités de stockage des dates prises en charge par pandas, de la plus grossière
+# à la plus fine (plage représentable de plus en plus étroite)
+DATETIME_UNITS: Tuple[str, ...] = ('s', 'ms', 'us', 'ns')
 
 # ---------------------------------------------------------------------------
 # Classification des bases de fréquence

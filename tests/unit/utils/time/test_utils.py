@@ -13,8 +13,10 @@ properties).
 
 Nanosecond, millisecond, time zone, ``Period`` input and anchor behaviours are covered
 by ``TestNanosecond``, ``TestMillisecond``, ``TestTimezone``, ``TestPeriodInput``,
-``TestPeriodAnchorsAndMultipliers`` and ``TestResolveDate``; the independence from the
-resolution of the input dates (``s`` to ``ns``) by ``TestDatetimeResolution``.
+``TestPeriodAnchorsAndMultipliers`` and ``TestResolveDate``; the unit of the bounds
+(that of the date from ``s`` to ``ns``, finer when a bound needs it, microseconds for a
+``datetime`` or a ``Period``, refusal outside the nanosecond range) by
+``TestDatetimeResolution``.
 """
 # Importation des modules
 # Modules de base
@@ -24,6 +26,7 @@ import pandas as pd
 from datetime import date as date_type, datetime, timedelta
 # Module de test
 import pytest
+from pandas.errors import OutOfBoundsDatetime
 
 # Résolutions de dates prises en charge par pandas
 from tests.support.perturbations import DATETIME_UNITS
@@ -1044,7 +1047,7 @@ class TestInvalidFrequency:
 
 
 class TestDatetimeResolution:
-    """Period bounds and string conversions do not depend on the resolution of the input dates."""
+    """Period bounds come back at the unit of the date; string conversions ignore it."""
 
     # Fréquences calendaires, infra-journalières, ancrées et multipliées
     _FREQS = ["D", "W", "SM", "M", "Q", "Y", "h", "min", "s", "2h", "QE-NOV", "W-WED"]
@@ -1052,17 +1055,49 @@ class TestDatetimeResolution:
     @pytest.mark.parametrize("unit", DATETIME_UNITS)
     @pytest.mark.parametrize("freq", _FREQS)
     @pytest.mark.parametrize("tz", [None, "Europe/Paris"], ids=["naive", "paris"])
-    def test_bounds_do_not_depend_on_resolution(self, freq, tz, unit):
-        """Same start and end instants as from a nanosecond date; one bound unit for every input."""
+    def test_bounds_come_back_at_the_unit_of_the_date(self, freq, tz, unit):
+        """Same start and end instants as from a nanosecond date, both at the unit of the date."""
         # Date à la seconde près, représentable exactement dans toutes les résolutions
-        date = pd.Timestamp("2024-02-29 13:47:12", tz=tz)
+        date = pd.Timestamp("2024-02-29 13:47:12", tz=tz).as_unit(unit)
         reference = get_period_boundaries(date.as_unit("ns"), freq)
 
-        result = get_period_boundaries(date.as_unit(unit), freq)
+        result = get_period_boundaries(date, freq)
 
         assert result == reference
-        # Unité des bornes : celle obtenue depuis une date en nanosecondes
-        assert [bound.unit for bound in result] == [bound.unit for bound in reference]
+        assert [bound.unit for bound in result] == [unit, unit]
+        assert [get_period_start(date, freq).unit, get_period_end(date, freq).unit] == [unit, unit]
+
+    # Autres chemins, une ligne par chemin : (date, fréquence, origine, unités des deux bornes)
+    _OTHER_PATHS = {
+        "end-finer-than-the-date-ms": (pd.Timestamp("2024-02-29 13:47:12").as_unit("s"), "ms", None, ["s", "ms"]),
+        "end-finer-than-the-date-ns": (pd.Timestamp("2024-02-29 13:47:12").as_unit("us"), "ns", None, ["us", "ns"]),
+        "datetime": (datetime(2024, 2, 29, 13, 47, 12), "M", None, ["us", "us"]),
+        "period-calendar": (pd.Period("2024-02", freq="M"), "Q", None, ["us", "us"]),
+        "period-sub-daily": (pd.Period("2024-02", freq="M"), "h", None, ["us", "us"]),
+        "datetime64-day": (np.datetime64("2024-02-29"), "M", None, ["s", "s"]),
+        "datetime64-ms": (np.datetime64("2024-02-29T13:47:12", "ms"), "h", None, ["ms", "ms"]),
+        "origin-in-nanoseconds": (pd.Timestamp("2024-02-29 13:47:12").as_unit("s"), "2h",
+                                  pd.Timestamp("2024-01-01 01:00").as_unit("ns"), ["s", "s"]),
+        "origin-finer-than-the-date": (pd.Timestamp("2024-02-29 13:47:12").as_unit("s"), "2h",
+                                       pd.Timestamp("2024-01-01 01:00:00.5"), ["ms", "ms"]),
+    }
+
+    @pytest.mark.parametrize("path", list(_OTHER_PATHS), ids=list(_OTHER_PATHS))
+    def test_unit_of_the_bounds_on_the_other_paths(self, path):
+        """A bound finer than the date widens it; a date without unit gives microseconds; origin never sets it."""
+        date, freq, origin, expected = self._OTHER_PATHS[path]
+
+        result = get_period_boundaries(date, freq, origin=origin)
+
+        assert [bound.unit for bound in result] == expected
+
+    def test_bound_outside_the_nanosecond_range_is_refused(self):
+        """April 2262 in nanoseconds: its end (2262-05-01) has no nanosecond representation."""
+        date = pd.Timestamp("2262-04-01").as_unit("ns")
+
+        assert get_period_start(date, "M") == date
+        with pytest.raises(OutOfBoundsDatetime):
+            get_period_end(date, "M")
 
     @pytest.mark.parametrize("unit", DATETIME_UNITS)
     def test_string_round_trip_does_not_depend_on_resolution(self, unit):

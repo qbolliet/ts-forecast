@@ -120,8 +120,9 @@ class PeriodPositionConverter(TemporalConverter):
 
         Returns:
             Converted time series data with adjusted index. Values, dtypes
-            and column labels are unchanged. If both positions are identical,
-            ``value`` itself is returned.
+            and column labels are unchanged; the converted dates keep the unit
+            of the source dates. If both positions are identical, ``value``
+            itself is returned.
 
         Raises:
             ValueError: If positions or frequency are invalid, if no frequency
@@ -303,7 +304,7 @@ class PeriodPositionConverter(TemporalConverter):
             freq: Frequency string (multiplier and anchor honoured)
 
         Returns:
-            Converted DatetimeIndex (same name and time zone); ``index``
+            Converted DatetimeIndex (same name, time zone and unit); ``index``
             itself for identical positions or frequencies without position
 
         Raises:
@@ -316,6 +317,10 @@ class PeriodPositionConverter(TemporalConverter):
             >>> [str(d.date()) for d in converter._convert_datetime_index(dates, 'S', 'E', 'QS-FEB')]
             ['2024-04-30', '2024-07-31']
         """
+        # Import différé : évite un import circulaire avec tsforecast.utils.time
+        # (dont utils.py importe tsforecast.utils.frequency)
+        from ..time.resolution import as_exact_unit
+
         # Cas identique, retourner tel quel
         if from_pos == to_pos:
             return index
@@ -357,10 +362,12 @@ class PeriodPositionConverter(TemporalConverter):
                     first_half, dates - pd.to_timedelta(days - _SEMI_MONTH_DAY, unit='D')
                 )
 
-        # Conversion en datetime index
+        # Conversion en datetime index, dans l'unité des dates source : l'arithmétique
+        # des offsets pandas rend au moins des microsecondes
         converted = pd.DatetimeIndex(converted, name=index.name)
         if index.tz is not None:
             converted = converted.tz_localize(index.tz)
+        converted = as_exact_unit(converted, index.unit)
 
         # Garde-fou : une conversion de position ne fusionne jamais deux dates distinctes
         # (sinon des observations quitteraient leur période d'origine)
