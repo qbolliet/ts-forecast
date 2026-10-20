@@ -209,6 +209,17 @@ class TestCalendarGoldenValues:
         )
         np.testing.assert_allclose(divisors.to_numpy(), expected, rtol=_EXACT)
 
+    def test_calendar_share_is_an_exact_ratio_of_days(self):
+        """The share is the exact ratio of whole period lengths, without sub-microsecond drift."""
+        # Valeur d'or : 31 / 91, 29 / 91 et 31 / 91 au bit près (durées entières de nanosecondes,
+        # une seule division flottante) ; une longueur de période amputée d'une fraction de
+        # microseconde fausserait le dernier chiffre
+        dates = pd.DatetimeIndex(['2024-01-31', '2024-02-29', '2024-03-31'])
+        divisors = StageScaler(scale_features='calendar').target_divisor(
+            'v', source_freq='ME', pred_freq='QE', index=dates
+        )
+        assert divisors.tolist() == [31 / 91, 29 / 91, 31 / 91]
+
     def test_calendar_share_falls_back_on_the_constant_ratio(self):
         """A frequency without pandas Period (semi-monthly) falls back on the constant ratio, 1/2."""
         index = pd.to_datetime(['2024-01-15', '2024-01-31'])

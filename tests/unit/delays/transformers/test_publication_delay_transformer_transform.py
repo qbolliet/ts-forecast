@@ -83,7 +83,8 @@ def _shifted_gold() -> pd.DataFrame:
     gdp = pd.Series(np.arange(12, dtype=float), index=pd.date_range('2023-03-01', periods=12, freq='MS'), name='GDP')
     cpi = pd.Series(np.arange(12, dtype=float) * 2, index=pd.date_range('2023-02-01', periods=12, freq='MS'),
                     name='CPI')
-    return pd.concat([gdp, cpi], axis=1)
+    # Union des dates, de février 2023 à février 2024, dans l'ordre chronologique
+    return pd.concat([gdp, cpi], axis=1, sort=True)
 
 
 # =============================================================================
@@ -162,6 +163,17 @@ class TestTransformGoldValues:
         """Without any delayed column, ``transform`` returns the data unchanged."""
         X = _monthly(('Z',))
         pd.testing.assert_frame_equal(_fit_transform(_transformer(), X), X)
+
+    @pytest.mark.parametrize('kwargs', [{}, {'strategy': 'mask', 'target_frequency': 'Q'}], ids=['shift', 'mask'])
+    def test_regular_grid_keeps_its_frequency(self, kwargs):
+        """The output of a month-start grid is a month-start grid, and its index says so (``freq='MS'``).
+
+        Shifted columns and an untouched column joined on the union of their dates, January 2023
+        to February 2024 without a gap for the shift: the union of regular grids keeps the
+        frequency of the input index.
+        """
+        result = _fit_transform(_transformer(**kwargs), _monthly(('Z', 'GDP', 'CPI')))
+        assert result.index.freqstr == 'MS'
 
 
 # =============================================================================

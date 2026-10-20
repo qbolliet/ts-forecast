@@ -79,7 +79,8 @@ class TestAnchorFraction:
             anchor_fraction=0.0
         )
 
-        expected = pd.DatetimeIndex(['2021-01-01', '2022-01-01'])
+        # Ancres calculées à la nanoseconde (bornes de période exactes)
+        expected = pd.DatetimeIndex(['2021-01-01', '2022-01-01']).as_unit('ns')
         pd.testing.assert_index_equal(shifted, expected)
 
     @pytest.mark.internal
@@ -94,7 +95,7 @@ class TestAnchorFraction:
         )
 
         # Bornage à la fin de période : pas de débordement sur la période suivante
-        expected = pd.DatetimeIndex(['2021-12-31', '2022-12-31'])
+        expected = pd.DatetimeIndex(['2021-12-31', '2022-12-31']).as_unit('ns')
         pd.testing.assert_index_equal(shifted, expected)
 
     @pytest.mark.internal
@@ -108,7 +109,7 @@ class TestAnchorFraction:
             anchor_fraction=0.5
         )
         pd.testing.assert_index_equal(
-            shifted, pd.DatetimeIndex(['2021-07-02', '2022-07-02'])
+            shifted, pd.DatetimeIndex(['2021-07-02', '2022-07-02']).as_unit('ns')
         )
 
         # Interpolation vers le trimestre avec et sans ancrage
@@ -265,6 +266,15 @@ class TestAnchorFractionPaths:
         # 6 h le lendemain → 1.75 ; avant midi le 1er, comblement arrière → 1.0
         hours = pd.DatetimeIndex(['2024-01-01 06:00', '2024-01-01 18:00', '2024-01-02 06:00'])
         assert result.loc[hours].tolist() == pytest.approx([1.0, 1.25, 1.75])
+
+    def test_anchor_is_an_exact_instant(self, converter):
+        """The middle of a day is noon exactly: the interpolated hours are exact quarters."""
+        daily = pd.Series([1.0, 2.0], index=pd.date_range('2024-01-01', periods=2, freq='D'))
+        result = converter.interpolate_to_higher_frequency(daily, 'h', anchor_fraction=0.5)
+        # Valeurs d'or exactes : 18 h est à 6 h de l'ancre de midi sur 24 h → 1 + 1/4 = 1.25 ;
+        # une durée de jour amputée d'une fraction de microseconde décalerait l'ancre
+        hours = pd.DatetimeIndex(['2024-01-01 18:00', '2024-01-02 06:00'])
+        assert result.loc[hours].tolist() == [1.25, 1.75]
 
     def test_non_period_source_falls_back_on_none(self, converter):
         """A semi-monthly source has no ``pd.Period``: same output as ``anchor_fraction=None``."""

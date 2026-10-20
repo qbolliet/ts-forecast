@@ -374,9 +374,11 @@ def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[p
 
         reference_index = changes_mask.index
 
-    # Concaténation, ou jeu vide d'index de même structure quand rien n'est détecté
-    if frames:
-        return pd.concat(frames), comparison
+    # Concaténation des seules colonnes où une observation est détectée (un jeu vide ne
+    # participe pas aux types du résultat), ou jeu vide d'index de même structure
+    detected = [frame for frame in frames if len(frame)]
+    if detected:
+        return pd.concat(detected), comparison
     return _flag_observations(reference_index[:0], None), comparison
 
 

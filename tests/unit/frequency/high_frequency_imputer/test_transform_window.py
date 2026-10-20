@@ -238,8 +238,9 @@ class TestTransformOnLaterDates:
             de_months.groupby(de_months.index.to_period('Q')).sum().to_numpy(),
             de_quarters.to_numpy(),
         )
-        # IT : observations mensuelles intactes
-        pd.testing.assert_series_equal(result.loc['IT', 'v'], source.loc['IT'])
+        # IT : observations mensuelles intactes (valeurs et dates ; la fréquence portée par
+        # l'index d'une sélection de MultiIndex n'est pas l'objet du test)
+        pd.testing.assert_series_equal(result.loc['IT', 'v'], source.loc['IT'], check_freq=False)
 
 
 class TestColumnWithoutAnchorAtTransform:

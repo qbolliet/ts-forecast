@@ -139,12 +139,31 @@ def _calendar_share(
         # Repli sur le facteur constant si les bases ne sont pas des Periods
         return np.full(len(dates), float(converter.get_conversion_factor(coarse, fine)))
 
-    # Durées exactes en nanosecondes : fin de période incluse (fin = début
-    # de la période suivante moins une nanoseconde)
-    one = pd.Timedelta(1, unit='ns')
-    fine_span = (fine_periods.end_time - fine_periods.start_time + one).asi8
-    coarse_span = (coarse_periods.end_time - coarse_periods.start_time + one).asi8
+    # Durées exactes en nanosecondes : du début de la période au début de la
+    # suivante (``end_time`` porte la résolution de pandas, pas forcément la
+    # nanoseconde, et ne donne pas la durée exacte)
+    fine_span = _period_span_nanoseconds(fine_periods)
+    coarse_span = _period_span_nanoseconds(coarse_periods)
     return fine_span.astype(float) / coarse_span.astype(float)
+
+
+# Fonction auxiliaire de la durée exacte de périodes
+def _period_span_nanoseconds(periods: pd.PeriodIndex) -> np.ndarray:
+    """Exact length of each period, in integer nanoseconds.
+
+    Args:
+        periods: Periods to measure.
+
+    Returns:
+        ``int64`` array: start of the next period minus start of the period.
+
+    Examples:
+        >>> months = pd.PeriodIndex(['2024-02', '2023-02'], freq='M')
+        >>> (_period_span_nanoseconds(months) // 86_400_000_000_000).tolist()
+        [29, 28]
+    """
+    span = (periods + 1).start_time - periods.start_time
+    return span.as_unit('ns').asi8
 
 
 # Fonction auxiliaire de clé de comparaison d'une fréquence

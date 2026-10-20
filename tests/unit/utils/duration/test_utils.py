@@ -6,12 +6,15 @@ Covers the module-level convenience functions that delegate to a shared
 ``to_literal``, ``to_code``, ``validate_duration``, ``get_duration_conversion_factor``,
 ``convert_duration`` and ``get_duration_order``. Equivalence with the class
 methods is the central property under test: these functions add no logic of
-their own beyond instantiation and delegation.
+their own beyond instantiation and delegation. ``get_duration_nanoseconds`` is
+also checked against pandas durations stored at every resolution (``s`` to ``ns``).
 """
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
+from tests.support.perturbations import DATETIME_UNITS
 from tsforecast.utils.duration.converter import DurationConverter
 from tsforecast.utils.duration.normalizer import DurationNormalizer
 from tsforecast.utils.duration.utils import (
@@ -214,3 +217,32 @@ class TestGetDurationNanoseconds:
     def test_unknown_unit_raises(self, unit):
         with pytest.raises(ValueError):
             get_duration_nanoseconds(unit)
+
+
+class TestDatetimeResolution:
+    """Exact durations agree with pandas durations stored at any resolution."""
+
+    # Résolution la plus grossière qui représente exactement chaque unité de durée fixe
+    # (une microseconde n'a pas de valeur exacte en secondes)
+    _COARSEST_EXACT = {"us": "us", "ms": "ms", "s": "s", "min": "s", "h": "s", "D": "s", "W": "s"}
+    _PAIRS = [
+        (code, resolution)
+        for code, coarsest in _COARSEST_EXACT.items()
+        for resolution in DATETIME_UNITS[DATETIME_UNITS.index(coarsest):]
+    ]
+
+    @pytest.mark.parametrize("code, resolution", _PAIRS, ids=[f"{c}-{r}" for c, r in _PAIRS])
+    def test_length_matches_a_timedelta_at_any_resolution(self, code, resolution):
+        """``get_duration_nanoseconds`` equals the length of ``Timedelta(1, code)`` in ns, whatever its storage."""
+        # Durée d'une unité stockée à la résolution testée, ramenée en nanosecondes entières
+        length = pd.Timedelta(1, unit=code).as_unit(resolution)
+        assert get_duration_nanoseconds(code) == length // pd.Timedelta(1, unit="ns")
+
+    @pytest.mark.parametrize("resolution", DATETIME_UNITS)
+    def test_elapsed_time_counted_exactly(self, resolution):
+        """Days elapsed between two dates: same integer from any storage resolution."""
+        # Valeur d'or : du 1er janvier 2023 au 1er mars 2024 (année bissextile) = 425 jours
+        start = pd.Timestamp("2023-01-01").as_unit(resolution)
+        end = pd.Timestamp("2024-03-01").as_unit(resolution)
+        elapsed = (end - start).as_unit("ns").value
+        assert elapsed // get_duration_nanoseconds("D") == 425

@@ -184,7 +184,7 @@ outputs/*
 
 # Claude
 .claude/
-CLAUDE.md
+# CLAUDE.md
 
 # TODO
 TODO

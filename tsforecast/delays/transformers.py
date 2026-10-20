@@ -819,12 +819,27 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             The assembled frame (outer join on the index), sorted by date; for a panel,
             grouped by entity in the order of ``X``, then sorted by date.
         """
-        # Jointure sur l'index des données transformées (aucune colonne transformée : index seul)
-        assembled = pd.concat(parts, axis=1, join='outer') if parts else pd.DataFrame(index=X.index)
-        # Ajout des colonnes non transformées
-        untouched = [col for col in X.columns if col not in assembled.columns]
-        if untouched:
-            assembled = pd.concat([assembled, X[untouched]], axis=1, join='outer')
+        # Colonnes non transformées, dans l'ordre de X
+        transformed = {col for part in parts for col in part.columns}
+        untouched = [col for col in X.columns if col not in transformed]
+        if parts and isinstance(X.index, pd.DatetimeIndex):
+            # Index de dates : union triée des index par Index.union (qui conserve la fréquence
+            # d'une grille régulière), chaque groupe de colonnes réindexé sur cette union
+            frames = [*parts, X[untouched]] if untouched else list(parts)
+            union = frames[0].index
+            for frame in frames[1:]:
+                union = union.union(frame.index)
+            assembled = pd.concat([frame.reindex(union) for frame in frames], axis=1)
+        elif parts:
+            # Autres index : jointure externe dans l'ordre d'apparition des étiquettes (un panel
+            # est retrié ci-dessous par entité puis par date), puis colonnes non transformées
+            assembled = pd.concat(parts, axis=1, join='outer', sort=False)
+            if untouched:
+                assembled = pd.concat([assembled, X[untouched]], axis=1, join='outer', sort=False)
+        else:
+            # Aucune colonne transformée : les colonnes de X sur son index (sans jointure avec un
+            # jeu sans colonne, qui ne participerait pas au type des étiquettes de colonnes)
+            assembled = X[untouched]
         # Restauration de l'ordre original des colonnes
         assembled = assembled[X.columns]
 
@@ -1453,8 +1468,11 @@ def _build_entity_params(
     # Initialisation du dictionnaire de paramètres associés à l'entité
     entity_params = {}
 
-    # Groupement par entité panel
-    for entity_key, group in df_delays.groupby(level=get_entity_levels(df_delays)):
+    # Groupement par entité panel ; un niveau unique est passé sous forme scalaire (une
+    # liste de longueur 1 produit des clés en tuples à un élément)
+    entity_levels = get_entity_levels(df_delays)
+    group_levels = entity_levels[0] if len(entity_levels) == 1 else entity_levels
+    for entity_key, group in df_delays.groupby(level=group_levels):
         # Normalisation de la clé en tuple
         entity_key = normalize_entity_key(entity_key)
 

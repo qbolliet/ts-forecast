@@ -248,6 +248,40 @@ def _frequency_key(freq: Any) -> Any:
         return freq
 
 
+# Fonction auxiliaire d'écriture d'un registre : la nouvelle production l'emporte
+def _combine_first(produced: pd.Series, existing: Optional[pd.Series]) -> pd.Series:
+    """Return ``produced.combine_first(existing)``, ``produced`` alone when there is no store yet.
+
+    When ``existing`` holds another dtype and every one of its cells is covered
+    by a value of ``produced``, nothing of ``existing`` survives: the result is
+    ``produced`` on the union of the two indexes, built without concatenating
+    an empty remainder of ``existing`` (an empty part must not weigh on the
+    dtype of the result).
+
+    Args:
+        produced: New values, which win on the overlap.
+        existing: Current content of the store, or ``None``.
+
+    Returns:
+        The combined series: values of ``produced``, completed by the cells of
+        ``existing`` it does not cover, on the union of the indexes.
+
+    Examples:
+        >>> dates = pd.date_range('2024-01-01', periods=3, freq='MS')
+        >>> new = pd.Series(['model', 'model'], index=dates[:2], dtype=object)
+        >>> old = pd.Series([1.0, 2.0], index=dates[1:])
+        >>> _combine_first(new, old).tolist()
+        ['model', 'model', 2.0]
+        >>> _combine_first(new, old.iloc[:1]).tolist()
+        ['model', 'model']
+    """
+    if existing is None:
+        return produced
+    if produced.dtype != existing.dtype and existing.index.isin(produced.index[produced.notna()]).all():
+        return produced.reindex(produced.index.union(existing.index))
+    return produced.combine_first(existing)
+
+
 # Composant de matérialisation des covariables
 class CovariateMaterializer:
     """Single producer of the feature frames of ``HighFrequencyImputer``.
@@ -741,10 +775,7 @@ class CovariateMaterializer:
             (self.imputed_freq_store, production_freq),
             (self.origin_store, origins),
         ):
-            existing = store.get(column)
-            store[column] = (
-                produced if existing is None else produced.combine_first(existing)
-            )
+            store[column] = _combine_first(produced, store.get(column))
 
     # Méthode auxiliaire d'indexation du miroir d'une colonne par entité
     def _mirror_blocks(self, column: str) -> Dict[EntityKey, pd.DataFrame]:

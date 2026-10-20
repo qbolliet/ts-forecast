@@ -8,6 +8,7 @@ folds returned), duplicated dates, entities on several index levels, missing val
 ``X`` and ``y``, and the containers accepted for ``X``.
 """
 # Importation des modules
+import re
 import warnings
 
 import numpy as np
@@ -159,9 +160,11 @@ class TestUnsortedData:
         """Labels out of alphabetical order cannot be sorted by date: refused, without sorting."""
         # Exemple : '01/31/2024' précède '12/31/2023' dans l'ordre alphabétique
         X = pd.Series(np.arange(12.0), index=labels)
+        # Le message nomme le dtype des libellés (chaîne ou objet selon la version de pandas)
+        message = rf'Time series index is not sorted and holds labels of dtype {re.escape(str(X.index.dtype))}.*pd\.to_datetime'
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            with pytest.raises(ValueError, match=r'Time series index is not sorted and holds labels of dtype object.*pd\.to_datetime'):
+            with pytest.raises(ValueError, match=message):
                 collect_folds(cls(n_splits=3), X)
 
     def test_sorted_labels_are_taken_in_their_order(self):

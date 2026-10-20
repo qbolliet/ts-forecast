@@ -288,10 +288,13 @@ class TestBuiltStringIsValidPandas:
     def test_every_base_and_position_gives_a_valid_offset(self, frequency, position):
         """Any supported base frequency combined with any position is a valid pandas offset.
 
-        ``'W'`` and ``'B'`` never receive a position suffix (``'WS'``, ``'BE'``),
-        which pandas does not know.
+        The string is built as for pandas, with ``default_position='E'``: a bare
+        ``'M'`` / ``'Q'`` / ``'Y'`` / ``'SM'`` is a base code, which pandas does not
+        accept as an offset alias. ``'W'`` and ``'B'`` never receive a position
+        suffix (``'WS'``, ``'BE'``), which pandas does not know.
         """
-        assert to_offset(build_frequency_string(frequency, position=position)) is not None
+        alias = build_frequency_string(frequency, position=position, default_position="E")
+        assert to_offset(alias) is not None
 
 
 class TestDefaultPosition:
@@ -362,16 +365,23 @@ class TestDefaultPosition:
             assert to_offset(build_frequency_string(frequency, default_position=default_position)) is not None
 
     @pytest.mark.parametrize("frequency", ["M", "Q", "Y", "SM"])
-    def test_bare_code_is_deprecated_by_pandas(self, frequency):
-        """Why the parameter exists: the bare code makes pandas warn (and fails in pandas 3)."""
-        with pytest.warns(FutureWarning, match="deprecated"):
+    def test_bare_code_is_rejected_by_pandas(self, frequency):
+        """Why the parameter exists: pandas does not read the bare code as an offset alias."""
+        with pytest.raises(ValueError):
             to_offset(build_frequency_string(frequency))
 
-    @pytest.mark.parametrize("frequency", ["M", "Q", "Y", "SM"])
-    def test_end_alias_generates_the_dates_of_the_former_bare_alias(self, frequency):
-        """Property: the end alias generates the dates the bare alias generated in pandas 2."""
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            former = pd.date_range("2023-01-01", periods=6, freq=frequency)
+    @pytest.mark.parametrize(
+        "frequency, dates",
+        [
+            # Valeurs d'or : dates générées depuis le 2023-01-01 par l'alias nu, quand pandas
+            # l'acceptait encore (fins de mois, de trimestre, d'année ; le 15 et la fin du mois)
+            ("M", ["2023-01-31", "2023-02-28", "2023-03-31", "2023-04-30", "2023-05-31", "2023-06-30"]),
+            ("Q", ["2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31", "2024-03-31", "2024-06-30"]),
+            ("Y", ["2023-12-31", "2024-12-31", "2025-12-31", "2026-12-31", "2027-12-31", "2028-12-31"]),
+            ("SM", ["2023-01-15", "2023-01-31", "2023-02-15", "2023-02-28", "2023-03-15", "2023-03-31"]),
+        ],
+    )
+    def test_end_alias_generates_the_dates_of_the_former_bare_alias(self, frequency, dates):
+        """Property: the end alias generates the dates the bare alias generated when pandas accepted it."""
         current = pd.date_range("2023-01-01", periods=6, freq=build_frequency_string(frequency, default_position="E"))
-        assert list(current) == list(former)
+        assert list(current) == [pd.Timestamp(date) for date in dates]

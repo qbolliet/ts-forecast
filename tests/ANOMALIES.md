@@ -1899,6 +1899,60 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `tests/unit/utils/frequency/converter/test_interpolation.py::TestEmptyOrUnobservedInput`
 - **Statut** : corrigée
 
+### ANO-UTILS-071 — `anchor_fraction` : longueur de période lue sur `Period.end_time`, fausse de 999 ns sous pandas 3
+- **Type** : [CODE] comportement (migration pandas ≥ 3)
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter._shift_index_to_anchor_fraction`
+  (via `interpolate_to_higher_frequency(..., anchor_fraction=...)`)
+- **Sévérité** : mineure
+- **Observé** : la longueur de chaque période source était `end_time - start_time + 1 ns`, ce qui suppose
+  que `Period.end_time` est la dernière **nanoseconde** de la période. Vrai sous pandas 2.3 ; sous pandas 3,
+  `end_time` porte la résolution par défaut (`us`) : `2024-01-01 23:59:59.999999`. Un jour mesure alors
+  86 399 999 999 001 ns, l'ancre `0.5` tombe à 11:59:59.9999995 et une cible horaire interpolée à 18 h
+  vaut 1.2500000000058 au lieu de 1.25 ; la borne de fin (`anchor_fraction=1.0`) recule d'une microseconde.
+- **Attendu** : longueur exacte de la période, indépendante de la résolution de pandas.
+- **Reproduction** (pandas 3) :
+  ```python
+  import pandas as pd
+  p = pd.date_range('2024-01-01', periods=2, freq='D').to_period('D')
+  ((p.end_time - p.start_time) + pd.Timedelta(1, unit='ns')).as_unit('ns').asi8[0]   # 86399999999001
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_anchor_fraction.py::TestAnchorFractionPaths::test_anchor_is_an_exact_instant`
+- **Correctif** : bornes en nanosecondes tirées des débuts de période : longueur = début de la période
+  suivante − début (`(periods + 1).start_time`), fin = début suivant − 1 ns. Identique au bit près sous
+  pandas 2.3 (sorties de référence inchangées), exact sous pandas 3.
+- **Statut** : corrigée
+
+### ANO-UTILS-072 — Résolution des dates en sortie de `FrequencyConverter` et des utilitaires de période : propre à chaque chemin
+- **Type** : [CODE] comportement (résolution des dates, pandas ≥ 3)
+- **Composant** : `tsforecast/utils/frequency/converter.py::FrequencyConverter` (`convert_frequency`,
+  `aggregate_to_lower_frequency`, `interpolate_to_higher_frequency`), `tsforecast/utils/position/utils.py::convert_position`,
+  `tsforecast/utils/time/utils.py::get_period_start` / `get_period_end`
+- **Sévérité** : à arbitrer
+- **Observé** : les valeurs et les instants ne dépendent jamais de la résolution de l'entrée (`s`, `ms`, `us`, `ns`), mais
+  l'unité des dates rendues, oui, et différemment selon le chemin (pandas 3.0.6) :
+  - agrégation d'une série, descente d'un panel : **unité de l'entrée** ;
+  - montée d'un panel (`convert_frequency`) et `convert_position` : grille tirée par pandas des dates de l'entrée, **au
+    moins `us`** (`s` / `ms` → `us`, `ns` → `ns`) ;
+  - `interpolate_to_higher_frequency` : toujours **`us`** (grille issue de `Period.to_timestamp`) ;
+  - `get_period_start` / `get_period_end` : `us` pour une fréquence calendaire, `ns` en infra-journalier ;
+  - ancres internes d'`anchor_fraction` : `ns` (bornes exactes à la nanoseconde, ANO-UTILS-071).
+  Sous pandas 2.3, les chemins de montée rendaient toujours `ns`. Aucun impact sur les valeurs ; deux sorties de
+  résolutions différentes s'alignent par instant (`Index.equals` et `reindex` comparent les instants sous pandas 3),
+  mais un `assert_index_equal` ou une comparaison de dtypes chez l'utilisateur les distingue.
+- **Attendu** : à arbitrer — (1) statu quo (pandas décide, chemin par chemin) ; (2) restituer l'unité de l'entrée ;
+  (3) normaliser une unité documentée (`ns`, ou `us` par défaut de pandas 3).
+- **Reproduction** (pandas 3) :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.frequency import FrequencyConverter
+  q = pd.Series([0.0, 3.0], index=pd.DatetimeIndex(['2024-01-01', '2024-04-01']).as_unit('ns'))
+  FrequencyConverter().interpolate_to_higher_frequency(q, 'MS').index.unit                 # 'us'
+  FrequencyConverter().aggregate_to_lower_frequency(q.asfreq('MS'), 'QS').index.unit        # 'ns'
+  ```
+- **Test** : `tests/unit/utils/frequency/converter/test_datetime_resolution.py::TestDatetimeResolution` (unités épinglées),
+  `tests/unit/utils/time/test_utils.py::TestDatetimeResolution`
+- **Statut** : ouvert (à arbitrer)
+
 ## DELAYS
 
 ### ANO-DELAYS-001 — Docstrings de `calculator.py` périmées
@@ -2949,6 +3003,31 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `PublicationDelayTransformer`. Docstring de la classe et tutoriel (« Pipeline avec une cible ») le mentionnent ; le
   test épingle l'échec du score sans étape de réalignement.
 - **Statut** : corrigée (arbitrée : comportement conservé, réalignement hors classe)
+
+### ANO-DELAYS-045 — `compare_and_detect_delays` : dates de sortie à trois résolutions, jeu vide typé autrement
+- **Type** : [CODE] comportement (résolution des dates et dtype chaîne, pandas ≥ 3)
+- **Composant** : `tsforecast/delays/data_manager.py::compare_and_detect_delays` (et `_empty_publication_delays`)
+- **Sévérité** : à arbitrer
+- **Observé** (pandas 3.0.6) : délais identiques quelle que soit la résolution de l'entrée, mais
+  `observation_date` est à la **résolution de l'entrée**, `period_start` / `period_end` et `download_date` toujours en
+  **`us`** (sous pandas 2.3 : bornes en `ns`, téléchargement en `us`). Le résultat **vide** (aucune observation
+  détectée) est typé à part : dates en `datetime64[ns]`, `reference_point` / `unit` en `object`, quand un résultat
+  non vide porte des dates en `us` (ou à la résolution de l'entrée) et ces deux colonnes en `str` (`frequency` reste
+  `object` dans les deux cas). Une concaténation de résultats (calendrier de publications, `tests/integration/delays`)
+  mélange donc les deux.
+- **Attendu** : à arbitrer — unité commune des quatre colonnes de dates (celle de l'entrée, ou une unité fixe
+  documentée), et mêmes dtypes pour un résultat vide ou non.
+- **Reproduction** (pandas 3) :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays import compare_and_detect_delays
+  data = pd.DataFrame({'PIB': [1.0, 2.0]}, index=pd.date_range('2023-01-01', periods=2, freq='MS').as_unit('s'))
+  compare_and_detect_delays(data, None, '2023-03-10').dtypes          # observation_date [s], period_* [us]
+  compare_and_detect_delays(data * np.nan, None, '2023-03-10').dtypes  # dates [ns], chaînes object
+  ```
+- **Test** : `tests/unit/delays/data_manager/test_datetime_resolution.py::TestDatetimeResolution::test_single_download`
+  (unités épinglées)
+- **Statut** : ouvert (à arbitrer)
 
 ### Arbitrages de l'auteur (2026-10-04) sur `compare_and_detect_delays`
 - **Fuseaux horaires** : une date sans fuseau est lue en UTC face à une date avec fuseau ; deux dates avec fuseaux sont
@@ -5015,6 +5094,54 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `new_pairs, misaligned = REF_T._check_transform_frequencies(PANEL_X.copy())`, commentaire mis à jour (D42). Le
   notebook audite volontairement les méthodes privées : il reste exposé à leurs changements de signature, que
   le test d'exécution (`slow`) détecte. Le `xfail` est retiré ; le notebook s'exécute sans erreur.
+
+### ANO-FREQ-085 — Part calendaire (`scale_features='calendar'`) : durées lues sur `Period.end_time`, fausses sous pandas 3
+- **Type** : [CODE] comportement (migration pandas ≥ 3)
+- **Composant** : `tsforecast/frequency/stage_scaler.py::_calendar_share` (diviseurs fractionnaires de
+  `StageScaler(scale_features='calendar')`)
+- **Sévérité** : mineure
+- **Observé** : la durée de chaque période fine et grossière était `end_time - start_time + 1 ns`. Sous
+  pandas 3, `Period.end_time` est en microsecondes (`...23:59:59.999999`) : chaque durée perd 999 ns et la
+  part de janvier dans le premier trimestre 2024 vaut `31/91 - 8.4e-14` au lieu de `31/91` (écart relatif
+  ≈ 2.5e-13, sous la tolérance `1e-12` des tests de valeurs d'or existants).
+- **Attendu** : rapport exact des durées entières des périodes.
+- **Reproduction** (pandas 3) :
+  ```python
+  import pandas as pd
+  d = pd.DatetimeIndex(['2024-01-31']); f, c = d.to_period('M'), d.to_period('Q')
+  one = pd.Timedelta(1, unit='ns')
+  (f.end_time - f.start_time + one).asi8 / (c.end_time - c.start_time + one).asi8 == 31 / 91   # [False]
+  ```
+- **Test** : `tests/unit/frequency/stage_scaler/test_golden_values.py::TestCalendarGoldenValues::test_calendar_share_is_an_exact_ratio_of_days`
+- **Correctif** : `_period_span_nanoseconds` : début de la période suivante − début, en nanosecondes
+  entières. Identique au bit près sous pandas 2.3, exact sous pandas 3.
+- **Statut** : corrigée
+
+### ANO-FREQ-086 — `HighFrequencyImputer` : grille de sortie en `us` quelle que soit l'entrée, provenance d'un panel à la résolution de l'entrée
+- **Type** : [CODE] comportement (résolution des dates, pandas ≥ 3)
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer` (`fit_transform`, `transform`,
+  `imputation_provenance_`)
+- **Sévérité** : à arbitrer
+- **Observé** (pandas 3.0.6) : valeurs imputées, provenance, rejeu et inversion identiques quelle que soit la
+  résolution de l'entrée ; la sortie empilée et le rejeu sont toujours en **`us`** (grille construite par
+  l'imputeur ; `ns` sous pandas 2.3), la matrice de provenance d'un **panel** est à la **résolution de l'entrée**
+  (celle d'une série suit la grille). Pour une entrée en `ns` sur un panel, sortie et provenance ont donc deux
+  résolutions ; elles s'alignent par instant, mais `assert_frame_equal` sur leurs index les distingue.
+- **Attendu** : à arbitrer — une même résolution pour la sortie et la provenance (celle de l'entrée, ou une unité fixe
+  documentée).
+- **Reproduction** (pandas 3) :
+  ```python
+  from sklearn.linear_model import LinearRegression
+  from tests.support.datasets import build_panel_reference
+  from tests.support.perturbations import with_datetime_resolution
+  from tsforecast.frequency import HighFrequencyImputer
+  data = with_datetime_resolution(build_panel_reference()[['m1', 'q1', 'v']], 's')
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+  imputer.fit_transform(data).index.levels[-1].unit, imputer.imputation_provenance_.index.levels[-1].unit   # ('us', 's')
+  ```
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_datetime_resolution.py::TestDatetimeResolution`
+  (unités épinglées)
+- **Statut** : ouvert (à arbitrer)
 
 ## BASE
 

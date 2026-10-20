@@ -457,10 +457,11 @@ def to_period_index(df: Union[pd.DataFrame, pd.Series]) -> Union[pd.DataFrame, p
             return None
         # ``PeriodIndex`` ne connaît pas la position (« MS » / « QS » / « YS »
         # début, « ME » / « QE » / « YE » fin) : seule la granularité compte
-        # (« M » / « Q » / « Y »). ``get_period_alias`` fait cette conversion ;
-        # sans elle, ``to_period('MS')`` lève (alias non supporté en période).
-        freq = get_period_alias(freq) or freq
-        return index.to_period(freq)
+        # (« M » / « Q » / « Y »). ``get_period_alias`` fait cette conversion,
+        # sur l'alias en chaîne (un objet offset n'est pas converti) ; sans elle,
+        # ``to_period('MS')`` lève (alias non supporté en période).
+        alias = freq if isinstance(freq, str) else freq.freqstr
+        return index.to_period(get_period_alias(alias) or alias)
 
     if isinstance(df.index, pd.MultiIndex):
         level = df.index.nlevels - 1
@@ -860,3 +861,123 @@ def truncate_entity(
         limit = end
     keep = ~(mask & np.asarray(dates > limit))
     return df[keep].copy()
+
+
+# Résolutions de dates prises en charge par pandas, de la plus grossière à la plus fine
+DATETIME_UNITS: tuple = ('s', 'ms', 'us', 'ns')
+
+
+def _as_resolution(values: pd.Index, unit: str) -> pd.Index:
+    """Cast a ``DatetimeIndex`` / ``TimedeltaIndex`` to ``unit``, other indexes unchanged.
+
+    Raises:
+        ValueError: If a value has a part finer than ``unit``.
+    """
+    if not isinstance(values, (pd.DatetimeIndex, pd.TimedeltaIndex)):
+        return values
+    converted = values.as_unit(unit)
+    # Contrôle d'exactitude : ``as_unit`` vers une unité plus grossière tronque en silence
+    if not (converted.as_unit(values.unit) == values)[~values.isna()].all():
+        raise ValueError(f"Some dates are not representable exactly at resolution '{unit}'")
+    return converted
+
+
+def with_datetime_resolution(
+    df: Union[pd.DataFrame, pd.Series], unit: str
+) -> Union[pd.DataFrame, pd.Series]:
+    """Store every date (index levels, datetime and timedelta columns) at one resolution.
+
+    Edge case: the same instants stored in seconds, milliseconds, microseconds
+    or nanoseconds. pandas infers the resolution from the input (a string or a
+    ``datetime`` gives microseconds, a ``np.datetime64`` keeps its own unit),
+    so a component must give the same result whatever the resolution of its
+    input.
+
+    Args:
+        df: Time series or panel data: ``DatetimeIndex`` / ``TimedeltaIndex``
+            index or levels, ``datetime64`` / ``timedelta64`` columns (time
+            zone kept).
+        unit: Target resolution, one of :data:`DATETIME_UNITS`.
+
+    Returns:
+        A copy of ``df`` whose dates have resolution ``unit``; the other
+        levels, columns and values are unchanged.
+
+    Raises:
+        ValueError: If ``unit`` is not one of :data:`DATETIME_UNITS`, or if a
+            date has a part finer than ``unit``.
+
+    Examples:
+        >>> import pandas as pd
+        >>> df = pd.DataFrame({'v': [1, 2]}, index=pd.date_range('2020-01-01', periods=2, freq='MS'))
+        >>> converted = with_datetime_resolution(df, 's')
+        >>> str(converted.index.dtype)
+        'datetime64[s]'
+        >>> bool((converted.index == df.index).all())
+        True
+    """
+    if unit not in DATETIME_UNITS:
+        raise ValueError(f"unit must be one of {DATETIME_UNITS}, got {unit!r}")
+
+    out = df.copy()
+    # Index : chaque niveau de dates (ou de durées) converti, les autres inchangés
+    if isinstance(out.index, pd.MultiIndex):
+        arrays = [_as_resolution(out.index.get_level_values(i), unit) for i in range(out.index.nlevels)]
+        out.index = pd.MultiIndex.from_arrays(arrays, names=out.index.names)
+    else:
+        # Index simple : ``as_unit`` conserve le nom et la fréquence de l'index
+        out.index = _as_resolution(out.index, unit)
+
+    # Colonnes de dates ou de durées, valeurs manquantes comprises
+    columns = [out] if isinstance(out, pd.Series) else [out[col] for col in out.columns]
+    for position, column in enumerate(columns):
+        if not (pd.api.types.is_datetime64_any_dtype(column.dtype)
+                or pd.api.types.is_timedelta64_dtype(column.dtype)):
+            continue
+        converted = _as_resolution(pd.Index(column), unit)
+        if isinstance(out, pd.Series):
+            out = pd.Series(converted, index=out.index, name=out.name)
+        else:
+            out.isetitem(position, converted)
+    return out
+
+
+def datetime_units(obj: Union[pd.DataFrame, pd.Series, pd.Index]) -> dict:
+    """Map every date or duration location of an object to its resolution.
+
+    Companion of :func:`with_datetime_resolution`: tells at which resolution a
+    component returns its dates.
+
+    Args:
+        obj: ``DataFrame``, ``Series`` or ``Index``.
+
+    Returns:
+        ``{('index', level): unit}`` for each ``DatetimeIndex`` /
+        ``TimedeltaIndex`` level (``level`` is the position), and
+        ``{('column', name): unit}`` for each ``datetime64`` / ``timedelta64``
+        column (a ``Series`` counts as one column).
+
+    Examples:
+        >>> import pandas as pd
+        >>> df = pd.DataFrame({'when': pd.to_datetime(['2024-01-01']).as_unit('s')},
+        ...                   index=pd.date_range('2020-01-01', periods=1).as_unit('ms'))
+        >>> datetime_units(df)
+        {('index', 0): 'ms', ('column', 'when'): 's'}
+    """
+    units = {}
+    index = obj if isinstance(obj, pd.Index) else obj.index
+    levels = (
+        [index.get_level_values(i) for i in range(index.nlevels)]
+        if isinstance(index, pd.MultiIndex) else [index]
+    )
+    for position, level in enumerate(levels):
+        if isinstance(level, (pd.DatetimeIndex, pd.TimedeltaIndex)):
+            units[('index', position)] = level.unit
+    if isinstance(obj, pd.Index):
+        return units
+    columns = [obj] if isinstance(obj, pd.Series) else [obj[col] for col in obj.columns]
+    for column in columns:
+        if (pd.api.types.is_datetime64_any_dtype(column.dtype)
+                or pd.api.types.is_timedelta64_dtype(column.dtype)):
+            units[('column', column.name)] = column.dt.unit
+    return units

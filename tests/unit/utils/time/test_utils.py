@@ -13,7 +13,8 @@ properties).
 
 Nanosecond, millisecond, time zone, ``Period`` input and anchor behaviours are covered
 by ``TestNanosecond``, ``TestMillisecond``, ``TestTimezone``, ``TestPeriodInput``,
-``TestPeriodAnchorsAndMultipliers`` and ``TestResolveDate``.
+``TestPeriodAnchorsAndMultipliers`` and ``TestResolveDate``; the independence from the
+resolution of the input dates (``s`` to ``ns``) by ``TestDatetimeResolution``.
 """
 # Importation des modules
 # Modules de base
@@ -23,6 +24,9 @@ import pandas as pd
 from datetime import date as date_type, datetime, timedelta
 # Module de test
 import pytest
+
+# Résolutions de dates prises en charge par pandas
+from tests.support.perturbations import DATETIME_UNITS
 
 # Fonctions à tester
 from tsforecast.utils.time.utils import (
@@ -1037,3 +1041,37 @@ class TestInvalidFrequency:
         """An anchor of the wrong kind, or on a base without anchor, is rejected."""
         with pytest.raises(ValueError, match=message):
             get_period_start(datetime(2023, 6, 15), freq)
+
+
+class TestDatetimeResolution:
+    """Period bounds and string conversions do not depend on the resolution of the input dates."""
+
+    # Fréquences calendaires, infra-journalières, ancrées et multipliées
+    _FREQS = ["D", "W", "SM", "M", "Q", "Y", "h", "min", "s", "2h", "QE-NOV", "W-WED"]
+
+    @pytest.mark.parametrize("unit", DATETIME_UNITS)
+    @pytest.mark.parametrize("freq", _FREQS)
+    @pytest.mark.parametrize("tz", [None, "Europe/Paris"], ids=["naive", "paris"])
+    def test_bounds_do_not_depend_on_resolution(self, freq, tz, unit):
+        """Same start and end instants as from a nanosecond date; one bound unit for every input."""
+        # Date à la seconde près, représentable exactement dans toutes les résolutions
+        date = pd.Timestamp("2024-02-29 13:47:12", tz=tz)
+        reference = get_period_boundaries(date.as_unit("ns"), freq)
+
+        result = get_period_boundaries(date.as_unit(unit), freq)
+
+        assert result == reference
+        # Unité des bornes : celle obtenue depuis une date en nanosecondes
+        assert [bound.unit for bound in result] == [bound.unit for bound in reference]
+
+    @pytest.mark.parametrize("unit", DATETIME_UNITS)
+    def test_string_round_trip_does_not_depend_on_resolution(self, unit):
+        """Formatted labels are identical; parsing them back gives the same instants."""
+        index = pd.date_range("2023-01-31", periods=4, freq="ME").as_unit(unit)
+        series = pd.Series([1.0, 2.0, 3.0, 4.0], index=index, name="v")
+
+        labels = timeseries_to_string(series)
+        restored = string_to_timeseries(labels)
+
+        assert labels.index.tolist() == ["2023-01-31", "2023-02-28", "2023-03-31", "2023-04-30"]
+        assert (restored.index == index).all() and restored.tolist() == series.tolist()

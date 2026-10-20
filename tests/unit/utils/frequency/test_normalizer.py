@@ -10,6 +10,7 @@ rejection of the pandas aliases abandoned by the package (``'A'``, ``'AS'``,
 The module-level functions of ``utils.py`` (``normalize_frequency`` and its
 ``return_format``, ``get_frequency_order``...) are tested in ``test_utils.py``.
 """
+import re
 import warnings
 from typing import get_args
 
@@ -614,6 +615,16 @@ PANDAS_ANCHOR_CANDIDATES = [
 ]
 
 
+# Valeurs d'or : six dates générées depuis le 2023-01-01 par l'alias nu, quand pandas
+# l'acceptait encore (fins de mois, de trimestre, d'année ; le 15 et la fin du mois)
+FORMER_BARE_ALIAS_DATES = {
+    'M': ['2023-01-31', '2023-02-28', '2023-03-31', '2023-04-30', '2023-05-31', '2023-06-30'],
+    'Q': ['2023-03-31', '2023-06-30', '2023-09-30', '2023-12-31', '2024-03-31', '2024-06-30'],
+    'Y': ['2023-12-31', '2024-12-31', '2025-12-31', '2026-12-31', '2027-12-31', '2028-12-31'],
+    'SM': ['2023-01-15', '2023-01-31', '2023-02-15', '2023-02-28', '2023-03-15', '2023-03-31'],
+}
+
+
 class TestBareCodesGiveTheEndVariant:
     """A code with start / end variants and no position gets its end variant.
 
@@ -666,12 +677,9 @@ class TestBareCodesGiveTheEndVariant:
 
     @pytest.mark.parametrize("code", ['M', 'Q', 'Y', 'SM'])
     def test_end_alias_generates_the_dates_of_the_former_bare_alias(self, normalizer, code):
-        """Property: the end alias generates the same dates as the bare alias of pandas 2."""
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            former = pd.date_range('2023-01-01', periods=6, freq=code)
+        """Property: the end alias generates the dates the bare alias generated in pandas 2."""
         current = pd.date_range('2023-01-01', periods=6, freq=normalizer.to_pandas_freq(code))
-        assert list(current) == list(former)
+        assert list(current) == [pd.Timestamp(date) for date in FORMER_BARE_ALIAS_DATES[code]]
 
 
 class TestAnchorValidation:
@@ -750,14 +758,18 @@ class TestAnchorValidation:
 
     @pytest.mark.parametrize("candidate", PANDAS_ANCHOR_CANDIDATES)
     def test_validation_agrees_with_pandas(self, normalizer, candidate):
-        """Property: for a frequency the package supports, a valid anchor is one pandas accepts."""
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            try:
-                pd.tseries.frequencies.to_offset(candidate)
-                pandas_accepts = True
-            except ValueError:
-                pandas_accepts = False
+        """Property: for a frequency the package supports, a valid anchor is one pandas accepts.
+
+        A bare base code with a month anchor (``'Q-JAN'``) is not a pandas alias: pandas is
+        asked about the end variant the package hands it (``'QE-JAN'``). A semi-monthly
+        anchor needs an explicit position in both vocabularies (``'SM-15'`` is refused).
+        """
+        pandas_candidate = re.sub(r'^(M|Q|Y)-', r'\1E-', candidate)
+        try:
+            pd.tseries.frequencies.to_offset(pandas_candidate)
+            pandas_accepts = True
+        except ValueError:
+            pandas_accepts = False
         assert normalizer.validate(candidate) is pandas_accepts
 
 

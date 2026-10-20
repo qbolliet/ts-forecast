@@ -11,6 +11,8 @@ import pandas as pd
 import pytest
 
 from tests.support.perturbations import (
+    DATETIME_UNITS,
+    datetime_units,
     drop_entity,
     empty_like,
     interleave_entities,
@@ -25,6 +27,7 @@ from tests.support.perturbations import (
     to_three_level_index,
     truncate_entity,
     unsort_within_entities,
+    with_datetime_resolution,
     with_duplicated_rows,
     with_index_names,
     with_single_observation_entity,
@@ -613,3 +616,89 @@ class TestTruncateEntity:
         pd.testing.assert_frame_equal(
             out.drop(index=entity, level=0), panel.drop(index=entity, level=0)
         )
+
+
+class TestWithDatetimeResolution:
+    """``with_datetime_resolution``: the same instants stored at another resolution."""
+
+    @pytest.mark.parametrize('unit', DATETIME_UNITS)
+    def test_index_resolution_and_instants(self, small_timeseries: pd.DataFrame, unit: str) -> None:
+        """The index takes the requested unit; instants, name, frequency and values are kept."""
+        out = with_datetime_resolution(small_timeseries, unit)
+
+        assert out.index.unit == unit
+        assert (out.index == small_timeseries.index).all()
+        assert out.index.freq == small_timeseries.index.freq
+        pd.testing.assert_frame_equal(out, small_timeseries, check_index_type=False)
+
+    @pytest.mark.parametrize('unit', DATETIME_UNITS)
+    def test_panel_date_level_only(self, panel_region: pd.DataFrame, unit: str) -> None:
+        """Only the date level of a three-level panel changes; entity levels and names are kept."""
+        out = with_datetime_resolution(panel_region, unit)
+
+        assert out.index.get_level_values('date').unit == unit
+        assert out.index.names == panel_region.index.names
+        assert out.index.get_level_values('country').tolist() == panel_region.index.get_level_values('country').tolist()
+        assert (out.index.get_level_values('date') == panel_region.index.get_level_values('date')).all()
+
+    @pytest.mark.parametrize('unit', DATETIME_UNITS)
+    def test_datetime_and_timedelta_columns(self, unit: str) -> None:
+        """Date and duration columns change unit, missing values included; other columns are untouched."""
+        # Colonnes de dates avec fuseau et de durées, chacune avec une valeur manquante
+        df = pd.DataFrame({
+            'when': pd.to_datetime(['2024-01-01 10:00', None]).tz_localize('Europe/Paris'),
+            'lag': pd.to_timedelta(['3 days', None]),
+            'v': [1.0, 2.0],
+        })
+
+        out = with_datetime_resolution(df, unit)
+
+        assert out['when'].dt.unit == unit and str(out['when'].dt.tz) == 'Europe/Paris'
+        assert out['lag'].dt.unit == unit
+        assert out['when'].isna().tolist() == [False, True]
+        assert out['when'].iloc[0] == df['when'].iloc[0] and out['lag'].iloc[0] == df['lag'].iloc[0]
+        assert out['v'].tolist() == [1.0, 2.0]
+
+    def test_series(self, small_timeseries: pd.DataFrame) -> None:
+        """A ``Series`` keeps its name and values, its index takes the unit."""
+        out = with_datetime_resolution(small_timeseries['a'], 'ms')
+        assert out.index.unit == 'ms' and out.name == 'a' and out.tolist() == [1.0, 2.0, 3.0, 4.0]
+
+    def test_input_is_not_modified(self, small_timeseries: pd.DataFrame) -> None:
+        """The perturbation returns a copy."""
+        before = small_timeseries.copy()
+        with_datetime_resolution(small_timeseries, 's')
+        pd.testing.assert_frame_equal(small_timeseries, before)
+        assert small_timeseries.index.unit == before.index.unit
+
+    def test_sub_unit_part_raises(self) -> None:
+        """A date with a millisecond part has no exact value in seconds: no silent truncation."""
+        df = pd.DataFrame({'v': [1.0]}, index=pd.DatetimeIndex(['2024-01-01 00:00:00.500']))
+        with pytest.raises(ValueError, match='not representable'):
+            with_datetime_resolution(df, 's')
+
+    def test_unknown_unit_raises(self, small_timeseries: pd.DataFrame) -> None:
+        """Only the four resolutions supported by pandas are accepted."""
+        with pytest.raises(ValueError, match='unit must be one of'):
+            with_datetime_resolution(small_timeseries, 'D')
+
+
+class TestDatetimeUnits:
+    """``datetime_units``: resolution of each date location of an object."""
+
+    def test_panel_levels_and_columns(self, panel_region: pd.DataFrame) -> None:
+        """Only the date level and the date or duration columns are reported, by position and name."""
+        panel = with_datetime_resolution(panel_region, 'ms').assign(
+            lag=pd.to_timedelta([1] * 6, unit='D').as_unit('s'), label='x'
+        )
+        assert datetime_units(panel) == {('index', 2): 'ms', ('column', 'lag'): 's'}
+
+    def test_series_and_index(self, small_timeseries: pd.DataFrame) -> None:
+        """A ``Series`` of dates counts as one column; an ``Index`` reports its own resolution."""
+        dates = small_timeseries.index.as_unit('us')
+        assert datetime_units(pd.Series(dates, name='d')) == {('column', 'd'): 'us'}
+        assert datetime_units(dates) == {('index', 0): 'us'}
+
+    def test_no_dates(self) -> None:
+        """An object without dates gives an empty mapping."""
+        assert datetime_units(pd.DataFrame({'v': [1.0]})) == {}

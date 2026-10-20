@@ -122,7 +122,9 @@ class TestLabelsAndOrder:
         """Integer values come out as floats; entity and date columns keep their dtypes."""
         panel = column_panel.astype({'a': 'int64', 'b': 'int64'})
         output = _column_transformer().fit_transform(panel)
-        assert output.dtypes.astype(str).tolist() == ['object', 'datetime64[ns]', 'float64', 'float64']
+        # Colonnes d'entité et de date : dtypes de l'entrée (chaîne et résolution des dates comprises)
+        expected = [panel.dtypes['country'], panel.dtypes['date'], np.dtype('float64'), np.dtype('float64')]
+        assert output.dtypes.tolist() == expected
 
 
 # =============================================================================

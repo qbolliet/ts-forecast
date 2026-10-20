@@ -159,7 +159,8 @@ class TestEmptyAndSingle:
         features, _ways, _origins = _materialize(
             single_observation(reference_timeseries), monthly_grid(), 'M', ['m1', 'a1']
         )
-        assert features.stack().to_dict() == {(pd.Timestamp('2021-01-31'), 'm1'): 100.0}
+        # Cellules produites seulement (``stack`` conserve les cellules vides)
+        assert features.stack().dropna().to_dict() == {(pd.Timestamp('2021-01-31'), 'm1'): 100.0}
 
     @pytest.mark.parametrize('method', ['decide_ways', 'materialize', 'stage_frame'])
     def test_empty_panel_grid(self, mixed_freq_panel_heterogeneous, method):

@@ -1245,16 +1245,19 @@ class FrequencyConverter(TemporalConverter):
         if source_base in NON_PERIOD_FREQUENCIES:
             return None
 
-        # Périodes source réelles
+        # Périodes source réelles, bornes en nanosecondes : début de chaque période
+        # et début de la suivante
         periods = index.to_period(source_base)
-        starts = periods.start_time
-        ends = periods.end_time
+        starts = periods.start_time.as_unit('ns')
+        next_starts = (periods + 1).start_time.as_unit('ns')
+        # Dernier nanoseconde strictement intérieur à chaque période :
+        # borne du clamp, plus petite que tout pas de grille cible, donc sans effet
+        # sur une cible infra-journalière et ramenée au dernier jour par normalize()
+        ends = next_starts - pd.Timedelta(1, unit='ns')
 
-        # Durée calendaire pleine de chaque période : end_time est la dernière
-        # nanoseconde de la période, d'où le +1 ns. La longueur pleine est de
-        # surcroît exactement représentable en float64, ce que n'est pas
-        # (end_time - start_time) pour une période annuelle
-        lengths = (ends - starts) + pd.Timedelta(1, unit='ns')
+        # Durée calendaire pleine de chaque période, exactement représentable en
+        # float64, ce que n'est pas (ends - starts) pour une période annuelle
+        lengths = next_starts - starts
         shifted = pd.DatetimeIndex(starts + anchor_fraction * lengths)
 
         # Bornage à la fin de période : sans lui, anchor_fraction=1.0 tomberait

@@ -435,7 +435,8 @@ class TestRobustness:
             irregular_index_timeseries, ['balance_commerciale_annuelle'], 'MS'
         )
 
-        observed = irregular_index_timeseries.stack()
+        # Cellules observées seulement (``stack`` conserve les cellules vides)
+        observed = irregular_index_timeseries.stack().dropna()
         pd.testing.assert_series_equal(result.stack().loc[observed.index], observed)
 
 

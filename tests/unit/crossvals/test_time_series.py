@@ -3,9 +3,9 @@
 Covers what the two classes add to their bases (``groups`` ignored with a
 warning, inheritance), their folds on time series with golden values
 (expanding and rolling windows, gap, explicit test dates and positions,
-degenerate data), a panel given by mistake, and the sklearn contract:
+degenerate data), a panel given by mistake, the sklearn contract:
 ``cross_validate``, ``cross_val_score`` and ``GridSearchCV`` with
-``cv=splitter``.
+``cv=splitter``, and the independence of the folds from the resolution of the dates.
 """
 # Importation des modules
 import warnings
@@ -17,6 +17,7 @@ from sklearn.dummy import DummyRegressor
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import GridSearchCV, cross_val_score, cross_validate
 
+from tests.support.perturbations import DATETIME_UNITS, with_datetime_resolution
 from tests.support.splits import as_lists, assert_folds_cover, assert_in_sample, assert_no_leakage, collect_folds
 from tsforecast.crossvals.base import InSampleSplit, OutOfSampleSplit
 from tsforecast.crossvals.time_series import TSInSampleSplit, TSOutOfSampleSplit
@@ -291,3 +292,21 @@ class TestSklearnModelSelection:
         scores = cross_validate(DummyRegressor(), [[v] for v in values], [2 * v for v in values],
                                 cv=TSOutOfSampleSplit(n_splits=3), scoring='neg_mean_absolute_error')['test_score']
         np.testing.assert_allclose(scores, [-6.0, -9.0, -12.0])
+
+
+class TestDatetimeResolution:
+    """Folds of the time series splitters do not depend on how the dates are stored."""
+
+    @pytest.mark.parametrize('unit', DATETIME_UNITS)
+    @pytest.mark.parametrize('splitter', [
+        TSOutOfSampleSplit(n_splits=3, test_size=2, gap=1),
+        TSOutOfSampleSplit(test_indices=[pd.Timestamp('2024-03-31').as_unit('s')], max_train_size=12),
+        TSInSampleSplit(n_splits=2, test_size=3),
+    ], ids=['out-gap', 'out-timestamp', 'in-sample'])
+    def test_folds(self, cv_frame_24, splitter, unit):
+        """Same positions as on the nanosecond index (expanding, rolling and dated folds)."""
+        expected = as_lists(collect_folds(splitter, with_datetime_resolution(cv_frame_24, 'ns')))
+
+        folds = as_lists(collect_folds(splitter, with_datetime_resolution(cv_frame_24, unit)))
+
+        assert folds == expected

@@ -23,6 +23,12 @@ Ce package poursuit les objectifs suivants :
 - Permettre l'utilisation de méthodes d'interprétabilité
 - L'agrégation sera traitée dans un package différent
 
+## Prérequis
+
+Python ≥ 3.13, `pandas>=3.0,<4` (Copy-on-Write, dtype chaîne `str` et résolution des dates
+inférée — `us` par défaut), `scikit-learn>=1.9,<2`, `numpy>=2.3.1,<3`, `joblib>=1.5.1,<2`
+(voir `pyproject.toml`). pandas 2 n'est plus pris en charge.
+
 ## Test
 
 Les tests utilisent `pytest` ; la couverture (lignes et branches) est mesurée par `pytest-cov`
