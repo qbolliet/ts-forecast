@@ -177,7 +177,9 @@ class DelayDetectionReport(_Report):
         detection_mode: ``'new_only'`` or ``'all_changes'``.
         reference_point: ``'start'`` or ``'end'``.
         delay_unit: Label of the delay unit (``'day'``, ``'second'``, ``'microsecond'``).
-        download_date: Resolved download date.
+        download_date: Resolved download date, as in the ``download_date`` column of the
+            result: a ``pd.Timestamp`` at the unit of the dates of ``new_data`` (finer if
+            the date needs it), in the time zone it was given with.
         has_existing_data: Whether ``existing_data`` was given. Without it, the latest
             observation of each (entity, column) couple is detected and counted
             as a new value.

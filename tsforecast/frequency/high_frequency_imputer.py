@@ -252,6 +252,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     Without ``y`` at ``fit``, nothing of this applies: ``transform`` replays
     the plan on any data and ``fit_transform(X) == fit(X).transform(X)``.
 
+    **Unit of the dates**: every date a pass returns — output, provenance
+    matrix, inversion, and ``y`` too — is stored at the unit of the dates of
+    the ``X`` of that pass (``'s'``, ``'ms'``, ``'us'`` or ``'ns'``); a ``y``
+    stored at another unit comes back at ``X``'s, its values unchanged. The
+    fitted state holds the unit of the fit input, and a ``transform`` on data
+    stored at another unit returns the unit of those data, with the same
+    values.
+
     **Limit — scoring a target coarser than the grid**: the model then
     predicts sub-period values, while the test target keeps its observed
     period totals; a score compares the two on different scales. Aggregate
@@ -1322,12 +1330,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         index recorded before that conversion, it is repositioned onto
         ``X.index``.
 
+        The same instants stored at another unit (``y`` in nanoseconds, ``X``
+        in seconds) match: ``y`` then takes ``X``'s dates, so that both come
+        out at the unit of ``X``.
+
         Args:
             X: Working features, already validated and converted.
             y: Target series as received by ``fit``.
 
         Returns:
-            ``y`` repositioned onto ``X.index`` when that is safe to do.
+            ``y`` repositioned onto ``X.index`` when that is safe to do, its
+            values and index names unchanged.
 
         Raises:
             ValueError: If the two indices neither match nor derive from the
@@ -1335,6 +1348,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """
         # Cas nominal : les deux index coïncident déjà
         if X.index.equals(y.index):
+            # Mêmes instants exprimés dans une autre unité : y prend les dates de
+            # X, faute de quoi le jeu de travail, concaténé, passerait à la plus
+            # fine des deux unités
+            if self._datetime_units(X.index) != self._datetime_units(y.index):
+                return y.set_axis(X.index.set_names(y.index.names))
             return y
 
         # Cas colonnes -> index : la conversion appliquée à X, jamais à y,
@@ -1363,6 +1381,32 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             f"index, or — for column-based panel/time-series data "
             f"(time_col/panel_cols) — the index X had before those columns "
             f"were converted to the index."
+        )
+
+    # Méthode auxiliaire de lecture des unités de stockage des dates d'un index
+    @staticmethod
+    def _datetime_units(index: pd.Index) -> Tuple[Optional[str], ...]:
+        """Return the storage unit of the dates of each level of an index.
+
+        Args:
+            index: Flat index or ``MultiIndex``.
+
+        Returns:
+            One entry per level: the unit (``'s'``, ``'ms'``, ``'us'`` or
+            ``'ns'``) of a date level, None for any other level.
+
+        Examples:
+            >>> import pandas as pd
+            >>> dates = pd.date_range('2024-01-31', periods=2, freq='ME').as_unit('s')
+            >>> HighFrequencyImputer._datetime_units(pd.MultiIndex.from_product([['FR'], dates]))
+            (None, 's')
+        """
+        # Extraction des niveaux de l'index
+        levels = index.levels if isinstance(index, pd.MultiIndex) else [index]
+        # Extraction des unités associées à chaque niveau
+        return tuple(
+            level.unit if isinstance(level, pd.DatetimeIndex) else None
+            for level in levels
         )
 
     # -------------------------------------------------------------------------

@@ -94,7 +94,10 @@ Sans *metadata routing*, les paramètres de `predict`, `predict_proba` et
 données les recharge au lieu de les réajuster. Les étapes données au pipeline
 sont alors clonées et restent non ajustées. La clé de cache lit le **contenu**
 des données (valeurs, index, colonnes, types) : un `DataFrame` daté dont l'index
-a rempli ses caches internes pandas retrouve son entrée.
+a rempli ses caches internes pandas retrouve son entrée. Les types comprennent
+l'unité de stockage des dates : les mêmes instants en secondes et en
+nanosecondes sont deux entrées distinctes, comme le sont les sorties des étapes,
+rendues à l'unité de leur entrée.
 
 ## Structure pandas des sorties
 

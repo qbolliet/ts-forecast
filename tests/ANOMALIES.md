@@ -1975,6 +1975,28 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `tests/unit/utils/position/test_converter.py::TestDatetimeResolution` (aller-retour compris)
 - **Statut** : corrigée
 
+### ANO-UTILS-073 — `resolve_date` tronque les nanosecondes d'une date donnée en chaîne
+- **Type** : [CODE] comportement (résolution des dates)
+- **Composant** : `tsforecast/utils/time/utils.py::resolve_date` (et `compare_and_detect_delays`, qui lui confie
+  `download_date`)
+- **Sévérité** : mineure (à arbitrer)
+- **Observé** (constaté le 2026-10-20, antérieur à la règle de l'unité de l'entrée et inchangé par elle) : une chaîne
+  est lue par `pd.to_datetime` puis rendue par `to_pydatetime()`, en `datetime` Python, à la microseconde : la partie
+  nanoseconde est perdue (`UserWarning: Discarding nonzero nanoseconds in conversion`). Un `pd.Timestamp` passé tel quel
+  la garde. Sur des données en `ns`, `compare_and_detect_delays(…, '2023-03-10 00:00:00.000000001', delay_unit='us')`
+  rend donc la date de téléchargement `2023-03-10 00:00:00` et un délai de 777 600 000 000 µs, contre 777 600 000 001 µs
+  (arrondi par excès de 1 ns) pour le `Timestamp` équivalent.
+- **Attendu** : à arbitrer — aucune troncature (règle 3 de l'unité des dates : jamais d'arrondi) : `resolve_date` rendant
+  un `pd.Timestamp` (sous-classe de `datetime`, changement du type documenté), ou `compare_and_detect_delays` lisant
+  elle-même les chaînes par `pd.Timestamp` ; ou statu quo documenté (précision à la microseconde d'une chaîne).
+- **Reproduction** :
+  ```python
+  import pandas as pd
+  from tsforecast.utils.time import resolve_date
+  resolve_date('2023-03-10 00:00:00.000000001')   # datetime(2023, 3, 10, 0, 0) + UserWarning
+  ```
+- **Statut** : ouverte (à arbitrer)
+
 ## DELAYS
 
 ### ANO-DELAYS-001 — Docstrings de `calculator.py` périmées
@@ -3029,7 +3051,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 ### ANO-DELAYS-045 — `compare_and_detect_delays` : dates de sortie à trois résolutions, jeu vide typé autrement
 - **Type** : [CODE] comportement (résolution des dates et dtype chaîne, pandas ≥ 3)
 - **Composant** : `tsforecast/delays/data_manager.py::compare_and_detect_delays` (et `_empty_publication_delays`)
-- **Sévérité** : à arbitrer
+- **Sévérité** : mineure (dates : arbitrées le 2026-10-20 avec ANO-UTILS-072) ; chaînes : à arbitrer
 - **Observé** (pandas 3.0.6) : délais identiques quelle que soit la résolution de l'entrée, mais
   `observation_date` est à la **résolution de l'entrée**, `period_start` / `period_end` et `download_date` toujours en
   **`us`** (sous pandas 2.3 : bornes en `ns`, téléchargement en `us`). Le résultat **vide** (aucune observation
@@ -3037,8 +3059,12 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   non vide porte des dates en `us` (ou à la résolution de l'entrée) et ces deux colonnes en `str` (`frequency` reste
   `object` dans les deux cas). Une concaténation de résultats (calendrier de publications, `tests/integration/delays`)
   mélange donc les deux.
-- **Attendu** : à arbitrer — unité commune des quatre colonnes de dates (celle de l'entrée, ou une unité fixe
-  documentée), et mêmes dtypes pour un résultat vide ou non.
+- **Attendu** : dates — règle de l'unité de l'entrée (arbitrage d'ANO-UTILS-072) : les quatre colonnes de dates à
+  l'unité de `new_data` (axe temporel validé : index, dernier niveau d'un panel ou `time_col`), quelle que soit celle
+  d'`existing_data` ou de `download_date` ; une date que cette unité ne représente pas exactement (téléchargement à la
+  microseconde sur des données en `s`) porte sa colonne à la plus grossière des unités plus fines qui la représente,
+  sans arrondi ; un résultat vide a les dtypes de dates d'un résultat non vide pour la même entrée (unité et fuseau).
+  Chaînes : mêmes dtypes pour un résultat vide ou non (à arbitrer avec le dtype des chaînes).
 - **Reproduction** (pandas 3) :
   ```python
   import numpy as np, pandas as pd
@@ -3053,9 +3079,27 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `new_data`, plus fine si la date l'exige) ; `observation_date` à l'unité d'`existing_data` quand il est fourni
   (`new_data` en `s`, `existing_data` en `ns` → `ns` ; attendu : `new_data`) ; résultat vide en `datetime64[ns]`
   (attendu : unité de `new_data`) ; chaînes `object` du résultat vide (dtype des chaînes, arbitrage séparé).
-- **Test** : `tests/unit/delays/data_manager/test_datetime_resolution.py::TestDatetimeResolution::test_single_download`
-  (observation et bornes à l'unité de l'entrée ; `download_date` épinglé à `us`)
-- **Statut** : ouvert (à arbitrer)
+- **Correctif** (dates, 2026-10-20) : `compare_and_detect_delays` exprime la date de téléchargement résolue par
+  `as_exact_unit(pd.Timestamp(date), unité de new_data)` (son fuseau conservé) ; `_calculate_publication_delays`
+  ramène `observation_date` à l'unité de `new_data` (l'alignement sur `existing_data` la portait à la plus fine des deux)
+  et construit les bornes de période par `_as_output_dates` (unité de `new_data` ; une colonne entièrement `NaT`, sans
+  fréquence détectée, reçoit le fuseau des données au lieu de l'unité `s` naïve que pandas infère) ;
+  `_empty_publication_delays` type ses colonnes de dates sur l'axe temporel de `new_data` et sur la date de
+  téléchargement rendue. `DelayDetectionReport.download_date` porte la date de la colonne (`pd.Timestamp`, ex-`datetime`
+  pour une chaîne ; `to_dict()` inchangé, `isoformat` ne dépendant pas de l'unité). `calculate_applicable_delay` ne rend
+  aucune date (vérifié : résultats identiques au bit près pour les quatre unités). Sorties de référence (723 cas de
+  délais : six jeux réalistes × 4 unités, deux instantanés `s` / `ns`, `Timestamp` et `datetime` en téléchargement,
+  fuseaux, `time_col`, index de périodes et de chaînes, fréquences indétectables, grilles infra-seconde, rapports,
+  délais applicables) : instants et valeurs identiques au bit près ; les 238 résultats vides ont les dtypes de dates
+  de leur équivalent non vide (232 en différaient).
+- **Reste ouvert** : partie « chaînes `object` du résultat vide » (`reference_point`, `unit` et niveau `column` en
+  `object`, `str` dans un résultat non vide), traitée avec l'arbitrage du dtype des chaînes (P4). Garde :
+  `xfail` strict `TestEmptyResult::test_empty_result_strings_have_the_dtypes_of_a_non_empty_one`.
+- **Test** : `tests/unit/delays/data_manager/test_datetime_resolution.py` — `TestDatetimeResolution` (unités de la
+  politique, deux instantanés à des unités différentes), `TestOutputUnit` (date de téléchargement en `Timestamp` /
+  `datetime`, plus fine que les données, avec fuseau ; données avec fuseau ; fréquence indétectable ; rapport ; grille
+  de 100 ms ; `time_col`), `TestEmptyResult` (résultat vide aux dtypes d'un résultat non vide), `TestApplicableDelay`
+- **Statut** : corrigée pour les dates (2026-10-20) ; partie chaînes ouverte (P4)
 
 ### Arbitrages de l'auteur (2026-10-04) sur `compare_and_detect_delays`
 - **Fuseaux horaires** : une date sans fuseau est lue en UTC face à une date avec fuseau ; deux dates avec fuseaux sont
@@ -5149,14 +5193,15 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Type** : [CODE] comportement (résolution des dates, pandas ≥ 3)
 - **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer` (`fit_transform`, `transform`,
   `imputation_provenance_`)
-- **Sévérité** : à arbitrer
+- **Sévérité** : mineure (arbitrée le 2026-10-20 avec ANO-UTILS-072)
 - **Observé** (pandas 3.0.6) : valeurs imputées, provenance, rejeu et inversion identiques quelle que soit la
   résolution de l'entrée ; la sortie empilée et le rejeu sont toujours en **`us`** (grille construite par
   l'imputeur ; `ns` sous pandas 2.3), la matrice de provenance d'un **panel** est à la **résolution de l'entrée**
   (celle d'une série suit la grille). Pour une entrée en `ns` sur un panel, sortie et provenance ont donc deux
   résolutions ; elles s'alignent par instant, mais `assert_frame_equal` sur leurs index les distingue.
-- **Attendu** : à arbitrer — une même résolution pour la sortie et la provenance (celle de l'entrée, ou une unité fixe
-  documentée).
+- **Attendu** : règle de l'unité de l'entrée (arbitrage d'ANO-UTILS-072) : toute date d'une passe (sortie empilée ou
+  plate, provenance, rejeu, inversion, `y`) à l'unité du `X` de cette passe ; `X` et `y` : celle de `X` ; l'état ajusté à
+  l'unité de l'entrée du `fit`.
 - **Reproduction** (pandas 3) :
   ```python
   from sklearn.linear_model import LinearRegression
@@ -5172,9 +5217,33 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `interpolate` et `model`) et `fit_transform(X, y)` sont à l'unité de l'entrée, valeurs et provenance inchangées au
   bit près. Restent à vérifier : l'état ajusté (plan, grilles, instantanés d'`inverse_transform`) d'un `fit` à un
   `transform`, et l'empreinte de `XYPipeline(memory=…)` pour deux unités d'entrée.
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_datetime_resolution.py::TestDatetimeResolution`
-  (sortie, provenance, rejeu et inversion à l'unité de l'entrée)
-- **Statut** : ouvert (à arbitrer)
+- **Audit de l'état ajusté (2026-10-20)** : parcours de tout l'état de l'imputeur (attributs publics et privés, plan,
+  modèles, registres du matérialiseur, masques et bornes de fenêtres, instantanés `_original_X_` / `_original_y_`), en
+  `s` et en `ns`, sur TS, PANEL-F (`interpolate`, `model`), PANEL-X et les jeux réalistes (série : 3 stratégies × 3
+  modalités ; panel : 3 stratégies) : **une seule unité**, celle de
+  l'entrée du `fit`. Un `transform` sur des données à une autre unité rend l'unité de ces données (sortie, provenance,
+  inversion), valeurs identiques à celles d'un ajustement à cette unité, sans toucher l'état ajusté. **Un seul écart**
+  : un `y` stocké à une autre unité que `X` (mêmes instants). `_align_target_index` le gardait tel quel (les index sont
+  égaux par instant) ; le jeu de travail concaténé passait alors à la plus fine des deux unités : `fit_transform(X, y)`
+  rendait `X`, `y` et la provenance à cette unité, l'état ajusté mêlait deux unités (`_original_X_` à celle de `X`) et
+  la passe de prédiction rendait `y` à la sienne.
+- **Correctif** : `_align_target_index` repositionne `y` sur l'index de `X` (noms de niveaux de `y` conservés) quand
+  les deux index sont égaux mais que leurs dates diffèrent d'unité (`_datetime_units`). Docstring de la classe : règle
+  d'unité des passes. Sorties de référence (895 cas, dont 172 de l'imputeur : passes TS / PANEL-F / PANEL / PANEL-X ×
+  `interpolate` / `model` / sortie plate, passes X / y avec `y` aux quatre unités, `target_as_covariate`,
+  `XYPipeline`, ajustement et transformation à deux unités, matrice réaliste 2 jeux × 3 stratégies × 3 modalités, × 4
+  unités) : valeurs et matrices de provenance identiques au bit près ; seules changent les unités des passes à `y`
+  stocké à une autre unité que `X`, désormais celle de `X`.
+- **`XYPipeline(memory=…)`** : l'empreinte de cache lit les dtypes (unité des dates comprise) : les mêmes instants à
+  deux unités sont **deux entrées de cache**. C'est voulu sous la règle : les sorties des étapes, à l'unité de leur
+  entrée, diffèrent aussi par leurs dtypes, et une entrée partagée servirait l'une à l'unité de l'autre. Documenté
+  (`docs/concepts/xy_pipeline.md`, « Mise en cache ») et épinglé.
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_datetime_resolution.py` — `TestDatetimeResolution`
+  (sortie, provenance, rejeu, inversion à l'unité de l'entrée ; provenance indexée exactement comme la sortie ;
+  inversion rendant l'index d'entrée, unité comprise), `TestTargetPasses` (passe d'entraînement et `y` à une autre unité
+  que `X`), `TestFittedState` (état ajusté à l'unité du `fit`, `transform` à une autre unité),
+  `TestCachedPipeline::test_each_unit_is_its_own_cache_entry`
+- **Statut** : corrigée (2026-10-20)
 
 ## BASE
 

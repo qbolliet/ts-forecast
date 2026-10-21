@@ -2334,6 +2334,17 @@ Critères : `.venv/Scripts/python.exe -m pytest --doctest-modules tsforecast/{ba
 xy,utils,delays,tracking} -q` → 0 échec, 0 skip dû à +SKIP ; `python scripts/check_conventions.py
 --verify-code-unchanged HEAD` → aucun écart de code ; suite normale inchangée. Rapport : nombre
 d'exemples corrigés par module, anomalies (i)/(ii), exemples ajoutés.
+
+Complément pandas 3 : sous pandas 3.0.6, 5 doctests échouent par représentation seulement —
+base/transformers.py::PanelTimeSeriesTransformer._validate_index_time_series et
+::_validate_multiindex_panel (dtype('O') → StringDtype, [ns] → [us]),
+panel/utils.py::extract_time_series_from_multiindex,
+utils/frequency/converter.py::FrequencyConverter._extend_index_for_upsampling et
+::_reanchor_index_to_target (DatetimeIndex(..., dtype='datetime64[ns]')). Les réécrire pour qu'ils
+n'affichent ni dtype ni unité (`.strftime('%Y-%m-%d').tolist()`, `str(x.dtype)` seulement si l'unité
+est fixée par la politique de P2, `.tolist()`), en conservant ce qu'ils démontrent. Même règle pour
+tout exemple corrigé : aucune sortie dépendant de la résolution des dates ou du dtype chaîne, sauf
+quand c'est l'objet de l'exemple.
 ```
 
 ### Prompt N8 — Doctests : `frequency`
@@ -2355,6 +2366,17 @@ il met en jeu un panel. Un résultat d'exemple qui te paraît faux (valeur d'imp
 incohérente, NaN inattendu) est une anomalie (ii) : instruire avant de « corriger » l'exemple.
 Critères N7 appliqués à tsforecast/frequency ; puis, vérification globale finale :
 `python scripts/check_conventions.py --rule all` → 0 violation bloquante.
+
+Complément pandas 3 : sous pandas 3.0.6, 5 doctests échouent par représentation seulement —
+base/transformers.py::PanelTimeSeriesTransformer._validate_index_time_series et
+::_validate_multiindex_panel (dtype('O') → StringDtype, [ns] → [us]),
+panel/utils.py::extract_time_series_from_multiindex,
+utils/frequency/converter.py::FrequencyConverter._extend_index_for_upsampling et
+::_reanchor_index_to_target (DatetimeIndex(..., dtype='datetime64[ns]')). Les réécrire pour qu'ils
+n'affichent ni dtype ni unité (`.strftime('%Y-%m-%d').tolist()`, `str(x.dtype)` seulement si l'unité
+est fixée par la politique de P2, `.tolist()`), en conservant ce qu'ils démontrent. Même règle pour
+tout exemple corrigé : aucune sortie dépendant de la résolution des dates ou du dtype chaîne, sauf
+quand c'est l'objet de l'exemple.
 ```
 
 ---

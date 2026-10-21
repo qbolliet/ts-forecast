@@ -15,8 +15,8 @@ import warnings
 from ..utils.frequency import detect_frequency, to_literal
 # Module de validation des données temporelles
 from ..utils.validation import validate_temporal_data
-# Module de manipulation temporelle
-from ..utils.time import resolve_date, get_period_boundaries
+# Module de manipulation temporelle (bornes de période, unité de stockage des dates rendues)
+from ..utils.time import resolve_date, get_period_boundaries, as_exact_unit
 # Module de conversion des durées (le calcul des délais se fait en nanosecondes entières :
 # un produit flottant par 1e6 fausserait le dernier chiffre au-delà de ~800 jours)
 from ..utils.duration import to_code as duration_to_code, to_literal as duration_to_literal, get_duration_nanoseconds
@@ -105,8 +105,15 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
           frequency is None)
         - 'unit': Unit of the delay value ('day', 'second' or 'microsecond')
 
-        The frame is empty (with the same columns and index levels) when nothing is detected:
-        no change since ``existing_data``, no observation at all, or no column.
+        The four date columns are stored at the unit of the dates of ``new_data`` (``'s'``,
+        ``'ms'``, ``'us'`` or ``'ns'``), whatever the unit of ``existing_data`` or of
+        ``download_date``; a date that this unit cannot hold exactly (a download time with
+        microseconds on data stored in seconds) moves its column to the coarsest finer unit
+        that holds it, never rounded. ``observation_date`` and the period bounds keep the
+        time zone of the data, ``download_date`` the one it was given with.
+
+        The frame is empty (with the same columns, index levels and date dtypes) when nothing
+        is detected: no change since ``existing_data``, no observation at all, or no column.
 
     Raises:
         TypeError: If new_data or existing_data is not a DataFrame
@@ -157,10 +164,11 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
     if len(new_data) == 0:
         raise ValueError("Cannot detect publication delays on empty data: new_data has no row")
 
-    # Validation de la date de téléchargement
+    # Validation de la date de téléchargement, exprimée dans l'unité des dates de
+    # new_data (plus fine si la date l'exige) : elle est rendue telle quelle
     if download_date is None:
         download_date = datetime.now()
-    download_date = resolve_date(date=download_date)
+    download_date = as_exact_unit(pd.Timestamp(resolve_date(date=download_date)), _time_axis(new_data).unit)
 
     # Logging
     logger.debug(
@@ -261,6 +269,39 @@ def _validate_input_data(data: pd.DataFrame, time_col: Optional[str] = None, pan
     )
 
     return data_validated
+
+
+# Fonction auxiliaire d'extraction de l'axe temporel d'un jeu validé
+def _time_axis(data: pd.DataFrame) -> pd.DatetimeIndex:
+    """Return the dates of a validated dataset: its index, or the last level of a panel.
+
+    Args:
+        data: Dataset returned by ``_validate_input_data``
+
+    Returns:
+        The dates of the rows, whose unit and time zone are those of the dates returned
+    """
+    return pd.DatetimeIndex(data.index.get_level_values(-1))
+
+
+# Fonction auxiliaire d'expression des dates rendues dans l'unité et le fuseau des données
+def _as_output_dates(dates: pd.DatetimeIndex, unit: str, tz: Any) -> pd.DatetimeIndex:
+    """Express result dates at the unit of the data, finer only for a date that needs it.
+
+    Args:
+        dates: Dates of one output column (``NaT`` accepted)
+        unit: Unit of the dates of the data
+        tz: Time zone of the dates of the data (None if naive)
+
+    Returns:
+        The same instants at ``unit`` (or at the coarsest finer unit holding them), with
+        the time zone ``tz`` when the dates are all missing
+    """
+    # Colonne entièrement manquante (aucune fréquence détectée) : sans fuseau à la
+    # construction, elle reçoit celui des données
+    if tz is not None and dates.tz is None and dates.isna().all():
+        dates = dates.tz_localize(tz)
+    return as_exact_unit(dates, unit)
 
 
 # Fonction auxiliaire de marquage des observations détectées
@@ -383,18 +424,19 @@ def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[p
 
 
 # Fonction auxiliaire de construction du résultat vide
-def _empty_publication_delays(new_observations: pd.DataFrame, download_date: datetime, reference_point: str, unit_label: str) -> pd.DataFrame:
+def _empty_publication_delays(new_observations: pd.DataFrame, download_date: pd.Timestamp, reference_point: str, unit_label: str, time_axis: pd.DatetimeIndex) -> pd.DataFrame:
     """Build the result frame when no observation is detected.
 
     Args:
         new_observations: Empty detection frame, indexed like the data (dates, or entities and dates)
-        download_date: Date when the data was downloaded
+        download_date: Date when the data was downloaded, as returned in a non-empty result
         reference_point: 'start' or 'end'
         unit_label: Label of the delay unit
+        time_axis: Dates of the new data, whose unit and time zone type the date columns
 
     Returns:
         Empty DataFrame with the output columns and the index levels of a non-empty result
-        (entity levels, then 'column')
+        (entity levels, then 'column'); its date columns have the dtypes of a non-empty result
     """
     # Niveaux d'index du résultat : entités éventuelles, puis nom de la variable
     names = list(new_observations.index.names[:-1]) + ['column']
@@ -403,15 +445,20 @@ def _empty_publication_delays(new_observations: pd.DataFrame, download_date: dat
     else:
         index = pd.MultiIndex.from_arrays([[] for _ in names], names=names)
 
+    # Dates vides typées comme dans un résultat non vide : unité et fuseau des
+    # données, unité et fuseau de la date de téléchargement rendue
+    data_dates = time_axis[:0]
+    download_dates = pd.DatetimeIndex([download_date])[:0]
+
     # Colonnes de sortie, avec leurs types
     return pd.DataFrame(
         {
-            'observation_date': pd.Series([], dtype='datetime64[ns]'),
+            'observation_date': pd.Series(data_dates),
             'has_changes': pd.Series([], dtype=bool),
-            'download_date': pd.Series([], dtype='datetime64[ns]'),
+            'download_date': pd.Series(download_dates),
             'frequency': pd.Series([], dtype=object),
-            'period_start': pd.Series([], dtype='datetime64[ns]'),
-            'period_end': pd.Series([], dtype='datetime64[ns]'),
+            'period_start': pd.Series(data_dates),
+            'period_end': pd.Series(data_dates),
             'reference_point': pd.Series([], dtype=object),
             'delay': pd.Series([], dtype=float),
             'unit': pd.Series([], dtype=object),
@@ -423,7 +470,7 @@ def _empty_publication_delays(new_observations: pd.DataFrame, download_date: dat
 # Fonction de calcul des délais de publication
 def _calculate_publication_delays(new_observations: pd.DataFrame,
                                 new_data: pd.DataFrame,
-                                download_date: datetime,
+                                download_date: pd.Timestamp,
                                 reference_point: Literal['start', 'end'],
                                 unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day']
                                 ) -> Tuple[pd.DataFrame, Dict[Any, Optional[str]]]:
@@ -439,8 +486,10 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
     Args:
         new_observations: DataFrame with detected observations, indexed by datetime/multi-level
             and containing 'column' and 'has_changes' columns
-        new_data: Original DataFrame containing the time series data
-        download_date: Date when the data was downloaded (as datetime object)
+        new_data: Original DataFrame containing the time series data; the returned dates
+            are at the unit and in the time zone of its dates
+        download_date: Date when the data was downloaded, already at the unit of the
+            returned dates (the column holds it as is)
         reference_point: Point used for delay calculation - 'start' (period start) or 'end'
             (exclusive period end)
         unit: Unit for delay values - 'day'/'D', 'second'/'s', or 'microsecond'/'us'
@@ -470,9 +519,12 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
     # Résolution de l'unité du délai
     unit_label, unit_nanoseconds = _resolve_delay_unit(unit)
 
+    # Dates de new_data : leur unité et leur fuseau sont ceux des dates rendues
+    time_axis = _time_axis(new_data)
+
     # Cas où aucune observation n'est détectée : résultat vide de même structure
     if new_observations.empty:
-        return _empty_publication_delays(new_observations, download_date, reference_point, unit_label), {}
+        return _empty_publication_delays(new_observations, download_date, reference_point, unit_label, time_axis), {}
 
     # Copie indépendante du jeu de données
     publication_delays = new_observations.copy()
@@ -487,6 +539,12 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
             "observation_date" if i == publication_delays.index.nlevels-2 else i
             for i in range(publication_delays.index.nlevels)
         ],
+    )
+    # Dates d'observation dans l'unité de new_data : l'alignement sur existing_data
+    # les porte à la plus fine des deux unités quand les deux jeux n'ont pas les
+    # mêmes dates
+    publication_delays["observation_date"] = _as_output_dates(
+        pd.DatetimeIndex(publication_delays["observation_date"]), time_axis.unit, time_axis.tz
     )
 
     # Ajout d'informations d'intérêt
@@ -529,8 +587,12 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
             publication_delays["observation_date"], publication_delays["frequency"], detected
         )
     ]
-    publication_delays["period_start"] = pd.DatetimeIndex([bounds[0] for bounds in boundaries])
-    publication_delays["period_end"] = pd.DatetimeIndex([bounds[1] for bounds in boundaries])
+    # Bornes dans l'unité de new_data, quelle que soit celle que la construction
+    # infère des valeurs (une colonne sans fréquence détectée n'en porte aucune)
+    for position, column in enumerate(("period_start", "period_end")):
+        publication_delays[column] = _as_output_dates(
+            pd.DatetimeIndex([bounds[position] for bounds in boundaries]), time_axis.unit, time_axis.tz
+        )
 
     # Point de référence
     publication_delays["reference_point"] = reference_point

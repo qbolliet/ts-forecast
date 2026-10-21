@@ -120,6 +120,12 @@ sa période. `inverse_transform` défait la dernière passe et rend **l'index de
 son entrée**, dans son ordre : sans `restore_original_values`, seules les
 cellules `ORIGINAL` y reviennent ; avec, toutes les valeurs observées.
 
+Les dates de toute passe (sortie, matrice de provenance, inversion, `y`) sont
+stockées dans l'unité des dates du `X` de cette passe (`s`, `ms`, `us` ou `ns`) :
+un `y` stocké dans une autre unité revient dans celle de `X`, ses valeurs
+inchangées. L'état ajusté garde l'unité de l'entrée du `fit` ; un `transform` sur
+des données dans une autre unité rend la leur, avec les mêmes valeurs.
+
 ## Dans un pipeline entraîné avec `y`
 
 Entraîné avec `y`, `HighFrequencyImputer` **augmente un jeu d'entraînement** (`X`

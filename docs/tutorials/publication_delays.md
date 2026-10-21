@@ -233,6 +233,13 @@ La fonction retourne un `DataFrame` indexé par les niveaux d'entité des donné
 | `delay` | Délai de publication calculé (arrondi à l'entier supérieur de l'unité) entre le point de référence de la période de l'observation et la date de téléchargement ; négatif si le téléchargement précède ce point (par exemple une prévision utilisée comme observation) |
 | `unit` | Unité du délai (`'day'`, `'second'`, `'microsecond'`) |
 
+Les quatre colonnes de dates sont stockées dans l'unité des dates de `new_data`
+(`s`, `ms`, `us` ou `ns`), quelles que soient celles de `existing_data` et de
+`download_date` ; une date que cette unité ne représente pas exactement (une
+heure de téléchargement à la microseconde sur des données en secondes) porte sa
+colonne à l'unité plus fine nécessaire, sans arrondi. Un résultat vide a les
+mêmes types de dates qu'un résultat non vide.
+
 #### 4.1.3 Cas d'usage 1 : Comparaison de deux jeux de données
 
 Lorsque `existing_data` est fourni, la fonction compare les deux jeux de données pour identifier les changements.
