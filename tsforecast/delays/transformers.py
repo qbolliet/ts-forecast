@@ -414,7 +414,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         if 'column' not in table.columns:
             level = 'column' if 'column' in table.index.names else table.index.nlevels - 1
             variables = table.index.get_level_values(level)
-            table = table.reset_index(drop=True).assign(column=np.asarray(variables, dtype=object))
+            table = table.reset_index(drop=True).assign(column=variables.array)
 
         # Un délai par variable : les délais par entité relèvent des fabriques
         duplicated = table.loc[table['column'].duplicated(), 'column'].unique().tolist()

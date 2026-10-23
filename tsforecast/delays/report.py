@@ -345,6 +345,13 @@ _STRING_RECORD_FIELDS: Tuple[str, ...] = (
     'delay_unit_source', 'reference_point_source', 'target_frequency_source', 'delay_source',
 )
 
+# Champs numériques et booléens de ColumnDelayRecord, typés par DelayFitReport.to_frame
+# même vides ou tout None : les décomptes propres à une stratégie sont des entiers
+# nullables (manquants pour l'autre stratégie)
+_TYPED_RECORD_FIELDS: Dict[str, str] = {
+    'delay': 'float64', 'n_periods': 'Int64', 'n_obs': 'Int64', 'moved_from_mask': 'bool',
+}
+
 
 # Rapport d'ajustement du transformateur de délais
 @dataclass(frozen=True)
@@ -396,8 +403,10 @@ class DelayFitReport(_Report):
         Returns:
             DataFrame indexed by ``'column'`` with the fields of :class:`ColumnDelayRecord`.
             The string fields (strategy, unit, reference point, frequencies, sources) have
-            the ``str`` dtype, a None field being missing (NaN); the index holds the labels
-            with the dtype pandas infers from them.
+            the ``str`` dtype, a None field being missing (NaN); ``delay`` is ``float64``,
+            ``n_periods`` and ``n_obs`` are nullable integers (``Int64``, missing for the
+            other strategy) and ``moved_from_mask`` is ``bool``, whatever the content;
+            the index holds the labels with the dtype pandas infers from them.
 
         Examples:
             >>> pdt.fit(X).fit_report_.to_frame()   # doctest: +SKIP
@@ -408,5 +417,6 @@ class DelayFitReport(_Report):
             columns=names,
             index=pd.Index([record.column for record in self.columns], name='column'),
         )
-        # Champs textuels en dtype chaîne, quel que soit leur contenu (tout None compris)
-        return frame.astype({name: 'str' for name in _STRING_RECORD_FIELDS})
+        # Champs textuels en dtype chaîne, quel que soit leur contenu (tout None compris),
+        # champs numériques et booléens à leur dtype
+        return frame.astype({**{name: 'str' for name in _STRING_RECORD_FIELDS}, **_TYPED_RECORD_FIELDS})

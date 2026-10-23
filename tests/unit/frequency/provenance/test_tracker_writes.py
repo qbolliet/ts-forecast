@@ -158,6 +158,15 @@ class TestInitialize:
         tracker = ImputationProvenanceTracker().initialize(data, panel_cols=['country'])
         assert list(tracker.provenance_matrix_.columns) == ['a']
 
+    def test_no_tracked_column_keeps_the_label_dtype(self):
+        """Every column declared as panel: an empty matrix whose columns keep the ``str`` labels dtype."""
+        data = pd.DataFrame(
+            {'country': ['x', 'y']}, index=pd.date_range('2023-01-01', periods=2, freq='MS'),
+        )
+        tracker = ImputationProvenanceTracker().initialize(data, panel_cols=['country'])
+        assert tracker.provenance_matrix_.shape == (2, 0)
+        assert tracker.provenance_matrix_.columns.dtype == 'str'
+
     def test_flat_frame_without_panel_cols_tracks_every_column(self):
         """Without ``panel_cols`` and without MultiIndex, nothing is excluded."""
         data = pd.DataFrame(

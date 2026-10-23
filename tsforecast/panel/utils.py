@@ -178,6 +178,94 @@ def normalize_entity_key(key) -> tuple:
         raise TypeError(f"Entity key must be hashable, got {key!r}") from None
     return normalized
 
+# Fonction de codage entier de clés de lignes composites
+def factorize_row_keys(*keys: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """Encode composite row keys as integer codes, in order of first appearance.
+
+    Two rows share a code when they are equal on every key. Each key is
+    factorized on its own, then the codes are combined key after key, so that
+    no tuple is ever built per row. A missing value (NaN, NaT, None) is a value
+    like any other: the rows that hold it share a code.
+
+    Args:
+        *keys: One-dimensional array-likes of the same length (arrays, Series,
+            Index, MultiIndex level codes), one per component of the key.
+
+    Returns:
+        Tuple ``(codes, first_rows)``: ``codes[i]`` is the code of row ``i``
+        (``0`` for the first distinct key, ``1`` for the next one, ...) and
+        ``first_rows[k]`` the position of the first row of code ``k``. Without
+        any key, both arrays are empty.
+
+    Raises:
+        ValueError: If the keys do not have the same length.
+
+    Examples:
+        >>> codes, first_rows = factorize_row_keys(['FR', 'FR', 'DE', 'FR'], ['M', 'Q', 'M', 'M'])
+        >>> codes.tolist(), first_rows.tolist()
+        ([0, 1, 2, 0], [0, 1, 2])
+        >>> factorize_row_keys(pd.Series([1.0, None, None]))[0].tolist()
+        [0, 1, 1]
+    """
+    # Absence de clé : aucune ligne
+    if not keys:
+        return np.zeros(0, dtype=np.intp), np.zeros(0, dtype=np.intp)
+
+    # Contrôle des longueurs
+    n_rows = len(keys[0])
+    if any(len(key) != n_rows for key in keys):
+        raise ValueError(f"All keys must have the same length, got {[len(key) for key in keys]}")
+
+    # Combinaison clé après clé : le code combiné reste borné par le nombre de lignes
+    codes = np.zeros(n_rows, dtype=np.int64)
+    for key in keys:
+        # Une liste n'est pas factorisable directement par pandas
+        values = np.asarray(key) if isinstance(key, list) else key
+        key_codes, uniques = pd.factorize(values, use_na_sentinel=False)
+        codes, _ = pd.factorize(codes * max(len(uniques), 1) + key_codes)
+
+    # Première ligne de chaque code : les codes suivent l'ordre de première apparition
+    _, first_rows = np.unique(codes, return_index=True)
+    return codes.astype(np.intp, copy=False), first_rows
+
+# Fonction de codage entier des entités de chaque ligne
+def get_entity_codes(index: pd.Index) -> Tuple[np.ndarray, List[tuple]]:
+    """Return the entity code of each row and the entity keys, in order of first appearance.
+
+    The codes are read from the integer codes of the entity levels (all levels
+    of a panel ``MultiIndex`` but the last), without building any tuple per
+    row. A simple index is a time series: a single degenerate entity ``()``.
+
+    Args:
+        index: Index of the data: ``(entity..., date)`` ``MultiIndex`` for a
+            panel, any simple index for a time series.
+
+    Returns:
+        Tuple ``(codes, entities)``: ``codes[i]`` is the position in
+        ``entities`` of the entity of row ``i``, and ``entities`` the
+        normalized entity keys (tuples). A missing entity label is a label like
+        any other.
+
+    Examples:
+        >>> idx = pd.MultiIndex.from_product([['FR', 'DE'], pd.date_range('2023-01-01', periods=2)])
+        >>> codes, entities = get_entity_codes(idx)
+        >>> codes.tolist(), entities
+        ([0, 0, 1, 1], [('FR',), ('DE',)])
+        >>> get_entity_codes(pd.date_range('2023-01-01', periods=2))[1]
+        [()]
+    """
+    # Série temporelle : une seule entité dégénérée
+    if not isinstance(index, pd.MultiIndex) or index.nlevels < 2:
+        return np.zeros(len(index), dtype=np.intp), [()]
+
+    # Codes des niveaux d'entité, combinés sans construire de tuple par ligne
+    n_entity_levels = index.nlevels - 1
+    codes, first_rows = factorize_row_keys(*index.codes[:n_entity_levels])
+
+    # Étiquettes de la première ligne de chaque entité, niveau par niveau
+    labels = [index.get_level_values(level)[first_rows].tolist() for level in range(n_entity_levels)]
+    return codes, [normalize_entity_key(tuple(entity)) for entity in zip(*labels)]
+
 # Fonction auxiliaire de comparaison de deux valeurs déclarées
 def _same_value(first: Any, second: Any) -> bool:
     """Tell whether two declared values are equal, a failing comparison meaning no.
@@ -307,6 +395,25 @@ def get_unique_panel_entities(panel_data: Union[pd.DataFrame, pd.Series]) -> Lis
         >>> get_unique_panel_entities(pd.Series([1, 2, 3, 4], index=idx))
         [('FR',), ('DE',)]
     """
+    # Refus des données sans niveau d'entité ou aux étiquettes manquantes
+    _check_panel_entity_labels(panel_data)
+
+    # Combinaisons uniques d'entités, lues sur les codes des niveaux d'entité
+    return get_entity_codes(panel_data.index)[1]
+
+
+# Fonction auxiliaire de validation des étiquettes d'entité d'un panel
+def _check_panel_entity_labels(panel_data: Union[pd.DataFrame, pd.Series]) -> None:
+    """Reject data without entity level, or whose entity labels are missing.
+
+    Args:
+        panel_data: Panel data (DataFrame or Series).
+
+    Raises:
+        ValueError: If ``panel_data`` has fewer than 2 index levels, or if an
+            entity label is missing (NaN, None): such rows could be selected
+            by no entity.
+    """
     # Refus des données sans niveau d'entité
     if not is_panel_data(panel_data):
         raise ValueError(
@@ -314,23 +421,15 @@ def get_unique_panel_entities(panel_data: Union[pd.DataFrame, pd.Series]) -> Lis
             f"(entity levels then time), got {panel_data.index.nlevels} level(s)"
         )
 
-    # Extraction des levels d'entité (tous sauf le dernier qui est la date)
-    entity_index = panel_data.index.droplevel(-1)
-
     # Refus des étiquettes d'entité manquantes : aucun masque ne les sélectionne
-    for position in range(entity_index.nlevels):
-        if entity_index.get_level_values(position).isna().any():
-            name = entity_index.names[position]
+    index = panel_data.index
+    for position in range(index.nlevels - 1):
+        if index.get_level_values(position).isna().any():
+            name = index.names[position]
             raise ValueError(
                 f"Entity labels must not be missing, level "
                 f"{name if name is not None else position!r} holds missing values"
             )
-
-    # Récupération des combinaisons uniques d'entités
-    unique_entities = entity_index.unique()
-
-    # Normalisation des clés d'entité
-    return [normalize_entity_key(entity) for entity in unique_entities]
 
 # Fonction de regroupement des variables par entité
 def group_keys_by_entity_and_variable(
@@ -679,10 +778,15 @@ def iter_entity_blocks(
     # Niveaux d'entité à retirer pour ramener chaque bloc à un index daté
     entity_levels = get_entity_levels(data)
 
+    # Entités du panel, codées une fois : le masque d'une entité compare des
+    # codes entiers, sans relire les niveaux d'entité
+    _check_panel_entity_labels(data)
+    entity_codes, entities = get_entity_codes(data.index)
+
     # Parcours des entités du panel
-    for entity in get_unique_panel_entities(data):
+    for code, entity in enumerate(entities):
         # Masque des observations de l'entité
-        mask = get_entity_mask(data, entity)
+        mask = entity_codes == code
         # Extraction du bloc, ramené à son seul index temporel
         yield entity, mask, data[mask].droplevel(entity_levels)
 

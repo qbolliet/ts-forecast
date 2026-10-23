@@ -176,7 +176,9 @@ class TestStagePlanAxis2:
             assert len(fits[('Q', column)].y_train) == 3
             training = fits[('M', column)].training
             assert len(fits[('M', column)].y_train) == 12
-            assert sorted(training.row_origin.value_counts().to_dict().items()) == [
+            # Origines catégorielles : les catégories absentes, à zéro, sont écartées
+            counts = training.row_origin.value_counts()
+            assert sorted(counts[counts > 0].to_dict().items()) == [
                 ('model', 9), ('observed', 3)
             ]
 

@@ -47,6 +47,18 @@ _DIAGNOSTIC_STRING_COLUMNS: Tuple[str, ...] = (
     'interpolation_method', 'materialization', 'training_blocks',
 )
 
+# Colonnes numériques et booléennes du jeu de diagnostic, typées même sans étape ;
+# un ancrage d'interpolation absent y est manquant (NaN)
+_DIAGNOSTIC_TYPED_COLUMNS: Dict[str, str] = {
+    'n_entities': 'int64', 'unanchored': 'bool', 'n_features': 'int64',
+    'n_training_rows': 'int64', 'n_written': 'int64', 'is_fallback': 'bool',
+    'interpolation_anchor': 'float64',
+}
+
+# Facteurs d'échelle du jeu de diagnostic : flottants, sauf si une étape porte
+# un facteur par ligne, rendu par son libellé
+_DIAGNOSTIC_SCALE_COLUMNS: Tuple[str, ...] = ('scale_factor', 'fit_scale_factor')
+
 
 # Fonction auxiliaire de test de la sentinelle de repli
 def _is_interpolate_fallback(model: Any) -> bool:
@@ -530,7 +542,12 @@ class ImputationPlan:
             (rendered as a comma-separated ``entity=frequency`` string,
             sorted by entity key so that the frame does not depend on the
             order of the input rows). The text columns have the ``str``
-            dtype (a missing ``source_frequency`` is NaN); ``variable`` holds
+            dtype (a missing ``source_frequency`` is NaN); the counts are
+            ``int64``, the flags ``bool`` and ``interpolation_anchor``
+            ``float64`` (NaN when no anchor applies), an empty plan included;
+            the scale factors are ``float64`` unless a step holds a per-row
+            factor (``object`` column, the label ``'per-row'`` standing for
+            it); ``variable`` holds
             the labels with the dtype pandas infers from them;
             ``emitted_provenance`` has the categorical dtype
             ``PROVENANCE_DTYPE`` of the provenance matrices (one
@@ -609,8 +626,17 @@ class ImputationPlan:
         frame['emitted_provenance'] = pd.Series(
             [row['emitted_provenance'] for row in rows], index=frame.index, dtype=PROVENANCE_DTYPE
         )
-        # Colonnes textuelles en dtype chaîne quel que soit leur contenu
-        return frame.astype({column: 'str' for column in _DIAGNOSTIC_STRING_COLUMNS})
+        # Colonnes textuelles en dtype chaîne quel que soit leur contenu, colonnes
+        # numériques et booléennes à leur dtype, plan vide compris
+        dtypes = {column: 'str' for column in _DIAGNOSTIC_STRING_COLUMNS}
+        dtypes.update(_DIAGNOSTIC_TYPED_COLUMNS)
+        # Facteurs d'échelle flottants, sauf libellé d'un facteur par ligne :
+        # valeurs hétérogènes, la colonne reste alors de dtype object
+        dtypes.update({
+            column: 'float64' for column in _DIAGNOSTIC_SCALE_COLUMNS
+            if not any(isinstance(row[column], str) for row in rows)
+        })
+        return frame.astype(dtypes)
 
 
 # Construction incrémentale : un nouveau plan, jamais de mutation en place

@@ -9,6 +9,9 @@ import pandas as pd
 from typing import Optional, List, Union, Dict, Any, Tuple
 import warnings
 
+# Codage entier des clés de lignes composites
+from ...panel.utils import factorize_row_keys
+
 
 # Fonction de validation 
 def validate_temporal_data(
@@ -258,17 +261,10 @@ def validate_entities_grouped(
     if not isinstance(data, (pd.Series, pd.DataFrame)):
         raise ValueError("Input data must be a pandas Series or DataFrame")
 
-    # Cas 1: Données avec MultiIndex (données de panel)
+    # Cas 1: Données avec MultiIndex (données de panel) : l'entité est la
+    # combinaison de tous les niveaux sauf le dernier (le temps), codée en entiers
     if isinstance(data.index, pd.MultiIndex):
-        # Extraction de tous les niveaux sauf le dernier (qui représente le temps)
-        # Si un seul niveau d'entité (nlevels=2), extraction directe du niveau 0
-        # Si plusieurs niveaux d'entité (nlevels>2), création de tuples pour chaque combinaison
-        if data.index.nlevels == 2:
-            entities = data.index.get_level_values(0)
-        else:
-            # Extraction de tous les niveaux sauf le dernier et création de tuples
-            entity_levels = [data.index.get_level_values(i) for i in range(data.index.nlevels - 1)]
-            entities = pd.Series(list(zip(*entity_levels)))
+        entity_codes = _entity_codes(data.index.codes[:-1], len(data))
     # Cas 2: Données avec panel_cols spécifiés
     elif panel_cols is not None:
         if isinstance(data, pd.Series):
@@ -277,30 +273,17 @@ def validate_entities_grouped(
             missing = set(panel_cols) - set(data.columns)
             raise ValueError(f"Panel columns not found in data: {missing}")
         _check_columns_unique(data, panel_cols)
-        # Si un seul panel_col, extraction directe
-        if len(panel_cols) == 1:
-            entities = data[panel_cols[0]]
-        else:
-            # Pour plusieurs panel_cols, création d'un tuple pour chaque ligne
-            entities = pd.Series(list(zip(*[data[col] for col in panel_cols])))
+        # Entité de chaque ligne : combinaison des colonnes de panel, codée en entiers
+        entity_codes = _entity_codes([data[col] for col in panel_cols], len(data))
     else:
         raise ValueError("Data must have MultiIndex or panel_cols must be specified for panel data validation")
 
-    # Conversion en codes catégoriels pour comparaisons efficaces
-    entity_codes = pd.Categorical(entities).codes
-    unique_entities = np.unique(entity_codes)
-
-    # Vérification vectorisée : pour chaque entité, ses positions doivent être consécutives
-    for entity_code in unique_entities:
-        # Extraction des positions de l'entité
-        entity_positions = np.where(entity_codes == entity_code)[0]
-        if len(entity_positions) > 1:
-            # Vérification que les positions sont consécutives
-            position_diffs = np.diff(entity_positions)
-            if not np.all(position_diffs == 1):
-                return False
-
-    return True
+    # Entités groupées : chaque entité forme un seul bloc de lignes consécutives,
+    # autrement dit il y a exactement un changement de code par nouvelle entité
+    if len(entity_codes) == 0:
+        return True
+    n_runs = 1 + int(np.count_nonzero(np.diff(entity_codes)))
+    return n_runs == len(np.unique(entity_codes))
 
 # Fonction de vérification que les données du panel sont ordonnées au sein de chaque entité
 def validate_sorted_within_groups(
@@ -362,17 +345,10 @@ def validate_sorted_within_groups(
     if not isinstance(data, (pd.Series, pd.DataFrame)):
         raise ValueError("Input data must be a pandas Series or DataFrame")
 
-    # Cas 1: Données avec MultiIndex (données de panel)
+    # Cas 1: Données avec MultiIndex (données de panel) : l'entité est la
+    # combinaison de tous les niveaux sauf le dernier (le temps), codée en entiers
     if isinstance(data.index, pd.MultiIndex):
-        # Extraction de tous les niveaux sauf le dernier (qui représente le temps)
-        # Si un seul niveau d'entité (nlevels=2), extraction directe du niveau 0
-        # Si plusieurs niveaux d'entité (nlevels>2), création de tuples pour chaque combinaison
-        if data.index.nlevels == 2:
-            entities = data.index.get_level_values(0)
-        else:
-            # Extraction de tous les niveaux sauf le dernier et création de tuples
-            entity_levels = [data.index.get_level_values(i) for i in range(data.index.nlevels - 1)]
-            entities = pd.Series(list(zip(*entity_levels)))
+        entity_codes = _entity_codes(data.index.codes[:-1], len(data))
         # Extraction du dernier niveau (dates/temps)
         dates = data.index.get_level_values(-1)
     # Cas 2: Données avec panel_cols et time_col spécifiés
@@ -386,12 +362,8 @@ def validate_sorted_within_groups(
             raise ValueError(f"Time column '{time_col}' not found in data")
         _check_columns_unique(data, [*panel_cols, time_col])
 
-        # Extraction des entités
-        if len(panel_cols) == 1:
-            entities = data[panel_cols[0]]
-        else:
-            # Pour plusieurs panel_cols, création d'un tuple pour chaque ligne
-            entities = pd.Series(list(zip(*[data[col] for col in panel_cols])))
+        # Entité de chaque ligne : combinaison des colonnes de panel, codée en entiers
+        entity_codes = _entity_codes([data[col] for col in panel_cols], len(data))
 
         # Extraction des dates
         dates = data[time_col]
@@ -406,16 +378,42 @@ def validate_sorted_within_groups(
     else:
         raise ValueError("For panel data, both panel_cols and time_col must be specified, or data must have MultiIndex")
 
-    # Utilisation de groupby pour vérification vectorisée ; les dates sont prises telles quelles
-    # (PeriodIndex compris) et une erreur de structure n'est pas masquée en « non trié »
-    grouped_dates = pd.Series(np.asarray(dates), index=entities).groupby(level=0)
+    # Regroupement des positions par entité (tri stable : ordre des lignes conservé
+    # dans chaque entité) ; les dates sont prises telles quelles (PeriodIndex compris)
+    # et une erreur de structure n'est pas masquée en « non trié »
+    date_values = pd.Index(dates)
+    order = np.argsort(entity_codes, kind='stable')
+    boundaries = np.flatnonzero(np.diff(entity_codes[order])) + 1
 
     # Vérification que chaque groupe est monotone croissant
-    for _, group_dates in grouped_dates:
-        if not pd.Series(group_dates.values).is_monotonic_increasing:
+    for positions in np.split(order, boundaries):
+        if not date_values[positions].is_monotonic_increasing:
             return False
 
     return True
+
+
+# Fonction auxiliaire de codage entier des entités d'un panel
+def _entity_codes(keys: List[Any], n_rows: int) -> np.ndarray:
+    """Code the entity of each row from its components, without building tuples.
+
+    Args:
+        keys: Components of the entity key, one array-like per level or
+            column (index level codes, columns).
+        n_rows: Number of rows, for a panel without any entity component.
+
+    Returns:
+        Integer code of each row's entity, in order of first appearance; a
+        missing label is a label like any other.
+
+    Examples:
+        >>> _entity_codes([np.array(['FR', 'FR', 'DE']), np.array([1, 2, 1])], 3).tolist()
+        [0, 1, 2]
+    """
+    # Aucune composante : une seule entité dégénérée
+    if not keys:
+        return np.zeros(n_rows, dtype=np.intp)
+    return factorize_row_keys(*keys)[0]
 
 
 # Fonctions auxiliaires

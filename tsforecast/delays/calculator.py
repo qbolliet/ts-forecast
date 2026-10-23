@@ -9,12 +9,13 @@ from fractions import Fraction
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Union, Literal
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Literal
 
 # Modules du package
 from ..utils.frequency import normalize_frequency, is_higher_frequency, to_pandas_freq
 from ..utils.time.utils import get_period_boundaries
 from ..utils.duration import to_code as duration_to_code, get_duration_nanoseconds
+from ..panel.utils import factorize_row_keys
 
 # Fonction de calcul du délai applicable
 def calculate_applicable_delay(
@@ -324,12 +325,16 @@ def _resolve_target_frequencies(index: pd.Index, frequency: Dict[Union[str, tupl
         >>> _resolve_target_frequencies(index, {('DE', 'GDP'): 'Q', 'GDP': 'M'})
         ['M', 'Q']
     """
-    # Liste des fréquences valides
+    # Clés distinctes de l'index, codées sans construire de tuple par ligne
+    level_codes = index.codes if isinstance(index, pd.MultiIndex) else [index]
+    codes, first_rows = factorize_row_keys(*level_codes)
+
+    # Liste des fréquences de chaque clé distincte
     targets = []
-    # Liste des entités sans fréquences associées
+    # Liste des clés sans fréquences associées
     uncovered = []
-    # Parcours de l'index
-    for key in index:
+    # Parcours des seules clés distinctes, dans l'ordre de première apparition
+    for key in index[first_rows]:
         # Extraction de l'indicateur en dernière position de l'index
         indicator = key[-1] if isinstance(key, tuple) else key
         # Recherche de la fréquence associée à l'indicateur
@@ -345,11 +350,12 @@ def _resolve_target_frequencies(index: pd.Index, frequency: Dict[Union[str, tupl
     # Cas avec des entités non couvertes
     if uncovered:
         raise ValueError(
-            f"'frequency' does not give a target frequency for: {list(dict.fromkeys(uncovered))}. "
+            f"'frequency' does not give a target frequency for: {uncovered}. "
             f"Give one per indicator, or per (entity, ..., indicator) index key"
         )
 
-    return targets
+    # Diffusion de la fréquence de chaque clé distincte sur ses lignes
+    return [targets[code] for code in codes]
 
 
 # Fonction auxiliaire de validation de l'unicité de la fréquence cible par indicateur
@@ -386,8 +392,11 @@ def _convert_to_target_frequency_and_reference(
     """Convert delays to target frequency and reference point.
 
     The columns ``target_frequency``, ``target_frequency_normalized`` and
-    ``current_frequency_normalized`` are added to ``delays`` in place; the
-    conversion of each row is then delegated to ``_calculate_converted_delay``.
+    ``current_frequency_normalized`` are added to ``delays`` in place. The
+    conversion is computed by ``_calculate_converted_delay`` once per distinct
+    combination of the columns it reads, then spread over the rows sharing it:
+    the entities and indicators of a same observation date share their period
+    and their delay, so the combinations are far fewer than the rows.
 
     Args:
         delays: Publication delays DataFrame
@@ -396,28 +405,87 @@ def _convert_to_target_frequency_and_reference(
 
     Returns:
         DataFrame with the input columns, the three frequency columns above and
-        ``converted_delay``, ``target_period_start``, ``target_period_end`` and
-        ``target_reference_point``
+        ``converted_delay`` (``int64``, ``float64`` as soon as a delay is unknown),
+        ``target_period_start``, ``target_period_end`` (``NaT`` for an unknown delay)
+        and ``target_reference_point``
 
     Raises:
-        ValueError: If a frequency is not supported
+        ValueError: If a frequency is not supported, or if the unit of a row with a
+            known delay is not a supported duration
     """
     # Ajout d'une colonne pour la fréquence cible
     delays['target_frequency'] = target_frequencies
 
     # Normalisation des fréquences (une fréquence source indéterminée reste telle quelle)
-    delays['target_frequency_normalized'] = delays['target_frequency'].apply(normalize_frequency)
-    delays['current_frequency_normalized'] = delays['frequency'].apply(
-        lambda current: normalize_frequency(current) if pd.notna(current) else np.nan
-    )
+    delays['target_frequency_normalized'] = _map_distinct(delays['target_frequency'], normalize_frequency)
+    delays['current_frequency_normalized'] = _map_distinct(delays['frequency'], normalize_frequency)
+    delays['target_reference_point'] = target_reference_point
 
-    # Calcul de la nouvelle date de référence selon la fréquence et le point de référence cibles
-    delays = delays.apply(
-        lambda row: _calculate_converted_delay(row, target_reference_point),
-        axis=1
-    )
+    # Lignes au délai et à la fréquence source connus : seules converties, les
+    # autres gardent un délai inconnu
+    known = (delays['delay'].notna() & delays['current_frequency_normalized'].notna()).to_numpy()
+    known_rows = np.flatnonzero(known)
+    known_delays = delays.iloc[known_rows]
+
+    # Combinaisons distinctes des colonnes lues par la conversion
+    codes, first_rows = factorize_row_keys(*(known_delays[column] for column in _CONVERSION_COLUMNS))
+    distinct = known_delays[list(_CONVERSION_COLUMNS)].iloc[first_rows]
+
+    # Conversion exacte de chaque combinaison distincte, dans l'ordre de première
+    # apparition (une erreur désigne donc la première ligne fautive)
+    converted = [
+        _calculate_converted_delay(*combination, target_reference_point)
+        for combination in distinct.itertuples(index=False, name=None)
+    ]
+
+    # Diffusion du délai converti : entiers, flottants dès qu'un délai est inconnu
+    distinct_delays = np.asarray([delay for delay, _start, _end in converted])
+    if known.all():
+        delays['converted_delay'] = distinct_delays[codes] if len(codes) else np.zeros(0, dtype=np.int64)
+    else:
+        converted_delay = np.full(len(delays), np.nan)
+        converted_delay[known_rows] = distinct_delays[codes].astype(float) if len(codes) else []
+        delays['converted_delay'] = converted_delay
+
+    # Diffusion des bornes de la période cible, NaT pour un délai inconnu (dernière position)
+    positions = np.full(len(delays), len(converted))
+    positions[known_rows] = codes
+    for position, column in ((1, 'target_period_start'), (2, 'target_period_end')):
+        bounds = pd.DatetimeIndex([bound[position] for bound in converted] + [pd.NaT])
+        delays[column] = bounds.take(positions)
 
     return delays
+
+
+# Colonnes lues par la conversion d'un délai, dans l'ordre des arguments de
+# "_calculate_converted_delay"
+_CONVERSION_COLUMNS: Tuple[str, ...] = (
+    'observation_date', 'period_start', 'period_end', 'reference_point', 'delay', 'unit',
+    'target_frequency_normalized', 'current_frequency_normalized',
+)
+
+
+# Fonction auxiliaire d'application d'une fonction aux seules valeurs distinctes
+def _map_distinct(values: pd.Series, function: Callable[[Any], Any]) -> pd.Series:
+    """Apply a scalar function once per distinct value, missing values kept missing.
+
+    The values are visited in order of first appearance: an error raised by
+    ``function`` designates the first faulty row.
+
+    Args:
+        values: Series to transform
+        function: Scalar function applied to each distinct non-missing value
+
+    Returns:
+        Series of the results, indexed like ``values`` (NaN where ``values`` is missing)
+
+    Examples:
+        >>> _map_distinct(pd.Series(['monthly', None, 'monthly']), normalize_frequency).tolist()
+        ['M', nan, 'M']
+    """
+    # Résultat de chaque valeur distincte non manquante
+    results = {value: function(value) for value in pd.unique(values.dropna())}
+    return values.map(results)
 
 
 # Fonction auxiliaire de conversion d'une valeur en nanosecondes entières
@@ -445,8 +513,18 @@ def _to_nanoseconds(value: float, nanoseconds_per_unit: int) -> int:
 
 
 # Fonction auxiliaire de conversion des délais de publication à la bonne fréquence et à la bonne référence
-def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> pd.Series:
-    """Calculate delay with converted frequency and reference point for a single row.
+def _calculate_converted_delay(
+    observation_date: pd.Timestamp,
+    period_start: pd.Timestamp,
+    period_end: pd.Timestamp,
+    reference_point: str,
+    delay: float,
+    unit: str,
+    target_frequency: str,
+    current_frequency: str,
+    target_reference_point: str,
+) -> Tuple[Union[int, float], pd.Timestamp, pd.Timestamp]:
+    """Calculate delay with converted frequency and reference point for a single observation.
 
     This function performs a three-step conversion process:
 
@@ -473,103 +551,81 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
        then converts back to the original time unit using ceiling rounding.
        The calculation is made with integer nanoseconds, hence exact.
 
-    A row whose delay or source frequency is unknown (``NaN`` / ``None``) is returned
-    with a ``NaN`` converted delay and ``NaT`` target period bounds.
+    A delay or a source frequency unknown (``NaN`` / ``None``) gives a ``NaN``
+    converted delay and ``NaT`` target period bounds.
 
     Args:
-        row: Row from delays DataFrame containing:
-            - observation_date: Date the observation refers to
-            - period_start, period_end: Original period boundaries
-            - reference_point: Original reference ('start' or 'end')
-            - delay: Numeric delay value
-            - unit: Duration name or code of the delay ('day'/'D', 'second'/'s',
-              'microsecond'/'us', ...; plural forms such as 'days' are rejected)
-            - target_frequency_normalized: Target frequency, as a base code ('M')
-            - current_frequency_normalized: Current frequency, as a base code ('Q')
+        observation_date: Date the observation refers to
+        period_start: Start of the original period
+        period_end: End of the original period
+        reference_point: Original reference ('start' or 'end')
+        delay: Numeric delay value
+        unit: Duration name or code of the delay ('day'/'D', 'second'/'s',
+            'microsecond'/'us', ...; plural forms such as 'days' are rejected)
+        target_frequency: Target frequency, as a base code ('M')
+        current_frequency: Current frequency, as a base code ('Q')
         target_reference_point: Target reference point ('start' or 'end')
 
     Returns:
-        Updated row with:
-            - converted_delay: Delay value in original unit, rounded up
-            - target_period_start: Start of target period
-            - target_period_end: End of target period (exclusive)
-            - target_reference_point: Target reference point used
+        Tuple ``(converted_delay, target_period_start, target_period_end)``: the
+        delay in the original unit, rounded up, and the bounds of the target
+        period, the end being exclusive
 
     Raises:
-        ValueError: If the unit of a row with a known delay is not a supported duration
+        ValueError: If the unit of a known delay is not a supported duration
 
     Examples:
         >>> # Q1 2024 data (Jan 1 - Mar 31), published 45 days after quarter end
         >>> # Observation occurred in March, convert to monthly with 'start' reference
-        >>> row = pd.Series({
-        ...     'observation_date': pd.Timestamp('2024-03-15'),
-        ...     'period_start': pd.Timestamp('2024-01-01'),
-        ...     'period_end': pd.Timestamp('2024-03-31'),
-        ...     'reference_point': 'end',
-        ...     'delay': 45,
-        ...     'unit': 'day',
-        ...     'target_frequency_normalized': 'M',
-        ...     'current_frequency_normalized': 'Q'
-        ... })
-        >>> result = _calculate_converted_delay(row, 'start')
+        >>> converted_delay, start, end = _calculate_converted_delay(
+        ...     pd.Timestamp('2024-03-15'), pd.Timestamp('2024-01-01'), pd.Timestamp('2024-03-31'),
+        ...     'end', 45, 'day', 'M', 'Q', 'start',
+        ... )
         >>> # Download date: Mar 31 + 45 days = May 15
         >>> # Target period: March 2024 because observation_date is in March
-        >>> result['target_period_start'], result['target_period_end']
+        >>> start, end
         (Timestamp('2024-03-01 00:00:00'), Timestamp('2024-04-01 00:00:00'))
         >>> # Converted delay: May 15 - Mar 1 = 75 days
-        >>> result['converted_delay']
+        >>> converted_delay
         75
     """
-    # Extraction du point de référence ("start"/"end")
-    row['target_reference_point'] = target_reference_point
-
-    # Délai ou fréquence source inconnus : la ligne est conservée avec un délai inconnu
-    if pd.isna(row['delay']) or pd.isna(row['current_frequency_normalized']):
-        row['converted_delay'] = np.nan
-        row['target_period_start'] = pd.NaT
-        row['target_period_end'] = pd.NaT
-        return row
+    # Délai ou fréquence source inconnus : délai inconnu, sans période cible
+    if pd.isna(delay) or pd.isna(current_frequency):
+        return np.nan, pd.NaT, pd.NaT
 
     # Reconstruction de la date de téléchargement originale
     # download_date = reference_date + delay
-    if row['reference_point'] == 'start':
-        original_reference_date = row['period_start']
+    if reference_point == 'start':
+        original_reference_date = period_start
     else:
-        original_reference_date = row['period_end']
+        original_reference_date = period_end
 
     # Durée de l'unité du délai en nanosecondes entières (calcul exact, sans secondes flottantes)
-    nanoseconds_per_unit = get_duration_nanoseconds(row['unit'])
-    delay_timedelta = pd.Timedelta(_to_nanoseconds(row['delay'], nanoseconds_per_unit), unit='ns')
+    nanoseconds_per_unit = get_duration_nanoseconds(unit)
+    delay_timedelta = pd.Timedelta(_to_nanoseconds(delay, nanoseconds_per_unit), unit='ns')
 
     # Calcul de la date de téléchargement
     download_date = original_reference_date + delay_timedelta
 
-    # Calcul de la nouvelle période de référence selon la fréquence cible
-    # Si la fréquence cible est plus élevée que la fréquence actuelle,
-    # on prend la première sous-période
-    target_freq_normalized = row['target_frequency_normalized']
-    current_freq_normalized = row['current_frequency_normalized']
-
     # Détermination de la période de référence pour la fréquence cible
-    if is_higher_frequency(target_freq_normalized, current_freq_normalized):
+    if is_higher_frequency(target_frequency, current_frequency):
         # Fréquence plus élevée : on identifie la sous-période qui coïncide avec observation_date
         # Génération de toutes les sous-périodes dans la période originale
-        target_freq_pandas = to_pandas_freq(target_freq_normalized)
+        target_freq_pandas = to_pandas_freq(target_frequency)
         subperiods = pd.date_range(
-            start=row['period_start'],
-            end=row['period_end'],
+            start=period_start,
+            end=period_end,
             freq=target_freq_pandas
         )
 
         # Identification de la sous-période qui contient observation_date
         # On cherche la sous-période dont les bornes englobent observation_date
-        observation_date = row['observation_date']
         reference_date_for_subperiod = None
 
         for subperiod_date in subperiods:
             subperiod_start, subperiod_end = get_period_boundaries(
                 date=subperiod_date,
-                frequency=target_freq_normalized
+                frequency=target_frequency
             )
             # Vérification si observation_date se trouve dans cette sous-période
             if subperiod_start <= observation_date < subperiod_end:
@@ -582,13 +638,13 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
 
         target_period_start, target_period_end = get_period_boundaries(
             date=reference_date_for_subperiod,
-            frequency=target_freq_normalized
+            frequency=target_frequency
         )
     else:
         # Fréquence égale ou inférieure : on garde la même période
         target_period_start, target_period_end = get_period_boundaries(
-            date=row['observation_date'],
-            frequency=target_freq_normalized
+            date=observation_date,
+            frequency=target_frequency
         )
 
     # Calcul de la nouvelle date de référence selon le point de référence cible
@@ -601,13 +657,9 @@ def _calculate_converted_delay(row: pd.Series, target_reference_point: str) -> p
     new_delay_nanoseconds = (download_date - new_reference_date) // pd.Timedelta(1, unit='ns')
 
     # Conversion dans l'unité d'origine, arrondie au supérieur (division entière par excès)
-    row['converted_delay'] = -(-new_delay_nanoseconds // nanoseconds_per_unit)
+    converted_delay = -(-new_delay_nanoseconds // nanoseconds_per_unit)
 
-    # Ajout des informations sur la nouvelle période de référence
-    row['target_period_start'] = target_period_start
-    row['target_period_end'] = target_period_end
-
-    return row
+    return converted_delay, target_period_start, target_period_end
 
 # Fonction auxiliaire de conversion de l'unité du délai
 def _convert_delay_unit(delays: pd.DataFrame, target_unit: str) -> pd.DataFrame:
@@ -636,15 +688,9 @@ def _convert_delay_unit(delays: pd.DataFrame, target_unit: str) -> pd.DataFrame:
     target_nanoseconds = get_duration_nanoseconds(target_unit_code)
 
     # Fonction de conversion en nanosecondes entières
-    def convert_value(row):
-        value = row['converted_delay']
-
-        # Délai inconnu : conservé tel quel
-        if pd.isna(value):
-            return value
-
+    def convert_value(value, unit):
         # Extraction du code de l'unité courante
-        current_unit_code = duration_to_code(row['unit'])
+        current_unit_code = duration_to_code(unit)
 
         # Pas de conversion nécessaire si les unités sont identiques
         if current_unit_code == target_unit_code:
@@ -654,8 +700,28 @@ def _convert_delay_unit(delays: pd.DataFrame, target_unit: str) -> pd.DataFrame:
         nanoseconds = _to_nanoseconds(value, get_duration_nanoseconds(current_unit_code))
         return -(-nanoseconds // target_nanoseconds)
 
-    # Conversion
-    delays['converted_delay'] = delays.apply(convert_value, axis=1)
+    # Délais connus, seuls convertis : un délai inconnu reste tel quel
+    values = delays['converted_delay']
+    known = values.notna().to_numpy()
+    known_rows = np.flatnonzero(known)
+
+    # Conversion une fois par couple (délai, unité) distinct, dans l'ordre de
+    # première apparition (une erreur désigne donc la première ligne fautive)
+    known_values = values.iloc[known_rows]
+    known_units = delays['unit'].iloc[known_rows]
+    codes, first_rows = factorize_row_keys(known_values, known_units)
+    distinct = np.asarray([
+        convert_value(value, unit)
+        for value, unit in zip(known_values.iloc[first_rows], known_units.iloc[first_rows])
+    ])
+
+    # Diffusion : entiers, flottants dès qu'un délai est inconnu
+    if known.all():
+        delays['converted_delay'] = distinct[codes] if len(codes) else values
+    else:
+        converted_delay = np.full(len(delays), np.nan)
+        converted_delay[known_rows] = distinct[codes].astype(float) if len(codes) else []
+        delays['converted_delay'] = converted_delay
     delays['unit'] = target_unit_code
 
     return delays

@@ -138,7 +138,7 @@ class TestAggregationMethods:
         pytest.param('any', [True, True], id='any'),
     ])
     def test_boolean_methods_keep_booleans(self, aligner, agg_method, expected):
-        """``'all'`` / ``'any'`` write booleans (object column, NaN off the labels)."""
+        """``'all'`` / ``'any'`` write booleans (nullable ``boolean`` column, NA off the labels)."""
         df = pd.DataFrame({'flag': [1, 1, 0, 1, 1, 1]},
                           index=pd.date_range('2023-01-01', periods=6, freq='MS'))
 
@@ -154,7 +154,18 @@ class TestAggregationMethods:
             warnings.simplefilter('error')
             result = aligner.convert_to_target(df, ['x'], 'QS', agg_method='all')
 
-        assert result['x'].dtype == object
+        assert result['x'].dtype == 'boolean'
+
+    def test_boolean_column_of_a_panel_is_nullable_boolean(self, aligner):
+        """Every entity converted with ``'any'``: one nullable boolean column, missing off the labels."""
+        panel = _panel({'A': _frame([0, 0, 1, 0, 0, 0], '2023-01-01', 'MS'),
+                        'B': _frame([0, 0, 0, 1, 1, 1], '2023-01-01', 'MS')})
+
+        result = aligner.convert_to_target(panel, ['x'], 'QS', agg_method='any')
+
+        assert result['x'].dtype == 'boolean'
+        assert result['x'].dropna().tolist() == [True, False, False, True]
+        assert result['x'].isna().sum() == len(result) - 4
 
     def test_method_is_applied_per_entity(self, aligner):
         """On a panel, the method reduces each entity on its own rows."""

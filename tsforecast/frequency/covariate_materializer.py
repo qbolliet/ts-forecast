@@ -30,7 +30,7 @@ import pandas as pd
 # Voies de matérialisation, définies avec l'étape du plan
 from .imputation_plan import MaterializationWay
 # Primitives d'origine de cellule
-from .provenance import CellOrigin, max_origin
+from .provenance import CELL_ORIGIN_DTYPE, CellOrigin, max_cell_origin
 # Arithmétique et conversion de fréquences
 from ..utils.frequency.converter import FrequencyConverter
 from ..utils.frequency.utils import (
@@ -282,6 +282,26 @@ def _combine_first(produced: pd.Series, existing: Optional[pd.Series]) -> pd.Ser
     return produced.combine_first(existing)
 
 
+# Fonction auxiliaire du support de découpage d'une grille par entité
+def _grid_scaffold(grid_index: pd.Index) -> pd.Series:
+    """Return a value-less series on a grid, to split the grid into entity blocks.
+
+    Only the index of each block is read: a float series carries it without
+    any column label to type.
+
+    Args:
+        grid_index: Grid to split.
+
+    Returns:
+        Series of NaN floats indexed on ``grid_index``.
+
+    Examples:
+        >>> _grid_scaffold(pd.date_range('2024-01-31', periods=2, freq='ME')).dtype
+        dtype('float64')
+    """
+    return pd.Series(np.nan, index=grid_index, dtype=float)
+
+
 # Composant de matérialisation des covariables
 class CovariateMaterializer:
     """Single producer of the feature frames of ``HighFrequencyImputer``.
@@ -315,8 +335,9 @@ class CovariateMaterializer:
         imputed_store: Mapping column -> values produced so far.
         imputed_freq_store: Mapping column -> production frequency per cell
             (``str`` dtype).
-        origin_store: Mapping column -> :data:`CellOrigin` per cell (``str``
-            dtype).
+        origin_store: Mapping column -> :data:`CellOrigin` per cell
+            (ordered categorical dtype
+            :data:`~tsforecast.frequency.provenance.CELL_ORIGIN_DTYPE`).
 
     Args:
         covariate_strategy: How a covariate observed at a frequency strictly
@@ -772,11 +793,12 @@ class CovariateMaterializer:
             return
 
         # Écriture des trois registres, chacun par combine_first ; fréquences
-        # et origines en dtype chaîne, quel que soit le dtype reçu
+        # en dtype chaîne et origines en dtype catégoriel ordonné, quel que
+        # soit le dtype reçu
         for store, produced in (
             (self.imputed_store, values),
             (self.imputed_freq_store, production_freq.astype('str')),
-            (self.origin_store, origins.astype('str')),
+            (self.origin_store, origins.astype(CELL_ORIGIN_DTYPE)),
         ):
             store[column] = _combine_first(produced, store.get(column))
 
@@ -802,7 +824,7 @@ class CovariateMaterializer:
         frame = pd.DataFrame({
             'value': values,
             'freq': self.imputed_freq_store.get(column, pd.Series(dtype='str')),
-            'origin': self.origin_store.get(column, pd.Series(dtype='str')),
+            'origin': self.origin_store.get(column, pd.Series(dtype=CELL_ORIGIN_DTYPE)),
         })
         # Découpage par entité, index de date seul dans chaque bloc
         return {
@@ -994,7 +1016,7 @@ class CovariateMaterializer:
         """
         return [
             normalize_entity_key(entity)
-            for entity, _mask, _block in iter_entity_blocks(pd.DataFrame(index=grid_index))
+            for entity, _mask, _block in iter_entity_blocks(_grid_scaffold(grid_index))
         ]
 
     # Méthode de classification d'une covariable face à une grille
@@ -1412,10 +1434,13 @@ class CovariateMaterializer:
         # Nombre de lignes
         n_rows = len(grid_index)
 
-        # Initialisation du triplet résultat
+        # Initialisation du triplet résultat : origines et fréquences portées par
+        # des codes entiers (-1 : aucune valeur produite)
         values = np.full(n_rows, np.nan, dtype=float)
-        origins = np.full(n_rows, None, dtype=object)
-        freqs = np.full(n_rows, None, dtype=object)
+        origin_codes = np.full(n_rows, -1, dtype=np.int8)
+        freq_codes = np.full(n_rows, -1, dtype=np.intp)
+        # Fréquences de production rencontrées, dans l'ordre de première apparition
+        freq_labels: Dict[str, int] = {}
 
         # Découpage en blocs (correspondant à des entités)
         blocks = self._source_blocks(source_data)
@@ -1427,7 +1452,7 @@ class CovariateMaterializer:
         # produire, la source ne fournissant que les observations. Une
         # liaison d'étape qui laisse une entité de la grille sans fréquence est
         # refusée avant toute production
-        grid_blocks = list(iter_entity_blocks(pd.DataFrame(index=grid_index)))
+        grid_blocks = list(iter_entity_blocks(_grid_scaffold(grid_index)))
         self._check_stage_coverage(
             stage_freq, [normalize_entity_key(entity) for entity, _mask, _block in grid_blocks]
         )
@@ -1475,13 +1500,23 @@ class CovariateMaterializer:
             # Report du bloc sur les lignes de l'entité dans la grille
             filled = produced.notna().to_numpy()
             values[mask] = produced.to_numpy(dtype=float)
-            origins[mask] = produced_origins.to_numpy(dtype=object)
-            freqs[mask] = np.where(filled, f_stage, None)
+            origin_codes[mask] = produced_origins.cat.codes.to_numpy()
+            if f_stage is not None:
+                freq_code = freq_labels.setdefault(f_stage, len(freq_labels))
+                freq_codes[mask] = np.where(filled, freq_code, -1)
 
+        # Fréquences de production en dtype chaîne, NaN là où rien n'est produit
+        production_freq = pd.Series(
+            pd.Categorical.from_codes(freq_codes, categories=list(freq_labels)),
+            index=grid_index, name=column,
+        ).astype('str')
         return (
             pd.Series(values, index=grid_index, name=column),
-            pd.Series(origins, index=grid_index, name=column),
-            pd.Series(freqs, index=grid_index, name=column),
+            pd.Series(
+                pd.Categorical.from_codes(origin_codes, dtype=CELL_ORIGIN_DTYPE),
+                index=grid_index, name=column,
+            ),
+            production_freq,
         )
 
     # Méthode auxiliaire de production d'un bloc d'entité
@@ -1548,10 +1583,10 @@ class CovariateMaterializer:
                     column, observations, dates, f_col, f_stage
                 )
             # Origine constante, portée par la voie elle-même
-            origins = pd.Series(_WAY_ORIGIN[way], index=dates, dtype=object)
+            origins = pd.Series(_WAY_ORIGIN[way], index=dates, dtype=CELL_ORIGIN_DTYPE)
 
         # Aucune origine là où aucune valeur n'a pu être produite
-        origins = origins.where(values.notna(), other=None).astype(object)
+        origins = origins.where(values.notna())
         return values, origins
 
     # Méthode auxiliaire de production d'un bloc par une voie de modèle
@@ -1581,7 +1616,7 @@ class CovariateMaterializer:
         """
         # Bloc absent : l'entité n'a rien dans le miroir, ses lignes restent NaN
         empty_values = pd.Series(np.nan, index=dates, name=column)
-        empty_origins = pd.Series(None, index=dates, dtype=object)
+        empty_origins = pd.Series(np.nan, index=dates, dtype=CELL_ORIGIN_DTYPE)
         if mirror_block is None or mirror_block.empty:
             return empty_values, empty_origins
 
@@ -1592,7 +1627,7 @@ class CovariateMaterializer:
                 return empty_values, empty_origins
             return (
                 cells['value'].reindex(dates).rename(column),
-                cells['origin'].reindex(dates).astype(object),
+                cells['origin'].reindex(dates).astype(CELL_ORIGIN_DTYPE),
             )
 
         # Rang 3 : fréquence de production lue dans le registre, jamais redétectée
@@ -1608,8 +1643,8 @@ class CovariateMaterializer:
         )
         # Origine propagée sans dégradation ni amélioration : l'interpolation
         # d'une valeur de modèle reste de modèle, un repli reste 'interpolated'
-        carried_origin = max_origin(cells['origin'].dropna().tolist())
-        return values, pd.Series(carried_origin, index=dates, dtype=object)
+        carried_origin = max_cell_origin(cells['origin'])
+        return values, pd.Series(carried_origin, index=dates, dtype=CELL_ORIGIN_DTYPE)
 
     # Méthode auxiliaire d'enregistrement d'une colonne dans les registres
     def _record(
@@ -1624,7 +1659,8 @@ class CovariateMaterializer:
         Args:
             column: Column produced.
             values: Values on the grid.
-            origins: Origin of each cell, None where nothing was produced.
+            origins: Origin of each cell (:data:`CELL_ORIGIN_DTYPE`), NaN where
+                nothing was produced.
             freqs: Production frequency of each cell, same convention.
         """
         # Extraction des valeurs non vides
@@ -1774,8 +1810,7 @@ class CovariateMaterializer:
             # Ajout des valeurs transformées au jeu de données résultat
             features[column] = values
             # Origine agrégée : max des origines des cellules produites
-            produced = origins.dropna().tolist()
-            column_origins[column] = max_origin(produced) if produced else 'observed'
+            column_origins[column] = max_cell_origin(origins)
 
         # Construction du jeu de données résultat
         frame = pd.DataFrame(features, index=grid_index, columns=list(columns))

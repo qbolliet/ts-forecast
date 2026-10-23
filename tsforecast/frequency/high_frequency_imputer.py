@@ -39,6 +39,8 @@ from ..utils.frequency.utils import (
     normalize_frequency,
 )
 from ..panel.utils import (
+    factorize_row_keys,
+    get_entity_codes,
     get_unique_panel_entities,
     iter_entity_blocks,
     is_panel_data,
@@ -70,11 +72,13 @@ from .imputation_window import (
     TrainingScope,
 )
 from .provenance import (
+    CELL_ORIGIN_DTYPE,
     CellOrigin,
     ImputationProvenanceTracker,
     PROVENANCE_DTYPE,
     ProvenanceType,
     Taint,
+    max_cell_origin,
     max_origin,
     origin_to_taint,
     provenance_statistics,
@@ -2629,7 +2633,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         stage_freq: Union[str, Dict[EntityKey, str]],
         row_frequency: pd.Series,
         real_index: pd.Index,
-        row_entities: Sequence[EntityKey],
+        entity_codes: np.ndarray,
+        entities: Sequence[EntityKey],
     ) -> pd.DataFrame:
         """Divide the covariates by the period their own row spans.
 
@@ -2656,8 +2661,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 or not.
             real_index: The ``(entity..., date)`` grid of the same rows, the
                 only shape :class:`StageScaler` ever reads.
-            row_entities: Entity key of each row, decomposed once by
+            entity_codes: Entity code of each row, decomposed once by
                 :func:`split_training_index`.
+            entities: Entity keys the codes point to.
 
         Returns:
             A ``DataFrame`` of per-row divisors, indexed like
@@ -2665,15 +2671,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """
         # Extraction de l'index
         index = row_frequency.index
-        # Extraction des fréquences
-        frequencies = row_frequency.to_numpy(dtype=object)
 
         # Un appel par couche, puis remontée au format par ligne, seul capable
         # de porter deux échelles sur une même colonne
         divisors = pd.DataFrame(
             np.nan, index=index, columns=list(feature_cols), dtype=float
         )
-        for layer, in_layer in self._row_layers(row_entities, frequencies, blocks):
+        for layer, in_layer in self._row_layers(entity_codes, entities, row_frequency, blocks):
             # Écriture positionnelle : sous une grille estampillée, deux lignes
             # partagent une date et l'alignement par étiquette les confondrait
             positions = np.flatnonzero(in_layer)
@@ -2701,8 +2705,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire d'énumération des couches d'une grille d'entraînement
     @staticmethod
     def _row_layers(
-        row_entities: Sequence[EntityKey],
-        frequencies: np.ndarray,
+        entity_codes: np.ndarray,
+        entities: Sequence[EntityKey],
+        row_frequency: pd.Series,
         blocks: Dict[EntityKey, str],
     ) -> List[Tuple[Dict[EntityKey, str], np.ndarray]]:
         """Enumerate the layers of a training grid, one frequency per entity.
@@ -2710,43 +2715,63 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Same rule as :meth:`TrainingSetBuilder._frequency_layers`, read here
         on the assembled grid rather than on the per-entity frames: the block
         frequency opens each entity's list, so a grid where axis 2 injected
-        nothing yields exactly one layer.
+        nothing yields exactly one layer. The rows are read through integer
+        codes of their entity and frequency: one pass per distinct (entity,
+        frequency) pair, never per row.
 
         Args:
-            row_entities: Entity key of each row, in grid order.
-            frequencies: Production frequency of each row, in grid order.
+            entity_codes: Entity code of each row, in grid order.
+            entities: Entity keys the codes point to.
+            row_frequency: Production frequency of each row, in grid order.
             blocks: Block frequency of each contributing entity.
 
         Returns:
             Ordered list of ``(layer, selector)`` pairs, the selector being a
             boolean array over the grid. Empty layers are dropped.
+
+        Examples:
+            >>> layers = HighFrequencyImputer._row_layers(
+            ...     np.array([0, 0, 1]), [('FR',), ('DE',)],
+            ...     pd.Series(['Y', 'Q', 'Q'], dtype='str'), {('FR',): 'Y', ('DE',): 'Q'},
+            ... )
+            >>> [(layer, selector.tolist()) for layer, selector in layers]
+            [({('FR',): 'Y', ('DE',): 'Q'}, [True, False, True]), ({('FR',): 'Q'}, [False, True, False])]
         """
-        # Fréquences de chaque entité, celle de son bloc en tête
-        per_entity: Dict[EntityKey, List[str]] = {}
-        for entity, frequency in zip(row_entities, frequencies):
+        # Codes des fréquences de ligne ; une fréquence manquante n'appartient
+        # à aucune couche
+        freq_codes, freq_labels = pd.factorize(row_frequency, use_na_sentinel=True)
+        label_codes = {label: code for code, label in enumerate(freq_labels)}
+
+        # Fréquences de chaque entité, celle de son bloc en tête, puis celles
+        # de ses lignes dans l'ordre de première apparition des couples
+        per_entity: Dict[int, List[str]] = {}
+        _pair_codes, first_rows = factorize_row_keys(entity_codes, freq_codes)
+        for row in first_rows:
+            entity_code = int(entity_codes[row])
+            entity = entities[entity_code]
             ordered = per_entity.setdefault(
-                entity,
+                entity_code,
                 [blocks[entity]] if entity in blocks else [],
             )
-            if frequency not in ordered:
-                ordered.append(frequency)
+            if freq_codes[row] >= 0 and freq_labels[freq_codes[row]] not in ordered:
+                ordered.append(freq_labels[freq_codes[row]])
 
-        # Couches : la i-ème fréquence de chaque entité qui en porte une
+        # Couches : la i-ème fréquence de chaque entité qui en porte une ; une
+        # ligne en fait partie si sa fréquence est celle de son entité au rang i
         layers: List[Tuple[Dict[EntityKey, str], np.ndarray]] = []
         depth = max((len(f) for f in per_entity.values()), default=0)
         for rank in range(depth):
             layer = {
-                entity: ordered[rank]
-                for entity, ordered in per_entity.items()
+                entities[entity_code]: ordered[rank]
+                for entity_code, ordered in per_entity.items()
                 if rank < len(ordered)
             }
-            in_layer = np.array(
-                [
-                    layer.get(entity) == frequency
-                    for entity, frequency in zip(row_entities, frequencies)
-                ],
-                dtype=bool,
-            )
+            # Code de fréquence attendu par entité (-2 : aucun, jamais égal)
+            expected = np.full(len(entities), -2, dtype=np.intp)
+            for entity_code, ordered in per_entity.items():
+                if rank < len(ordered):
+                    expected[entity_code] = label_codes.get(ordered[rank], -2)
+            in_layer = (freq_codes >= 0) & (freq_codes == expected[entity_codes])
             if in_layer.any():
                 layers.append((layer, in_layer))
         return layers
@@ -2760,7 +2785,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         stage_freq: Union[str, Dict[EntityKey, str]],
         row_frequency: pd.Series,
         real_index: pd.Index,
-        row_entities: Sequence[EntityKey],
+        entity_codes: np.ndarray,
+        entities: Sequence[EntityKey],
     ) -> pd.Series:
         """Divide the target by the period its own row spans.
 
@@ -2778,7 +2804,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             stage_freq: Frequency of the stage.
             row_frequency: Frequency each training row was produced at.
             real_index: The ``(entity..., date)`` grid of the same rows.
-            row_entities: Entity key of each row.
+            entity_codes: Entity code of each row.
+            entities: Entity keys the codes point to.
 
         Returns:
             A ``Series`` of per-row divisors indexed like ``row_frequency``
@@ -2786,11 +2813,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """
         # Extraction de l'index et des fréquences de ligne
         index = row_frequency.index
-        frequencies = row_frequency.to_numpy(dtype=object)
+        frequencies = row_frequency.array
 
         # Un appel par couche, sur la grille réelle
         divisors = pd.Series(np.nan, index=index, dtype=float)
-        for layer, in_layer in self._row_layers(row_entities, frequencies, blocks):
+        for layer, in_layer in self._row_layers(entity_codes, entities, row_frequency, blocks):
             positions = np.flatnonzero(in_layer)
             sub_real = real_index[in_layer]
             produced = pd.Series(frequencies[in_layer], index=sub_real)
@@ -3125,7 +3152,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Décomposition unique de la grille d'entraînement : la grille
             # réelle que lisent le matérialiseur et le scaler, et l'entité de
             # chaque ligne — "key[:-2]" sous une grille estampillée
-            real_index, row_entities = split_training_index(
+            real_index, entity_codes, entities = split_training_index(
                 training.X.index,
                 has_frequency_level=training.has_frequency_level,
             )
@@ -3137,7 +3164,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     stage_freq=stage_freq,
                     row_frequency=training.row_frequency,
                     real_index=real_index,
-                    row_entities=row_entities,
+                    entity_codes=entity_codes,
+                    entities=entities,
                 ),
             )
             if feature_cols:
@@ -3151,7 +3179,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                         stage_freq=stage_freq,
                         row_frequency=training.row_frequency,
                         real_index=real_index,
-                        row_entities=row_entities,
+                        entity_codes=entity_codes,
+                        entities=entities,
                     ),
                 )
 
@@ -3209,7 +3238,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         materializer = self._covariate_materializer
         # Grille réelle de la sonde et entité de chaque ligne : le niveau de
         # fréquence n'est jamais lu par le matérialiseur
-        real_index, row_entities = split_training_index(
+        real_index, entity_codes, entities = split_training_index(
             probe.X.index, has_frequency_level=probe.has_frequency_level
         )
 
@@ -3217,9 +3246,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # coïncidentes partagent par définition une date
         frames: List[pd.DataFrame] = []
         if blocks:
-            layers = self._row_layers(
-                row_entities, probe.row_frequency.to_numpy(dtype=object), blocks
-            )
+            layers = self._row_layers(entity_codes, entities, probe.row_frequency, blocks)
             for layer, in_layer in layers:
                 sub_grid = real_index[in_layer]
                 sub_grid = sub_grid[~sub_grid.duplicated()]
@@ -3299,7 +3326,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Souillure de la cible : lue par le filtre d'origine, jamais codée en
         # dur — le lot de l'axe 2 n'aura qu'à élargir ELIGIBLE_ORIGINS
         target_taint = origin_to_taint(
-            max_origin([origin for origin in training.row_origin if pd.notna(origin)])
+            max_cell_origin(training.row_origin)
         )
 
         # Matérialisation de la grille de prédiction en mode rejeu des voies
@@ -3699,12 +3726,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         materializer.record_production(
             column,
             written,
-            pd.Series(origin, index=written.index, dtype='str'),
-            pd.Series(
-                self._stage_frequency_of(stage_freq, written.index),
-                index=written.index,
-                dtype='str',
-            ),
+            pd.Series(origin, index=written.index, dtype=CELL_ORIGIN_DTYPE),
+            self._stage_frequency_of(stage_freq, written.index),
         )
         return degraded, len(written)
 
@@ -3830,7 +3853,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     def _stage_frequency_of(
         stage_freq: Union[str, Dict[EntityKey, str]],
         index: pd.Index,
-    ) -> List[str]:
+    ) -> pd.Series:
         """Give the stage frequency of each row of a grid.
 
         Args:
@@ -3838,20 +3861,30 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             index: Grid the frequencies are read on.
 
         Returns:
-            One frequency string per row of ``index``.
+            Series indexed on ``index`` holding the base frequency code of
+            each row (``str`` dtype).
+
+        Examples:
+            >>> idx = pd.MultiIndex.from_product(
+            ...     [['FR', 'DE'], pd.date_range('2021-03-31', periods=2, freq='QE')]
+            ... )
+            >>> HighFrequencyImputer._stage_frequency_of({('FR',): 'QE', ('DE',): 'monthly'}, idx).tolist()
+            ['Q', 'Q', 'M', 'M']
         """
         # Fréquence unique : la même pour toutes les lignes
         if not isinstance(stage_freq, dict):
-            return [normalize_frequency(stage_freq, return_format='base')] * len(index)
-
-        # Fréquence par entité : lecture ligne à ligne
-        levels = [index.get_level_values(level) for level in range(index.nlevels - 1)]
-        return [
-            normalize_frequency(
-                stage_freq[normalize_entity_key(tuple(values))], return_format='base'
+            return pd.Series(
+                normalize_frequency(stage_freq, return_format='base'), index=index, dtype='str'
             )
-            for values in zip(*levels)
-        ]
+
+        # Fréquence par entité : normalisée une fois par entité, puis diffusée
+        # sur ses lignes par le code d'entité
+        entity_codes, entities = get_entity_codes(index)
+        per_entity = pd.array(
+            [normalize_frequency(stage_freq[entity], return_format='base') for entity in entities],
+            dtype='str',
+        )
+        return pd.Series(per_entity.take(entity_codes), index=index)
 
     # Méthode auxiliaire du masque d'entraînement lu à la fréquence des blocs
     def _training_mask_at(
@@ -4815,21 +4848,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Returns:
             Boolean frame shaped like ``frame``.
         """
-        # Fréquence d'étape et entité de chaque ligne, factorisées en couples
+        # Fréquence d'étape et entité de chaque ligne, codées en couples
+        # distincts sans construire de tuple par ligne
         row_frequency = self._stage_frequency_of(output_binding, frame.index)
-        if isinstance(frame.index, pd.MultiIndex):
-            levels = [
-                frame.index.get_level_values(level)
-                for level in range(frame.index.nlevels - 1)
-            ]
-            row_entity = [
-                normalize_entity_key(tuple(values)) for values in zip(*levels)
-            ]
-        else:
-            row_entity = [()] * len(frame)
-        codes, pairs = pd.factorize(
-            pd.Series(list(zip(row_entity, row_frequency)), dtype=object)
-        )
+        entity_codes, entities = get_entity_codes(frame.index)
+        codes, first_rows = factorize_row_keys(entity_codes, row_frequency)
+        pairs = [
+            (entities[entity_codes[row]], row_frequency.iat[row]) for row in first_rows
+        ]
 
         # Fréquence de chaque colonne, par entité sur un panel
         column_frequencies = self._detected_frequencies_by_column()
@@ -4882,9 +4908,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             return frame
 
         # Fréquence d'étape de chaque ligne de la grille
-        row_frequency = pd.Series(
-            self._stage_frequency_of(output_binding, frame.index), index=frame.index
-        )
+        row_frequency = self._stage_frequency_of(output_binding, frame.index)
 
         # Initialisation du jeu de données résultat
         result = frame.copy()
@@ -5247,15 +5271,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """
         # Empilage dans l'ordre d'insertion, l'étiquette de chaque bloc étant
         # construite à part pour ne jamais entrer en collision avec une colonne
-        all_frames: List[pd.DataFrame] = []
-        freq_labels: List[np.ndarray] = []
-        for freq_label, frame in stage_frames.items():
-            all_frames.append(frame)
-            freq_labels.append(np.full(len(frame), freq_label, dtype=object))
-
+        all_frames = list(stage_frames.values())
         combined = pd.concat(all_frames, ignore_index=False)
-        # Niveau de fréquence en dtype chaîne, quel que soit le nombre d'étapes
-        freq_values = pd.Index(np.concatenate(freq_labels), dtype='str')
+        # Niveau de fréquence en dtype chaîne, quel que soit le nombre d'étapes :
+        # l'étiquette de chaque étape répétée sur ses lignes, par position
+        labels = pd.array(list(stage_frames), dtype='str')
+        freq_values = pd.Index(
+            labels.take(np.repeat(np.arange(len(labels)), [len(frame) for frame in all_frames]))
+        )
 
         # Construction du MultiIndex de sortie
         if self.is_panel_ and isinstance(combined.index, pd.MultiIndex):

@@ -287,7 +287,7 @@ class TestIndexRobustness:
         assert list(training.X.index.names) == [
             'region', 'country', FREQUENCY_LEVEL_NAME, 'date'
         ]
-        _real, entities = split_training_index(training.X.index, has_frequency_level=True)
+        _real, _codes, entities = split_training_index(training.X.index, has_frequency_level=True)
         assert set(entities) == set(training.blocks)
         assert len(training) == 52
 

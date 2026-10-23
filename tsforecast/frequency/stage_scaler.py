@@ -40,7 +40,7 @@ from sklearn.utils.validation import check_is_fitted
 from ..utils.frequency.converter import FrequencyConverter
 from ..utils.frequency.utils import is_higher_frequency, normalize_frequency
 # Normalisation des clés d'entité du panel
-from ..panel.utils import normalize_entity_key, normalize_entity_mapping
+from ..panel.utils import get_entity_codes, normalize_entity_key, normalize_entity_mapping
 
 
 # Modalités de mise à l'échelle
@@ -214,20 +214,28 @@ def _dates_of(index: pd.Index) -> pd.DatetimeIndex:
 
 
 # Fonction auxiliaire d'extraction des entités d'un index de panel
-def _entities_of(index: pd.Index) -> Optional[List[EntityKey]]:
-    """Extract the entity of each row of a stage index.
+def _entities_of(index: pd.Index) -> Optional[Tuple[np.ndarray, List[EntityKey]]]:
+    """Extract the entity of each row of a stage index, as integer codes.
 
     Args:
         index: Stage grid index.
 
     Returns:
-        One normalized entity tuple per row, or None when ``index`` carries no
-        entity level (time series).
+        Tuple ``(entity_codes, entities)`` — the entity code of each row and
+        the normalized entity tuples the codes point to, in order of first
+        appearance —, or None when ``index`` carries no entity level (time
+        series).
+
+    Examples:
+        >>> idx = pd.MultiIndex.from_product([['FR', 'DE'], pd.date_range('2021-01-31', periods=2, freq='ME')])
+        >>> codes, entities = _entities_of(idx)
+        >>> codes.tolist(), entities
+        ([0, 0, 1, 1], [('FR',), ('DE',)])
     """
     # Absence de niveau d'entité : série temporelle
     if not isinstance(index, pd.MultiIndex):
         return None
-    return index.droplevel(-1).map(normalize_entity_key).tolist()
+    return get_entity_codes(index)
 
 
 # Classe de mise à l'échelle des données
@@ -694,25 +702,27 @@ class StageScaler(BaseEstimator, TransformerMixin):
                 f"scale_features gives column {column!r} per-entity modes that "
                 "differ: an index is required to spread them over the rows"
             )
-        entities_per_row = _entities_of(index)
+        entity_rows = _entities_of(index)
         # Série temporelle : aucune entité, le repli interne s'applique
-        if entities_per_row is None:
+        if entity_rows is None:
             return compute(self.resolve_mode(column))
+        entity_codes, entities = entity_rows
 
-        # Modalité de chaque ligne, résolue une fois par entité
-        by_entity = {
-            entity: self.resolve_mode(column, entity) for entity in set(entities_per_row)
-        }
-        row_modes = np.array([by_entity[entity] for entity in entities_per_row], dtype=object)
-        distinct = sorted(set(by_entity.values()))
+        # Modalité de chaque entité, résolue une fois par entité
+        entity_modes = [self.resolve_mode(column, entity) for entity in entities]
+        distinct = sorted(set(entity_modes))
         if len(distinct) == 1:
             return compute(distinct[0])
+        # Code de modalité de chaque ligne, lu par son code d'entité
+        row_mode_codes = np.array(
+            [distinct.index(mode) for mode in entity_modes], dtype=np.intp
+        )[entity_codes]
 
         # Un calcul par modalité, écrit positionnellement sur ses lignes
         result = pd.Series(np.nan, index=index, dtype=float)
-        for mode in distinct:
+        for mode_code, mode in enumerate(distinct):
             divisor = compute(mode)
-            mask = row_modes == mode
+            mask = row_mode_codes == mode_code
             result.iloc[np.flatnonzero(mask)] = (
                 float(divisor) if np.isscalar(divisor)
                 else np.asarray(divisor, dtype=float)[mask]
@@ -909,13 +919,13 @@ class StageScaler(BaseEstimator, TransformerMixin):
             )
         
         # Extraction des entités de l'index
-        entities = _entities_of(index)
-        if entities is None:
+        entity_rows = _entities_of(index)
+        if entity_rows is None:
             raise ValueError(
                 f"{parameter} given as an entity -> frequency mapping requires "
                 f"a MultiIndex (entity..., date), got a {type(index).__name__}"
             )
-        return sorted(set(entities))
+        return sorted(entity_rows[1])
 
     # Méthode auxiliaire de résolution de la fréquence de bloc d'une entité
     def _block_freq(
@@ -1254,22 +1264,26 @@ class StageScaler(BaseEstimator, TransformerMixin):
             return pd.Series(np.asarray(divisor, dtype=float), index=index)
 
         # Cohérence de l'index avec la ventilation demandée
-        entities_per_row = _entities_of(index)
-        if entities_per_row is None:
+        entity_rows = _entities_of(index)
+        if entity_rows is None:
             raise ValueError(
                 "Entity-wise divisors require a MultiIndex (entity..., date), "
                 f"got a {type(index).__name__}"
             )
+        entity_codes, entities = entity_rows
+        # Code de chaque entité de la grille
+        code_of = {entity: code for code, entity in enumerate(entities)}
 
         # Initialisation de la Series résultat
         result = pd.Series(np.nan, index=index, dtype=float)
-        # Ventilation par entité : comparaison terme à terme plutôt que par un
-        # Index de tuples, que pandas diffuserait élément par élément
+        # Ventilation par entité : comparaison des codes entiers, sans tuple
+        # construit par ligne ; une entité absente de la grille n'a aucune ligne
         for entity, divisor in per_entity.items():
             # Masque correspondant à l'entité
-            mask = np.array(
-                [row_entity == entity for row_entity in entities_per_row],
-                dtype=bool,
+            code = code_of.get(entity)
+            mask = (
+                entity_codes == code if code is not None
+                else np.zeros(len(index), dtype=bool)
             )
             result.loc[mask] = (
                 divisor
@@ -1525,22 +1539,27 @@ class StageScaler(BaseEstimator, TransformerMixin):
         # Initialisation de la série résultat avec le même index
         result = pd.Series(np.nan, index=rows, dtype=float)
 
-        # Fréquence d'étape de chaque ligne : constante, ou lue par entité
-        entities_per_row = _entities_of(rows)
+        # Fréquence d'étape de chaque ligne : constante, ou lue une fois par
+        # entité puis diffusée par le code d'entité
         if isinstance(pred_freq, Mapping):
-            if entities_per_row is None:
+            entity_rows = _entities_of(rows)
+            if entity_rows is None:
                 raise ValueError(
                     "Entity-wise prediction frequencies require a MultiIndex "
                     f"(entity..., date), got a {type(rows).__name__}"
                 )
-            stage_per_row = [self._stage_freq_for(pred_freq, e) for e in entities_per_row]
+            entity_codes, entities = entity_rows
+            stage_per_entity = pd.array(
+                [self._stage_freq_for(pred_freq, entity) for entity in entities], dtype='str'
+            )
+            stage_per_row = stage_per_entity.take(entity_codes)
         else:
-            stage_per_row = [pred_freq] * len(rows)
+            stage_per_row = pd.array([pred_freq] * len(rows), dtype='str')
 
         # Regroupement par couple (fréquence d'étape, fréquence de production) :
         # un seul appel au convertisseur par couple distinct
         pairs = pd.DataFrame(
-            {'stage': stage_per_row, 'produced': produced_freq.to_numpy()},
+            {'stage': stage_per_row, 'produced': produced_freq.array},
             index=rows,
         )
         for (f_stage, f_row), group in pairs.groupby(['stage', 'produced'], sort=False):

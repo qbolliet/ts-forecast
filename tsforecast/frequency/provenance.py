@@ -119,6 +119,13 @@ _TAINTS: Tuple[str, ...] = ('none', 'interpolated', 'imputed')
 # Ordre de souillure des origines, pour "max_origin"
 _ORIGIN_ORDER: Dict[str, int] = {'observed': 0, 'interpolated': 1, 'model': 2}
 
+# Dtype des origines de cellules (registres du matérialiseur, lignes d'un jeu
+# d'entraînement) : catégoriel ORDONNÉ dans l'ordre croissant de souillure. Les
+# catégories sont fixes, si bien que deux séries d'origines se combinent sans
+# perdre leur dtype, et que l'origine la plus souillée d'une série est son
+# maximum. Une cellule se relit en simple chaîne, NaN quand aucune origine
+CELL_ORIGIN_DTYPE = pd.CategoricalDtype(list(_ORIGIN_ORDER), ordered=True)
+
 # Correspondance origine -> souillure, pour "origin_to_taint"
 _ORIGIN_TO_TAINT: Dict[str, Taint] = {
     'observed': 'none',
@@ -209,6 +216,45 @@ def max_origin(origins: Iterable[CellOrigin]) -> CellOrigin:
         if _ORIGIN_ORDER[origin] > _ORIGIN_ORDER[best]:
             best = origin
     return best
+
+
+# Origine la plus souillée d'une série d'origines
+def max_cell_origin(origins: pd.Series) -> CellOrigin:
+    """Return the most-tainted origin of a series of cell origins, vectorized.
+
+    Series counterpart of :func:`max_origin`: the maximum of the ordered
+    categorical :data:`CELL_ORIGIN_DTYPE`, missing cells ignored.
+
+    Args:
+        origins: Cell origins, in :data:`CELL_ORIGIN_DTYPE` or as strings of
+            the same vocabulary; missing values are ignored.
+
+    Returns:
+        The origin with the highest taint level; ``'observed'`` when no cell
+        holds an origin (the least-tainted origin, neutral for the operation).
+
+    Raises:
+        ValueError: If a value is outside the vocabulary of :data:`CellOrigin`.
+
+    Examples:
+        >>> max_cell_origin(pd.Series(['observed', None, 'interpolated']))
+        'interpolated'
+        >>> max_cell_origin(pd.Series([], dtype=CELL_ORIGIN_DTYPE))
+        'observed'
+    """
+    # Contrôle du vocabulaire avant conversion, une série typée y étant conforme
+    if origins.dtype != CELL_ORIGIN_DTYPE:
+        unknown = origins.notna() & ~origins.isin(CELL_ORIGIN_DTYPE.categories)
+        if unknown.any():
+            raise ValueError(
+                f"Unknown cell origin(s) {sorted(set(origins[unknown]))}: expected one of "
+                f"{list(CELL_ORIGIN_DTYPE.categories)}"
+            )
+    # Codes de souillure : -1 pour une cellule sans origine
+    codes = origins.astype(CELL_ORIGIN_DTYPE).cat.codes.to_numpy()
+    if not len(codes) or codes.max() < 0:
+        return 'observed'
+    return CELL_ORIGIN_DTYPE.categories[codes.max()]
 
 
 # Statistiques de répartition d'une matrice de provenance
@@ -365,11 +411,12 @@ class ImputationProvenanceTracker:
 
         # Détermination des colonnes à tracker : seul un panel porté par des
         # colonnes ordinaires nécessite une exclusion, un panel en index ne
-        # laisse déjà que les variables dans les colonnes
+        # laisse déjà que les variables dans les colonnes. Les libellés restent
+        # un Index au dtype de l'entrée, même vide
         if is_panel and not panel_in_index:
-            track_cols = [col for col in data.columns if col not in panel_cols]
+            track_cols = data.columns[~data.columns.isin(panel_cols)]
         else:
-            track_cols = list(data.columns)
+            track_cols = data.columns
 
         # Matrice catégorielle : valeurs non nulles -> ORIGINAL, valeurs nulles
         # non renseignées (NaN, à remplir lors de l'imputation)

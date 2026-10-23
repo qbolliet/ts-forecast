@@ -490,3 +490,58 @@ class TestRescalePanel:
         )
 
         pd.testing.assert_series_equal(perturbed.reindex(reference.index), reference)
+
+
+# =============================================================================
+# Recalage : blocs codés par (entité, période)
+# =============================================================================
+class TestRescaleBlocks:
+    """The blocks are matched between the predicted rows and the anchors on (entity, period)."""
+
+    def test_time_series_with_a_mapping_grid_frequency(self):
+        """A time series is the degenerate entity ``()``, also under a mapping ``grid_freq``."""
+        values = _raw_predictions()
+        rescaled, mask = AggregationConstraint('sum').rescale(
+            values, _annual_observations(), 'Y', grid_freq={(): 'M'}
+        )
+        assert rescaled.sum() == pytest.approx(120.0, abs=_EXACT)
+        assert mask.all()
+
+    def test_structures_without_common_block_rescale_nothing(self):
+        """Panel predictions against time-series anchors share no (entity, period) block."""
+        values = _to_panel(_raw_predictions())
+        rescaled, mask = AggregationConstraint('sum').rescale(values, _annual_observations(), 'Y')
+        pd.testing.assert_series_equal(rescaled, values)
+        assert not mask.any()
+
+    def test_no_anchor_rescales_nothing(self):
+        """Without any observed total, the predictions stay raw."""
+        values = _raw_predictions()
+        observations = _annual_observations() * np.nan
+        rescaled, mask = AggregationConstraint('sum').rescale(values, observations, 'Y')
+        pd.testing.assert_series_equal(rescaled, values)
+        assert not mask.any()
+
+    def test_anchor_of_an_entity_absent_from_the_grid_is_ignored(self):
+        """An observed total whose entity has no predicted row constrains nothing."""
+        values = _to_panel(_raw_predictions(), entities=('FR',))
+        observations = _to_panel(_annual_observations(), entities=('FR', 'DE'))
+        rescaled, mask = AggregationConstraint('sum').rescale(values, observations, 'Y')
+        assert rescaled.sum() == pytest.approx(120.0, abs=_EXACT)
+        assert mask.all()
+
+    def test_rows_dated_nat_belong_to_no_block(self):
+        """A predicted row dated ``NaT`` is never rescaled, the others are."""
+        values = pd.concat([_raw_predictions(), pd.Series([5.0], index=pd.DatetimeIndex([pd.NaT]))])
+        rescaled, mask = AggregationConstraint('sum').rescale(values, _annual_observations(), 'Y')
+        assert not mask.iloc[-1] and rescaled.iloc[-1] == 5.0
+        assert rescaled.iloc[:-1].sum() == pytest.approx(120.0, abs=_EXACT)
+
+    def test_integer_entities_and_reported_keys(self):
+        """Integer entity labels form blocks and are reported as plain Python keys."""
+        values = _to_panel(_raw_predictions(values=[0.1, 0.2, -0.3] * 4), entities=(7,))
+        observations = _to_panel(_annual_observations(), entities=(7,))
+        _result, messages = _record_warnings(
+            AggregationConstraint('sum').rescale, values, observations, 'Y'
+        )
+        assert any("((7,), Period('2021', 'Y-DEC'))" in message for message in messages)

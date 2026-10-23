@@ -24,6 +24,7 @@ import pytest
 
 # Objet testé
 from tsforecast.frequency.covariate_materializer import CovariateMaterializer
+from tsforecast.frequency.provenance import CELL_ORIGIN_DTYPE
 
 # Jeux et perturbations partagés
 from tests.support.perturbations import shuffle_rows
@@ -404,11 +405,11 @@ class TestReset:
 
 
 class TestStoreDtypes:
-    """Frequencies and origins are stored in the ``str`` dtype, whatever the dtype received."""
+    """Frequencies are stored in the ``str`` dtype and origins in ``CELL_ORIGIN_DTYPE``, whatever the dtype received."""
 
     @pytest.mark.parametrize('text_dtype', [object, 'str'])
-    def test_stores_are_str(self, text_dtype):
-        """``object`` or ``str`` input, a missing origin included: ``str`` stores and snapshot."""
+    def test_stores_are_typed(self, text_dtype):
+        """``object`` or ``str`` input, a missing origin included: typed stores and snapshot."""
         grid = monthly_grid(periods=3)
         materializer = CovariateMaterializer()
 
@@ -418,21 +419,21 @@ class TestStoreDtypes:
             pd.Series(['M', 'M', 'M'], index=grid, dtype=text_dtype),
         )
 
-        assert materializer.origin_store['a1'].dtype == 'str'
+        assert materializer.origin_store['a1'].dtype == CELL_ORIGIN_DTYPE
         assert materializer.imputed_freq_store['a1'].dtype == 'str'
         assert materializer.origin_store['a1'].tolist()[:2] == ['model', 'interpolated']
         snapshot = materializer.snapshot()
-        assert snapshot['origin']['a1'].dtype == 'str' and snapshot['imputed_freq']['a1'].dtype == 'str'
+        assert snapshot['origin']['a1'].dtype == CELL_ORIGIN_DTYPE and snapshot['imputed_freq']['a1'].dtype == 'str'
 
-    def test_successive_productions_stay_str(self):
-        """A second production combined with the first keeps the ``str`` dtype."""
+    def test_successive_productions_stay_typed(self):
+        """A second production combined with the first keeps the dtypes of the stores."""
         grid = monthly_grid(periods=4)
         materializer = CovariateMaterializer()
         prime(materializer, 'a1', pd.Series([1.0, 2.0], index=grid[:2]), 'Q', 'model')
         prime(materializer, 'a1', pd.Series([3.0, 4.0], index=grid[2:]), 'M', 'interpolated')
 
         assert materializer.imputed_freq_store['a1'].tolist() == ['Q', 'Q', 'M', 'M']
-        assert materializer.origin_store['a1'].dtype == 'str'
+        assert materializer.origin_store['a1'].dtype == CELL_ORIGIN_DTYPE
         assert materializer.imputed_freq_store['a1'].dtype == 'str'
 
     @pytest.mark.internal

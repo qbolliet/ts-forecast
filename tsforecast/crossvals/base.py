@@ -24,7 +24,7 @@ from sklearn.utils import indexable
 from sklearn.utils.validation import _num_samples
 
 # Utilitaires de panel et de validation
-from ..panel.utils import get_entity_levels, is_panel_data
+from ..panel.utils import get_entity_codes, get_entity_levels, is_panel_data
 from ..utils.validation import validate_entities_grouped, validate_sorted_within_groups
 
 # Natures possibles des indices de test demandés
@@ -376,8 +376,11 @@ def _precompute_group_mappings(groups: Any) -> dict:
     """
     # Codage des étiquettes (scalaires ou tuples) par ordre de première apparition
     codes, uniques = pd.factorize(_labels_array(groups), sort=False)
-    # Positions des lignes de chaque groupe, calculées une seule fois
-    return {group: np.flatnonzero(codes == code) for code, group in enumerate(uniques)}
+    # Positions des lignes de chaque groupe, en un seul tri stable : chaque
+    # groupe garde ses positions dans l'ordre croissant
+    order = np.argsort(codes, kind='stable')
+    positions = np.split(order, np.flatnonzero(np.diff(codes[order])) + 1)
+    return dict(zip(uniques, positions)) if len(codes) else {}
 
 
 # Vérification de l'unicité des dates (des couples entité-date pour un panel)
@@ -408,8 +411,20 @@ def _check_groups(X: Any, groups: np.ndarray) -> None:
     # Une étiquette par ligne
     if len(groups) != len(X):
         raise ValueError(f"groups must hold one label per row: got {len(groups)} labels for {len(X)} rows")
-    # Même entité que celle de l'index, ligne par ligne (les positions de test en dépendent)
-    if not np.array_equal(groups, _entity_labels(X)):
+    # Même entité que celle de l'index, ligne par ligne (les positions de test en
+    # dépendent) : codes de première apparition identiques ligne à ligne, puis
+    # mêmes étiquettes code à code, sans construire l'entité de chaque ligne
+    group_codes, group_labels = pd.factorize(groups, sort=False)
+    entity_codes, entities = get_entity_codes(X.index)
+    same_labels = (
+        np.array_equal(group_codes, entity_codes)
+        and len(group_labels) == len(entities)
+        and all(
+            label == (entity[0] if len(entity) == 1 else entity)
+            for label, entity in zip(group_labels, entities)
+        )
+    )
+    if not same_labels:
         raise ValueError("groups must match the entity levels of X (all index levels but the last), row by row")
 
 

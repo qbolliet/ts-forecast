@@ -33,6 +33,7 @@ import pytest
 
 # Objets testés
 from tsforecast.frequency.high_frequency_imputer import ELIGIBLE_ORIGINS
+from tsforecast.frequency.provenance import CELL_ORIGIN_DTYPE
 
 # Constantes et fabriques partagées du paquet
 from tests.unit.frequency.training_set_builder.helpers import (
@@ -361,19 +362,19 @@ class TestTrainingWindow:
 
 
 class TestRowDtypes:
-    """``row_frequency`` and ``row_origin`` are ``str`` series, empty or not."""
+    """``row_frequency`` is a ``str`` series and ``row_origin`` a ``CELL_ORIGIN_DTYPE`` one, empty or not."""
 
-    def test_rows_are_str(self, mixed_freq_panel_multifrequency):
+    def test_rows_are_typed(self, mixed_freq_panel_multifrequency):
         builder = seed_panel_mirror(make_builder(), [('2021-03-31', 28.0, 'model')])
 
         training = build_panel_f(
             builder, mixed_freq_panel_multifrequency, eligible_origins={'observed', 'model'}
         )
 
-        assert training.row_frequency.dtype == 'str' and training.row_origin.dtype == 'str'
+        assert training.row_frequency.dtype == 'str' and training.row_origin.dtype == CELL_ORIGIN_DTYPE
         assert set(training.row_origin) == {'observed', 'model'}
 
-    def test_rows_of_an_empty_set_are_str(self, mixed_freq_panel_multifrequency):
+    def test_rows_of_an_empty_set_are_typed(self, mixed_freq_panel_multifrequency):
         provider = layer_mask_provider(lambda _entity, _freq, _date: False)
 
         training = build_panel_f(
@@ -381,4 +382,4 @@ class TestRowDtypes:
         )
 
         assert len(training) == 0
-        assert training.row_frequency.dtype == 'str' and training.row_origin.dtype == 'str'
+        assert training.row_frequency.dtype == 'str' and training.row_origin.dtype == CELL_ORIGIN_DTYPE

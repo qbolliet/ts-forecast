@@ -36,6 +36,13 @@ from tests.unit.frequency.training_set_builder.helpers import (
 )
 
 
+# Décomposition d'une grille, entité écrite en toutes lettres pour chaque ligne
+def _split(index, *, has_frequency_level):
+    """Call ``split_training_index`` and spell out the entity key of each row."""
+    real, codes, entities = split_training_index(index, has_frequency_level=has_frequency_level)
+    return real, [entities[code] for code in codes]
+
+
 # =============================================================================
 # split_training_index
 # =============================================================================
@@ -49,7 +56,7 @@ class TestSplitTrainingIndex:
         """An unstamped time-series grid is its own real index, entity ``()``."""
         index = pd.DatetimeIndex(self.DATES, name='date')
 
-        real, entities = split_training_index(index, has_frequency_level=False)
+        real, entities = _split(index, has_frequency_level=False)
 
         # Aucun niveau ajouté : la grille réelle EST l'entrée
         assert real is index
@@ -68,7 +75,7 @@ class TestSplitTrainingIndex:
         """Unstamped panel: every level but the date belongs to the entity."""
         index = pd.MultiIndex.from_arrays([*entity_levels, self.DATES])
 
-        real, entities = split_training_index(index, has_frequency_level=False)
+        real, entities = _split(index, has_frequency_level=False)
 
         assert real is index
         assert entities == expected
@@ -97,7 +104,7 @@ class TestSplitTrainingIndex:
             names=names + [FREQUENCY_LEVEL_NAME, 'date'],
         )
 
-        real, entities = split_training_index(index, has_frequency_level=True)
+        real, entities = _split(index, has_frequency_level=True)
 
         assert entities == expected_entities
         assert list(real.names) == expected_names
@@ -111,7 +118,7 @@ class TestSplitTrainingIndex:
             [['Y', 'Q'], self.DATES], names=[FREQUENCY_LEVEL_NAME, 'date']
         )
 
-        real, _entities = split_training_index(index, has_frequency_level=True)
+        real, _entities = _split(index, has_frequency_level=True)
 
         assert isinstance(real, pd.DatetimeIndex)
 
@@ -123,7 +130,7 @@ class TestSplitTrainingIndex:
             [['FR', 'DE'], self.DATES], names=[FREQUENCY_LEVEL_NAME, 'date']
         )
 
-        real, entities = split_training_index(index, has_frequency_level=False)
+        real, entities = _split(index, has_frequency_level=False)
 
         assert real is index
         assert entities == [('FR',), ('DE',)]
@@ -134,10 +141,22 @@ class TestSplitTrainingIndex:
             [['FR', 'FR'], ['Y', 'Q'], self.DATES], names=['pays', 'pas', 'periode']
         )
 
-        real, entities = split_training_index(index, has_frequency_level=True)
+        real, entities = _split(index, has_frequency_level=True)
 
         assert list(real.names) == ['pays', 'periode']
         assert entities == [('FR',), ('FR',)]
+
+    def test_entities_are_coded_once_each(self):
+        """One integer code per row, one key per distinct entity, in order of appearance."""
+        index = pd.MultiIndex.from_arrays(
+            [['DE', 'FR', 'DE', 'FR'], ['Y', 'Y', 'Q', 'Q'], pd.to_datetime(['2021-12-31'] * 4)],
+            names=['country', FREQUENCY_LEVEL_NAME, 'date'],
+        )
+
+        _real, codes, entities = split_training_index(index, has_frequency_level=True)
+
+        assert codes.tolist() == [0, 1, 0, 1]
+        assert entities == [('DE',), ('FR',)]
 
     @pytest.mark.parametrize('has_level', [False, True], ids=['plain', 'stamped'])
     def test_empty_grid(self, has_level):
@@ -145,7 +164,7 @@ class TestSplitTrainingIndex:
         names = ['country', FREQUENCY_LEVEL_NAME, 'date'] if has_level else ['country', 'date']
         index = pd.MultiIndex.from_tuples([], names=names)
 
-        real, entities = split_training_index(index, has_frequency_level=has_level)
+        real, entities = _split(index, has_frequency_level=has_level)
 
         assert len(real) == 0
         assert entities == []
@@ -160,7 +179,7 @@ class TestSplitTrainingIndex:
         )
         assert training.has_frequency_level
 
-        real, entities = split_training_index(
+        real, entities = _split(
             training.X.index, has_frequency_level=training.has_frequency_level
         )
 
@@ -191,14 +210,14 @@ class TestSplitTrainingIndex:
             eligible_origins=('observed', 'model'), keep_coincident_cells=False,
         )
 
-        real, _entities = split_training_index(stamped.X.index, has_frequency_level=True)
+        real, _entities = _split(stamped.X.index, has_frequency_level=True)
 
         # Grille réelle = grille sans estampille, plus le seul doublon de la
         # cellule coïncidente conservée
         assert real.duplicated().sum() == 1
         assert real[~real.duplicated()].sort_values().equals(plain.X.index.sort_values())
         # Grille sans estampille : la décomposition est l'identité
-        plain_real, _ = split_training_index(plain.X.index, has_frequency_level=False)
+        plain_real, _ = _split(plain.X.index, has_frequency_level=False)
         assert plain_real is plain.X.index
 
 

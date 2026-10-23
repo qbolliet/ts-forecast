@@ -684,6 +684,30 @@ class TestDiagnosticFrame:
         assert list(frame.columns) == _DIAGNOSTIC_COLUMNS
         assert len(frame) == 0
 
+    def test_empty_plan_has_the_dtypes_of_a_non_empty_one(self):
+        """Counts in int64, flags in bool, factors and anchor in float64, even without a step."""
+        empty = ImputationPlan().to_diagnostic_frame()
+        full = ImputationPlan((_make_step(),)).to_diagnostic_frame()
+        typed = ['n_entities', 'scale_factor', 'fit_scale_factor', 'unanchored', 'n_features',
+                 'n_training_rows', 'n_written', 'is_fallback', 'interpolation_anchor']
+        assert empty[typed].dtypes.to_dict() == full[typed].dtypes.to_dict()
+        assert {str(dtype) for dtype in full[typed].dtypes} == {'int64', 'bool', 'float64'}
+
+    def test_missing_interpolation_anchor_is_nan_in_float(self):
+        """A step without interpolation anchor gives NaN in a float column, never object."""
+        frame = ImputationPlan((_make_step(interpolation_anchor=None),)).to_diagnostic_frame()
+        assert frame['interpolation_anchor'].dtype == 'float64'
+        assert frame['interpolation_anchor'].isna().all()
+
+    def test_per_row_scale_factor_keeps_its_label(self):
+        """A per-row factor is rendered by its label: heterogeneous column, object dtype."""
+        idx = pd.date_range('2021-01-31', periods=2, freq='ME')
+        steps = (_make_step(), _make_step(scale_factor=pd.Series([3.0, 1.0], index=idx)))
+        frame = ImputationPlan(steps).to_diagnostic_frame()
+        assert frame['scale_factor'].tolist() == [3.0, 'per-row']
+        assert frame['scale_factor'].dtype == object
+        assert frame['fit_scale_factor'].dtype == 'float64'
+
     def test_one_row_per_step_in_plan_order(self):
         """N steps give N rows, in the order of the plan."""
         steps = [_make_step(var_name=name, var_key=name) for name in ('c', 'a', 'b')]

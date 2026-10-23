@@ -73,6 +73,13 @@ valeurs de `ProvenanceType`, une cellule se relit en simple chaîne (`'original'
 entier : comptages et masques restent rapides et peu gourmands en mémoire sur de
 gros panels, et toute valeur hors vocabulaire est refusée à l'écriture.
 
+L'**origine** d'une cellule produite (`'observed'`, `'interpolated'`, `'model'`),
+lue par les étapes suivantes pour calculer leur souillure, suit le même principe
+avec un catégoriel **ordonné** (`CELL_ORIGIN_DTYPE`) : ses catégories vont de la
+moins à la plus souillée, si bien que l'origine la plus souillée d'une série est
+son maximum (`max_cell_origin`). C'est le dtype des registres d'origines du
+matérialiseur (`origin_store`) et de `row_origin` dans un jeu d'entraînement.
+
 ## Le plan, source de vérité unique
 
 `fit` construit un `ImputationPlan` (`imputation_plan_`) : la liste ordonnée des

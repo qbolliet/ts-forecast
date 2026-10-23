@@ -1,7 +1,8 @@
 """Provenance vocabulary and taint primitives.
 
 Scenarios: ``ProvenanceType`` members and serialization, ``resolve_model_provenance``
-truth table, origin-to-taint mapping and the maximum over the taint order.
+truth table, origin-to-taint mapping, the maximum over the taint order (iterable and
+series forms) and the ordered categorical dtype of cell origins.
 """
 
 # Modules de base
@@ -13,6 +14,8 @@ import pytest
 
 # Objet testé
 from tsforecast.frequency.provenance import (
+    CELL_ORIGIN_DTYPE,
+    max_cell_origin,
     max_origin,
     origin_to_taint,
     resolve_model_provenance,
@@ -231,3 +234,59 @@ class TestMaxOrigin:
         """An unknown origin raises KeyError instead of being ignored."""
         with pytest.raises(KeyError):
             max_origin(['observed', 'bogus'])
+
+
+class TestCellOriginDtype:
+    """``CELL_ORIGIN_DTYPE``: closed vocabulary, ordered by increasing taint."""
+
+    def test_categories_follow_the_taint_order(self):
+        """The categories are the three origins, ordered."""
+        assert list(CELL_ORIGIN_DTYPE.categories) == TestMaxOrigin._ORDER
+        assert CELL_ORIGIN_DTYPE.ordered
+
+    def test_value_outside_the_vocabulary_is_refused(self):
+        """Writing an unknown origin into a typed series raises."""
+        origins = pd.Series(['observed', 'model'], dtype=CELL_ORIGIN_DTYPE)
+        with pytest.raises(TypeError):
+            origins.iloc[0] = 'aggregated'
+
+    def test_cells_read_back_as_plain_strings(self):
+        """A cell compares equal to its string, a missing one is NaN."""
+        origins = pd.Series(['model', None], dtype=CELL_ORIGIN_DTYPE)
+        assert origins.iloc[0] == 'model' and pd.isna(origins.iloc[1])
+
+
+class TestMaxCellOrigin:
+    """``max_cell_origin`` is the series form of ``max_origin``."""
+
+    @pytest.mark.parametrize(
+        'left, right', list(itertools.product(TestMaxOrigin._ORDER, repeat=2)), ids=lambda v: str(v)
+    )
+    def test_agrees_with_max_origin(self, left, right):
+        """Same maximum as ``max_origin`` on every pair, typed or plain strings."""
+        expected = max_origin([left, right])
+        assert max_cell_origin(pd.Series([left, right], dtype=CELL_ORIGIN_DTYPE)) == expected
+        assert max_cell_origin(pd.Series([left, right], dtype='str')) == expected
+
+    @pytest.mark.parametrize(
+        'origins',
+        [pd.Series([], dtype=CELL_ORIGIN_DTYPE), pd.Series([None, None], dtype=CELL_ORIGIN_DTYPE)],
+        ids=['empty', 'all_missing'],
+    )
+    def test_no_origin_is_observed(self, origins):
+        """Without any origin, the neutral, least-tainted origin."""
+        assert max_cell_origin(origins) == 'observed'
+
+    def test_missing_cells_are_ignored(self):
+        """Missing cells take no part in the maximum."""
+        assert max_cell_origin(pd.Series([None, 'interpolated', None])) == 'interpolated'
+
+    def test_result_is_a_plain_string(self):
+        """The result is a ``str``, usable as a dictionary key of ``origin_to_taint``."""
+        result = max_cell_origin(pd.Series(['model'], dtype=CELL_ORIGIN_DTYPE))
+        assert type(result) is str and origin_to_taint(result) == 'imputed'
+
+    def test_unknown_origin_raises(self):
+        """An unknown origin raises instead of being ignored."""
+        with pytest.raises(ValueError, match='bogus'):
+            max_cell_origin(pd.Series(['observed', 'bogus']))

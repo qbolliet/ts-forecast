@@ -422,9 +422,9 @@ class TestPublicExports:
         assert name in panel_package.__all__
         assert getattr(panel_package, name) is getattr(panel_utils, name)
 
-    def test_the_fifteen_functions_are_found(self):
+    def test_the_seventeen_functions_are_found(self):
         """Guard for the introspection: the module holds the expected public functions."""
-        assert len(PUBLIC_FUNCTIONS) == 15
+        assert len(PUBLIC_FUNCTIONS) == 17
 
     def test_every_exported_name_exists(self):
         """``__all__`` lists nothing that the package does not define."""

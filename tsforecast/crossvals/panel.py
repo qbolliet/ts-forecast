@@ -282,14 +282,16 @@ class _PerEntitySplitMixin:
     # Méthode auxiliaire de répartition des plis globaux par entité
     def _split_global_folds(self, global_folds, groups):
         """Yield each global fold restricted to each of its tested entities."""
-        # Positions des lignes de chaque entité (entités scalaires ou tuples)
-        group_mappings = _precompute_group_mappings(_labels_array(groups))
+        # Code de l'entité de chaque ligne (entités scalaires ou tuples), par
+        # ordre de première apparition
+        codes, uniques = pd.factorize(_labels_array(groups), sort=False)
         for train_indices, test_indices in global_folds:
-            for group_indices in group_mappings.values():
-                entity_test = test_indices[np.isin(test_indices, group_indices)]
+            train_codes, test_codes = codes[train_indices], codes[test_indices]
+            for code in range(len(uniques)):
+                entity_test = test_indices[test_codes == code]
                 # Entité sans ligne de test dans ce pli : pas de pli pour elle
                 if len(entity_test) > 0:
-                    yield train_indices[np.isin(train_indices, group_indices)], entity_test
+                    yield train_indices[train_codes == code], entity_test
 
     # Méthode auxiliaire de découpage de chaque entité sur ses propres dates
     def _split_each_entity(self, X, groups, parsed):

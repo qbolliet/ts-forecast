@@ -139,3 +139,19 @@ class TestStringDtypes:
         frame = dataclasses.replace(fit_report, columns=()).to_frame()
 
         assert all(frame[column].dtype == 'str' for column in self.TEXT_FIELDS)
+
+    def test_fit_frame_numeric_fields_are_typed(self, fit_report):
+        """Delay in float, strategy counts in nullable integers, fallback flag in bool."""
+        frame = fit_report.to_frame()
+
+        assert {column: str(frame[column].dtype) for column in ('delay', 'n_periods', 'n_obs', 'moved_from_mask')} \
+            == {'delay': 'float64', 'n_periods': 'Int64', 'n_obs': 'Int64', 'moved_from_mask': 'bool'}
+        # Un décalage n'a aucun masquage : décompte manquant, jamais object
+        assert frame.loc['GDP', 'n_periods'] == -3 and frame['n_obs'].isna().all()
+
+    def test_empty_fit_frame_numeric_fields_are_typed(self, fit_report):
+        """An empty frame has the dtypes of a non-empty one."""
+        frame = dataclasses.replace(fit_report, columns=()).to_frame()
+
+        assert not (frame.dtypes == object).any()
+        assert str(frame['n_obs'].dtype) == 'Int64'

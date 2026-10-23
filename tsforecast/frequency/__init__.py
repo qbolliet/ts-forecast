@@ -18,11 +18,13 @@ from .provenance import (
     ImputationProvenanceTracker,
     ProvenanceType,
     PROVENANCE_DTYPE,
+    CELL_ORIGIN_DTYPE,
     CellOrigin,
     Taint,
     resolve_model_provenance,
     origin_to_taint,
     max_origin,
+    max_cell_origin,
     provenance_statistics,
 )
 from .covariate_materializer import (
@@ -64,11 +66,13 @@ __all__ = [
     'ImputationProvenanceTracker',
     'ProvenanceType',
     'PROVENANCE_DTYPE',
+    'CELL_ORIGIN_DTYPE',
     'CellOrigin',
     'Taint',
     'resolve_model_provenance',
     'origin_to_taint',
     'max_origin',
+    'max_cell_origin',
     'provenance_statistics',
     # Matérialisation des covariables
     'CovariateMaterializer',

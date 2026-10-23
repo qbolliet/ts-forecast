@@ -55,8 +55,8 @@ from sklearn.utils.validation import check_is_fitted
 
 # Normalisation des fréquences : seule la base est acceptée par "to_period"
 from ..utils.frequency.utils import normalize_frequency
-# Normalisation des clés d'entité du panel
-from ..panel.utils import normalize_entity_key
+# Clés d'entité du panel et codage entier des clés de lignes
+from ..panel.utils import factorize_row_keys, get_entity_codes, normalize_entity_key
 
 
 # Clé d'entité normalisée : "()" en série temporelle
@@ -80,14 +80,15 @@ DEFAULT_CONSTRAINT: ConstraintSetting = 'sum'
 _CONSTRAINT_SETTINGS: Tuple[Any, ...] = ('sum', None)
 
 
-# Fonction auxiliaire d'appartenance des dates à leur période basse fréquence
-def _period_membership(index: pd.Index, period_freq: str) -> pd.Series:
-    """Map each row of a grid to the low-frequency period holding it.
+# Fonction auxiliaire des composantes de la clé de bloc de chaque ligne
+def _block_key_components(index: pd.Index, period_freq: str) -> Tuple[List[pd.Index], pd.PeriodIndex]:
+    """Return the entity labels and the low-frequency period of each row of a grid.
 
-    The reference frequency is always the detected frequency of the variable
-    being imputed, never the frequency of the cascade stage: a yearly variable
-    imputed at the quarter then at the month is rescaled on its yearly total at
-    both stages.
+    The rescaling block of a row is the pair (entity, period): two entities
+    never share a block. The reference frequency is always the detected
+    frequency of the variable being imputed, never the frequency of the
+    cascade stage: a yearly variable imputed at the quarter then at the month
+    is rescaled on its yearly total at both stages.
 
     Args:
         index: Grid index — a ``DatetimeIndex`` for a time series, a
@@ -96,59 +97,58 @@ def _period_membership(index: pd.Index, period_freq: str) -> pd.Series:
             (any representation: ``'Q'``, ``'QS'``, ``'quarterly'``...).
 
     Returns:
-        ``Series`` indexed like ``index`` holding a ``pd.Period`` for a time
-        series and an ``(entity_tuple, Period)`` pair for a panel — two
-        entities never share a rescaling block. A row dated ``NaT`` belongs
-        to no period and holds None: it never forms a block of its own.
+        Tuple ``(entity_levels, periods)``: one ``Index`` of labels per entity
+        level (none for a time series) and the ``PeriodIndex`` of the period
+        holding each row. A row dated ``NaT`` has a ``NaT`` period: it belongs
+        to no block.
 
     Examples:
         >>> idx = pd.date_range('2021-01-31', periods=2, freq='ME')
-        >>> [str(period) for period in _period_membership(idx, 'Y')]
-        ['2021', '2021']
-        >>> _period_membership(pd.DatetimeIndex(['2021-01-31', 'NaT']), 'Y').tolist()[1] is None
-        True
+        >>> levels, periods = _block_key_components(idx, 'Y')
+        >>> levels, [str(period) for period in periods]
+        ([], ['2021', '2021'])
+        >>> _block_key_components(pd.DatetimeIndex(['2021-01-31', 'NaT']), 'Y')[1].isna().tolist()
+        [False, True]
     """
     # Normalisation en base de fréquence
     base = normalize_frequency(period_freq, return_format='base')
 
     # Cas des séries temporelles : la période suffit à identifier le bloc
     if not isinstance(index, pd.MultiIndex):
-        periods = pd.DatetimeIndex(index).to_period(base)
-        # Date absente : aucune période d'appartenance, donc aucun bloc
-        keys = [None if pd.isna(period) else period for period in periods]
-        return pd.Series(keys, index=index, dtype=object)
+        return [], pd.DatetimeIndex(index).to_period(base)
 
     # Cas des données de panel : l'entité fait partie de la clé de bloc
-    periods = index.get_level_values(-1).to_period(base)
-    # Normalisation en tuple : "droplevel" rend des scalaires pour un panel
-    # à un seul niveau d'entité
-    entity_tuples = [normalize_entity_key(key) for key in index.droplevel(-1)]
-    keys = [
-        None if pd.isna(period) else (entity, period)
-        for entity, period in zip(entity_tuples, periods)
-    ]
-    return pd.Series(keys, index=index, dtype=object)
+    entity_levels = [index.get_level_values(level) for level in range(index.nlevels - 1)]
+    return entity_levels, index.get_level_values(-1).to_period(base)
 
 
-# Fonction auxiliaire de test d'une clé de bloc utilisable
-def _is_usable_key(period_key: Any) -> bool:
-    """Tell whether a period membership key designates a rescaling block.
+# Fonction auxiliaire de regroupement des positions par code
+def _positions_by_code(codes: np.ndarray, selected: np.ndarray) -> Dict[int, np.ndarray]:
+    """Group the selected positions by code, each group in increasing position order.
 
     Args:
-        period_key: One value of a ``_period_membership`` Series.
+        codes: Integer code of each position.
+        selected: Boolean mask of the positions to group.
 
     Returns:
-        False for the ``None`` / NaN markers of a row outside the
-        disaggregation scope (a row dated ``NaT``), True otherwise.
+        Mapping code -> sorted positions holding it.
 
     Examples:
-        >>> _is_usable_key(pd.Period('2021', 'Y-DEC'))
-        True
-        >>> _is_usable_key(float('nan'))
-        False
+        >>> groups = _positions_by_code(np.array([1, 0, 1, 0]), np.array([True, True, True, False]))
+        >>> {code: positions.tolist() for code, positions in groups.items()}
+        {0: [1], 1: [0, 2]}
     """
-    # Le dtype object porte les absences en None ou en float('nan')
-    return period_key is not None and not isinstance(period_key, float)
+    # Tri stable par code : chaque groupe garde l'ordre des positions
+    positions = np.flatnonzero(selected)
+    order = positions[np.argsort(codes[positions], kind='stable')]
+    sorted_codes = codes[order]
+    # Découpage aux changements de code
+    boundaries = np.flatnonzero(np.diff(sorted_codes)) + 1
+    starts = np.concatenate(([0], boundaries)) if len(order) else np.zeros(0, dtype=np.intp)
+    return {
+        int(sorted_codes[start]): group
+        for start, group in zip(starts, np.split(order, boundaries))
+    }
 
 
 # Fonction auxiliaire de rejet des dates dupliquées
@@ -246,7 +246,7 @@ def _resolve_grid_freq(
 
     # Entités de la grille : "()" pour une série temporelle
     if isinstance(index, pd.MultiIndex):
-        entities = {normalize_entity_key(key) for key in index.droplevel(-1).unique()}
+        entities = set(get_entity_codes(index)[1])
     else:
         entities = {()} if len(index) else set()
 
@@ -713,45 +713,6 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
     # -------------------------------------------------------------------------
     # Recalage
     # -------------------------------------------------------------------------
-    # Méthode auxiliaire des totaux observés par période
-    @staticmethod
-    def _observed_totals(
-        observations: pd.Series,
-        period_freq: str,
-    ) -> Dict[Any, float]:
-        """Aggregate the observations of each period into its target total.
-
-        The aggregate is always the sum: additivity is the
-        contract of the whole class, not a per-call choice.
-
-        Args:
-            observations: Observed low-frequency values, anchors non-null.
-            period_freq: Frequency of the periods.
-
-        Returns:
-            Target total of each period, keyed like ``_period_membership``.
-        """
-        # Ancres seules : les lignes vides ne portent aucune contrainte
-        observed = observations.dropna()
-        if observed.empty:
-            return {}
-
-        # Regroupement positionnel des observations par période
-        membership = _period_membership(observed.index, period_freq)
-        # Initilaisation des blocks
-        blocks: Dict[Any, List[float]] = {}
-        # Population des blocks avec leur valeur et leur période d'appartenance
-        for value, period_key in zip(observed.to_numpy(), membership.to_numpy()):
-            if not _is_usable_key(period_key):
-                continue
-            blocks.setdefault(period_key, []).append(float(value))
-
-        # Agrégation pour chaque période : toujours la somme
-        return {
-            period_key: float(np.sum(values))
-            for period_key, values in blocks.items()
-        }
-
     # Méthode auxiliaire du décompte attendu de sous-périodes d'une période
     @staticmethod
     def _expected_subperiods(
@@ -766,9 +727,8 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         truncate.
 
         Args:
-            period_key: Usable membership key of the period, as
-                :func:`_period_membership` builds it — a ``Period`` for a time
-                series, an ``(entity, Period)`` pair for a panel.
+            period_key: Key of the period — a ``Period`` for a time series,
+                an ``(entity, Period)`` pair for a panel.
             grid_freq: Frequency of the grid the values sit on, as
                 :func:`_resolve_grid_freq` returns it — scalar, or a mapping
                 covering every entity. None disables the count, hence the
@@ -851,54 +811,91 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         # Fréquence de grille validée une fois pour tout l'appel
         grid_freq = _resolve_grid_freq(grid_freq, values.index)
 
-        # Totaux visés, période par période
-        period_totals = self._observed_totals(observations, period_freq)
-
-        # Initialisation du résultat et du masque des cellules recalées
-        rescaled = values.copy()
-        rescaled_mask = pd.Series(False, index=values.index)
-
-        # Regroupement positionnel des lignes prédites par période
-        membership = _period_membership(values.index, period_freq)
-        rows_by_period: Dict[Any, List[int]] = {}
-        for position, period_key in enumerate(membership.to_numpy()):
-            if not _is_usable_key(period_key):
-                continue
-            rows_by_period.setdefault(period_key, []).append(position)
+        # Ancres seules : les lignes vides ne portent aucune contrainte
+        observed = observations.dropna()
 
         # Recensement des cas dégénérés pour un avertissement agrégé
         zero_periods: List[Any] = []
         flipped_periods: List[Any] = []
         truncated_periods: List[Any] = []
 
+        # Clés de bloc (entité, période) des lignes prédites puis des ancres,
+        # codées ensemble pour partager les mêmes codes. Des structures
+        # différentes (série temporelle d'un côté, panel de l'autre) n'ont
+        # aucun bloc commun
+        value_levels, value_periods = _block_key_components(values.index, period_freq)
+        observed_levels, observed_periods = _block_key_components(observed.index, period_freq)
+        if observed.empty or len(value_levels) != len(observed_levels):
+            return (
+                values.copy(), pd.Series(False, index=values.index),
+                zero_periods, flipped_periods, truncated_periods,
+            )
+        levels = [value.append(other) for value, other in zip(value_levels, observed_levels)]
+        periods = value_periods.append(observed_periods)
+        codes, first_rows = factorize_row_keys(*levels, periods)
+        # Une ligne datée NaT n'appartient à aucun bloc
+        usable = ~np.asarray(periods.isna())
+        n_values = len(values)
+        value_codes, observed_codes = codes[:n_values], codes[n_values:]
+
+        # Positions de chaque bloc, côté lignes prédites et côté ancres
+        value_positions = _positions_by_code(value_codes, usable[:n_values])
+        observed_positions = _positions_by_code(observed_codes, usable[n_values:])
+
+        # Clé de chaque bloc, construite à la demande : la période seule pour
+        # une série temporelle, le couple (entité, période) pour un panel
+        entity_labels = [level.take(first_rows).tolist() for level in levels]
+        block_periods = periods.take(first_rows)
+
+        def block_key(code: int) -> Any:
+            if not entity_labels:
+                return block_periods[code]
+            entity = normalize_entity_key(tuple(labels[code] for labels in entity_labels))
+            return entity, block_periods[code]
+
+        # Valeurs en tableaux : aucune opération pandas par période
+        observed_values = observed.to_numpy(dtype=float)
+        value_array = values.to_numpy(dtype=float, na_value=np.nan)
+        missing = values.isna().to_numpy()
+        new_values = value_array.copy()
+        moved = np.zeros(n_values, dtype=bool)
+        # Décomptes calendaires déjà calculés, par fréquence de grille et période
+        expected_counts: Dict[Tuple[Any, Any], Optional[int]] = {}
+
         # Recalage : les prédictions de chaque période basse fréquence sont
         # ajustées pour que leur agrégat égale la valeur observée. La boucle
-        # itère sur les totaux observés, ce qui réalise la garde des périodes
-        # sans aucune observation : elles n'ont pas de clé ici.
-        for period_key, period_value in period_totals.items():
+        # itère sur les périodes observées, dans l'ordre de première apparition
+        # des ancres, ce qui réalise la garde des périodes sans aucune
+        # observation : elles n'y figurent pas.
+        for code in pd.unique(observed_codes[usable[n_values:]]):
+            # Total observé de la période : toujours la somme
+            period_value = float(np.sum(observed_values[observed_positions[code]]))
             # Extraction des positions associées à la période
-            positions = rows_by_period.get(period_key)
-            if not positions:
+            positions = value_positions.get(code)
+            if positions is None:
                 continue
             # Périodes calendairement incomplètes : les sous-périodes que
             # les bornes du jeu retranchent ne sont pas des NaN, la garde
             # suivante ne peut donc pas les voir. Imposer le total d'une année
             # entière aux dix mois présents fausserait la répartition ;
             # le total observé est alors perdu, ce que dit l'avertissement
-            expected = self._expected_subperiods(period_key, grid_freq)
+            period_key = block_key(code)
+            entity = period_key[0] if entity_labels else ()
+            entity_freq = grid_freq[entity] if isinstance(grid_freq, Mapping) else grid_freq
+            count_key = (entity_freq, block_periods[code])
+            if count_key not in expected_counts:
+                expected_counts[count_key] = self._expected_subperiods(period_key, grid_freq)
+            expected = expected_counts[count_key]
             if expected is not None and len(positions) < expected:
                 truncated_periods.append(period_key)
                 continue
 
-            # Extraction des observations associées à ces positions
-            block = values.iloc[positions]
-
             # Périodes partiellement prédites : aucune contrainte imposable
-            if not block.notna().all():
+            if missing[positions].any():
                 continue
 
-            # Agrégation des observations sur la période : toujours la somme
-            block_values = block.to_numpy(dtype=float)
+            # Agrégation des valeurs prédites sur la période : toujours la somme
+            block_values = value_array[positions]
             aggregate = float(np.sum(block_values))
 
             # Agrégat nul : le ratio est indéfini, prédictions brutes conservées.
@@ -917,12 +914,18 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
                 continue
 
             # Application du ratio de recalage
-            rescaled.iloc[positions] = block * (period_value / aggregate)
-            rescaled_mask.iloc[positions] = True
+            new_values[positions] = block_values * (period_value / aggregate)
+            moved[positions] = True
 
             # Signe opposé : la contrainte est imposée mais le profil est inversé
             if period_value != 0 and np.sign(aggregate) != np.sign(period_value):
                 flipped_periods.append(period_key)
+
+        # Écriture unique des cellules recalées
+        rescaled = values.copy()
+        if moved.any():
+            rescaled.iloc[np.flatnonzero(moved)] = new_values[moved]
+        rescaled_mask = pd.Series(moved, index=values.index)
 
         return rescaled, rescaled_mask, zero_periods, flipped_periods, truncated_periods
 

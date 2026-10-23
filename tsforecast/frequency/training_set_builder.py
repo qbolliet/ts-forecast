@@ -33,13 +33,13 @@ from .covariate_materializer import CovariateMaterializer, _WAY_RANK
 # Voies de matérialisation, définies avec l'étape du plan
 from .imputation_plan import MaterializationWay
 # Primitives d'origine de cellule
-from .provenance import CellOrigin, max_origin
+from .provenance import CELL_ORIGIN_DTYPE, CellOrigin, max_origin
 # Normalisation des fréquences détectées
 from ..utils.frequency.utils import normalize_frequency
 # Nom réservé du niveau de fréquence, partagé avec la sortie de l'imputeur
 from ..utils._constants import FREQUENCY_LEVEL_NAME
 # Utilitaires de panel : découpage et normalisation des clés d'entité
-from ..panel.utils import iter_entity_blocks, normalize_entity_key
+from ..panel.utils import get_entity_codes, iter_entity_blocks, normalize_entity_key
 
 
 # Clé d'entité, tuple normalisé ("()" pour une série temporelle)
@@ -56,6 +56,25 @@ LogCallback = Callable[[str], None]
 # Colonnes du tableau intermédiaire d'une ligne candidate
 _ROW_COLUMNS: Tuple[str, ...] = ('value', 'freq', 'origin')
 
+
+# Fonction auxiliaire des lignes candidates vides
+def _empty_rows() -> pd.DataFrame:
+    """Return an empty frame of candidate rows, typed like a non-empty one.
+
+    Returns:
+        Empty frame with columns ``value`` (``float64``), ``freq`` (``str``)
+        and ``origin`` (:data:`~tsforecast.frequency.provenance.CELL_ORIGIN_DTYPE`).
+
+    Examples:
+        >>> _empty_rows().dtypes.astype(str).tolist()
+        ['float64', 'str', 'category']
+    """
+    return pd.DataFrame({
+        'value': pd.Series(dtype=float),
+        'freq': pd.Series(dtype='str'),
+        'origin': pd.Series(dtype=CELL_ORIGIN_DTYPE),
+    })
+
 # Marqueur interne d'une ligne candidate issue du miroir (cellule produite par
 # une étape antérieure), par opposition à une cellule observée de la source
 _PRODUCED_COLUMN: str = 'produced'
@@ -66,8 +85,8 @@ def split_training_index(
     index: pd.Index,
     *,
     has_frequency_level: bool,
-) -> Tuple[pd.Index, List[EntityKey]]:
-    """Split a training grid into its real index and its entity keys.
+) -> Tuple[pd.Index, np.ndarray, List[EntityKey]]:
+    """Split a training grid into its real index and the entity of each row.
 
     Under ``keep_coincident_cells`` the training grid carries an extra
     frequency level placed on the entity side — ``(entity..., freq, date)`` —
@@ -75,7 +94,8 @@ def split_training_index(
     the single decomposition every consumer goes through, so the two shapes
     are read in exactly one place. The level is read by POSITION, never by
     name: a level named :data:`FREQUENCY_LEVEL_NAME` without the flag is an
-    entity level like any other.
+    entity level like any other. The entities are coded as integers, read
+    from the codes of the entity levels: no tuple is built per row.
 
     Args:
         index: Training grid, stamped or not.
@@ -84,33 +104,29 @@ def split_training_index(
             from the level names.
 
     Returns:
-        Tuple ``(real_index, entities)``: the ``(entity..., date)`` grid the
-        materializer and the scaler read — the input itself when no level was
-        added — and the entity key of each row, in grid order. A time series
-        yields the degenerate key ``()`` everywhere.
+        Tuple ``(real_index, entity_codes, entities)``: the ``(entity...,
+        date)`` grid the materializer and the scaler read — the input itself
+        when no level was added —, the entity code of each row, in grid order,
+        and the entity keys the codes point to, in order of first appearance.
+        A time series holds the single degenerate key ``()``.
 
     Examples:
         >>> dates = pd.to_datetime(['2021-12-31', '2021-12-31'])
         >>> stamped = pd.MultiIndex.from_arrays(
         ...     [['Y', 'Q'], dates], names=['frequency', 'date']
         ... )
-        >>> real, entities = split_training_index(
+        >>> real, codes, entities = split_training_index(
         ...     stamped, has_frequency_level=True
         ... )
-        >>> list(real), entities
-        ([Timestamp('2021-12-31 00:00:00'), Timestamp('2021-12-31 00:00:00')], [(), ()])
+        >>> list(real), codes.tolist(), entities
+        ([Timestamp('2021-12-31 00:00:00'), Timestamp('2021-12-31 00:00:00')], [0, 0], [()])
     """
-    # Grille non estampillée : aucun niveau de fréquence
-    if not has_frequency_level:
-        if not isinstance(index, pd.MultiIndex):
-            return index, [()] * len(index)
-        depth = index.nlevels - 1
-        return index, [tuple(key[:depth]) for key in index]
-
-    # Grille estampillée : le niveau de fréquence est l'avant-dernier
-    real = index.droplevel(-2)
-    depth = index.nlevels - 2
-    return real, [tuple(key[:depth]) for key in index]
+    # Grille réelle : l'entrée sans estampille, privée du niveau de fréquence
+    # (l'avant-dernier) sinon
+    real = index.droplevel(-2) if has_frequency_level else index
+    # Entité de chaque ligne, lue sur les niveaux d'entité de la grille réelle
+    entity_codes, entities = get_entity_codes(real)
+    return real, entity_codes, entities
 
 
 # Jeu d'entraînement mutualisé d'une variable à une étape
@@ -132,7 +148,8 @@ class TrainingSet:
             observed cell, the frequency read in ``imputed_freq_store`` for a
             cell produced by an earlier stage (``str`` dtype).
         row_origin: :data:`CellOrigin` of each row of :attr:`y`, same two
-            sources as :attr:`row_frequency` (``str`` dtype).
+            sources as :attr:`row_frequency` (ordered categorical dtype
+            :data:`~tsforecast.frequency.provenance.CELL_ORIGIN_DTYPE`).
         blocks: Mapping entity -> ``f_block(e)``, the composition of the
             mutualized set. It does not depend on the stage: only the
             divisors do.
@@ -151,7 +168,7 @@ class TrainingSet:
         >>> empty = TrainingSet(
         ...     X=pd.DataFrame(), y=pd.Series(dtype=float),
         ...     row_frequency=pd.Series(dtype='str'),
-        ...     row_origin=pd.Series(dtype='str'),
+        ...     row_origin=pd.Series(dtype=CELL_ORIGIN_DTYPE),
         ...     blocks={}, ways={}, column_origins={},
         ... )
         >>> len(empty)
@@ -419,7 +436,7 @@ class TrainingSetBuilder:
             {
                 'value': observed.astype(float),
                 'freq': f_block,
-                'origin': 'observed',
+                'origin': pd.Series('observed', index=observed.index, dtype=CELL_ORIGIN_DTYPE),
                 _PRODUCED_COLUMN: False,
             },
             index=observed.index,
@@ -507,7 +524,7 @@ class TrainingSetBuilder:
             f_block = blocks.get(entity)
             frequencies = [f_block] if f_block is not None else []
             # Ajout des fréquences manquantes
-            for frequency in pd.unique(rows['freq'].dropna().to_numpy(dtype=object)):
+            for frequency in rows['freq'].dropna().unique():
                 if frequency not in frequencies:
                     frequencies.append(frequency)
             per_entity[entity] = frequencies
@@ -612,7 +629,7 @@ class TrainingSetBuilder:
                     keep |= in_layer
                     continue
                 # Date absente du masque : hors fenêtre, la ligne est écartée.
-                in_window = entity_mask.reindex(rows.index).eq(True).to_numpy(dtype=bool)
+                in_window = entity_mask.reindex(rows.index, fill_value=False).eq(True).to_numpy(dtype=bool)
                 keep |= in_layer & in_window
             restricted[entity] = rows[keep]
         return restricted
@@ -849,14 +866,15 @@ class TrainingSetBuilder:
         stacked = (
             pd.concat(list(rows_per_entity.values()))
             if rows_per_entity
-            else pd.DataFrame(columns=list(_ROW_COLUMNS))
+            else _empty_rows()
         )
         y = pd.Series(stacked['value'].to_numpy(dtype=float), index=grid, name=column)
+        # Métadonnées reprises telles quelles (tableaux pandas, sans passage par object)
         row_frequency = pd.Series(
-            stacked['freq'].to_numpy(dtype=object), index=grid, name='row_frequency', dtype='str'
+            stacked['freq'].astype('str').array, index=grid, name='row_frequency'
         )
         row_origin = pd.Series(
-            stacked['origin'].to_numpy(dtype=object), index=grid, name='row_origin', dtype='str'
+            stacked['origin'].astype(CELL_ORIGIN_DTYPE).array, index=grid, name='row_origin'
         )
 
         # Journalisation de la composition du jeu, étape à l'appui

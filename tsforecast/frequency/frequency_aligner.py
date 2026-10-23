@@ -274,7 +274,9 @@ class FrequencyAligner:
             result[col] = result[col].astype(float)
 
         # Valeurs booléennes mêlées de NaN (agrégations 'all' / 'any') : colonne
-        # passée en object, seul dtype capable de porter True / False / NaN
+        # passée en object le temps de l'écriture entité par entité, les lignes
+        # des autres entités gardant encore leurs valeurs d'origine ; le dtype
+        # booléen nullable est posé une fois la colonne complète (voir "_assemble")
         if np.asarray(values).dtype.kind in 'bO' and result[col].dtype.kind != 'O':
             result[col] = result[col].astype(object)
 
@@ -321,6 +323,17 @@ class FrequencyAligner:
                 self._assign_entity_values(
                     result, mask, col, series.reindex(block.index).values
                 )
+
+        # Colonnes converties entièrement booléennes, manquants compris : dtype
+        # booléen nullable (True / False / <NA>) plutôt qu'object. Une colonne
+        # mêlant booléens et valeurs d'origine (entité non convertie) reste object
+        converted_columns = dict.fromkeys(col for columns in converted.values() for col in columns)
+        for col in converted_columns:
+            if (
+                result[col].dtype == object
+                and pd.api.types.infer_dtype(result[col], skipna=True) == 'boolean'
+            ):
+                result[col] = result[col].astype('boolean')
 
         return result
 
@@ -679,7 +692,10 @@ class FrequencyAligner:
                 interpolation (``'inside'`` or ``'outside'``).
 
         Returns:
-            DataFrame with converted columns.
+            DataFrame with converted columns. A column aggregated with
+            ``'all'`` / ``'any'`` holds the nullable ``boolean`` dtype
+            (missing off the target grid), unless some of its entities keep
+            their original values.
 
         Raises:
             ValueError: If ``agg_method`` is not supported, if a target dict

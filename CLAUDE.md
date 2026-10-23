@@ -67,8 +67,9 @@ de `X` sauf `target_as_covariate=True` (décisions D47 / D48 de la spec).
 Composants auxiliaires de `HighFrequencyImputer` :
 - `imputation_plan.py` : `ImputationPlan`, `ImputationStep` — état ajusté complet
 - `provenance.py` : `ImputationProvenanceTracker`, `ProvenanceType` (10 niveaux),
-  `PROVENANCE_DTYPE` (dtype catégoriel des matrices de provenance), primitives de
-  souillure (`Taint`, `resolve_model_provenance`, ...)
+  `PROVENANCE_DTYPE` (dtype catégoriel des matrices de provenance), `CELL_ORIGIN_DTYPE`
+  (catégoriel ordonné des origines de cellules), primitives de souillure (`Taint`,
+  `resolve_model_provenance`, `max_origin` / `max_cell_origin`, ...)
 - `covariate_materializer.py` : `CovariateMaterializer` — production de
   `X_train` / `X_pred` (invariant central : jamais de dégradation fit → predict)
 - `aggregation_constraint.py` : `AggregationConstraint` — recale les sous-périodes
@@ -91,7 +92,9 @@ Détection de fréquence : `FrequencyDetector` et `detect_frequency()` /
 - `transformers.py` : `PanelwiseTransformer` — applique un transformateur
   indépendamment à chaque entité d'un panel (parallélisable via joblib)
 - `utils.py` : `is_panel_data()`, `get_entity_levels()`, `get_unique_panel_entities()`,
-  `normalize_entity_key()`, `get_entity_mask()`, `resolve_entity_column_frequencies()`, ...
+  `normalize_entity_key()`, `get_entity_mask()`, `resolve_entity_column_frequencies()`,
+  `get_entity_codes()` / `factorize_row_keys()` (codes entiers d'entités et de clés composites,
+  sans tuple par ligne), ...
 
 ### `tsforecast/xy/`
 - `transformers.py` : `XYTransformerMixin` — transformateurs qui transforment
@@ -214,7 +217,15 @@ Le paquet requiert `pandas>=3.0,<4` et `scikit-learn>=1.9,<2` (pas de support de
     (matrices de provenance, colonne `emitted_provenance`), jamais `object` ni `str` ; un membre s'écrit
     tel quel (`.loc[...] = membre`, `mask(cond, membre)`), une cellule se relit en simple chaîne et se
     compare par `==` à un membre (jamais `is` / `isinstance`) ; un `reindex` qui ajoute des colonnes les
-    crée en `float` : `astype(PROVENANCE_DTYPE)` avant tout marquage ;
+    crée en `float` : `astype(PROVENANCE_DTYPE)` avant tout marquage ; l'origine d'une cellule
+    (`CellOrigin`) suit la même règle avec `CELL_ORIGIN_DTYPE`, catégoriel **ordonné** (registres
+    d'origines, `row_origin`) ;
+  - **clés composites** (entité multi-niveaux, couple entité × période ou entité × fréquence) : codes
+    entiers (`get_entity_codes`, `factorize_row_keys`), jamais un tuple par ligne ni un `apply(axis=1)`
+    (chaque ligne y devient une Series `object`) ; un calcul scalaire inévitable se fait une fois par
+    combinaison distincte, puis se diffuse ;
+  - colonnes numériques et booléennes d'une sortie publique : dtype explicite même vide ou tout `None`
+    (`float64` avec NaN, `Int64` pour un décompte facultatif, `boolean` pour des booléens avec manquants) ;
   - `object` explicite, avec un commentaire au site, seulement pour des valeurs hétérogènes : tuples,
     `Period`, `feature_names_in_` (convention sklearn) ;
   - hors pandas (dict, kwargs, scalaires), une chaîne manquante est `None` ; les tableaux `object` internes
