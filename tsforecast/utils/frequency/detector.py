@@ -285,11 +285,11 @@ class FrequencyDetector:
         Returns:
             - For simple series: Detected frequency as string, or None if detection fails
             - For MultiIndex series: Dictionary mapping panel_id to frequencies.
-              Panel ids are always tuples, even for a single entity level. Entities
-              for which frequency detection fails (e.g. fewer than
-              ``min_observations`` dates) are still present in the dictionary,
-              mapped to None, rather than being silently dropped. None is only
-              returned if the series has no panel group at all.
+                Panel ids are always tuples, even for a single entity level. Entities
+                for which frequency detection fails (e.g. fewer than
+                ``min_observations`` dates) are still present in the dictionary,
+                mapped to None, rather than being silently dropped. None is only
+                returned if the series has no panel group at all.
 
         Raises:
             ValueError: If a simple series has insufficient non-null

@@ -11,7 +11,7 @@ transformer.
 import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, List
+from typing import Any, Optional, Tuple, List
 import warnings
 # Sklearn
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -1213,7 +1213,7 @@ class InverseTransformer(BaseEstimator, TransformerMixin):
         True
     """
     # Initialisation
-    def __init__(self, transformer):
+    def __init__(self, transformer: Any):
         """Initialize the InverseTransformer.
 
         Args:
@@ -1246,7 +1246,7 @@ class InverseTransformer(BaseEstimator, TransformerMixin):
         return True
 
     # Méthode d'entraînement
-    def fit(self, X, y=None):
+    def fit(self, X: Any, y: Any = None) -> 'InverseTransformer':
         """Fit method (no-op since transformer is already fitted).
 
         Args:
@@ -1260,7 +1260,7 @@ class InverseTransformer(BaseEstimator, TransformerMixin):
         return self
 
     # Méthode de transformation
-    def transform(self, X):
+    def transform(self, X: Any) -> Any:
         """Apply the inverse_transform method of the wrapped transformer.
 
         Args:
@@ -1277,7 +1277,7 @@ class InverseTransformer(BaseEstimator, TransformerMixin):
         return self.transformer.inverse_transform(X)
 
     # Méthode de transformation inverse
-    def inverse_transform(self, X):
+    def inverse_transform(self, X: Any) -> Any:
         """Apply the transform method of the wrapped transformer.
 
         Args:

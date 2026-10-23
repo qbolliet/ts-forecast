@@ -9,6 +9,8 @@ last, which holds the date) when ``groups`` is not given.
 """
 # Importation des modules
 # Modules de base
+from collections.abc import Iterator
+from typing import Any
 import inspect
 import warnings
 
@@ -122,7 +124,7 @@ class PanelOutOfSampleSplit(OutOfSampleSplit):
     """
 
     # Méthode principale de séparation des données de panel
-    def split(self, X, y=None, groups=None):
+    def split(self, X: Any, y: Any = None, groups: Any = None) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         """Generate the ``(train, test)`` positions of each fold.
 
         Args:
@@ -181,7 +183,7 @@ class PanelInSampleSplit(InSampleSplit):
     """
 
     # Méthode principale de séparation des données de panel
-    def split(self, X, y=None, groups=None):
+    def split(self, X: Any, y: Any = None, groups: Any = None) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         """Generate the in-sample ``(train, test)`` positions.
 
         Args:
@@ -218,7 +220,7 @@ class _PerEntitySplitMixin:
     _global_class = None
 
     # Méthode de calcul du nombre de plis
-    def get_n_splits(self, X=None, y=None, groups=None):
+    def get_n_splits(self, X: Any = None, y: Any = None, groups: Any = None) -> int:
         """Return the number of folds that ``split`` produces on ``X``.
 
         The count depends on the entities and on their dates, so the data is
@@ -247,7 +249,7 @@ class _PerEntitySplitMixin:
             return sum(1 for _ in self.split(X, y, groups))
 
     # Méthode de séparation des données entité par entité
-    def split(self, X, y=None, groups=None):
+    def split(self, X: Any, y: Any = None, groups: Any = None) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         """Generate one ``(train, test)`` pair per entity and per split.
 
         Folds come split by split (in date order), and within a split entity

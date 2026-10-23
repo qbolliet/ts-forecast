@@ -875,7 +875,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
         return params
 
     # Méthode d'instanciation des paramètres
-    def set_params(self, **params) -> 'PanelwiseTransformer':
+    def set_params(self, **params: Any) -> 'PanelwiseTransformer':
         """Set the parameters of this estimator.
 
         Args:

@@ -5,7 +5,7 @@ different duration units with optional rounding.
 """
 # Importation des modules
 import math
-from typing import Union, Literal, Optional
+from typing import Any, Union, Literal, Optional
 
 # Import de la classe parente
 from ..abc.converter import TemporalConverter
@@ -49,7 +49,7 @@ class DurationConverter(TemporalConverter):
         from_unit: Union[DurationType, UserDurationType],
         to_unit: Union[DurationType, UserDurationType],
         rounding: RoundingType = None,
-        **kwargs
+        **kwargs: Any
     ) -> Union[int, float]:
         """Convert a value from one duration unit to another.
 

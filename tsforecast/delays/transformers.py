@@ -244,7 +244,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             warnings.warn("'target_frequency' is ignored when a shifting strategy is applied")
 
     # Méthode d'entraînement
-    def fit(self, X: Union[pd.Series, pd.DataFrame], y=None):
+    def fit(self, X: Union[pd.Series, pd.DataFrame], y: Any = None) -> 'PublicationDelayTransformer':
         """Resolve the delay settings of every column at the prediction date.
 
         Args:
@@ -1849,7 +1849,7 @@ class ShiftTransformer(BaseEstimator, TransformerMixin):
         self.frequency = frequency
 
     # Méthode d'entraînement
-    def fit(self, X: Union[pd.Series, pd.DataFrame], y=None):
+    def fit(self, X: Union[pd.Series, pd.DataFrame], y: Any = None) -> 'ShiftTransformer':
         """Validate the parameters and detect the index frequency.
 
         Args:
@@ -2082,7 +2082,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         self.how = how
 
     # Méthode d'entraînement
-    def fit(self, X: Union[pd.Series, pd.DataFrame], y=None):
+    def fit(self, X: Union[pd.Series, pd.DataFrame], y: Any = None) -> 'MaskTransformer':
         """Validate the parameters, detect the index frequency and empty the store.
 
         Args:

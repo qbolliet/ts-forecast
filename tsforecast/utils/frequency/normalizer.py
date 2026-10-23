@@ -251,7 +251,7 @@ class FrequencyNormalizer(TemporalNormalizer):
         """Validate if a frequency is supported.
 
         Args:
-            frequency: Frequency to validate
+            value: Frequency to validate
 
         Returns:
             True if frequency is valid and supported

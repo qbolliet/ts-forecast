@@ -17,7 +17,7 @@ Conventions:
 """
 # Importation des modules
 import pandas as pd
-from typing import Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 from pandas.tseries.frequencies import to_offset
 from pandas.tseries.offsets import DateOffset
 
@@ -103,7 +103,7 @@ class PeriodPositionConverter(TemporalConverter):
         from_unit: Union[PositionType, UserPositionType],
         to_unit: Union[PositionType, UserPositionType],
         freq: Optional[str] = None,
-        **kwargs
+        **kwargs: Any
     ) -> Union[pd.Series, pd.DataFrame, pd.DatetimeIndex]:
         """Convert time series data from one period position to another.
 

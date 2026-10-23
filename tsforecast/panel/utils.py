@@ -142,7 +142,7 @@ def extract_time_series_from_multiindex(series: pd.Series) -> pd.Series:
     return pd.Series(series.values, index=time_index, name=series.name)
 
 # Fonction de normalisation de l'entité du panel
-def normalize_entity_key(key) -> tuple:
+def normalize_entity_key(key: Any) -> tuple:
     """Normalize entity key to tuple format.
 
     A scalar label designates a single-level entity: ``'FR'`` and ``('FR',)``

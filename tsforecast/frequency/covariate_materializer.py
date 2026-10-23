@@ -1743,13 +1743,13 @@ class CovariateMaterializer:
             Tuple ``(features, ways, column_origins)``:
 
             - ``features``: frame indexed on ``grid_index``, one column per
-              entry of ``columns``;
+                entry of ``columns``;
             - ``ways``: the way retained for each column, to be stored in the
-              step and replayed as-is;
+                step and replayed as-is;
             - ``column_origins``: the AGGREGATED origin of each column, the
-              max of the origins of the cells actually produced — the input of
-              the ``covariate_taint`` computation. A column that
-              produced nothing reports ``'observed'``.
+                max of the origins of the cells actually produced — the input of
+                the ``covariate_taint`` computation. A column that
+                produced nothing reports ``'observed'``.
 
         Raises:
             KeyError: If a column of ``columns`` is absent from

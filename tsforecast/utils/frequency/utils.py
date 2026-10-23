@@ -105,16 +105,15 @@ def normalize_frequency(
               multiplier is kept: '2MS' → '2MS')
             - 'components': ParsedFrequency (base, position, anchor,
               multiplier) → ('Q', 'E', 'DEC', 1)
-
-        A leading multiplier is accepted by every format. 'base' and
-        'with_position' leave it out ('2MS' → 'M' / 'MS'); 'full' and
-        'components' keep it.
+            A leading multiplier is accepted by every format: 'base' and
+            'with_position' leave it out ('2MS' → 'M' / 'MS'); 'full' and
+            'components' keep it.
 
     Returns:
         Normalized frequency in requested format:
         - 'base', 'with_position', 'full': str
         - 'components': ParsedFrequency, a named tuple
-          ``(freq, position, suffix, multiplier)``
+            ``(freq, position, suffix, multiplier)``
 
     Raises:
         ValueError: If frequency is invalid (not a string, unsupported, or with an
@@ -366,10 +365,9 @@ def detect_frequency(data: Union[pd.Series, pd.DataFrame],
         consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
             - 'modal': Returns the most common frequency (default)
             - 'highest': Returns the highest frequency (most granular)
-        strict: If True, all frequencies must be identical (used with check_consistency)
-
-        Undetectable entities or columns (None) are ignored by the consistency
-        check: they neither break a strict check nor count in the modal one.
+        strict: If True, all frequencies must be identical (used with check_consistency).
+            Undetectable entities or columns (None) are ignored by the consistency
+            check: they neither break a strict check nor count in the modal one.
 
     Returns:
         For Series without MultiIndex: Detected frequency as string, or None if detection fails

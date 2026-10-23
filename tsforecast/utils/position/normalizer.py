@@ -131,7 +131,7 @@ class PeriodPositionNormalizer(TemporalNormalizer):
         """Validate if a position is supported.
 
         Args:
-            position: Position to validate
+            value: Position to validate
 
         Returns:
             True if position is valid and supported

@@ -368,8 +368,8 @@ class XYPipeline(Pipeline):
         ...     ('log_xy', LogTransformXY()),
         ... ])
         >>> X_t, y_t = pipe.fit_transform(X, y)
-        >>> [round(value, 4) for value in y_t]
-        [0.0, 0.6931, 1.3863]
+        >>> print(*[round(value, 4) for value in y_t])
+        0.0 0.6931 1.3863
         >>> list(X_t.columns)
         ['x']
 
@@ -396,7 +396,7 @@ class XYPipeline(Pipeline):
         steps: list,
         *,
         transform_input=None,
-        memory=None,
+        memory: Any = None,
         verbose: bool = False,
         preserve_dataframe: bool = True,
     ):
@@ -652,7 +652,7 @@ class XYPipeline(Pipeline):
 
     # Apprentissage du pipeline
     @_fit_context(prefer_skip_nested_validation=False)
-    def fit(self, X, y=None, **params):
+    def fit(self, X: Any, y: Any = None, **params: Any) -> 'XYPipeline':
         """Fit the pipeline.
 
         Fit all the transformers one after the other and sequentially transform
@@ -706,7 +706,7 @@ class XYPipeline(Pipeline):
     # Apprentissage et transformation combinés
     @available_if(Pipeline._can_fit_transform)
     @_fit_context(prefer_skip_nested_validation=False)
-    def fit_transform(self, X, y=None, **params):
+    def fit_transform(self, X: Any, y: Any = None, **params: Any) -> Any:
         """Fit and transform the data.
 
         An array output of a pandas input gets the pandas structure back when
@@ -771,7 +771,7 @@ class XYPipeline(Pipeline):
 
     # Transformation des données
     @available_if(Pipeline._can_transform)
-    def transform(self, X, y=None, **params):
+    def transform(self, X: Any, y: Any = None, **params: Any) -> Any:
         """Transform the data.
 
         An array output of a pandas input gets the pandas structure back when
@@ -808,7 +808,7 @@ class XYPipeline(Pipeline):
 
     # Transformation inverse des données
     @available_if(Pipeline._can_inverse_transform)
-    def inverse_transform(self, X, y=None, **params):
+    def inverse_transform(self, X: Any, y: Any = None, **params: Any) -> Any:
         """Inverse transform the data.
 
         Args:
@@ -853,7 +853,7 @@ class XYPipeline(Pipeline):
 
     # Transformation et prédiction
     @available_if(_final_estimator_has("predict"))
-    def predict(self, X, **params):
+    def predict(self, X: Any, **params: Any) -> Any:
         """Transform and predict.
 
         The steps receive ``X`` only: a step that drops the rows without target
@@ -893,7 +893,7 @@ class XYPipeline(Pipeline):
 
     # Prédiction de probabilités
     @available_if(_final_estimator_has("predict_proba"))
-    def predict_proba(self, X, **params):
+    def predict_proba(self, X: Any, **params: Any) -> Any:
         """Transform and predict_proba.
 
         Args:
@@ -930,7 +930,7 @@ class XYPipeline(Pipeline):
 
     # Fonction de décision
     @available_if(_final_estimator_has("decision_function"))
-    def decision_function(self, X, **params):
+    def decision_function(self, X: Any, **params: Any) -> Any:
         """Transform and decision_function.
 
         Args:
@@ -963,7 +963,7 @@ class XYPipeline(Pipeline):
 
     # Calcul du score
     @available_if(_final_estimator_has("score"))
-    def score(self, X, y=None, sample_weight=None, **params):
+    def score(self, X: Any, y: Any = None, sample_weight: Any = None, **params: Any) -> float:
         """Transform and score.
 
         ``y`` goes through the XY steps: a step dropping the rows without
@@ -1009,7 +1009,7 @@ class XYPipeline(Pipeline):
 
     # Prédiction des log-probabilités
     @available_if(_final_estimator_has("predict_log_proba"))
-    def predict_log_proba(self, X, **params):
+    def predict_log_proba(self, X: Any, **params: Any) -> Any:
         """Transform and predict_log_proba.
 
         Args:
@@ -1047,7 +1047,7 @@ class XYPipeline(Pipeline):
     # Fit et prédiction combinés
     @available_if(_final_estimator_has("fit_predict"))
     @_fit_context(prefer_skip_nested_validation=False)
-    def fit_predict(self, X, y=None, **params):
+    def fit_predict(self, X: Any, y: Any = None, **params: Any) -> Any:
         """Fit the pipeline and predict with the final estimator.
 
         Args:
@@ -1085,7 +1085,7 @@ class XYPipeline(Pipeline):
 
     # Score des échantillons
     @available_if(_final_estimator_has("score_samples"))
-    def score_samples(self, X):
+    def score_samples(self, X: Any) -> Any:
         """Transform and score_samples with the final estimator.
 
         Args:

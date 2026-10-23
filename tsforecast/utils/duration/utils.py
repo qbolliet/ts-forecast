@@ -119,8 +119,8 @@ def get_duration_conversion_factor(
     Implementation of TemporalConverter.get_conversion_factor() for durations.
 
     Args:
-        from_unit: Source duration unit
-        to_unit: Target duration unit
+        from_duration: Source duration unit
+        to_duration: Target duration unit
 
     Returns:
         Conversion factor to multiply by source value

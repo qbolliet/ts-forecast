@@ -6,8 +6,11 @@ warning, and panel data (a ``MultiIndex``) is refused in favour of the
 """
 # Importation des modules
 # Modules de base
+from collections.abc import Iterator
+from typing import Any
 import warnings
 
+import numpy as np
 import pandas as pd
 
 # Importations locales
@@ -65,7 +68,7 @@ class TSOutOfSampleSplit(OutOfSampleSplit):
     """
 
     # Méthode principale de séparation des données de séries temporelles
-    def split(self, X, y=None, groups=None):
+    def split(self, X: Any, y: Any = None, groups: Any = None) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         """Generate out-of-sample folds of a single time series.
 
         Args:
@@ -116,7 +119,7 @@ class TSInSampleSplit(InSampleSplit):
     """
 
     # Méthode principale de séparation des données de séries temporelles (in-sample)
-    def split(self, X, y=None, groups=None):
+    def split(self, X: Any, y: Any = None, groups: Any = None) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         """Generate the in-sample fold of a single time series.
 
         Args:

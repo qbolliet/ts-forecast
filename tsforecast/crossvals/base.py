@@ -13,6 +13,7 @@ identify the entity.
 import datetime
 import warnings
 from numbers import Integral
+from collections.abc import Iterator
 from typing import Any, Optional
 
 import numpy as np
@@ -646,7 +647,15 @@ class OutOfSampleSplit(_BaseKFold):
     """
 
     # Initialisation
-    def __init__(self, n_splits=5, *, test_indices=None, max_train_size=None, test_size=None, gap=0):
+    def __init__(
+        self,
+        n_splits: int = 5,
+        *,
+        test_indices: Any = None,
+        max_train_size: Optional[int] = None,
+        test_size: Optional[int] = None,
+        gap: int = 0,
+    ):
         """Initialize the cross-validator; parameters are stored unchanged.
 
         Args:
@@ -672,7 +681,7 @@ class OutOfSampleSplit(_BaseKFold):
         self.gap = gap
 
     # Méthode de calcul du nombre de plis
-    def get_n_splits(self, X=None, y=None, groups=None):
+    def get_n_splits(self, X: Any = None, y: Any = None, groups: Any = None) -> int:
         """Return the number of folds, computed from the parameters alone.
 
         Like sklearn's splitters, the count does not read the data: it is the
@@ -702,7 +711,7 @@ class OutOfSampleSplit(_BaseKFold):
         return self.n_splits if parsed is None else len(parsed[1])
 
     # Méthode de séparation des indices d'entrainement et de test
-    def split(self, X, y=None, groups=None):
+    def split(self, X: Any, y: Any = None, groups: Any = None) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         """Generate out-of-sample ``(train, test)`` position arrays.
 
         Parameters, ``y`` and ``groups`` are checked when ``split`` is called;
@@ -995,7 +1004,14 @@ class InSampleSplit(_BaseKFold):
     """
 
     # Initialisation de la classe
-    def __init__(self, n_splits=5, *, test_indices=None, max_train_size=None, test_size=None):
+    def __init__(
+        self,
+        n_splits: int = 5,
+        *,
+        test_indices: Any = None,
+        max_train_size: Optional[int] = None,
+        test_size: Optional[int] = None,
+    ):
         """Initialize the cross-validator; parameters are stored unchanged.
 
         Args:
@@ -1019,7 +1035,7 @@ class InSampleSplit(_BaseKFold):
         self.test_size = test_size
 
     # Méthode de calcul du nombre de plis
-    def get_n_splits(self, X=None, y=None, groups=None):
+    def get_n_splits(self, X: Any = None, y: Any = None, groups: Any = None) -> int:
         """Return 1: an in-sample split has a single fold.
 
         Args:
@@ -1037,7 +1053,7 @@ class InSampleSplit(_BaseKFold):
         return 1
 
     # Méthode principale de séparation des données
-    def split(self, X, y=None, groups=None):
+    def split(self, X: Any, y: Any = None, groups: Any = None) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         """Generate the in-sample ``(train, test)`` position arrays.
 
         Args:

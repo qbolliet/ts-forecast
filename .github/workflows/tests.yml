@@ -1,6 +1,7 @@
 # Continuous integration: tests on pull requests to main; coverage (uploaded to Codecov)
 # and slow tests on pushes to main. Manual runs execute the slow tests too. The fast tests
 # also run with the optional pyarrow extra, under the pyarrow storage of the string dtype.
+# A separate job builds the documentation with mkdocs in strict mode (no warning allowed).
 name: tests
 
 on:
@@ -48,6 +49,18 @@ jobs:
         run: uv run python -c "import pandas as pd; assert pd.Series(['a']).dtype.storage == 'pyarrow'"
       - name: Run fast tests with pyarrow
         run: uv run pytest tests/ -m "not slow"
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --group docs
+      - name: Build the documentation in strict mode
+        run: uv run mkdocs build --strict -d "$RUNNER_TEMP/site"
 
   slow-tests:
     if: github.event_name != 'pull_request'

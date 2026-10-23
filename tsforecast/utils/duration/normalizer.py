@@ -153,7 +153,7 @@ class DurationNormalizer(TemporalNormalizer):
         """Validate if a duration is supported.
 
         Args:
-            duration: Duration to validate
+            value: Duration to validate
 
         Returns:
             True if duration is valid and supported

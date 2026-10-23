@@ -120,7 +120,7 @@ class FrequencyConverter(TemporalConverter):
                 value: Union[pd.Series, pd.DataFrame],
                 from_unit: str,
                 to_unit: str,
-                **kwargs) -> Union[pd.Series, pd.DataFrame]:
+                **kwargs: Any) -> Union[pd.Series, pd.DataFrame]:
         """Convert data from one frequency to another.
 
         Implementation of TemporalConverter.convert() for frequencies.

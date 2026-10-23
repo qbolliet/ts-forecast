@@ -4,7 +4,7 @@
 # Importation des modules
 # Modules de base
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Self
 # Manipulation de données
 import numpy as np
 # Sklearn
@@ -63,11 +63,11 @@ class XYTransformerMixin(TransformerMixin):
         >>> y = pd.Series([10.0, 11.0, 13.0])
         >>> step = LogTransformXY()
         >>> X_t, y_t = step.fit_transform(X, y)
-        >>> [round(value, 4) for value in y_t]
-        [0.0, 0.6931, 1.3863]
+        >>> print(*[round(value, 4) for value in y_t])
+        0.0 0.6931 1.3863
         >>> X_inv, y_inv = step.inverse_transform(X_t, y_t)
-        >>> [round(value, 6) for value in y_inv]
-        [10.0, 11.0, 13.0]
+        >>> print(*[round(value, 6) for value in y_inv])
+        10.0 11.0 13.0
     """
 
     # État ajusté au sens de sklearn : marqueur posé par fit, ou attribut
@@ -98,7 +98,7 @@ class XYTransformerMixin(TransformerMixin):
         return any(name.endswith('_') and not name.startswith('__') for name in vars(self))
 
     # Méthode d'apprentissage des paramètres de transformation
-    def fit(self, X, y=None):
+    def fit(self, X: Any, y: Any = None) -> Self:
         """Fit the transformer.
 
         Args:
@@ -117,7 +117,7 @@ class XYTransformerMixin(TransformerMixin):
         return self
 
     # Méthode abstraite d'entrainement à implémenter par les sous-classes
-    def _fit(self, X, y):
+    def _fit(self, X: Any, y: Any) -> Self:
         """Learn transformation parameters. Override in subclasses.
 
         Args:
@@ -130,7 +130,7 @@ class XYTransformerMixin(TransformerMixin):
         raise NotImplementedError("Subclasses must implement _fit")
 
     # Méthode de transformation des données X et y
-    def transform(self, X, y=None):
+    def transform(self, X: Any, y: Any = None) -> Any:
         """Transform X and optionally y.
 
         Args:
@@ -144,7 +144,7 @@ class XYTransformerMixin(TransformerMixin):
         return self._transform(X, y)
 
     # Méthode abstraite de transformation à implémenter par les sous-classes
-    def _transform(self, X, y=None):
+    def _transform(self, X: Any, y: Any = None) -> Any:
         """Transform features and targets. Override in subclasses.
 
         Args:
@@ -158,7 +158,7 @@ class XYTransformerMixin(TransformerMixin):
         raise NotImplementedError("Subclasses must implement _transform")
 
     # Méthode de transformation inverse des données
-    def inverse_transform(self, X, y=None):
+    def inverse_transform(self, X: Any, y: Any = None) -> Any:
         """Inverse transform X and optionally y.
 
         Args:
@@ -172,7 +172,7 @@ class XYTransformerMixin(TransformerMixin):
         return self._inverse_transform(X, y)
 
     # Méthode optionnelle de transformation inverse des données, l'implémentation par défaut lève une erreur
-    def _inverse_transform(self, X, y=None):
+    def _inverse_transform(self, X: Any, y: Any = None) -> Any:
         """Inverse transform features and targets. Override in subclasses.
 
         Args:
@@ -188,7 +188,7 @@ class XYTransformerMixin(TransformerMixin):
         )
 
     # Apprentissage et transformation combinés
-    def fit_transform(self, X, y=None):
+    def fit_transform(self, X: Any, y: Any = None) -> Any:
         """Fit and transform.
 
         This method MUST be implemented to properly pass y to transform.
@@ -228,7 +228,7 @@ class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
     """
     
     # Surcharge de transform pour accepter y tout en gardant les validations
-    def transform(self, X, y=None):
+    def transform(self, X: Any, y: Any = None) -> Any:
         """Transform X and optionally y with full validation.
         
         Args:
@@ -251,7 +251,7 @@ class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
         return self._transform(X, y)
     
     @abstractmethod
-    def _transform(self, X, y=None):
+    def _transform(self, X: Any, y: Any = None) -> Any:
         """Transform features and targets. Override in subclasses.
 
         Args:
@@ -265,7 +265,7 @@ class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
         pass
     
     # fit_transform explicite pour propager y
-    def fit_transform(self, X, y=None):
+    def fit_transform(self, X: Any, y: Any = None) -> Any:
         """Fit and transform.
 
         Args:
@@ -278,7 +278,7 @@ class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
         return self.fit(X, y).transform(X, y)
 
     # Méthode de transformation inverse des données
-    def inverse_transform(self, X, y=None):
+    def inverse_transform(self, X: Any, y: Any = None) -> Any:
         """Inverse transform X and optionally y.
 
         Args:
@@ -293,7 +293,7 @@ class XYPanelTimeSeriesTransformer(PanelTimeSeriesTransformer, ABC):
         check_is_fitted(self)
         return self._inverse_transform(X, y)
 
-    def _inverse_transform(self, X, y=None):
+    def _inverse_transform(self, X: Any, y: Any = None) -> Any:
         """Inverse transform features and targets. Override in subclasses.
 
         Default implementation raises NotImplementedError.

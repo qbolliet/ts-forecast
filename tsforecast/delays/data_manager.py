@@ -96,13 +96,13 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
         - 'has_changes': Always True (marks the detected observations)
         - 'download_date': Date when data was downloaded
         - 'frequency': Detected frequency of the (entity, column) couple, as a literal
-          ('daily', 'weekly', 'monthly', 'quarterly', 'annual', ...), missing (NaN) if it
-          could not be detected
+            ('daily', 'weekly', 'monthly', 'quarterly', 'annual', ...), missing (NaN) if it
+            could not be detected
         - 'period_start': Start boundary of the period (NaT if the frequency is missing)
         - 'period_end': Exclusive end boundary of the period (NaT if the frequency is missing)
         - 'reference_point': Reference point used ('start' or 'end')
         - 'delay': Calculated publication delay (ceil-rounded to the unit; NaN if the
-          frequency is missing)
+            frequency is missing)
         - 'unit': Unit of the delay value ('day', 'second' or 'microsecond')
 
         The four date columns are stored at the unit of the dates of ``new_data`` (``'s'``,
