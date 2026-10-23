@@ -17,6 +17,7 @@ from .imputation_plan import (
 from .provenance import (
     ImputationProvenanceTracker,
     ProvenanceType,
+    PROVENANCE_DTYPE,
     CellOrigin,
     Taint,
     resolve_model_provenance,
@@ -62,6 +63,7 @@ __all__ = [
     # Provenance tracking
     'ImputationProvenanceTracker',
     'ProvenanceType',
+    'PROVENANCE_DTYPE',
     'CellOrigin',
     'Taint',
     'resolve_model_provenance',

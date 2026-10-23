@@ -10,6 +10,7 @@ import pytest
 
 # Objet testé
 from tsforecast.frequency.provenance import (
+    PROVENANCE_DTYPE,
     ImputationProvenanceTracker,
     provenance_statistics,
 )
@@ -281,20 +282,19 @@ class TestMatrixViews:
         assert all(type(cell) is str for cell in cells)
 
     def test_matrix_dtypes(self):
-        """String view in ``str``; the matrix itself stays ``object``, holding the members."""
+        """String view in ``str``; the matrix itself in ``PROVENANCE_DTYPE``, read back by value."""
         tracker, dates = _tracker()
         tracker.mark_interpolated('a', dates[1])
 
         assert (tracker.to_string_matrix().dtypes == 'str').all()
-        assert (tracker.provenance_matrix_.dtypes == object).all()
-        assert isinstance(tracker.provenance_matrix_.loc[dates[1], 'a'], P)
+        assert (tracker.provenance_matrix_.dtypes == PROVENANCE_DTYPE).all()
+        assert tracker.provenance_matrix_.loc[dates[1], 'a'] == P.INTERPOLATED
 
-    @pytest.mark.internal
-    def test_to_string_matrix_stringifies_foreign_values(self):
-        """A non-ProvenanceType, non-null cell is rendered with ``str``."""
+    def test_matrix_refuses_values_outside_the_vocabulary(self):
+        """The categorical matrix refuses a value that is not a ``ProvenanceType`` value."""
         tracker, dates = _tracker()
-        tracker.provenance_matrix_.loc[dates[0], 'a'] = 'legacy_value'
-        assert tracker.to_string_matrix().loc[dates[0], 'a'] == 'legacy_value'
+        with pytest.raises(TypeError, match='new category'):
+            tracker.provenance_matrix_.loc[dates[0], 'a'] = 'legacy_value'
 
     def test_to_string_matrix_uninitialized_raises(self):
         """Rendering before ``initialize`` raises ValueError."""
@@ -343,7 +343,7 @@ class TestMerge:
         """No ``overwrite`` argument means ``overwrite=True``."""
         base, other, _ = self._pair()
         base.merge(other)
-        assert base.provenance_matrix_['a'].iloc[0] is P.INTERPOLATED
+        assert base.provenance_matrix_['a'].iloc[0] == P.INTERPOLATED
 
     def test_preserve_keeps_self_and_fills_none(self):
         """``overwrite=False``: conflicts resolve to ``self``, null cells are filled from ``other``."""
@@ -382,7 +382,7 @@ class TestMerge:
         column_b = base.provenance_matrix_['b']
         assert column_b.iloc[[0, 2]].tolist() == [P.ORIGINAL, P.INTERPOLATED]
         assert pd.isna(column_b.iloc[1])
-        assert base.provenance_matrix_['a'].iloc[0] is P.ORIGINAL
+        assert base.provenance_matrix_['a'].iloc[0] == P.ORIGINAL
 
     def test_how_argument_is_gone(self):
         """The former ``how`` strategy is replaced by ``overwrite``."""

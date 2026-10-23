@@ -72,6 +72,7 @@ from .imputation_window import (
 from .provenance import (
     CellOrigin,
     ImputationProvenanceTracker,
+    PROVENANCE_DTYPE,
     ProvenanceType,
     Taint,
     max_origin,
@@ -454,7 +455,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             imputable column may receive a complete imputation of it, learned
             on the other entities of the panel. ``False`` (default) leaves
             such a pair out of every prediction grid: its cells stay NaN and
-            unmarked (``None`` in ``imputation_provenance_``). ``True`` makes
+            unmarked (NaN in ``imputation_provenance_``). ``True`` makes
             the pair imputable at **every stage of its entity's
             progression**, through one dedicated plan
             step per stage whose ``source_frequency`` is ``None``. It is the
@@ -603,7 +604,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             carried the strict bounds, here each attribute carries the bounds
             of its own mask, and
             ``strict_window_mask_`` is the sole holder of the strict window.
-        imputation_provenance_: Provenance matrix. Written by ``fit``, then
+        imputation_provenance_: Provenance matrix, of the categorical dtype
+            ``PROVENANCE_DTYPE`` (one ``ProvenanceType`` value per cell, NaN
+            for a cell not marked). Written by ``fit``, then
             overwritten by every ``transform``: it always describes the
             last pass, which is what ``inverse_transform`` undoes. It follows
             the shape of the output — stacked on the frequency level under
@@ -4782,19 +4785,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             The provenance of the frame, cell for cell.
         """
         has_value = frame.notna()
-
-        # Remplacement par un membre d'énumération porté par une trame object :
-        # un scalaire chaîne passé à "mask" serait écrit en simple chaîne
-        def marked(cells: pd.DataFrame, member: ProvenanceType) -> pd.DataFrame:
-            return provenance.mask(cells, pd.DataFrame(
-                member, index=provenance.index, columns=provenance.columns, dtype=object
-            ))
+        # Colonnes que le suivi ne porte pas : ajoutées par la réindexation en
+        # float, ramenées au dtype catégoriel avant tout marquage
+        provenance = provenance.astype(PROVENANCE_DTYPE)
 
         # Cellules sans marque mais renseignées : valeurs reprises telles quelles
-        provenance = marked(provenance.isna() & has_value, ProvenanceType.ORIGINAL)
+        provenance = provenance.mask(provenance.isna() & has_value, ProvenanceType.ORIGINAL)
         # Agrégations exactes d'une colonne plus fine que la ligne
         aggregated = self._aggregated_cells(frame, output_binding) & has_value
-        provenance = marked(aggregated, ProvenanceType.AGGREGATED)
+        provenance = provenance.mask(aggregated, ProvenanceType.AGGREGATED)
         # Cellule vide : jamais marquée, au rejeu comme au fit
         return provenance.where(has_value)
 
@@ -5182,7 +5181,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Passe de prédiction : niveau cible, sur les lignes d'entrée et les
             # colonnes de X — aucune ligne ajoutée, ni niveau de fréquence
             data_result = frames[final_label].reindex(index=X.index, columns=X.columns)
-            provenance = provenances[final_label].reindex(index=X.index, columns=X.columns)
+            # Colonne absente de l'étape : réindexée en float, ramenée au dtype catégoriel
+            provenance = provenances[final_label].reindex(
+                index=X.index, columns=X.columns
+            ).astype(PROVENANCE_DTYPE)
         elif self.keep_lower_frequencies:
             data_result = self._build_multifreq_output(frames)
             provenance = self._build_multifreq_output(provenances)

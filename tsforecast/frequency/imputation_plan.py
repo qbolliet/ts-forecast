@@ -14,7 +14,7 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Literal, Mapping, Optio
 import pandas as pd
 
 # Primitives de souillure et de provenance (lot précédent)
-from .provenance import ProvenanceType, Taint, resolve_model_provenance
+from .provenance import PROVENANCE_DTYPE, ProvenanceType, Taint, resolve_model_provenance
 # Sentinelle de repli : simple constante, pas une hiérarchie (foyer canonique).
 INTERPOLATE_FALLBACK = 'interpolate_fallback'
 
@@ -532,8 +532,9 @@ class ImputationPlan:
             order of the input rows). The text columns have the ``str``
             dtype (a missing ``source_frequency`` is NaN); ``variable`` holds
             the labels with the dtype pandas infers from them;
-            ``emitted_provenance`` is an ``object`` column of
-            :class:`ProvenanceType` members.
+            ``emitted_provenance`` has the categorical dtype
+            ``PROVENANCE_DTYPE`` of the provenance matrices (one
+            :class:`ProvenanceType` value per step).
 
         Examples:
             >>> ImputationPlan().to_diagnostic_frame().columns.tolist()
@@ -603,11 +604,10 @@ class ImputationPlan:
                 'training_blocks': training_blocks_repr,
             })
         frame = pd.DataFrame(rows, columns=columns)
-        # Provenance émise construite en object : des membres d'énumération, que
-        # l'inférence d'une colonne de chaînes (stockage pyarrow) ramènerait à de
-        # simples chaînes, sans retour possible
+        # Provenance émise au dtype catégoriel des matrices de provenance,
+        # quel que soit le nombre d'étapes
         frame['emitted_provenance'] = pd.Series(
-            [row['emitted_provenance'] for row in rows], index=frame.index, dtype=object
+            [row['emitted_provenance'] for row in rows], index=frame.index, dtype=PROVENANCE_DTYPE
         )
         # Colonnes textuelles en dtype chaîne quel que soit leur contenu
         return frame.astype({column: 'str' for column in _DIAGNOSTIC_STRING_COLUMNS})

@@ -5286,9 +5286,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   (égalité), 584 cellules redevenues des membres. Le diagnostic `to_diagnostic_frame()` rend aussi
   `emitted_provenance` en `object` explicite (une colonne `str` ramènerait ses membres à des chaînes sous stockage
   pyarrow).
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_string_dtypes.py::TestStringDtypes::test_provenance_cells_are_members`,
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_string_dtypes.py::TestStringDtypes::test_provenance_matrix_is_categorical`,
   `tests/integration/input_contract/test_string_labels.py::TestOutputStringDtypes`
 - **Statut** : corrigée (2026-10-21)
+- **Suite** (décision de l'auteur, 2026-10-23) : matrices de provenance et colonne `emitted_provenance` passées au dtype
+  catégoriel `PROVENANCE_DTYPE` (catégories : les dix valeurs de `ProvenanceType`). Les cellules se relisent en simples
+  chaînes, comparées par `==` aux membres ; `get_provenance` rend toujours un membre pour une cellule unique. Mesure
+  (200 000 × 20 cellules) : mémoire 446 Mo → 4 Mo, statistiques 2,1 s → 0,05 s, `mask` 280 ms → 10 ms, avec ou sans
+  pyarrow. Le contournement `mask(cond, DataFrame(membre, dtype=object))` disparaît.
 
 ## BASE
 

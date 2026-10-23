@@ -25,7 +25,7 @@ from tsforecast.frequency.imputation_plan import (
     INTERPOLATE_FALLBACK,
     MaterializationWay,
 )
-from tsforecast.frequency.provenance import ProvenanceType, resolve_model_provenance
+from tsforecast.frequency.provenance import PROVENANCE_DTYPE, ProvenanceType, resolve_model_provenance
 
 
 # Fabrique d'étape : valeurs par défaut cohérentes, surchargeables au cas par cas
@@ -236,7 +236,7 @@ class TestImputationPlan:
             is_fallback=True,
         )
         frame = ImputationPlan((fallback,)).to_diagnostic_frame()
-        assert frame.loc[0, 'emitted_provenance'] is ProvenanceType.INTERPOLATED
+        assert frame.loc[0, 'emitted_provenance'] == ProvenanceType.INTERPOLATED
         assert bool(frame.loc[0, 'is_fallback']) is True
         assert frame.loc[0, 'materialization'] == ''
 
@@ -707,7 +707,7 @@ class TestDiagnosticFrame:
         assert row['n_features'] == 2
         assert row['n_training_rows'] == 12 and row['n_written'] == 36
         assert row['covariate_taint'] == 'none' and row['target_taint'] == 'none'
-        assert row['emitted_provenance'] is ProvenanceType.MODEL_ON_TRUE
+        assert row['emitted_provenance'] == ProvenanceType.MODEL_ON_TRUE
         assert bool(row['is_fallback']) is False
         assert row['interpolation_method'] == 'linear'
         assert row['interpolation_anchor'] == 1.0
@@ -721,7 +721,7 @@ class TestDiagnosticFrame:
         assert row['n_entities'] == 2
         # Blocs triés par clé d'entité, quel que soit l'ordre du dict
         assert row['training_blocks'] == 'DE=Q, FR=M'
-        assert row['emitted_provenance'] is ProvenanceType.MODEL_ON_IMPUTED_TARGET
+        assert row['emitted_provenance'] == ProvenanceType.MODEL_ON_IMPUTED_TARGET
 
     def test_training_blocks_rendering_ignores_the_entity_order(self):
         """Two orders of the same blocks give the same rendering."""
@@ -778,7 +778,7 @@ class TestDiagnosticFrame:
         row = ImputationPlan((step,)).to_diagnostic_frame().iloc[0]
         assert bool(row['unanchored']) is True
         assert pd.isna(row['source_frequency'])
-        assert row['emitted_provenance'] is ProvenanceType.MODEL_UNANCHORED
+        assert row['emitted_provenance'] == ProvenanceType.MODEL_UNANCHORED
         # Les souillures calculées restent lisibles dans le diagnostic
         assert (row['covariate_taint'], row['target_taint']) == ('imputed', 'imputed')
 
@@ -788,7 +788,7 @@ class TestDiagnosticFrame:
             model=INTERPOLATE_FALLBACK, feature_cols=(), materialization={}, is_fallback=True,
         )
         row = ImputationPlan((step,)).to_diagnostic_frame().iloc[0]
-        assert row['emitted_provenance'] is ProvenanceType.INTERPOLATED
+        assert row['emitted_provenance'] == ProvenanceType.INTERPOLATED
         assert row['n_features'] == 0
         assert row['materialization'] == ''
         assert bool(row['is_fallback']) is True
@@ -798,7 +798,7 @@ class TestDiagnosticFrame:
         """The column reproduces the truth table for each of the nine pairs."""
         step = _make_step(covariate_taint=covariate_taint, target_taint=target_taint)
         frame = ImputationPlan((step,)).to_diagnostic_frame()
-        assert frame.loc[0, 'emitted_provenance'] is expected
+        assert frame.loc[0, 'emitted_provenance'] == expected
 
     def test_materialization_follows_feature_cols_order(self):
         """The ``col=way`` rendering follows the order of ``feature_cols``."""
@@ -818,7 +818,7 @@ class TestDiagnosticFrame:
 
 
 class TestDiagnosticFrameDtypes:
-    """Text columns in ``str`` whatever their content; provenance as ``object`` members."""
+    """Text columns in ``str`` whatever their content; provenance in ``PROVENANCE_DTYPE``."""
 
     # Colonnes textuelles du diagnostic
     TEXT_COLUMNS = ('stage', 'source_frequency', 'entities', 'covariate_taint', 'target_taint',
@@ -836,13 +836,16 @@ class TestDiagnosticFrameDtypes:
         assert {column: str(frame[column].dtype) for column in self.TEXT_COLUMNS} == dict.fromkeys(
             self.TEXT_COLUMNS, 'str'
         )
-        assert frame['emitted_provenance'].dtype == object
+        assert frame['emitted_provenance'].dtype == PROVENANCE_DTYPE
 
-    def test_emitted_provenance_holds_enumeration_members(self):
-        """The provenance cells are ``ProvenanceType`` members, not plain strings."""
-        frame = ImputationPlan((_make_step(), _make_step(unanchored=True, source_frequency=None))).to_diagnostic_frame()
+    def test_emitted_provenance_holds_the_values_of_the_steps(self):
+        """Each cell is the value of the ``ProvenanceType`` its step emits."""
+        steps = (_make_step(), _make_step(unanchored=True, source_frequency=None))
+        frame = ImputationPlan(steps).to_diagnostic_frame()
 
-        assert all(isinstance(value, ProvenanceType) for value in frame['emitted_provenance'])
+        assert frame['emitted_provenance'].tolist() == [
+            ProvenanceType.MODEL_ON_TRUE.value, ProvenanceType.MODEL_UNANCHORED.value
+        ]
 
 
 # =============================================================================

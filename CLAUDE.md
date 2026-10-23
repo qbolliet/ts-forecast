@@ -67,7 +67,8 @@ de `X` sauf `target_as_covariate=True` (décisions D47 / D48 de la spec).
 Composants auxiliaires de `HighFrequencyImputer` :
 - `imputation_plan.py` : `ImputationPlan`, `ImputationStep` — état ajusté complet
 - `provenance.py` : `ImputationProvenanceTracker`, `ProvenanceType` (10 niveaux),
-  primitives de souillure (`Taint`, `resolve_model_provenance`, ...)
+  `PROVENANCE_DTYPE` (dtype catégoriel des matrices de provenance), primitives de
+  souillure (`Taint`, `resolve_model_provenance`, ...)
 - `covariate_materializer.py` : `CovariateMaterializer` — production de
   `X_train` / `X_pred` (invariant central : jamais de dégradation fit → predict)
 - `aggregation_constraint.py` : `AggregationConstraint` — recale les sous-périodes
@@ -201,7 +202,7 @@ Le paquet requiert `pandas>=3.0,<4` et `scikit-learn>=1.9,<2` (pas de support de
   `with_datetime_resolution` × `datetime_units` (`assert datetime_units(result) == {…: unit}`).
 - **Dtype chaîne** : libellés et colonnes de chaînes sont en dtype `str` (NaN comme manquant) ;
   ne pas tester `dtype == object` ; `dtype=object` explicite seulement pour des valeurs
-  hétérogènes (énumérations, tuples, `None`).
+  hétérogènes (tuples, `None`) ; une énumération est catégorielle (voir ci-dessous).
 - **Dtype des chaînes en sortie** (sorties publiques : colonnes, niveaux d'index, attributs ajustés) :
   - chaîne **produite par le paquet** (fréquence, unité, point de référence, origine, source, libellé
     d'étape) : `dtype='str'` **explicite**, quel que soit le contenu (vide, tout manquant) ; manquant =
@@ -209,11 +210,13 @@ Le paquet requiert `pandas>=3.0,<4` et `scikit-learn>=1.9,<2` (pas de support de
   - **libellé repris de l'entrée** (noms de colonnes, entités) : dtype que pandas infère des valeurs
     (`str` pour des chaînes), les niveaux d'entité gardant celui des données ; un résultat **vide** a les
     dtypes (colonnes et niveaux) d'un résultat non vide ;
-  - `object` explicite, avec un commentaire au site, seulement pour des valeurs hétérogènes : membres
-    d'énumération (`ProvenanceType` : sous le stockage pyarrow une colonne `str` les ramène à de simples
-    chaînes, `is` / `isinstance` échouent), tuples, `Period`, `feature_names_in_` (convention sklearn) ;
-  - écrire un membre d'énumération par `.loc[...] = membre` ou `mask(cond, DataFrame(membre, dtype=object))`,
-    jamais `mask(cond, membre)` (pandas l'écrit en simple chaîne) ;
+  - **vocabulaire fermé d'énumération** (`ProvenanceType`) : dtype catégoriel `PROVENANCE_DTYPE`
+    (matrices de provenance, colonne `emitted_provenance`), jamais `object` ni `str` ; un membre s'écrit
+    tel quel (`.loc[...] = membre`, `mask(cond, membre)`), une cellule se relit en simple chaîne et se
+    compare par `==` à un membre (jamais `is` / `isinstance`) ; un `reindex` qui ajoute des colonnes les
+    crée en `float` : `astype(PROVENANCE_DTYPE)` avant tout marquage ;
+  - `object` explicite, avec un commentaire au site, seulement pour des valeurs hétérogènes : tuples,
+    `Period`, `feature_names_in_` (convention sklearn) ;
   - hors pandas (dict, kwargs, scalaires), une chaîne manquante est `None` ; les tableaux `object` internes
     restent libres, l'harmonisation se fait à la frontière publique ;
   - tests : `dtype == 'str'` (vrai sous les deux stockages, python et pyarrow), `string_dtypes`

@@ -21,12 +21,12 @@ from tests.unit.frequency.provenance.helpers import P, _tracker
 class TestInitialize:
     """Initialization of the provenance matrix from the input data."""
 
-    def test_non_null_cells_are_original_and_null_cells_none(self):
-        """Golden values: ORIGINAL where the value exists, None elsewhere."""
+    def test_non_null_cells_are_original_and_null_cells_unmarked(self):
+        """Golden values: ORIGINAL where the value exists, NaN elsewhere."""
         tracker, _ = _tracker()
         matrix = tracker.provenance_matrix_
-        assert matrix['a'].tolist()[0] is P.ORIGINAL
-        assert matrix['a'].tolist()[2] is P.ORIGINAL
+        assert matrix['a'].tolist()[0] == P.ORIGINAL
+        assert matrix['a'].tolist()[2] == P.ORIGINAL
         assert matrix['a'].isna().tolist() == [False, True, False, True]
         # Colonne entièrement NaN : aucune provenance
         assert matrix['b'].isna().all()
@@ -67,7 +67,7 @@ class TestInitialize:
             pd.DataFrame({'a': [5.0]}, index=pd.date_range('2023-01-31', periods=1))
         )
         assert tracker.provenance_matrix_.shape == (1, 1)
-        assert tracker.provenance_matrix_.iloc[0, 0] is P.ORIGINAL
+        assert tracker.provenance_matrix_.iloc[0, 0] == P.ORIGINAL
 
     def test_unsorted_index_keeps_input_order_and_pairing(self):
         """Disorder is preserved, each label keeps the provenance of its own value."""
@@ -189,14 +189,15 @@ class TestExtendIndex:
         return ImputationProvenanceTracker().initialize(data)
 
     def test_new_rows_are_unfilled_and_sorted_in(self):
-        """Added dates are None and take their chronological place."""
+        """Added dates are unmarked (NaN) and take their chronological place."""
         tracker = self._tracker(pd.to_datetime(['2015-01-01', '2015-04-01']))
         grid = pd.date_range('2015-01-01', '2015-04-01', freq='MS')
         tracker.extend_index(grid)
 
         matrix = tracker.provenance_matrix_
         assert list(matrix.index) == list(grid)
-        assert matrix['a'].tolist() == [P.ORIGINAL, None, None, P.ORIGINAL]
+        assert matrix['a'].isna().tolist() == [False, True, True, False]
+        assert matrix['a'].iloc[[0, 3]].tolist() == [P.ORIGINAL, P.ORIGINAL]
 
     def test_new_rows_are_unfilled_in_every_column(self):
         """The added rows are None in all columns, not only one."""

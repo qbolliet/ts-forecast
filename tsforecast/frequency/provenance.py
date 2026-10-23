@@ -3,9 +3,10 @@
 This module provides the ImputationProvenanceTracker class to track the origin
 of each value in an imputed dataset, distinguishing original values, exact
 aggregations, disaggregated sub-periods, interpolated values, and the five
-levels of model-imputation taint (see ProvenanceType). It also exposes the
-taint primitives shared by the imputation plan: the CellOrigin / Taint aliases
-and the functions resolve_model_provenance, origin_to_taint and max_origin, plus
+levels of model-imputation taint (see ProvenanceType), in a categorical matrix
+of dtype PROVENANCE_DTYPE. It also exposes the taint primitives shared by the
+imputation plan: the CellOrigin / Taint aliases and the functions
+resolve_model_provenance, origin_to_taint and max_origin, plus
 provenance_statistics, the per-type census of a provenance matrix.
 """
 # Importation des modules
@@ -89,13 +90,21 @@ class ProvenanceType(str, Enum):
 
     MODEL_UNANCHORED = 'model_unanchored'
 
-    # Représentation lisible (utilisée par l'affichage tabulaire de pandas,
-    # p.ex. provenance_matrix_) : 'original' plutôt que 'ProvenanceType.ORIGINAL'.
-    # __repr__ reste celui d'Enum (<ProvenanceType.ORIGINAL: 'original'>), qui
-    # continue de distinguer un ProvenanceType d'un str brut dans les affichages
-    # scalaires (repr de liste, retour de get_provenance, etc.).
+    # Représentation lisible (formatage, messages) : 'original' plutôt que
+    # 'ProvenanceType.ORIGINAL'. __repr__ reste celui d'Enum
+    # (<ProvenanceType.ORIGINAL: 'original'>), qui distingue un membre d'une
+    # simple chaîne dans les affichages scalaires (retour de get_provenance, etc.).
     def __str__(self) -> str:
         return self.value
+
+
+# Dtype des matrices de provenance : catégoriel à vocabulaire fermé, une catégorie
+# par valeur de ProvenanceType (ordre de déclaration, sans relation d'ordre).
+# Une cellule est stockée sur un code entier : comptages et masques vectorisés
+# sans dépendre du stockage des chaînes, et toute écriture hors vocabulaire lève.
+# Un membre s'écrit tel quel (il est égal à sa valeur) ; une cellule se relit
+# en simple chaîne, NaN pour une cellule non renseignée.
+PROVENANCE_DTYPE = pd.CategoricalDtype([member.value for member in ProvenanceType])
 
 
 # Alias de typage : origine d'une cellule et niveau de souillure associé.
@@ -213,8 +222,10 @@ def provenance_statistics(
     which no tracker holds.
 
     Args:
-        matrix: Provenance matrix, one ``ProvenanceType`` (or a missing value
-            for a cell never marked) per cell.
+        matrix: Provenance matrix, one ``ProvenanceType`` value (or a missing
+            value for a cell never marked) per cell, preferably of dtype
+            ``PROVENANCE_DTYPE``; any other dtype is converted to it first, a
+            value outside the vocabulary then counting as not marked.
 
     Returns:
         ``{'overall': {...}, column: {...}}``. Each block holds, for every
@@ -223,32 +234,40 @@ def provenance_statistics(
         the unmarked cells. Percentages are 0.0 on an empty matrix.
 
     Examples:
-        >>> matrix = pd.DataFrame({'a1': [ProvenanceType.ORIGINAL, None]})
+        >>> matrix = pd.DataFrame(
+        ...     {'a1': [ProvenanceType.ORIGINAL, None]}, dtype=PROVENANCE_DTYPE
+        ... )
         >>> stats = provenance_statistics(matrix)
-        >>> int(stats['a1']['original']), float(stats['overall']['not_imputed_pct'])
+        >>> stats['a1']['original'], stats['overall']['not_imputed_pct']
         (1, 50.0)
     """
-    # Bloc de statistiques d'un ensemble de cellules
-    def _block(cells: pd.DataFrame) -> Dict[str, Union[int, float]]:
-        # Extraction des dimensions
-        total = cells.size
-        # Initialisation des blocs de statistiques pour chaque provenance
+    # Bloc de statistiques d'un ensemble de codes de catégorie (-1 : non renseignée)
+    def _block(codes: np.ndarray) -> Dict[str, Union[int, float]]:
+        total = codes.size
+        # Décalage de 1 : la case 0 compte les cellules non renseignées,
+        # la case i + 1 la catégorie i (ordre de ProvenanceType)
+        counts = np.bincount(codes.ravel() + 1, minlength=len(ProvenanceType) + 1)
         block: Dict[str, Union[int, float]] = {}
-        # Parcours des types de provenance
-        for prov_type in ProvenanceType:
-            count = (cells == prov_type).to_numpy().sum()
+        for position, prov_type in enumerate(ProvenanceType, start=1):
+            count = int(counts[position])
             block[prov_type.value] = count
             block[f'{prov_type.value}_pct'] = (count / total * 100) if total > 0 else 0.0
-        # Cellules jamais marquées : None dans la matrice
-        null_count = cells.isna().to_numpy().sum()
+        null_count = int(counts[0])
         block['not_imputed'] = null_count
         block['not_imputed_pct'] = (null_count / total * 100) if total > 0 else 0.0
         return block
 
+    # Codes de catégorie de chaque cellule, colonne par colonne (par position :
+    # des noms de colonnes dupliqués restent distincts)
+    matrix = matrix.astype(PROVENANCE_DTYPE)
+    codes = np.empty(matrix.shape, dtype=np.int64)
+    for position in range(matrix.shape[1]):
+        codes[:, position] = matrix.iloc[:, position].cat.codes.to_numpy()
+
     # Bloc global, puis un bloc par colonne
-    statistics: Dict[str, Dict[str, Union[int, float]]] = {'overall': _block(matrix)}
-    for column in matrix.columns:
-        statistics[column] = _block(matrix[[column]])
+    statistics: Dict[str, Dict[str, Union[int, float]]] = {'overall': _block(codes)}
+    for position, column in enumerate(matrix.columns):
+        statistics[column] = _block(codes[:, position])
     return statistics
 
 
@@ -262,22 +281,27 @@ class ImputationProvenanceTracker:
     at one of the five taint levels (see ProvenanceType).
 
     Attributes:
-        provenance_matrix_: DataFrame with same shape as data, containing ProvenanceType values.
+        provenance_matrix_: DataFrame with the index of the data and its
+            tracked columns, of dtype ``PROVENANCE_DTYPE``: one
+            ``ProvenanceType`` value per cell (read back as a plain string),
+            NaN for a cell not marked.
         statistics_: Dictionary with counts and percentages per provenance type.
 
     Examples:
         >>> import pandas as pd
         >>> import numpy as np
         >>> tracker = ImputationProvenanceTracker()
-        >>> dates = pd.date_range('2023-01-01', periods=12, freq='M')
+        >>> dates = pd.date_range('2023-01-01', periods=12, freq='ME')
         >>> data = pd.DataFrame({
         ...     'var1': [1, 2, np.nan, 4, np.nan, 6, 7, 8, 9, 10, 11, 12],
         ...     'var2': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]
         ... }, index=dates)
-        >>> tracker.initialize(data)
+        >>> _ = tracker.initialize(data)
         >>> tracker.mark_imputed('var1', dates[2], ProvenanceType.MODEL_ON_TRUE)
         >>> tracker.get_provenance('var1', dates[2])
         <ProvenanceType.MODEL_ON_TRUE: 'model_on_true'>
+        >>> tracker.provenance_matrix_['var1'].tolist()[:3]
+        ['original', 'original', 'model_on_true']
     """
     # Initialisation
     def __init__(self):
@@ -297,9 +321,10 @@ class ImputationProvenanceTracker:
     ) -> 'ImputationProvenanceTracker':
         """Initialize the provenance matrix from input data.
 
-        Creates a provenance matrix with the same shape as the input data,
-        marking all non-null values as ORIGINAL and leaving null values unfilled
-        (NaN, to be filled during imputation; test them with ``pd.isna``).
+        Creates a provenance matrix of dtype ``PROVENANCE_DTYPE`` with the
+        same shape as the input data, marking all non-null values as ORIGINAL
+        and leaving null values unfilled (NaN, to be filled during imputation;
+        test them with ``pd.isna``).
 
         Args:
             data: Input DataFrame with potential NaN values to be imputed.
@@ -322,7 +347,7 @@ class ImputationProvenanceTracker:
         Examples:
             >>> tracker = ImputationProvenanceTracker()
             >>> data = pd.DataFrame({'a': [1, np.nan, 3], 'b': [4, 5, np.nan]})
-            >>> tracker.initialize(data)
+            >>> _ = tracker.initialize(data)
             >>> tracker.provenance_matrix_['a'].isna().tolist()
             [False, True, False]
         """
@@ -346,20 +371,10 @@ class ImputationProvenanceTracker:
         else:
             track_cols = list(data.columns)
 
-        # Création de la matrice de provenance, en object : des membres de
-        # ProvenanceType (qu'un stockage de chaînes ramènerait à de simples
-        # chaînes, is / isinstance échouant alors) et des cellules non renseignées
-        self.provenance_matrix_ = pd.DataFrame(
-            index=data.index,
-            columns=track_cols,
-            dtype=object
-        )
-
-        # Initialisation: valeurs non-nulles -> ORIGINAL, valeurs nulles -> None
-        for col in track_cols:
-            mask_not_null = data[col].notna()
-            self.provenance_matrix_.loc[mask_not_null, col] = ProvenanceType.ORIGINAL
-            # Les valeurs nulles restent non renseignées (NaN, à remplir lors de l'imputation)
+        # Matrice catégorielle : valeurs non nulles -> ORIGINAL, valeurs nulles
+        # non renseignées (NaN, à remplir lors de l'imputation)
+        unfilled = pd.DataFrame(index=data.index, columns=track_cols, dtype=PROVENANCE_DTYPE)
+        self.provenance_matrix_ = unfilled.mask(data[track_cols].notna(), ProvenanceType.ORIGINAL)
 
         return self
 
@@ -371,7 +386,7 @@ class ImputationProvenanceTracker:
         writes on a densified grid: on an irregular index (a few isolated
         annual observations before the start of the monthly grid, say), the
         grid carries dates the input never had. The added rows are "not
-        filled" (null, like the NaN cells :meth:`initialize` leaves unfilled),
+        filled" (NaN, like the cells :meth:`initialize` leaves unfilled),
         so that only the subsequent ``mark_*`` call decides their provenance.
 
         The existing rows keep their order; the matrix is re-sorted only when
@@ -392,7 +407,7 @@ class ImputationProvenanceTracker:
             >>> _ = tracker.initialize(data)
             >>> tracker.extend_index(pd.to_datetime(['2015-02-01']))
             >>> tracker.provenance_matrix_['a'].tolist()
-            [<ProvenanceType.ORIGINAL: 'original'>, None, <ProvenanceType.ORIGINAL: 'original'>]
+            ['original', nan, 'original']
         """
         # Validation de l'initialisation
         if self.provenance_matrix_ is None:
@@ -403,13 +418,12 @@ class ImputationProvenanceTracker:
         if len(missing) == 0:
             return
 
-        # Ajout des lignes "non renseignées", tri conservé s'il existait
+        # Ajout des lignes "non renseignées" (NaN de "reindex", dtype catégoriel
+        # conservé), tri conservé s'il existait
         was_sorted = self.provenance_matrix_.index.is_monotonic_increasing
         extended = self.provenance_matrix_.reindex(
             self.provenance_matrix_.index.append(missing)
         )
-        # "reindex" remplit de NaN : retour explicite à la convention None
-        extended.loc[missing] = None
         self.provenance_matrix_ = extended.sort_index() if was_sorted else extended
 
     # Garde : une écriture ne crée jamais de ligne (réservé à extend_index)
@@ -462,8 +476,13 @@ class ImputationProvenanceTracker:
                 are added by :meth:`extend_index` only).
 
         Examples:
+            >>> dates = pd.date_range('2023-01-31', periods=6, freq='ME')
+            >>> data = pd.DataFrame({'var1': [1.0, 2.0, np.nan, np.nan, np.nan, 6.0]}, index=dates)
+            >>> tracker = ImputationProvenanceTracker().initialize(data)
             >>> tracker.mark_imputed('var1', pd.Timestamp('2023-03-31'), ProvenanceType.MODEL_ON_TRUE)
-            >>> tracker.mark_imputed('var1', data.index[2:5], ProvenanceType.MODEL_ON_IMPUTED)
+            >>> tracker.mark_imputed('var1', dates[3:5], ProvenanceType.MODEL_ON_IMPUTED)
+            >>> tracker.provenance_matrix_['var1'].tolist()[2:5]
+            ['model_on_true', 'model_on_imputed', 'model_on_imputed']
         """
         # Validation de l'initialisation
         if self.provenance_matrix_ is None:
@@ -477,7 +496,7 @@ class ImputationProvenanceTracker:
         if not isinstance(provenance, ProvenanceType):
             raise ValueError(f"provenance must be a ProvenanceType, got {type(provenance).__name__}")
 
-        # Marquage de la provenance
+        # Marquage de la provenance : le membre s'écrit comme sa catégorie
         self._check_labels_exist(index)
         self.provenance_matrix_.loc[index, column] = provenance
 
@@ -496,7 +515,12 @@ class ImputationProvenanceTracker:
             index: Index location(s) of the aggregated value(s).
 
         Examples:
-            >>> tracker.mark_aggregated('daily_var', monthly_index)
+            >>> dates = pd.date_range('2023-01-31', periods=3, freq='ME')
+            >>> data = pd.DataFrame({'var': [1.0, np.nan, np.nan]}, index=dates)
+            >>> tracker = ImputationProvenanceTracker().initialize(data)
+            >>> tracker.mark_aggregated('var', dates[1:])
+            >>> tracker.provenance_matrix_['var'].tolist()
+            ['original', 'aggregated', 'aggregated']
         """
         self.mark_imputed(column, index, ProvenanceType.AGGREGATED)
 
@@ -525,7 +549,12 @@ class ImputationProvenanceTracker:
             index: Index location(s) of the disaggregated value(s).
 
         Examples:
-            >>> tracker.mark_disaggregated('quarterly_var', monthly_index)
+            >>> dates = pd.date_range('2023-01-31', periods=3, freq='ME')
+            >>> data = pd.DataFrame({'var': [1.0, np.nan, np.nan]}, index=dates)
+            >>> tracker = ImputationProvenanceTracker().initialize(data)
+            >>> tracker.mark_disaggregated('var', dates[1:])
+            >>> tracker.provenance_matrix_['var'].tolist()
+            ['original', 'disaggregated', 'disaggregated']
         """
         self.mark_imputed(column, index, ProvenanceType.DISAGGREGATED)
 
@@ -548,7 +577,12 @@ class ImputationProvenanceTracker:
             index: Index location(s) of the interpolated value(s).
 
         Examples:
-            >>> tracker.mark_interpolated('quarterly_var', monthly_index)
+            >>> dates = pd.date_range('2023-01-31', periods=3, freq='ME')
+            >>> data = pd.DataFrame({'var': [1.0, np.nan, np.nan]}, index=dates)
+            >>> tracker = ImputationProvenanceTracker().initialize(data)
+            >>> tracker.mark_interpolated('var', dates[1:])
+            >>> tracker.provenance_matrix_['var'].tolist()
+            ['original', 'interpolated', 'interpolated']
         """
         self.mark_imputed(column, index, ProvenanceType.INTERPOLATED)
 
@@ -574,10 +608,15 @@ class ImputationProvenanceTracker:
                 fit on.
 
         Examples:
+            >>> dates = pd.date_range('2023-01-31', periods=3, freq='ME')
+            >>> data = pd.DataFrame({'var': [1.0, np.nan, np.nan]}, index=dates)
+            >>> tracker = ImputationProvenanceTracker().initialize(data)
             >>> # Model that only saw true values
-            >>> tracker.mark_model_imputed('var1', dates[2])
+            >>> tracker.mark_model_imputed('var', dates[1])
             >>> # Model that read a model-imputed covariate
-            >>> tracker.mark_model_imputed('var1', dates[5], covariate_taint='imputed')
+            >>> tracker.mark_model_imputed('var', dates[2], covariate_taint='imputed')
+            >>> tracker.provenance_matrix_['var'].tolist()
+            ['original', 'model_on_true', 'model_on_imputed']
         """
         provenance = resolve_model_provenance(covariate_taint, target_taint)
         self.mark_imputed(column, index, provenance)
@@ -591,7 +630,7 @@ class ImputationProvenanceTracker:
         """Reset the provenance of specific cells to "not filled".
 
         Symmetric of :meth:`mark_imputed`: it removes a provenance instead of
-        setting one. The cells go back to "not filled" (null, like the NaN cells
+        setting one. The cells go back to "not filled" (NaN, like the cells
         :meth:`initialize` leaves unfilled), so that a cell emptied by the
         cascade stops being declared ORIGINAL while it no longer carries any
         value.
@@ -605,8 +644,11 @@ class ImputationProvenanceTracker:
             KeyError: If a label of ``index`` is absent from the matrix.
 
         Examples:
-            >>> tracker.clear_provenance('pib_trimestriel', anchor_dates)
-            >>> tracker.get_provenance('pib_trimestriel', anchor_dates[0]) is None
+            >>> dates = pd.date_range('2023-01-31', periods=2, freq='ME')
+            >>> data = pd.DataFrame({'var': [1.0, 2.0]}, index=dates)
+            >>> tracker = ImputationProvenanceTracker().initialize(data)
+            >>> tracker.clear_provenance('var', dates[:1])
+            >>> tracker.get_provenance('var', dates[0]) is None
             True
         """
         # Validation de l'initialisation
@@ -617,7 +659,7 @@ class ImputationProvenanceTracker:
         if column not in self.provenance_matrix_.columns:
             raise ValueError(f"Column '{column}' not found in provenance matrix")
 
-        # Remise à l'état "non renseigné" (convention de initialize pour un NaN)
+        # Remise à l'état "non renseigné" (NaN, comme les cellules vides de initialize)
         self._check_labels_exist(index)
         self.provenance_matrix_.loc[index, column] = None
 
@@ -634,14 +676,24 @@ class ImputationProvenanceTracker:
             index: Index location(s) to query.
 
         Returns:
-            ProvenanceType for single index, or Series of ProvenanceType for multiple indices.
+            For a single label, the ``ProvenanceType`` member of the cell, or
+            ``None`` when it is not marked; otherwise the selected cells, of
+            dtype ``PROVENANCE_DTYPE``.
 
         Raises:
             ValueError: If provenance matrix not initialized or invalid inputs.
 
         Examples:
-            >>> tracker.get_provenance('var1', pd.Timestamp('2023-03-31'))
+            >>> dates = pd.date_range('2023-01-31', periods=3, freq='ME')
+            >>> data = pd.DataFrame({'var1': [1.0, np.nan, np.nan]}, index=dates)
+            >>> tracker = ImputationProvenanceTracker().initialize(data)
+            >>> tracker.mark_model_imputed('var1', dates[1])
+            >>> tracker.get_provenance('var1', pd.Timestamp('2023-02-28'))
             <ProvenanceType.MODEL_ON_TRUE: 'model_on_true'>
+            >>> tracker.get_provenance('var1', dates[2]) is None
+            True
+            >>> tracker.get_provenance('var1', dates).tolist()
+            ['original', 'model_on_true', nan]
         """
         # Validation de l'initialisation
         if self.provenance_matrix_ is None:
@@ -651,7 +703,11 @@ class ImputationProvenanceTracker:
         if column not in self.provenance_matrix_.columns:
             raise ValueError(f"Column '{column}' not found in provenance matrix")
 
-        return self.provenance_matrix_.loc[index, column]
+        selected = self.provenance_matrix_.loc[index, column]
+        # Cellule unique : le membre d'énumération plutôt que la chaîne stockée
+        if isinstance(selected, pd.Series):
+            return selected
+        return None if pd.isna(selected) else ProvenanceType(selected)
 
     # Méthode d'extraction du masque
     def get_mask(
@@ -672,10 +728,17 @@ class ImputationProvenanceTracker:
             ValueError: If provenance matrix not initialized.
 
         Examples:
-            >>> # Get mask of all model-imputed values
+            >>> data = pd.DataFrame({'var1': [1.0, np.nan, np.nan], 'var2': [1.0, 2.0, 3.0]})
+            >>> tracker = ImputationProvenanceTracker().initialize(data)
+            >>> tracker.mark_model_imputed('var1', 1)
+            >>> tracker.mark_model_imputed('var1', 2, covariate_taint='imputed')
+            >>> # Mask of all model-imputed values
             >>> mask = tracker.get_mask([ProvenanceType.MODEL_ON_TRUE, ProvenanceType.MODEL_ON_IMPUTED])
-            >>> # Get mask of original values for specific column
-            >>> mask = tracker.get_mask(ProvenanceType.ORIGINAL, column='var1')
+            >>> mask['var1'].tolist()
+            [False, True, True]
+            >>> # Mask of original values for a specific column
+            >>> tracker.get_mask(ProvenanceType.ORIGINAL, column='var1').tolist()
+            [True, False, False]
         """
         # Validation de l'initialisation
         if self.provenance_matrix_ is None:
@@ -715,7 +778,8 @@ class ImputationProvenanceTracker:
             ValueError: If provenance matrix not initialized.
 
         Examples:
-            >>> stats = tracker.compute_statistics()
+            >>> data = pd.DataFrame({'var1': [1.0, np.nan], 'var2': [1.0, 2.0]})
+            >>> stats = ImputationProvenanceTracker().initialize(data).compute_statistics()
             >>> print(f"Original values: {stats['overall']['original_pct']:.1f}%")
             Original values: 75.0%
         """
@@ -732,7 +796,7 @@ class ImputationProvenanceTracker:
         """Get the full provenance matrix.
 
         Returns:
-            DataFrame containing ProvenanceType values for each cell.
+            Copy of the matrix, of dtype ``PROVENANCE_DTYPE``.
 
         Raises:
             ValueError: If provenance matrix not initialized.
@@ -746,30 +810,23 @@ class ImputationProvenanceTracker:
         """Convert provenance matrix to string representation.
 
         Returns:
-            DataFrame with string values ('original', 'model_on_true', etc.) instead of enums,
-            in the ``str`` dtype.
+            DataFrame with string values ('original', 'model_on_true', etc.),
+            ``'not_imputed'`` for a cell not marked, in the ``str`` dtype.
 
         Raises:
             ValueError: If provenance matrix not initialized.
 
         Examples:
-            >>> string_matrix = tracker.to_string_matrix()
-            >>> string_matrix.iloc[0, 0]
-            'original'
+            >>> data = pd.DataFrame({'var1': [1.0, np.nan]})
+            >>> string_matrix = ImputationProvenanceTracker().initialize(data).to_string_matrix()
+            >>> string_matrix['var1'].tolist()
+            ['original', 'not_imputed']
         """
         if self.provenance_matrix_ is None:
             raise ValueError("Provenance matrix not initialized. Call initialize() first.")
 
-        # Conversion des ProvenanceType en chaînes
-        def convert_to_string(val):
-            if val is None or pd.isna(val):
-                return 'not_imputed'
-            elif isinstance(val, ProvenanceType):
-                return val.value
-            else:
-                return str(val)
-
-        return self.provenance_matrix_.map(convert_to_string).astype('str')
+        # Catégories rendues en chaînes, cellules non renseignées nommées
+        return self.provenance_matrix_.astype('str').fillna('not_imputed')
 
     # Méthode d'appariement de deux jeux de données
     def merge(
@@ -801,8 +858,12 @@ class ImputationProvenanceTracker:
                 shape is not enough).
 
         Examples:
-            >>> tracker1.merge(tracker2, overwrite=True)
-            >>> tracker1.merge(tracker3, overwrite=False)
+            >>> data = pd.DataFrame({'var': [1.0, np.nan, np.nan]})
+            >>> tracker1 = ImputationProvenanceTracker().initialize(data)
+            >>> tracker2 = ImputationProvenanceTracker().initialize(data)
+            >>> tracker2.mark_interpolated('var', [1, 2])
+            >>> tracker1.merge(tracker2, overwrite=True).provenance_matrix_['var'].tolist()
+            ['original', 'interpolated', 'interpolated']
         """
         # Validation
         if self.provenance_matrix_ is None:

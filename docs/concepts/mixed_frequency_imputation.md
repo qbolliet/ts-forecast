@@ -64,7 +64,14 @@ chaque `transform`) est exposée dans `imputation_provenance_`, et son résumé
 chiffré dans `provenance_statistics_`, compté sur le niveau cible. La matrice
 d'un `transform` décrit les cellules de **sa sortie** : une colonne plus fine
 que la ligne y porte l'agrégation exacte de la période (`AGGREGATED`), et une
-cellule vide n'est jamais marquée.
+cellule vide n'est jamais marquée (`NaN`).
+
+La matrice est **catégorielle** (`PROVENANCE_DTYPE`) : ses catégories sont les dix
+valeurs de `ProvenanceType`, une cellule se relit en simple chaîne (`'original'`,
+`'model_on_true'`...) et se compare directement à un membre
+(`provenance == ProvenanceType.ORIGINAL`). Chaque cellule tient sur un code
+entier : comptages et masques restent rapides et peu gourmands en mémoire sur de
+gros panels, et toute valeur hors vocabulaire est refusée à l'écriture.
 
 ## Le plan, source de vérité unique
 

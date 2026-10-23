@@ -190,7 +190,7 @@ class TestTransformOnLaterDates:
 
         # Cellules 2023 de a1 et a2 toutes produites par un modèle
         for column in ('a1', 'a2'):
-            assert provenance[column].map(lambda mark: mark.value.startswith('model_')).all()
+            assert provenance[column].map(lambda mark: mark.startswith('model_')).all()
         # Valeurs d'or : totaux 2023 de 150 (a1) et 72 (a2)
         assert result.loc['2023', 'a1'].sum() == pytest.approx(150.0)
         assert result.loc['2023', 'a2'].sum() == pytest.approx(72.0)
@@ -290,7 +290,7 @@ class TestColumnWithoutAnchorAtTransform:
 
         assert captured['result']['a1'].notna().sum() == 12
         marks = set(imputer.imputation_provenance_['a1'])
-        assert len(marks) == 1 and marks.pop().value.startswith('model_on_')
+        assert len(marks) == 1 and marks.pop().startswith('model_on_')
         assert any('a1' in m and 'without any observation' in m for m in messages)
 
     def test_extended_window_predicts_it_with_its_history(self, reference_timeseries):
@@ -304,7 +304,7 @@ class TestColumnWithoutAnchorAtTransform:
 
         assert result.loc['2023', 'a1'].notna().all()
         marks = set(imputer.imputation_provenance_.loc['2023', 'a1'])
-        assert len(marks) == 1 and marks.pop().value.startswith('model_on_')
+        assert len(marks) == 1 and marks.pop().startswith('model_on_')
 
 
 # =============================================================================

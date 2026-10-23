@@ -27,7 +27,7 @@ from tests.support.datasets import build_mixed_frequency_panel, build_panel_refe
 from tests.support.perturbations import string_dtypes
 from tsforecast.crossvals import PanelOutOfSampleSplit, PanelOutOfSampleSplitPerEntity
 from tsforecast.delays import calculate_applicable_delay, compare_and_detect_delays, create_delay_transformer_factory
-from tsforecast.frequency import HighFrequencyImputer, ProvenanceType
+from tsforecast.frequency import PROVENANCE_DTYPE, HighFrequencyImputer, ProvenanceType
 from tsforecast.panel import PanelwiseTransformer
 from tsforecast.utils.frequency import detect_dataset_frequency
 from tsforecast.utils.validation import validate_temporal_data
@@ -203,7 +203,7 @@ class TestOutputStringDtypes:
         assert frame.index.dtype == 'str' and set(frame.index) == set(COLUMNS.values())
 
     def test_imputer_frequency_level_and_provenance(self, label_dtype):
-        """The stacked output's ``frequency`` level is ``str``; the provenance holds members."""
+        """The stacked output's ``frequency`` level is ``str``; the provenance is categorical."""
         reference = build_panel_reference()[['m1', 'q1', 'v']]
         data = _relabel(reference, {'FR': 'Côte d’Ivoire', 'DE': 'A/B (n°2)', 'IT': 'É-1 % x'},
                         {'m1': 'mensuel (brut)', 'q1': 'trimestriel %', 'v': 'v/an'}, label_dtype)
@@ -214,5 +214,6 @@ class TestOutputStringDtypes:
 
         assert output.index.get_level_values('frequency').dtype == 'str'
         assert list(imputer.imputation_provenance_.columns) == list(data.columns)
+        assert (imputer.imputation_provenance_.dtypes == PROVENANCE_DTYPE).all()
         cells = [value for value in imputer.imputation_provenance_.to_numpy().ravel() if not pd.isna(value)]
-        assert cells and all(isinstance(value, ProvenanceType) for value in cells)
+        assert cells and set(cells) <= {member.value for member in ProvenanceType}

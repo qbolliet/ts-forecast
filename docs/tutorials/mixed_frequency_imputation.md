@@ -57,15 +57,16 @@ La sortie porte un niveau `frequency` sur l'index (`(frequency, date)` ici).
 ## 3. Lire la provenance
 
 ```python
-imputer.imputation_provenance_.xs("M", level="frequency")["a1"].value_counts()
-# ProvenanceType.MODEL_ON_TRUE   60   (tout le niveau mensuel produit)
+imputer.imputation_provenance_.xs("M", level="frequency")["a1"].value_counts().head(1)
+# model_on_true    60   (tout le niveau mensuel produit)
 
 imputer.provenance_statistics_["overall"]["model_on_true_pct"]
 ```
 
 Le niveau mensuel de `a1` est **entièrement produit** (désagrégation modélisée
 des ancres) : ses cellules portent toutes `MODEL_ON_TRUE`. Le niveau annuel
-d'origine, lui, reste `ORIGINAL`.
+d'origine, lui, reste `ORIGINAL`. La matrice est catégorielle : `value_counts`
+liste les dix types de provenance, à zéro compris, d'où le `head(1)`.
 
 `provenance_statistics_` est le résumé chiffré (comptes + pourcentages par
 `ProvenanceType`), au global et par colonne. Comme `imputation_provenance_`, il
