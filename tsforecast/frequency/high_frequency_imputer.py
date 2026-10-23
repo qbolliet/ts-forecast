@@ -639,9 +639,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         >>> imputer = HighFrequencyImputer(
         ...     target_frequency='M', estimator=LinearRegression()
         ... )
-        >>> imputer.fit(data)                       # doctest: +SKIP
-        >>> imputer.frequency_progression_          # doctest: +SKIP
+        >>> imputed = imputer.fit(data).transform(data)
+        >>> imputer.frequency_progression_
         ['M']
+        >>> float(imputed.loc['M', 'a1'].loc['2022'].sum().round(1))
+        132.0
     """
 
     # Initialisation
@@ -1505,8 +1507,21 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             panel where every entity agrees) or to a per-entity mapping.
 
         Examples:
-            >>> imputer._detected_frequencies_by_column()   # doctest: +SKIP
-            {'m1': 'M', 'q1': 'Q', 'v': {('FR',): 'Y', ('DE',): 'Q'}}
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> idx = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['entity', 'date'])
+            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
+            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
+            >>> panel.loc[('DE', dates[2::3]), 'v'] = np.arange(8.0) * 5 + 30
+
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M', estimator=LinearRegression()
+            ... ).fit(panel)
+            >>> imputer._detected_frequencies_by_column()
+            {'m1': 'M', 'v': {('DE',): 'Q', ('FR',): 'Y'}}
         """
         # Couples apparus au transform : aucune fréquence de fit ne les porte,
         # la détection faite sur les données du transform est leur seule
@@ -1635,7 +1650,20 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             ``None`` for an unanchored group.
 
         Examples:
-            >>> imputer._imputable_groups('M')          # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
+            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
+            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M',
+            ...     estimator=LinearRegression(),
+            ...     impute_unobserved_entities=True,
+            ... ).fit(panel)
+            >>> imputer._imputable_groups({('FR',): 'M', ('IT',): 'M'})
             {('v', 'Y'): (('FR',),), ('v', None): (('IT',),)}
         """
         # Regroupement des couples imputables par (colonne, fréquence source)
@@ -1672,7 +1700,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             binding does not name it.
 
         Examples:
-            >>> imputer._entity_target_frequency(('FR',))   # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
+            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
+            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M', estimator=LinearRegression()
+            ... ).fit(panel)
+            >>> imputer._entity_target_frequency(('FR',))
             'M'
         """
         # Les deux formes de la cible, scalaire et par entité, lues ici seulement
@@ -1723,7 +1762,20 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             from.
 
         Examples:
-            >>> imputer._unanchored_pairs_at({("IT",): "M"})   # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
+            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
+            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M',
+            ...     estimator=LinearRegression(),
+            ...     impute_unobserved_entities=True,
+            ... ).fit(panel)
+            >>> imputer._unanchored_pairs_at({('IT',): 'M'})
             [(('IT',), 'v')]
         """
         # Capacité fermée par défaut, et sans objet sur une série temporelle :
@@ -1809,9 +1861,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Kept columns, in the order of ``candidates``.
 
         Examples:
-            >>> imputer._select_feature_columns(       # doctest: +SKIP
-            ...     ['m1', 'q1'], train_frame, pred_frame
-            ... )
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
+            >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M', estimator=LinearRegression()
+            ... ).fit(data)
+            >>> pred_frame = data.assign(q1=np.nan)
+            >>> imputer._select_feature_columns(['m1', 'q1'], data, pred_frame)
             ('m1',)
         """
         # Éligibilité par entité, portée par le matérialiseur
@@ -1883,7 +1944,22 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             a stage: nothing is imputable at it.
 
         Examples:
-            >>> imputer._group_frequency_progression(None, 'M')  # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2020-01-31', periods=36, freq='ME')
+            >>> data = pd.DataFrame(
+            ...     {'m1': np.arange(36.0), 'q1': np.nan, 'a1': np.nan}, index=dates
+            ... )
+            >>> data.loc[dates[2::3], 'q1'] = np.arange(12.0) * 3 + 10
+            >>> data.loc[dates[11::12], 'a1'] = [100.0, 130.0, 160.0]
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M',
+            ...     estimator=LinearRegression(),
+            ...     impute_intermediate_frequencies=True,
+            ... ).fit(data)
+            >>> imputer._group_frequency_progression(None, 'M')
             ['Q', 'M']
         """
         # Fréquence cible du groupe, forme canonique de comparaison
@@ -1951,8 +2027,23 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             ``{entity: frequency}`` bindings.
 
         Examples:
-            >>> imputer.frequency_progression_          # doctest: +SKIP
-            [{('FR',): 'Q', ('DE',): 'Q'}, {('FR',): 'M'}]
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> idx = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['entity', 'date'])
+            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
+            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
+            >>> panel.loc[('DE', dates[2::3]), 'v'] = np.arange(8.0) * 5 + 30
+
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M',
+            ...     estimator=LinearRegression(),
+            ...     impute_intermediate_frequencies=True,
+            ... ).fit(panel)
+            >>> [sorted(stage.items()) for stage in imputer.frequency_progression_]
+            [[(('DE',), 'Q'), (('FR',), 'Q')], [(('DE',), 'M'), (('FR',), 'M')]]
         """
         # Modalité sans étape intermédiaire : une seule étape, la cible.
         if self.impute_intermediate_frequencies is False:
@@ -2432,8 +2523,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             none does — the interpolation fallback then applies.
 
         Examples:
-            >>> imputer._estimator_for('a1')          # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M', estimator={'a1': LinearRegression()}
+            ... )
+            >>> imputer._estimator_for('a1')
             LinearRegression()
+            >>> imputer._estimator_for('m1') is None
+            True
         """
         # Initialisation de l'estimateur à la valeur de l'attribut
         estimator = self.estimator
@@ -3748,7 +3848,20 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             carries no entity level.
 
         Examples:
-            >>> HighFrequencyImputer._step_pairs(step)     # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
+            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
+            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M',
+            ...     estimator=LinearRegression(),
+            ...     impute_unobserved_entities=True,
+            ... ).fit(panel)
+            >>> HighFrequencyImputer._step_pairs(imputer.imputation_plan_.steps[-1])
             [('IT', 'v')]
         """
         # Série temporelle : aucune entité, donc aucun couple à nommer
@@ -3952,7 +4065,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             The keys of the misaligned pairs, sorted for determinism.
 
         Examples:
-            >>> imputer._misaligned_anchor_pairs(fiscal_years, {'a1': 'Y'})  # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=36, freq='ME')
+            >>> fiscal_years = pd.DataFrame(
+            ...     {'m1': np.arange(36.0), 'a1': np.nan}, index=dates
+            ... )
+            >>> fiscal_years.loc[dates[5::12], 'a1'] = [1.0, 2.0, 3.0]
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M', estimator=LinearRegression()
+            ... ).fit(fiscal_years)
+            >>> imputer._misaligned_anchor_pairs(fiscal_years, {'a1': 'Y'})
             ('a1',)
         """
         # Initialisation de la liste des couples mal placés
@@ -4095,10 +4220,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Frequency label string.
 
         Examples:
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> imputer = HighFrequencyImputer(target_frequency='M')
             >>> imputer._stage_frequency_label('M')
             'M'
             >>> imputer._stage_frequency_label({('FR',): 'Q', ('DE',): 'Q'})
             'Q'
+            >>> imputer._stage_frequency_label({('FR',): 'Y', ('DE',): 'Q'})
+            "('DE',)=Q+('FR',)=Y"
         """
         # Cas d'une fréquence unique (séries temporelles)
         if not isinstance(pred_freq, dict):
@@ -4953,7 +5082,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             given.
 
         Examples:
-            >>> X_train, y_train = imputer.fit_transform(X, y)   # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
+            >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
+            >>> y = pd.Series(np.nan, index=dates, name='y')
+            >>> y.loc[dates[2::3]] = np.arange(8.0)
+            >>> imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+            >>> X_train, y_train = imputer.fit_transform(data, y)
+            >>> int(y.notna().sum()), int(y_train.notna().sum())
+            (8, 24)
         """
         # Entraînement du transformer
         self.fit(X, y)
@@ -5067,7 +5208,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 prediction pass meets a model that needs the target.
 
         Examples:
-            >>> imputed = imputer.fit(df).transform(df)      # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
+            >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
+            >>> imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+            >>> imputed = imputer.fit(data).transform(data)
+            >>> imputed.loc['M', 'q1'].iloc[:3].round(1).tolist()
+            [3.0, 3.3, 3.7]
         """
         # =================================================================
         # PHASE 0' — Setup, contrat d'entrée et instantané
@@ -5542,7 +5693,22 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 transform did not produce.
 
         Examples:
-            >>> restored = imputer.inverse_transform(transformed)  # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
+            >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M',
+            ...     estimator=LinearRegression(),
+            ...     restore_original_values=True,
+            ... )
+            >>> transformed = imputer.fit(data).transform(data)
+            >>> restored = imputer.inverse_transform(transformed)
+            >>> restored.shape, restored['q1'].dropna().head(3).tolist()
+            ((24, 2), [10.0, 13.0, 16.0])
         """
         # 0. Garde : la provenance du dernier transform est indispensable
         if 'imputation_provenance_' not in self.__dict__:

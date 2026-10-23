@@ -348,8 +348,19 @@ class ImputationStep:
             :func:`~tsforecast.frequency.provenance.resolve_model_provenance`.
 
         Examples:
-            >>> _example_step().emitted_provenance      # doctest: +SKIP
-            <ProvenanceType.MODEL_ON_TRUE: 'model_on_true'>
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from sklearn.linear_model import LinearRegression
+            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+            >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
+            >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
+            >>> imputer = HighFrequencyImputer(
+            ...     target_frequency='M', estimator=LinearRegression()
+            ... ).fit(data)
+            >>> step = imputer.imputation_plan_.steps[0]
+            >>> step.emitted_provenance == 'model_on_true'
+            True
         """
         if self.is_fallback:
             return ProvenanceType.INTERPOLATED
@@ -655,9 +666,20 @@ def append_step(plan: ImputationPlan, step: ImputationStep) -> ImputationPlan:
         followed by ``step``.
 
     Examples:
+        >>> import numpy as np
+        >>> import pandas as pd
+        >>> from sklearn.linear_model import LinearRegression
+        >>> from tsforecast.frequency import HighFrequencyImputer
+        >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+        >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
+        >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
+        >>> imputer = HighFrequencyImputer(
+        ...     target_frequency='M', estimator=LinearRegression()
+        ... ).fit(data)
+        >>> step = imputer.imputation_plan_.steps[0]
         >>> plan = ImputationPlan()
-        >>> append_step(plan, _example_step()).steps  # doctest: +SKIP
-        (ImputationStep(...),)
+        >>> len(append_step(plan, step).steps)
+        1
         >>> len(plan)
         0
     """

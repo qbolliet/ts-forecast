@@ -222,9 +222,14 @@ class ImputationWindowCalculator:
         ...     imputation_scope='extended_both',
         ...     training_scope='unrestricted',
         ... )
-        >>> calc.fit(data)
+        >>> calc.fit(data) is calc
+        True
         >>> print(calc.imputation_window_start_, calc.imputation_window_end_)
+        2023-01-31 00:00:00 2023-12-31 00:00:00
+        >>> strict = calc.get_imputation_window_mask(data, kind='strict')
         >>> training = calc.get_imputation_window_mask(data, kind='training')
+        >>> int(strict.sum()), int(training.sum())
+        (10, 12)
     """
 
     # Initialisation
@@ -403,9 +408,16 @@ class ImputationWindowCalculator:
                 and a single warning says so.
 
         Examples:
-            >>> calc = ImputationWindowCalculator()
-            >>> calc.fit(data)
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> dates = pd.date_range('2023-01-31', periods=12, freq='ME')
+            >>> data = pd.DataFrame({
+            ...     'var1': [np.nan] + list(range(1, 11)) + [np.nan],
+            ...     'var2': range(12),
+            ... }, index=dates)
+            >>> calc = ImputationWindowCalculator().fit(data)
             >>> print(calc.imputation_window_start_, calc.imputation_window_end_)
+            2023-02-28 00:00:00 2023-11-30 00:00:00
         """
         # Validation des données d'entrée
         if not isinstance(data, pd.DataFrame):
@@ -1581,8 +1593,16 @@ class ImputationWindowCalculator:
                 the target frequency is not lower than the mask frequency.
 
         Examples:
-            >>> monthly_calc.fit(data)
-            >>> quarterly_mask = monthly_calc.get_mask_at_frequency('QE')
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> dates = pd.date_range('2023-01-31', periods=12, freq='ME')
+            >>> data = pd.DataFrame({
+            ...     'var1': [np.nan] + list(range(1, 11)) + [np.nan],
+            ...     'var2': range(12),
+            ... }, index=dates)
+            >>> calc = ImputationWindowCalculator().fit(data)
+            >>> calc.get_mask_at_frequency('QE').tolist()
+            [False, True, True, False]
         """
         # Vérification de l'entraînement du calculateur
         if not self._is_fitted:
@@ -1711,6 +1731,8 @@ class ImputationWindowCalculator:
             ValueError: If source_freq is strictly lower than target_freq.
 
         Examples:
+            >>> import pandas as pd
+            >>> calc = ImputationWindowCalculator()
             >>> grid = pd.date_range('2023-01-01', periods=12, freq='MS')
             >>> mask = pd.Series(True, index=grid)
             >>> calc._convert_mask_to_frequency(mask, 'M', 'Y').tolist()

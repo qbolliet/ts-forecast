@@ -512,7 +512,14 @@ class TrainingSetBuilder:
             row exactly once.
 
         Examples:
-            >>> builder._frequency_layers(rows, blocks)     # doctest: +SKIP
+            >>> import pandas as pd
+            >>> from tsforecast.frequency.training_set_builder import TrainingSetBuilder
+            >>> rows = {
+            ...     ('FR',): pd.DataFrame({'freq': ['Y', 'Q']}),
+            ...     ('DE',): pd.DataFrame({'freq': ['Q', 'Q']}),
+            ... }
+            >>> blocks = {('FR',): 'Y', ('DE',): 'Q'}
+            >>> TrainingSetBuilder._frequency_layers(rows, blocks)
             [{('FR',): 'Y', ('DE',): 'Q'}, {('FR',): 'Q'}]
         """
         # Fréquences de chaque entité, celle de son bloc en tête
