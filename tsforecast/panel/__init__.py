@@ -1,8 +1,8 @@
 """Panel data tools: ``PanelwiseTransformer`` and the entity helpers of ``panel.utils``.
 
 Re-exports the per-entity transformer and every public function of ``panel/utils.py``
-(panel detection, entity keys and their integer codes, entity masks and blocks, per-entity
-frequencies).
+(panel detection, entity keys and their integer codes, missing entity labels, entity masks
+and blocks, per-entity frequencies).
 """
 # Importation des modules
 from .transformers import PanelwiseTransformer
@@ -14,6 +14,7 @@ from .utils import (
     normalize_entity_key,
     factorize_row_keys,
     get_entity_codes,
+    check_entity_labels,
     normalize_entity_mapping,
     split_variable_key,
     get_unique_panel_entities,
@@ -36,6 +37,7 @@ __all__ = [
     'normalize_entity_key',
     'factorize_row_keys',
     'get_entity_codes',
+    'check_entity_labels',
     'normalize_entity_mapping',
     'split_variable_key',
     'get_unique_panel_entities',

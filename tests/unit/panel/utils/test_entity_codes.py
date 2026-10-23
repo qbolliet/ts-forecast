@@ -3,13 +3,15 @@
 Covers ``factorize_row_keys`` (composite keys, missing values, order of first
 appearance, length checks) and ``get_entity_codes`` (time series, one- and
 two-level panels, unsorted rows, unused levels, agreement with
-``get_unique_panel_entities``), with no tuple built per row.
+``get_unique_panel_entities``), with no tuple built per row, and ``check_entity_labels``
+(missing entity labels on index levels or columns).
 """
 import numpy as np
 import pandas as pd
 import pytest
 
 from tsforecast.panel.utils import (
+    check_entity_labels,
     factorize_row_keys,
     get_entity_codes,
     get_unique_panel_entities,
@@ -145,3 +147,47 @@ class TestGetEntityCodes:
         codes, entities = get_entity_codes(index)
         assert codes.tolist() == [0, 1, 1]
         assert entities[0] == ('FR',) and pd.isna(entities[1][0])
+
+
+class TestCheckEntityLabels:
+    """``check_entity_labels`` refuses a missing entity label, on index levels or columns."""
+
+    @pytest.mark.parametrize('missing', [np.nan, None], ids=['nan', 'none'])
+    def test_missing_label_on_the_entity_level_is_refused(self, dates, missing):
+        """Default levels of a panel: every level but the last, data or index alike."""
+        index = pd.MultiIndex.from_arrays([['FR', missing, missing], dates], names=['entity', 'date'])
+        for data in (index, pd.Series(range(3), index=index)):
+            with pytest.raises(ValueError, match="level 'entity' holds missing values"):
+                check_entity_labels(data)
+
+    def test_error_names_the_position_of_an_unnamed_level(self, panel_3l):
+        """An unnamed level is designated by its position."""
+        index = panel_3l.index.to_frame(index=False)
+        index.loc[0, 'country'] = np.nan
+        broken = pd.MultiIndex.from_frame(index).set_names([None, None, None])
+        with pytest.raises(ValueError, match='level 1 holds missing values'):
+            check_entity_labels(broken)
+
+    def test_only_the_given_levels_are_read(self, dates):
+        """A missing label outside ``levels`` is not an entity label."""
+        index = pd.MultiIndex.from_arrays([['FR', 'FR', 'DE'], ['a', None, 'b'], dates])
+        check_entity_labels(index, levels=[0])
+        with pytest.raises(ValueError, match='level 1'):
+            check_entity_labels(index, levels=[1])
+
+    def test_missing_date_is_not_an_entity_label(self, dates):
+        """The last level of a panel is the time: never read by default."""
+        index = pd.MultiIndex.from_arrays([['FR', 'FR', 'DE'], [dates[0], pd.NaT, dates[2]]])
+        check_entity_labels(index)
+
+    def test_time_series_has_no_entity_label(self, timeseries):
+        """A simple index has no entity level to read."""
+        check_entity_labels(timeseries)
+
+    def test_missing_label_in_an_entity_column_is_refused(self, dates):
+        """Entity columns are read on the frame, the other columns are not."""
+        frame = pd.DataFrame({'country': ['FR', None, 'DE'], 'sector': ['a', 'b', 'c'],
+                              'x': [1.0, np.nan, 3.0]}, index=dates)
+        check_entity_labels(frame, columns=['sector'])
+        with pytest.raises(ValueError, match="column 'country' holds missing values"):
+            check_entity_labels(frame, columns=['sector', 'country'])

@@ -94,7 +94,8 @@ Détection de fréquence : `FrequencyDetector` et `detect_frequency()` /
 - `utils.py` : `is_panel_data()`, `get_entity_levels()`, `get_unique_panel_entities()`,
   `normalize_entity_key()`, `get_entity_mask()`, `resolve_entity_column_frequencies()`,
   `get_entity_codes()` / `factorize_row_keys()` (codes entiers d'entités et de clés composites,
-  sans tuple par ligne), ...
+  sans tuple par ligne), `check_entity_labels()` (refus des étiquettes d'entité manquantes, en
+  niveaux d'index ou en colonnes : jamais d'entité `NaN` écartée en silence par un `groupby`), ...
 
 ### `tsforecast/xy/`
 - `transformers.py` : `XYTransformerMixin` — transformateurs qui transforment

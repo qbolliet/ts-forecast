@@ -23,6 +23,8 @@ from ..utils.frequency.utils import (
     normalize_frequency,
 )
 from ..panel.utils import (
+    check_entity_labels,
+    get_entity_codes,
     get_entity_mask,
     get_unique_panel_entities,
     is_panel_data,
@@ -461,7 +463,12 @@ class ImputationWindowCalculator:
             index: Panel ``MultiIndex``, the date as last level.
 
         Returns:
-            Mapping from entity key tuple to detected frequency, or None.
+            Mapping from entity key tuple to detected frequency, or None, in
+            order of first appearance of the entities.
+
+        Raises:
+            ValueError: If an entity label is missing (NaN, None): such rows
+                belong to no entity.
 
         Examples:
             >>> idx = pd.MultiIndex.from_tuples(
@@ -470,17 +477,25 @@ class ImputationWindowCalculator:
             >>> ImputationWindowCalculator._detect_entity_index_frequencies(idx)
             {('A',): 'M', ('B',): None}
         """
-        # Dates et entités de chaque ligne
+        # Refus des étiquettes d'entité manquantes : leurs lignes n'ont pas d'entité
+        check_entity_labels(index)
+
+        # Code entier de l'entité de chaque ligne, sans tuple par ligne
+        codes, entities = get_entity_codes(index)
+        # Lignes regroupées par entité en un seul tri stable : les lignes d'une
+        # entité forment une tranche contiguë, dans leur ordre d'origine
+        order = np.argsort(codes, kind='stable')
+        bounds = np.searchsorted(codes[order], np.arange(len(entities) + 1))
         dates = index.get_level_values(-1)
-        entities = index.droplevel(-1)
+
         # Détection entité par entité, l'échec d'une seule n'arrêtant rien
         frequencies: Dict[tuple, Optional[str]] = {}
-        for entity in entities.unique():
+        for position, entity in enumerate(entities):
             try:
-                frequency = detect_index_frequency(dates[entities == entity])
+                frequency = detect_index_frequency(dates[order[bounds[position]:bounds[position + 1]]])
             except ValueError:
                 frequency = None
-            frequencies[normalize_entity_key(entity)] = frequency
+            frequencies[entity] = frequency
         return frequencies
 
     # Méthode auxiliaire d'estimation de la fenêtre sur des données de séries temporelles

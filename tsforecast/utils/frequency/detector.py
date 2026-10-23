@@ -15,7 +15,12 @@ from .types import FrequencyType, UserFrequencyType
 from .._constants import INTRADAY_UNITS, MONTH_ABBREVIATIONS, WEEKDAY_ABBREVIATIONS
 from ..parse.utils import build_frequency_string
 from ..validation.utils import _convert_to_datetime
-from ...panel.utils import normalize_entity_key, detect_panel_structure, extract_time_series_from_multiindex
+from ...panel.utils import (
+    check_entity_labels,
+    detect_panel_structure,
+    extract_time_series_from_multiindex,
+    normalize_entity_key,
+)
 
 # Formats de sortie acceptés par toutes les méthodes de détection
 _RETURN_FORMATS = ('base', 'with_position', 'full', 'components')
@@ -289,8 +294,8 @@ class FrequencyDetector:
         Raises:
             ValueError: If a simple series has insufficient non-null
                 observations, if an index cannot be converted to datetime, if
-                a MultiIndex has fewer than 2 levels, or if ``return_format``
-                is unknown
+                a MultiIndex has fewer than 2 levels, if an entity label is
+                missing (NaN, None), or if ``return_format`` is unknown
 
         Examples:
             >>> import pandas as pd
@@ -330,6 +335,9 @@ class FrequencyDetector:
         # Extraction des niveaux de panel (tous sauf le dernier), désignés par position
         panel_levels = list(range(n_levels - 1))
         frequency_map = {}
+
+        # Refus des étiquettes d'entité manquantes : le groupby écarterait leurs lignes
+        check_entity_labels(series.index, levels=panel_levels)
 
         # Groupby sur les niveaux de panel et détection pour chaque groupe.
         # Un niveau UNIQUE est passé sous forme scalaire (et non liste de
@@ -389,6 +397,8 @@ class FrequencyDetector:
                 level_names.index(col) if col is not None else position
                 for position, col in enumerate(panel_cols)
             ]
+            # Refus des étiquettes d'entité manquantes : le groupby écarterait leurs lignes
+            check_entity_labels(df.index, levels=levels)
             # Un niveau unique est passé sous forme scalaire (et non liste de
             # longueur 1)
             groupby_levels = levels[0] if len(levels) == 1 else levels
@@ -406,6 +416,8 @@ class FrequencyDetector:
                         simple_series, return_format
                     )
         else:
+            # Refus des étiquettes d'entité manquantes : le groupby écarterait leurs lignes
+            check_entity_labels(df, columns=panel_cols)
             # Groupby par colonnes
             for panel_values, group_df in df.groupby(panel_cols):
                 # Création de l'identifiant du panel
@@ -492,7 +504,8 @@ class FrequencyDetector:
 
         Raises:
             ValueError: If time_col is specified but not found in df.columns,
-                if the time index cannot be converted to datetime, or if
+                if the time index cannot be converted to datetime, if an
+                entity label of a panel is missing (NaN, None), or if
                 ``return_format`` is unknown
 
         Examples:

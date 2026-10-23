@@ -422,13 +422,64 @@ def _check_panel_entity_labels(panel_data: Union[pd.DataFrame, pd.Series]) -> No
         )
 
     # Refus des étiquettes d'entité manquantes : aucun masque ne les sélectionne
-    index = panel_data.index
-    for position in range(index.nlevels - 1):
-        if index.get_level_values(position).isna().any():
+    check_entity_labels(panel_data)
+
+# Fonction de refus des étiquettes d'entité manquantes
+def check_entity_labels(
+    data: Union[pd.DataFrame, pd.Series, pd.Index],
+    levels: Optional[Sequence[int]] = None,
+    columns: Optional[Sequence[Any]] = None,
+) -> None:
+    """Reject entity labels that are missing (NaN, None).
+
+    A row whose entity label is missing belongs to no entity: grouping would
+    drop it silently, and no entity key could select it. Entity labels are
+    read on index levels, on columns, or both.
+
+    Args:
+        data: Data (DataFrame or Series) or its index.
+        levels: Positions of the entity levels of the index. ``None`` with
+            ``columns`` also ``None``: every level but the last of a panel
+            ``MultiIndex``, no level for a simple index.
+        columns: Names of the entity columns of a DataFrame.
+
+    Raises:
+        ValueError: If an entity level or column holds a missing value.
+
+    Examples:
+        >>> idx = pd.MultiIndex.from_arrays(
+        ...     [['FR', None], pd.date_range('2023-01-01', periods=2)], names=['country', 'date']
+        ... )
+        >>> check_entity_labels(idx)
+        Traceback (most recent call last):
+        ...
+        ValueError: Entity labels must not be missing, level 'country' holds missing values
+        >>> check_entity_labels(pd.DataFrame({'country': ['FR', 'DE']}), columns=['country'])
+    """
+    # Index des données
+    index = data if isinstance(data, pd.Index) else data.index
+    # Niveaux d'entité par défaut : tous sauf le dernier d'un panel
+    if levels is None and columns is None:
+        levels = range(index.nlevels - 1) if isinstance(index, pd.MultiIndex) else ()
+
+    # Niveaux d'index : une étiquette manquante d'un MultiIndex a le code -1
+    for position in levels or ():
+        if isinstance(index, pd.MultiIndex):
+            missing = bool((index.codes[position] == -1).any())
+        else:
+            missing = bool(index.isna().any())
+        if missing:
             name = index.names[position]
             raise ValueError(
                 f"Entity labels must not be missing, level "
                 f"{name if name is not None else position!r} holds missing values"
+            )
+
+    # Colonnes d'entité
+    for column in columns or ():
+        if data[column].isna().any():
+            raise ValueError(
+                f"Entity labels must not be missing, column {column!r} holds missing values"
             )
 
 # Fonction de regroupement des variables par entité

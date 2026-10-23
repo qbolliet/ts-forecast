@@ -24,6 +24,7 @@ from ..base.transformers import (
 )
 from .utils import (
     build_panel_index,
+    check_entity_labels,
     is_panel_data,
     iter_entity_blocks,
     normalize_entity_key,
@@ -317,11 +318,7 @@ class PanelwiseTransformer(PanelTimeSeriesTransformer, ReversibleTransformerMixi
 
         # Entités portées par des colonnes : une étiquette manquante écarterait ses
         # lignes de tout groupe, comme pour les entités portées par l'index
-        for col in self.panel_cols:
-            if X[col].isna().any():
-                raise ValueError(
-                    f"Entity labels must not be missing, column {col!r} holds missing values"
-                )
+        check_entity_labels(X, columns=self.panel_cols)
         # Groupes dans l'ordre d'apparition, blocs indexés par leurs dates
         has_time_col = self.time_col in X.columns
         for entity_key, positions in _groups_in_order_of_appearance(X.groupby(self.panel_cols, sort=False)):

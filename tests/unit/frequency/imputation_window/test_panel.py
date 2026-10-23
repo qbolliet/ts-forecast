@@ -1,7 +1,8 @@
 """Windows on panels.
 
-Scenarios: panel return types, entities without a window, structurally absent columns
-and heterogeneous coverage across entities.
+Scenarios: panel return types, entities without a window, structurally absent columns,
+heterogeneous coverage across entities and per-entity index frequencies (several entity
+levels, missing entity labels).
 """
 
 # Modules de base
@@ -489,3 +490,42 @@ class TestHeterogeneousCoveragePanel:
         calc = _fit_quietly(ImputationWindowCalculator(), heterogeneous_coverage_panel)
 
         assert (calc.entities_without_window_, set(calc.index_freq_.values())) == ((), {'M'})
+
+
+# =============================================================================
+# Fréquence d'index entité par entité
+# =============================================================================
+class TestEntityIndexFrequencies:
+    """The index frequency is detected per entity, entity labels being never missing."""
+
+    def test_two_entity_levels_with_interleaved_rows(self):
+        """Each ``(level 0, level 1)`` combination is one entity, whatever the row order.
+
+        The rows of the entities are interleaved: each entity still reads its
+        own dates only, in their original order.
+        """
+        months = pd.date_range('2020-01-31', periods=4, freq='ME')
+        quarters = pd.date_range('2020-03-31', periods=4, freq='QE')
+        tuples = [
+            row
+            for month, quarter in zip(months, quarters)
+            for row in (('A', 'x', month), ('A', 'y', quarter))
+        ] + [('B', 'x', months[0])]
+        index = pd.MultiIndex.from_tuples(tuples, names=['country', 'sector', 'date'])
+
+        assert ImputationWindowCalculator._detect_entity_index_frequencies(index) == {
+            ('A', 'x'): 'M', ('A', 'y'): 'Q', ('B', 'x'): None,
+        }
+
+    @pytest.mark.parametrize('level', [0, 1], ids=['first_entity_level', 'second_entity_level'])
+    def test_missing_entity_label_is_rejected(self, level):
+        """A missing entity label raises instead of being dropped or kept as an entity."""
+        df = _make_panel([('A', 'x'), ('B', 'y')])
+        labels = [list(df.index.get_level_values(position)) for position in range(df.index.nlevels)]
+        labels[level] = [np.nan if label == 'B' or label == 'y' else label for label in labels[level]]
+        df.index = pd.MultiIndex.from_arrays(labels, names=df.index.names)
+
+        with pytest.raises(ValueError, match='Entity labels must not be missing'):
+            ImputationWindowCalculator._detect_entity_index_frequencies(df.index)
+        with pytest.raises(ValueError, match='Entity labels must not be missing'):
+            _fit_quietly(ImputationWindowCalculator(), df)

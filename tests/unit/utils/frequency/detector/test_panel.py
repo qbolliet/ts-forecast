@@ -6,7 +6,7 @@ entity of a ``MultiIndex`` series, keys always tuples since commit ``67529a5``) 
 series, or per ``(entity..., column)`` pair of a panel, keys flattened; undetectable
 pairs mapped to ``None``): 2 and 3-level indexes, panel
 columns, ``time_col``, unsorted dates, unnamed levels, invalid
-``return_format``, undetectable time series columns.
+``return_format``, undetectable time series columns, missing entity labels.
 """
 from __future__ import annotations
 
@@ -303,3 +303,50 @@ class TestDetectDatasetFrequencyPanel:
         """An unknown ``return_format`` is rejected on a panel as on a time series."""
         with pytest.raises(ValueError, match='Invalid return_format'):
             FrequencyDetector().detect_dataset_frequency(two_entity_panel, return_format='bogus')
+
+
+# =============================================================================
+# Étiquettes d'entité manquantes : refusées, jamais écartées en silence
+# =============================================================================
+
+class TestMissingEntityLabels:
+    """A row without entity label raises instead of vanishing from the frequency map."""
+
+    @staticmethod
+    def _panel(missing_level: int) -> pd.DataFrame:
+        """Two-entity-level monthly panel whose second entity misses its label on ``missing_level``."""
+        dates = pd.date_range('2023-01-31', periods=4, freq='ME')
+        labels = [['A'] * 4 + ['B'] * 4, ['x'] * 4 + ['y'] * 4, list(dates) * 2]
+        labels[missing_level] = labels[missing_level][:4] + [np.nan] * 4
+        index = pd.MultiIndex.from_arrays(labels, names=['country', 'sector', 'date'])
+        return pd.DataFrame({'value': np.arange(8.0)}, index=index)
+
+    @pytest.mark.parametrize('level', [0, 1], ids=['first_entity_level', 'second_entity_level'])
+    def test_series_detection_refuses_a_missing_label(self, level):
+        """``detect_frequency`` on a ``MultiIndex`` series."""
+        with pytest.raises(ValueError, match='Entity labels must not be missing'):
+            FrequencyDetector().detect_frequency(self._panel(level)['value'])
+
+    @pytest.mark.parametrize('level', [0, 1], ids=['first_entity_level', 'second_entity_level'])
+    def test_dataset_detection_refuses_a_missing_label_in_the_index(self, level):
+        """``detect_dataset_frequency`` with the entities on the index."""
+        with pytest.raises(ValueError, match='Entity labels must not be missing'):
+            FrequencyDetector().detect_dataset_frequency(self._panel(level))
+
+    def test_dataset_detection_refuses_a_missing_label_in_a_column(self):
+        """``detect_dataset_frequency`` with the entities in columns."""
+        frame = self._panel(1).reset_index()
+        with pytest.raises(ValueError, match="column 'sector' holds missing values"):
+            FrequencyDetector().detect_dataset_frequency(
+                frame, time_col='date', panel_cols=['country', 'sector']
+            )
+
+    def test_missing_value_outside_the_entity_labels_is_accepted(self):
+        """Missing values of the measured column are not entity labels."""
+        frame = self._panel(0).reset_index()
+        frame['country'] = frame['country'].fillna('B')
+        frame.loc[0, 'value'] = np.nan
+        result = FrequencyDetector().detect_dataset_frequency(
+            frame, time_col='date', panel_cols=['country', 'sector']
+        )
+        assert result == {('A', 'x', 'value'): 'M', ('B', 'y', 'value'): 'M'}
