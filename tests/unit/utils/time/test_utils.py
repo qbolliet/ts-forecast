@@ -20,6 +20,7 @@ by ``TestNanosecond``, ``TestMillisecond``, ``TestTimezone``, ``TestPeriodInput`
 """
 # Importation des modules
 # Modules de base
+import warnings
 import numpy as np
 import pandas as pd
 # Module de gestion des dates
@@ -246,9 +247,26 @@ class TestResolveDate:
         """An explicit ``format`` overrides pandas' inference."""
         assert resolve_date(text, format=fmt) == expected
 
-    def test_string_result_is_plain_datetime(self):
-        """A parsed string is returned as a ``datetime``, not a ``Timestamp``."""
-        assert type(resolve_date("2023-06-15")) is datetime
+    def test_string_result_is_a_timestamp(self):
+        """A parsed string is returned as a ``Timestamp`` (a ``datetime`` subclass)."""
+        result = resolve_date("2023-06-15")
+
+        assert type(result) is pd.Timestamp
+        assert isinstance(result, datetime)
+
+    def test_today_result_is_a_timestamp(self):
+        """The keyword ``'today'`` is returned as a ``Timestamp``, like any string."""
+        assert type(resolve_date("today")) is pd.Timestamp
+
+    @pytest.mark.parametrize("fmt", [None, "%Y-%m-%d %H:%M:%S.%f"], ids=["inferred", "explicit-format"])
+    def test_string_keeps_its_nanoseconds(self, fmt):
+        """The sub-microsecond part of a string is kept, without any warning."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = resolve_date("2023-03-10 00:00:00.000000001", format=fmt)
+
+        assert result == pd.Timestamp("2023-03-10 00:00:00.000000001")
+        assert result.nanosecond == 1
 
     def test_string_with_offset_keeps_it(self):
         """An ISO string carrying a UTC offset yields an aware datetime."""

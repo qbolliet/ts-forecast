@@ -164,6 +164,20 @@ class TestOutputUnit:
         assert result['download_date'].iloc[0].value == given.value
 
     @pytest.mark.parametrize('unit', DATETIME_UNITS)
+    def test_string_download_date_keeps_its_nanoseconds(self, unit):
+        """A download date given as a string with nanoseconds is read like the equivalent ``Timestamp``."""
+        text = '2023-05-10 00:00:00.000000001'
+        data = _small('series', unit)
+
+        from_string = compare_and_detect_delays(data, None, text, delay_unit='us')
+        from_timestamp = compare_and_detect_delays(data, None, pd.Timestamp(text), delay_unit='us')
+
+        pd.testing.assert_frame_equal(from_string, from_timestamp)
+        # Valeur d'or : 1er avril -> 10 mai = 39 j = 3 369 600 000 000 µs, plus 1 ns arrondie par excès à 1 µs
+        assert from_string['delay'].tolist() == [3_369_600_000_001.0]
+        assert from_string['download_date'].iloc[0].value == pd.Timestamp(text).value
+
+    @pytest.mark.parametrize('unit', DATETIME_UNITS)
     def test_download_date_keeps_its_time_zone(self, unit):
         """An aware download date keeps its zone; naive data keep none."""
         given = pd.Timestamp('2023-06-15 08:00', tz='Asia/Tokyo')

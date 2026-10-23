@@ -1995,7 +1995,12 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   from tsforecast.utils.time import resolve_date
   resolve_date('2023-03-10 00:00:00.000000001')   # datetime(2023, 3, 10, 0, 0) + UserWarning
   ```
-- **Statut** : ouverte (à arbitrer)
+- **Correctif** (décision de l'auteur, 2026-10-23 : aucune troncature) : `resolve_date` rend une chaîne (`'today'`
+  compris) en `pd.Timestamp`, sous-classe de `datetime`, partie nanoseconde conservée ; un `datetime` reste rendu tel
+  quel. Corrige aussi `PublicationDelayTransformer.prediction_date_`, résolu par la même fonction.
+- **Test** : `tests/unit/utils/time/test_utils.py::TestResolveDate::test_string_keeps_its_nanoseconds`,
+  `tests/unit/delays/data_manager/test_datetime_resolution.py::TestOutputUnit::test_string_download_date_keeps_its_nanoseconds`
+- **Statut** : corrigée (2026-10-23)
 
 ## DELAYS
 

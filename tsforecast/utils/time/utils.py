@@ -19,12 +19,19 @@ from .resolution import as_exact_unit
 def resolve_date(date: Union[str, datetime], format: str = None) -> datetime:
     """Resolve date from provided parameter.
 
+    A string is parsed by pandas and returned as a ``pd.Timestamp`` (a
+    ``datetime`` subclass), so that a sub-microsecond part is kept: a Python
+    ``datetime`` stops at the microsecond. A ``datetime`` (a ``Timestamp``
+    included) is returned as is.
+
     Args:
-        date: Date ('today' or datetime)
-        format: String format for dates
+        date: Date ('today', a string, or a datetime)
+        format: String format for dates (ignored unless ``date`` is a string
+            other than 'today')
 
     Returns:
-        Resolved date
+        Resolved date: a ``pd.Timestamp`` for a string ('today' gives the
+        current instant), the input itself for a datetime
 
     Raises:
         ValueError: If date is not 'today', a string, or a datetime object, or if
@@ -32,14 +39,17 @@ def resolve_date(date: Union[str, datetime], format: str = None) -> datetime:
 
     Examples:
         >>> from datetime import datetime
-        >>> resolve_date('today')  # doctest: +SKIP
-        datetime.datetime(2025, 11, 28, 10, 30, 15, 123456)
+        >>> isinstance(resolve_date('today'), pd.Timestamp)
+        True
 
         >>> resolve_date('2023-06-15')
-        datetime.datetime(2023, 6, 15, 0, 0)
+        Timestamp('2023-06-15 00:00:00')
 
         >>> resolve_date('06/15/2023', format='%m/%d/%Y')
-        datetime.datetime(2023, 6, 15, 0, 0)
+        Timestamp('2023-06-15 00:00:00')
+
+        >>> resolve_date('2023-03-10 00:00:00.000000001').nanosecond
+        1
 
         >>> existing_date = datetime(2023, 6, 15, 14, 30)
         >>> resolve_date(existing_date)
@@ -50,7 +60,7 @@ def resolve_date(date: Union[str, datetime], format: str = None) -> datetime:
     if isinstance(date, str):
         # Cas où l'on souhaite obtenir la date d'aujourd'hui
         if date.lower() == 'today':
-            return datetime.now()
+            return pd.Timestamp.now()
         else:
             # Utilise le format si spécifié
             if format is not None :
@@ -60,7 +70,8 @@ def resolve_date(date: Union[str, datetime], format: str = None) -> datetime:
             # Une chaîne vide est convertie en NaT : refus explicite plutôt que propagation
             if pd.isna(resolved):
                 raise ValueError(f"Could not resolve a date from {date!r}")
-            return resolved.to_pydatetime()
+            # Timestamp rendu tel quel : un datetime Python perdrait les nanosecondes
+            return resolved
     # Cas où la date est un datetime (NaT en est un : refusé)
     elif isinstance(date, datetime):
         if pd.isna(date):
