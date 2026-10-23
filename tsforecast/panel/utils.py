@@ -127,11 +127,11 @@ def extract_time_series_from_multiindex(series: pd.Series) -> pd.Series:
         ValueError: If ``series`` is two-dimensional.
 
     Examples:
+        >>> import pandas as pd
         >>> idx = pd.MultiIndex.from_product([['FR'], pd.date_range('2023-01-01', periods=2)])
-        >>> extract_time_series_from_multiindex(pd.Series([1, 2], index=idx, name='gdp'))
-        2023-01-01    1
-        2023-01-02    2
-        Name: gdp, dtype: int64
+        >>> series = extract_time_series_from_multiindex(pd.Series([1, 2], index=idx, name='gdp'))
+        >>> series.index.strftime('%Y-%m-%d').tolist(), series.tolist(), series.name
+        (['2023-01-01', '2023-01-02'], [1, 2], 'gdp')
     """
     # Refus des données à deux dimensions : seule une Series porte un nom et des valeurs uniques
     if series.ndim != 1:

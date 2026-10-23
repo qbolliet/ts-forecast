@@ -701,8 +701,8 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             ... ], names=['entity', 'date'])
             >>> df = pd.DataFrame({'value': [1, 2, 3, 4]}, index=idx)
             >>> validated = Identity()._validate_multiindex_panel(df)
-            >>> validated.index.get_level_values('date').dtype
-            dtype('<M8[ns]')
+            >>> validated.index.get_level_values('date').strftime('%Y-%m-%d').tolist()
+            ['2023-01-01', '2023-01-02', '2023-01-01', '2023-01-02']
         """
         # Validation via validate_temporal_data : en mode permissif elle avertit
         # sans lever, seule une erreur stricte remonte ici
@@ -888,10 +888,13 @@ class PanelTimeSeriesTransformer(BaseEstimator, TransformerMixin, TimeSeriesTran
             ...     def _fit(self, X, y=None): pass
             ...     def _transform(self, X): return X
             >>> df = pd.DataFrame({'value': [1, 2]}, index=['2023-01-01', '2023-01-02'])
-            >>> isinstance(Identity()._validate_index_time_series(df).index, pd.DatetimeIndex)
+            >>> validated = Identity()._validate_index_time_series(df)
+            >>> isinstance(validated.index, pd.DatetimeIndex)
             True
-            >>> df.index.dtype
-            dtype('O')
+            >>> validated.index.strftime('%Y-%m-%d').tolist()
+            ['2023-01-01', '2023-01-02']
+            >>> df.index.tolist()  # the input keeps its string index
+            ['2023-01-01', '2023-01-02']
         """
         # Validation du séquencement temporel via validate_temporal_data : en mode
         # permissif elle avertit sans lever, seule une erreur stricte remonte ici

@@ -480,6 +480,15 @@ def detect_dataset_frequency(df: pd.DataFrame,
         series) or FLATTENED ``(entity..., column)`` tuples (panel, e.g.
         ``('FR', 'gdp')``) to frequencies, None for an undetectable column or
         pair. With ``check_consistency``: the consistent frequency, or None.
+
+    Examples:
+        >>> import pandas as pd
+        >>> dates = pd.date_range('2023-01-31', periods=6, freq='ME')
+        >>> df = pd.DataFrame({'gdp': range(6), 'cpi': range(6)}, index=dates)
+        >>> detect_dataset_frequency(df)
+        {'gdp': 'M', 'cpi': 'M'}
+        >>> detect_dataset_frequency(df, check_consistency=True)
+        'M'
     """
     # Importation du locale du détector (pour éviter les imports circulaires)
     from .detector import FrequencyDetector

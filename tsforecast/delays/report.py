@@ -135,7 +135,18 @@ class _Report:
 
         Examples:
             >>> import json
-            >>> json.dumps(report.to_dict())   # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from tsforecast.delays import compare_and_detect_delays
+            >>> dates = pd.date_range('2023-01-01', periods=4, freq='MS')
+            >>> existing = pd.DataFrame({'GDP': [1.0, 2.0, 3.0, np.nan]}, index=dates)
+            >>> new = pd.DataFrame({'GDP': [1.0, 2.0, 3.0, 4.0]}, index=dates)
+            >>> _, report = compare_and_detect_delays(
+            ...     new, existing, download_date='2023-06-15', return_report=True
+            ... )
+            >>> payload = json.loads(json.dumps(report.to_dict()))
+            >>> payload['n_detected'], payload['delay_unit'], payload['columns_compared']
+            (1, 'day', ['GDP'])
         """
         return _to_jsonable(asdict(self))  # type: ignore[call-overload]
 
@@ -249,8 +260,19 @@ class DelayDetectionReport(_Report):
             statistics (when at least one delay is known).
 
         Examples:
-            >>> report.summary()   # doctest: +SKIP
-            'delays detection: 2 observations detected (2 new, 0 revised) over 3 columns, delay in day: min=75.0 max=75.0 mean=75.0, 0 vanished, 0 undetected frequency'
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from tsforecast.delays import compare_and_detect_delays
+            >>> dates = pd.date_range('2023-01-01', periods=4, freq='MS')
+            >>> existing = pd.DataFrame({'GDP': [1.0, 2.0, 3.0, np.nan]}, index=dates)
+            >>> new = pd.DataFrame({'GDP': [1.0, 2.0, 3.0, 4.0]}, index=dates)
+            >>> _, report = compare_and_detect_delays(
+            ...     new, existing, download_date='2023-06-15', return_report=True
+            ... )
+            >>> print(report.summary())  # doctest: +NORMALIZE_WHITESPACE
+            delays detection (new_only, reference=start): 1 observations detected
+            (1 new, 0 revised) over 1 compared columns, delay in day: min=75
+            max=75 mean=75, 0 vanished values, 0 undetected frequencies
         """
         # Initialisation du message
         text = (
@@ -281,10 +303,19 @@ class DelayDetectionReport(_Report):
             per entity, are in :attr:`frequencies`.
 
         Examples:
-            >>> report.to_frame()   # doctest: +SKIP
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> from tsforecast.delays import compare_and_detect_delays
+            >>> dates = pd.date_range('2023-01-01', periods=4, freq='MS')
+            >>> existing = pd.DataFrame({'GDP': [1.0, 2.0, 3.0, np.nan]}, index=dates)
+            >>> new = pd.DataFrame({'GDP': [1.0, 2.0, 3.0, 4.0]}, index=dates)
+            >>> _, report = compare_and_detect_delays(
+            ...     new, existing, download_date='2023-06-15', return_report=True
+            ... )
+            >>> print(report.to_frame())
                     n_detected  compared
             column
-            GDP              2      True
+            GDP              1      True
         """
         # Colonnes du jeu de données
         columns = list(self.columns_compared) + list(self.columns_new_only)
@@ -383,8 +414,22 @@ class DelayFitReport(_Report):
             ignored variables, of imputed defaults and of mask fallbacks.
 
         Examples:
-            >>> pdt.fit(X).fit_report_.summary()   # doctest: +SKIP
-            'delays fit (prediction_date=2024-12-15): 2 shifted, 0 masked, 1 unaffected, 0 ignored, 0 defaults imputed, 0 mask fallbacks'
+            >>> import pandas as pd
+            >>> from tsforecast.delays import PublicationDelayTransformer
+            >>> X = pd.DataFrame(
+            ...     {'GDP': range(12), 'CPI': range(12)},
+            ...     index=pd.date_range('2023-01-01', periods=12, freq='MS'), dtype=float,
+            ... )
+            >>> delays = pd.DataFrame({
+            ...     'column': ['GDP', 'CPI'], 'delay': [45.0, 20.0], 'unit': ['D', 'D'],
+            ...     'reference_point': ['start', 'start'], 'frequency': ['M', 'M'],
+            ... })
+            >>> fit_report = PublicationDelayTransformer(
+            ...     delays=delays, prediction_date='2023-12-15'
+            ... ).fit(X).fit_report_
+            >>> print(fit_report.summary())  # doctest: +NORMALIZE_WHITESPACE
+            delays fit (prediction_date=2023-12-15): 2 shifted, 0 masked, 0 unaffected,
+            0 ignored, 0 defaults imputed, 0 mask fallbacks
         """
         # Comptage des délais shiftés et masqués
         n_masked = sum(record.strategy == 'mask' for record in self.columns)
@@ -409,7 +454,21 @@ class DelayFitReport(_Report):
             the index holds the labels with the dtype pandas infers from them.
 
         Examples:
-            >>> pdt.fit(X).fit_report_.to_frame()   # doctest: +SKIP
+            >>> import pandas as pd
+            >>> from tsforecast.delays import PublicationDelayTransformer
+            >>> X = pd.DataFrame(
+            ...     {'GDP': range(12), 'CPI': range(12)},
+            ...     index=pd.date_range('2023-01-01', periods=12, freq='MS'), dtype=float,
+            ... )
+            >>> delays = pd.DataFrame({
+            ...     'column': ['GDP', 'CPI'], 'delay': [45.0, 20.0], 'unit': ['D', 'D'],
+            ...     'reference_point': ['start', 'start'], 'frequency': ['M', 'M'],
+            ... })
+            >>> fit_report = PublicationDelayTransformer(
+            ...     delays=delays, prediction_date='2023-12-15'
+            ... ).fit(X).fit_report_
+            >>> fit_report.to_frame()[['strategy', 'delay', 'n_periods']].to_dict('list')
+            {'strategy': ['shift', 'shift'], 'delay': [45.0, 20.0], 'n_periods': [-2, -1]}
         """
         names: List[str] = [f.name for f in fields(ColumnDelayRecord) if f.name != 'column']
         frame = pd.DataFrame(

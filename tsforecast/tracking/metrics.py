@@ -87,9 +87,18 @@ def imputation_metrics(
             (i.e. it is not fitted, or not an imputer).
 
     Examples:
-        >>> metrics = imputation_metrics(fitted_imputer)   # doctest: +SKIP
-        >>> import mlflow                                   # doctest: +SKIP
-        >>> mlflow.log_metrics(metrics)                     # doctest: +SKIP
+        >>> import pandas as pd
+        >>> from sklearn.linear_model import LinearRegression
+        >>> from tsforecast.frequency import HighFrequencyImputer
+        >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
+        >>> data = pd.DataFrame({'m1': range(24), 'a1': float('nan')}, index=dates, dtype=float)
+        >>> data.loc[['2021-12-31', '2022-12-31'], 'a1'] = [120.0, 132.0]
+        >>> imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
+        >>> metrics = imputation_metrics(imputer.fit(data))
+        >>> metrics['provenance.original_pct'], metrics['provenance.model_on_true_pct']
+        (50.0, 50.0)
+        >>> metrics['n_stages'], metrics['n_unanchored_pairs']
+        (1.0, 0.0)
     """
     # Statistiques de la dernière passe : le fit, puis chaque transform
     statistics = getattr(imputer, "provenance_statistics_", None)
@@ -155,8 +164,20 @@ def delay_metrics(delay_transformer: Any) -> Dict[str, float]:
             ``shift_params`` / ``mask_params``).
 
     Examples:
-        >>> delay_metrics(fitted_delay_transformer)         # doctest: +SKIP
-        {'n_shift_columns': 2.0, ...}
+        >>> import pandas as pd
+        >>> from tsforecast.delays import PublicationDelayTransformer
+        >>> X = pd.DataFrame(
+        ...     {'GDP': range(12), 'CPI': range(12)},
+        ...     index=pd.date_range('2023-01-01', periods=12, freq='MS'), dtype=float,
+        ... )
+        >>> delays = pd.DataFrame({
+        ...     'column': ['GDP', 'CPI'], 'delay': [45.0, 20.0], 'unit': ['D', 'D'],
+        ...     'reference_point': ['start', 'start'], 'frequency': ['M', 'M'],
+        ... })
+        >>> transformer = PublicationDelayTransformer(delays=delays, prediction_date='2023-12-15')
+        >>> metrics = delay_metrics(transformer.fit(X))
+        >>> metrics['n_shift_columns'], metrics['shift_periods.min'], metrics['delay.max']
+        (2.0, -2.0, 45.0)
     """
     # Vérification de l'ajustement
     if not hasattr(delay_transformer, "shift_params") and not hasattr(
@@ -239,9 +260,18 @@ def detection_metrics(
         AttributeError: If ``report`` is not a detection report.
 
     Examples:
-        >>> _, report = compare_and_detect_delays(new, existing, return_report=True)  # doctest: +SKIP
-        >>> import mlflow                                                             # doctest: +SKIP
-        >>> mlflow.log_metrics(detection_metrics(report))                            # doctest: +SKIP
+        >>> import numpy as np
+        >>> import pandas as pd
+        >>> from tsforecast.delays import compare_and_detect_delays
+        >>> dates = pd.date_range('2023-01-01', periods=4, freq='MS')
+        >>> existing = pd.DataFrame({'GDP': [1.0, 2.0, 3.0, np.nan]}, index=dates)
+        >>> new = pd.DataFrame({'GDP': [1.0, 2.0, 3.0, 4.0]}, index=dates)
+        >>> _, report = compare_and_detect_delays(
+        ...     new, existing, download_date='2023-06-15', return_report=True
+        ... )
+        >>> metrics = detection_metrics(report)
+        >>> metrics['n_detected'], metrics['delay.mean']
+        (1.0, 75.0)
     """
     # COnstruction du dictionnaire de métriques
     metrics: Dict[str, float] = {

@@ -1136,10 +1136,11 @@ class FrequencyConverter(TemporalConverter):
         Examples:
             >>> converter = FrequencyConverter()
             >>> qs_index = pd.date_range('2024-01-01', periods=2, freq='QS')
-            >>> converter._reanchor_index_to_target(qs_index, 'ME')
-            DatetimeIndex(['2024-01-31', '2024-04-30'], dtype='datetime64[ns]', freq=None)
-            >>> converter._reanchor_index_to_target(pd.DatetimeIndex(['2024-01-31']), 'SMS')
-            DatetimeIndex(['2024-01-15'], dtype='datetime64[ns]', freq=None)
+            >>> converter._reanchor_index_to_target(qs_index, 'ME').strftime('%Y-%m-%d').tolist()
+            ['2024-01-31', '2024-04-30']
+            >>> mid_month = converter._reanchor_index_to_target(pd.DatetimeIndex(['2024-01-31']), 'SMS')
+            >>> mid_month.strftime('%Y-%m-%d').tolist()
+            ['2024-01-15']
         """
         # Décomposition de la fréquence cible
         target = normalize_frequency(target_freq, return_format='components')
@@ -1928,8 +1929,9 @@ class FrequencyConverter(TemporalConverter):
             >>> len(converter._extend_index_for_upsampling(qe_index, 'QE', 'ME'))
             12
             >>> me_index = pd.date_range('2024-01-31', periods=3, freq='ME')
-            >>> converter._extend_index_for_upsampling(me_index, 'ME', 'W')[[0, -1]]
-            DatetimeIndex(['2024-01-07', '2024-03-31'], dtype='datetime64[ns]', freq=None)
+            >>> extended = converter._extend_index_for_upsampling(me_index, 'ME', 'W')
+            >>> extended[[0, -1]].strftime('%Y-%m-%d').tolist()
+            ['2024-01-07', '2024-03-31']
         """
         # Extraction des informations de fréquence, position et multiplicateur
         source = normalize_frequency(source_freq, return_format='components')
