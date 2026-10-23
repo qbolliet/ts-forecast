@@ -1504,15 +1504,25 @@ def _extract_param_by_variable(
         column: Column holding the parameter.
 
     Returns:
-        The single value, or ``{variable: value}``.
+        The single value, or ``{variable: value}``. A missing value of a string column
+        (NaN in the ``str`` dtype) is returned as None, the missing marker of the
+        transformer keyword arguments.
 
     Examples:
         >>> rows = pd.DataFrame({'unit': ['D', 'W']}, index=pd.Index(['GDP', 'CPI']))
         >>> _extract_param_by_variable(rows, 'unit')
         {'GDP': 'D', 'CPI': 'W'}
+        >>> rows = pd.DataFrame({'frequency': ['Q', None]}, index=pd.Index(['GDP', 'CPI']))
+        >>> _extract_param_by_variable(rows, 'frequency')
+        {'GDP': 'Q', 'CPI': None}
     """
+    # Valeurs de la colonne : hors pandas, une chaîne manquante est None
+    values = group[column]
+    if isinstance(values.dtype, pd.StringDtype):
+        values = values.astype(object).where(values.notna(), None)
+
     # Vérification de l'unicité de la valeur
-    unique_values = group[column].unique()
+    unique_values = values.unique()
 
     if len(unique_values) == 1:
         # Valeur constante pour toutes les variables
@@ -1521,7 +1531,7 @@ def _extract_param_by_variable(
         # Valeur variable selon les variables -> retourne un dictionnaire
         return dict(zip(
             group.index.get_level_values(group.index.nlevels - 1),
-            group[column]
+            values
         ))
 
 

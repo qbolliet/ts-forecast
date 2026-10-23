@@ -6,7 +6,8 @@ are written together, NaN cells excluded, by ``new.combine_first(existing)``
 (cells a production does not cover survive). "Fallback materializes": the
 fallback interpolation feeds the stores like a model prediction. ``reset``
 separates two passes — a transform never reads the fit's mirror — and
-``snapshot`` returns an independent deep copy.
+``snapshot`` returns an independent deep copy. Frequencies and origins are stored
+in the ``str`` dtype, whatever the dtype of the series received.
 
 Covered symbols: ``CovariateMaterializer.record_production``,
 ``interpolate_column``, ``snapshot``, ``reset``, ``imputed_store``,
@@ -44,8 +45,8 @@ def _record(materializer, column, values, freq='M', origin='model'):
     materializer.record_production(
         column,
         values,
-        pd.Series(origin, index=values.index, dtype=object),
-        pd.Series(freq, index=values.index, dtype=object),
+        pd.Series(origin, index=values.index, dtype='str'),
+        pd.Series(freq, index=values.index, dtype='str'),
     )
 
 
@@ -400,3 +401,50 @@ class TestReset:
         assert (second[1:], sorted(reused.imputed_store)) == (expected[1:], sorted(fresh.imputed_store))
         # L'instantané du premier usage n'a pas été touché par le second
         assert first_use['origin']['a1'].index.nlevels == 2
+
+
+class TestStoreDtypes:
+    """Frequencies and origins are stored in the ``str`` dtype, whatever the dtype received."""
+
+    @pytest.mark.parametrize('text_dtype', [object, 'str'])
+    def test_stores_are_str(self, text_dtype):
+        """``object`` or ``str`` input, a missing origin included: ``str`` stores and snapshot."""
+        grid = monthly_grid(periods=3)
+        materializer = CovariateMaterializer()
+
+        materializer.record_production(
+            'a1', pd.Series([1.0, 2.0, 3.0], index=grid),
+            pd.Series(['model', 'interpolated', None], index=grid, dtype=text_dtype),
+            pd.Series(['M', 'M', 'M'], index=grid, dtype=text_dtype),
+        )
+
+        assert materializer.origin_store['a1'].dtype == 'str'
+        assert materializer.imputed_freq_store['a1'].dtype == 'str'
+        assert materializer.origin_store['a1'].tolist()[:2] == ['model', 'interpolated']
+        snapshot = materializer.snapshot()
+        assert snapshot['origin']['a1'].dtype == 'str' and snapshot['imputed_freq']['a1'].dtype == 'str'
+
+    def test_successive_productions_stay_str(self):
+        """A second production combined with the first keeps the ``str`` dtype."""
+        grid = monthly_grid(periods=4)
+        materializer = CovariateMaterializer()
+        prime(materializer, 'a1', pd.Series([1.0, 2.0], index=grid[:2]), 'Q', 'model')
+        prime(materializer, 'a1', pd.Series([3.0, 4.0], index=grid[2:]), 'M', 'interpolated')
+
+        assert materializer.imputed_freq_store['a1'].tolist() == ['Q', 'Q', 'M', 'M']
+        assert materializer.origin_store['a1'].dtype == 'str'
+        assert materializer.imputed_freq_store['a1'].dtype == 'str'
+
+    @pytest.mark.internal
+    def test_combine_first_of_two_dtypes(self):
+        """A production of another dtype covering the store replaces it without concatenating a remainder."""
+        from tsforecast.frequency.covariate_materializer import _combine_first
+
+        grid = monthly_grid(periods=3)
+        produced = pd.Series(['model', 'model'], index=grid[:2], dtype='str')
+
+        covered = _combine_first(produced, pd.Series([1.0], index=grid[1:2]))
+        partial = _combine_first(produced, pd.Series([1.0, 2.0], index=grid[1:]))
+
+        assert covered.dtype == 'str' and covered.tolist() == ['model', 'model']
+        assert partial.tolist() == ['model', 'model', 2.0]

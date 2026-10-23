@@ -313,8 +313,10 @@ class CovariateMaterializer:
 
     Attributes:
         imputed_store: Mapping column -> values produced so far.
-        imputed_freq_store: Mapping column -> production frequency per cell.
-        origin_store: Mapping column -> :data:`CellOrigin` per cell.
+        imputed_freq_store: Mapping column -> production frequency per cell
+            (``str`` dtype).
+        origin_store: Mapping column -> :data:`CellOrigin` per cell (``str``
+            dtype).
 
     Args:
         covariate_strategy: How a covariate observed at a frequency strictly
@@ -769,11 +771,12 @@ class CovariateMaterializer:
         if values.empty:
             return
 
-        # Écriture des trois registres, chacun par combine_first
+        # Écriture des trois registres, chacun par combine_first ; fréquences
+        # et origines en dtype chaîne, quel que soit le dtype reçu
         for store, produced in (
             (self.imputed_store, values),
-            (self.imputed_freq_store, production_freq),
-            (self.origin_store, origins),
+            (self.imputed_freq_store, production_freq.astype('str')),
+            (self.origin_store, origins.astype('str')),
         ):
             store[column] = _combine_first(produced, store.get(column))
 
@@ -798,8 +801,8 @@ class CovariateMaterializer:
         # Assemblage des trois registres sur l'index du miroir
         frame = pd.DataFrame({
             'value': values,
-            'freq': self.imputed_freq_store.get(column, pd.Series(dtype=object)),
-            'origin': self.origin_store.get(column, pd.Series(dtype=object)),
+            'freq': self.imputed_freq_store.get(column, pd.Series(dtype='str')),
+            'origin': self.origin_store.get(column, pd.Series(dtype='str')),
         })
         # Découpage par entité, index de date seul dans chaque bloc
         return {

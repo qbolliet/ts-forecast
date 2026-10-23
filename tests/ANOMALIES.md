@@ -3092,14 +3092,22 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   fuseaux, `time_col`, index de périodes et de chaînes, fréquences indétectables, grilles infra-seconde, rapports,
   délais applicables) : instants et valeurs identiques au bit près ; les 238 résultats vides ont les dtypes de dates
   de leur équivalent non vide (232 en différaient).
-- **Reste ouvert** : partie « chaînes `object` du résultat vide » (`reference_point`, `unit` et niveau `column` en
-  `object`, `str` dans un résultat non vide), traitée avec l'arbitrage du dtype des chaînes (P4). Garde :
-  `xfail` strict `TestEmptyResult::test_empty_result_strings_have_the_dtypes_of_a_non_empty_one`.
+- **Arbitrage des chaînes (2026-10-21)** : harmonisation en `str` (option 2 de D2) : toute chaîne produite par le
+  paquet est rendue en dtype `str`, manquant = `NaN` ; les libellés repris de l'entrée gardent le dtype que pandas
+  infère de leurs valeurs ; un résultat vide a les dtypes d'un résultat non vide.
+- **Correctif** (chaînes, 2026-10-21) : `frequency` passe de `object` (manquant = `None`) à `str` (manquant = `NaN`),
+  `reference_point` / `unit` sont `str` explicites ; `_empty_publication_delays` type ses colonnes de chaînes en `str`,
+  ses niveaux d'entité comme ceux des données et son niveau `column` comme le dtype inféré des noms de variables
+  (`str` sans aucune variable). `prepare_entity_kwargs_from_delays` rend toujours `None` pour une chaîne manquante.
+  Sorties de référence (284 cas, 880 objets pandas) : aucune valeur changée ; seuls changent les dtypes annoncés et
+  le marqueur des 20 fréquences indétectables (`None` → `NaN`).
 - **Test** : `tests/unit/delays/data_manager/test_datetime_resolution.py` — `TestDatetimeResolution` (unités de la
   politique, deux instantanés à des unités différentes), `TestOutputUnit` (date de téléchargement en `Timestamp` /
   `datetime`, plus fine que les données, avec fuseau ; données avec fuseau ; fréquence indétectable ; rapport ; grille
-  de 100 ms ; `time_col`), `TestEmptyResult` (résultat vide aux dtypes d'un résultat non vide), `TestApplicableDelay`
-- **Statut** : corrigée pour les dates (2026-10-20) ; partie chaînes ouverte (P4)
+  de 100 ms ; `time_col`), `TestEmptyResult` (résultat vide aux dtypes d'un résultat non vide, chaînes et niveaux
+  compris), `TestApplicableDelay` ; `tests/unit/delays/data_manager/test_string_dtypes.py` (libellés `str`, `object`
+  et entiers ; deux causes de vide ; rapport)
+- **Statut** : corrigée (dates : 2026-10-20 ; chaînes : 2026-10-21)
 
 ### Arbitrages de l'auteur (2026-10-04) sur `compare_and_detect_delays`
 - **Fuseaux horaires** : une date sans fuseau est lue en UTC face à une date avec fuseau ; deux dates avec fuseaux sont
@@ -5244,6 +5252,38 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   que `X`), `TestFittedState` (état ajusté à l'unité du `fit`, `transform` à une autre unité),
   `TestCachedPipeline::test_each_unit_is_its_own_cache_entry`
 - **Statut** : corrigée (2026-10-20)
+
+### ANO-FREQ-087 — `HighFrequencyImputer.transform` : cellules de provenance écrites en simples chaînes
+- **Type** : [CODE] comportement (dtype des chaînes, pandas ≥ 3)
+- **Composant** : `tsforecast/frequency/high_frequency_imputer.py` (provenance du rejeu, `imputation_provenance_`
+  après `transform`)
+- **Sévérité** : mineure
+- **Observé** (pandas 3.0.6) : à la passe de prédiction, les cellules marquées `ORIGINAL` (valeurs reprises) et
+  `AGGREGATED` (agrégations exactes d'une colonne plus fine) sont écrites par `DataFrame.mask(cond, membre)` : pandas
+  convertit le membre scalaire en simple `str` (`'aggregated'`), même dans une trame `object`. L'égalité
+  (`== ProvenanceType.AGGREGATED`) et `isin` répondent juste, mais `isinstance(cellule, ProvenanceType)` et
+  `cellule is ProvenanceType.X` échouent sur ces cellules, alors qu'ils réussissent sur la matrice du `fit`.
+- **Attendu** : toute cellule marquée de la matrice de provenance est un membre de `ProvenanceType`, au `fit` comme au
+  `transform`.
+- **Reproduction** :
+  ```python
+  from sklearn.linear_model import LinearRegression
+  from tsforecast.frequency import HighFrequencyImputer, ProvenanceType
+  from tests.support.datasets import build_panel_reference
+  X = build_panel_reference()[['m1', 'q1', 'v']]
+  imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                 impute_intermediate_frequencies=True).fit(X)
+  imputer.transform(X)
+  {type(v).__name__ for v in imputer.imputation_provenance_.to_numpy().ravel() if isinstance(v, str)}  # {'str', ...}
+  ```
+- **Correctif** (2026-10-21) : le remplacement passe par une trame `object` remplie du membre
+  (`mask(cond, DataFrame(membre, dtype=object))`), qui conserve les membres. Sorties de référence : mêmes valeurs
+  (égalité), 584 cellules redevenues des membres. Le diagnostic `to_diagnostic_frame()` rend aussi
+  `emitted_provenance` en `object` explicite (une colonne `str` ramènerait ses membres à des chaînes sous stockage
+  pyarrow).
+- **Test** : `tests/unit/frequency/high_frequency_imputer/test_string_dtypes.py::TestStringDtypes::test_provenance_cells_are_members`,
+  `tests/integration/input_contract/test_string_labels.py::TestOutputStringDtypes`
+- **Statut** : corrigée (2026-10-21)
 
 ## BASE
 

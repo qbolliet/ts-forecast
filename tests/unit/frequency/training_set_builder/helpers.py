@@ -191,8 +191,8 @@ def seed_panel_mirror(builder: TrainingSetBuilder, cells: List[Tuple[str, float,
     builder.materializer.record_production(
         'v',
         pd.Series([value for _date, value, _origin in cells], index=index, dtype=float),
-        pd.Series([origin for _date, _value, origin in cells], index=index, dtype=object),
-        pd.Series([freq] * len(cells), index=index, dtype=object),
+        pd.Series([origin for _date, _value, origin in cells], index=index, dtype='str'),
+        pd.Series([freq] * len(cells), index=index, dtype='str'),
     )
     return builder
 

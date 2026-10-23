@@ -293,7 +293,7 @@ class DelayDetectionReport(_Report):
                 'n_detected': [self.n_detected_by_column.get(col, 0) for col in columns],
                 'compared': [col in self.columns_compared for col in columns],
             },
-            index=pd.Index(columns, name='column', dtype=object),
+            index=pd.Index(columns, name='column'),
         )
 
 
@@ -337,6 +337,13 @@ class ColumnDelayRecord:
     target_frequency_source: Optional[str]
     moved_from_mask: bool
     delay_source: Optional[str] = None
+
+
+# Champs textuels de ColumnDelayRecord, rendus en dtype chaîne par DelayFitReport.to_frame
+_STRING_RECORD_FIELDS: Tuple[str, ...] = (
+    'strategy', 'delay_unit', 'reference_point', 'frequency', 'target_frequency',
+    'delay_unit_source', 'reference_point_source', 'target_frequency_source', 'delay_source',
+)
 
 
 # Rapport d'ajustement du transformateur de délais
@@ -388,13 +395,18 @@ class DelayFitReport(_Report):
 
         Returns:
             DataFrame indexed by ``'column'`` with the fields of :class:`ColumnDelayRecord`.
+            The string fields (strategy, unit, reference point, frequencies, sources) have
+            the ``str`` dtype, a None field being missing (NaN); the index holds the labels
+            with the dtype pandas infers from them.
 
         Examples:
             >>> pdt.fit(X).fit_report_.to_frame()   # doctest: +SKIP
         """
         names: List[str] = [f.name for f in fields(ColumnDelayRecord) if f.name != 'column']
-        return pd.DataFrame(
+        frame = pd.DataFrame(
             [{name: getattr(record, name) for name in names} for record in self.columns],
             columns=names,
-            index=pd.Index([record.column for record in self.columns], name='column', dtype=object),
+            index=pd.Index([record.column for record in self.columns], name='column'),
         )
+        # Champs textuels en dtype chaîne, quel que soit leur contenu (tout None compris)
+        return frame.astype({name: 'str' for name in _STRING_RECORD_FIELDS})

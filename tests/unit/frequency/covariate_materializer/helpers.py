@@ -173,8 +173,8 @@ def prime(
     materializer.record_production(
         column,
         values,
-        pd.Series(origin, index=values.index, dtype=object),
-        pd.Series(freq, index=values.index, dtype=object),
+        pd.Series(origin, index=values.index, dtype='str'),
+        pd.Series(freq, index=values.index, dtype='str'),
     )
 
 

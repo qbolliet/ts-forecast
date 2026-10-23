@@ -15,7 +15,8 @@ on the calendar (last month published on December 15, moved onto December):
 1 + 80 days = December 20 is too late), ``DE`` CPI 20 -> -1.
 
 The tests of ``_extract_param_by_variable`` and ``_resolve_strategy`` go through
-the public functions: constant versus varying parameter, every form of strategy.
+the public functions: constant versus varying parameter (a missing text of a ``str``
+column reaching the kwargs as None), every form of strategy.
 """
 # Modules de base
 import doctest
@@ -297,6 +298,20 @@ class TestPrepareEntityKwargs:
         """With two entity levels, keys are pairs."""
         delays = pd.concat({'EU': _entity_delays()}, names=['region'])
         assert set(prepare_entity_kwargs_from_delays(delays)) == {('EU', 'FR'), ('EU', 'DE')}
+
+    @pytest.mark.parametrize('text_dtype', ['str', object])
+    @pytest.mark.parametrize('frequency', [{'GDP': 'Q', 'CPI': None}, None], ids=['one_missing', 'all_missing'])
+    def test_missing_text_reaches_the_kwargs_as_none(self, frequency, text_dtype):
+        """A missing frequency, NaN in the ``str`` dtype or None as ``object``, reaches the kwargs as None."""
+        delays = _entity_delays(frequency=frequency)
+        delays['frequency'] = delays['frequency'].astype(text_dtype)
+        if text_dtype is object:
+            delays['frequency'] = delays['frequency'].where(delays['frequency'].notna(), None)
+
+        kwargs = prepare_entity_kwargs_from_delays(delays, strategy='mask')
+
+        expected = {'GDP': 'Q', 'CPI': None} if frequency else None
+        assert all(entity_kwargs['target_frequency'] == expected for entity_kwargs in kwargs.values())
 
     def test_missing_columns_are_rejected(self):
         """A table without one of the required columns is rejected."""

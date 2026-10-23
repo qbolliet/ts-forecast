@@ -3,7 +3,7 @@
 Immutable step, exact coverage of feature_cols by the materialization
 way, fallback invariant, per-row scale factor (pd.Series),
 Series-safe equality, emitted provenance (taints, fallback, unanchored step),
-immutable plan, views (by_stage, models), diagnostic serialization,
+immutable plan, views (by_stage, models), diagnostic serialization (and its dtypes),
 append_step, to_entity_tuple, INTERPOLATE_FALLBACK and MaterializationWay.
 """
 # Modules de base
@@ -777,7 +777,7 @@ class TestDiagnosticFrame:
         )
         row = ImputationPlan((step,)).to_diagnostic_frame().iloc[0]
         assert bool(row['unanchored']) is True
-        assert row['source_frequency'] is None
+        assert pd.isna(row['source_frequency'])
         assert row['emitted_provenance'] is ProvenanceType.MODEL_UNANCHORED
         # Les souillures calculées restent lisibles dans le diagnostic
         assert (row['covariate_taint'], row['target_taint']) == ('imputed', 'imputed')
@@ -815,6 +815,34 @@ class TestDiagnosticFrame:
         frame = plan.to_diagnostic_frame()
         frame.loc[0, 'variable'] = 'tampered'
         assert plan.to_diagnostic_frame().loc[0, 'variable'] == 'gdp'
+
+
+class TestDiagnosticFrameDtypes:
+    """Text columns in ``str`` whatever their content; provenance as ``object`` members."""
+
+    # Colonnes textuelles du diagnostic
+    TEXT_COLUMNS = ('stage', 'source_frequency', 'entities', 'covariate_taint', 'target_taint',
+                    'interpolation_method', 'materialization', 'training_blocks')
+
+    @pytest.mark.parametrize('steps', [
+        (),
+        (_make_step(),),
+        (_make_step(unanchored=True, source_frequency=None, covariate_taint='imputed', target_taint='imputed'),),
+    ], ids=['empty_plan', 'anchored_step', 'unanchored_step'])
+    def test_text_columns_are_str(self, steps):
+        """Empty plan, ordinary step, all-None source frequency: the text columns stay ``str``."""
+        frame = ImputationPlan(steps).to_diagnostic_frame()
+
+        assert {column: str(frame[column].dtype) for column in self.TEXT_COLUMNS} == dict.fromkeys(
+            self.TEXT_COLUMNS, 'str'
+        )
+        assert frame['emitted_provenance'].dtype == object
+
+    def test_emitted_provenance_holds_enumeration_members(self):
+        """The provenance cells are ``ProvenanceType`` members, not plain strings."""
+        frame = ImputationPlan((_make_step(), _make_step(unanchored=True, source_frequency=None))).to_diagnostic_frame()
+
+        assert all(isinstance(value, ProvenanceType) for value in frame['emitted_provenance'])
 
 
 # =============================================================================

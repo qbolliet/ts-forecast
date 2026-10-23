@@ -29,6 +29,12 @@ Python ≥ 3.13, `pandas>=3.0,<4` (Copy-on-Write, dtype chaîne `str` et résolu
 inférée — `us` par défaut), `scikit-learn>=1.9,<2`, `numpy>=2.3.1,<3`, `joblib>=1.5.1,<2`
 (voir `pyproject.toml`). pandas 2 n'est plus pris en charge.
 
+Optionnel : l'extra `pyarrow` (`pip install "ts-forecast[pyarrow]"`, ou `uv sync --extra pyarrow`)
+installe pyarrow, que pandas utilise alors pour stocker le dtype chaîne `str` : même sémantique
+(manquant = `NaN`), stockage et opérations sur les chaînes plus rapides. Les sorties textuelles du
+paquet (fréquences, unités, origines…) sont en dtype `str` avec ou sans pyarrow ; la CI exécute les
+tests rapides sous les deux stockages.
+
 ## Test
 
 Les tests utilisent `pytest` ; la couverture (lignes et branches) est mesurée par `pytest-cov`

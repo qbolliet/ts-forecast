@@ -96,13 +96,13 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
         - 'has_changes': Always True (marks the detected observations)
         - 'download_date': Date when data was downloaded
         - 'frequency': Detected frequency of the (entity, column) couple, as a literal
-          ('daily', 'weekly', 'monthly', 'quarterly', 'annual', ...), None if it could not
-          be detected
-        - 'period_start': Start boundary of the period (NaT if the frequency is None)
-        - 'period_end': Exclusive end boundary of the period (NaT if the frequency is None)
+          ('daily', 'weekly', 'monthly', 'quarterly', 'annual', ...), missing (NaN) if it
+          could not be detected
+        - 'period_start': Start boundary of the period (NaT if the frequency is missing)
+        - 'period_end': Exclusive end boundary of the period (NaT if the frequency is missing)
         - 'reference_point': Reference point used ('start' or 'end')
         - 'delay': Calculated publication delay (ceil-rounded to the unit; NaN if the
-          frequency is None)
+          frequency is missing)
         - 'unit': Unit of the delay value ('day', 'second' or 'microsecond')
 
         The four date columns are stored at the unit of the dates of ``new_data`` (``'s'``,
@@ -110,9 +110,11 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
         ``download_date``; a date that this unit cannot hold exactly (a download time with
         microseconds on data stored in seconds) moves its column to the coarsest finer unit
         that holds it, never rounded. ``observation_date`` and the period bounds keep the
-        time zone of the data, ``download_date`` the one it was given with.
+        time zone of the data, ``download_date`` the one it was given with. The string
+        columns (``'frequency'``, ``'reference_point'``, ``'unit'``) have the ``str`` dtype;
+        the ``'column'`` level holds the labels with the dtype pandas infers from them.
 
-        The frame is empty (with the same columns, index levels and date dtypes) when nothing
+        The frame is empty (with the same columns, index levels and dtypes) when nothing
         is detected: no change since ``existing_data``, no observation at all, or no column.
 
     Raises:
@@ -123,7 +125,7 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
     Warns:
         UserWarning: If the frequency of some (entity, column) couples cannot be detected
             (for instance a single observation). They are still returned, with
-            ``frequency=None`` and NaN period bounds and delay.
+            a missing (NaN) frequency and NaN period bounds and delay.
 
     Examples:
         >>> import numpy as np
@@ -424,7 +426,7 @@ def _identify_new_observations(new_data: pd.DataFrame, existing_data: Optional[p
 
 
 # Fonction auxiliaire de construction du résultat vide
-def _empty_publication_delays(new_observations: pd.DataFrame, download_date: pd.Timestamp, reference_point: str, unit_label: str, time_axis: pd.DatetimeIndex) -> pd.DataFrame:
+def _empty_publication_delays(new_observations: pd.DataFrame, download_date: pd.Timestamp, reference_point: str, unit_label: str, time_axis: pd.DatetimeIndex, variables: pd.Index) -> pd.DataFrame:
     """Build the result frame when no observation is detected.
 
     Args:
@@ -433,17 +435,29 @@ def _empty_publication_delays(new_observations: pd.DataFrame, download_date: pd.
         reference_point: 'start' or 'end'
         unit_label: Label of the delay unit
         time_axis: Dates of the new data, whose unit and time zone type the date columns
+        variables: Variables of the new data, whose labels type the 'column' level
 
     Returns:
         Empty DataFrame with the output columns and the index levels of a non-empty result
-        (entity levels, then 'column'); its date columns have the dtypes of a non-empty result
+        (entity levels, then 'column'); its columns and index levels have the dtypes of a
+        non-empty result
     """
-    # Niveaux d'index du résultat : entités éventuelles, puis nom de la variable
-    names = list(new_observations.index.names[:-1]) + ['column']
-    if len(names) == 1:
-        index = pd.Index([], name='column', dtype=object)
+    # Niveaux d'index du résultat : entités éventuelles, typées comme celles des
+    # données, puis nom de la variable, typé comme les libellés le seraient dans
+    # un résultat non vide (dtype inféré des valeurs : str pour des chaînes ;
+    # sans aucune variable, str, dtype des noms de variables usuels)
+    entity_levels = [
+        new_observations.index.get_level_values(level)[:0]
+        for level in range(new_observations.index.nlevels - 1)
+    ]
+    column_level = pd.Index(list(variables))[:0] if len(variables) else pd.Index([], dtype='str')
+    if not entity_levels:
+        index = column_level.rename('column')
     else:
-        index = pd.MultiIndex.from_arrays([[] for _ in names], names=names)
+        index = pd.MultiIndex.from_arrays(
+            [*entity_levels, column_level],
+            names=list(new_observations.index.names[:-1]) + ['column'],
+        )
 
     # Dates vides typées comme dans un résultat non vide : unité et fuseau des
     # données, unité et fuseau de la date de téléchargement rendue
@@ -456,12 +470,12 @@ def _empty_publication_delays(new_observations: pd.DataFrame, download_date: pd.
             'observation_date': pd.Series(data_dates),
             'has_changes': pd.Series([], dtype=bool),
             'download_date': pd.Series(download_dates),
-            'frequency': pd.Series([], dtype=object),
+            'frequency': pd.Series([], dtype='str'),
             'period_start': pd.Series(data_dates),
             'period_end': pd.Series(data_dates),
-            'reference_point': pd.Series([], dtype=object),
+            'reference_point': pd.Series([], dtype='str'),
             'delay': pd.Series([], dtype=float),
-            'unit': pd.Series([], dtype=object),
+            'unit': pd.Series([], dtype='str'),
         },
         index=index
     )
@@ -500,7 +514,7 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
         - 'observation_date': The date of the observation
         - 'has_changes': Always True
         - 'download_date': Date when data was downloaded
-        - 'frequency': Detected frequency (literal), None if it could not be detected
+        - 'frequency': Detected frequency (literal), NaN if it could not be detected
         - 'period_start': Start boundary of the period (NaT without frequency)
         - 'period_end': Exclusive end boundary of the period (NaT without frequency)
         - 'reference_point': Reference point used ('start' or 'end')
@@ -524,7 +538,9 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
 
     # Cas où aucune observation n'est détectée : résultat vide de même structure
     if new_observations.empty:
-        return _empty_publication_delays(new_observations, download_date, reference_point, unit_label, time_axis), {}
+        return _empty_publication_delays(
+            new_observations, download_date, reference_point, unit_label, time_axis, new_data.columns
+        ), {}
 
     # Copie indépendante du jeu de données
     publication_delays = new_observations.copy()
@@ -557,14 +573,13 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
     frequency_map_raw = cast(Dict[Any, Any], detect_frequency(new_data))
     frequency_map = {k: to_literal(v) if v is not None else None for k, v in frequency_map_raw.items()}
 
-    # Conversion du dictionnaire en DataFrame (clés de panel aplaties en tuples : MultiIndex)
-    freq_df = pd.Series(frequency_map, name="frequency", dtype=object).to_frame()
+    # Conversion du dictionnaire en DataFrame (clés de panel aplaties en tuples : MultiIndex) ;
+    # fréquence en dtype chaîne, un couple indétectable y étant manquant (NaN)
+    freq_df = pd.Series(frequency_map, name="frequency", dtype='str').to_frame()
 
     # Ajout de la fréquence au jeu de données
     publication_delays = publication_delays.join(freq_df, on=publication_delays.index.names)
-    publication_delays["frequency"] = publication_delays["frequency"].astype(object).where(
-        publication_delays["frequency"].notna(), None
-    )
+    publication_delays["frequency"] = publication_delays["frequency"].astype('str')
 
     # Couples sans fréquence détectable : conservés, sans période ni délai, avec un avertissement
     detected = publication_delays["frequency"].notna().to_numpy()
@@ -595,7 +610,7 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
         )
 
     # Point de référence
-    publication_delays["reference_point"] = reference_point
+    publication_delays["reference_point"] = pd.Series(reference_point, index=publication_delays.index, dtype='str')
 
     # Délai de publication
     # Le délai de publication est toujours arrondi à l'entier supérieur
@@ -620,7 +635,7 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
     elapsed_nanoseconds = delays_timedelta[known].dt.as_unit('ns').astype('int64').to_numpy()
     delays[known] = -(-elapsed_nanoseconds // unit_nanoseconds)
     publication_delays["delay"] = delays
-    publication_delays["unit"] = unit_label
+    publication_delays["unit"] = pd.Series(unit_label, index=publication_delays.index, dtype='str')
 
     # Ordre des colonnes de sortie
     output_columns = [

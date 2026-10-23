@@ -3296,7 +3296,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Souillure de la cible : lue par le filtre d'origine, jamais codée en
         # dur — le lot de l'axe 2 n'aura qu'à élargir ELIGIBLE_ORIGINS
         target_taint = origin_to_taint(
-            max_origin([origin for origin in training.row_origin if origin is not None])
+            max_origin([origin for origin in training.row_origin if pd.notna(origin)])
         )
 
         # Matérialisation de la grille de prédiction en mode rejeu des voies
@@ -3696,10 +3696,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         materializer.record_production(
             column,
             written,
-            pd.Series(origin, index=written.index),
+            pd.Series(origin, index=written.index, dtype='str'),
             pd.Series(
                 self._stage_frequency_of(stage_freq, written.index),
                 index=written.index,
+                dtype='str',
             ),
         )
         return degraded, len(written)
@@ -4781,13 +4782,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             The provenance of the frame, cell for cell.
         """
         has_value = frame.notna()
+
+        # Remplacement par un membre d'énumération porté par une trame object :
+        # un scalaire chaîne passé à "mask" serait écrit en simple chaîne
+        def marked(cells: pd.DataFrame, member: ProvenanceType) -> pd.DataFrame:
+            return provenance.mask(cells, pd.DataFrame(
+                member, index=provenance.index, columns=provenance.columns, dtype=object
+            ))
+
         # Cellules sans marque mais renseignées : valeurs reprises telles quelles
-        provenance = provenance.mask(
-            provenance.isna() & has_value, ProvenanceType.ORIGINAL
-        )
+        provenance = marked(provenance.isna() & has_value, ProvenanceType.ORIGINAL)
         # Agrégations exactes d'une colonne plus fine que la ligne
         aggregated = self._aggregated_cells(frame, output_binding) & has_value
-        provenance = provenance.mask(aggregated, ProvenanceType.AGGREGATED)
+        provenance = marked(aggregated, ProvenanceType.AGGREGATED)
         # Cellule vide : jamais marquée, au rejeu comme au fit
         return provenance.where(has_value)
 
@@ -5245,7 +5252,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             freq_labels.append(np.full(len(frame), freq_label, dtype=object))
 
         combined = pd.concat(all_frames, ignore_index=False)
-        freq_values = np.concatenate(freq_labels)
+        # Niveau de fréquence en dtype chaîne, quel que soit le nombre d'étapes
+        freq_values = pd.Index(np.concatenate(freq_labels), dtype='str')
 
         # Construction du MultiIndex de sortie
         if self.is_panel_ and isinstance(combined.index, pd.MultiIndex):

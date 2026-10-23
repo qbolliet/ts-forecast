@@ -1,5 +1,6 @@
 # Continuous integration: tests on pull requests to main; coverage (uploaded to Codecov)
-# and slow tests on pushes to main. Manual runs execute the slow tests too.
+# and slow tests on pushes to main. Manual runs execute the slow tests too. The fast tests
+# also run with the optional pyarrow extra, under the pyarrow storage of the string dtype.
 name: tests
 
 on:
@@ -33,6 +34,20 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           fail_ci_if_error: false
+
+  tests-pyarrow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --group dev --extra pyarrow
+      - name: Check the pyarrow storage of the string dtype
+        run: uv run python -c "import pandas as pd; assert pd.Series(['a']).dtype.storage == 'pyarrow'"
+      - name: Run fast tests with pyarrow
+        run: uv run pytest tests/ -m "not slow"
 
   slow-tests:
     if: github.event_name != 'pull_request'

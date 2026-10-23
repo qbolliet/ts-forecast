@@ -9,7 +9,10 @@ accents, slashes, parentheses and percent signs: ``PanelwiseTransformer``
 ``compare_and_detect_delays``, ``detect_dataset_frequency``,
 ``validate_temporal_data`` on the column path and the panel splitters (test
 dates given as ``(entity, date)`` tuples) keep the labels, their order and the
-level names.
+level names. The text these components produce (delay frequencies, units and
+reference points, empty delay results included, applicable delays, the
+detection report's index, the imputer's ``frequency`` level) is in the ``str``
+dtype, and the imputer's provenance holds ``ProvenanceType`` members.
 """
 # Modules de base
 import warnings
@@ -21,9 +24,10 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 
 from tests.support.datasets import build_mixed_frequency_panel, build_panel_reference
+from tests.support.perturbations import string_dtypes
 from tsforecast.crossvals import PanelOutOfSampleSplit, PanelOutOfSampleSplitPerEntity
-from tsforecast.delays import compare_and_detect_delays, create_delay_transformer_factory
-from tsforecast.frequency import HighFrequencyImputer
+from tsforecast.delays import calculate_applicable_delay, compare_and_detect_delays, create_delay_transformer_factory
+from tsforecast.frequency import HighFrequencyImputer, ProvenanceType
 from tsforecast.panel import PanelwiseTransformer
 from tsforecast.utils.frequency import detect_dataset_frequency
 from tsforecast.utils.validation import validate_temporal_data
@@ -177,3 +181,38 @@ class TestSplittersFindTheEntities:
 
         tested = {panel.index[position] for _, test in folds for position in test}
         assert tested == {(ENTITIES['Allemagne'], pd.Timestamp('2023-06-01'))}
+
+
+class TestOutputStringDtypes:
+    """Text produced from special labels is ``str``; labels keep their dtype, empty result or not."""
+
+    def test_delay_tables_and_report(self, panel, label_dtype):
+        """Delays, empty delays, applicable delays and the detection report, labels kept."""
+        result, report = _quiet(compare_and_detect_delays, panel, None, '2024-10-15', return_report=True)
+        empty = _quiet(compare_and_detect_delays, panel * np.nan, None, '2024-10-15')
+        applicable = calculate_applicable_delay(result, 'end', 'quarterly', aggregate_by_panel=True)
+
+        expected_entity = 'str' if label_dtype is STR else 'object'
+        text = {('column', name): 'str' for name in ('frequency', 'reference_point', 'unit')}
+        expected = {('index', 0): expected_entity, ('index', 1): 'str', **text}
+        assert string_dtypes(result) == expected and string_dtypes(empty) == expected
+        assert {key: kind for key, kind in string_dtypes(applicable).items() if key[0] == 'column'} == {
+            **text, ('column', 'aggregation_method'): 'str'
+        }
+        frame = report.to_frame()
+        assert frame.index.dtype == 'str' and set(frame.index) == set(COLUMNS.values())
+
+    def test_imputer_frequency_level_and_provenance(self, label_dtype):
+        """The stacked output's ``frequency`` level is ``str``; the provenance holds members."""
+        reference = build_panel_reference()[['m1', 'q1', 'v']]
+        data = _relabel(reference, {'FR': 'Côte d’Ivoire', 'DE': 'A/B (n°2)', 'IT': 'É-1 % x'},
+                        {'m1': 'mensuel (brut)', 'q1': 'trimestriel %', 'v': 'v/an'}, label_dtype)
+        imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                       impute_intermediate_frequencies=True)
+
+        output = _quiet(imputer.fit_transform, data)
+
+        assert output.index.get_level_values('frequency').dtype == 'str'
+        assert list(imputer.imputation_provenance_.columns) == list(data.columns)
+        cells = [value for value in imputer.imputation_provenance_.to_numpy().ravel() if not pd.isna(value)]
+        assert cells and all(isinstance(value, ProvenanceType) for value in cells)

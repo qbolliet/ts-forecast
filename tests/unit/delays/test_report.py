@@ -1,6 +1,7 @@
 """Unit tests for ``tsforecast.delays.report``.
 
-Covers the rendering of the two reports (``summary``, ``to_dict``, ``to_frame``),
+Covers the rendering of the two reports (``summary``, ``to_dict``, ``to_frame`` and the
+``str`` dtype of the text in its frames),
 their immutability and the ``delay_statistics`` helper. The reports are built
 through the public API of the components (``compare_and_detect_delays`` and
 ``PublicationDelayTransformer.fit``); what they contain is checked in
@@ -107,3 +108,34 @@ class TestFitReportRendering:
     def test_to_frame_of_a_report_without_column_is_empty(self, fit_report):
         assert isinstance(fit_report.columns[0], ColumnDelayRecord)
         assert dataclasses.replace(fit_report, columns=()).to_frame().empty
+
+
+class TestStringDtypes:
+    """The frames of the reports hold their text in the ``str`` dtype, whatever their content."""
+
+    # Champs textuels d'un ColumnDelayRecord
+    TEXT_FIELDS = ('strategy', 'delay_unit', 'reference_point', 'frequency', 'target_frequency',
+                   'delay_unit_source', 'reference_point_source', 'target_frequency_source', 'delay_source')
+
+    def test_detection_frame_index_is_str(self, detection_report):
+        assert detection_report.to_frame().index.dtype == 'str'
+
+    def test_fit_frame_text_columns_are_str(self, fit_report):
+        frame = fit_report.to_frame()
+
+        assert frame.index.dtype == 'str'
+        assert {column: str(frame[column].dtype) for column in self.TEXT_FIELDS} == dict.fromkeys(self.TEXT_FIELDS, 'str')
+
+    def test_fit_frame_all_none_field_is_missing_in_str(self, fit_report):
+        """A shift has no target frequency: an all-None field is a ``str`` column of NaN."""
+        assert fit_report.columns[0].target_frequency is None
+        column = fit_report.to_frame()['target_frequency']
+
+        assert column.dtype == 'str' and column.isna().all()
+        # Le dictionnaire, hors pandas, garde None
+        assert fit_report.to_dict()['columns'][0]['target_frequency'] is None
+
+    def test_empty_fit_frame_text_columns_are_str(self, fit_report):
+        frame = dataclasses.replace(fit_report, columns=()).to_frame()
+
+        assert all(frame[column].dtype == 'str' for column in self.TEXT_FIELDS)

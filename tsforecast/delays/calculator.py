@@ -97,6 +97,8 @@ def calculate_applicable_delay(
         - reference_point: The target reference point used
         - n_observations: Number of observations (known delays) used in aggregation
         - aggregation_method: The aggregation method used
+        The text columns (unit, frequency, reference_point, aggregation_method) have the
+        ``str`` dtype.
 
     Raises:
         ValueError: If a required column is missing, if ``publication_delays`` has no
@@ -734,6 +736,7 @@ def _aggregate_delays(
         'n_observations',
         'aggregation_method'
     ]
-    agg_result = agg_result[column_order]
-
-    return agg_result
+    # Colonnes textuelles en dtype chaîne, quel que soit le dtype de l'entrée
+    return agg_result[column_order].astype(
+        {'unit': 'str', 'frequency': 'str', 'reference_point': 'str', 'aggregation_method': 'str'}
+    )

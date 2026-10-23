@@ -1,7 +1,7 @@
 """Reads, statistics and merges of ``ImputationProvenanceTracker``.
 
-Scenarios: cell provenance, boolean masks, per-type statistics, matrix views, merging
-two trackers and the realistic panel.
+Scenarios: cell provenance, boolean masks, per-type statistics, matrix views (and their
+dtypes), merging two trackers and the realistic panel.
 """
 
 import numpy as np
@@ -279,6 +279,15 @@ class TestMatrixViews:
         tracker, _ = _tracker()
         cells = tracker.to_string_matrix().to_numpy().ravel()
         assert all(type(cell) is str for cell in cells)
+
+    def test_matrix_dtypes(self):
+        """String view in ``str``; the matrix itself stays ``object``, holding the members."""
+        tracker, dates = _tracker()
+        tracker.mark_interpolated('a', dates[1])
+
+        assert (tracker.to_string_matrix().dtypes == 'str').all()
+        assert (tracker.provenance_matrix_.dtypes == object).all()
+        assert isinstance(tracker.provenance_matrix_.loc[dates[1], 'a'], P)
 
     @pytest.mark.internal
     def test_to_string_matrix_stringifies_foreign_values(self):

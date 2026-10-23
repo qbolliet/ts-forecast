@@ -226,7 +226,7 @@ La fonction retourne un `DataFrame` indexé par les niveaux d'entité des donné
 | `observation_date` | Date de l'observation détectée |
 | `has_changes` | Toujours `True` (marque les observations détectées) |
 | `download_date` | Date de téléchargement des données à partir de laquelle est calculé le délai |
-| `frequency` | Fréquence détectée du couple (entité, variable), en toutes lettres (`'daily'`, `'weekly'`, `'monthly'`, `'quarterly'`, `'annual'`, ...) ; `None` si elle est indétectable (une seule observation) — un avertissement est alors émis et `period_start`, `period_end` et `delay` valent `NaT` / `NaN` |
+| `frequency` | Fréquence détectée du couple (entité, variable), en toutes lettres (`'daily'`, `'weekly'`, `'monthly'`, `'quarterly'`, `'annual'`, ...) ; manquante (`NaN`) si elle est indétectable (une seule observation) — un avertissement est alors émis et `period_start`, `period_end` et `delay` valent `NaT` / `NaN` |
 | `period_start` | Date de début de la période de référence de l'observation à la fréquence détectée |
 | `period_end` | Borne de fin **exclusive** de la période de référence (premier instant de la période suivante : `2023-05-01` pour avril) |
 | `reference_point` | Point de référence utilisé (`'start'` ou `'end'`) |
@@ -237,8 +237,11 @@ Les quatre colonnes de dates sont stockées dans l'unité des dates de `new_data
 (`s`, `ms`, `us` ou `ns`), quelles que soient celles de `existing_data` et de
 `download_date` ; une date que cette unité ne représente pas exactement (une
 heure de téléchargement à la microseconde sur des données en secondes) porte sa
-colonne à l'unité plus fine nécessaire, sans arrondi. Un résultat vide a les
-mêmes types de dates qu'un résultat non vide.
+colonne à l'unité plus fine nécessaire, sans arrondi. Les colonnes de texte
+(`frequency`, `reference_point`, `unit`) sont en dtype `str` ; le niveau `column`
+porte les noms des variables dans le dtype que pandas en infère (`str` pour des
+chaînes). Un résultat vide a les mêmes dtypes (dates, texte, niveaux d'index)
+qu'un résultat non vide.
 
 #### 4.1.3 Cas d'usage 1 : Comparaison de deux jeux de données
 

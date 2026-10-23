@@ -202,6 +202,22 @@ Le paquet requiert `pandas>=3.0,<4` et `scikit-learn>=1.9,<2` (pas de support de
 - **Dtype chaîne** : libellés et colonnes de chaînes sont en dtype `str` (NaN comme manquant) ;
   ne pas tester `dtype == object` ; `dtype=object` explicite seulement pour des valeurs
   hétérogènes (énumérations, tuples, `None`).
+- **Dtype des chaînes en sortie** (sorties publiques : colonnes, niveaux d'index, attributs ajustés) :
+  - chaîne **produite par le paquet** (fréquence, unité, point de référence, origine, source, libellé
+    d'étape) : `dtype='str'` **explicite**, quel que soit le contenu (vide, tout manquant) ; manquant =
+    `NaN`, jamais `None` ;
+  - **libellé repris de l'entrée** (noms de colonnes, entités) : dtype que pandas infère des valeurs
+    (`str` pour des chaînes), les niveaux d'entité gardant celui des données ; un résultat **vide** a les
+    dtypes (colonnes et niveaux) d'un résultat non vide ;
+  - `object` explicite, avec un commentaire au site, seulement pour des valeurs hétérogènes : membres
+    d'énumération (`ProvenanceType` : sous le stockage pyarrow une colonne `str` les ramène à de simples
+    chaînes, `is` / `isinstance` échouent), tuples, `Period`, `feature_names_in_` (convention sklearn) ;
+  - écrire un membre d'énumération par `.loc[...] = membre` ou `mask(cond, DataFrame(membre, dtype=object))`,
+    jamais `mask(cond, membre)` (pandas l'écrit en simple chaîne) ;
+  - hors pandas (dict, kwargs, scalaires), une chaîne manquante est `None` ; les tableaux `object` internes
+    restent libres, l'harmonisation se fait à la frontière publique ;
+  - tests : `dtype == 'str'` (vrai sous les deux stockages, python et pyarrow), `string_dtypes`
+    (`tests/support/perturbations.py`) ; l'extra optionnel `pyarrow` est exercé par un job CI dédié.
 - **Alias de fréquence** : alias pandas actuels seulement (`ME`, `QE`, `YE`, `SME`, `h`, `min`,
   `s`...) ; les codes de base du paquet (`'M'`, `'Q'`, `'Y'`, `'SM'`) ne vont jamais à pandas sans
   `default_position` (`build_frequency_string`, `to_pandas_freq`).

@@ -380,7 +380,7 @@ class TestFrequencyAndPeriodBoundaries:
 
         row = result.iloc[0]
         assert list(result.index) == ['PIB'] and row['observation_date'] == TS('2023-01-01')
-        assert row['frequency'] is None
+        assert pd.isna(row['frequency'])
         assert pd.isna(row['period_start']) and pd.isna(row['period_end']) and pd.isna(row['delay'])
         assert (row['unit'], row['reference_point'], row['has_changes']) == ('day', reference_point, True)
 
@@ -390,7 +390,7 @@ class TestFrequencyAndPeriodBoundaries:
             compare_and_detect_delays(_series([100.0]), None, '2023-02-15')
 
     def test_one_undetectable_entity_does_not_spoil_the_panel(self):
-        """An entity with a single observation is returned with ``frequency=None``; the others are computed."""
+        """An entity with a single observation is returned with a missing frequency; the others are computed."""
         panel = _panel({'A': {'PIB': [1.0, 2.0, 3.0, 4.0]}, 'B': {'PIB': [1.0, np.nan, np.nan, np.nan]}})
 
         with pytest.warns(UserWarning, match=r"\('B', 'PIB'\)") as caught:
@@ -398,7 +398,7 @@ class TestFrequencyAndPeriodBoundaries:
 
         rows = {key: row for key, row in result.iterrows()}
         assert rows[('A', 'PIB')][['frequency', 'delay']].tolist() == ['monthly', 75.0]
-        assert rows[('B', 'PIB')]['frequency'] is None and pd.isna(rows[('B', 'PIB')]['delay'])
+        assert pd.isna(rows[('B', 'PIB')]['frequency']) and pd.isna(rows[('B', 'PIB')]['delay'])
         # Le message ne cite que le couple indétectable
         assert "('A', 'PIB')" not in str(caught[0].message)
 
@@ -419,7 +419,7 @@ class TestFrequencyAndPeriodBoundaries:
                 perturb.single_observation(_series([1.0, 2.0, 3.0, 4.0])), None, '2023-06-15',
             )
 
-        assert result['frequency'].tolist() == [None] and pd.isna(result['delay'].iloc[0])
+        assert result['frequency'].isna().all() and pd.isna(result['delay'].iloc[0])
 
 
 class TestDelayUnitResolution:

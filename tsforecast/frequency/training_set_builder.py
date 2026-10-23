@@ -130,9 +130,9 @@ class TrainingSet:
             :attr:`X`.
         row_frequency: Production frequency of each row: ``f_block(e)`` for an
             observed cell, the frequency read in ``imputed_freq_store`` for a
-            cell produced by an earlier stage.
+            cell produced by an earlier stage (``str`` dtype).
         row_origin: :data:`CellOrigin` of each row of :attr:`y`, same two
-            sources as :attr:`row_frequency`.
+            sources as :attr:`row_frequency` (``str`` dtype).
         blocks: Mapping entity -> ``f_block(e)``, the composition of the
             mutualized set. It does not depend on the stage: only the
             divisors do.
@@ -150,8 +150,8 @@ class TrainingSet:
     Examples:
         >>> empty = TrainingSet(
         ...     X=pd.DataFrame(), y=pd.Series(dtype=float),
-        ...     row_frequency=pd.Series(dtype=object),
-        ...     row_origin=pd.Series(dtype=object),
+        ...     row_frequency=pd.Series(dtype='str'),
+        ...     row_origin=pd.Series(dtype='str'),
         ...     blocks={}, ways={}, column_origins={},
         ... )
         >>> len(empty)
@@ -853,10 +853,10 @@ class TrainingSetBuilder:
         )
         y = pd.Series(stacked['value'].to_numpy(dtype=float), index=grid, name=column)
         row_frequency = pd.Series(
-            stacked['freq'].to_numpy(dtype=object), index=grid, name='row_frequency'
+            stacked['freq'].to_numpy(dtype=object), index=grid, name='row_frequency', dtype='str'
         )
         row_origin = pd.Series(
-            stacked['origin'].to_numpy(dtype=object), index=grid, name='row_origin'
+            stacked['origin'].to_numpy(dtype=object), index=grid, name='row_origin', dtype='str'
         )
 
         # Journalisation de la composition du jeu, étape à l'appui

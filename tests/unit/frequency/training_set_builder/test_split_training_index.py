@@ -219,7 +219,7 @@ class TestTrainingSet:
         """Without an explicit flag the grid is the historical one."""
         empty = TrainingSet(
             X=pd.DataFrame(), y=pd.Series(dtype=float),
-            row_frequency=pd.Series(dtype=object), row_origin=pd.Series(dtype=object),
+            row_frequency=pd.Series(dtype='str'), row_origin=pd.Series(dtype='str'),
             blocks={}, ways={}, column_origins={},
         )
 

@@ -981,3 +981,48 @@ def datetime_units(obj: Union[pd.DataFrame, pd.Series, pd.Index]) -> dict:
                 or pd.api.types.is_timedelta64_dtype(column.dtype)):
             units[('column', column.name)] = column.dt.unit
     return units
+
+
+def string_dtypes(obj: Union[pd.DataFrame, pd.Series, pd.Index]) -> dict:
+    """Map every string or object location of an object to ``'str'`` or ``'object'``.
+
+    Companion of :func:`datetime_units` for the string dtypes: tells whether a
+    component returns its text in the ``str`` dtype (whatever its storage,
+    python or pyarrow) or as ``object``. Locations of any other dtype are left out.
+
+    Args:
+        obj: ``DataFrame``, ``Series`` or ``Index``.
+
+    Returns:
+        ``{('index', level): kind}`` for each string or object index level
+        (``level`` is the position), and ``{('column', name): kind}`` for each
+        string or object column (a ``Series`` counts as one column).
+
+    Examples:
+        >>> import pandas as pd
+        >>> df = pd.DataFrame({'unit': ['day'], 'n': [1], 'tag': pd.Series([None], dtype=object)},
+        ...                   index=pd.Index(['GDP'], name='column'))
+        >>> string_dtypes(df)
+        {('index', 0): 'str', ('column', 'unit'): 'str', ('column', 'tag'): 'object'}
+    """
+    def kind(dtype) -> Optional[str]:
+        if isinstance(dtype, pd.StringDtype):
+            return 'str'
+        return 'object' if dtype == object else None
+
+    kinds = {}
+    index = obj if isinstance(obj, pd.Index) else obj.index
+    levels = (
+        [index.get_level_values(i) for i in range(index.nlevels)]
+        if isinstance(index, pd.MultiIndex) else [index]
+    )
+    for position, level in enumerate(levels):
+        if kind(level.dtype) is not None:
+            kinds[('index', position)] = kind(level.dtype)
+    if isinstance(obj, pd.Index):
+        return kinds
+    columns = [obj] if isinstance(obj, pd.Series) else [obj.iloc[:, i] for i in range(obj.shape[1])]
+    for column in columns:
+        if kind(column.dtype) is not None:
+            kinds[('column', column.name)] = kind(column.dtype)
+    return kinds

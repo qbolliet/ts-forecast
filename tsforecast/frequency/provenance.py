@@ -346,7 +346,9 @@ class ImputationProvenanceTracker:
         else:
             track_cols = list(data.columns)
 
-        # Création de la matrice de provenance
+        # Création de la matrice de provenance, en object : des membres de
+        # ProvenanceType (qu'un stockage de chaînes ramènerait à de simples
+        # chaînes, is / isinstance échouant alors) et des cellules non renseignées
         self.provenance_matrix_ = pd.DataFrame(
             index=data.index,
             columns=track_cols,
@@ -744,7 +746,8 @@ class ImputationProvenanceTracker:
         """Convert provenance matrix to string representation.
 
         Returns:
-            DataFrame with string values ('original', 'model_on_true', etc.) instead of enums.
+            DataFrame with string values ('original', 'model_on_true', etc.) instead of enums,
+            in the ``str`` dtype.
 
         Raises:
             ValueError: If provenance matrix not initialized.
@@ -766,7 +769,7 @@ class ImputationProvenanceTracker:
             else:
                 return str(val)
 
-        return self.provenance_matrix_.map(convert_to_string)
+        return self.provenance_matrix_.map(convert_to_string).astype('str')
 
     # Méthode d'appariement de deux jeux de données
     def merge(

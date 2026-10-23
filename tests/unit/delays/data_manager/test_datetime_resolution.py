@@ -8,7 +8,7 @@ of the nanosecond input, and every date column of the result (observation,
 period bounds, download) is stored at the unit of ``new_data``, finer only for
 a download date that needs it; the same holds for a download date given as a
 ``Timestamp``, for time-zone-aware data, for undetected frequencies, for the
-detection report and for empty results, whose date columns carry the dtypes of
+detection report and for empty results, whose columns and index levels carry the dtypes of
 a non-empty result. The applicable delays derived from the result do not depend
 on the resolution either.
 """
@@ -32,9 +32,6 @@ from tests.unit.delays.data_manager.helpers import OUTPUT_COLUMNS, _panel, _seri
 
 # Colonnes de dates du résultat
 DATE_COLUMNS = ('observation_date', 'download_date', 'period_start', 'period_end')
-
-# Colonnes de chaînes du résultat : leur dtype n'est pas une affaire d'unité de dates
-STRING_COLUMNS = ('reference_point', 'unit')
 
 # Date de téléchargement à la microseconde, et unité attendue de sa colonne selon
 # l'unité des données : celle des données, sauf si elle ne peut pas la représenter
@@ -235,7 +232,7 @@ class TestOutputUnit:
 
 
 class TestEmptyResult:
-    """An empty result has the date dtypes of a non-empty one for the same input."""
+    """An empty result has the dtypes (dates and strings) and index levels of a non-empty one."""
 
     @pytest.mark.parametrize('unit', DATETIME_UNITS)
     @pytest.mark.parametrize('structure', ['series', 'panel'])
@@ -255,14 +252,8 @@ class TestEmptyResult:
             result = compare_and_detect_delays(data, with_datetime_resolution(data, 'ns'), download_date)
 
         assert result.empty and list(result.columns) == OUTPUT_COLUMNS
-        compared = [column for column in OUTPUT_COLUMNS if column not in STRING_COLUMNS]
-        pd.testing.assert_series_equal(result.dtypes[compared], non_empty.dtypes[compared])
+        pd.testing.assert_series_equal(result.dtypes, non_empty.dtypes)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason='ANO-DELAYS-045: the string columns and the column level of an empty result are '
-               'stored as object, as str in a non-empty one.',
-    )
     @pytest.mark.parametrize('structure', ['series', 'panel'])
     def test_empty_result_strings_have_the_dtypes_of_a_non_empty_one(self, structure):
         """The string columns and index levels of an empty result are typed like a non-empty one."""

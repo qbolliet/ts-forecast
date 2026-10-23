@@ -41,6 +41,12 @@ _MATERIALIZATION_WAYS: FrozenSet[str] = frozenset(
     ('identity', 'aggregate', 'stage_model', 'carried_model', 'interpolate', 'raw_anchors')
 )
 
+# Colonnes textuelles du jeu de diagnostic, rendues en dtype chaîne
+_DIAGNOSTIC_STRING_COLUMNS: Tuple[str, ...] = (
+    'stage', 'source_frequency', 'entities', 'covariate_taint', 'target_taint',
+    'interpolation_method', 'materialization', 'training_blocks',
+)
+
 
 # Fonction auxiliaire de test de la sentinelle de repli
 def _is_interpolate_fallback(model: Any) -> bool:
@@ -523,7 +529,11 @@ class ImputationPlan:
             comma-separated ``col=way`` string) and ``training_blocks``
             (rendered as a comma-separated ``entity=frequency`` string,
             sorted by entity key so that the frame does not depend on the
-            order of the input rows).
+            order of the input rows). The text columns have the ``str``
+            dtype (a missing ``source_frequency`` is NaN); ``variable`` holds
+            the labels with the dtype pandas infers from them;
+            ``emitted_provenance`` is an ``object`` column of
+            :class:`ProvenanceType` members.
 
         Examples:
             >>> ImputationPlan().to_diagnostic_frame().columns.tolist()
@@ -592,7 +602,15 @@ class ImputationPlan:
                 'materialization': materialization_repr,
                 'training_blocks': training_blocks_repr,
             })
-        return pd.DataFrame(rows, columns=columns)
+        frame = pd.DataFrame(rows, columns=columns)
+        # Provenance émise construite en object : des membres d'énumération, que
+        # l'inférence d'une colonne de chaînes (stockage pyarrow) ramènerait à de
+        # simples chaînes, sans retour possible
+        frame['emitted_provenance'] = pd.Series(
+            [row['emitted_provenance'] for row in rows], index=frame.index, dtype=object
+        )
+        # Colonnes textuelles en dtype chaîne quel que soit leur contenu
+        return frame.astype({column: 'str' for column in _DIAGNOSTIC_STRING_COLUMNS})
 
 
 # Construction incrémentale : un nouveau plan, jamais de mutation en place

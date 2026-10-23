@@ -5,7 +5,7 @@ mutualization WHICH entities contribute: the two compose without knowing each
 other. ``ELIGIBLE_ORIGINS`` of every modality of
 ``impute_intermediate_frequencies`` (``False`` and ``'covariates_only'``
 share literally one filter), the per-row production frequency of an imputed
-row, NaN mirror cells ignored.
+row, NaN mirror cells ignored, the ``str`` dtype of the row frequencies and origins.
 
 Layers: the ``'training'`` window is read once per layer —
 ``[{FR: Y, DE: Q, IT: M}, {FR: Q}]`` on ``PANEL-F`` once ``FR`` was imputed at
@@ -358,3 +358,27 @@ class TestTrainingWindow:
 
         assert training.ways == {'m1': 'aggregate', 'a2': 'interpolate'}
         assert training.column_origins == {'m1': 'observed', 'a2': 'interpolated'}
+
+
+class TestRowDtypes:
+    """``row_frequency`` and ``row_origin`` are ``str`` series, empty or not."""
+
+    def test_rows_are_str(self, mixed_freq_panel_multifrequency):
+        builder = seed_panel_mirror(make_builder(), [('2021-03-31', 28.0, 'model')])
+
+        training = build_panel_f(
+            builder, mixed_freq_panel_multifrequency, eligible_origins={'observed', 'model'}
+        )
+
+        assert training.row_frequency.dtype == 'str' and training.row_origin.dtype == 'str'
+        assert set(training.row_origin) == {'observed', 'model'}
+
+    def test_rows_of_an_empty_set_are_str(self, mixed_freq_panel_multifrequency):
+        provider = layer_mask_provider(lambda _entity, _freq, _date: False)
+
+        training = build_panel_f(
+            make_builder(training_mask=provider), mixed_freq_panel_multifrequency
+        )
+
+        assert len(training) == 0
+        assert training.row_frequency.dtype == 'str' and training.row_origin.dtype == 'str'

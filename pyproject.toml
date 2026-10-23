@@ -15,6 +15,12 @@ dependencies = [
     "joblib>=1.5.1,<2",
 ]
 
+[project.optional-dependencies]
+# Stockage pyarrow du dtype chaîne de pandas (même sémantique, plus rapide) ; minimum de pandas 3 : 13.0.0
+pyarrow = [
+    "pyarrow>=13.0.0,<27",
+]
+
 [dependency-groups]
 dev = [
     "ipykernel>=6.30.1,<7",
