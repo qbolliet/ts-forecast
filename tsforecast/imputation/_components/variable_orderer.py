@@ -3,9 +3,10 @@
 # Modules de base
 import numbers
 import warnings
-from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, List, Literal, Mapping, Optional, Tuple, Union
+from typing import (
+    Any, Callable, Iterable, List, Literal, Mapping, Optional, Tuple, Union, get_args,
+)
 
 # Manipulation de données
 import numpy as np
@@ -19,11 +20,21 @@ from sklearn.utils.validation import check_is_fitted
 
 # Utilitaires du package
 from ...utils.frequency.utils import get_frequency_order
+from .._engine.params import (
+    validate_cv,
+    validate_cv_scoring,
+    validate_literal,
+    validate_min_cv_train_size,
+)
 
 # Identifiant retourné par order() : le nom de variable pour une série
 # temporelle, ou la clé de groupe (nom, fréquence) de HighFrequencyImputer pour un panel dont
 # les entités divergent de fréquence
 VariableKey = Any
+
+# Modes d'ordonnancement admis ; source unique pour ce composant et pour l'imputeur
+FitPredictOrder = Literal['frequency', 'cv']
+FIT_PREDICT_ORDERS: Tuple[str, ...] = get_args(FitPredictOrder)
 
 
 # Description d'une variable à ordonner
@@ -115,7 +126,7 @@ class VariableOrderer(BaseEstimator):
     # Initialisation
     def __init__(
         self,
-        fit_predict_order: Literal['frequency', 'cv'] = 'frequency',
+        fit_predict_order: FitPredictOrder = 'frequency',
         cv: Union[int, BaseCrossValidator, Iterable, None] = None,
         cv_scoring: Union[str, Callable] = 'neg_mean_absolute_percentage_error',
         min_cv_train_size: int = 10,
@@ -160,72 +171,24 @@ class VariableOrderer(BaseEstimator):
             ValueError: If ``fit_predict_order`` is not ``'frequency'`` or
                 ``'cv'``; if ``cv`` is an ``int`` < 2; if ``min_cv_train_size``
                 < 1.
-            TypeError: If ``cv`` is neither ``None``, an ``int``, an object
-                exposing ``split`` and ``get_n_splits``, nor an iterable; if
-                ``cv_scoring`` is neither a string nor a callable.
+            TypeError: If ``min_cv_train_size`` is not an ``int``; if ``cv`` is a bool, or neither ``None``, an ``int``,
+                an object exposing ``split`` and ``get_n_splits``, nor an
+                iterable; if ``cv_scoring`` is neither a string nor a
+                callable.
         """
         # Validation à l'init : aucune transformation, seulement un
         # contrôle de forme — la résolution effective de "cv" (check_cv)
         # n'a lieu qu'au fit
-        if fit_predict_order not in ('frequency', 'cv'):
-            raise ValueError(
-                f"fit_predict_order must be 'frequency' or 'cv', "
-                f"got '{fit_predict_order}'"
-            )
-        self._validate_cv(cv)
-        if not (isinstance(cv_scoring, str) or callable(cv_scoring)):
-            raise TypeError(
-                f"cv_scoring must be a str or a callable, got {type(cv_scoring).__name__}"
-            )
-        if min_cv_train_size < 1:
-            raise ValueError(
-                f"min_cv_train_size must be >= 1, got {min_cv_train_size}"
-            )
+        validate_literal('fit_predict_order', fit_predict_order, FIT_PREDICT_ORDERS)
+        validate_cv(cv)
+        validate_cv_scoring(cv_scoring)
+        validate_min_cv_train_size(min_cv_train_size)
 
         # Instanciation des attributs
         self.fit_predict_order = fit_predict_order
         self.cv = cv
         self.cv_scoring = cv_scoring
         self.min_cv_train_size = min_cv_train_size
-
-    # Méthode auxiliaire de validation de "cv"
-    @staticmethod
-    def _validate_cv(cv: Any) -> None:
-        """Validate the shape of ``cv``, without resolving it.
-
-        Args:
-            cv: Value received for the ``cv`` parameter.
-
-        Raises:
-            ValueError: If ``cv`` is an ``int`` < 2.
-            TypeError: If ``cv`` is a string, or is none of ``None``, an
-                ``int``, a splitter (``split`` + ``get_n_splits``), or an
-                iterable.
-        """
-        # Cas de la cv par défaut
-        if cv is None:
-            return
-        # Cas d'erreur qui pourrait être confondu avec un entier
-        if isinstance(cv, bool):
-            # bool est un sous-type de int en Python ; jamais une valeur de
-            # "cv" sensée
-            raise TypeError(f"cv must not be a bool, got {cv!r}")
-        # Cas d'un entier, entiers numpy compris
-        if isinstance(cv, numbers.Integral):
-            if cv < 2:
-                raise ValueError(f"cv must be >= 2 when given as an int, got {cv}")
-            return
-        # Cas d'un cv spliter respectant l'API sklearn
-        if hasattr(cv, 'split') and hasattr(cv, 'get_n_splits'):
-            return
-        # Une chaîne est itérable caractère par caractère : jamais une
-        # collection de splits valide
-        if isinstance(cv, str) or not isinstance(cv, IterableABC):
-            raise TypeError(
-                f"cv must be None, an int >= 2, a cross-validation splitter "
-                f"(exposing split and get_n_splits), or an iterable of "
-                f"splits, got {type(cv).__name__}"
-            )
 
     # Résolution de "cv" et avertissement croisé
     def fit(self, X: Optional[pd.DataFrame] = None, y: Optional[pd.Series] = None) -> 'VariableOrderer':

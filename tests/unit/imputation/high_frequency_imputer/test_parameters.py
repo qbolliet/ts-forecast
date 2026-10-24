@@ -144,10 +144,15 @@ class TestParameterValidation:
         make_imputer(interpolation_anchor=0.5)
         make_imputer(interpolation_anchor={'a1': 0.0, 'q1': None})
 
-    @pytest.mark.parametrize('value', [1, 'five', 3.5])
-    def test_cv_invalid_forms_raise(self, value):
-        """Un cv entier < 2, ou d'un type inattendu, est refusé."""
+    def test_cv_int_below_two_raises_value_error(self):
+        """Un cv entier < 2 est une valeur refusée."""
         with pytest.raises(ValueError, match='cv'):
+            make_imputer(cv=1)
+
+    @pytest.mark.parametrize('value', ['five', 3.5])
+    def test_cv_unexpected_type_raises_type_error(self, value):
+        """Un cv d'un type inattendu est refusé."""
+        with pytest.raises(TypeError, match='cv'):
             make_imputer(cv=value)
 
     def test_cv_accepts_none_int_splitter_and_iterable(self):
@@ -166,7 +171,7 @@ class TestParameterValidation:
     @pytest.mark.parametrize('value', [3, ['a']])
     def test_cv_scoring_must_be_str_or_callable(self, value):
         """Un score de validation croisée ni textuel ni appelable est refusé."""
-        with pytest.raises(ValueError, match='cv_scoring'):
+        with pytest.raises(TypeError, match='cv_scoring'):
             make_imputer(cv_scoring=value)
 
     def test_min_cv_train_size_below_one_raises(self):
@@ -361,9 +366,9 @@ _REJECTED = [
     ('interpolation_anchor', True, ValueError, 'interpolation_anchor'),
     ('cv', 0, ValueError, 'cv'),
     ('cv', -1, ValueError, 'cv'),
-    ('cv', True, ValueError, 'cv'),
-    ('cv', _SplitOnly(), ValueError, 'get_n_splits'),
-    ('cv_scoring', None, ValueError, 'cv_scoring'),
+    ('cv', True, TypeError, 'cv'),
+    ('cv', _SplitOnly(), TypeError, 'get_n_splits'),
+    ('cv_scoring', None, TypeError, 'cv_scoring'),
     ('min_cv_train_size', True, TypeError, 'min_cv_train_size'),
     ('coverage_threshold', None, TypeError, 'coverage_threshold'),
     ('coverage_threshold', '0.5', TypeError, 'coverage_threshold'),

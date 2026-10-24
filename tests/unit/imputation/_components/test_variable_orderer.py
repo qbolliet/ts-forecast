@@ -521,12 +521,12 @@ class TestInitValidation:
         'kwargs, error, message',
         [
             pytest.param({'fit_predict_order': 'random'}, ValueError,
-                         "fit_predict_order must be 'frequency' or 'cv', got 'random'",
+                         r"fit_predict_order must be one of \('frequency', 'cv'\), got 'random'",
                          id='bad-order'),
             pytest.param({'cv': 1}, ValueError,
-                         'cv must be >= 2 when given as an int, got 1', id='cv-one'),
-            pytest.param({'cv': 0}, ValueError, 'cv must be >= 2', id='cv-zero'),
-            pytest.param({'cv': -3}, ValueError, 'cv must be >= 2', id='cv-negative'),
+                         'cv must be an int >= 2, got 1', id='cv-one'),
+            pytest.param({'cv': 0}, ValueError, 'cv must be an int >= 2', id='cv-zero'),
+            pytest.param({'cv': -3}, ValueError, 'cv must be an int >= 2', id='cv-negative'),
             pytest.param({'cv': True}, TypeError, 'cv must not be a bool', id='cv-bool'),
             pytest.param({'cv': 'abc'}, TypeError, 'cv must be None, an int >= 2', id='cv-string'),
             pytest.param({'cv': 2.5}, TypeError, 'got float', id='cv-float'),
@@ -535,6 +535,10 @@ class TestInitValidation:
                          'cv_scoring must be a str or a callable, got int', id='scoring-int'),
             pytest.param({'min_cv_train_size': 0}, ValueError,
                          'min_cv_train_size must be >= 1, got 0', id='min-size-zero'),
+            pytest.param({'min_cv_train_size': 2.5}, TypeError,
+                         'min_cv_train_size must be an int, got float', id='min-size-float'),
+            pytest.param({'min_cv_train_size': True}, TypeError,
+                         'min_cv_train_size must be an int, got bool', id='min-size-bool'),
         ],
     )
     def test_invalid_parameter_is_rejected_at_init(self, kwargs, error, message):

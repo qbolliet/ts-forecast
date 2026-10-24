@@ -18,7 +18,7 @@ features. Window masks are applied by the caller, upstream, on ``grid_index``.
 # Modules de base
 from typing import (
     Any, Dict, FrozenSet, Iterable, List, Literal, Mapping, Optional,
-    Protocol, Sequence, Tuple, Union,
+    Protocol, Sequence, Tuple, Union, get_args,
 )
 
 # Calcul numérique
@@ -38,6 +38,8 @@ from ...utils.frequency.utils import (
     normalize_frequency,
     target_offset_for_index,
 )
+# Validation d'un littéral, partagée avec l'imputeur
+from .._engine.params import validate_literal
 # Primitives du paramètre de contrainte d'agrégation, partagées avec
 # "AggregationConstraint" : une seule validation, une seule résolution
 from .aggregation_constraint import (
@@ -60,12 +62,14 @@ DEFAULT_MATERIALIZATION_KEY = '__default__'
 # l'imputeur transmettant son dictionnaire tel quel
 DEFAULT_INTERPOLATION_METHOD = 'linear'
 
-# Stratégies et modalités admises
-_COVARIATE_STRATEGIES: FrozenSet[str] = frozenset(
-    ('tolerate_nan', 'interpolate', 'model')
-)
-_COVARIATE_FALLBACKS: FrozenSet[str] = frozenset(('interpolate', 'tolerate_nan'))
-_COVARIATE_ELIGIBILITIES: FrozenSet[str] = frozenset(('any_entity', 'all_entities'))
+# Stratégies et modalités admises : les valeurs admissibles se lisent dans les
+# littéraux, source unique pour ce composant et pour l'imputeur
+CovariateStrategy = Literal['tolerate_nan', 'interpolate', 'model']
+CovariateFallback = Literal['interpolate', 'tolerate_nan']
+CovariateEligibility = Literal['any_entity', 'all_entities']
+COVARIATE_STRATEGIES: Tuple[str, ...] = get_args(CovariateStrategy)
+COVARIATE_FALLBACKS: Tuple[str, ...] = get_args(CovariateFallback)
+COVARIATE_ELIGIBILITIES: Tuple[str, ...] = get_args(CovariateEligibility)
 
 # Voies réservées aux modèles
 _MODEL_WAYS: FrozenSet[str] = frozenset(('stage_model', 'carried_model'))
@@ -422,9 +426,9 @@ class CovariateMaterializer:
     # Initialisation du composant : validation sans transformation
     def __init__(
         self,
-        covariate_strategy: Literal['tolerate_nan', 'interpolate', 'model'] = 'interpolate',
-        covariate_fallback: Literal['interpolate', 'tolerate_nan'] = 'interpolate',
-        covariate_eligibility: Literal['any_entity', 'all_entities'] = 'any_entity',
+        covariate_strategy: CovariateStrategy = 'interpolate',
+        covariate_fallback: CovariateFallback = 'interpolate',
+        covariate_eligibility: CovariateEligibility = 'any_entity',
         interpolation_method: PerFeature = DEFAULT_INTERPOLATION_METHOD,
         interpolation_anchor: PerFeature = None,
         aggregation_constraint: AggregationConstraintSetting = 'sum',
@@ -432,10 +436,15 @@ class CovariateMaterializer:
         aggregation_constraint_applier: Optional[AggregationConstraintApplier] = None,
     ) -> None:
         # Validation des littéraux
-        self._validate_literal('covariate_strategy', covariate_strategy, _COVARIATE_STRATEGIES)
-        self._validate_literal('covariate_fallback', covariate_fallback, _COVARIATE_FALLBACKS)
-        self._validate_literal(
-            'covariate_eligibility', covariate_eligibility, _COVARIATE_ELIGIBILITIES
+        validate_literal(
+            'covariate_strategy', covariate_strategy, COVARIATE_STRATEGIES, sort=True
+        )
+        validate_literal(
+            'covariate_fallback', covariate_fallback, COVARIATE_FALLBACKS, sort=True
+        )
+        validate_literal(
+            'covariate_eligibility', covariate_eligibility, COVARIATE_ELIGIBILITIES,
+            sort=True,
         )
         # Validation des formes par feature
         self._validate_interpolation_method(interpolation_method)
@@ -461,24 +470,6 @@ class CovariateMaterializer:
     # -------------------------------------------------------------------------
     # Validations
     # -------------------------------------------------------------------------
-    # Méthode auxiliaire de validation d'un littéral
-    @staticmethod
-    def _validate_literal(name: str, value: Any, admissible: FrozenSet[str]) -> None:
-        """Check that a scalar parameter belongs to its admissible set.
-
-        Args:
-            name: Parameter name, used in the message.
-            value: Value handed to ``__init__``.
-            admissible: Admissible values.
-
-        Raises:
-            ValueError: If the value is not admissible.
-        """
-        if value not in admissible:
-            raise ValueError(
-                f"{name} must be one of {sorted(admissible)}, got {value!r}"
-            )
-
     # Méthode auxiliaire de validation de la méthode d'interpolation
     @staticmethod
     def _validate_interpolation_method(interpolation_method: PerFeature) -> None:
