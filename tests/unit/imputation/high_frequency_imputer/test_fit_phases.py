@@ -23,6 +23,7 @@ from sklearn.linear_model import LinearRegression
 from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
 from tsforecast.imputation._components.imputation_plan import INTERPOLATE_FALLBACK
 from tsforecast.imputation._components.training_set_builder import TrainingSetBuilder
+from tsforecast.imputation._engine.run_context import _RunContext
 
 # Outils de test partagés
 from tests.support.estimators import (
@@ -518,57 +519,91 @@ class TestPerEntityFrequencies:
 # test_widening_training_scope_adds_rows_not_columns
 @pytest.mark.internal
 class TestWiring:
-    """The components of the imputer are instantiated and wired at fit."""
+    """The fit wires its components: training mask, window calculator, constraint.
 
-    def test_training_set_builder_is_wired(self, mixed_freq_panel_multifrequency, monkeypatch):
-        """Le callable de masque du builder appelle get_mask_at_frequency(kind='training')."""
-        imputer = fit_quietly(make_imputer(), mixed_freq_panel_multifrequency)
+    The context of the fit is observed as the fit builds it
+    (``_RunContext.for_fit``, recorded then delegated). The wiring internal to
+    the context — training-set builder on the materializer of the pass — is
+    tested on the context itself, in ``tests/unit/imputation/_engine/``.
+    """
 
-        # Le composant est instancié et porte le matérialiseur de l'instance
-        assert imputer._training_set_builder is not None
-        assert imputer._training_set_builder.materializer is imputer._covariate_materializer
+    # Ajustement qui enregistre les arguments du contexte d'exécution du fit
+    @staticmethod
+    def _fit_recording_context(imputer, data, monkeypatch) -> dict:
+        """Fit the imputer, recording the keyword arguments of its execution context.
 
-        # Espionnage de l'appel effectué par le callable injecté
+        Args:
+            imputer: Imputer to fit.
+            data: Fit data.
+            monkeypatch: Pytest fixture, restoring the factory afterwards.
+
+        Returns:
+            The keyword arguments ``_RunContext.for_fit`` received.
+        """
         recorded = {}
-        original = imputer._imputation_window_calc.get_mask_at_frequency
+        original = _RunContext.for_fit
+
+        def _recording(components, **kwargs):
+            recorded.update(kwargs)
+            return original(components, **kwargs)
+
+        monkeypatch.setattr(_RunContext, 'for_fit', _recording)
+        fit_quietly(imputer, data)
+        return recorded
+
+    def test_training_mask_reads_the_training_window_of_the_fit(
+        self, mixed_freq_panel_multifrequency, monkeypatch
+    ):
+        """Le callable de masque du builder appelle get_mask_at_frequency(kind='training')."""
+        recorded = self._fit_recording_context(
+            make_imputer(), mixed_freq_panel_multifrequency, monkeypatch
+        )
+        calculator = recorded['window_calculator']
+
+        # Espionnage de l'appel effectué par le callable remis au builder
+        calls = {}
+        original = calculator.get_mask_at_frequency
 
         def _spy(frequency, kind='imputation'):
-            recorded['frequency'] = frequency
-            recorded['kind'] = kind
+            calls['frequency'] = frequency
+            calls['kind'] = kind
             return original(frequency, kind=kind)
 
-        monkeypatch.setattr(
-            imputer._imputation_window_calc, 'get_mask_at_frequency', _spy
-        )
+        monkeypatch.setattr(calculator, 'get_mask_at_frequency', _spy)
 
         # Blocs de la colonne v sur PANEL-F, exactement la forme que le
         # TrainingSetBuilder passe : IT y est à la fréquence de la grille, cas
         # que le calculateur traite en identité
         blocks = {FR: 'Y', DE: 'Q', IT: 'M'}
-        mask = imputer._training_set_builder.training_mask(blocks)
+        mask = recorded['training_mask'](blocks)
 
-        # Le "kind" est nommé explicitement par le câblage, jamais laissé au défaut
-        assert recorded['kind'] == 'training'
-        assert recorded['frequency'] == blocks
+        # Le "kind" est nommé explicitement par le câblage, jamais laissé au défaut,
+        # sur le calculateur même du fit
+        assert calls['kind'] == 'training'
+        assert calls['frequency'] == blocks
         # Le masque revient exploitable pour les trois entités
         assert isinstance(mask, pd.Series)
         assert set(mask.index.get_level_values(0).unique()) == {'FR', 'DE', 'IT'}
 
-    def test_covariate_materializer_carries_the_aggregation_constraint(
-        self, reference_timeseries
-    ):
-        """La contrainte d'agrégation est portée par le matérialiseur, pas par le builder."""
+    def test_materializer_carries_the_aggregation_constraint(self, reference_timeseries):
+        """La contrainte d'agrégation est portée par le matérialiseur de chaque passe."""
         constraint = {'a1': None, '__default__': 'sum'}
         imputer = fit_quietly(
             make_imputer(aggregation_constraint=constraint), reference_timeseries
         )
-        assert imputer._covariate_materializer.aggregation_constraint is constraint
-        # Le builder n'en porte aucune : la cible n'est jamais agrégée
-        assert not hasattr(imputer._training_set_builder, 'aggregation_constraint')
+        materializer = imputer._fitted_components_.new_materializer()
+        assert materializer.aggregation_constraint is constraint
+        # Le recalage des covariables interpolées passe par la contrainte du fit
+        assert (
+            materializer.aggregation_constraint_applier
+            is imputer._fitted_components_.aggregation_constraint
+        )
 
-    def test_window_calculator_receives_the_four_window_parameters(self, reference_timeseries):
-        """The window calculator receives the four window parameters."""
-        imputer = fit_quietly(
+    def test_window_calculator_receives_the_four_window_parameters(
+        self, reference_timeseries, monkeypatch
+    ):
+        """The window calculator of the fit receives the four window parameters."""
+        recorded = self._fit_recording_context(
             make_imputer(
                 imputation_scope='extended_forward',
                 coverage_threshold=0.75,
@@ -576,8 +611,9 @@ class TestWiring:
                 training_coverage_threshold=0.25,
             ),
             reference_timeseries,
+            monkeypatch,
         )
-        calculator = imputer._imputation_window_calc
+        calculator = recorded['window_calculator']
         assert calculator.imputation_scope == 'extended_forward'
         assert calculator.coverage_threshold == 0.75
         assert calculator.training_scope == 'strict'

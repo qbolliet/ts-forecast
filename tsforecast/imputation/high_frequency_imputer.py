@@ -5,8 +5,8 @@ Also holds the private per-variable fit record."""
 # Modules de base
 import warnings
 from collections import OrderedDict
-from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import (
     Any,
     Callable,
@@ -47,7 +47,6 @@ from ..panel.utils import (
 )
 from ..utils._constants import FREQUENCY_LEVEL_NAME, MONTH_BASED_FREQUENCIES
 from ._components.aggregation_constraint import (
-    AggregationConstraint,
     ConstraintSetting,
     resolve_aggregation_constraint,
     validate_aggregation_constraint,
@@ -88,7 +87,6 @@ from ._components.stage_scaler import ScaleFeatures, StageScaler
 from ._components.target_frequency_validator import TargetFrequencyValidator
 from ._components.training_set_builder import (
     TrainingSet,
-    TrainingSetBuilder,
     split_training_index,
 )
 from ._components.variable_orderer import FIT_PREDICT_ORDERS, VariableOrderer, VariableSpec
@@ -103,6 +101,8 @@ from ._engine.params import (
     validate_target_frequency_format,
     validate_unit_interval,
 )
+from ._engine.run_context import FittedComponents, _RunContext
+from ._engine.warnings import WarningAccumulator
 
 # Type aliases
 VariableCategory = Literal['aggregate', 'impute', 'target_freq']
@@ -1175,6 +1175,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de conversion des fréquences détectées à la forme des consommateurs
     def _detected_frequencies_by_column(
         self,
+        transform_frequencies: Optional[Mapping[Union[str, tuple], str]] = None,
     ) -> Dict[str, Union[str, Dict[EntityKey, str]]]:
         """Return the detected frequencies keyed by column.
 
@@ -1185,6 +1186,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         ``{column: frequency | {entity: frequency}}``. This adapter is the
         single crossing point between the two, so no consumer ever
         re-implements the split.
+
+        Args:
+            transform_frequencies: Frequencies a replay detected for the pairs
+                the fit never observed (``_RunContext.transform_frequencies``).
+                None or empty at fit time. They never override a pair of the
+                fit.
 
         Returns:
             Mapping from column name to a scalar frequency (time series, or a
@@ -1211,7 +1218,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # la détection faite sur les données du transform est leur seule
         # source. Les couples du fit, eux, ne sont jamais recouverts
         pairs: Dict[Union[str, tuple], str] = {
-            **getattr(self, '_transform_frequencies', {}),
+            **(transform_frequencies or {}),
             **self.detected_frequencies_,
         }
 
@@ -1515,6 +1522,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de sélection des colonnes de features
     def _select_feature_columns(
         self,
+        materializer: CovariateMaterializer,
         candidates: Sequence[str],
         training_frame: pd.DataFrame,
         prediction_frame: pd.DataFrame,
@@ -1537,6 +1545,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         at all are dropped — is applied by :meth:`_drop_empty_training_rows`.
 
         Args:
+            materializer: Materializer of the pass, carrier of
+                ``covariate_eligibility``.
             candidates: Candidate covariate columns, in output order.
             training_frame: Frame restricted to the training grid.
             prediction_frame: Frame restricted to the prediction grid.
@@ -1556,14 +1566,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             ...     target_frequency='M', estimator=LinearRegression()
             ... ).fit(data)
             >>> pred_frame = data.assign(q1=np.nan)
-            >>> imputer._select_feature_columns(['m1', 'q1'], data, pred_frame)
+            >>> materializer = imputer._fitted_components_.new_materializer()
+            >>> imputer._select_feature_columns(materializer, ['m1', 'q1'], data, pred_frame)
             ('m1',)
         """
         # Éligibilité par entité, portée par le matérialiseur
         eligible = set(
-            self._covariate_materializer.eligible_columns(
-                candidates, prediction_frame
-            )
+            materializer.eligible_columns(candidates, prediction_frame)
         )
 
         # Non-vacuité sur les deux fenêtres : une colonne vide sur l'une des
@@ -1785,7 +1794,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         - PHASE 2: additive transformer.
         - PHASE 3: frequency progression.
         - PHASE 4: provenance tracker, initialized after the additive
-          transformer.
+          transformer, and the execution context of the fit
+          (:class:`_RunContext`), dropped at the end of the pass.
 
         - PHASE 5: stage execution — one model per (stage, variable),
           shared by its source-frequency groups, then one plan step per
@@ -1964,29 +1974,24 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         )
 
         # Résolution de la stratégie de validation croisée : "cv_" n'existe
-        # que sous fit_predict_order='cv'
+        # que sous fit_predict_order='cv'. L'ordonnanceur ne sert qu'au fit :
+        # il rejoint le contexte d'exécution de la passe
+        variable_orderer = VariableOrderer(
+            fit_predict_order=self.fit_predict_order,
+            cv=self.cv,
+            cv_scoring=self.cv_scoring,
+            min_cv_train_size=self.min_cv_train_size,
+        )
         if self.fit_predict_order == 'cv':
-            self._variable_orderer = VariableOrderer(
-                fit_predict_order=self.fit_predict_order,
-                cv=self.cv,
-                cv_scoring=self.cv_scoring,
-                min_cv_train_size=self.min_cv_train_size,
-            )
             # Hors covariate_strategy='model', l'ordre et ses paramètres sont
             # inertes : l'avertissement croisé de l'ordonnanceur sur
             # "min_cv_train_size" n'y a pas d'objet et est étouffé
             with warnings.catch_warnings():
                 if self.covariate_strategy != 'model':
                     warnings.simplefilter('ignore', UserWarning)
-                self._variable_orderer.fit()
-            self.cv_ = self._variable_orderer.cv_
+                variable_orderer.fit()
+            self.cv_ = variable_orderer.cv_
         else:
-            self._variable_orderer = VariableOrderer(
-                fit_predict_order=self.fit_predict_order,
-                cv=self.cv,
-                cv_scoring=self.cv_scoring,
-                min_cv_train_size=self.min_cv_train_size,
-            )
             # Purge d'un "cv_" laissé par un fit précédent sous un autre ordre
             if 'cv_' in self.__dict__:
                 delattr(self, 'cv_')
@@ -2001,41 +2006,20 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # fit_predict_order='cv'. Exposé pour le tracking.
         self.imputation_cv_scores_: Dict[str, Dict[Any, float]] = {}
 
-        # Accumulateur des avertissements de la phase 5 : ils sont émis en un
-        # seul message en fin de phase, jamais un par variable et par étape
-        self._warnings: List[str] = []
-
-        # Couples imputés sans ancre, et couples que l'absence de covariable
-        # exploitable a laissés NaN : les premiers alimentent
-        # "unanchored_pairs_", les seconds l'avertissement agrégé
-        self._unanchored_written: set = set()
-        self._unanchored_failures: List[tuple] = []
-
-        # Contrainte d'agrégation, portée par un composant unique : il recale
-        # les prédictions des étapes ET, injecté dans le matérialiseur, les
-        # covariables interpolées — une seule implémentation, aucune dérive
-        self._aggregation_constraint = AggregationConstraint(
-            aggregation_constraint=self.aggregation_constraint,
-            context='HighFrequencyImputer',
-        )
-
-        # Instanciation du matérialiseur : producteur unique des features,
-        # porteur des trois registres et de la contrainte d'agrégation
-        self._covariate_materializer = CovariateMaterializer(
+        # Composants configurés une fois pour toutes et relus tels quels par
+        # chaque passe : la contrainte d'agrégation (elle recale les
+        # prédictions des étapes et, injectée dans le matérialiseur, les
+        # covariables interpolées — une seule implémentation, aucune dérive),
+        # le metteur à l'échelle des étapes et la configuration du
+        # matérialiseur. Chaque passe reçoit son propre matérialiseur, donc des
+        # registres vides : un fit ne lit jamais le miroir d'un précédent
+        self._fitted_components_ = FittedComponents.build(
             covariate_strategy=self.covariate_strategy,
             covariate_fallback=self.covariate_fallback,
             covariate_eligibility=self.covariate_eligibility,
             interpolation_method=self.interpolation_method,
             interpolation_anchor=self.interpolation_anchor,
             aggregation_constraint=self.aggregation_constraint,
-            aggregation_constraint_applier=self._aggregation_constraint,
-        )
-        # Purge des registres : un fit ne lit jamais le miroir d'un précédent
-        self._covariate_materializer.reset()
-
-        # Metteur à l'échelle des étapes : sans état, il rend un diviseur par
-        # appel — jamais un scalaire figé pour tout un jeu
-        self._stage_scaler = StageScaler(
             scale_features=self.scale_features,
             column_frequencies=self._detected_frequencies_by_column(),
         )
@@ -2049,7 +2033,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # et une fenêtre vide n'est jamais un échec (masques
         # tout-faux et avertissement du calculateur)
         window_calc = self._make_window_calculator().fit(X_work)
-        self._imputation_window_calc = window_calc
 
         # Chaque appelant nomme explicitement son masque
         self.strict_window_mask_ = window_calc.get_imputation_window_mask(
@@ -2079,19 +2062,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # vide implique une fenêtre d'imputation vide, que le calculateur
         # signale déjà (« no period … where all the variables are
         # available ») — rien n'est alors imputé, ni par modèle ni par repli
-
-        # Câblage du constructeur de jeu d'entraînement mutualisé.
-        # Le "kind" du masque est nommé ici, une fois pour toutes : le
-        # composant reçoit un callable, jamais le calculateur, et ne peut donc
-        # pas lire un autre masque que celui d'entraînement.
-        # La contrainte d'agrégation ne lui est pas passée : elle ne joue
-        # aucun rôle dans la composition du jeu
-        # et lui parvient de toute façon par le matérialiseur injecté
-        self._training_set_builder = TrainingSetBuilder(
-            materializer=self._covariate_materializer,
-            training_mask=self._training_mask_at,
-            log=self._log if self.verbose else None,
-        )
 
         # =================================================================
         # PHASE 2 — Transformateur additif
@@ -2127,8 +2097,25 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # scanne le jeu de données réellement imputé, et non celui d'avant la
         # transformation, dont les cellules non nulles ne coïncident pas
         # nécessairement.
-        self._provenance_tracker = ImputationProvenanceTracker()
-        self._provenance_tracker.initialize(X_work, panel_cols=self.panel_cols)
+        tracker = ImputationProvenanceTracker()
+        tracker.initialize(X_work, panel_cols=self.panel_cols)
+
+        # Contexte d'exécution du fit, abandonné en fin de passe. Le
+        # constructeur du jeu d'entraînement mutualisé y est câblé sur le
+        # matérialiseur de la passe ; le "kind" de son masque est nommé ici,
+        # une fois pour toutes : il reçoit un callable, jamais le calculateur,
+        # et ne peut donc pas lire un autre masque que celui d'entraînement.
+        # La contrainte d'agrégation ne lui est pas passée : elle ne joue
+        # aucun rôle dans la composition du jeu et lui parvient de toute
+        # façon par le matérialiseur
+        run = _RunContext.for_fit(
+            self._fitted_components_,
+            window_calculator=window_calc,
+            provenance_tracker=tracker,
+            variable_orderer=variable_orderer,
+            training_mask=partial(self._training_mask_at, window_calc),
+            log=self._log if self.verbose else None,
+        )
 
         # =================================================================
         # PHASE 5 — Exécution des étapes
@@ -2141,32 +2128,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # profils inversés — des étapes comme des covariables interpolées —
         # donnent un avertissement par cas en fin de phase, jamais un par
         # variable × étape
-        with self._aggregation_constraint.deferred_warnings():
+        with run.aggregation_constraint.deferred_warnings():
             # Parcours des fréquences
             for stage_freq in self.frequency_progression_:
                 # Exécution de l'imputation à l'étape donnée
-                self._execute_stage(X_work, stage_freq)
+                self._execute_stage(run, X_work, stage_freq)
 
-        # Avertissements de la phase, agrégés en UN SEUL message
-        if self._warnings:
-            warnings.warn(
-                f"{len(self._warnings)} imputation step(s) degraded during the "
-                f"fit:\n  - " + "\n  - ".join(self._warnings),
-                UserWarning,
-            )
-
-        # Couples sans ancre restés vides : un seul avertissement les nommant
-        # tous. L'interpolation ne peut pas leur servir de repli — il n'y a
-        # rien à interpoler
-        if self._unanchored_failures:
-            named = sorted({pair for pair in self._unanchored_failures}, key=repr)
-            warnings.warn(
-                f"{len(named)} unobserved (entity, column) pair(s) could not be "
-                f"imputed: no prediction on the target grid (no usable covariate, "
-                f"or the prediction failed), and no interpolation fallback exists "
-                f"without an anchor; their cells stay NaN and unmarked: {named}",
-                UserWarning,
-            )
+        # Avertissements de la phase, un seul message par famille : étapes
+        # dégradées, puis couples sans ancre restés vides — l'interpolation ne
+        # peut pas servir de repli à ces derniers, il n'y a rien à interpoler
+        run.pending_warnings.emit()
 
         # =================================================================
         # PHASE 6 — Finalisation
@@ -2174,17 +2145,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Le plan est figé et les attributs de sortie sont renseignés. La
         # sortie multi-fréquences relève du "transform", seul producteur de
         # frame
-        self.imputation_provenance_ = self._provenance_tracker.get_provenance_matrix()
+        self.imputation_provenance_ = run.provenance_tracker.get_provenance_matrix()
 
         # Statistiques de provenance (comptes et pourcentages par
         # "ProvenanceType", au global et par colonne) : exposées telles quelles
         # pour le tracking, elles évitent à l'utilisateur de reconstruire un
         # tracker pour les recalculer
-        self.provenance_statistics_ = self._provenance_tracker.compute_statistics()
+        self.provenance_statistics_ = run.provenance_tracker.compute_statistics()
 
         # Couples imputés sans ancre : toujours écrit, vide compris, ce qui
         # autorise sa lecture par "check_is_fitted"
-        self.unanchored_pairs_ = tuple(sorted(self._unanchored_written, key=repr))
+        self.unanchored_pairs_ = tuple(sorted(run.unanchored_written, key=repr))
 
         # Instantané de l'entrée du fit : comme "imputation_provenance_", il
         # décrit la dernière passe, que "inverse_transform" défait — y compris
@@ -2284,6 +2255,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # /!\ Cette logique n'est pas déjà présente ailleurs ?
     def _stage_mask(
         self,
+        window_calculator: ImputationWindowCalculator,
         X_work: pd.DataFrame,
         stage_freq: Union[str, Dict[EntityKey, str]],
         kind: Literal['imputation', 'training'],
@@ -2298,6 +2270,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         left unrestricted rather than silently losing every one of its rows.
 
         Args:
+            window_calculator: Window calculator of the pass.
             X_work: Working frame, the fallback grid.
             stage_freq: Frequency of the stage, scalar or per entity.
             kind: Window read: ``'imputation'`` or ``'training'``.
@@ -2310,9 +2283,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Calculateur non ajusté ou fréquence inconvertible : aucune
         # restriction, la garde de la phase 1 ayant déjà averti
         try:
-            mask = self._imputation_window_calc.get_mask_at_frequency(
-                stage_freq, kind=kind
-            )
+            mask = window_calculator.get_mask_at_frequency(stage_freq, kind=kind)
         except (ValueError, KeyError, TypeError) as error:
             self._log(f"[fit] {kind} mask unavailable ({error}); every row kept")
             return pd.Series(True, index=X_work.index)
@@ -2331,6 +2302,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de la grille de prédiction d'une étape
     def _prediction_grid(
         self,
+        window_calculator: ImputationWindowCalculator,
         X_work: pd.DataFrame,
         stage_freq: Union[str, Dict[EntityKey, str]],
         entities: Optional[Sequence[EntityKey]],
@@ -2342,6 +2314,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         predicted like any other.
 
         Args:
+            window_calculator: Window calculator of the pass.
             X_work: Working frame.
             stage_freq: Frequency of the stage.
             entities: Entities of the group, None for a time series.
@@ -2350,13 +2323,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Index of the rows the step writes on.
         """
         # Masque d'imputation, "kind" nommé explicitement
-        mask = self._stage_mask(X_work, stage_freq, kind='imputation')
+        mask = self._stage_mask(window_calculator, X_work, stage_freq, kind='imputation')
         grid = mask.index[mask.to_numpy(dtype=bool)]
         return self._restrict_to_entities(grid, entities)
 
     # Méthode auxiliaire de la grille non restreinte d'un groupe
     def _unrestricted_grid(
         self,
+        window_calculator: ImputationWindowCalculator,
         X_work: pd.DataFrame,
         stage_freq: Union[str, Dict[EntityKey, str]],
         entities: Optional[Sequence[EntityKey]],
@@ -2370,6 +2344,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         cannot feed producing a NaN that is simply never written.
 
         Args:
+            window_calculator: Window calculator of the pass.
             X_work: Working frame.
             stage_freq: Frequency of the stage.
             entities: Entities of the group, None for a time series.
@@ -2378,7 +2353,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Index of the rows of those entities at the stage frequency.
         """
         # Index du masque, pris sans sa valeur booléenne : la grille de l'étape
-        mask = self._stage_mask(X_work, stage_freq, kind='imputation')
+        mask = self._stage_mask(window_calculator, X_work, stage_freq, kind='imputation')
         return self._restrict_to_entities(mask.index, entities)
 
     # Méthode auxiliaire de liaison de fréquence des blocs
@@ -2409,6 +2384,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de calcul des diviseurs de features par fréquence de ligne
     def _feature_divisors_per_row(
         self,
+        stage_scaler: StageScaler,
         *,
         feature_cols: Sequence[str],
         freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
@@ -2435,6 +2411,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         block binding.
 
         Args:
+            stage_scaler: Stage scaler of the pass.
             feature_cols: Covariate columns to scale.
             freqs_by_column: Detected frequencies, keyed by column.
             ways: Materialization way retained for each covariate.
@@ -2466,7 +2443,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # partagent une date et l'alignement par étiquette les confondrait
             positions = np.flatnonzero(in_layer)
             sub_real = real_index[in_layer]
-            sub_divisors = self._stage_scaler.feature_divisors(
+            sub_divisors = stage_scaler.feature_divisors(
                 columns=feature_cols,
                 column_frequencies=freqs_by_column,
                 ways=ways,
@@ -2563,6 +2540,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de calcul des diviseurs de cible par fréquence de ligne
     def _target_divisors_per_row(
         self,
+        stage_scaler: StageScaler,
         *,
         column: str,
         blocks: Dict[EntityKey, str],
@@ -2583,6 +2561,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         injected nothing is a single layer, hence a single call.
 
         Args:
+            stage_scaler: Stage scaler of the pass.
             column: Column being imputed, for scale-mode resolution.
             blocks: Block frequency of each contributing entity.
             stage_freq: Frequency of the stage.
@@ -2605,7 +2584,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             positions = np.flatnonzero(in_layer)
             sub_real = real_index[in_layer]
             produced = pd.Series(frequencies[in_layer], index=sub_real)
-            sub_divisors = self._stage_scaler.target_divisor(
+            sub_divisors = stage_scaler.target_divisor(
                 column,
                 source_freq=self._block_binding(layer, sub_real),
                 pred_freq=stage_freq,
@@ -2618,6 +2597,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire d'ordonnancement des colonnes d'une étape
     def _order_columns(
         self,
+        run: _RunContext,
         by_column: Dict[str, Dict[Tuple[str, str], Tuple[EntityKey, ...]]],
         X_work: pd.DataFrame,
         stage_label: str,
@@ -2650,6 +2630,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         own context rather than reusing these.
 
         Args:
+            run: Execution context of the fit.
             by_column: Imputable groups of the stage, keyed by column.
             X_work: Working frame.
             stage_label: Readable label of the stage.
@@ -2696,10 +2677,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # seulement — la phase 0 l'ajuste déjà sous 'cv' : l'avertissement
         # croisé qu'il émet ne concerne que la validation croisée et n'aurait
         # ici aucun sens
-        if not hasattr(self._variable_orderer, 'cv_'):
+        if not hasattr(run.variable_orderer, 'cv_'):
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', UserWarning)
-                self._variable_orderer.fit()
+                run.variable_orderer.fit()
 
         # Jeux de scoring de l'ordre 'cv' : ceux-là mêmes que la 5c ajustera.
         # Rien n'est préparé sous l'ordre 'frequency', qui n'en lit aucun
@@ -2721,6 +2702,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                     key=repr,
                 )
                 prepared = self._prepare_variable(
+                    run,
                     column=column,
                     entities=group_entities if self.is_panel_ else None,
                     stage_freq=stage_freq,
@@ -2731,7 +2713,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 training_sets[column] = (prepared.X_train, prepared.y_train)
 
         # Les lignes scorées sont celles du jeu mutualisé, déjà restreintes à la fenêtre 'training'
-        ordered = list(self._variable_orderer.order(
+        ordered = list(run.variable_orderer.order(
             specs,
             estimator=self.estimator,
             log=self._log if self.verbose else None,
@@ -2740,7 +2722,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.imputation_order_[stage_label] = list(ordered)
         # Report des scores CV qui ont décidé du rang, pour le tracking. Sous
         # l'ordre 'frequency' l'ordonnanceur laisse "scores_" vide
-        stage_scores = dict(getattr(self._variable_orderer, 'scores_', {}) or {})
+        stage_scores = dict(getattr(run.variable_orderer, 'scores_', {}) or {})
         if stage_scores:
             self.imputation_cv_scores_[stage_label] = stage_scores
         return ordered
@@ -2748,6 +2730,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode d'exécution d'une étape de fréquence
     def _execute_stage(
         self,
+        run: _RunContext,
         X_work: pd.DataFrame,
         stage_freq: Union[str, Dict[EntityKey, str]],
     ) -> None:
@@ -2757,13 +2740,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         variables and their order, then one pass per variable.
 
         Args:
+            run: Execution context of the fit.
             X_work: Working frame, after the additive transformer.
             stage_freq: Frequency of the stage.
         """
         # Étiquette lisible de l'étape, clé du plan et des journaux
         stage_label = self._stage_frequency_label(stage_freq)
         # Détection des fréquences
-        freqs_by_column = self._detected_frequencies_by_column()
+        freqs_by_column = self._detected_frequencies_by_column(run.transform_frequencies)
 
         # Groupes imputables : un par (colonne, fréquence source)
         groups = self._imputable_groups(stage_freq)
@@ -2772,8 +2756,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             return
 
         # 5a. Frame d'étape : données d'origine, agrégations exactes et miroir
-        stage_mask = self._stage_mask(X_work, stage_freq, kind='imputation')
-        stage_frame = self._covariate_materializer.stage_frame(
+        stage_mask = self._stage_mask(
+            run.window_calculator, X_work, stage_freq, kind='imputation'
+        )
+        stage_frame = run.materializer.stage_frame(
             grid_index=stage_mask.index,
             stage_freq=stage_freq,
             detected_frequencies=freqs_by_column,
@@ -2785,6 +2771,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         for group_key, entities in groups.items():
             by_column.setdefault(group_key[0], {})[group_key] = entities
         ordered = self._order_columns(
+            run,
             by_column,
             X_work,
             stage_label,
@@ -2796,6 +2783,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # 5c. Une variable à la fois, un seul ajustement par (étape, variable)
         for column in ordered:
             self._fit_variable(
+                run,
                 column=column,
                 groups=by_column[column],
                 stage_freq=stage_freq,
@@ -2808,6 +2796,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de composition du contexte d'ajustement d'une variable
     def _prepare_variable(
         self,
+        run: _RunContext,
         *,
         column: str,
         entities: Optional[Sequence[EntityKey]],
@@ -2832,6 +2821,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         only feeds ``covariate_taint``, which is the caller's business.
 
         Args:
+            run: Execution context of the fit.
             column: Column being imputed.
             entities: Entities of the variable's groups, None for a time
                 series. The prediction grid is restricted to them, so a
@@ -2846,9 +2836,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             The :class:`_VariableFit` of that (stage, variable).
         """
         # Constructeur du jeu de données d'entraînement
-        builder = self._training_set_builder
+        builder = run.training_set_builder
         # Matérialiseur des résultats des étapes précédentes
-        materializer = self._covariate_materializer
+        materializer = run.materializer
         # Origines acceptées pour la target et les covariables
         eligible = ELIGIBLE_ORIGINS[self.impute_intermediate_frequencies]
 
@@ -2879,13 +2869,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         blocks = dict(probe.blocks)
 
         # Grille de prédiction des entités concernées
-        pred_grid = self._prediction_grid(X_work, stage_freq, entities)
+        pred_grid = self._prediction_grid(
+            run.window_calculator, X_work, stage_freq, entities
+        )
 
         # Vues des deux fenêtres, chacune à sa fréquence : la grille
         # d'entraînement au pas de chaque couche de lignes, la grille de
         # prédiction au pas de l'étape
         train_view = self._training_view(
-            probe, blocks, stage_freq, freqs_by_column, X_work
+            materializer, probe, blocks, stage_freq, freqs_by_column, X_work
         )
         pred_view = stage_frame.reindex(pred_grid)
 
@@ -2903,7 +2895,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             name for name in X_work.columns
             if name != column and name != excluded_target and name in freqs_by_column
         ]
-        feature_cols = self._select_feature_columns(candidates, train_view, pred_view)
+        feature_cols = self._select_feature_columns(
+            materializer, candidates, train_view, pred_view
+        )
 
         # Voie de matérialisation : décidée une seule, sur la grille de
         # prédiction puis imposée aux deux grilles : une covariable servie par
@@ -2940,9 +2934,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 training.X.index,
                 has_frequency_level=training.has_frequency_level,
             )
-            y_train = self._stage_scaler.apply(
+            y_train = run.stage_scaler.apply(
                 y_train,
                 self._target_divisors_per_row(
+                    run.stage_scaler,
                     column=column,
                     blocks=dict(training.blocks),
                     stage_freq=stage_freq,
@@ -2953,9 +2948,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 ),
             )
             if feature_cols:
-                X_train = self._stage_scaler.apply(
+                X_train = run.stage_scaler.apply(
                     X_train,
                     self._feature_divisors_per_row(
+                        run.stage_scaler,
                         feature_cols=feature_cols,
                         freqs_by_column=freqs_by_column,
                         ways=ways,
@@ -2991,6 +2987,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de la vue d'entraînement, lue couche par couche
     def _training_view(
         self,
+        materializer: CovariateMaterializer,
         probe: TrainingSet,
         blocks: Dict[EntityKey, str],
         stage_freq: Union[str, Dict[EntityKey, str]],
@@ -3007,6 +3004,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         grid.
 
         Args:
+            materializer: Materializer of the pass, sole producer of the
+                stage frames.
             probe: Covariate-free training set of the variable, carrying the
                 rows, their production frequency and the blocks.
             blocks: Block frequency of each contributing entity.
@@ -3018,8 +3017,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             The stage frames of every layer, stacked; rows are never written
             back, only read for their non-emptiness.
         """
-        # Matérialiseur, seul producteur des trames d'étape
-        materializer = self._covariate_materializer
         # Grille réelle de la sonde et entité de chaque ligne : le niveau de
         # fréquence n'est jamais lu par le matérialiseur
         real_index, entity_codes, entities = split_training_index(
@@ -3054,6 +3051,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode d'ajustement d'une variable à une étape
     def _fit_variable(
         self,
+        run: _RunContext,
         *,
         column: str,
         groups: Dict[Tuple[str, str], Tuple[EntityKey, ...]],
@@ -3072,6 +3070,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         rescaling.
 
         Args:
+            run: Execution context of the fit.
             column: Column being imputed.
             groups: Imputable groups of that column, keyed by
                 ``(column, source frequency)``.
@@ -3093,6 +3092,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # ont écrit dans le miroir, et c'est précisément ce que la cascade
         # cherche à exploiter
         prepared = self._prepare_variable(
+            run,
             column=column,
             entities=entities,
             stage_freq=stage_freq,
@@ -3119,7 +3119,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # la raison pour laquelle la 5b n'en a pas besoin pour ordonner
         pred_origins: Dict[str, CellOrigin] = {}
         if feature_cols and len(training) > 0:
-            _X_pred, _ways, pred_origins = self._covariate_materializer.materialize(
+            _X_pred, _ways, pred_origins = run.materializer.materialize(
                 columns=feature_cols,
                 grid_index=pred_grid,
                 stage_freq=stage_freq,
@@ -3146,7 +3146,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             source_frequency is None for _column, source_frequency in groups
         )
         model, is_fallback = self._fit_estimator(
-            column, X_train, y_train, feature_cols, stage_label,
+            run.pending_warnings, column, X_train, y_train, feature_cols, stage_label,
             announce=writes_something,
         )
         # Logging
@@ -3163,6 +3163,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             group_entities_or_none = group if self.is_panel_ else None
             # Construction de l'étape
             step = self._build_step(
+                run,
                 column=column,
                 source_frequency=group_key[1],
                 entities=group_entities_or_none,
@@ -3185,7 +3186,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # La volumétrie écrite n'est connue qu'après coup : elle est gelée
             # sur l'étape au même titre que la dégradation
             degraded, n_written = self._execute_step(
-                step, X_work=X_work, stage_freq=stage_freq
+                run, step, X_work=X_work, stage_freq=stage_freq
             )
             step = replace(step, n_written=n_written)
             if degraded:
@@ -3203,6 +3204,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire d'ajustement de l'estimateur d'une variable
     def _fit_estimator(
         self,
+        pending_warnings: WarningAccumulator,
         column: str,
         X_train: pd.DataFrame,
         y_train: pd.Series,
@@ -3213,6 +3215,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """Fit the estimator of one variable, or fall back on interpolation.
 
         Args:
+            pending_warnings: Pending warnings of the pass, which receive the
+                announced fallbacks.
             column: Column being imputed.
             X_train: Scaled training features.
             y_train: Scaled training target.
@@ -3230,7 +3234,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Repli d'interpolation, annoncé par l'avertissement agrégé de la phase
         def _fallback(reason: str) -> Tuple[Any, bool]:
             if announce:
-                self._warnings.append(
+                pending_warnings.add_degraded_step(
                     f"{column!r} at stage {stage_label}: {reason}, "
                     f"interpolation fallback"
                 )
@@ -3264,6 +3268,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de construction d'une étape de plan
     def _build_step(
         self,
+        run: _RunContext,
         *,
         column: str,
         source_frequency: Optional[str],
@@ -3285,6 +3290,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """Freeze one plan step of a (stage, variable, source frequency) group.
 
         Args:
+            run: Execution context of the fit.
             column: Column imputed by the step.
             source_frequency: Detected frequency of the column for the group,
                 None for an unanchored group.
@@ -3319,7 +3325,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if unanchored:
             scale = 1.0
         else:
-            scale = self._group_scale_factor(column, source_frequency, stage_freq, grid)
+            scale = self._group_scale_factor(
+                run.stage_scaler, column, source_frequency, stage_freq, grid
+            )
 
         # Clé de registre : la fréquence n'entre dans la clé que lorsque les
         # entités divergent sur la fréquence de cette colonne
@@ -3340,8 +3348,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             target_taint=target_taint,
             materialization=materialization,
             is_fallback=is_fallback,
-            interpolation_method=self._covariate_materializer.resolve_method(column),
-            interpolation_anchor=self._covariate_materializer.resolve_anchor(column),
+            interpolation_method=run.materializer.resolve_method(column),
+            interpolation_anchor=run.materializer.resolve_anchor(column),
             training_blocks=training_blocks,
             unanchored=unanchored,
             n_training_rows=n_training_rows,
@@ -3350,6 +3358,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire du facteur d'échelle d'un groupe ancré
     def _group_scale_factor(
         self,
+        stage_scaler: StageScaler,
         column: str,
         source_frequency: str,
         stage_freq: Union[str, Dict[EntityKey, str]],
@@ -3362,6 +3371,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         coincide and the carry is 1.0.
 
         Args:
+            stage_scaler: Stage scaler of the pass.
             column: Column imputed by the step.
             source_frequency: Detected frequency of the column for the group.
             stage_freq: Frequency of the stage.
@@ -3372,7 +3382,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             The factor. A conversion the scaler refuses raises: a silent
             ``1.0`` would mis-scale every prediction of the group.
         """
-        return self._stage_scaler.fit_scale_factor(
+        return stage_scaler.fit_scale_factor(
             column,
             source_freq=source_frequency,
             pred_freq=stage_freq,
@@ -3382,6 +3392,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode unique d'exécution d'une étape du plan
     def _execute_step(
         self,
+        run: _RunContext,
         step: ImputationStep,
         *,
         X_work: pd.DataFrame,
@@ -3401,9 +3412,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         interpolation fallback — there is nothing to interpolate for an
         entity that never observes the column, so a failure leaves its cells
         NaN and unmarked and is reported by the aggregated warning of the
-        end of the fit.
+        end of the pass.
 
         Args:
+            run: Execution context of the pass, fit or replay.
             step: Frozen step to execute.
             X_work: Working frame the values are read from.
             stage_freq: Frequency of the stage.
@@ -3419,14 +3431,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             ``transform`` discards both.
         """
         # Extraction du matérisaliseur des étapes précédentes
-        materializer = self._covariate_materializer
+        materializer = run.materializer
         # Extraction du nom de la colonne
         column = step.var_name
         # Détection des fréquences de la colonne (éventuellement pour différentes entités)
-        freqs_by_column = self._detected_frequencies_by_column()
+        freqs_by_column = self._detected_frequencies_by_column(run.transform_frequencies)
 
         # Grille du groupe : la fenêtre d'imputation de ses entités, ancres comprises
-        grid = self._prediction_grid(X_work, stage_freq, step.entities)
+        grid = self._prediction_grid(
+            run.window_calculator, X_work, stage_freq, step.entities
+        )
 
         # Sans ancre, la fenêtre stricte d'une entité est vide par
         # construction : elle est l'intervalle où toutes ses colonnes sont
@@ -3435,7 +3449,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # circulaire ; l'entité est donc laissée sans restriction, exactement
         # comme "_stage_mask" traite déjà une entité que le calculateur omet
         if step.unanchored and len(grid) == 0:
-            grid = self._unrestricted_grid(X_work, stage_freq, step.entities)
+            grid = self._unrestricted_grid(
+                run.window_calculator, X_work, stage_freq, step.entities
+            )
 
         if len(grid) == 0:
             return False, 0
@@ -3443,14 +3459,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Production des valeurs : modèle, ou repli d'interpolation
         values: Optional[pd.Series] = None
         if not step.is_fallback:
-            values = self._predict_step(step, grid, X_work, freqs_by_column, stage_freq)
+            values = self._predict_step(
+                run, step, grid, X_work, freqs_by_column, stage_freq
+            )
         degraded = values is None and not step.is_fallback
 
         # Absence d'ancre : l'interpolation ne peut pas être le repli, faute
         # d'observation à interpoler. Les couples restent NaN et non marqués,
-        # et l'avertissement agrégé de la fin du fit les nomme
+        # et l'avertissement agrégé de la fin de la passe les nomme
         if step.unanchored and values is None:
-            self._unanchored_failures.extend(self._step_pairs(step))
+            run.pending_warnings.add_unimputed_pairs(self._step_pairs(step))
             return False, 0
 
         if values is None:
@@ -3480,7 +3498,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             observations = X_work[column].reindex(
                 self._restrict_to_entities(X_work.index, step.entities)
             )
-            values, _rescaled_mask = self._aggregation_constraint.rescale(
+            values, _rescaled_mask = run.aggregation_constraint.rescale(
                 values, observations, step.source_frequency, column=column,
                 grid_freq=stage_freq,
             )
@@ -3494,7 +3512,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Couples effectivement imputés sans ancre, source de unanchored_pairs_
         if step.unanchored:
-            self._unanchored_written.update(self._step_pairs(step))
+            run.unanchored_written.update(self._step_pairs(step))
 
         # Marquage de provenance : identique pour les cellules recalées et non
         # recalées, lignes d'ancres comprises — le recalage ne change aucune
@@ -3503,8 +3521,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # l'entrée (index irrégulier, fenêtre étendue vers des périodes où
         # seules des observations basse fréquence isolées existent) : la
         # matrice, initialisée sur l'index d'entrée, est donc étendue d'abord
-        self._provenance_tracker.extend_index(written.index)
-        self._provenance_tracker.mark_imputed(column, written.index, provenance)
+        run.provenance_tracker.extend_index(written.index)
+        run.provenance_tracker.mark_imputed(column, written.index, provenance)
 
         # Mise à jour des trois registres, y compris en repli
         materializer.record_production(
@@ -3556,6 +3574,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de prédiction d'une étape à modèle
     def _predict_step(
         self,
+        run: _RunContext,
         step: ImputationStep,
         grid: pd.Index,
         X_work: pd.DataFrame,
@@ -3565,6 +3584,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """Produce the predictions of one model step on its grid.
 
         Args:
+            run: Execution context of the pass, fit or replay.
             step: Frozen step, holding the model and the ways to replay.
             grid: Prediction grid of the group.
             X_work: Working frame.
@@ -3586,7 +3606,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # matérialisation d'une covariable écraserait l'imputation que son
         # propre modèle vient d'écrire, et rendrait le résultat dépendant de
         # l'ordre de traitement
-        X_pred, _ways, _origins = self._covariate_materializer.materialize(
+        X_pred, _ways, _origins = run.materializer.materialize(
             columns=step.feature_cols,
             grid_index=grid,
             stage_freq=stage_freq,
@@ -3599,7 +3619,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Mise à l'échelle des features à la fréquence source du groupe, puis
         # prédiction
         try:
-            divisors = self._stage_scaler.feature_divisors(
+            divisors = run.stage_scaler.feature_divisors(
                 columns=step.feature_cols,
                 column_frequencies=freqs_by_column,
                 ways=step.materialization,
@@ -3608,13 +3628,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 index=grid,
             )
             predictions = step.model.predict(
-                self._stage_scaler.apply(X_pred, divisors)
+                run.stage_scaler.apply(X_pred, divisors)
             )
         except Exception as error:
             # Sans ancre, aucun repli n'existe : seul l'avertissement des
             # couples non imputés le dira, jamais un « repli » qui n'a pas lieu
             if not step.unanchored:
-                self._warnings.append(
+                run.pending_warnings.add_degraded_step(
                     f"{step.var_name!r} at stage {step.pred_freq_label}: prediction "
                     f"failed ({type(error).__name__}: {error}), interpolation fallback"
                 )
@@ -3633,13 +3653,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         n_missing = int(values.isna().sum())
         if n_missing == len(values):
             if not step.unanchored:
-                self._warnings.append(
+                run.pending_warnings.add_degraded_step(
                     f"{step.var_name!r} at stage {step.pred_freq_label}: the model "
                     f"predicted only NaN, interpolation fallback"
                 )
             return None
         if n_missing and not step.unanchored:
-            self._warnings.append(
+            run.pending_warnings.add_degraded_step(
                 f"{step.var_name!r} at stage {step.pred_freq_label}: {n_missing} of "
                 f"{len(values)} prediction(s) are NaN and stay unimputed"
             )
@@ -3686,15 +3706,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire du masque d'entraînement lu à la fréquence des blocs
     def _training_mask_at(
         self,
+        window_calculator: ImputationWindowCalculator,
         frequencies: Dict[EntityKey, str],
     ) -> Optional[pd.Series]:
         """Read the ``'training'`` window mask at one frequency per block.
 
-        Injected into :class:`TrainingSetBuilder`, which therefore receives a
-        callable and never the calculator: it cannot read a window other than
-        the training one, whose ``kind`` is named here once and for all.
+        Injected into :class:`TrainingSetBuilder`, bound to the calculator of
+        the fit: the builder therefore receives a callable and never the
+        calculator, so it cannot read a window other than the training one,
+        whose ``kind`` is named here once and for all.
 
         Args:
+            window_calculator: Window calculator of the fit.
             frequencies: Mapping entity -> block frequency ``f_block(e)``.
 
         Returns:
@@ -3710,9 +3733,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         if not self.is_panel_ and isinstance(frequencies, dict):
             binding = next(iter(frequencies.values()))
         try:
-            return self._imputation_window_calc.get_mask_at_frequency(
-                binding, kind='training'
-            )
+            return window_calculator.get_mask_at_frequency(binding, kind='training')
         except (ValueError, KeyError, TypeError) as error:
             # Logging
             self._log(f"[fit] training mask unavailable ({error}); every row kept")
@@ -3947,72 +3968,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Transform — rejeu du plan figé
     # -------------------------------------------------------------------------
-    # Gestionnaire de contexte installant l'état de rejeu
-    @contextmanager
-    def _replay_state(
-        self,
-        window_calc: ImputationWindowCalculator,
-        tracker: ImputationProvenanceTracker,
-        frequencies: Dict[Union[str, tuple], str],
-        misaligned: Tuple[Union[str, tuple], ...] = (),
-    ):
-        """Install the transform state around a replay, then restore the fit's.
-
-        The step execution of ``fit`` reads its window calculator, its
-        provenance tracker, its warning accumulators and its three registers
-        from the instance. Swapping them here is what lets ``transform`` reuse
-        :meth:`_execute_step` **as is** rather than carry a second execution
-        loop.
-
-        Args:
-            window_calc: Window calculator recomputed on the transformed data.
-            tracker: Provenance tracker of this transform, already initialized
-                on the frame produced by the additive transformer.
-            frequencies: Frequencies detected for the (entity, column) pairs
-                the fit never observed, the only ones no fit value can be
-                replayed for.
-            misaligned: Those of the pairs the fit never observed that the
-                transform observes off the calendar bounds of their frequency.
-
-        Yields:
-            None. The fit state is restored on the way out, exception
-            included.
-        """
-        # Mémorisation de l'état du fit, restauré en sortie
-        saved = (
-            self._imputation_window_calc,
-            self._provenance_tracker,
-            self._warnings,
-            self._unanchored_written,
-            self._unanchored_failures,
-            getattr(self, '_transform_frequencies', {}),
-            getattr(self, '_transform_misaligned', frozenset()),
-            getattr(self, '_replay_notes', []),
-        )
-        self._imputation_window_calc = window_calc
-        self._provenance_tracker = tracker
-        self._warnings = []
-        self._unanchored_written = set()
-        self._unanchored_failures = []
-        self._transform_frequencies = dict(frequencies)
-        self._transform_misaligned = frozenset(misaligned)
-        self._replay_notes = []
-        # Registres du transform : recalculés, jamais hérités du fit
-        self._covariate_materializer.reset()
-        try:
-            yield
-        finally:
-            (
-                self._imputation_window_calc,
-                self._provenance_tracker,
-                self._warnings,
-                self._unanchored_written,
-                self._unanchored_failures,
-                self._transform_frequencies,
-                self._transform_misaligned,
-                self._replay_notes,
-            ) = saved
-
     # Méthode auxiliaire de contrôle des fréquences au transform
     def _check_transform_frequencies(
         self,
@@ -4200,6 +4155,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire d'extension de la liaison d'étape aux entités nouvelles
     def _extend_stage_binding(
         self,
+        pending_warnings: WarningAccumulator,
         stage_freq: Union[str, Dict[EntityKey, str]],
         new_entities: Sequence[EntityKey],
         stage_label: str,
@@ -4213,6 +4169,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         by the aggregated warning.
 
         Args:
+            pending_warnings: Pending warnings of the replay, which name the
+                entities left out.
             stage_freq: Frequency of the stage, scalar or per entity.
             new_entities: Entities the fit never saw.
             stage_label: Readable label of the stage, for the message.
@@ -4230,7 +4188,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             for freq in stage_freq.values()
         }
         if len(unique) != 1:
-            self._replay_notes.append(
+            pending_warnings.add_outside_plan_case(
                 f"stage {stage_label}: its entities disagree on the stage "
                 f"frequency, so the entities born at transform time "
                 f"{tuple(new_entities)} cannot be bound to it and are skipped"
@@ -4243,6 +4201,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire des étapes rejouées à une étape de fréquence
     def _replay_steps(
         self,
+        run: _RunContext,
         steps: Sequence[ImputationStep],
         new_entities: Sequence[EntityKey],
         binding: Union[str, Dict[EntityKey, str]],
@@ -4274,6 +4233,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         pairs stay as given.
 
         Args:
+            run: Execution context of the replay.
             steps: Plan steps of the stage, in plan order.
             new_entities: Entities the fit never saw.
             binding: Stage binding, already extended (or not) to them.
@@ -4311,7 +4271,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 remaining = []
                 for entity in step.entities:
                     if not self._route_transform_pair(
-                        entity, column, binding, anchored
+                        run, entity, column, binding, anchored
                     ):
                         remaining.append(entity)
                 if remaining:
@@ -4319,14 +4279,20 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
             # Entités nouvelles : ancrées si observées, sans ancre sinon
             for entity in bound:
-                if not self._route_transform_pair(entity, column, binding, anchored):
+                if not self._route_transform_pair(
+                    run, entity, column, binding, anchored
+                ):
                     unanchored.append(entity)
 
             # Étapes dérivées, juste après celles de la colonne
             representative = column_steps[0]
             for frequency, entities in anchored.items():
-                grid = self._prediction_grid(X_stage, binding, entities)
-                scale = self._group_scale_factor(column, frequency, binding, grid)
+                grid = self._prediction_grid(
+                    run.window_calculator, X_stage, binding, entities
+                )
+                scale = self._group_scale_factor(
+                    run.stage_scaler, column, frequency, binding, grid
+                )
                 composed.append(
                     replace(
                         representative,
@@ -4353,6 +4319,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire d'aiguillage d'un couple inconnu du fit
     def _route_transform_pair(
         self,
+        run: _RunContext,
         entity: EntityKey,
         column: str,
         binding: Dict[EntityKey, str],
@@ -4361,6 +4328,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """Route one pair the fit never observed, by what the transform observes of it.
 
         Args:
+            run: Execution context of the replay, holding what the transform
+                observes of the pairs the fit never observed.
             entity: Entity of the pair.
             column: Column of the pair.
             binding: Stage binding, naming ``entity``.
@@ -4378,9 +4347,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         key = (*entity, column)
         # Couple observé hors des bornes calendaires de sa fréquence : écarté,
         # comme au fit, plutôt qu'imputé sur une lecture fausse
-        if key in self._transform_misaligned:
+        if key in run.transform_misaligned:
             return True
-        frequency = self._transform_frequencies.get(key)
+        frequency = run.transform_frequencies.get(key)
         if frequency is None:
             return False
         # Classification du fit, couple par couple : imputable si sa fréquence
@@ -4396,6 +4365,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode de rejeu du plan, étape de fréquence par étape de fréquence
     def _replay_plan(
         self,
+        run: _RunContext,
         X_stage: pd.DataFrame,
         skip_columns: FrozenSet[str] = frozenset(),
     ) -> Tuple["OrderedDict[str, pd.DataFrame]", "OrderedDict[str, pd.DataFrame]"]:
@@ -4408,6 +4378,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         provenance are recomputed.
 
         Args:
+            run: Execution context of the replay.
             X_stage: Working frame after the additive transformer. Never
                 modified: the imputations travel through the registers of
                 :class:`CovariateMaterializer`, exactly as at fit time.
@@ -4432,19 +4403,19 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         new_entities = self._new_entities(X_stage)
         # Entités nouvelles laissées de côté faute de paramètre : une note
         if new_entities and not self.impute_unobserved_entities:
-            self._replay_notes.append(
+            run.pending_warnings.add_outside_plan_case(
                 f"{len(new_entities)} entity/entities absent from the fit "
                 f"{new_entities} are left untouched "
                 f"(impute_unobserved_entities=False)"
             )
         # Couples inconnus du fit observés hors des bornes de leur période :
         # écartés comme au fit, et nommés
-        if self._transform_misaligned and self.impute_unobserved_entities:
-            self._replay_notes.append(
-                f"{len(self._transform_misaligned)} (entity, column) pair(s) "
+        if run.transform_misaligned and self.impute_unobserved_entities:
+            run.pending_warnings.add_outside_plan_case(
+                f"{len(run.transform_misaligned)} (entity, column) pair(s) "
                 f"unknown to the fit are observed off the calendar bounds of "
                 f"their frequency and are left untouched: "
-                f"{sorted(self._transform_misaligned, key=repr)}"
+                f"{sorted(run.transform_misaligned, key=repr)}"
             )
 
         # Report de fréquence : dernière étape traversée par chaque entité
@@ -4453,7 +4424,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         for stage_freq in self.frequency_progression_:
             stage_label = self._stage_frequency_label(stage_freq)
             # Liaison de fréquence, étendue aux entités nouvelles
-            binding = self._extend_stage_binding(stage_freq, new_entities, stage_label)
+            binding = self._extend_stage_binding(
+                run.pending_warnings, stage_freq, new_entities, stage_label
+            )
 
             # Étapes du plan de l'étape, complétées pour les couples que le fit
             # n'a jamais observés
@@ -4462,14 +4435,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 step for step in by_stage.get(stage_label, ())
                 if step.var_name not in skip_columns
             )
-            steps = self._replay_steps(stage_steps, new_entities, binding, X_stage)
+            steps = self._replay_steps(run, stage_steps, new_entities, binding, X_stage)
             # Logging
             self._log(
                 f"[transform] stage {stage_label}: replaying {len(steps)} step(s)"
             )
             # Exécution par la même méthode qu'au fit
             for step in steps:
-                self._execute_step(step, X_work=X_stage, stage_freq=binding)
+                self._execute_step(run, step, X_work=X_stage, stage_freq=binding)
 
             # Liaison complète, pour la sortie : une entité que l'étape ne
             # concerne pas garde les lignes de son dernier passage, et une
@@ -4485,7 +4458,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # période, et l'inversion rend l'index d'entrée. L'ordre est
             # celui de l'entrée (on impose qu'il soit trié)
             grid = self._in_input_order(
-                self._stage_mask(X_stage, output_binding, kind='imputation').index,
+                self._stage_mask(
+                    run.window_calculator, X_stage, output_binding, kind='imputation'
+                ).index,
                 X_stage.index,
             )
 
@@ -4493,10 +4468,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # par les imputations : "stage_frame" ne lit le miroir que sous
             # "covariate_strategy='model'", et la sortie doit le porter sous
             # toutes les stratégies
-            frame = self._covariate_materializer.stage_frame(
+            frame = run.materializer.stage_frame(
                 grid_index=grid,
                 stage_freq=output_binding,
-                detected_frequencies=self._detected_frequencies_by_column(),
+                detected_frequencies=self._detected_frequencies_by_column(
+                    run.transform_frequencies
+                ),
                 source_data=X_stage,
             )
             # Noms de l'index d'entrée : la grille vient d'un masque converti,
@@ -4504,13 +4481,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # l'entrée — empilée ou non
             if grid.nlevels == X_stage.index.nlevels:
                 frame = frame.rename_axis(X_stage.index.names)
-            frames[stage_label] = self._overlay_imputations(frame, output_binding)
+            frames[stage_label] = self._overlay_imputations(
+                run.materializer, frame, output_binding
+            )
 
             # Instantané de provenance, pris au même instant et réindexé sur la
             # grille de l'étape : la matrice partage ainsi l'index de la sortie,
             # que "_inverse_transform" lit ensuite masque contre masque
-            snapshot = self._provenance_tracker.get_provenance_matrix()
+            snapshot = run.provenance_tracker.get_provenance_matrix()
             provenances[stage_label] = self._stage_provenance(
+                run.transform_frequencies,
                 snapshot.reindex(index=grid, columns=frame.columns),
                 frames[stage_label],
                 output_binding,
@@ -4606,6 +4586,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de la provenance d'une frame d'étape
     def _stage_provenance(
         self,
+        transform_frequencies: Mapping[Union[str, tuple], str],
         provenance: pd.DataFrame,
         frame: pd.DataFrame,
         output_binding: Union[str, Dict[EntityKey, str]],
@@ -4623,6 +4604,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         whatever the tracker says of the input cell of the same date.
 
         Args:
+            transform_frequencies: Frequencies the replay detected for the
+                pairs the fit never observed.
             provenance: Snapshot of the tracker, reindexed on the frame.
             frame: Stage frame, imputations laid over.
             output_binding: Complete frequency binding of the frame's grid.
@@ -4638,7 +4621,10 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Cellules sans marque mais renseignées : valeurs reprises telles quelles
         provenance = provenance.mask(provenance.isna() & has_value, ProvenanceType.ORIGINAL)
         # Agrégations exactes d'une colonne plus fine que la ligne
-        aggregated = self._aggregated_cells(frame, output_binding) & has_value
+        aggregated = (
+            self._aggregated_cells(transform_frequencies, frame, output_binding)
+            & has_value
+        )
         provenance = provenance.mask(aggregated, ProvenanceType.AGGREGATED)
         # Cellule vide : jamais marquée, au rejeu comme au fit
         return provenance.where(has_value)
@@ -4646,6 +4632,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire des cellules agrégées d'une frame d'étape
     def _aggregated_cells(
         self,
+        transform_frequencies: Mapping[Union[str, tuple], str],
         frame: pd.DataFrame,
         output_binding: Union[str, Dict[EntityKey, str]],
     ) -> pd.DataFrame:
@@ -4655,6 +4642,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         carries its exact additive aggregation over the period of the row.
 
         Args:
+            transform_frequencies: Frequencies the replay detected for the
+                pairs the fit never observed.
             frame: Stage frame.
             output_binding: Complete frequency binding of the frame's grid.
 
@@ -4671,7 +4660,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         ]
 
         # Fréquence de chaque colonne, par entité sur un panel
-        column_frequencies = self._detected_frequencies_by_column()
+        column_frequencies = self._detected_frequencies_by_column(transform_frequencies)
         result = pd.DataFrame(False, index=frame.index, columns=frame.columns)
         # Détection des colonnes à plus haute fréquence que celle de l'étape
         for column in frame.columns:
@@ -4691,6 +4680,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de recouvrement d'une frame par les imputations
     def _overlay_imputations(
         self,
+        materializer: CovariateMaterializer,
         frame: pd.DataFrame,
         output_binding: Union[str, Dict[EntityKey, str]],
     ) -> pd.DataFrame:
@@ -4708,14 +4698,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         finer grid at the magnitude of another period.
 
         Args:
+            materializer: Materializer of the replay, holder of the mirror.
             frame: Stage frame, as built by the materializer.
             output_binding: Complete frequency binding of the frame's grid.
 
         Returns:
             The frame, imputations included.
         """
-        # Extraction du matérialiseur
-        materializer = self._covariate_materializer
         # Aucune production : la frame est déjà la sortie de l'étape
         if not materializer.imputed_store:
             return frame
@@ -4856,7 +4845,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         applied with the fitted object, the provenance tracker initialized
         after it, the windows recomputed and the frequency check
         — then every frozen step is replayed by :meth:`_execute_step`,
-        the very method the fit calls. No second execution loop, and no
+        the very method the fit calls, on an execution context
+        (:class:`_RunContext`) built from the fitted state alone. No second
+        execution loop, and no
         training set is ever rebuilt: the ``TrainingSetBuilder`` is not on this
         path.
 
@@ -4990,41 +4981,26 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 5' — Rejeu du plan
         # =================================================================
-        with self._replay_state(window_calc, tracker, new_frequencies, new_misaligned):
-            # Recalages du rejeu sous un bloc différé, comme au fit : un
-            # avertissement par cas dégénéré pour tout le rejeu
-            with self._aggregation_constraint.deferred_warnings():
-                frames, provenances = self._replay_plan(
-                    X_stage, skip_columns=frozenset(target_skipped)
-                )
-            # Avertissements accumulés pendant le rejeu, relevés avant que le
-            # contexte ne restaure les accumulateurs du fit
-            degraded = list(self._warnings)
-            unanchored_failures = sorted(set(self._unanchored_failures), key=repr)
-            notes = list(self._replay_notes)
+        # Contexte d'exécution neuf, construit depuis l'état ajusté seul :
+        # composants partagés du fit, matérialiseur et registres vides,
+        # fenêtre et traceur de ce transform. Le rejeu ne lit ni n'altère
+        # aucun état d'exécution du fit
+        run = _RunContext.for_transform(
+            self._fitted_components_,
+            window_calculator=window_calc,
+            provenance_tracker=tracker,
+            transform_frequencies=new_frequencies,
+            transform_misaligned=new_misaligned,
+        )
+        # Recalages du rejeu sous un bloc différé, comme au fit : un
+        # avertissement par cas dégénéré pour tout le rejeu
+        with run.aggregation_constraint.deferred_warnings():
+            frames, provenances = self._replay_plan(
+                run, X_stage, skip_columns=frozenset(target_skipped)
+            )
 
         # Avertissements agrégés, un message par famille
-        if degraded:
-            warnings.warn(
-                f"{len(degraded)} imputation step(s) degraded during the "
-                f"transform:\n  - " + "\n  - ".join(degraded),
-                UserWarning,
-            )
-        if unanchored_failures:
-            warnings.warn(
-                f"{len(unanchored_failures)} unobserved (entity, column) "
-                f"pair(s) could not be imputed: no prediction on the target grid "
-                f"(no usable covariate, or the prediction failed), and no "
-                f"interpolation fallback exists without an anchor; their cells "
-                f"stay NaN and unmarked: {unanchored_failures}",
-                UserWarning,
-            )
-        if notes:
-            warnings.warn(
-                f"{len(notes)} case(s) of entities outside the frozen plan at "
-                f"transform time:\n  - " + "\n  - ".join(notes),
-                UserWarning,
-            )
+        run.pending_warnings.emit()
 
         # =================================================================
         # PHASE 6' — Sortie multi-fréquences et provenance

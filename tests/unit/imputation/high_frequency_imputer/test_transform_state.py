@@ -178,8 +178,11 @@ class TestTransformLeavesTheFitIntact:
             diverging['q1'] = np.nan
             diverging.loc[diverging.index.month == 12, 'q1'] = [30.0, 90.0, 150.0]
             return data, diverging, False
-        # Entité ES inconnue du fit, imputée sans ancre : étapes dérivées
         data = request.getfixturevalue('mixed_freq_panel_multifrequency')
+        # Entité ES inconnue du fit, laissée intacte : cas hors du plan figé
+        if name == 'panel_new_entity_untouched':
+            return data, _with_new_entity(data), False
+        # Entité ES inconnue du fit, imputée sans ancre : étapes dérivées
         return data, _with_new_entity(data), True
 
     @pytest.mark.slow
@@ -234,6 +237,73 @@ class TestTransformLeavesTheFitIntact:
         transform_quietly(imputer, transform_data)
 
         assert_same_state(snapshot, public_fitted_state(imputer))
+
+    @pytest.mark.internal
+    @pytest.mark.parametrize(
+        'scenario',
+        ['timeseries_later_dates', 'timeseries_diverging_frequency', 'panel_new_entity'],
+    )
+    def test_transform_leaves_the_fitted_components_intact(self, scenario, request):
+        """The private fitted state is, after a transform, what the fit left.
+
+        The transform reads the components the fit configured — aggregation
+        constraint, stage scaler, materializer configuration — and never
+        writes them: its materializer, registers and accumulators are its own.
+        A deep copy taken right after the fit is compared structurally.
+        """
+        fit_data, transform_data, unobserved = self._replay_inputs(scenario, request)
+        imputer = fit_quietly(
+            make_imputer(covariate_strategy='model', impute_unobserved_entities=unobserved),
+            fit_data,
+        )
+        names = (
+            '_fitted_components_', '_undetected_frequencies_', '_misaligned_pairs',
+            '_source_index_frequency_label',
+        )
+        snapshot = copy.deepcopy({name: getattr(imputer, name) for name in names})
+
+        transform_quietly(imputer, transform_data)
+
+        assert_same_state(snapshot, {name: getattr(imputer, name) for name in names})
+
+    @pytest.mark.parametrize(
+        'scenario',
+        [
+            'timeseries_later_dates', 'timeseries_diverging_frequency',
+            'panel_new_entity', 'panel_new_entity_untouched',
+        ],
+    )
+    def test_two_successive_transforms_are_identical(self, scenario, request):
+        """Two transforms of the same data agree on output, provenance, statistics and warnings.
+
+        Each replay starts from an execution context of its own, built from the
+        fitted state alone: nothing of the first one — registers, derived steps,
+        pending warnings — reaches the second.
+        """
+        fit_data, transform_data, unobserved = self._replay_inputs(scenario, request)
+        imputer = fit_quietly(
+            make_imputer(covariate_strategy='model', impute_unobserved_entities=unobserved),
+            fit_data,
+        )
+
+        passes = []
+        for _ in range(2):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                output = imputer.transform(transform_data)
+            passes.append((
+                output,
+                imputer.imputation_provenance_.copy(),
+                copy.deepcopy(imputer.provenance_statistics_),
+                [(item.category, str(item.message)) for item in caught],
+            ))
+        (output, provenance, statistics, emitted), (again, provenance_again,
+                                                    statistics_again, emitted_again) = passes
+
+        pd.testing.assert_frame_equal(again, output)
+        pd.testing.assert_frame_equal(provenance_again, provenance)
+        assert_same_state(statistics, statistics_again)
+        assert emitted_again == emitted
 
     @pytest.mark.slow
     def test_transform_depends_on_its_own_input_only(self, mixed_freq_panel_multifrequency):
