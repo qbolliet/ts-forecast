@@ -34,12 +34,12 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Objets testés
-from tsforecast.frequency.training_set_builder import (
+from tsforecast.imputation._components.training_set_builder import (
     TrainingSet,
     TrainingSetBuilder,
 )
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
-from tsforecast.frequency.stage_scaler import StageScaler
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation._components.stage_scaler import StageScaler
 from tsforecast.utils.frequency.converter import FrequencyConverter
 
 # Perturbations partagées
@@ -48,7 +48,7 @@ from tests.support.perturbations import (
 )
 
 # Constantes et fabriques partagées du paquet
-from tests.unit.frequency.training_set_builder.helpers import (
+from tests.unit.imputation._components.training_set_builder.helpers import (
     FEATURES,
     PANEL_F_BLOCKS,
     PANEL_F_FREQUENCIES,

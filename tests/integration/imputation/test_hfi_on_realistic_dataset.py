@@ -1,6 +1,6 @@
 """``HighFrequencyImputer`` end to end on the realistic datasets of notebook 3.
 
-Runs ``tsforecast.frequency.HighFrequencyImputer`` (``fit_transform`` then
+Runs ``tsforecast.imputation.HighFrequencyImputer`` (``fit_transform`` then
 ``inverse_transform``) on ``irregular_index_timeseries`` (annual anchors
 2015-2017 before a monthly grid 2018-01 -> 2024-07, genuinely irregular index)
 and ``heterogeneous_coverage_panel`` (coverage specific to each entity,
@@ -45,10 +45,10 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Matrice des scénarios et ajustements partagés (fixtures ``realistic_run`` / ``record``)
-from tests.integration.frequency.realistic_runs import CASES, DATASET_FIXTURES
+from tests.integration.imputation.realistic_runs import CASES, DATASET_FIXTURES
 
 # Composant testé
-from tsforecast.frequency import HighFrequencyImputer, ProvenanceType
+from tsforecast.imputation import HighFrequencyImputer, ProvenanceType
 from tsforecast.utils.frequency import normalize_frequency
 
 

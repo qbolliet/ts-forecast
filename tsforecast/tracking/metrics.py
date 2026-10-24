@@ -61,7 +61,7 @@ def imputation_metrics(
 ) -> Dict[str, float]:
     """Summarize a fitted mixed-frequency imputer as flat tracking metrics.
 
-    Works with a fitted :class:`~tsforecast.frequency.HighFrequencyImputer`.
+    Works with a fitted :class:`~tsforecast.imputation.HighFrequencyImputer`.
     The provenance statistics are read from ``provenance_statistics_``, which
     describes the **last pass**: the ``fit``, then each ``transform`` — on the
     target level of its output, whatever ``keep_lower_frequencies`` stacks.
@@ -89,7 +89,7 @@ def imputation_metrics(
     Examples:
         >>> import pandas as pd
         >>> from sklearn.linear_model import LinearRegression
-        >>> from tsforecast.frequency import HighFrequencyImputer
+        >>> from tsforecast.imputation import HighFrequencyImputer
         >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
         >>> data = pd.DataFrame({'m1': range(24), 'a1': float('nan')}, index=dates, dtype=float)
         >>> data.loc[['2021-12-31', '2022-12-31'], 'a1'] = [120.0, 132.0]

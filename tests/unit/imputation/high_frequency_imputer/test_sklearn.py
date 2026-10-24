@@ -50,11 +50,11 @@ from sklearn.utils.estimator_checks import (
 from sklearn.utils.validation import check_is_fitted
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
 from tsforecast.xy import DropNaNTarget, XYPipeline
 
 # Outils de test partagés
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     fit_quietly,
     make_imputer,
     transform_quietly,

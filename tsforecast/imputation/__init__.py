@@ -1,106 +1,37 @@
-"""Frequency detection, conversion, and imputation utilities for time series processing.
+"""Mixed-frequency imputation with provenance tracking.
 
-This module provides tools for detecting and converting between different time frequencies,
-with support for pandas frequency codes, DateOffsets, and user-friendly frequency names.
-It also provides mixed-frequency imputation capabilities with provenance tracking.
+This package provides ``HighFrequencyImputer``, which imputes low-frequency columns on a
+finer grid, cascading from one frequency to the next while recording the provenance of every
+cell. It re-exports the types read from the fitted attributes of the imputer: the imputation
+plan, the provenance vocabulary and the cell origins. Reusable building blocks live in the
+private ``_components`` sub-package.
 """
 
-# Import des classes principales
-from ..utils.frequency import FrequencyDetector, detect_frequency, detect_dataset_frequency, detect_index_frequency
 from .high_frequency_imputer import HighFrequencyImputer
-from .imputation_plan import (
-    ImputationStep,
+from ._components.imputation_plan import (
     ImputationPlan,
-    INTERPOLATE_FALLBACK,
+    ImputationStep,
     MaterializationWay,
 )
-from .provenance import (
-    ImputationProvenanceTracker,
-    ProvenanceType,
-    PROVENANCE_DTYPE,
+from ._components.provenance import (
     CELL_ORIGIN_DTYPE,
+    PROVENANCE_DTYPE,
     CellOrigin,
+    ProvenanceType,
     Taint,
-    resolve_model_provenance,
-    origin_to_taint,
-    max_origin,
-    max_cell_origin,
-    provenance_statistics,
 )
-from .covariate_materializer import (
-    CovariateMaterializer,
-    AggregationConstraintApplier,
-    DEFAULT_MATERIALIZATION_KEY,
-)
-from .aggregation_constraint import (
-    AggregationConstraint,
-    ConstraintKind,
-    ConstraintSetting,
-    AggregationConstraintSetting,
-    DEFAULT_CONSTRAINT_KEY,
-    validate_aggregation_constraint,
-    resolve_aggregation_constraint,
-    validate_constraint_columns,
-)
-from .stage_scaler import StageScaler, ScaleMode
-from .variable_orderer import VariableOrderer, VariableSpec
-from .imputation_window import ImputationWindowCalculator, ImputationScope
-from .target_frequency_validator import TargetFrequencyValidator
-from .frequency_aligner import FrequencyAligner
-from .regularizer import IndexRegularizer, is_regular, regularize
 
 __all__ = [
-    # Classes et fonctions principales
-    # Détection
-    'FrequencyDetector',
-    'detect_frequency',
-    'detect_dataset_frequency',
-    'detect_index_frequency',
-    # Imputation
+    # Imputeur
     'HighFrequencyImputer',
-    'ImputationStep',
+    # Plan d'imputation (attributs ajustés)
     'ImputationPlan',
-    'INTERPOLATE_FALLBACK',
+    'ImputationStep',
     'MaterializationWay',
-    # Provenance tracking
-    'ImputationProvenanceTracker',
+    # Provenance
     'ProvenanceType',
     'PROVENANCE_DTYPE',
-    'CELL_ORIGIN_DTYPE',
     'CellOrigin',
+    'CELL_ORIGIN_DTYPE',
     'Taint',
-    'resolve_model_provenance',
-    'origin_to_taint',
-    'max_origin',
-    'max_cell_origin',
-    'provenance_statistics',
-    # Matérialisation des covariables
-    'CovariateMaterializer',
-    'AggregationConstraintApplier',
-    'DEFAULT_MATERIALIZATION_KEY',
-    # Contrainte d'agrégation
-    'AggregationConstraint',
-    'ConstraintKind',
-    'ConstraintSetting',
-    'AggregationConstraintSetting',
-    'DEFAULT_CONSTRAINT_KEY',
-    'validate_aggregation_constraint',
-    'resolve_aggregation_constraint',
-    'validate_constraint_columns',
-    # Mise à l'échelle d'étape
-    'StageScaler',
-    'ScaleMode',
-    # Ordonnancement des variables
-    'VariableOrderer',
-    'VariableSpec',
-    # Imputation window calculation
-    'ImputationWindowCalculator',
-    'ImputationScope',
-    # Validation et alignement
-    'TargetFrequencyValidator',
-    'FrequencyAligner',
-    # Régularisation d'index
-    'IndexRegularizer',
-    'is_regular',
-    'regularize',
 ]

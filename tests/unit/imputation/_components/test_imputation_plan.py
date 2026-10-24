@@ -1,4 +1,4 @@
-"""Tests for tsforecast.frequency.imputation_plan.
+"""Tests for tsforecast.imputation._components.imputation_plan.
 
 Immutable step, exact coverage of feature_cols by the materialization
 way, fallback invariant, per-row scale factor (pd.Series),
@@ -17,7 +17,7 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Objets testés
-from tsforecast.frequency.imputation_plan import (
+from tsforecast.imputation._components.imputation_plan import (
     ImputationStep,
     ImputationPlan,
     append_step,
@@ -25,7 +25,7 @@ from tsforecast.frequency.imputation_plan import (
     INTERPOLATE_FALLBACK,
     MaterializationWay,
 )
-from tsforecast.frequency.provenance import PROVENANCE_DTYPE, ProvenanceType, resolve_model_provenance
+from tsforecast.imputation._components.provenance import PROVENANCE_DTYPE, ProvenanceType, resolve_model_provenance
 
 
 # Fabrique d'étape : valeurs par défaut cohérentes, surchargeables au cas par cas

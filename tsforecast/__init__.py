@@ -10,7 +10,7 @@ This package provides sklearn-compatible tools for:
 Modules:
     crossvals: Cross-validation splitters that respect temporal ordering.
     delays: Publication-delay inference and transformers.
-    frequency: Frequency detection, conversion and mixed-frequency imputation.
+    imputation: Mixed-frequency imputation with provenance tracking.
     xy: Pipeline and mixin for transformers that transform X and y jointly.
     panel: Per-entity transformer wrapper and panel utilities.
     base: Base classes and mixins for temporal transformers.
@@ -36,7 +36,7 @@ from .crossvals import (
     PanelInSampleSplitPerEntity,
 )
 from .delays import PublicationDelayTransformer
-from .frequency import HighFrequencyImputer
+from .imputation import HighFrequencyImputer
 from .panel import PanelwiseTransformer
 from .xy import XYPipeline, XYTransformerMixin
 from .tracking import imputation_metrics, delay_metrics, detection_metrics, split_summary

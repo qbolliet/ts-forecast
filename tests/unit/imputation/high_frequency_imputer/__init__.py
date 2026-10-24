@@ -1,1 +1,1 @@
-"""Test package for the tsforecast.frequency.high_frequency_imputer unit tests."""
+"""Test package for the tsforecast.imputation.high_frequency_imputer unit tests."""

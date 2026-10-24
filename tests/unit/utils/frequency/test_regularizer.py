@@ -1,4 +1,4 @@
-"""Tests for tsforecast.frequency.regularizer.
+"""Tests for tsforecast.utils.frequency.regularizer.
 
 ``IndexRegularizer`` is exported but not used by ``HighFrequencyImputer``; its
 contract is therefore read from its own docstrings and from the finality of the
@@ -19,7 +19,7 @@ import pandas as pd
 import pytest
 
 # Objet testé
-from tsforecast.frequency.regularizer import (
+from tsforecast.utils.frequency.regularizer import (
     IndexRegularizer,
     is_regular,
     regularize,

@@ -45,7 +45,8 @@ from tsforecast.delays import (
     compare_and_detect_delays,
     create_delay_transformer_factory,
 )
-from tsforecast.frequency import FrequencyAligner, HighFrequencyImputer, is_regular, regularize
+from tsforecast.utils.frequency import FrequencyAligner, is_regular, regularize
+from tsforecast.imputation import HighFrequencyImputer
 from tsforecast.panel import PanelwiseTransformer
 from tsforecast.tracking import split_summary
 from tsforecast.utils.frequency import FrequencyConverter, detect_dataset_frequency, detect_frequency

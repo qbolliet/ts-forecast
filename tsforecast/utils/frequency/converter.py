@@ -9,7 +9,7 @@ output index always carries the target frequency (or the union of the target
 indexes when converting columns to mixed frequencies). To convert selected
 variables of a dataset while keeping the other columns in place (original
 index preserved, or extended by the target dates), see
-:class:`tsforecast.frequency.frequency_aligner.FrequencyAligner`, which
+:class:`tsforecast.utils.frequency.aligner.FrequencyAligner`, which
 delegates the actual conversions to this class.
 """
 # Importation des modules

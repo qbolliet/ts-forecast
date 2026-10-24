@@ -11,12 +11,12 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import ELIGIBLE_ORIGINS
-from tsforecast.frequency.provenance import ProvenanceType
+from tsforecast.imputation.high_frequency_imputer import ELIGIBLE_ORIGINS
+from tsforecast.imputation._components.provenance import ProvenanceType
 
 # Outils de test partagés
 from tests.support.estimators import RecordingEstimator, SpyEstimator
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     FR,
     DE,
     IT,
@@ -31,7 +31,7 @@ from tests.unit.frequency.high_frequency_imputer.helpers import (
     replay,
     transform_quietly,
 )
-from tests.unit.frequency.training_set_builder.helpers import (
+from tests.unit.imputation._components.training_set_builder.helpers import (
     TS_FREQUENCIES,
     make_builder,
 )

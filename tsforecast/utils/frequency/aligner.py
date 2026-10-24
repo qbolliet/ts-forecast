@@ -32,10 +32,10 @@ import numpy as np
 import pandas as pd
 
 # Utilitaires du package
-from ..utils.frequency.converter import AggregationMethod, FrequencyConverter
-from ..utils.frequency.utils import normalize_frequency, is_higher_frequency
-from ..utils.parse import parse_frequency
-from ..panel.utils import (
+from .converter import AggregationMethod, FrequencyConverter
+from .utils import normalize_frequency, is_higher_frequency
+from ..parse import parse_frequency
+from ...panel.utils import (
     build_panel_index,
     extract_column_names,
     get_entity_target_frequency,
@@ -47,7 +47,7 @@ from ..panel.utils import (
 )
 
 # Détection de la fréquence de l'index
-from ..utils.frequency.utils import (
+from .utils import (
     detect_frequency,
     detect_dataset_frequency,
     target_offset_for_index,

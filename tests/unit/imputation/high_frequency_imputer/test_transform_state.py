@@ -17,12 +17,12 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import FunctionTransformer
 
 # Objets testés
-from tsforecast.frequency.provenance import ProvenanceType, provenance_statistics
-from tsforecast.frequency.training_set_builder import TrainingSetBuilder
+from tsforecast.imputation._components.provenance import ProvenanceType, provenance_statistics
+from tsforecast.imputation._components.training_set_builder import TrainingSetBuilder
 
 # Outils de test partagés
 from tests.support.estimators import SpyEstimator
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     assert_same_state,
     fit_quietly,
     fit_transform_quietly,

@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.aggregation_constraint.helpers import _RAW_2021
+from tests.unit.imputation._components.aggregation_constraint.helpers import _RAW_2021
 
 
 # =============================================================================

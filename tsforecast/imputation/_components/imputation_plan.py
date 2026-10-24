@@ -345,13 +345,13 @@ class ImputationStep:
             :attr:`ProvenanceType.MODEL_UNANCHORED` for an
             :attr:`unanchored` one, otherwise the MODEL_* provenance resolved
             from :attr:`covariate_taint` and :attr:`target_taint` by
-            :func:`~tsforecast.frequency.provenance.resolve_model_provenance`.
+            :func:`~tsforecast.imputation._components.provenance.resolve_model_provenance`.
 
         Examples:
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
             >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
@@ -545,7 +545,7 @@ class ImputationPlan:
             ``n_training_rows``, ``n_written``, ``covariate_taint``,
             ``target_taint``, ``emitted_provenance``
             (via
-            :func:`~tsforecast.frequency.provenance.resolve_model_provenance`,
+            :func:`~tsforecast.imputation._components.provenance.resolve_model_provenance`,
             or :attr:`ProvenanceType.INTERPOLATED` for a fallback step),
             ``is_fallback``, ``interpolation_method``,
             ``interpolation_anchor``, ``materialization`` (rendered as a
@@ -669,7 +669,7 @@ def append_step(plan: ImputationPlan, step: ImputationStep) -> ImputationPlan:
         >>> import numpy as np
         >>> import pandas as pd
         >>> from sklearn.linear_model import LinearRegression
-        >>> from tsforecast.frequency import HighFrequencyImputer
+        >>> from tsforecast.imputation import HighFrequencyImputer
         >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
         >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
         >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10

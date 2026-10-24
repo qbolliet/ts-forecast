@@ -27,7 +27,7 @@ from tests.support.datasets import build_mixed_frequency_panel, build_panel_refe
 from tests.support.perturbations import string_dtypes
 from tsforecast.crossvals import PanelOutOfSampleSplit, PanelOutOfSampleSplitPerEntity
 from tsforecast.delays import calculate_applicable_delay, compare_and_detect_delays, create_delay_transformer_factory
-from tsforecast.frequency import PROVENANCE_DTYPE, HighFrequencyImputer, ProvenanceType
+from tsforecast.imputation import PROVENANCE_DTYPE, HighFrequencyImputer, ProvenanceType
 from tsforecast.panel import PanelwiseTransformer
 from tsforecast.utils.frequency import detect_dataset_frequency
 from tsforecast.utils.validation import validate_temporal_data

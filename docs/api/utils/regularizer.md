@@ -1,1 +1,1 @@
-::: tsforecast.frequency.regularizer
+::: tsforecast.utils.frequency.regularizer

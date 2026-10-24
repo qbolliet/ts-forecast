@@ -11,13 +11,13 @@ import pandas as pd
 from typing import Dict, List, Optional, Union
 
 # Import des utilitaires internes
-from ..utils.frequency.utils import (
+from .utils import (
     _get_highest_frequency,
     detect_index_frequency,
     normalize_frequency,
     to_pandas_freq,
 )
-from ..panel.utils import (
+from ...panel.utils import (
     is_panel_data,
     build_panel_index,
     iter_entity_blocks,

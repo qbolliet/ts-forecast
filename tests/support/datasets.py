@@ -67,7 +67,7 @@ def build_mixed_frequency_timeseries(
         With a trade balance history earlier than the monthly grid
         (notebook 3 parameters), the global index becomes irregular:
 
-        >>> from tsforecast.frequency import is_regular
+        >>> from tsforecast.utils.frequency import is_regular
         >>> df_irregular = build_mixed_frequency_timeseries(annual_start_date='2015-01-01')
         >>> is_regular(df_irregular)
         False

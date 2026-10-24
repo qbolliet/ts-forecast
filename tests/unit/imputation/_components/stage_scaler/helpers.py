@@ -11,7 +11,7 @@ from typing import Tuple
 import pandas as pd
 
 # Objets testés
-from tsforecast.frequency.stage_scaler import StageScaler
+from tsforecast.imputation._components.stage_scaler import StageScaler
 
 
 # Seuil de la symétrie transform / inverse_transform : un écart supérieur est

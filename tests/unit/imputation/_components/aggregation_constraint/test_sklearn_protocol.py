@@ -17,7 +17,7 @@ from sklearn.base import clone
 from sklearn.exceptions import NotFittedError
 
 # Objets testés
-from tsforecast.frequency.aggregation_constraint import (
+from tsforecast.imputation._components.aggregation_constraint import (
     AggregationConstraint,
     DEFAULT_CONSTRAINT_KEY,
 )
@@ -26,7 +26,7 @@ from tsforecast.frequency.aggregation_constraint import (
 from tests.support.perturbations import shuffle_rows, with_special_column_names
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.aggregation_constraint.helpers import (
+from tests.unit.imputation._components.aggregation_constraint.helpers import (
     _EXACT,
     _RAW_2021,
     _annual_observations,

@@ -23,12 +23,12 @@ import pandas as pd
 import pytest
 
 # Objet testé
-from tsforecast.frequency.covariate_materializer import CovariateMaterializer
-from tsforecast.frequency.provenance import CELL_ORIGIN_DTYPE
+from tsforecast.imputation._components.covariate_materializer import CovariateMaterializer
+from tsforecast.imputation._components.provenance import CELL_ORIGIN_DTYPE
 
 # Jeux et perturbations partagés
 from tests.support.perturbations import shuffle_rows
-from tests.unit.frequency.covariate_materializer.helpers import (
+from tests.unit.imputation._components.covariate_materializer.helpers import (
     PANEL_FREQUENCIES,
     PANEL_F_FREQUENCIES,
     TS_FREQUENCIES,
@@ -439,7 +439,7 @@ class TestStoreDtypes:
     @pytest.mark.internal
     def test_combine_first_of_two_dtypes(self):
         """A production of another dtype covering the store replaces it without concatenating a remainder."""
-        from tsforecast.frequency.covariate_materializer import _combine_first
+        from tsforecast.imputation._components.covariate_materializer import _combine_first
 
         grid = monthly_grid(periods=3)
         produced = pd.Series(['model', 'model'], index=grid[:2], dtype='str')

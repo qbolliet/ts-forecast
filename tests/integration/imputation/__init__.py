@@ -1,1 +1,1 @@
-"""Test package for the tsforecast.frequency integration tests."""
+"""Test package for the tsforecast.imputation integration tests."""

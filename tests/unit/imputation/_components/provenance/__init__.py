@@ -1,1 +1,1 @@
-"""Tests of ``tsforecast.frequency.provenance``, split by theme."""
+"""Tests of ``tsforecast.imputation._components.provenance``, split by theme."""

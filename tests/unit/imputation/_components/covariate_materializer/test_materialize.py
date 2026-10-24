@@ -23,14 +23,14 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.aggregation_constraint import AggregationConstraint
-from tsforecast.frequency.covariate_materializer import (
+from tsforecast.imputation._components.aggregation_constraint import AggregationConstraint
+from tsforecast.imputation._components.covariate_materializer import (
     DEFAULT_MATERIALIZATION_KEY,
     CovariateMaterializer,
 )
 
 # Jeux partagés
-from tests.unit.frequency.covariate_materializer.helpers import (
+from tests.unit.imputation._components.covariate_materializer.helpers import (
     PANEL_FREQUENCIES,
     PANEL_F_FREQUENCIES,
     SpyApplier,

@@ -18,13 +18,13 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.aggregation_constraint import AggregationConstraint
+from tsforecast.imputation._components.aggregation_constraint import AggregationConstraint
 
 # Perturbations partagées
 from tests.support.perturbations import shuffle_rows
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.aggregation_constraint.helpers import (
+from tests.unit.imputation._components.aggregation_constraint.helpers import (
     _EXACT,
     _GRID_ALIASES,
     _RAW_2021,

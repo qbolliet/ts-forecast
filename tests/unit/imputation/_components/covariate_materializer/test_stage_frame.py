@@ -26,11 +26,11 @@ import pandas as pd
 import pytest
 
 # Objet testé
-from tsforecast.frequency.covariate_materializer import CovariateMaterializer
+from tsforecast.imputation._components.covariate_materializer import CovariateMaterializer
 
 # Jeux et perturbations partagés
 from tests.support.perturbations import shuffle_rows
-from tests.unit.frequency.covariate_materializer.helpers import (
+from tests.unit.imputation._components.covariate_materializer.helpers import (
     PANEL_FREQUENCIES,
     PANEL_F_FREQUENCIES,
     TS_FREQUENCIES,

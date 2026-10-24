@@ -1191,7 +1191,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   d'exception : il compte les valeurs non nulles et renvoie `None` sous `min_observations`, toute autre erreur
   (index non temporel, `return_format` inconnu) remonte. Effets de bord : `ImputationWindowCalculator` traite
   désormais une colonne vide de série temporelle comme en panel (structurellement absente, exclue du
-  dénominateur, avertissement) — le test `tests/unit/frequency/imputation_window/test_panel.py::TestStructurallyAbsentColumns::test_notion_is_panel_only_on_a_time_series`,
+  dénominateur, avertissement) — le test `tests/unit/imputation/_components/imputation_window/test_panel.py::TestStructurallyAbsentColumns::test_notion_is_panel_only_on_a_time_series`,
   qui épinglait l'ancienne exception, est réécrit en `::test_empty_column_of_a_time_series_is_absent` (catégorie
   (a)) ; `delays/data_manager.py::compare_and_detect_delays` ne passe plus `None` à `to_literal`.
 - **Statut** : corrigée
@@ -3142,7 +3142,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-001 — `mark_*` d'un `Timestamp` absent de la matrice ajoute silencieusement une ligne
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/provenance.py::ImputationProvenanceTracker.mark_imputed`
+- **Composant** : `tsforecast/imputation/_components/provenance.py::ImputationProvenanceTracker.mark_imputed`
   (et `mark_aggregated`, `mark_disaggregated`, `mark_interpolated`, `mark_model_imputed`)
 - **Sévérité** : mineure
 - **Observé** : `mark_imputed('a', pd.Timestamp('2030-01-01'), ...)` sur une date hors matrice agrandit la
@@ -3159,13 +3159,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   tracker.mark_interpolated('a', pd.Timestamp('2030-01-01'))
   tracker.provenance_matrix_.shape   # (2, 1) au lieu d'un KeyError
   ```
-- **Test** : `tests/unit/frequency/provenance/test_tracker_writes.py::TestMarks::test_scalar_timestamp_outside_the_matrix_raises_key_error`
+- **Test** : `tests/unit/imputation/_components/provenance/test_tracker_writes.py::TestMarks::test_scalar_timestamp_outside_the_matrix_raises_key_error`
 - **Statut** : corrigé (2026-10-09)
 - **Correction** : `_check_labels_exist` (appelée par `mark_imputed` et `clear_provenance`) fait lever `KeyError` pour une étiquette scalaire ou une clé de `MultiIndex` absente ; plus de test `xfail` (`TestMarks`, `TestClearProvenance`).
 
 ### ANO-FREQ-002 — `merge` : aucune erreur quand les étiquettes ne se recoupent pas
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/provenance.py::ImputationProvenanceTracker.merge`
+- **Composant** : `tsforecast/imputation/_components/provenance.py::ImputationProvenanceTracker.merge`
 - **Sévérité** : à arbitrer
 - **Observé** : seule la *forme* des deux matrices est contrôlée ; l'appariement se fait par étiquettes
   (`self.provenance_matrix_[mask] = other.provenance_matrix_[mask]`). Deux trackers de même forme mais de
@@ -3174,14 +3174,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   incompatibles », ce qui peut se lire comme « étiquettes incompatibles ». `merge` n'est appelé nulle part
   dans `tsforecast/` : aucune source ne tranche. Comportement actuel épinglé.
 - **Reproduction** : `a.merge(b)` avec `a` de colonnes `['a', 'b']` et `b` de colonnes `['x', 'y']`, mêmes dates.
-- **Test** : `tests/unit/frequency/provenance/test_tracker_reads.py::TestMerge::test_same_shape_but_disjoint_columns_is_a_silent_no_op`
+- **Test** : `tests/unit/imputation/_components/provenance/test_tracker_reads.py::TestMerge::test_same_shape_but_disjoint_columns_is_a_silent_no_op`
   et `::test_same_shape_but_disjoint_index_is_a_silent_no_op`
 - **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
 - **Correction** : `merge(other, overwrite=True)` s'appuie sur `DataFrame.update` (le paramètre `how` disparaît : `'update'` → `overwrite=True`, `'preserve'` → `overwrite=False`) ; il lève `ValueError('Incompatible labels')` si l'index (ordre compris) ou l'ensemble des colonnes diffèrent, et n'ajoute jamais de cellule. Tests : `TestMerge`.
 
 ### ANO-FREQ-003 — `resolve_model_provenance` n'invalide pas ses arguments
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/provenance.py::resolve_model_provenance`
+- **Composant** : `tsforecast/imputation/_components/provenance.py::resolve_model_provenance`
 - **Sévérité** : à arbitrer
 - **Observé** : `resolve_model_provenance('zz', 'zz')` renvoie `MODEL_ON_TRUE` ; une souillure inconnue (ou
   une faute de frappe) est traitée comme « indemne », alors que `origin_to_taint` et `max_origin` lèvent
@@ -3191,13 +3191,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   Comportement actuel épinglé.
 - **Reproduction** : `resolve_model_provenance('interpolate', 'none')` (faute de frappe pour `'interpolated'`)
   renvoie `MODEL_ON_TRUE`.
-- **Test** : `tests/unit/frequency/provenance/test_types_and_taint.py::TestResolveModelProvenance::test_unknown_taint_is_silently_treated_as_clean`
+- **Test** : `tests/unit/imputation/_components/provenance/test_types_and_taint.py::TestResolveModelProvenance::test_unknown_taint_is_silently_treated_as_clean`
 - **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
 - **Correction** : `ValueError` nommant l'argument fautif (plutôt que `None`, qui serait écrit tel quel comme « non renseigné » dans la matrice par `mark_model_imputed`). Test : `TestResolveModelProvenance::test_unknown_taint_raises`.
 
 ### ANO-FREQ-004 — Représentation d'une cellule « non renseignée » : `NaN` ou `None`
 - **Type** : [DOC] docstring ≠ code
-- **Composant** : `tsforecast/frequency/provenance.py::ImputationProvenanceTracker.initialize`
+- **Composant** : `tsforecast/imputation/_components/provenance.py::ImputationProvenanceTracker.initialize`
 - **Sévérité** : cosmétique
 - **Observé** : la docstring d'`initialize` (texte et exemple `[<ProvenanceType.ORIGINAL...>, None, ...]`) et
   celle de `get_provenance` parlent de `None` pour une cellule non renseignée ; la matrice construite par
@@ -3207,13 +3207,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : le test suit le code (anomalie [DOC], pas de `xfail`) : les tests de lecture d'une cellule
   issue d'`initialize` utilisent `pd.isna`.
 - **Reproduction** : `ImputationProvenanceTracker().initialize(df).get_provenance('a', ts_nan) is None` → `False`.
-- **Test** : `tests/unit/frequency/provenance/test_tracker_reads.py::TestGetProvenance::test_unfilled_cell_is_none`
+- **Test** : `tests/unit/imputation/_components/provenance/test_tracker_reads.py::TestGetProvenance::test_unfilled_cell_is_none`
 - **Statut** : corrigé (2026-10-09)
 - **Correction** : docstrings d'`initialize`, `extend_index` et `clear_provenance` alignées sur le code (cellule non renseignée = nulle, à tester avec `pd.isna`) ; le code n'a pas changé.
 
 ### ANO-FREQ-005 — `regularize` (mode global) réécrit une entité sur la fréquence d'une autre
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/regularizer.py::IndexRegularizer.regularize` (`per_entity=False`)
+- **Composant** : `tsforecast/utils/frequency/regularizer.py::IndexRegularizer.regularize` (`per_entity=False`)
 - **Sévérité** : à arbitrer
 - **Observé** : sur un panel dont l'entité A est mensuelle et l'entité B trimestrielle (chacune avec un trou),
   `regularize(panel)` réindexe B sur la grille **mensuelle** : 5 trimestres deviennent 13 mois (`MS`), les
@@ -3224,13 +3224,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `is_regular(per_entity=True)` (A et B « régulières ») plaident pour ne pas changer la fréquence d'une entité
   régulière. Comportement actuel épinglé.
 - **Reproduction** : `regularize(pd.concat({'A': mensuelle_a_trou, 'B': trimestrielle_a_trou}))`.
-- **Test** : `tests/unit/frequency/test_regularizer.py::TestRegularizeMixedPositionsAndFrequencies::test_global_mode_rewrites_the_quarterly_entity_on_the_monthly_grid`
+- **Test** : `tests/unit/utils/frequency/test_regularizer.py::TestRegularizeMixedPositionsAndFrequencies::test_global_mode_rewrites_the_quarterly_entity_on_the_monthly_grid`
 - **Statut** : clos (2026-10-09) — arbitrage de l'auteur : le mode global est un alignement sur une fréquence unique, le comportement est voulu.
 - **Correction** : docstrings de `regularize` précisées ; le test n'est plus une anomalie épinglée.
 
 ### ANO-FREQ-006 — `regularize` ne restitue pas `panel_cols` en colonnes
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/regularizer.py::IndexRegularizer.regularize`
+- **Composant** : `tsforecast/utils/frequency/regularizer.py::IndexRegularizer.regularize`
 - **Sévérité** : cosmétique
 - **Observé** : avec `time_col='date', panel_cols=['country']`, le résultat a `date` en colonne mais `country`
   reste dans l'index (`reset_index(level=-1)` seulement) : la structure d'entrée (colonnes) n'est pas
@@ -3238,13 +3238,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : indécidable — la docstring ne parle que de `time_col` ; l'entrée en colonnes et la sortie
   en index sont asymétriques. Comportement actuel épinglé.
 - **Reproduction** : `regularize(df, time_col='date', panel_cols=['country']).index.names` → `['country']`.
-- **Test** : `tests/unit/frequency/test_regularizer.py::TestRegularizePanel::test_panel_cols_and_time_col_are_restored_as_columns`
+- **Test** : `tests/unit/utils/frequency/test_regularizer.py::TestRegularizePanel::test_panel_cols_and_time_col_are_restored_as_columns`
 - **Statut** : corrigé (2026-10-09)
 - **Correction** : `regularize` restitue `panel_cols` (et `time_col`) en colonnes ; `panel_cols` sans `time_col` conserve le `DatetimeIndex` comme niveau temporel. Tests : `TestRegularizePanel::test_panel_cols_and_time_col_are_restored_as_columns`, `::test_panel_cols_alone_keep_the_datetime_index`.
 
 ### ANO-FREQ-007 — `is_regular` : un index non trié mais complet est « irrégulier »
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/regularizer.py::IndexRegularizer.is_regular`
+- **Composant** : `tsforecast/utils/frequency/regularizer.py::IndexRegularizer.is_regular`
 - **Sévérité** : cosmétique
 - **Observé** : `is_regular(serie_melangee_sans_trou)` renvoie `False` (`pd.infer_freq` ne trie pas), alors que
   `regularize` trie d'abord et restitue une série sans trou. Même constat par entité pour un panel mélangé.
@@ -3252,13 +3252,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   devrait pas compter comme un trou, mais le contrat « `pd.infer_freq` renvoie non-None » le fige.
   Comportement actuel épinglé.
 - **Reproduction** : `is_regular(pd.Series(range(6), index=dates_mensuelles).iloc[[3, 0, 5, 1, 4, 2]])`.
-- **Test** : `tests/unit/frequency/test_regularizer.py::TestIsRegularTimeSeries::test_unsorted_but_complete_index_is_regular`
+- **Test** : `tests/unit/utils/frequency/test_regularizer.py::TestIsRegularTimeSeries::test_unsorted_but_complete_index_is_regular`
 - **Statut** : corrigé (2026-10-09)
 - **Correction** : l'index est trié avant `pd.infer_freq`. Tests : `TestIsRegularTimeSeries::test_unsorted_but_complete_index_is_regular`, `TestIsRegularPanel::test_unsorted_panel_is_regular_per_entity`.
 
 ### ANO-FREQ-008 — `regularize` détruit les observations hors grille
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/regularizer.py::IndexRegularizer.regularize` (`_regularize_ts`)
+- **Composant** : `tsforecast/utils/frequency/regularizer.py::IndexRegularizer.regularize` (`_regularize_ts`)
 - **Sévérité** : majeure
 - **Observé** : la fréquence est lue sur l'espacement modal, puis les données sont `reindex`ées sur
   `date_range(min, max, freq)`. Toute observation dont la date n'est pas sur cette grille est supprimée
@@ -3275,24 +3275,24 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   s = pd.Series(range(6), index=d, dtype=float)
   regularize(s).count()   # 0 au lieu de 6
   ```
-- **Test** : `tests/unit/frequency/test_regularizer.py::TestOffGridObservations` et `::TestUndetectableFrequency`
+- **Test** : `tests/unit/utils/frequency/test_regularizer.py::TestOffGridObservations` et `::TestUndetectableFrequency`
 - **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
 - **Correction** : `regularize` lève `ValueError` quand aucune fréquence constante n'est détectable (série ou entité, y compris en mode global) ou quand aucune observation ne tombe sur la grille ; si seules certaines observations sont hors grille, elles sont écartées avec un `UserWarning` qui les liste. Les séries / entités à moins de deux dates sont rendues telles quelles. Tests : `TestOffGridObservations`, `TestUndetectableFrequency`.
 - **Note** : le détecteur (`_detect_calendar_frequency`) perdait la position (`'M'` sans `S` / `E`) dès qu'une seule date sortait du motif ; au moins 75 % des dates en début (ou fin) de mois suffit désormais à la conserver (`'MS'`, `'QS-JAN'`, `'YS-JAN'` avec ancre prise sur les dates alignées). Reste sans position le cas où aucune position ne domine : `regularize` lève alors une `ValueError`. Tests : `tests/unit/utils/frequency/detector/test_time_series.py::TestFallbackWithOutlierDates`, `TestOffGridObservations::test_mid_month_outlier_keeps_the_month_start_grid`.
 
 ### ANO-FREQ-009 — `TargetFrequencyValidator.validate` : comportements permissifs
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/target_frequency_validator.py::TargetFrequencyValidator.validate`
+- **Composant** : `tsforecast/imputation/_components/target_frequency_validator.py::TargetFrequencyValidator.validate`
 - **Sévérité** : cosmétique
 - **Observé** : (1) toute valeur de `on_frequency_mismatch` autre que `'error'` était traitée comme `'warn'` ; (2) une entité sans aucune fréquence détectée était écartée du dict renvoyé, avec un simple avertissement.
 - **Attendu** : (1) `ValueError` pour une valeur non supportée ; (2) `ValueError` nommant l'entité.
-- **Test** : `tests/unit/frequency/test_target_frequency_validator.py::TestOnFrequencyMismatchValues`, `::TestPanelEntityWithoutDetectedFrequency`
+- **Test** : `tests/unit/imputation/_components/test_target_frequency_validator.py::TestOnFrequencyMismatchValues`, `::TestPanelEntityWithoutDetectedFrequency`
 - **Statut** : corrigé (2026-10-09) — arbitrage de l'auteur
 - **Correction** : validation du paramètre en tête de `validate` ; l'`except ValueError` qui convertissait l'erreur en avertissement est supprimé.
 
 ### ANO-FREQ-010 — Agrégation : les dates dupliquées sont sommées deux fois
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/frequency_aligner.py::FrequencyAligner.convert_to_target` (voie d'agrégation, `_aggregate_series`)
+- **Composant** : `tsforecast/utils/frequency/aligner.py::FrequencyAligner.convert_to_target` (voie d'agrégation, `_aggregate_series`)
 - **Sévérité** : mineure
 - **Observé** : une série mensuelle dont janvier est dupliqué, agrégée en `'QS'`, donne T1 = 1+2+3+1 = **7** sans erreur ni
   avertissement (`full_periods_only` est satisfait : 4 valeurs ≥ 3 attendues), et la ligne dupliquée reçoit aussi la valeur
@@ -3308,13 +3308,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   df = pd.concat([df, df.iloc[:1]])
   FrequencyAligner().convert_to_target(df, ['x'], 'QS')['x'].iloc[0]   # 7.0
   ```
-- **Test** : `tests/unit/frequency/frequency_aligner/test_aggregation.py::TestAggregationContract::test_duplicated_dates_are_rejected`
+- **Test** : `tests/unit/utils/frequency/aligner/test_aggregation.py::TestAggregationContract::test_duplicated_dates_are_rejected`
 - **Statut** : corrigé (2026-10-10)
 - **Correction** : `_iter_variable_series` (voie commune à l'agrégation et à l'interpolation) lève `ValueError('Duplicate dates[ for entity …]: …')` dès qu'une entité portant une colonne à convertir a des dates dupliquées ; les entités sans clé ne sont pas contrôlées. Tests : `TestAggregationContract::test_duplicated_dates_are_rejected`, `::test_duplicated_dates_of_a_panel_entity_name_the_entity`, `::test_duplicates_of_an_entity_without_key_are_tolerated`, `TestConvertToTargetRouting::test_duplicated_dates_raise_on_interpolation`.
 
 ### ANO-FREQ-011 — Panel : une clé « nom de colonne » simple est ignorée en silence
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/frequency_aligner.py::FrequencyAligner.convert_to_target`
+- **Composant** : `tsforecast/utils/frequency/aligner.py::FrequencyAligner.convert_to_target`
 - **Sévérité** : à arbitrer
 - **Observé** : sur un panel, `convert_to_target(panel, ['x'], 'QS')` renvoie le panel inchangé, sans erreur ni avertissement.
   `split_variable_key('x')` donne l'entité `()`, qu'aucun bloc d'entité du panel ne porte ; la clé est en outre orientée vers
@@ -3324,13 +3324,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   colonnes aux séries temporelles ; le no-op silencieux n'est conforme à aucune des deux lectures. Le test `xfail` accepte
   l'une ou l'autre résolution.
 - **Reproduction** : `convert_to_target(panel_mensuel_A_B, ['x'], 'QS').equals(panel_mensuel_A_B)` → `True`.
-- **Test** : `tests/unit/frequency/frequency_aligner/test_convert_to_target.py::TestConvertToTargetRouting::test_plain_column_name_on_a_panel_converts_every_entity`
+- **Test** : `tests/unit/utils/frequency/aligner/test_convert_to_target.py::TestConvertToTargetRouting::test_plain_column_name_on_a_panel_converts_every_entity`
 - **Statut** : corrigé (2026-10-10) — arbitrage de l'auteur : conversion de toutes les entités, comme les autres fonctions du package
 - **Correction** : `_expand_keys` remplace un nom de colonne seul par une clé `(entité..., colonne)` par entité du panel (dédoublonnée avec les clés tuples), avant l'orientation agrégation / interpolation : chaque entité garde sa propre fréquence source. Tests : `TestConvertToTargetRouting::test_plain_column_name_on_a_panel_converts_every_entity`, `::test_plain_and_tuple_keys_are_equivalent`, `::test_several_plain_column_names_on_a_panel`, `::test_plain_and_tuple_keys_for_the_same_column_are_merged`.
 
 ### ANO-FREQ-012 — `_interpolate_to_target` plante sur une colonne sans observation (garde morte)
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/frequency_aligner.py::FrequencyAligner._interpolate_series` / `_interpolate_to_target`
+- **Composant** : `tsforecast/utils/frequency/aligner.py::FrequencyAligner._interpolate_series` / `_interpolate_to_target`
 - **Sévérité** : cosmétique (inatteignable par l'API publique)
 - **Observé** : `_interpolate_series` renvoie `None` pour une série sans observation (annotation `-> pd.Series` pourtant) ;
   `_interpolate_to_target` range ce `None` dans `interpolated`, puis `build_densified_index` lève
@@ -3346,13 +3346,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   df = pd.DataFrame({'x': [np.nan] * 3}, index=pd.date_range('2023-01-01', periods=3, freq='QS'))
   FrequencyAligner()._interpolate_to_target(df, ['x'], 'MS')   # AttributeError
   ```
-- **Test** : `tests/unit/frequency/frequency_aligner/test_convert_to_target.py::TestPrivateGuards::test_interpolating_a_column_without_frequency_leaves_it_unchanged`
+- **Test** : `tests/unit/utils/frequency/aligner/test_convert_to_target.py::TestPrivateGuards::test_interpolating_a_column_without_frequency_leaves_it_unchanged`
 - **Statut** : corrigé (2026-10-10)
 - **Correction** : `_interpolate_series` renvoie `None` sous deux observations (annotation `Optional[pd.Series]`) et `_interpolate_to_target` laisse alors la colonne telle quelle ; `_observed_series`, sans effet observable, est supprimée (le convertisseur restreint lui-même aux lignes observées).
 
 ### ANO-FREQ-013 — Documentation : `FrequencyAligner` présenté comme brique du `HighFrequencyImputer`
 - **Type** : [DOC] docstring ≠ code
-- **Composant** : `tsforecast/frequency/frequency_aligner.py` (docstring de module et de classe),
+- **Composant** : `tsforecast/utils/frequency/aligner.py` (docstring de module et de classe),
   `tsforecast/utils/frequency/converter.py` (docstring de module)
 - **Sévérité** : cosmétique
 - **Observé** : la docstring du module annonce « FrequencyAligner builds homogeneous-frequency datasets for the
@@ -3362,7 +3362,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `_interpolate_to_target`) plutôt que `convert_to_target`.
 - **Attendu** : outil autonome d'alignement, exemples sur `convert_to_target` / `build_densified_index`. Pas de `xfail`
   (le code est juste).
-- **Test** : `tests/unit/frequency/frequency_aligner/` (docstring de module)
+- **Test** : `tests/unit/utils/frequency/aligner/` (docstring de module)
 - **Statut** : corrigé (2026-10-10)
 - **Correction** : docstrings du module, de la classe et de `convert_to_target` réécrites (outil autonome, exemples sur `convert_to_target` / `build_densified_index`), docstring de module de `converter.py`, ligne du tableau de `docs/concepts/mixed_frequency_imputation.md` et `CLAUDE.md`. Restent périmés (non modifiés) : `notebooks/utils/frequency_aligner.ipynb` (appels privés avec l'argument `is_panel` supprimé en `6db1ca7`), textes de `notebooks/0 - QB - Utils.ipynb` et `notebooks/explore_frequency_converter.ipynb`.
 
@@ -3381,7 +3381,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-014 — Grille ancrée en fin de période quand aucune colonne n'est à la fréquence de l'index
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._build_index_freq_grid`
+- **Composant** : `tsforecast/imputation/_components/imputation_window.py::ImputationWindowCalculator._build_index_freq_grid`
 - **Sévérité** : majeure
 - **Observé** : la position (début / fin) de la grille de couverture est lue sur la première colonne dont la fréquence
   détectée égale celle de l'index. Sans telle colonne — index mensuel `MS` ne portant que des séries trimestrielles et
@@ -3402,7 +3402,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   calc.imputation_strict_window_start_          # Timestamp('2020-01-31')
   calc.get_imputation_window_mask(df).sum()     # 0
   ```
-- **Test** : `tests/unit/frequency/imputation_window/test_robustness.py::TestGridAnchoring::test_grid_follows_the_index_when_every_column_is_coarser`
+- **Test** : `tests/unit/imputation/_components/imputation_window/test_robustness.py::TestGridAnchoring::test_grid_follows_the_index_when_every_column_is_coarser`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : nouvelle méthode `_detect_grid_position` : la position est lue sur les dates observées des colonnes à la
   fréquence de la grille, puis sur l'index de l'entité, puis sur les dates observées des autres colonnes de fréquence
@@ -3411,7 +3411,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-015 — `fit` plante sur une colonne observée une seule fois
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._build_coverage_matrix`
+- **Composant** : `tsforecast/imputation/_components/imputation_window.py::ImputationWindowCalculator._build_coverage_matrix`
 - **Sévérité** : majeure
 - **Observé** : depuis ANO-UTILS-042, une colonne (ou un couple (entité, colonne)) observée une seule fois a une fréquence
   détectée `None`. `_build_index_freq_grid` se replie alors sur la fréquence de l'index (`col_freqs.get(col) or
@@ -3429,7 +3429,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                      'c': [np.nan] * 5 + [1.0] + [np.nan] * 6}, index=dates)
   ImputationWindowCalculator().fit(df)   # ValueError: Frequency must be a string, got <class 'NoneType'>
   ```
-- **Test** : `tests/unit/frequency/imputation_window/test_validation.py::TestUndetectedFrequencyColumns`
+- **Test** : `tests/unit/imputation/_components/imputation_window/test_validation.py::TestUndetectedFrequencyColumns`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : exclusion (décision D40, spec §14.8)
 - **Correction** : `_compute_window` recense les colonnes observées de fréquence `None` ; `_build_index_freq_grid` et
   `_build_coverage_matrix` les ignorent (plus de repli sur la fréquence de l'index), le dénominateur les écarte. Nouvel
@@ -3440,7 +3440,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-016 — `imputation_scope='unrestricted'` : prévu par la spec, refusé par le code
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationScope`, `ImputationWindowCalculator.__init__`
+- **Composant** : `tsforecast/imputation/_components/imputation_window.py::ImputationScope`, `ImputationWindowCalculator.__init__`
 - **Sévérité** : à arbitrer
 - **Observé** : `ImputationScope` n'a que quatre valeurs ; `ImputationWindowCalculator(imputation_scope='unrestricted')`
   lève `ValueError`. `'unrestricted'` n'existe que dans `TrainingScope` (commit `44f5266`, commentaire explicite :
@@ -3450,14 +3450,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   donnée) a peu de sens : la spec est probablement à corriger plutôt que le code. Comportement actuel épinglé,
   sans `xfail`.
 - **Reproduction** : `ImputationWindowCalculator(imputation_scope='unrestricted')` → `ValueError`.
-- **Test** : `tests/unit/frequency/imputation_window/test_validation.py::TestConstructorValidation::test_imputation_scope_rejects_unrestricted`
+- **Test** : `tests/unit/imputation/_components/imputation_window/test_validation.py::TestConstructorValidation::test_imputation_scope_rejects_unrestricted`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : `'unrestricted'` n'a d'intérêt que pour `TrainingScope`
 - **Correction** : la spec est corrigée (§7 : `ImputationScope` à quatre valeurs, `TrainingScope` explicite, paragraphe de
   motif) ; le code, déjà conforme, est inchangé. Le test épingle désormais le contrat.
 
 ### ANO-FREQ-017 — Entité sans aucune observation : `structurally_absent_columns_` vide
 - **Type** : [DOC] docstring ≠ code (ou [CODE], selon l'arbitrage)
-- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._fit_panel` /
+- **Composant** : `tsforecast/imputation/_components/imputation_window.py::ImputationWindowCalculator._fit_panel` /
   `_compute_window`
 - **Sévérité** : à arbitrer
 - **Observé** : une entité d'index régulier dont toutes les colonnes sont NaN a une grille vide ; `_compute_window`
@@ -3475,7 +3475,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   calc = ImputationWindowCalculator().fit(pd.DataFrame({'a': values, 'b': values}, index=idx, dtype=float))
   calc.structurally_absent_columns_   # {('A',): (), ('B',): ()}
   ```
-- **Test** : `tests/unit/frequency/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_empty_entity_reports_no_excluded_column`
+- **Test** : `tests/unit/imputation/_components/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_empty_entity_reports_no_excluded_column`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : docstring précisée, code inchangé
 - **Correction** : la docstring de `structurally_absent_columns_` (et de `undetected_frequency_columns_`) énonce la règle :
   l'attribut n'a de sens que pour une entité dotée d'une grille ; une entité de `entities_without_window_` porte toujours un
@@ -3484,7 +3484,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-018 — `get_mask_at_frequency` : entités sans fenêtre traitées de deux façons
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator.get_mask_at_frequency`
+- **Composant** : `tsforecast/imputation/_components/imputation_window.py::ImputationWindowCalculator.get_mask_at_frequency`
 - **Sévérité** : mineure
 - **Observé** : une entité dont la fréquence d'index est indéterminée est **absente** du résultat ; une entité d'index
   régulier sans aucune observation (grille vide) y figure **à False**. Or l'imputeur (`_window_mask_at`) et
@@ -3495,7 +3495,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   mask — is left unrestricted ») désignent l'absence.
 - **Reproduction** : panel `A` complet, `B` entièrement NaN sur un index mensuel régulier ;
   `calc.get_mask_at_frequency('QS').loc['B']` → 4 × `False`.
-- **Test** : `tests/unit/frequency/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_entity_without_window_is_absent_from_mask_at_frequency`
+- **Test** : `tests/unit/imputation/_components/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_entity_without_window_is_absent_from_mask_at_frequency`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : la boucle par entité saute toute entité de `entities_without_window_` ; un `frequency` en dict n'a plus à
   nommer ces entités (`::test_dict_target_need_not_name_an_entity_without_window`). Les masques ajustés gardent leurs lignes
@@ -3503,33 +3503,33 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-019 — `get_imputation_window_mask(data)` : `FutureWarning` de pandas
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator.get_imputation_window_mask`
+- **Composant** : `tsforecast/imputation/_components/imputation_window.py::ImputationWindowCalculator.get_imputation_window_mask`
 - **Sévérité** : cosmétique
 - **Observé** : `source.reindex(data.index).fillna(False).astype(bool)` passe par un tableau `object` dès qu'une ligne de
   `data` manque à la grille : `FutureWarning: Downcasting object dtype arrays on .fillna ... is deprecated`.
 - **Attendu** : aucun avertissement de dépréciation ; résultat booléen identique.
 - **Reproduction** : `calc.get_imputation_window_mask(pd.DataFrame(index=index_avec_une_date_hors_grille))`.
-- **Test** : `tests/unit/frequency/imputation_window/test_accessors.py::TestGetImputationWindowMask::test_alignment_emits_no_pandas_deprecation`
+- **Test** : `tests/unit/imputation/_components/imputation_window/test_accessors.py::TestGetImputationWindowMask::test_alignment_emits_no_pandas_deprecation`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `source.reindex(data.index, fill_value=False).astype(bool)`.
 
 ### ANO-FREQ-020 — Entité sans fenêtre écartée en silence
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._fit_panel`
+- **Composant** : `tsforecast/imputation/_components/imputation_window.py::ImputationWindowCalculator._fit_panel`
 - **Sévérité** : mineure
 - **Observé** : une entité sans fenêtre (fréquence d'index indéterminée, ou aucune observation) voit toutes ses lignes à
   False dans les trois masques sans aucun avertissement — alors que l'exclusion d'une simple colonne (D39) en émet un.
 - **Attendu** : un avertissement agrégé unique nommant ces entités (point de vigilance 5 du §17 de la spec : tout
   avertissement est agrégé et unique).
 - **Reproduction** : panel `A` complet, `B` entièrement NaN ; `fit` ne produit aucun avertissement.
-- **Test** : `tests/unit/frequency/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_entities_without_window_are_named_by_one_warning`
+- **Test** : `tests/unit/imputation/_components/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_entities_without_window_are_named_by_one_warning`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `_fit_panel` émet un `UserWarning` unique listant `entities_without_window_` ; un panel où toutes les
   entités ont une fenêtre reste silencieux (`::test_no_warning_when_every_entity_has_a_window`).
 
 ### ANO-FREQ-021 — Agrégat prédit quasi nul : le recalage explose et la somme n'égale plus le total
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint._rescale_one` (via `rescale` / `transform`)
+- **Composant** : `tsforecast/imputation/_components/aggregation_constraint.py::AggregationConstraint._rescale_one` (via `rescale` / `transform`)
 - **Sévérité** : mineure
 - **Observé** : la garde « agrégat prédit nul » (§11.1) teste l'égalité **exacte** `aggregate == 0`. Des prédictions
   qui s'annulent mathématiquement mais pas en flottant passent la garde : `[0.1, 0.2, -0.3]` (agrégat `5.55e-17`) face à
@@ -3548,7 +3548,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   rescaled, mask = AggregationConstraint('sum').rescale(values, observations, 'Q', grid_freq='M')
   rescaled.sum()   # 16.0, mask tout à True
   ```
-- **Test** : `tests/unit/frequency/aggregation_constraint/test_rescale_guards.py::TestRescaleGuards::test_numerically_zero_aggregate_is_zero`
+- **Test** : `tests/unit/imputation/_components/aggregation_constraint/test_rescale_guards.py::TestRescaleGuards::test_numerically_zero_aggregate_is_zero`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur
 - **Correction** : `_rescale_one` traite comme nul tout agrégat dont la valeur absolue est inférieure à la borne d'erreur
   d'arrondi de la sommation, `n · ε · Σ|x|` (`np.finfo(float).eps`) : la période reste brute, avec l'avertissement agrégé
@@ -3560,7 +3560,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-022 — Dates d'observation dupliquées : le total visé est compté deux fois
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint._observed_totals` (via `rescale` / `transform`)
+- **Composant** : `tsforecast/imputation/_components/aggregation_constraint.py::AggregationConstraint._observed_totals` (via `rescale` / `transform`)
 - **Sévérité** : mineure
 - **Observé** : une ancre dupliquée (deux lignes `2021-12-31` à 120) est sommée : la cible de 2021 devient **240** et
   l'année est recalée dessus, sans erreur ni avertissement (la garde de troncature est satisfaite : 13 lignes ≥ 12
@@ -3577,7 +3577,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   observations = pd.Series(np.nan, index=dup); observations.iloc[-2:] = 120.0
   AggregationConstraint('sum').rescale(values, observations, 'Y', grid_freq='M')[0].sum()   # 240.0
   ```
-- **Test** : `tests/unit/frequency/aggregation_constraint/test_rescale_guards.py::TestRescaleGuards::test_duplicated_observation_dates_are_rejected`
+- **Test** : `tests/unit/imputation/_components/aggregation_constraint/test_rescale_guards.py::TestRescaleGuards::test_duplicated_observation_dates_are_rejected`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `_check_unique_dates` lève `ValueError('Duplicate dates in observations|values: [...]')` dans
   `_rescale_one` (ancres non nulles des observations, et grille des valeurs : une sous-période dupliquée compterait deux
@@ -3587,7 +3587,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-023 — `set_params` contourne la validation d'`aggregation_constraint` (D20)
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint.fit`
+- **Composant** : `tsforecast/imputation/_components/aggregation_constraint.py::AggregationConstraint.fit`
 - **Sévérité** : mineure
 - **Observé** : la validation n'a lieu qu'à `__init__`. `set_params(aggregation_constraint='mean')` (chemin de
   `GridSearchCV`, des pipelines) l'esquive ; `fit` ne revalide pas, et `transform` traite `'mean'` comme une contrainte
@@ -3604,14 +3604,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   c = AggregationConstraint('sum', 'Y', obs).set_params(aggregation_constraint='mean')
   c.fit(X).transform(X)['a'].sum()   # 78.0, aucune erreur
   ```
-- **Test** : `tests/unit/frequency/aggregation_constraint/test_validation.py::TestValidationThroughSetParams`
+- **Test** : `tests/unit/imputation/_components/aggregation_constraint/test_validation.py::TestValidationThroughSetParams`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur (composants utilisables seuls, `set_params` compris)
 - **Correction** : `fit`, `transform` et `rescale` (utilisable sans `fit`) revalident `aggregation_constraint` par
   `validate_aggregation_constraint` ; la validation d'`__init__` est conservée (§13.1). Tests : `TestValidationThroughSetParams`.
 
 ### ANO-FREQ-024 — Garde de troncature désactivée en silence
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint._expected_subperiods`
+- **Composant** : `tsforecast/imputation/_components/aggregation_constraint.py::AggregationConstraint._expected_subperiods`
 - **Sévérité** : à arbitrer
 - **Observé** : la garde de troncature calendaire (§11.1) se désactive sans signal dans deux cas : (1) un `grid_freq`
   illisible (`'zz'`) — le `ValueError` de `normalize_frequency` est absorbé par le `except (ValueError, TypeError)`
@@ -3629,7 +3629,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   observations = pd.Series([np.nan, np.nan, 120.0], index=grid)
   AggregationConstraint('sum').rescale(values, observations, 'Y', grid_freq='zz')[1].all()   # True
   ```
-- **Test** : `tests/unit/frequency/aggregation_constraint/test_validation.py::TestGridFrequencyValidation`
+- **Test** : `tests/unit/imputation/_components/aggregation_constraint/test_validation.py::TestGridFrequencyValidation`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur
 - **Correction** : `_resolve_grid_freq`, appelée une fois par appel en tête de `_rescale_one`, normalise `grid_freq` et lève
   `ValueError` sur une fréquence illisible (« grid_freq must be a readable frequency ») et sur un dictionnaire qui ne couvre
@@ -3641,46 +3641,46 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-025 — Une ligne datée `NaT` forme son propre bloc de recalage
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/aggregation_constraint.py::_period_membership`
+- **Composant** : `tsforecast/imputation/_components/aggregation_constraint.py::_period_membership`
 - **Sévérité** : cosmétique
 - **Observé** : `to_period` rend `NaT` pour une date absente, et `_is_usable_key(NaT)` vaut `True` : toutes les lignes `NaT`
   forment une « période » commune, et une observation datée `NaT` y devient un total imposé. La garde `_is_usable_key` était
   du code mort (aucune clé `None` / NaN n'était jamais produite).
 - **Attendu** : une ligne `NaT` n'appartient à aucune période, ni recalée ni source de total.
 - **Reproduction** : grille de 12 mois + une ligne `NaT` portant 7 et une observation à 5 → la ligne `NaT` était recalée à 5.
-- **Test** : `tests/unit/frequency/aggregation_constraint/test_rescale_guards.py::TestRescaleGuards::test_nat_rows_never_form_a_period`
+- **Test** : `tests/unit/imputation/_components/aggregation_constraint/test_rescale_guards.py::TestRescaleGuards::test_nat_rows_never_form_a_period`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `_period_membership` rend `None` pour une date `NaT` (série et panel) ; `_is_usable_key` écarte ces lignes
   dans `_observed_totals` et `_rescale_one`.
 
 ### ANO-FREQ-026 — `transform` accepte d'autres colonnes que celles du `fit`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint.transform`
+- **Composant** : `tsforecast/imputation/_components/aggregation_constraint.py::AggregationConstraint.transform`
 - **Sévérité** : mineure
 - **Observé** : aucune comparaison avec `feature_names_in_` ; une colonne inconnue au `fit` est recalée sans que ses clés de
   dictionnaire ni ses métadonnées aient été contrôlées, une colonne manquante passe inaperçue.
 - **Attendu** : convention sklearn, `ValueError` nommant les colonnes manquantes et inattendues.
 - **Reproduction** : `AggregationConstraint('sum', 'Y', obs).fit(X).transform(X.assign(q1=1.0))` ne levait rien.
-- **Test** : `tests/unit/frequency/aggregation_constraint/test_sklearn_protocol.py::TestSklearnProtocol::test_transform_rejects_other_columns_than_fit`
+- **Test** : `tests/unit/imputation/_components/aggregation_constraint/test_sklearn_protocol.py::TestSklearnProtocol::test_transform_rejects_other_columns_than_fit`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `ValueError('X has different columns than during fit: missing [...], unexpected [...]')` ; l'ordre des
   colonnes reste libre (`::test_transform_accepts_reordered_columns`).
 
 ### ANO-FREQ-027 — `fit` ne purge pas `rescaled_mask_`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint.fit`
+- **Composant** : `tsforecast/imputation/_components/aggregation_constraint.py::AggregationConstraint.fit`
 - **Sévérité** : cosmétique
 - **Observé** : après `fit_transform(X)` puis `fit(X_autre)`, `rescaled_mask_` porte encore le masque du transform
   précédent, sur une autre grille.
 - **Attendu** : principe B19 (§12.5) — l'état du `transform` est purgé en tête de `fit`.
 - **Reproduction** : `c.fit_transform(X); c.fit(X2); c.rescaled_mask_.index` → index de `X`.
-- **Test** : `tests/unit/frequency/aggregation_constraint/test_sklearn_protocol.py::TestSklearnProtocol::test_refit_purges_the_previous_rescaled_mask`
+- **Test** : `tests/unit/imputation/_components/aggregation_constraint/test_sklearn_protocol.py::TestSklearnProtocol::test_refit_purges_the_previous_rescaled_mask`
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `fit` supprime `rescaled_mask_` s'il existe.
 
 ### ANO-FREQ-028 — `'calendar'` : diviseur `1.0` au lieu d'un diviseur fractionnaire quand l'étape est plus grossière
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler._pair_divisor` (donc `target_divisor`,
+- **Composant** : `tsforecast/imputation/_components/stage_scaler.py::StageScaler._pair_divisor` (donc `target_divisor`,
   `fit_scale_factor`, `feature_divisors`)
 - **Sévérité** : majeure
 - **Observé** : sous `'constant'`, un couple « étape plus grossière que la variable » donne bien `1/3` (M -> Q),
@@ -3699,14 +3699,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   StageScaler(scale_features='calendar').target_divisor('v', 'M', 'Q', index=idx).tolist()
   # [1.0, 1.0, 1.0] ; 'constant' donne 1/3
   ```
-- **Test** : `tests/unit/frequency/stage_scaler/test_golden_values.py::TestCalendarGoldenValues::test_fractional_divisor_under_calendar`,
+- **Test** : `tests/unit/imputation/_components/stage_scaler/test_golden_values.py::TestCalendarGoldenValues::test_fractional_divisor_under_calendar`,
   `::test_fractional_feature_divisor_under_calendar`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : part de jours en `'calendar'`, fraction uniforme en `'constant'`
-- **Correction** : `_pair_divisor` détecte une période portée plus fine que l'étape (`is_higher_frequency(f_to, f_from)`) et, sous `'calendar'`, calcule la part de temps réelle de la période d'étape (`_calendar_share` : durée de la période fine / durée de la période d'étape, en nanosecondes ; repli sur le facteur constant pour une fréquence sans `Period` pandas, ex. `SM`). `'constant'` est inchangé (1/3, 1/4, 1/12). Tests : `tests/unit/frequency/stage_scaler/test_golden_values.py::TestCalendarGoldenValues::test_calendar_share_of_days_gold`, `::test_calendar_share_on_a_mutualized_block`, `::test_fractional_divisor_under_calendar`.
+- **Correction** : `_pair_divisor` détecte une période portée plus fine que l'étape (`is_higher_frequency(f_to, f_from)`) et, sous `'calendar'`, calcule la part de temps réelle de la période d'étape (`_calendar_share` : durée de la période fine / durée de la période d'étape, en nanosecondes ; repli sur le facteur constant pour une fréquence sans `Period` pandas, ex. `SM`). `'constant'` est inchangé (1/3, 1/4, 1/12). Tests : `tests/unit/imputation/_components/stage_scaler/test_golden_values.py::TestCalendarGoldenValues::test_calendar_share_of_days_gold`, `::test_calendar_share_on_a_mutualized_block`, `::test_fractional_divisor_under_calendar`.
 
 ### ANO-FREQ-029 — `feature_divisors` : `grid_freq` par entité rend une `Series` quand les blocs coïncident
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.feature_divisors`
+- **Composant** : `tsforecast/imputation/_components/stage_scaler.py::StageScaler.feature_divisors`
 - **Sévérité** : mineure
 - **Observé** : avec `grid_freq` en liaison par entité, le retour est une `DataFrame` par ligne si les diviseurs
   diffèrent d'une entité à l'autre, mais une `Series` par colonne s'ils coïncident (blocs identiques, liaison à une
@@ -3721,13 +3721,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   type(StageScaler().feature_divisors(columns=['m1'], column_frequencies={'m1': 'M'}, ways={},
        grid_freq={('DE',): 'Y', ('FR',): 'Y'}, stage_freq='M', index=idx))   # Series
   ```
-- **Test** : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestShapeRule::test_per_entity_grid_freq_always_gives_a_dataframe`
+- **Test** : `tests/unit/imputation/_components/stage_scaler/test_shape_symmetry.py::TestShapeRule::test_per_entity_grid_freq_always_gives_a_dataframe`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `feature_divisors` rend toujours une `DataFrame` par ligne pour un `grid_freq` par entité. Plus généralement, la forme ne dépend plus de la coïncidence des diviseurs : par ligne sous `'calendar'`, pour un `grid_freq` par entité, ou quand les fréquences effectivement lues (étape, colonnes en `'raw_anchors'`) se résolvent différemment d'une entité à l'autre ; compacte sinon. Tests : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestShapeRule`.
+- **Correction** : `feature_divisors` rend toujours une `DataFrame` par ligne pour un `grid_freq` par entité. Plus généralement, la forme ne dépend plus de la coïncidence des diviseurs : par ligne sous `'calendar'`, pour un `grid_freq` par entité, ou quand les fréquences effectivement lues (étape, colonnes en `'raw_anchors'`) se résolvent différemment d'une entité à l'autre ; compacte sinon. Tests : `tests/unit/imputation/_components/stage_scaler/test_shape_symmetry.py::TestShapeRule`.
 
 ### ANO-FREQ-030 — Liaison d'étape par entité homogène : forme compacte, contrairement à `source_freq`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.feature_divisors`,
+- **Composant** : `tsforecast/imputation/_components/stage_scaler.py::StageScaler.feature_divisors`,
   `::StageScaler._stage_divisor` (`target_divisor`, `fit_scale_factor`)
 - **Sévérité** : à arbitrer
 - **Observé** : `pred_freq` / `stage_freq` = `{('DE',): 'M', ('FR',): 'M'}` rend un scalaire (`target_divisor`) et
@@ -3743,14 +3743,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   StageScaler().target_divisor('a1', 'Y', {('DE',): 'M', ('FR',): 'M'}, index=idx)        # 12.0
   StageScaler().target_divisor('a1', {('DE',): 'Y', ('FR',): 'Y'}, 'M', index=idx)        # Series
   ```
-- **Test** : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestShapeRule::test_homogeneous_stage_binding_keeps_the_compact_form`
+- **Test** : `tests/unit/imputation/_components/stage_scaler/test_shape_symmetry.py::TestShapeRule::test_homogeneous_stage_binding_keeps_the_compact_form`
   (épingle le comportement actuel)
 - **Statut** : arbitré (2026-10-11) — forme compacte conservée
-- **Correction** : règle retenue : une liaison d'étape (`stage_freq` / `pred_freq`) dont les entités s'accordent sur une fréquence (aux alias de position près, `'M'` = `'ME'`) reste compacte ; les liaisons `grid_freq` / `source_freq` décrivent un jeu mutualisé et sont toujours par ligne. Motif : `HighFrequencyImputer` passe une liaison par entité à toute étape de panel ; la forme par ligne figerait chaque `fit_scale_factor` en `Series` sur la grille du fit (report d'échelle exposé au désalignement NaN déjà signalé sous `'calendar'`, plan illisible : `'per-row'` au lieu de 12.0) sans bénéfice. Tests : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestShapeRule::test_homogeneous_stage_binding_keeps_the_compact_form`, `::test_disagreeing_stage_binding_is_per_row_even_with_equal_divisors`.
+- **Correction** : règle retenue : une liaison d'étape (`stage_freq` / `pred_freq`) dont les entités s'accordent sur une fréquence (aux alias de position près, `'M'` = `'ME'`) reste compacte ; les liaisons `grid_freq` / `source_freq` décrivent un jeu mutualisé et sont toujours par ligne. Motif : `HighFrequencyImputer` passe une liaison par entité à toute étape de panel ; la forme par ligne figerait chaque `fit_scale_factor` en `Series` sur la grille du fit (report d'échelle exposé au désalignement NaN déjà signalé sous `'calendar'`, plan illisible : `'per-row'` au lieu de 12.0) sans bénéfice. Tests : `tests/unit/imputation/_components/stage_scaler/test_shape_symmetry.py::TestShapeRule::test_homogeneous_stage_binding_keeps_the_compact_form`, `::test_disagreeing_stage_binding_is_per_row_even_with_equal_divisors`.
 
 ### ANO-FREQ-031 — Entité de la grille absente de la liaison d'étape : diviseur `NaN` en silence
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.feature_divisors`,
+- **Composant** : `tsforecast/imputation/_components/stage_scaler.py::StageScaler.feature_divisors`,
   `::StageScaler._stage_divisor`, `::StageScaler._spread_one`
 - **Sévérité** : mineure
 - **Observé** : quand seule la liaison d'étape (`stage_freq` / `pred_freq`) est par entité, les entités servies
@@ -3767,14 +3767,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   StageScaler().target_divisor('a1', 'Y', {('FR',): 'M', ('DE',): 'Q'}, index=idx).loc['IT'].tolist()
   # [nan, nan, nan]
   ```
-- **Test** : `tests/unit/frequency/stage_scaler/test_panel.py::TestPerEntityFrequencies::test_grid_entity_uncovered_by_the_stage_binding_raises`
+- **Test** : `tests/unit/imputation/_components/stage_scaler/test_panel.py::TestPerEntityFrequencies::test_grid_entity_uncovered_by_the_stage_binding_raises`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : la fréquence d'étape d'une entité est résolue par `_stage_freq_for` : entrée propre, liaison à une seule entrée, puis **liaison unanime** (toutes les entrées s'accordent : c'est la fréquence de l'étape, elle vaut pour tout le panel) ; seule une liaison **discordante** qui omet une entité de la grille lève un `ValueError` nommant l'entité. Les entités servies sont celles de la grille dès qu'une liaison par entité est lue (`feature_divisors`, `_stage_divisor`, chemin `produced_freq` de `target_divisor`). Une colonne d'ancres sans fréquence pour une entité retombe sur le diviseur par défaut, jamais sur NaN. Tests : `tests/unit/frequency/stage_scaler/test_panel.py::TestPerEntityFrequencies`.
+- **Correction** : la fréquence d'étape d'une entité est résolue par `_stage_freq_for` : entrée propre, liaison à une seule entrée, puis **liaison unanime** (toutes les entrées s'accordent : c'est la fréquence de l'étape, elle vaut pour tout le panel) ; seule une liaison **discordante** qui omet une entité de la grille lève un `ValueError` nommant l'entité. Les entités servies sont celles de la grille dès qu'une liaison par entité est lue (`feature_divisors`, `_stage_divisor`, chemin `produced_freq` de `target_divisor`). Une colonne d'ancres sans fréquence pour une entité retombe sur le diviseur par défaut, jamais sur NaN. Tests : `tests/unit/imputation/_components/stage_scaler/test_panel.py::TestPerEntityFrequencies`.
 - **Effet sur `HighFrequencyImputer`** : le cas se produisait réellement. Avec `target_frequency={FR: 'M', DE: 'Q', IT: 'M'}` et `impute_intermediate_frequencies=True` sur PANEL-F, l'étape `M` lie `{FR: M, IT: M}` alors que le jeu mutualisé contient le bloc trimestriel de DE (R2) : ses lignes recevaient un diviseur NaN puis étaient retirées par `usable = y_train.notna()` (côté features, le diviseur par défaut). `n_training_rows` de l'étape `M` / `v` passe de 48 à 60 : les 12 ancres de DE entrent désormais dans l'entraînement, ramenées à l'échelle mensuelle.
 
 ### ANO-FREQ-032 — `set_params` contourne la validation de `scale_features`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.fit` (et `target_divisor`,
+- **Composant** : `tsforecast/imputation/_components/stage_scaler.py::StageScaler.fit` (et `target_divisor`,
   `fit_scale_factor`, `feature_divisors`, utilisables sans `fit`)
 - **Sévérité** : mineure
 - **Observé** : la validation n'a lieu qu'à `__init__`. `set_params(scale_features='exact')` est accepté ;
@@ -3785,13 +3785,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```python
   StageScaler().set_params(scale_features='exact').target_divisor('a1', 'Y', 'M')   # 12.0, aucune erreur
   ```
-- **Test** : `tests/unit/frequency/stage_scaler/test_validation.py::TestValidationThroughSetParams::test_inadmissible_setting_raises_after_set_params`
+- **Test** : `tests/unit/imputation/_components/stage_scaler/test_validation.py::TestValidationThroughSetParams::test_inadmissible_setting_raises_after_set_params`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `resolve_mode`, point de passage de `fit` et des trois méthodes de diviseur, revalide `scale_features` ; la validation d'`__init__` est conservée. Tests : `tests/unit/frequency/stage_scaler/test_validation.py::TestValidationThroughSetParams`.
+- **Correction** : `resolve_mode`, point de passage de `fit` et des trois méthodes de diviseur, revalide `scale_features` ; la validation d'`__init__` est conservée. Tests : `tests/unit/imputation/_components/stage_scaler/test_validation.py::TestValidationThroughSetParams`.
 
 ### ANO-FREQ-033 — `transform` accepte d'autres colonnes que celles du `fit`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.transform` (et `inverse_transform`)
+- **Composant** : `tsforecast/imputation/_components/stage_scaler.py::StageScaler.transform` (et `inverse_transform`)
 - **Sévérité** : mineure
 - **Observé** : aucune comparaison avec `feature_names_in_`. Avec des diviseurs compacts, pandas aligne la `Series`
   de diviseurs sur les colonnes : une colonne inconnue au `fit` sort en `NaN`, une colonne du `fit` absente de `X`
@@ -3804,13 +3804,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   s = StageScaler(source_freq='Y', pred_freq='M', column_frequencies={'m1': 'M', 'a2': 'Y'}).fit(X)
   s.transform(X.rename(columns={'a2': 'q1'})).columns.tolist()   # ['a2', 'm1', 'q1'], a2 et q1 NaN
   ```
-- **Test** : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_transform_rejects_other_columns_than_fit`
+- **Test** : `tests/unit/imputation/_components/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_transform_rejects_other_columns_than_fit`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `transform` / `inverse_transform` d'une `DataFrame` lèvent `ValueError('X has different columns than during fit: missing [...], unexpected [...]')` ; l'ordre des colonnes reste libre. Tests : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_transform_rejects_other_columns_than_fit`, `::test_transform_accepts_reordered_columns`.
+- **Correction** : `transform` / `inverse_transform` d'une `DataFrame` lèvent `ValueError('X has different columns than during fit: missing [...], unexpected [...]')` ; l'ordre des colonnes reste libre. Tests : `tests/unit/imputation/_components/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_transform_rejects_other_columns_than_fit`, `::test_transform_accepts_reordered_columns`.
 
 ### ANO-FREQ-034 — `0`, `0.0`, `np.False_` acceptés par la validation puis traités comme `'constant'`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler._validate_scale_features` /
+- **Composant** : `tsforecast/imputation/_components/stage_scaler.py::StageScaler._validate_scale_features` /
   `::StageScaler.resolve_mode`
 - **Sévérité** : mineure
 - **Observé** : la validation compare par égalité (`value in (False, 'constant', 'calendar')`, or `0 == False`),
@@ -3823,13 +3823,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```python
   StageScaler(scale_features=np.False_).target_divisor('a1', 'Y', 'M')   # 12.0, attendu 1.0 ou ValueError
   ```
-- **Test** : `tests/unit/frequency/stage_scaler/test_validation.py::TestValidation::test_values_equal_to_false_are_rejected_or_act_as_false`
+- **Test** : `tests/unit/imputation/_components/stage_scaler/test_validation.py::TestValidation::test_values_equal_to_false_are_rejected_or_act_as_false`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `_is_admissible_setting` compare `False` par identité : `0`, `0.0`, `np.False_` sont rejetés, en forme scalaire comme en forme dict (validation partagée avec `HighFrequencyImputer.__init__`). Tests : `tests/unit/frequency/stage_scaler/test_validation.py::TestValidation::test_values_merely_equal_to_false_are_rejected`.
+- **Correction** : `_is_admissible_setting` compare `False` par identité : `0`, `0.0`, `np.False_` sont rejetés, en forme scalaire comme en forme dict (validation partagée avec `HighFrequencyImputer.__init__`). Tests : `tests/unit/imputation/_components/stage_scaler/test_validation.py::TestValidation::test_values_merely_equal_to_false_are_rejected`.
 
 ### ANO-FREQ-035 — `_feature_divisor` : ancienne règle B25 restée en code mort
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler._feature_divisor`
+- **Composant** : `tsforecast/imputation/_components/stage_scaler.py::StageScaler._feature_divisor`
 - **Sévérité** : cosmétique
 - **Observé** : la méthode (normalisation vers `f_var`, règle B25) n'a plus aucun appelant depuis `35c36e1`, où
   `feature_divisors` est passé à la règle de la période couverte. Elle reste définie (lignes non couvertes par
@@ -3837,14 +3837,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : §9.2 — « il n'existe **qu'une** méthode de diviseur de covariable » ; suppression du code mort, sans
   changement de comportement.
 - **Reproduction** : `git grep -n "_feature_divisor(" -- tsforecast` ne trouve que la définition.
-- **Test** : `tests/unit/frequency/stage_scaler/::TestSingleCovariateDivisorMethod::test_no_residual_covariate_divisor_method`
+- **Test** : `tests/unit/imputation/_components/stage_scaler/::TestSingleCovariateDivisorMethod::test_no_residual_covariate_divisor_method`
   (`internal`)
 - **Statut** : corrigé (2026-10-11)
 - **Correction** : `StageScaler._feature_divisor` supprimée ; `feature_divisors` est la seule méthode de diviseur de covariable.
 
 ### ANO-FREQ-036 — `transform` / `inverse_transform` perdent le nom de `y` sous un diviseur par ligne
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/stage_scaler.py::StageScaler.apply` / `::StageScaler.invert`
+- **Composant** : `tsforecast/imputation/_components/stage_scaler.py::StageScaler.apply` / `::StageScaler.invert`
 - **Sévérité** : mineure
 - **Observé** : `values / divisor` entre deux `Series` de noms différents rend une `Series` sans nom ; les diviseurs
   par ligne (`'calendar'`, `produced_freq`, `source_freq` par entité) ne sont pas nommés. `transform(y).name` vaut
@@ -3859,13 +3859,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   s = StageScaler(scale_features='calendar', source_freq='M', pred_freq='D').fit(y.to_frame(), y)
   s.transform(y).name   # None
   ```
-- **Test** : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`
+- **Test** : `tests/unit/imputation/_components/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `apply` / `invert` redonnent au résultat le nom de la `Series` d'entrée (`_keep_name`). Tests : `tests/unit/frequency/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`.
+- **Correction** : `apply` / `invert` redonnent au résultat le nom de la `Series` d'entrée (`_keep_name`). Tests : `tests/unit/imputation/_components/stage_scaler/test_shape_symmetry.py::TestTransformSymmetry::test_name_of_y_is_kept_under_per_row_divisors`.
 
 ### ANO-FREQ-037 — Liaison d'étape unanime : une entité de la grille non nommée reste sans fréquence
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer._stage_frequency` (via `classify`,
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::CovariateMaterializer._stage_frequency` (via `classify`,
   `decide_ways`, `materialize`, `stage_frame`) ; même lecture des clés dans `::_column_frequency`
 - **Sévérité** : majeure
 - **Observé** : `stage_freq={('FR',): 'Q', ('DE',): 'Q'}` sur une grille FR / DE / IT : IT n'a pas d'entrée propre, la
@@ -3893,14 +3893,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
       detected_frequencies={'m1': 'M'}, source_data=panel)
   ways, features['m1'].iloc[0]   # ({'m1': 'raw_anchors'}, 102.0)
   ```
-- **Tests** : `tests/unit/frequency/covariate_materializer/test_classification.py::TestStageBindingResolution`
-  (liaison unanime ; liaison discordante, sous `'model'` ; clés scalaires normalisées), `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`
+- **Tests** : `tests/unit/imputation/_components/covariate_materializer/test_classification.py::TestStageBindingResolution`
+  (liaison unanime ; liaison discordante, sous `'model'` ; clés scalaires normalisées), `tests/unit/imputation/_components/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : clés scalaires normalisées
-- **Correction** : `_stage_frequency` résout comme `StageScaler._stage_freq_for` : entrée propre, puis liaison **unanime** — aux alias de position près, une seule entrée comprise — valant pour tout le panel, sinon `None`. `_check_stage_coverage` lève une `ValueError` nommant les entités de la grille qu'une liaison discordante ne nomme pas, dans `decide_ways` et `_produce_column` (donc `materialize`, `stage_frame`, `interpolate_column`), avant toute lecture des registres. `_normalized_keys` normalise les clés des liaisons par entité (`detected_frequencies`, `stage_freq`) : `'FR'` vaut `('FR',)`, comme l'argument `entity` des méthodes publiques. Corollaire : sous `record=True`, plus aucune cellule n'est enregistrée avec une fréquence de production `None` (entité non liée). Même normalisation dans `StageScaler._freq_for` (arbitrage de l'auteur, 2026-10-12), par la fonction partagée `tsforecast.panel.utils.normalize_entity_mapping`, que le matérialiseur utilise aussi. Tests : `tests/unit/frequency/covariate_materializer/test_classification.py::TestStageBindingResolution`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`, `tests/unit/frequency/stage_scaler/test_panel.py::TestPerEntityFrequencies::test_plain_entity_keys_behave_like_tuple_keys`, `tests/unit/panel/utils/test_entity_keys.py::TestNormalizeEntityMapping`.
+- **Correction** : `_stage_frequency` résout comme `StageScaler._stage_freq_for` : entrée propre, puis liaison **unanime** — aux alias de position près, une seule entrée comprise — valant pour tout le panel, sinon `None`. `_check_stage_coverage` lève une `ValueError` nommant les entités de la grille qu'une liaison discordante ne nomme pas, dans `decide_ways` et `_produce_column` (donc `materialize`, `stage_frame`, `interpolate_column`), avant toute lecture des registres. `_normalized_keys` normalise les clés des liaisons par entité (`detected_frequencies`, `stage_freq`) : `'FR'` vaut `('FR',)`, comme l'argument `entity` des méthodes publiques. Corollaire : sous `record=True`, plus aucune cellule n'est enregistrée avec une fréquence de production `None` (entité non liée). Même normalisation dans `StageScaler._freq_for` (arbitrage de l'auteur, 2026-10-12), par la fonction partagée `tsforecast.panel.utils.normalize_entity_mapping`, que le matérialiseur utilise aussi. Tests : `tests/unit/imputation/_components/covariate_materializer/test_classification.py::TestStageBindingResolution`, `tests/unit/imputation/_components/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_unanimous_stage_binding_covers_an_unbound_grid_entity`, `tests/unit/imputation/_components/stage_scaler/test_panel.py::TestPerEntityFrequencies::test_plain_entity_keys_behave_like_tuple_keys`, `tests/unit/panel/utils/test_entity_keys.py::TestNormalizeEntityMapping`.
 
 ### ANO-FREQ-038 — `decide_ways` : les égalités de rang sont départagées par l'ordre des entités
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer.decide_ways` (réduction
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::CovariateMaterializer.decide_ways` (réduction
   `max(candidates, key=_WAY_RANK)`), `::_applicable_way`
 - **Sévérité** : majeure
 - **Observé** : `_WAY_RANK` donne le même rang à `'interpolate'` et `'raw_anchors'` (2), et à `'stage_model'` et
@@ -3928,14 +3928,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                                                 detected_frequencies=freqs))
   # {'v': 'interpolate'} puis {'v': 'raw_anchors'}
   ```
-- **Tests** : `tests/unit/frequency/covariate_materializer/test_classification.py::TestReductionOrder::test_entity_without_frequency_never_dictates_the_column_way`,
+- **Tests** : `tests/unit/imputation/_components/covariate_materializer/test_classification.py::TestReductionOrder::test_entity_without_frequency_never_dictates_the_column_way`,
   `::TestReductionOrder::test_tied_model_verdicts_never_skip_rank_two`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `decide_ways` écarte de la réduction les verdicts des entités sans conversion définissable (fréquence de colonne ou d'étape inconnue : leurs lignes restent servies par `_applicable_way`) ; une colonne qu'aucune entité ne convertit vaut `'raw_anchors'`. Les rangs égaux sont départagés par un ordre fixe, `_WAY_TIE_BREAK` (`'raw_anchors'` après `'interpolate'`, `'carried_model'` après `'stage_model'`) ; `_WAY_RANK`, lu par `TrainingSetBuilder`, est inchangé. `_applicable_way` résout une voie de modèle par la précédence propre de l'entité — rang 2 si son miroir porte des cellules à `f`, sinon rang 3, sinon repli —, quelle que soit la voie de modèle retenue pour la colonne. Tests : `tests/unit/frequency/covariate_materializer/test_classification.py::TestReductionOrder`, `tests/unit/frequency/covariate_materializer/test_precedence.py::TestModelWaysPerEntity`.
+- **Correction** : `decide_ways` écarte de la réduction les verdicts des entités sans conversion définissable (fréquence de colonne ou d'étape inconnue : leurs lignes restent servies par `_applicable_way`) ; une colonne qu'aucune entité ne convertit vaut `'raw_anchors'`. Les rangs égaux sont départagés par un ordre fixe, `_WAY_TIE_BREAK` (`'raw_anchors'` après `'interpolate'`, `'carried_model'` après `'stage_model'`) ; `_WAY_RANK`, lu par `TrainingSetBuilder`, est inchangé. `_applicable_way` résout une voie de modèle par la précédence propre de l'entité — rang 2 si son miroir porte des cellules à `f`, sinon rang 3, sinon repli —, quelle que soit la voie de modèle retenue pour la colonne. Tests : `tests/unit/imputation/_components/covariate_materializer/test_classification.py::TestReductionOrder`, `tests/unit/imputation/_components/covariate_materializer/test_precedence.py::TestModelWaysPerEntity`.
 
 ### ANO-FREQ-039 — Dates dupliquées dans `source_data` : l'agrégation exacte compte deux fois
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer._produce_block` (voie
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::CovariateMaterializer._produce_block` (voie
   `'aggregate'`, via `materialize` / `stage_frame`)
 - **Sévérité** : mineure
 - **Observé** : `TS` dont le 2023-12-31 est dupliqué, `m1` à l'étape Q : le T4 2023 vaut **537** (133 + 134 + 135 + 135)
@@ -3954,13 +3954,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
       columns=['m1'], grid_index=grid, stage_freq='Q', detected_frequencies={'m1': 'M'}, source_data=dup)
   features['m1'].iloc[-1]   # 537.0
   ```
-- **Test** : `tests/unit/frequency/covariate_materializer/test_robustness.py::TestDuplicates::test_duplicated_source_dates_are_rejected_by_every_way`
+- **Test** : `tests/unit/imputation/_components/covariate_materializer/test_robustness.py::TestDuplicates::test_duplicated_source_dates_are_rejected_by_every_way`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `_check_source_data` lève `ValueError('Duplicate dates in source_data: [...]')` — couples `(entité, date)` pour un panel — dans `materialize`, `stage_frame` et `interpolate_column`, avant toute production : les quatre voies échouent de la même façon. Tests : `tests/unit/frequency/covariate_materializer/test_robustness.py::TestDuplicates::test_duplicated_source_dates_are_rejected_by_every_way`, `::TestDuplicates::test_duplicated_panel_pairs_name_the_entity`, `tests/unit/frequency/covariate_materializer/test_stores.py::TestInterpolateColumn::test_duplicated_source_dates_raise`.
+- **Correction** : `_check_source_data` lève `ValueError('Duplicate dates in source_data: [...]')` — couples `(entité, date)` pour un panel — dans `materialize`, `stage_frame` et `interpolate_column`, avant toute production : les quatre voies échouent de la même façon. Tests : `tests/unit/imputation/_components/covariate_materializer/test_robustness.py::TestDuplicates::test_duplicated_source_dates_are_rejected_by_every_way`, `::TestDuplicates::test_duplicated_panel_pairs_name_the_entity`, `tests/unit/imputation/_components/covariate_materializer/test_stores.py::TestInterpolateColumn::test_duplicated_source_dates_raise`.
 
 ### ANO-FREQ-040 — Colonne absente de `source_data` : colonne NaN rendue en silence
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer.materialize`, `::stage_frame`
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::CovariateMaterializer.materialize`, `::stage_frame`
   (garde `column not in source_block.columns` de `_produce_column`)
 - **Sévérité** : mineure
 - **Observé** : `materialize(columns=['m1', 'typo'], ...)` rend une colonne `typo` entièrement NaN, de voie
@@ -3976,14 +3976,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
       detected_frequencies={'m1': 'M'}, source_data=ts)
   ways['typo'], int(features['typo'].notna().sum())   # ('raw_anchors', 0)
   ```
-- **Test** : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestColumnAbsentFromSource::test_column_absent_from_the_source_raises`
+- **Test** : `tests/unit/imputation/_components/covariate_materializer/test_materialize.py::TestColumnAbsentFromSource::test_column_absent_from_the_source_raises`
   (`materialize`, `stage_frame`)
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `_check_source_data` lève `KeyError('Columns missing from source_data: [...]')` dans `materialize` et `stage_frame`. Test : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestColumnAbsentFromSource::test_column_absent_from_the_source_raises`.
+- **Correction** : `_check_source_data` lève `KeyError('Columns missing from source_data: [...]')` dans `materialize` et `stage_frame`. Test : `tests/unit/imputation/_components/covariate_materializer/test_materialize.py::TestColumnAbsentFromSource::test_column_absent_from_the_source_raises`.
 
 ### ANO-FREQ-041 — Docstrings de `CovariateMaterializer` en écart avec le code et la spec
 - **Type** : [DOC] docstring ≠ code
-- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer` (docstring de classe),
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::CovariateMaterializer` (docstring de classe),
   `::materialize`, `::stage_frame`
 - **Sévérité** : cosmétique
 - **Observé** :
@@ -4000,14 +4000,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
      « an interpolation leaves empty no date a raw anchor would cover ».
 - **Attendu** : docstrings alignées sur le code et sur D21 / §4.4.
 - **Reproduction** : lecture des docstrings ; les tests ci-dessous suivent le code.
-- **Tests** : `tests/unit/frequency/covariate_materializer/test_precedence.py::TestPrecedenceRanks::test_rank_two_trigger_ignores_the_origin`,
-  `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFrameMirror::test_entity_with_an_empty_mirror_is_capped_to_its_raw_anchors`
+- **Tests** : `tests/unit/imputation/_components/covariate_materializer/test_precedence.py::TestPrecedenceRanks::test_rank_two_trigger_ignores_the_origin`,
+  `tests/unit/imputation/_components/covariate_materializer/test_stage_frame.py::TestStageFrameMirror::test_entity_with_an_empty_mirror_is_capped_to_its_raw_anchors`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : docstrings réécrites : `materialize` (voie choisie sur la grille de PRÉDICTION puis imposée à l'entraînement, D21 ; phrase complétée), docstring de classe (rangs 2 et 3 déclenchés par la seule présence de cellules produites, origine rapportée telle quelle ; registres limités à ce qui est produit, D24), `stage_frame` (plafonnement par entité : l'exception documentée disparaît avec ANO-FREQ-042). Tests : `tests/unit/frequency/covariate_materializer/test_precedence.py::TestPrecedenceRanks::test_rank_two_trigger_ignores_the_origin`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFrameMirror::test_entity_with_an_empty_mirror_is_capped_to_its_raw_anchors`.
+- **Correction** : docstrings réécrites : `materialize` (voie choisie sur la grille de PRÉDICTION puis imposée à l'entraînement, D21 ; phrase complétée), docstring de classe (rangs 2 et 3 déclenchés par la seule présence de cellules produites, origine rapportée telle quelle ; registres limités à ce qui est produit, D24), `stage_frame` (plafonnement par entité : l'exception documentée disparaît avec ANO-FREQ-042). Tests : `tests/unit/imputation/_components/covariate_materializer/test_precedence.py::TestPrecedenceRanks::test_rank_two_trigger_ignores_the_origin`, `tests/unit/imputation/_components/covariate_materializer/test_stage_frame.py::TestStageFrameMirror::test_entity_with_an_empty_mirror_is_capped_to_its_raw_anchors`.
 
 ### ANO-FREQ-042 — Voie `'raw_anchors'` : une entité plus fine que la grille reçoit des valeurs ponctuelles
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer._applicable_way` (sortie
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::CovariateMaterializer._applicable_way` (sortie
   anticipée `if way == 'raw_anchors': return way`), via `materialize` et `stage_frame`
 - **Sévérité** : majeure
 - **Observé** : `_applicable_way` rend `'raw_anchors'` avant la normalisation de rang 1 par entité ; une entité qui
@@ -4039,14 +4039,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                                               source_data=panel_f, columns=['v'])
   frame.loc['IT', 'v'].iloc[:4].tolist()   # [10.0, 10.0, 10.0, 10.0] au lieu de [30.0] * 4
   ```
-- **Tests** : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestRawAnchorsPerEntity` (trois tests),
-  `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_finer_entity_is_aggregated_exactly`
+- **Tests** : `tests/unit/imputation/_components/covariate_materializer/test_materialize.py::TestRawAnchorsPerEntity` (trois tests),
+  `tests/unit/imputation/_components/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_finer_entity_is_aggregated_exactly`
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : correction conjointe du matérialiseur et de `StageScaler`, plafonnement de `stage_frame` par entité
-- **Correction** : `_applicable_way` ne court-circuite plus `'raw_anchors'` : identité si `f_c == f`, agrégation exacte si `f_c` est plus fine, ancres brutes si elle est plus grossière. `stage_frame` plafonne entité par entité, APRÈS la précédence (`_produce_column(cap_interpolation=True)`) : seule une voie d'entité `'interpolate'` est ramenée aux ancres — y compris celle d'une entité dégradée au repli sous `'model'`, qui reste à ses ancres sous les deux replis ; les rangs 1 à 3 sont conservés. `StageScaler.feature_divisors` : une cellule `'raw_anchors'` ne couvre la période de la colonne que si celle-ci est strictement plus grossière que la grille (`_coarser_than`), une période de grille sinon ; sous `fit` (grille = étape), seules les colonnes plus fines que l'étape changent de diviseur. Deux tests de `tests/unit/frequency/stage_scaler/` passaient par une ancre plus fine que la grille pour obtenir une cellule mensuelle à l'étape Q (`TestConstantGoldenValues::test_feature_divisor_gold[M-cell@Q]`, `TestCalendarGoldenValues::test_fractional_feature_divisor_under_calendar`) : ils l'obtiennent désormais d'une grille de bloc mensuelle (voie `'identity'`), mêmes valeurs d'or. Tests : `tests/unit/frequency/covariate_materializer/test_materialize.py::TestRawAnchorsPerEntity`, `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_finer_entity_is_aggregated_exactly`, `::TestStageFrameMirror::test_carried_mirror_is_not_capped`, `tests/unit/frequency/stage_scaler/test_golden_values.py::TestCarriedPeriodRule` (`test_raw_anchors_of_a_column_at_least_as_fine_as_the_grid_span_the_grid`, `test_raw_anchors_per_entity_follow_each_entity_column`).
+- **Correction** : `_applicable_way` ne court-circuite plus `'raw_anchors'` : identité si `f_c == f`, agrégation exacte si `f_c` est plus fine, ancres brutes si elle est plus grossière. `stage_frame` plafonne entité par entité, APRÈS la précédence (`_produce_column(cap_interpolation=True)`) : seule une voie d'entité `'interpolate'` est ramenée aux ancres — y compris celle d'une entité dégradée au repli sous `'model'`, qui reste à ses ancres sous les deux replis ; les rangs 1 à 3 sont conservés. `StageScaler.feature_divisors` : une cellule `'raw_anchors'` ne couvre la période de la colonne que si celle-ci est strictement plus grossière que la grille (`_coarser_than`), une période de grille sinon ; sous `fit` (grille = étape), seules les colonnes plus fines que l'étape changent de diviseur. Deux tests de `tests/unit/imputation/_components/stage_scaler/` passaient par une ancre plus fine que la grille pour obtenir une cellule mensuelle à l'étape Q (`TestConstantGoldenValues::test_feature_divisor_gold[M-cell@Q]`, `TestCalendarGoldenValues::test_fractional_feature_divisor_under_calendar`) : ils l'obtiennent désormais d'une grille de bloc mensuelle (voie `'identity'`), mêmes valeurs d'or. Tests : `tests/unit/imputation/_components/covariate_materializer/test_materialize.py::TestRawAnchorsPerEntity`, `tests/unit/imputation/_components/covariate_materializer/test_stage_frame.py::TestStageFramePanel::test_finer_entity_is_aggregated_exactly`, `::TestStageFrameMirror::test_carried_mirror_is_not_capped`, `tests/unit/imputation/_components/stage_scaler/test_golden_values.py::TestCarriedPeriodRule` (`test_raw_anchors_of_a_column_at_least_as_fine_as_the_grid_span_the_grid`, `test_raw_anchors_per_entity_follow_each_entity_column`).
 
 ### ANO-FREQ-043 — Grille de panel vide : `ValueError: max() iterable argument is empty`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer.decide_ways` (via
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::CovariateMaterializer.decide_ways` (via
   `materialize`, `stage_frame`)
 - **Sévérité** : mineure
 - **Observé** : une grille `MultiIndex` vide n'a aucune entité ; la réduction `max(candidates, ...)` reçoit une liste
@@ -4061,14 +4061,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                                       detected_frequencies={'m1': 'M'})
   # ValueError: max() iterable argument is empty
   ```
-- **Test** : `tests/unit/frequency/covariate_materializer/test_robustness.py::TestEmptyAndSingle::test_empty_panel_grid`
+- **Test** : `tests/unit/imputation/_components/covariate_materializer/test_robustness.py::TestEmptyAndSingle::test_empty_panel_grid`
   (`decide_ways`, `materialize`, `stage_frame`)
 - **Statut** : corrigé (2026-10-11) — arbitrage de l'auteur : une voie par colonne, comme pour une série
-- **Correction** : `decide_ways` décide, pour une grille sans entité, pour l'entité dégénérée `()` — exactement le cas d'une grille de série vide ; `materialize` et `stage_frame` rendent une frame `(0, n)`. Test : `tests/unit/frequency/covariate_materializer/test_robustness.py::TestEmptyAndSingle::test_empty_panel_grid`.
+- **Correction** : `decide_ways` décide, pour une grille sans entité, pour l'entité dégénérée `()` — exactement le cas d'une grille de série vide ; `materialize` et `stage_frame` rendent une frame `(0, n)`. Test : `tests/unit/imputation/_components/covariate_materializer/test_robustness.py::TestEmptyAndSingle::test_empty_panel_grid`.
 
 ### ANO-FREQ-044 — `interpolation_method` en dict sans `'__default__'` : repli `'time'` au lieu de `'linear'`
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/covariate_materializer.py::DEFAULT_INTERPOLATION_METHOD`,
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::DEFAULT_INTERPOLATION_METHOD`,
   `::CovariateMaterializer.resolve_method`
 - **Sévérité** : mineure
 - **Observé** : `DEFAULT_INTERPOLATION_METHOD = 'time'` (depuis `bad4412`, création du composant) sert de défaut du
@@ -4083,13 +4083,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```python
   CovariateMaterializer(interpolation_method={'a1': 'cubic'}).resolve_method('q1')   # 'time'
   ```
-- **Test** : `tests/unit/frequency/covariate_materializer/test_configuration.py::TestPerFeatureResolution::test_uncovered_column_falls_back_to_the_parameter_default`
+- **Test** : `tests/unit/imputation/_components/covariate_materializer/test_configuration.py::TestPerFeatureResolution::test_uncovered_column_falls_back_to_the_parameter_default`
 - **Statut** : corrigé (2026-10-11)
-- **Correction** : `DEFAULT_INTERPOLATION_METHOD = 'linear'` : défaut du composant et repli d'une forme dict sans `'__default__'`. Effet hors imputeur : un `CovariateMaterializer()` autonome interpole désormais en `'linear'` (positionnel sans ancrage, `'time'` sous `anchor_fraction`, comme le prévoit le convertisseur). Test : `tests/unit/frequency/covariate_materializer/test_configuration.py::TestPerFeatureResolution::test_uncovered_column_falls_back_to_the_parameter_default`.
+- **Correction** : `DEFAULT_INTERPOLATION_METHOD = 'linear'` : défaut du composant et repli d'une forme dict sans `'__default__'`. Effet hors imputeur : un `CovariateMaterializer()` autonome interpole désormais en `'linear'` (positionnel sans ancrage, `'time'` sous `anchor_fraction`, comme le prévoit le convertisseur). Test : `tests/unit/imputation/_components/covariate_materializer/test_configuration.py::TestPerFeatureResolution::test_uncovered_column_falls_back_to_the_parameter_default`.
 
 ### ANO-FREQ-045 — Cellule coïncidente écartée au profit d'une ancre que la fenêtre exclut
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/training_set_builder.py::TrainingSetBuilder.build` (`_candidate_rows`)
+- **Composant** : `tsforecast/imputation/_components/training_set_builder.py::TrainingSetBuilder.build` (`_candidate_rows`)
 - **Sévérité** : mineure
 - **Observé** : sous `keep_coincident_cells=False` (traduction de `aggregation_constraint='sum'`), la cellule produite
   qui partage sa date avec une observation était écartée **avant** la fenêtre `'training'` et le filtre d'origine. Or
@@ -4108,7 +4108,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                        impute_intermediate_frequencies=True, aggregation_constraint='sum').fit(data)
   # jeu de 'a1' à l'étape M : 9 lignes, aucune au 2021-12-31
   ```
-- **Tests** : `tests/unit/frequency/training_set_builder/test_coincident_cells.py::TestCoincidentCells::test_produced_cell_kept_when_its_anchor_is_outside_the_window`,
+- **Tests** : `tests/unit/imputation/_components/training_set_builder/test_coincident_cells.py::TestCoincidentCells::test_produced_cell_kept_when_its_anchor_is_outside_the_window`,
   `::test_imputer_keeps_the_quarter_of_an_excluded_year`
 - **Statut** : corrigé (2026-10-12) — accord de l'auteur sur le principe (le constat initial « sans effet pour
   l'imputeur » était faux)
@@ -4118,7 +4118,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-046 — Entité à fréquence indétectable : elle emprunte la fréquence des autres quand elles s'accordent
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._detected_frequencies_by_column`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._detected_frequencies_by_column`
   (repli sur la forme scalaire), lu par `TrainingSetBuilder.blocks_of`
 - **Sévérité** : mineure
 - **Observé** : une entité qui observe la variable une seule fois a une fréquence indétectable
@@ -4137,7 +4137,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   data.loc['DE', 'v'] = np.nan   # puis DE annuelle : 120 / 132 / 150 aux fins d'année
   # HighFrequencyImputer(...).fit(data) : blocs de 'v' = {DE: Y, FR: Y, IT: Y}
   ```
-- **Test** : `tests/unit/frequency/training_set_builder/test_blocks_and_rows.py::TestScopeOfContributors::test_imputer_never_lends_a_frequency_to_an_undetectable_entity`
+- **Test** : `tests/unit/imputation/_components/training_set_builder/test_blocks_and_rows.py::TestScopeOfContributors::test_imputer_never_lends_a_frequency_to_an_undetectable_entity`
 - **Statut** : corrigé (2026-10-12) — arbitrage de l'auteur : écarter toujours
 - **Correction** : `HighFrequencyImputer._training_frequencies` remet au constructeur la colonne cible sous forme par
   entité, chaque couple indétectable explicitement à `None` ; `blocks_of` écarte alors le bloc (journalisé). Les
@@ -4145,8 +4145,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-047 — Niveau de fréquence repéré par son nom
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._has_frequency_level`,
-  `::_select_inverse_frequency_level`, `::_drop_frequency_level` ; `tsforecast/frequency/training_set_builder.py::TrainingSetBuilder.build`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._has_frequency_level`,
+  `::_select_inverse_frequency_level`, `::_drop_frequency_level` ; `tsforecast/imputation/_components/training_set_builder.py::TrainingSetBuilder.build`
 - **Sévérité** : mineure
 - **Observé** : `inverse_transform` reconnaissait une sortie multi-fréquences au nom `'frequency'` d'un de ses niveaux
   et l'adressait par ce nom (`xs(label, level='frequency')`). Une sortie dont l'utilisateur a renommé les niveaux
@@ -4161,8 +4161,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   out = imputer.fit_transform(reference_timeseries)
   imputer.inverse_transform(out.rename_axis(['pas', 'jour']))   # niveau de fréquence non retiré
   ```
-- **Tests** : `tests/unit/frequency/high_frequency_imputer/test_transform_window.py::TestReservedFrequencyLevel`,
-  `tests/unit/frequency/training_set_builder/test_robustness.py::TestIndexRobustness::test_reserved_level_name_is_rejected`
+- **Tests** : `tests/unit/imputation/high_frequency_imputer/test_transform_window.py::TestReservedFrequencyLevel`,
+  `tests/unit/imputation/_components/training_set_builder/test_robustness.py::TestIndexRobustness::test_reserved_level_name_is_rejected`
 - **Statut** : corrigé (2026-10-12) — arbitrage de l'auteur : l'option la plus robuste, appliquée partout
 - **Correction** : nom unique `FREQUENCY_LEVEL_NAME` dans `tsforecast/utils/_constants.py` (valeur `'frequency'`
   conservée : nom public de la sortie, utilisé par la documentation et le notebook 2) ; nom **réservé** — `fit`,
@@ -4172,7 +4172,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-048 — Estimateur dont tous les plis échouent : `ValueError` au lieu du repli `-inf`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/variable_orderer.py::VariableOrderer._order_by_cv`
+- **Composant** : `tsforecast/imputation/_components/variable_orderer.py::VariableOrderer._order_by_cv`
 - **Sévérité** : majeure
 - **Observé** : `cross_val_score(..., error_score=np.nan)` lève `ValueError: All the N fits failed` dès que
   **tous** les plis échouent (sklearn ne renvoie des NaN que si au moins un pli réussit). La branche
@@ -4186,7 +4186,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                             min_cv_train_size=2).fit()
   orderer.order(specs, X=frame, estimator=FailingEstimator(), log=print)   # ValueError
   ```
-- **Test** : `tests/unit/frequency/test_variable_orderer.py::TestFailingFolds::test_failing_estimator_scores_minus_inf_and_logs`
+- **Test** : `tests/unit/imputation/_components/test_variable_orderer.py::TestFailingFolds::test_failing_estimator_scores_minus_inf_and_logs`
 - **Statut** : corrigé (2026-10-12)
 - **Correction** : `_order_by_cv` rattrape la `ValueError` de `cross_val_score` dont le message contient
   `fits failed` et la traite comme des scores NaN (repli `-inf` + journal) ; toute autre `ValueError` est relancée
@@ -4194,8 +4194,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-049 — Un imputeur ajusté ne se sérialise pas (`pickle`, `copy.deepcopy`)
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/imputation_plan.py::ImputationStep` (champs `materialization`,
-  `training_blocks`), donc `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer` ajusté
+- **Composant** : `tsforecast/imputation/_components/imputation_plan.py::ImputationStep` (champs `materialization`,
+  `training_blocks`), donc `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer` ajusté
 - **Sévérité** : majeure
 - **Observé** : `pickle.dumps(imputeur_ajusté)` et `copy.deepcopy(imputeur_ajusté)` lèvent
   `TypeError: cannot pickle 'mappingproxy' object`. `ImputationStep.__post_init__` fige `materialization` et
@@ -4212,14 +4212,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   pickle.dumps(imputer)            # TypeError: cannot pickle 'mappingproxy' object
   copy.deepcopy(imputer)           # même erreur
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_sklearn.py::TestPersistence::test_pickle_round_trip_replays_identically`,
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_sklearn.py::TestPersistence::test_pickle_round_trip_replays_identically`,
   `::test_deepcopy_of_a_fitted_imputer_replays_identically`
 - **Statut** : corrigé (2026-10-12)
-- **Correction** : `ImputationStep.__getstate__` rend `materialization` et `training_blocks` en `dict`, `__setstate__` les fige de nouveau en `MappingProxyType` : le gel est conservé, l'étape — donc le plan et l'imputeur ajusté — passe `pickle` et `copy.deepcopy`, et le rejeu après aller-retour est identique. Tests : `test_sklearn.py::TestPersistence` (plus de `xfail`), `tests/unit/frequency/test_imputation_plan.py::TestImputationStepSerialization`.
+- **Correction** : `ImputationStep.__getstate__` rend `materialization` et `training_blocks` en `dict`, `__setstate__` les fige de nouveau en `MappingProxyType` : le gel est conservé, l'étape — donc le plan et l'imputeur ajusté — passe `pickle` et `copy.deepcopy`, et le rejeu après aller-retour est identique. Tests : `test_sklearn.py::TestPersistence` (plus de `xfail`), `tests/unit/imputation/_components/test_imputation_plan.py::TestImputationStepSerialization`.
 
 ### ANO-FREQ-050 — `transform` marque `ORIGINAL` les cellules NaN jamais imputées
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._transform`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._transform`
   (matrice `imputation_provenance_` du rejeu)
 - **Sévérité** : mineure
 - **Observé** : après `fit`, une cellule NaN qu'aucune étape n'impute est **non marquée** (`isna()`) ; après
@@ -4239,13 +4239,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   imputer.transform(data)
   imputer.imputation_provenance_.loc['2023', 'a1'].unique()        # ['original']
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_state.py::TestTransformState::test_never_imputed_cells_stay_unmarked_after_transform`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_transform_state.py::TestTransformState::test_never_imputed_cells_stay_unmarked_after_transform`
 - **Statut** : corrigé (2026-10-12)
 - **Correction** : `_replay_plan` ne pose `ORIGINAL` que sur les cellules de la grille absentes du tracker **et** porteuses d'une valeur (agrégations exactes) ; une cellule restée NaN est non marquée, au rejeu comme au fit. Le message de l'avertissement agrégé et les docstrings disent désormais « NaN and unmarked » au lieu de « NaN and ORIGINAL ». Tests : `test_transform_state.py::TestTransformState::test_never_imputed_cells_stay_unmarked_after_transform` (plus de `xfail`), `::test_fit_and_replay_provenances_agree_on_a_panel` (I1 sur `PANEL-F` sans `v` d'`IT`).
 
 ### ANO-FREQ-051 — `inverse_transform(restore_original_values=True)` juste après un `fit` : `AttributeError`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._restore_original_values`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._restore_original_values`
 - **Sévérité** : mineure
 - **Observé** : `AttributeError: 'HighFrequencyImputer' object has no attribute '_original_X_'`.
   `_restore_original_values` lit `self._original_X_` sans garde ; seul `transform` écrit cet instantané, et
@@ -4259,13 +4259,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                                  restore_original_values=True).fit(reference_timeseries)
   imputer.inverse_transform(reference_timeseries)   # AttributeError
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_inverse_transform.py::TestInverseTransform::test_restoring_inverse_right_after_a_fit`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_inverse_transform.py::TestInverseTransform::test_restoring_inverse_right_after_a_fit`
 - **Statut** : corrigé (2026-10-12)
 - **Correction** : le `fit` écrit en phase 6 l'instantané de sa propre entrée (`_original_X_`, `_original_y_`), comme il écrit sa propre matrice de provenance : B19 purge l'état du transform en tête de `fit`, puis le `fit` décrit la dernière passe. Les deux tests B19 deviennent publics (`test_fit_phases.py::TestFitPhases::test_fit_purges_stale_transform_state`, `test_transform_state.py::TestTransformState::test_transform_state_purged_at_fit` : l'inversion exacte restitue les valeurs du dernier passage) et perdent `@pytest.mark.internal`.
 
 ### ANO-FREQ-052 — `set_params` contourne la validation de cinq paramètres de l'imputeur
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 0)
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 0)
 - **Sévérité** : mineure
 - **Observé** : la validation de l'imputeur n'a lieu qu'à `__init__`. Après `set_params` (chemin de
   `GridSearchCV`), la plupart des valeurs refusées le restent au `fit`, parce que les composants reconstruits
@@ -4284,13 +4284,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   HighFrequencyImputer(target_frequency='M').set_params(
       impute_intermediate_frequencies='yes').fit(reference_timeseries)                              # KeyError
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_sklearn.py::TestValidationThroughSetParams::test_fit_raises_the_message_of_init`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_sklearn.py::TestValidationThroughSetParams::test_fit_raises_the_message_of_init`
 - **Statut** : corrigé (2026-10-12)
 - **Correction** : la validation d'`__init__` est regroupée dans `_validate_params()`, appelée par `__init__` (après le stockage tel quel) et rejouée en tête de la phase 0 du `fit` : toute valeur refusée à `__init__` l'est au `fit` avec la même exception et le même message. Test : `test_sklearn.py::TestValidationThroughSetParams::test_fit_raises_the_message_of_init` (24 paramètres).
 
 ### ANO-FREQ-053 — Clés inconnues des dictionnaires par feature ignorées au `fit`
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (transmission de
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._fit` (transmission de
   `scale_features`, `interpolation_method`, `interpolation_anchor`, `aggregation_constraint` aux composants)
 - **Sévérité** : majeure
 - **Observé** : `scale_features={'zz': 'calendar'}`, `interpolation_method={'zz': 'linear'}`,
@@ -4309,13 +4309,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
                        scale_features={'zz': 'calendar'}).fit(reference_timeseries)   # aucune erreur
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_parameters.py::TestPerFeatureDictUnknownColumn`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_parameters.py::TestPerFeatureDictUnknownColumn`
 - **Statut** : arbitré et corrigé (2026-10-12)
 - **Correction** : **arbitrage de l'auteur** — une clé inconnue est **ignorée avec un avertissement**, et non refusée : un dict par feature doit pouvoir servir à des jeux dont les colonnes diffèrent (sélection de variables en amont, recherche sur des sous-ensembles), et l'avertissement suffit à révéler une faute de frappe. `_warn_unknown_feature_keys` émet en phase 0 du `fit` un **unique** `UserWarning` listant, paramètre par paramètre, les clés absentes des colonnes de travail (cible comprise) ; `estimator` suit la même règle. Une clé `(entité, colonne)` est traitée de même, le message rappelant que les clés sont des noms de colonne (D10). La colonne concernée retombe sur `'__default__'` ou sur le défaut. Les composants utilisés seuls gardent leur `validate_columns` strict. Spec alignée (§9.1, §10.1, §13.1). Tests : `test_parameters.py::TestPerFeatureDictUnknownColumn` (plus de `xfail`).
 
 ### ANO-FREQ-054 — Avertissement sur `min_cv_train_size` hors `covariate_strategy='model'`
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (appel de
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._fit` (appel de
   `VariableOrderer.fit` sous `fit_predict_order='cv'`, quelle que soit la stratégie)
 - **Sévérité** : mineure
 - **Observé** : sous `covariate_strategy='interpolate'`, `fit_predict_order='cv', cv=3, min_cv_train_size=2`
@@ -4328,13 +4328,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(), fit_predict_order='cv',
                        cv=3, min_cv_train_size=2).fit(reference_timeseries)   # UserWarning
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_parameters.py::TestInertCombinations::test_inert_combination_is_silent[cv_parameters]`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_parameters.py::TestInertCombinations::test_inert_combination_is_silent[cv_parameters]`
 - **Statut** : corrigé (2026-10-12)
 - **Correction** : hors `covariate_strategy='model'`, l'imputeur résout toujours `cv_` mais étouffe l'avertissement croisé de `VariableOrderer.fit` ; il reste émis sous `'model'`. Tests : `test_parameters.py::TestInertCombinations::test_inert_combination_is_silent[cv_parameters]` (plus de `xfail`), `::test_cv_warning_is_kept_under_model`.
 
 ### ANO-FREQ-055 — Avertissement `estimator=None` : `__init__` (spec) ou `fit` (code)
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._validate_estimator`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._validate_estimator`
 - **Sévérité** : à arbitrer
 - **Observé** : `__init__` n'émet rien sous `estimator=None` ; l'avertissement unique est émis au `fit`. Le
   code le justifie (« pour ne pas se répéter à chaque clone ») et la docstring le dit (« a single warning at
@@ -4343,14 +4343,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   parmi les contrôles d'`__init__`. L'emplacement du code paraît le meilleur (B3 : `__init__` sans effet ;
   `clone` reconstruit l'objet) : la spec serait à aligner au prompt R9.
 - **Reproduction** : `HighFrequencyImputer(target_frequency='M')` → aucun avertissement ; `.fit(X)` → un.
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_parameters.py::TestInitDoesNotTransform::test_init_emits_no_warning`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_parameters.py::TestInitDoesNotTransform::test_init_emits_no_warning`
   (comportement actuel épinglé), `test_fit_phases.py::TestFitPhases::test_estimator_none_warns_once`
 - **Statut** : arbitré (2026-10-12) — spec alignée sur le code
 - **Correction** : **arbitrage de l'auteur** — l'avertissement reste au `fit`, émis en phase 0 avant tout entraînement : à `__init__` il se répéterait à chaque `clone` (une fois par pli et par candidat d'une recherche d'hyperparamètres) et manquerait `set_params(estimator=None)`, le chemin même de `GridSearchCV`. Un avertissement n'interrompt de toute façon pas l'entraînement. Le tableau §13.1 de la spec est corrigé ; aucun changement de code.
 
 ### ANO-FREQ-056 — Docstring de `HighFrequencyImputer` incomplète face au §13
 - **Type** : [DOC] docstring ≠ code
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer` (docstring de classe)
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer` (docstring de classe)
 - **Sévérité** : cosmétique
 - **Observé** : les entrées `scale_features`, `interpolation_method` et `interpolation_anchor` ne mentionnent
   ni la clé `'__default__'` (admise par le code, testée) ni le repli d'une colonne non couverte ;
@@ -4358,15 +4358,15 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Attendu** : §9.1 / §10.1 / §10.2 (forme dict avec `'__default__'`, défaut pour une colonne non
   couverte) ; section `Attributes:` complète.
 - **Reproduction** : lecture de `HighFrequencyImputer.__doc__`.
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_parameters.py::TestAdmittedValues` (formes
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_parameters.py::TestAdmittedValues` (formes
   `'__default__'` admises), `::TestAdmittedValuesTakeEffect::test_additive_transformer_is_cloned_not_fitted`
 - **Statut** : corrigé (2026-10-12)
 - **Correction** : docstring de classe complétée — clé `'__default__'` et repli d'une colonne non couverte pour les cinq dicts par feature, règle des clés inconnues (ANO-FREQ-053), attribut `additive_transformer_`.
 
 ### ANO-FREQ-057 — Scalaires numpy refusés par la validation de l'imputeur
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._validate_params`,
-  `tsforecast/frequency/variable_orderer.py::VariableOrderer._validate_cv`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._validate_params`,
+  `tsforecast/imputation/_components/variable_orderer.py::VariableOrderer._validate_cv`
 - **Sévérité** : mineure
 - **Observé** : un `np.bool_` passé à l'un des quatre booléens était refusé avec le message trompeur
   « must be a bool, got bool » ; `np.int64` était refusé pour `min_cv_train_size` (`TypeError`) et pour `cv`
@@ -4379,8 +4379,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   HighFrequencyImputer(target_frequency='M', verbose=np.False_)          # TypeError: got bool
   HighFrequencyImputer(target_frequency='M', min_cv_train_size=np.int64(3))  # TypeError
   ```
-- **Test** : `tests/unit/frequency/test_variable_orderer.py::TestCVResolution::test_numpy_int_cv_is_an_int`,
-  `tests/unit/frequency/high_frequency_imputer/test_parameters.py::TestRejectedValues::test_numpy_booleans_take_effect`,
+- **Test** : `tests/unit/imputation/_components/test_variable_orderer.py::TestCVResolution::test_numpy_int_cv_is_an_int`,
+  `tests/unit/imputation/high_frequency_imputer/test_parameters.py::TestRejectedValues::test_numpy_booleans_take_effect`,
   `::test_numpy_integers_from_a_grid_are_admitted`, `::test_numpy_scalars_outside_the_domain_are_refused`,
   `::TestAdmittedValues` (formes numpy)
 - **Statut** : corrigé (2026-10-12)
@@ -4400,7 +4400,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```python
   Pipeline([('impute', HighFrequencyImputer(target_frequency='M'))]).fit(X).n_features_in_   # AttributeError
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_sklearn.py::TestFeaturesSeenAtFit`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_sklearn.py::TestFeaturesSeenAtFit`
 - **Statut** : corrigé (2026-10-12)
 - **Correction** : `PanelTimeSeriesTransformer.fit` écrit `n_features_in_` et `feature_names_in_` (colonnes
   après passage des colonnes de temps et de panel dans l'index) ; les anciens `n_features_` / `feature_names_`
@@ -4415,8 +4415,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-059 — Avertissements de recalage émis une fois par (étape, colonne) et par covariable interpolée
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 5) et
-  `::_transform` (phase 5'), via `tsforecast/frequency/aggregation_constraint.py::AggregationConstraint.rescale`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 5) et
+  `::_transform` (phase 5'), via `tsforecast/imputation/_components/aggregation_constraint.py::AggregationConstraint.rescale`
   (appelée par `_execute_step` et par `CovariateMaterializer._interpolate_series`)
 - **Sévérité** : mineure
 - **Observé** : chaque appel à `rescale` émet ses propres avertissements « aggregate to zero » / « flipped the
@@ -4434,10 +4434,10 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   HighFrequencyImputer(target_frequency='M', estimator=ConstantEstimator(constant=1.0),
                        impute_intermediate_frequencies=True).fit(data)   # 4 avertissements « flipped »
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestAggregatedWarnings`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_fit_phases.py::TestAggregatedWarnings`
   (`test_flipped_profiles_of_two_columns_over_two_stages_warn_once`, `test_the_replay_warns_once_too`,
   `test_a_covariate_interpolated_for_several_variables_warns_once`, `test_zero_aggregates_of_two_columns_warn_once`),
-  `tests/unit/frequency/aggregation_constraint/test_warnings.py::TestDeferredWarnings`
+  `tests/unit/imputation/_components/aggregation_constraint/test_warnings.py::TestDeferredWarnings`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : `AggregationConstraint.deferred_warnings()` (gestionnaire de contexte, réentrant) : dans le bloc,
   `rescale` et `transform` recensent les périodes dégénérées au lieu d'avertir, dédoublonnées par colonne ; à la
@@ -4451,7 +4451,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-060 — Colonne à fréquence indétectable retenue comme covariable : les autres variables retombent en repli
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._select_feature_columns`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._select_feature_columns`
   (via `_prepare_variable`)
 - **Sévérité** : majeure
 - **Observé** : une colonne observée une seule fois (cible `y` à une observation, ou colonne de X) a une fréquence
@@ -4470,7 +4470,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   imputer.fit(reference_timeseries[['m1', 'q1', 'a2']], y)
   [step.is_fallback for step in imputer.imputation_plan_]   # [True, True]
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_undetectable_column_is_not_used_as_a_covariate`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_undetectable_column_is_not_used_as_a_covariate`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : `_prepare_variable` ne retient comme candidates que les colonnes dotées d'une fréquence détectée pour
   au moins une entité (clés de `_detected_frequencies_by_column`) ; une colonne indétectable — ou dont tous les
@@ -4480,7 +4480,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-061 — Entité réduite à une ligne : la fenêtre de tout le panel est perdue
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator.fit` (détection de la
+- **Composant** : `tsforecast/imputation/_components/imputation_window.py::ImputationWindowCalculator.fit` (détection de la
   fréquence d'index sur tout le `MultiIndex`), via `HighFrequencyImputer._fit_imputation_window`
 - **Sévérité** : mineure
 - **Observé** : une entité qui ne compte qu'une ligne fait échouer `detect_index_frequency` sur l'index entier ; le
@@ -4499,8 +4499,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(pd.concat([base, lu]))
   # UserWarning: Could not calculate imputation window: Series has only 1 non-null observations ...
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_entity_reduced_to_one_row_leaves_the_other_windows_intact`,
-  `tests/unit/frequency/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_entity_reduced_to_one_row_has_no_window_and_costs_the_others_nothing`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_entity_reduced_to_one_row_leaves_the_other_windows_intact`,
+  `tests/unit/imputation/_components/imputation_window/test_panel.py::TestEntitiesWithoutWindow::test_entity_reduced_to_one_row_has_no_window_and_costs_the_others_nothing`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : sur un panel, `ImputationWindowCalculator.fit` détecte la fréquence d'index entité par entité
   (`_detect_entity_index_frequencies`) ; une entité indéterminable vaut `None` et rejoint `entities_without_window_`,
@@ -4508,7 +4508,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-062 — Entité entièrement NaN : avertissement « entities not in data » erroné
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 0 : expansion
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 0 : expansion
   de `target_frequency` sur `entities_`, puis `TargetFrequencyValidator.validate` contre les seules fréquences
   détectées)
 - **Sévérité** : cosmétique
@@ -4524,7 +4524,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   data = mixed_freq_panel_multifrequency.copy(); data.loc[('IT',), :] = np.nan
   HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(data)
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_all_nan_entity_is_not_said_absent_from_the_data`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_all_nan_entity_is_not_said_absent_from_the_data`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : en phase 0, les entités présentes mais sans aucune fréquence détectée (entièrement NaN, ou réduites
   à une ligne) sont retirées de la cible effective avant la validation ; seul l'avertissement de la fenêtre les nomme.
@@ -4532,7 +4532,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-063 — Échec de prédiction d'une étape sans ancre annoncé comme repli d'interpolation
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._predict_step` (message
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._predict_step` (message
   accumulé quel que soit `step.unanchored`)
 - **Sévérité** : cosmétique
 - **Observé** : sous `impute_unobserved_entities=True`, quand la prédiction d'une étape sans ancre lève (covariable
@@ -4544,7 +4544,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   cellules restent NaN et non marquées, et un avertissement agrégé nomme les couples concernés. »
 - **Reproduction** : `HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
   impute_unobserved_entities=True).fit(panel_f_with_a_mute_entity)` (fixture du paquet).
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_mutualization.py::TestUnobservedEntities::test_unanchored_prediction_failure_announces_no_fallback`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_mutualization.py::TestUnobservedEntities::test_unanchored_prediction_failure_announces_no_fallback`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : `_predict_step` n'accumule plus de message « interpolation fallback » pour une étape sans ancre ;
   seul l'avertissement des couples non imputés la nomme, reformulé : « no prediction on the target grid (no usable
@@ -4552,7 +4552,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-064 — Prédictions entièrement NaN : rien n'est écrit, ni repli, ni avertissement
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._execute_step`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._execute_step`
 - **Sévérité** : à arbitrer
 - **Observé** : un estimateur dont `predict` rend des NaN (sans lever) produit une étape figée comme un succès
   (`is_fallback=False`, `n_written=0`) ; aucune cellule n'est écrite et aucun avertissement n'est émis. Une prédiction
@@ -4563,7 +4563,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   avertissement, comme pour une exception (§12.3 : « le plan dise toujours ce qui a réellement été fait ») ; (iii)
   au moins un avertissement agrégé nommant les étapes restées vides.
 - **Reproduction** : `HighFrequencyImputer(target_frequency='M', estimator=ConstantEstimator(constant=np.nan)).fit(reference_timeseries)`
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestPhaseFiveEdgeCases::test_all_nan_predictions_fall_back_and_warn`,
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_fit_phases.py::TestPhaseFiveEdgeCases::test_all_nan_predictions_fall_back_and_warn`,
   `::test_partly_nan_predictions_are_left_unwritten_and_named`
 - **Statut** : corrigé (2026-10-13) — option (ii) retenue, recommandée à l'auteur et à confirmer
 - **Correction** : des prédictions entièrement NaN sont traitées comme un échec de prédiction — repli d'interpolation,
@@ -4574,9 +4574,9 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-065 — Ancres basse fréquence hors du calendrier civil : aucune ligne d'entraînement
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._training_mask_at` /
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._training_mask_at` /
   `TrainingSetBuilder` (masque 'training' lu par date exacte), face à
-  `tsforecast/frequency/aggregation_constraint.py` (rattachement par période)
+  `tsforecast/imputation/_components/aggregation_constraint.py` (rattachement par période)
 - **Sévérité** : à arbitrer
 - **Observé** : une colonne annuelle dont les ancres ne tombent pas aux bornes civiles — exercice clos au 30 juin sur
   un index `ME`, ou ancre datée au 1er décembre sur un index `MS` (ce que produit `to_period_start` appliqué tel
@@ -4597,7 +4597,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(data).imputation_plan_
   # a1 : is_fallback=True, n_training_rows=0
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestPeriodPositions::test_off_calendar_anchors_are_left_out_with_one_warning`,
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_robustness.py::TestPeriodPositions::test_off_calendar_anchors_are_left_out_with_one_warning`,
   `::test_off_calendar_quarter_anchors_of_one_entity_only`
 - **Statut** : corrigé (2026-10-13) — option (i) retenue, recommandée à l'auteur et à confirmer
 - **Correction** : `_misaligned_anchor_pairs` repère, en phase 0, les couples mensuels, trimestriels ou annuels dont
@@ -4610,7 +4610,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-066 — Sélection des covariables lue à la fréquence du bloc, et non par couche (D30)
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._prepare_variable`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._prepare_variable`
   (vue `train_view` construite à `_block_binding(blocks, …)`, lue par `_select_feature_columns`)
 - **Sévérité** : mineure
 - **Observé** : sous `impute_intermediate_frequencies=True`, la vue d'entraînement qui décide de la sélection des
@@ -4633,7 +4633,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                                  impute_intermediate_frequencies=True).fit(data)
   # étape (M, a1) : n_training_rows=3, feature_cols=(), is_fallback=True
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_finer_rows_alone_keep_their_covariates`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_finer_rows_alone_keep_their_covariates`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : la vue d'entraînement de la sélection est construite par `_training_view`, couche par couche (une
   trame d'étape par couche, à la liaison de la couche, sur sa sous-grille), comme le masque 'training', la
@@ -4641,7 +4641,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-067 — `to_diagnostic_frame` : `training_blocks` sérialisé dans l'ordre d'entrée des entités
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/imputation_plan.py::ImputationPlan.to_diagnostic_frame` (colonne
+- **Composant** : `tsforecast/imputation/_components/imputation_plan.py::ImputationPlan.to_diagnostic_frame` (colonne
   `training_blocks`), alimentée par l'ordre des blocs de `TrainingSetBuilder.build`
 - **Sévérité** : cosmétique
 - **Observé** : sur `reverse_entities(PANEL-X)`, valeurs et provenances sont identiques à celles de l'original, mais
@@ -4657,8 +4657,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                                  covariate_eligibility='all_entities').fit(reverse_entities(panel_reference_full))
   imputer.imputation_plan_.to_diagnostic_frame()['training_blocks'][0]   # 'IT=Q, FR=Q, DE=Q'
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestPerturbationInvariance::test_diagnostic_frame_is_unchanged_up_to_renaming[reverse_entities]`,
-  `tests/unit/frequency/test_imputation_plan.py::TestDiagnosticFrame::test_training_blocks_rendering_ignores_the_entity_order`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_robustness.py::TestPerturbationInvariance::test_diagnostic_frame_is_unchanged_up_to_renaming[reverse_entities]`,
+  `tests/unit/imputation/_components/test_imputation_plan.py::TestDiagnosticFrame::test_training_blocks_rendering_ignores_the_entity_order`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : `to_diagnostic_frame` trie `training_blocks` par clé d'entité. Le test d'or
   `TestDiagnosticFrame::test_golden_row_of_a_panel_step`, qui figeait l'ordre d'insertion (`'FR=M, DE=Q'`), attend
@@ -4685,35 +4685,35 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   l'expose pas.
 - **Attendu** : un conseil réalisable.
 - **Test** : `tests/unit/base/transformers/test_validation.py::TestSortingAdvice`,
-  `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_unsorted_panel_is_refused`
+  `tests/unit/imputation/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_unsorted_panel_is_refused`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : `_sorting_advice` ne propose `auto_sort=True` que si le paramètre figure dans `get_params()` ;
   sinon « Sort the data by … before calling <classe>, which never sorts implicitly ».
 
 ### ANO-FREQ-070 — Frame à une seule colonne : « Could not calculate imputation window … min_columns=2 »
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._make_window_calculator`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._make_window_calculator`
 - **Sévérité** : cosmétique
 - **Observé** : l'imputeur imposait `min_columns=2` au calculateur (depuis l'implémentation initiale, sans
   justification) ; un frame d'une seule colonne émettait « Could not calculate imputation window: Data has 1 columns,
   but min_columns=2. Using all available data. » au `fit` et au `transform`.
 - **Attendu** : une colonne suffit à définir une fenêtre (sa propre couverture) : aucun avertissement.
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_no_low_frequency_column_gives_an_empty_plan`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_no_low_frequency_column_gives_an_empty_plan`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : le calculateur garde son défaut (`min_columns=1`).
 
 ### ANO-FREQ-071 — Couvertures disjointes : trois avertissements pour une cause, dont un inexact
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._compute_window` /
-  `_fit_panel`, `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 1) et `_fit_variable`
+- **Composant** : `tsforecast/imputation/_components/imputation_window.py::ImputationWindowCalculator._compute_window` /
+  `_fit_panel`, `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 1) et `_fit_variable`
 - **Sévérité** : mineure
 - **Observé** : sans période couverte par toutes les colonnes, le calculateur avertissait « There is no period in the
   DataFrame … » (une fois **par entité** sur un panel, sans la nommer), l'imputeur ajoutait « The training window is
   empty: … all imputations will fall back to interpolation » — inexact : la fenêtre d'imputation est vide aussi et
   rien n'est écrit — puis le message des étapes dégradées annonçait un repli pour chaque variable.
 - **Attendu** : un message unique et exact (§12.5).
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_disjoint_coverages_warn_once_and_impute_nothing`,
-  `tests/unit/frequency/imputation_window/test_windows.py::TestNoStrictWindow::test_time_series_message_says_nothing_is_imputed`,
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_disjoint_coverages_warn_once_and_impute_nothing`,
+  `tests/unit/imputation/_components/imputation_window/test_windows.py::TestNoStrictWindow::test_time_series_message_says_nothing_is_imputed`,
   `::test_entities_without_strict_window_are_named_by_one_warning`
 - **Statut** : corrigé (2026-10-13)
 - **Correction** : `_compute_window` signale l'absence de fenêtre stricte (`no_strict_window`) sans avertir ;
@@ -4724,8 +4724,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-072 — Panel sans fenêtre stricte pour aucune entité : imputé sur toutes ses lignes
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 1, repli sur des
-  masques tout-vrais), face à `tsforecast/frequency/imputation_window.py::ImputationWindowCalculator._fit_panel`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._fit` (phase 1, repli sur des
+  masques tout-vrais), face à `tsforecast/imputation/_components/imputation_window.py::ImputationWindowCalculator._fit_panel`
 - **Sévérité** : mineure
 - **Observé** : sur un panel dont aucune entité n'a de période couverte par toutes ses colonnes, le calculateur lève
   « No imputation window found for any entity in the panel » (comportement voulu du composant, testé) ; l'imputeur
@@ -4743,10 +4743,10 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(data)
   [step.n_written for step in imputer.imputation_plan_]   # [108, 108] ; sur data.loc['FR'] : [0, 0]
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_panel_without_any_strict_window_imputes_nothing`,
-  `tests/unit/frequency/imputation_window/test_validation.py::TestFitInputValidation::test_accepts_panel_where_no_entity_has_a_window`,
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_fit_phases.py::TestWindowWithoutTraining::test_panel_without_any_strict_window_imputes_nothing`,
+  `tests/unit/imputation/_components/imputation_window/test_validation.py::TestFitInputValidation::test_accepts_panel_where_no_entity_has_a_window`,
   `::TestNoStrictWindow::test_panel_without_window_behaves_like_a_time_series`,
-  `tests/unit/frequency/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_all_nan_entity_is_named_once_at_transform`
+  `tests/unit/imputation/high_frequency_imputer/test_robustness.py::TestInputEdgeCases::test_all_nan_entity_is_named_once_at_transform`
 - **Statut** : corrigé (2026-10-13) — arbitrage de l'auteur : aligner le panel sur la série temporelle
 - **Correction** : `ImputationWindowCalculator._fit_panel` ne lève plus quand aucune entité n'a de fenêtre stricte :
   comme une série (B23), les trois masques existent — tout faux, tout vrai à l'entraînement sous
@@ -4762,7 +4762,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-073 — Entité née au `transform` : ses colonnes observées sont servies sans ancre, ses observations écrasées
 - **Type** : [SPEC] code ≠ spec (D34 appliqué à la lettre, contraire à I4 et I7)
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._new_entity_steps`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._new_entity_steps`
   (et `_execute_step` pour les étapes `unanchored=True`)
 - **Sévérité** : majeure
 - **Observé** : sous `impute_unobserved_entities=True`, une entité absente du `fit` reçoit, pour **chaque** colonne
@@ -4793,7 +4793,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   out = imputer.transform(extended).loc['ES', 'v']
   out.groupby(out.index.to_period('Q')).sum().head(2)   # 28.74, 29.61 ; observé : 28.0, 30.0
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_new_entity.py::TestNewEntityAtTransform::test_observations_of_a_new_entity_are_never_overwritten`,
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_transform_new_entity.py::TestNewEntityAtTransform::test_observations_of_a_new_entity_are_never_overwritten`,
   `::test_new_entity_copy_is_imputed_like_its_model`, `::test_column_empty_at_fit_and_observed_at_transform_is_anchored`,
   `::test_pairs_unknown_to_the_fit_stay_as_given_by_default`
 - **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : option (a), D34 inchangée sous `False`
@@ -4812,7 +4812,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-074 — Colonne sans aucune observation dans les données du `transform` : prédite sans ancre, marquée `MODEL_ON_*`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._transform` (rejeu des
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._transform` (rejeu des
   fréquences du `fit` pour un couple que les données du `transform` n'observent pas), en interaction avec la fenêtre
   recalculée (`ImputationWindowCalculator`, D39)
 - **Sévérité** : majeure
@@ -4838,7 +4838,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   imputer.transform(data.loc['2023'])['a1'].notna().sum()        # 12
   imputer.imputation_provenance_['a1'].unique()                  # [MODEL_ON_INTERPOLATED]
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_window.py::TestColumnWithoutAnchorAtTransform::test_unpublished_year_alone_is_predicted_by_its_replayed_step`,
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_transform_window.py::TestColumnWithoutAnchorAtTransform::test_unpublished_year_alone_is_predicted_by_its_replayed_step`,
   `::test_extended_window_predicts_it_with_its_history`, `::test_unpublished_year_stays_empty_with_its_history`
 - **Statut** : clos (2026-10-14) — arbitrage de l'auteur : le comportement est voulu
 - **Correction** : aucun changement de code. Le couple est **observé au fit** : §12.1 rejoue sa classification, et
@@ -4853,7 +4853,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-075 — Lignes d'entrée ajoutées à l'étape finale (D38) : sortie non triée, entités non contiguës
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
   (`grid = grid.append(absent)` à l'étape finale)
 - **Sévérité** : majeure
 - **Observé** : la grille de l'étape finale est complétée des lignes d'entrée qu'elle ne couvre pas (D38) par un
@@ -4874,8 +4874,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   out.index.is_monotonic_increasing                             # False
   imputer.inverse_transform(out).index.equals(panel_f.index)    # False (même ensemble, autre ordre)
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_output.py::TestKeepLowerFrequencies::test_output_index_stays_sorted`,
-  `tests/unit/frequency/high_frequency_imputer/test_inverse_transform.py::TestRoundTripRestoresObservations::test_inverse_restores_the_row_order`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_transform_output.py::TestKeepLowerFrequencies::test_output_index_stays_sorted`,
+  `tests/unit/imputation/high_frequency_imputer/test_inverse_transform.py::TestRoundTripRestoresObservations::test_inverse_restores_the_row_order`
 - **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : la complétion est retirée
 - **Correction** : D43 (§14.10, D38 amendée). La complétion de la grille finale par `grid.append(absent)` est
   supprimée : sur huit jeux mesurés, les lignes ajoutées ne portaient jamais de valeur. Elles n'apparaissent qu'avec
@@ -4887,7 +4887,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-076 — Index irrégulier : `inverse_transform` rend les lignes que la grille cible a ajoutées
 - **Type** : [SPEC] code ≠ spec (I8 : « restitue l'index »)
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._inverse_transform`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._inverse_transform`
 - **Sévérité** : mineure
 - **Observé** : sur un index irrégulier (ancres annuelles antérieures à la grille mensuelle), la grille cible densifie
   la période (comportement voulu, `TestIrregularIndexExtendedWindow`) ; l'inversion la garde telle quelle.
@@ -4908,9 +4908,9 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   len(irregular_ts), len(restored)                                   # 82, 115
   restored.loc[restored.index.difference(irregular_ts.index)].isna().all().all()   # True
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_inverse_transform.py::TestRoundTripRestoresObservations::test_inverse_drops_the_rows_the_grid_added`,
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_inverse_transform.py::TestRoundTripRestoresObservations::test_inverse_drops_the_rows_the_grid_added`,
   `::TestInverseTransform::test_inverse_transform_preserves_multilevel_entity_names` (resserré : égalité d'index),
-  `tests/unit/frequency/high_frequency_imputer/test_transform_output.py::TestTargetCoarserThanTheIndex::test_inverse_gives_back_the_monthly_index`
+  `tests/unit/imputation/high_frequency_imputer/test_transform_output.py::TestTargetCoarserThanTheIndex::test_inverse_gives_back_the_monthly_index`
 - **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : réindexer sur l'index d'entrée
 - **Correction** : D43 (§12.4, §14.10). `_inverse_transform` réindexe, après la remise à NaN, sur l'index de
   l'instantané d'entrée de la dernière passe (`_original_X_`), dans son ordre. Les lignes que la grille a ajoutées
@@ -4919,7 +4919,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-077 — `provenance_statistics_` décrit le `fit`, ses docstrings « la dernière passe »
 - **Type** : [DOC] docstring ≠ code
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer` (section `Attributes`),
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer` (section `Attributes`),
   `tsforecast/tracking/metrics.py::imputation_metrics`
 - **Sévérité** : mineure
 - **Observé** : `provenance_statistics_` n'est écrit qu'au `fit` (phase 6) ; un `transform` le laisse intact, alors
@@ -4938,13 +4938,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   imputer.transform(ts.loc['2021'])
   imputer.provenance_statistics_ is stats, hasattr(imputer, 'provenance_statistics_fit_')   # True, False
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_state.py::TestTransformState::test_provenance_statistics_describe_the_last_pass`,
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_transform_state.py::TestTransformState::test_provenance_statistics_describe_the_last_pass`,
   `tests/unit/tracking/test_metrics.py::test_imputation_metrics_describe_the_last_pass`,
-  `tests/unit/frequency/provenance/test_tracker_reads.py::TestComputeStatistics::test_module_function_matches_the_tracker`
+  `tests/unit/imputation/_components/provenance/test_tracker_reads.py::TestComputeStatistics::test_module_function_matches_the_tracker`
 - **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : changement de code, les statistiques suivent la
   dernière passe
 - **Correction** : D45 (§13.2, §14.10). Le calcul de `ImputationProvenanceTracker.compute_statistics` est extrait
-  dans la fonction de module `provenance_statistics(matrix)`, exportée par `tsforecast.frequency`. `_transform`
+  dans la fonction de module `provenance_statistics(matrix)`, définie dans `tsforecast.imputation._components.provenance`. `_transform`
   réécrit `provenance_statistics_` sur le niveau cible de sa sortie, quel que soit `keep_lower_frequencies`, qui
   n'est qu'un affichage. `fit` le purge en phase 0 avec l'état de transform. Les docstrings de la classe disent
   « dernière passe » à bon droit. `tracking.imputation_metrics` ne lit plus que `provenance_statistics_` : le repli
@@ -4953,7 +4953,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-078 — Un `transform` qui lève a déjà écrasé l'instantané lu par l'inversion
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._transform` (phase 0' :
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._transform` (phase 0' :
   `_original_X_` / `_original_y_` écrits avant `_check_transform_frequencies`)
 - **Sévérité** : majeure
 - **Observé** : `_transform` copie son entrée dans `_original_X_` **avant** le contrôle des colonnes (D11). Un appel
@@ -4972,7 +4972,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   except ValueError: pass
   imputer.inverse_transform(out)['a1'].dropna().tolist()   # [240.0, 264.0, 300.0]
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_output.py::TestTransformFrequencyControl::test_failed_transform_leaves_the_last_pass_intact`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_transform_output.py::TestTransformFrequencyControl::test_failed_transform_leaves_the_last_pass_intact`
 - **Statut** : corrigé (2026-10-14)
 - **Correction** : D45. `_transform` copie son entrée dans des variables locales et ne publie l'état de la passe
   (`_original_X_`, `_original_y_`, `_stacked_index_nlevels`, `imputation_provenance_`, `provenance_statistics_`)
@@ -4981,7 +4981,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-079 — Lignes complétant l'étape finale (D38) : vides en sortie, marquées `ORIGINAL`
 - **Type** : [CODE] comportement (et question de spec à arbitrer sur le contenu de ces lignes)
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
   (instantané de provenance réindexé sur la grille complétée)
 - **Sévérité** : mineure
 - **Observé** : sous `target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'}` sur `PANEL-F`, les 24 mois de `DE` hors fin
@@ -5005,7 +5005,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   out.loc[('DE', '2021-01-31')].tolist()                           # [nan, nan, nan]
   imputer.imputation_provenance_.loc[('DE', '2021-01-31'), 'm1']   # ProvenanceType.ORIGINAL
   ```
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_transform_output.py::TestKeepLowerFrequencies::test_no_empty_cell_of_the_output_is_marked`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_transform_output.py::TestKeepLowerFrequencies::test_no_empty_cell_of_the_output_is_marked`
   (renommé et élargi : aucune cellule vide marquée, quelle que soit la marque)
 - **Statut** : corrigé (2026-10-14) — arbitrage de l'auteur : pas de mélange d'échelles ; les lignes ne sont plus
   ajoutées
@@ -5017,7 +5017,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-080 — Imputeur ajusté avec `y` : `transform(X)` sans `y` lève, `XYPipeline.predict` et les scorers textuels échouent
 - **Type** : [SPEC] code ≠ spec (I9 : conformité `Pipeline`)
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._check_transform_frequencies`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._check_transform_frequencies`
   (colonne de `y` fusionnée dans le plan au `fit` par `_fit`, exigée au `transform`)
 - **Sévérité** : majeure
 - **Observé** : au `fit(X, y)`, `y` est fusionnée dans la frame de travail sous son nom et entre dans le plan figé. Un
@@ -5040,8 +5040,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                          ('model', SpyEstimator())]).fit(X.iloc[:-6], y.iloc[:-6])
   pipeline.predict(X.iloc[-6:])   # ValueError: transform is missing 1 column(s) seen at fit time: ['taux_chomage']
   ```
-- **Test** : `tests/integration/frequency/test_pipelines.py::TestPredictWithoutTarget` (le `xfail` est retiré) ;
-  `tests/unit/frequency/high_frequency_imputer/test_xy_passes.py::TestPredictionPass`
+- **Test** : `tests/integration/imputation/test_pipelines.py::TestPredictWithoutTarget` (le `xfail` est retiré) ;
+  `tests/unit/imputation/high_frequency_imputer/test_xy_passes.py::TestPredictionPass`
 - **Statut** : corrigé (2026-10-15) — arbitrage de l'auteur : l'imputeur augmente un jeu d'entraînement (`X` et
   `y`) et n'a pas vocation à transformer des données de test ; conception arrêtée avec ANO-FREQ-081 et 082
 - **Correction** : D47 (spec §14, I22). Ajusté avec `y`, `transform(X, y=None)` est la **passe de prédiction** : la
@@ -5053,7 +5053,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   l'auteur.
 ### ANO-FREQ-081 — `y` covariable de l'imputation de `X` : la cible du pli de test alimente les features imputées
 - **Type** : [SPEC] à arbitrer (D15 appliquée hors de son cas d'usage)
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._fit` / `_transform`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._fit` / `_transform`
   (fusion de `y` dans la frame de travail, puis sélection des covariables)
 - **Sévérité** : à arbitrer
 - **Observé** : D15 fait de `y` « une colonne comme une autre ». Au `fit(X, y)`, `y` devient donc une covariable des
@@ -5075,8 +5075,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   b, _ = imputer.transform(X.iloc[-6:], 10 * y.iloc[-6:])
   a.equals(b)                                                    # False
   ```
-- **Test** : `tests/integration/frequency/test_pipelines.py::TestTargetRole` ;
-  `tests/unit/frequency/high_frequency_imputer/test_xy_passes.py::TestTargetAsCovariate`,
+- **Test** : `tests/integration/imputation/test_pipelines.py::TestTargetRole` ;
+  `tests/unit/imputation/high_frequency_imputer/test_xy_passes.py::TestTargetAsCovariate`,
   `::TestPredictionPass::test_imputed_x_ignores_the_target`
 - **Statut** : corrigé (2026-10-15) — arbitrage de l'auteur, après une simulation : avec `y` covariable, l'erreur
   d'imputation de `x` baisse (0,20 contre 0,77) mais le R² d'entraînement dépasse celui de l'oracle (0,99 contre 0,97),
@@ -5089,7 +5089,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   test ne dépend plus de sa cible.
 ### ANO-FREQ-082 — Pli d'entraînement ou de test qui coupe une période : la grille de l'imputeur la complète
 - **Type** : [CODE] à arbitrer (interaction imputeur × validation croisée)
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
   (sortie = index du masque d'imputation, grille complète par période, D38 / D43)
 - **Sévérité** : à arbitrer
 - **Observé** : la sortie de l'imputeur court jusqu'à la fin de la dernière période observée. Dans un `XYPipeline`
@@ -5113,7 +5113,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
                          ('model', SpyEstimator())])
   cross_validate(pipeline, X, y, cv=TSOutOfSampleSplit(n_splits=3, test_size=7))   # ValueError: Input contains NaN
   ```
-- **Test** : `tests/integration/frequency/test_pipelines.py::TestNoLeakage::test_test_fold_cutting_a_period_is_scored`,
+- **Test** : `tests/integration/imputation/test_pipelines.py::TestNoLeakage::test_test_fold_cutting_a_period_is_scored`,
   `::TestFullChainWithDropNaNTarget` ; `tests/unit/xy/test_transformers.py`
 - **Statut** : corrigé (2026-10-15) — arbitrage de l'auteur : ne retirer aucune ligne dans l'imputeur (un décalage
   aval vers plusieurs horizons lit encore les lignes sans cible)
@@ -5125,7 +5125,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   les prédictions au `y` de test brut, hors du pipeline ; une cible de test NaN ne peut y être scorée.
 ### ANO-FREQ-083 — Sous `covariate_strategy='model'`, les ancres hors fenêtre des couples imputés sont effacées
 - **Type** : [SPEC] code ≠ spec (I7 : « ne détruit jamais une observation d'entrée »)
-- **Composant** : `tsforecast/frequency/covariate_materializer.py::CovariateMaterializer.stage_frame` (voie miroir,
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::CovariateMaterializer.stage_frame` (voie miroir,
   rangs 2-3, propre à `'model'`), lue par `HighFrequencyImputer._replay_plan`
 - **Sévérité** : majeure
 - **Observé** : sur `irregular_index_timeseries` (fenêtre d'imputation 2019-01 → 2024-06, faute de
@@ -5148,8 +5148,8 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
       print(strategy, imputer.fit_transform(data).loc['2018-01-01', 'pib_trimestriel'])
   # interpolate 2500.0 ; model nan   (observé : 2500.0)
   ```
-- **Test** : `tests/integration/frequency/test_hfi_on_realistic_dataset.py::TestResidualNaN::test_input_rows_outside_the_window_are_left_as_is`
-  (les 18 cellules, `xfail` retiré) ; `tests/unit/frequency/covariate_materializer/test_stage_frame.py::TestStageFrameMirror::test_coarser_production_never_lands_raw_on_a_finer_grid`
+- **Test** : `tests/integration/imputation/test_hfi_on_realistic_dataset.py::TestResidualNaN::test_input_rows_outside_the_window_are_left_as_is`
+  (les 18 cellules, `xfail` retiré) ; `tests/unit/imputation/_components/covariate_materializer/test_stage_frame.py::TestStageFrameMirror::test_coarser_production_never_lands_raw_on_a_finer_grid`
   (assertion resserrée sur son intention : aucune production trimestrielle sur la grille mensuelle, l'observation
   annuelle 2021 restant à sa date)
 - **Statut** : corrigé (2026-10-15) — demande de l'auteur : traiter l'anomalie de la manière la plus logique
@@ -5163,7 +5163,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 ### ANO-FREQ-084 — Notebook 5 : la cellule 33 lit `_check_transform_frequencies` comme un dict
 - **Type** : [DOC] notebook ≠ code
 - **Composant** : `notebooks/5 - QB - HighFrequencyImputer pas a pas.ipynb` (cellule 33), face à
-  `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer._check_transform_frequencies`
+  `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._check_transform_frequencies`
 - **Sévérité** : mineure
 - **Observé** : la cellule appelle la méthode **privée** `REF_T._check_transform_frequencies(PANEL_X.copy())` et
   passe le résultat à `dict(...)`. Depuis `c9ecf79` (D42, correction d'ANO-FREQ-073), la méthode renvoie un tuple
@@ -5173,7 +5173,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `new_pairs, _misaligned = REF_T._check_transform_frequencies(PANEL_X.copy())`. Mieux : passer par l'API publique,
   puisqu'un notebook utilisateur ne devrait pas dépendre d'une méthode privée.
 - **Reproduction** : exécuter le notebook (`jupyter nbconvert --execute`, ou le test ci-dessous).
-- **Test** : `tests/integration/frequency/test_notebooks.py::TestStepByStepNotebook::test_notebook_runs_without_error`
+- **Test** : `tests/integration/imputation/test_notebooks.py::TestStepByStepNotebook::test_notebook_runs_without_error`
 - **Statut** : corrigé (2026-10-15) — arbitrage de l'auteur : corriger le notebook
 - **Correction** : cellule 33 alignée sur la signature actuelle :
   `new_pairs, misaligned = REF_T._check_transform_frequencies(PANEL_X.copy())`, commentaire mis à jour (D42). Le
@@ -5182,7 +5182,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-085 — Part calendaire (`scale_features='calendar'`) : durées lues sur `Period.end_time`, fausses sous pandas 3
 - **Type** : [CODE] comportement (migration pandas ≥ 3)
-- **Composant** : `tsforecast/frequency/stage_scaler.py::_calendar_share` (diviseurs fractionnaires de
+- **Composant** : `tsforecast/imputation/_components/stage_scaler.py::_calendar_share` (diviseurs fractionnaires de
   `StageScaler(scale_features='calendar')`)
 - **Sévérité** : mineure
 - **Observé** : la durée de chaque période fine et grossière était `end_time - start_time + 1 ns`. Sous
@@ -5197,14 +5197,14 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   one = pd.Timedelta(1, unit='ns')
   (f.end_time - f.start_time + one).asi8 / (c.end_time - c.start_time + one).asi8 == 31 / 91   # [False]
   ```
-- **Test** : `tests/unit/frequency/stage_scaler/test_golden_values.py::TestCalendarGoldenValues::test_calendar_share_is_an_exact_ratio_of_days`
+- **Test** : `tests/unit/imputation/_components/stage_scaler/test_golden_values.py::TestCalendarGoldenValues::test_calendar_share_is_an_exact_ratio_of_days`
 - **Correctif** : `_period_span_nanoseconds` : début de la période suivante − début, en nanosecondes
   entières. Identique au bit près sous pandas 2.3, exact sous pandas 3.
 - **Statut** : corrigée
 
 ### ANO-FREQ-086 — `HighFrequencyImputer` : grille de sortie en `us` quelle que soit l'entrée, provenance d'un panel à la résolution de l'entrée
 - **Type** : [CODE] comportement (résolution des dates, pandas ≥ 3)
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py::HighFrequencyImputer` (`fit_transform`, `transform`,
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer` (`fit_transform`, `transform`,
   `imputation_provenance_`)
 - **Sévérité** : mineure (arbitrée le 2026-10-20 avec ANO-UTILS-072)
 - **Observé** (pandas 3.0.6) : valeurs imputées, provenance, rejeu et inversion identiques quelle que soit la
@@ -5220,7 +5220,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   from sklearn.linear_model import LinearRegression
   from tests.support.datasets import build_panel_reference
   from tests.support.perturbations import with_datetime_resolution
-  from tsforecast.frequency import HighFrequencyImputer
+  from tsforecast.imputation import HighFrequencyImputer
   data = with_datetime_resolution(build_panel_reference()[['m1', 'q1', 'v']], 's')
   imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression())
   imputer.fit_transform(data).index.levels[-1].unit, imputer.imputation_provenance_.index.levels[-1].unit   # ('us', 's')
@@ -5251,7 +5251,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   deux unités sont **deux entrées de cache**. C'est voulu sous la règle : les sorties des étapes, à l'unité de leur
   entrée, diffèrent aussi par leurs dtypes, et une entrée partagée servirait l'une à l'unité de l'autre. Documenté
   (`docs/concepts/xy_pipeline.md`, « Mise en cache ») et épinglé.
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_datetime_resolution.py` — `TestDatetimeResolution`
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_datetime_resolution.py` — `TestDatetimeResolution`
   (sortie, provenance, rejeu, inversion à l'unité de l'entrée ; provenance indexée exactement comme la sortie ;
   inversion rendant l'index d'entrée, unité comprise), `TestTargetPasses` (passe d'entraînement et `y` à une autre unité
   que `X`), `TestFittedState` (état ajusté à l'unité du `fit`, `transform` à une autre unité),
@@ -5260,7 +5260,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-087 — `HighFrequencyImputer.transform` : cellules de provenance écrites en simples chaînes
 - **Type** : [CODE] comportement (dtype des chaînes, pandas ≥ 3)
-- **Composant** : `tsforecast/frequency/high_frequency_imputer.py` (provenance du rejeu, `imputation_provenance_`
+- **Composant** : `tsforecast/imputation/high_frequency_imputer.py` (provenance du rejeu, `imputation_provenance_`
   après `transform`)
 - **Sévérité** : mineure
 - **Observé** (pandas 3.0.6) : à la passe de prédiction, les cellules marquées `ORIGINAL` (valeurs reprises) et
@@ -5273,7 +5273,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Reproduction** :
   ```python
   from sklearn.linear_model import LinearRegression
-  from tsforecast.frequency import HighFrequencyImputer, ProvenanceType
+  from tsforecast.imputation import HighFrequencyImputer, ProvenanceType
   from tests.support.datasets import build_panel_reference
   X = build_panel_reference()[['m1', 'q1', 'v']]
   imputer = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
@@ -5286,7 +5286,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   (égalité), 584 cellules redevenues des membres. Le diagnostic `to_diagnostic_frame()` rend aussi
   `emitted_provenance` en `object` explicite (une colonne `str` ramènerait ses membres à des chaînes sous stockage
   pyarrow).
-- **Test** : `tests/unit/frequency/high_frequency_imputer/test_string_dtypes.py::TestStringDtypes::test_provenance_matrix_is_categorical`,
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_string_dtypes.py::TestStringDtypes::test_provenance_matrix_is_categorical`,
   `tests/integration/input_contract/test_string_labels.py::TestOutputStringDtypes`
 - **Statut** : corrigée (2026-10-21)
 - **Suite** (décision de l'auteur, 2026-10-23) : matrices de provenance et colonne `emitted_provenance` passées au dtype
@@ -5297,7 +5297,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-088 — Fréquence cible effective (ordre des entités, départage à ordre égal) variable d'un processus à l'autre
 - **Type** : [CODE] comportement (déterminisme)
-- **Composant** : `tsforecast/frequency/target_frequency_validator.py::TargetFrequencyValidator._infer_structure`
+- **Composant** : `tsforecast/imputation/_components/target_frequency_validator.py::TargetFrequencyValidator._infer_structure`
   et `_get_highest_frequency_timeseries` (lus par `validate`, donc `HighFrequencyImputer.effective_target_frequency_`)
 - **Sévérité** : majeure (le second volet change une valeur, pas seulement un ordre)
 - **Observé** : les entités d'un panel sont extraites par `list({k[:-1] for k in tuple_keys})` : un ensemble, dont
@@ -5316,13 +5316,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Reproduction** :
   ```python
   # à lancer sous PYTHONHASHSEED=0, puis 1, puis 2
-  from tsforecast.frequency.target_frequency_validator import TargetFrequencyValidator
+  from tsforecast.imputation._components.target_frequency_validator import TargetFrequencyValidator
   detected = {(e, c): f for e in ('FR', 'DE', 'IT') for c, f in (('m1', 'M'), ('q1', 'Q'))}
   print(list(TargetFrequencyValidator().validate('M', detected)))
   ```
 - **Correctif** (2026-10-24, avant le refactoring) : les deux parcours d'ensemble deviennent des parcours de
   `dict.fromkeys(...)` (ordre de première apparition). Golden master régénéré après le correctif, sans tri des clés.
-- **Test** : `tests/unit/frequency/test_target_frequency_validator.py::TestReproducibleAcrossProcesses` (trois processus
+- **Test** : `tests/unit/imputation/_components/test_target_frequency_validator.py::TestReproducibleAcrossProcesses` (trois processus
   neufs à `PYTHONHASHSEED` fixes ; les deux tests échouent sans le correctif)
 - **Statut** : corrigée (2026-10-24)
 
@@ -5532,7 +5532,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `_check_feature_names` (sans effet) : sa spec fixe son propre contrat (colonne manquante refusée en la nommant,
   colonne supplémentaire ignorée silencieusement).
 - **Test** : `tests/unit/base/transformers/test_sklearn_contract.py::TestFeatureNamesAtTransform` (6 tests) ;
-  contrat de l'imputeur : `tests/unit/frequency/high_frequency_imputer/test_transform_output.py::TestTransformFrequencyControl`
+  contrat de l'imputeur : `tests/unit/imputation/high_frequency_imputer/test_transform_output.py::TestTransformFrequencyControl`
 - **Statut** : corrigée (2026-10-16)
 
 ### ANO-BASE-010 — `convert_cols_to_index=False` fait quand même passer les colonnes dans l'index

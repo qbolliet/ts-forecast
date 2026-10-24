@@ -9,7 +9,7 @@ the observed total, which turns a free-floating prediction into a genuine
 disaggregation of the observation.
 
 This module honours the ``AggregationConstraintApplier``
-protocol of :mod:`~tsforecast.frequency.covariate_materializer`, whose
+protocol of :mod:`~tsforecast.imputation._components.covariate_materializer`, whose
 injection point is the single place where the constraint enters the
 materialization path.
 
@@ -54,9 +54,9 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
 # Normalisation des fréquences : seule la base est acceptée par "to_period"
-from ..utils.frequency.utils import normalize_frequency
+from ...utils.frequency.utils import normalize_frequency
 # Clés d'entité du panel et codage entier des clés de lignes
-from ..panel.utils import factorize_row_keys, get_entity_codes, normalize_entity_key
+from ...panel.utils import factorize_row_keys, get_entity_codes, normalize_entity_key
 
 
 # Clé d'entité normalisée : "()" en série temporelle
@@ -1114,7 +1114,7 @@ class AggregationConstraint(BaseEstimator, TransformerMixin):
         """Rescale sub-period values so each complete period matches its total.
 
         Implementation of the ``AggregationConstraintApplier`` protocol of
-        :mod:`~tsforecast.frequency.covariate_materializer`. The extra
+        :mod:`~tsforecast.imputation._components.covariate_materializer`. The extra
         ``column`` argument is optional and only selects the constraint under
         the dict form, so the protocol signature is honoured as is.
 

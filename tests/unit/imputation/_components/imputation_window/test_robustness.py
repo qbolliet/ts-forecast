@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 # Objet testé
-from tsforecast.frequency.imputation_window import ImputationWindowCalculator
+from tsforecast.imputation._components.imputation_window import ImputationWindowCalculator
 
 # Perturbations partagées
 from tests.support.perturbations import (
@@ -19,7 +19,7 @@ from tests.support.perturbations import (
 )
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.imputation_window.helpers import _KINDS, _fit_quietly, _frame
+from tests.unit.imputation._components.imputation_window.helpers import _KINDS, _fit_quietly, _frame
 
 
 class TestIrregularIndexTimeseries:

@@ -16,13 +16,13 @@ import pytest
 from sklearn.base import clone
 
 # Objets testés
-from tsforecast.frequency.stage_scaler import DEFAULT_SCALE_KEY, StageScaler
+from tsforecast.imputation._components.stage_scaler import DEFAULT_SCALE_KEY, StageScaler
 
 # Perturbations partagées
 from tests.support.perturbations import shuffle_rows
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.stage_scaler.helpers import _EXACT, _monthly_grid, _panel_grid
+from tests.unit.imputation._components.stage_scaler.helpers import _EXACT, _monthly_grid, _panel_grid
 
 
 # =============================================================================

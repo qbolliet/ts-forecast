@@ -3,7 +3,7 @@
 import pytest
 
 # Objet testé
-from tsforecast.frequency.frequency_aligner import FrequencyAligner
+from tsforecast.utils.frequency.aligner import FrequencyAligner
 
 
 @pytest.fixture

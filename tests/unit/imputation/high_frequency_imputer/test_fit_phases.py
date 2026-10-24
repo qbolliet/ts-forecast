@@ -20,16 +20,16 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.linear_model import LinearRegression
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
-from tsforecast.frequency.imputation_plan import INTERPOLATE_FALLBACK
-from tsforecast.frequency.training_set_builder import TrainingSetBuilder
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation._components.imputation_plan import INTERPOLATE_FALLBACK
+from tsforecast.imputation._components.training_set_builder import TrainingSetBuilder
 
 # Outils de test partagés
 from tests.support.estimators import (
     ConstantEstimator,
     FailingEstimator,
 )
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     FR,
     DE,
     IT,

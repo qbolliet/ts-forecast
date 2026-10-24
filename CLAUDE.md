@@ -20,7 +20,7 @@ tsforecast/
 ├── base/          # Classes de base des transformateurs temporels
 ├── crossvals/     # Validation croisée respectant l'ordre temporel
 ├── delays/        # Délais de publication (inférence, application, inversion)
-├── frequency/     # Détection de fréquence + imputation multi-fréquences
+├── imputation/    # Imputation multi-fréquences (HighFrequencyImputer) + composants
 ├── panel/         # Transformations par entité + utilitaires panel
 ├── xy/            # Pipeline et mixin pour transformateurs (X, y)
 ├── tracking/      # Constructeurs de métriques pour trackers (MLflow, ...)
@@ -56,15 +56,21 @@ sont donc utilisables directement avec `sklearn.model_selection.cross_validate`.
   briques `ShiftTransformer`, `MaskTransformer`, et les fabriques
   `create_delay_transformer_factory()`, `prepare_entity_kwargs_from_delays()`
 
-### `tsforecast/frequency/`
-**Implémentation courante** : `HighFrequencyImputer` — impute les colonnes de
+### `tsforecast/imputation/`
+**Implémentation courante** : `HighFrequencyImputer` (`high_frequency_imputer.py`) — impute les colonnes de
 basse fréquence sur une grille plus fine, en cascade, avec suivi de provenance.
 Ajusté avec `y`, il augmente un jeu d'entraînement : `fit_transform(X, y)` est la
 passe d'entraînement (`X` et `y` sur la grille), `transform` la passe de prédiction
 (`X` seul, sur ses lignes d'entrée, `y` rendu inchangé) ; `y` n'est pas covariable
 de `X` sauf `target_as_covariate=True` (décisions D47 / D48 de la spec).
 
-Composants auxiliaires de `HighFrequencyImputer` :
+`__init__.py` réexporte `HighFrequencyImputer` et les types lus dans les attributs ajustés
+(`ImputationPlan`, `ImputationStep`, `MaterializationWay`, `ProvenanceType`, `PROVENANCE_DTYPE`,
+`CellOrigin`, `CELL_ORIGIN_DTYPE`, `Taint`) ; `__all__` est explicite. `_engine/` est réservé
+aux morceaux extraits de la classe (détail d'implémentation, préfixe `_`).
+
+Composants auxiliaires de `HighFrequencyImputer`, dans `_components/` (détail d'implémentation,
+importés par chemin de module : `tsforecast.imputation._components.<module>`) :
 - `imputation_plan.py` : `ImputationPlan`, `ImputationStep` — état ajusté complet
 - `provenance.py` : `ImputationProvenanceTracker`, `ProvenanceType` (10 niveaux),
   `PROVENANCE_DTYPE` (dtype catégoriel des matrices de provenance), `CELL_ORIGIN_DTYPE`
@@ -79,14 +85,12 @@ Composants auxiliaires de `HighFrequencyImputer` :
   ou `'cv'`), expose `scores_` / `fallback_keys_`
 - `training_set_builder.py` : jeu d'entraînement mutualisé inter-entités
 - `imputation_window.py` : `ImputationWindowCalculator`, `ImputationScope`
-- `frequency_aligner.py` : `FrequencyAligner` — outil autonome, **non utilisé** par
-  `HighFrequencyImputer` : agrégation / interpolation de variables choisies
 - `target_frequency_validator.py` : `TargetFrequencyValidator`
-- `regularizer.py` : `IndexRegularizer`, `is_regular()`, `regularize()`
 
-Détection de fréquence : `FrequencyDetector` et `detect_frequency()` /
-`detect_dataset_frequency()` / `detect_index_frequency()` sont réexportés depuis
-`tsforecast/utils/frequency/`.
+`FrequencyAligner` (agrégation / interpolation de variables choisies) et `IndexRegularizer`
+(`is_regular()`, `regularize()`) ne sont pas utilisés par `HighFrequencyImputer` : ce sont des
+utilitaires de `tsforecast/utils/frequency/` (`aligner.py`, `regularizer.py`), de même que la
+détection de fréquence (`FrequencyDetector`, `detect_frequency()`, ...).
 
 ### `tsforecast/panel/`
 - `transformers.py` : `PanelwiseTransformer` — applique un transformateur
@@ -125,7 +129,8 @@ Utilitaires transversaux, organisés en sous-paquets (chacun expose une classe
   les constantes propres à un seul module restent locales à celui-ci
 - `utils/frequency/` : `FrequencyNormalizer`, `FrequencyConverter`,
   `FrequencyDetector` (`detector.py`), `normalize_frequency()`, `to_pandas_freq()`,
-  `is_higher_frequency()`, `get_frequency_order()`, ...
+  `is_higher_frequency()`, `get_frequency_order()`, `FrequencyAligner` (`aligner.py`),
+  `IndexRegularizer` / `is_regular()` / `regularize()` (`regularizer.py`), ...
 - `utils/duration/` : `DurationNormalizer`, `DurationConverter`,
   `normalize_duration()`, `convert_duration()`, `get_duration_nanoseconds()`
   (durée entière exacte d'une unité, source unique du calcul de délais), ...
@@ -369,16 +374,18 @@ def validate_temporal_data(
   │   ├── estimators.py    # SpyEstimator, FailingEstimator, ...
   │   └── golden/          # golden master de HighFrequencyImputer : generate.py (à la main),
   │                        #   manifest.json, cases/*.pkl.gz ; comparé par
-  │                        #   tests/integration/frequency/test_golden_master.py (slow)
+  │                        #   tests/integration/imputation/test_golden_master.py (slow)
   ├── unit/               # miroir EXACT de tsforecast/
   │   ├── base/  crossvals/  panel/  tracking/  xy/
   │   ├── delays/           # test_calculator.py, test_data_manager.py, ...
-  │   ├── frequency/        # un test_<module>.py par module de tsforecast/frequency/
+  │   ├── imputation/       # high_frequency_imputer/ (paquet) ; _components/ : un test_<module>.py
+  │   │                     #   ou un paquet par module de tsforecast/imputation/_components/
   │   └── utils/
   │       ├── abc/  duration/  parse/  position/  time/  validation/
-  │       └── frequency/     # test_normalizer.py, test_utils.py, detector/ et converter/ (paquets)
+  │       └── frequency/     # test_normalizer.py, test_utils.py, test_regularizer.py,
+  │                          #   detector/, converter/ et aligner/ (paquets)
   └── integration/
-      ├── crossvals/  delays/  frequency/  pipeline/
+      ├── crossvals/  delays/  imputation/  pipeline/
       └── input_contract/  # entrées jamais modifiées, entrées en lecture seule, libellés str
   ```
 - **Règle de miroir** : `tsforecast/<paquet>/<module>.py` ↔ `tests/unit/<paquet>/test_<module>.py`.
@@ -459,7 +466,7 @@ uv run pytest -m "not slow" tests/
 - **Outil** : `pytest-cov` (lignes **et** branches) mesure, localement et en CI ; Codecov publie
   (lecture de `coverage.xml`). Configuration : `[tool.coverage.*]` dans `pyproject.toml`,
   `codecov.yml` (statut `project` informatif, `tests/` et `notebooks/` ignorés).
-- **Seuil** : **≥ 90 %** par module de `tsforecast/{utils,delays,frequency,base,crossvals,panel,xy}`.
+- **Seuil** : **≥ 90 %** par module de `tsforecast/{utils,delays,imputation,base,crossvals,panel,xy}`.
   `uv run python tests/run_tests.py --mode coverage` lit `coverage.json` et échoue en listant
   les modules fautifs.
 - **Mesure locale** : `uv run pytest --cov=tsforecast --cov-branch tests/` (rapports `term-missing`,

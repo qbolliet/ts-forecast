@@ -1,1 +1,1 @@
-::: tsforecast.frequency.target_frequency_validator
+::: tsforecast.imputation._components.target_frequency_validator

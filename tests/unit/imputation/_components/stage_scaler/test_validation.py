@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.stage_scaler import (
+from tsforecast.imputation._components.stage_scaler import (
     DEFAULT_SCALE_KEY,
     DEFAULT_SCALE_MODE,
     StageScaler,
@@ -24,7 +24,7 @@ from tsforecast.frequency.stage_scaler import (
 from tests.support.perturbations import with_special_column_names
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.stage_scaler.helpers import _make_scaler, _monthly_grid
+from tests.unit.imputation._components.stage_scaler.helpers import _make_scaler, _monthly_grid
 
 
 # =============================================================================

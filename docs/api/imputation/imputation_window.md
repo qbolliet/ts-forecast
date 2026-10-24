@@ -1,1 +1,1 @@
-::: tsforecast.frequency.imputation_window
+::: tsforecast.imputation._components.imputation_window

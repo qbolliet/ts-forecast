@@ -17,9 +17,9 @@ component_management:
     - component_id: delays
       name: delays
       paths: ["tsforecast/delays/**"]
-    - component_id: frequency
-      name: frequency
-      paths: ["tsforecast/frequency/**"]
+    - component_id: imputation
+      name: imputation
+      paths: ["tsforecast/imputation/**"]
     - component_id: base
       name: base
       paths: ["tsforecast/base/**"]

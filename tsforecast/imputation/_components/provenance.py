@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 # Utilitaires de panel
-from ..panel.utils import detect_panel_structure
+from ...panel.utils import detect_panel_structure
 
 
 # Enumération des types de provenance

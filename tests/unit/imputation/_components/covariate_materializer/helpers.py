@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 import pandas as pd
 
 # Objet testé
-from tsforecast.frequency.covariate_materializer import CovariateMaterializer
+from tsforecast.imputation._components.covariate_materializer import CovariateMaterializer
 
 
 # Fréquences détectées du jeu TS

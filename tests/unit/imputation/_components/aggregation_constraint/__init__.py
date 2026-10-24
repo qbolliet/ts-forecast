@@ -1,1 +1,1 @@
-"""Tests of ``tsforecast.frequency.aggregation_constraint``, split by theme."""
+"""Tests of ``tsforecast.imputation._components.aggregation_constraint``, split by theme."""

@@ -14,11 +14,11 @@ import pandas as pd
 import pytest
 
 # Objet testé
-from tsforecast.frequency.imputation_window import ImputationWindowCalculator
+from tsforecast.imputation._components.imputation_window import ImputationWindowCalculator
 from tsforecast.panel.utils import get_unique_panel_entities
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.imputation_window.helpers import (
+from tests.unit.imputation._components.imputation_window.helpers import (
     _BOUND_ATTRIBUTES,
     _KINDS,
     _MASK_ATTRIBUTES,

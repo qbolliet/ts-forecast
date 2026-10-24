@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 # Objet testé
-from tsforecast.frequency.covariate_materializer import CovariateMaterializer
+from tsforecast.imputation._components.covariate_materializer import CovariateMaterializer
 
 # Jeux et perturbations partagés
 from tests.support.perturbations import (
@@ -27,7 +27,7 @@ from tests.support.perturbations import (
     to_three_level_index,
     with_special_column_names,
 )
-from tests.unit.frequency.covariate_materializer.helpers import (
+from tests.unit.imputation._components.covariate_materializer.helpers import (
     HETEROGENEOUS_FREQUENCIES,
     PANEL_FREQUENCIES,
     monthly_grid,

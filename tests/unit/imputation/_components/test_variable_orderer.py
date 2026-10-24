@@ -1,4 +1,4 @@
-"""Tests for tsforecast.frequency.variable_orderer.
+"""Tests for tsforecast.imputation._components.variable_orderer.
 
 'frequency' and 'cv' orders, deterministic alphabetical tie-break
 (independent of insertion order / input columns), polymorphic sklearn
@@ -18,7 +18,7 @@ from sklearn.model_selection import KFold, TimeSeriesSplit
 
 # Objet testé
 from tsforecast.crossvals.time_series import TSOutOfSampleSplit
-from tsforecast.frequency.variable_orderer import VariableOrderer, VariableSpec
+from tsforecast.imputation._components.variable_orderer import VariableOrderer, VariableSpec
 from tests.support.estimators import ConstantEstimator, FailingEstimator, SpyEstimator
 
 # Scoring à valeur d'or calculable à la main avec ConstantEstimator(0.0)
@@ -127,7 +127,7 @@ class TestCVOrder:
         ).fit()
         scores = {'q1': -0.08, 'a2': -0.15, 'a1': -0.15}
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=_fake_cross_val_score(scores),
         ):
             ordered = orderer.order(
@@ -163,7 +163,7 @@ class TestAlphabeticalTiebreak:
         permuted_X = reference_timeseries[['a2', 'q1', 'm1', 'a1']]
 
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=_fake_cross_val_score(scores),
         ):
             order_forward = orderer.order(
@@ -265,7 +265,7 @@ class TestPrebuiltScoringSets:
             return np.full(2, {'q1': -0.08, 'a2': -0.15, 'a1': -0.20}[y.name])
 
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=_spy,
         ):
             ordered = orderer.order(
@@ -286,7 +286,7 @@ class TestPrebuiltScoringSets:
             fit_predict_order='cv', cv=2, min_cv_train_size=2,
         ).fit()
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=_fake_cross_val_score({'q1': -0.08, 'a2': -0.15, 'a1': -0.20}),
         ):
             ordered = orderer.order(
@@ -315,7 +315,7 @@ class TestPrebuiltScoringSets:
         sets['q1'] = (pd.DataFrame(index=index), sets['q1'][1])
 
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=_fake_cross_val_score({'a2': -0.15, 'a1': -0.20}),
         ):
             ordered = orderer.order(
@@ -335,7 +335,7 @@ class TestPrebuiltScoringSets:
         sets['a1'] = (sets['a1'][0].iloc[:3], sets['a1'][1].iloc[:3])
 
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=_fake_cross_val_score({'a2': -0.15, 'q1': -0.08}),
         ):
             ordered = orderer.order(
@@ -354,7 +354,7 @@ class TestPrebuiltScoringSets:
         del sets['a1']
 
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=_fake_cross_val_score({'a2': -0.15, 'q1': -0.08}),
         ):
             ordered = orderer.order(
@@ -378,7 +378,7 @@ class TestCVFallbacksAndLogging:
         # "a1" n'a ni entrée dédiée ni '__default__' : estimateur résolu à
         # None -> score -inf, quel que soit min_cv_train_size
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=_fake_cross_val_score(scores),
         ):
             ordered = orderer.order(
@@ -400,7 +400,7 @@ class TestCVFallbacksAndLogging:
 
         messages = []
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=_fake_cross_val_score_with_failure,
         ):
             ordered = orderer.order(
@@ -769,7 +769,7 @@ class TestScoringRows:
 
         frame = _two_variable_frame()
         frame['m1'] = 1.0
-        with patch('tsforecast.frequency.variable_orderer.cross_val_score', side_effect=_spy):
+        with patch('tsforecast.imputation._components.variable_orderer.cross_val_score', side_effect=_spy):
             _mae_orderer(cv=2, min_cv_train_size=2).order(
                 _two_variable_specs(), X=frame, estimator=ConstantEstimator(0.0),
             )
@@ -789,7 +789,7 @@ class TestEstimatorResolution:
             return np.zeros(2)
 
         estimator = {'a': ConstantEstimator(1.0), '__default__': ConstantEstimator(2.0)}
-        with patch('tsforecast.frequency.variable_orderer.cross_val_score', side_effect=_spy):
+        with patch('tsforecast.imputation._components.variable_orderer.cross_val_score', side_effect=_spy):
             _mae_orderer(cv=2, min_cv_train_size=2).order(
                 _two_variable_specs(), X=_two_variable_frame(), estimator=estimator,
             )
@@ -804,7 +804,7 @@ class TestEstimatorResolution:
     def test_no_estimator_scores_minus_inf_without_cv(self):
         """estimator=None: every variable scores -inf, tie-broken by name, no CV run."""
         orderer = _mae_orderer()
-        with patch('tsforecast.frequency.variable_orderer.cross_val_score') as cvs:
+        with patch('tsforecast.imputation._components.variable_orderer.cross_val_score') as cvs:
             ordered = orderer.order(_two_variable_specs(), X=_two_variable_frame())
         assert (ordered, orderer.scores_, orderer.fallback_keys_, cvs.called) == (
             ['a', 'b'], {'a': -np.inf, 'b': -np.inf}, [], False,
@@ -905,7 +905,7 @@ class TestFallbackGroup:
             key: (x.iloc[:0], y.iloc[:0]) for key, (x, y) in self._sets().items()
         }
         orderer = _mae_orderer(cv=2, min_cv_train_size=2)
-        with patch('tsforecast.frequency.variable_orderer.cross_val_score') as cvs:
+        with patch('tsforecast.imputation._components.variable_orderer.cross_val_score') as cvs:
             ordered = orderer.order(
                 self._specs(), estimator=ConstantEstimator(0.0), training_sets=sets,
             )
@@ -962,7 +962,7 @@ class TestFailingFolds:
 
         messages = []
         orderer = _mae_orderer(cv=2, min_cv_train_size=2)
-        with patch('tsforecast.frequency.variable_orderer.cross_val_score', side_effect=_fake):
+        with patch('tsforecast.imputation._components.variable_orderer.cross_val_score', side_effect=_fake):
             orderer.order(
                 _two_variable_specs(), X=_two_variable_frame(),
                 estimator=ConstantEstimator(0.0), log=messages.append,
@@ -976,7 +976,7 @@ class TestFailingFolds:
             return np.array([np.nan, np.nan])
 
         orderer = _mae_orderer(cv=2, min_cv_train_size=2)
-        with patch('tsforecast.frequency.variable_orderer.cross_val_score', side_effect=_fake):
+        with patch('tsforecast.imputation._components.variable_orderer.cross_val_score', side_effect=_fake):
             ordered = orderer.order(
                 _two_variable_specs(), X=_two_variable_frame(),
                 estimator=ConstantEstimator(0.0),
@@ -998,7 +998,7 @@ class TestFailingFolds:
         frame = _two_variable_frame()
         frame['c'] = frame['a']
         orderer = _mae_orderer(cv=2, min_cv_train_size=2)
-        with patch('tsforecast.frequency.variable_orderer.cross_val_score', side_effect=_fake):
+        with patch('tsforecast.imputation._components.variable_orderer.cross_val_score', side_effect=_fake):
             ordered = orderer.order(
                 variables, X=frame, estimator=ConstantEstimator(0.0), log=messages.append,
             )

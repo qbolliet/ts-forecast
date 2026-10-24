@@ -17,12 +17,12 @@ import numpy as np
 import pandas as pd
 
 # Objets testés
-from tsforecast.frequency.training_set_builder import (
+from tsforecast.imputation._components.training_set_builder import (
     TrainingSet,
     TrainingSetBuilder,
 )
-from tsforecast.frequency.covariate_materializer import CovariateMaterializer
-from tsforecast.frequency.stage_scaler import StageScaler
+from tsforecast.imputation._components.covariate_materializer import CovariateMaterializer
+from tsforecast.imputation._components.stage_scaler import StageScaler
 
 
 # Fréquences détectées du jeu PANEL-F : `v` est une propriété du couple

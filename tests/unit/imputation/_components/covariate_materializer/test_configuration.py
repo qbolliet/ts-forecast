@@ -17,7 +17,7 @@ Covered symbols: ``CovariateMaterializer.__init__``, ``resolve_method``,
 import pytest
 
 # Objets testés
-from tsforecast.frequency.covariate_materializer import (
+from tsforecast.imputation._components.covariate_materializer import (
     DEFAULT_INTERPOLATION_METHOD,
     DEFAULT_MATERIALIZATION_KEY,
     CovariateMaterializer,

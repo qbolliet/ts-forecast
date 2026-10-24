@@ -12,7 +12,7 @@ import pytest
 from tests.support.perturbations import to_three_level_index
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.frequency_aligner.helpers import _frame, _panel, _series
+from tests.unit.utils.frequency.aligner.helpers import _frame, _panel, _series
 
 
 # ------------------------------------------------------------------ #

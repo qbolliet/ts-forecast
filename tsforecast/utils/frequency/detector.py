@@ -138,7 +138,7 @@ class FrequencyDetector:
         dominant grid, not a proof of regularity: an index made of a monthly
         grid plus a few isolated earlier annual dates is ``'MS'``. This is
         what an imputation onto that grid needs; use
-        :func:`tsforecast.frequency.is_regular` to test regularity itself.
+        :func:`tsforecast.utils.frequency.is_regular` to test regularity itself.
 
         Args:
             series: Time series data with a datetime index. Strings parsable

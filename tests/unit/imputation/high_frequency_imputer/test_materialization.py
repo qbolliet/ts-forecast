@@ -10,10 +10,10 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
 
 # Outils de test partagés
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     FR,
     DE,
     IT,

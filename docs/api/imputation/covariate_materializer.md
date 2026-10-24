@@ -1,1 +1,1 @@
-::: tsforecast.frequency.covariate_materializer
+::: tsforecast.imputation._components.covariate_materializer

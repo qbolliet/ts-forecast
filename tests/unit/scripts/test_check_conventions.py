@@ -307,9 +307,9 @@ class TestCollection:
     @pytest.mark.parametrize(
         "relative, expected",
         [
-            ("tsforecast/frequency/a.py", "tsforecast/frequency"),
+            ("tsforecast/imputation/a.py", "tsforecast/imputation"),
             ("tsforecast/utils/time/a.py", "tsforecast/utils"),
-            ("tests/unit/frequency/test_a.py", "tests/unit/frequency"),
+            ("tests/unit/imputation/test_a.py", "tests/unit/imputation"),
             ("tests/unit/utils/time/test_a.py", "tests/unit/utils"),
             ("a.py", "."),
         ],

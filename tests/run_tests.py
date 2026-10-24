@@ -71,7 +71,7 @@ def run_fast_tests() -> int:
 
 
 # Paquets soumis au seuil de couverture, et seuil par module (lignes + branches)
-COVERED_PACKAGES = ("utils", "delays", "frequency", "base", "crossvals", "panel", "xy")
+COVERED_PACKAGES = ("utils", "delays", "imputation", "base", "crossvals", "panel", "xy")
 COVERAGE_THRESHOLD = 90.0
 
 

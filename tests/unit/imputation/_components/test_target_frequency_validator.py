@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tsforecast.frequency.target_frequency_validator import TargetFrequencyValidator
+from tsforecast.imputation._components.target_frequency_validator import TargetFrequencyValidator
 from tsforecast.utils.frequency.utils import detect_dataset_frequency
 
 
@@ -456,7 +456,7 @@ _HASH_SEEDS = ('0', '1', '3')
 
 # Script de l'ordre des entités : validation d'un panel de trois entités
 _ENTITY_ORDER_SCRIPT = (
-    "from tsforecast.frequency.target_frequency_validator import TargetFrequencyValidator\n"
+    "from tsforecast.imputation._components.target_frequency_validator import TargetFrequencyValidator\n"
     "detected = {(e, c): f for e in ('FR', 'DE', 'IT') for c, f in (('m1', 'M'), ('q1', 'Q'))}\n"
     "print(repr(list(TargetFrequencyValidator().validate('M', detected))))\n"
 )
@@ -465,7 +465,7 @@ _ENTITY_ORDER_SCRIPT = (
 # quotidienne trop fine, ramenée à la plus fine des fréquences détectées
 _TIE_SCRIPT = (
     "import warnings\n"
-    "from tsforecast.frequency.target_frequency_validator import TargetFrequencyValidator\n"
+    "from tsforecast.imputation._components.target_frequency_validator import TargetFrequencyValidator\n"
     "warnings.simplefilter('ignore')\n"
     "detected = {'a': 'W-SUN', 'b': 'W-MON'}\n"
     "print(TargetFrequencyValidator().validate('D', detected, on_frequency_mismatch='warn'))\n"
@@ -483,7 +483,7 @@ def _outputs_under_hash_seeds(script: str) -> list:
         ``_HASH_SEEDS``.
     """
     # Racine du dépôt : import de tsforecast depuis les sources
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[4]
     outputs = []
     for seed in _HASH_SEEDS:
         completed = subprocess.run(

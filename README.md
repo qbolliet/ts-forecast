@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg)](https://codecov.io/gh/qbolliet/ts-forecast)
 [![utils](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=utils&label=utils)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=utils)
 [![delays](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=delays&label=delays)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=delays)
-[![frequency](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=frequency&label=frequency)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=frequency)
+[![imputation](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=imputation&label=imputation)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=imputation)
 [![base](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=base&label=base)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=base)
 [![crossvals](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=crossvals&label=crossvals)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=crossvals)
 [![panel](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=panel&label=panel)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=panel)
@@ -53,7 +53,7 @@ python tests/run_tests.py --path tests/unit/crossvals/base/   # cible libre (fic
 ```
 
 Le mode `coverage` produit `coverage.xml`, `coverage.json` et `htmlcov/`, puis échoue en listant
-les modules de `tsforecast/{utils,delays,frequency,base,crossvals,panel,xy}` sous 90 %.
+les modules de `tsforecast/{utils,delays,imputation,base,crossvals,panel,xy}` sous 90 %.
 
 ### Arborescence
 

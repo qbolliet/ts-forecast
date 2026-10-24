@@ -1,1 +1,1 @@
-"""Tests of ``tsforecast.frequency.frequency_aligner``, split by theme."""
+"""Tests of ``tsforecast.utils.frequency.aligner``, split by theme."""

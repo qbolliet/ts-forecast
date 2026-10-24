@@ -27,11 +27,11 @@ from tests.support.estimators import SpyEstimator
 from tests.support.perturbations import DATETIME_UNITS, datetime_units, with_datetime_resolution
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
 from tsforecast.xy import DropNaNTarget, XYPipeline
 
 # Outils de test partagés
-from tests.unit.frequency.high_frequency_imputer.helpers import make_imputer, public_fitted_state
+from tests.unit.imputation.high_frequency_imputer.helpers import make_imputer, public_fitted_state
 
 # Sorties d'une passe complète, dans l'ordre où elles sont produites
 PASS_OUTPUTS = ('output', 'provenance', 'replay', 'inverse')

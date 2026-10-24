@@ -18,7 +18,7 @@ from sklearn.model_selection import BaseCrossValidator, KFold, check_cv, cross_v
 from sklearn.utils.validation import check_is_fitted
 
 # Utilitaires du package
-from ..utils.frequency.utils import get_frequency_order
+from ...utils.frequency.utils import get_frequency_order
 
 # Identifiant retourné par order() : le nom de variable pour une série
 # temporelle, ou la clé de groupe (nom, fréquence) de HighFrequencyImputer pour un panel dont

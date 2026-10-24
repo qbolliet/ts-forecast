@@ -32,15 +32,15 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Objets testés
-from tsforecast.frequency.training_set_builder import (
+from tsforecast.imputation._components.training_set_builder import (
     FREQUENCY_LEVEL_NAME,
     TrainingSet,
     TrainingSetBuilder,
 )
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
 
 # Constantes et fabriques partagées du paquet
-from tests.unit.frequency.training_set_builder.helpers import (
+from tests.unit.imputation._components.training_set_builder.helpers import (
     build_panel_f,
     build_ts,
     layer_mask_provider,

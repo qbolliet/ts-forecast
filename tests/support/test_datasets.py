@@ -18,7 +18,7 @@ import pytest
 
 # Détecteur de fréquence utilisé par HighFrequencyImputer
 from tsforecast.utils.frequency.utils import detect_frequency
-from tsforecast.frequency import is_regular
+from tsforecast.utils.frequency import is_regular
 from tests.support.datasets import (
     HETEROGENEOUS_PANEL_COUNTRIES,
     build_mixed_frequency_panel,

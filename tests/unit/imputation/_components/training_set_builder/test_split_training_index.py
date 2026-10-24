@@ -22,14 +22,14 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.training_set_builder import (
+from tsforecast.imputation._components.training_set_builder import (
     FREQUENCY_LEVEL_NAME,
     TrainingSet,
     split_training_index,
 )
 
 # Constantes et fabriques partagées du paquet
-from tests.unit.frequency.training_set_builder.helpers import (
+from tests.unit.imputation._components.training_set_builder.helpers import (
     build_panel_f,
     make_builder,
     seed_panel_mirror,

@@ -30,12 +30,12 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.training_set_builder import (
+from tsforecast.imputation._components.training_set_builder import (
     FREQUENCY_LEVEL_NAME,
     TrainingSet,
     split_training_index,
 )
-from tsforecast.frequency.stage_scaler import StageScaler
+from tsforecast.imputation._components.stage_scaler import StageScaler
 
 # Perturbations partagées
 from tests.support.perturbations import (
@@ -48,7 +48,7 @@ from tests.support.perturbations import (
 )
 
 # Constantes et fabriques partagées du paquet
-from tests.unit.frequency.training_set_builder.helpers import (
+from tests.unit.imputation._components.training_set_builder.helpers import (
     HETEROGENEOUS_FEATURES,
     HETEROGENEOUS_FREQUENCIES,
     PANEL_F_BLOCKS,

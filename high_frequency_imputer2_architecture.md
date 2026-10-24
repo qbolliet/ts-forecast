@@ -1,5 +1,19 @@
 # `HighFrequencyImputer2` — spécification d'architecture
 
+> **Note du 2026-10-24 — chemins renommés.** Le paquet `tsforecast/frequency/` a été renommé
+> `tsforecast/imputation/` ; le corps de ce document n'est pas réécrit et cite encore les anciens
+> chemins. Correspondance :
+>
+> | Ancien chemin | Nouveau chemin |
+> |---|---|
+> | `tsforecast/frequency/high_frequency_imputer.py` | `tsforecast/imputation/high_frequency_imputer.py` |
+> | `tsforecast/frequency/{provenance, imputation_plan, imputation_window, covariate_materializer, aggregation_constraint, stage_scaler, variable_orderer, training_set_builder, target_frequency_validator}.py` | `tsforecast/imputation/_components/<même nom>.py` |
+> | `tsforecast/frequency/frequency_aligner.py` | `tsforecast/utils/frequency/aligner.py` |
+> | `tsforecast/frequency/regularizer.py` | `tsforecast/utils/frequency/regularizer.py` |
+> | `tests/unit/frequency/` | `tests/unit/imputation/` (`_components/` pour les composants ; aligneur : `tests/unit/utils/frequency/aligner/` ; régulariseur : `tests/unit/utils/frequency/test_regularizer.py`) |
+> | `tests/integration/frequency/` | `tests/integration/imputation/` |
+> | `docs/api/frequency/` | `docs/api/imputation/` (aligneur et régulariseur : `docs/api/utils/`) |
+
 > **Version 2 du document — 2026-09-01** (branche `qb-mixed-frequencies`).
 > Rédigé initialement le 2026-08-31 à partir de la spécification orale du 2026-08-31, de la
 > relecture de `_fit` dans `tsforecast/frequency/high_frequency_imputer.py`, et des deux

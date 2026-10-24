@@ -15,7 +15,7 @@ import pytest
 from tests.support.perturbations import shuffle_rows, with_duplicated_rows
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.frequency_aligner.helpers import _frame, _panel, _series
+from tests.unit.utils.frequency.aligner.helpers import _frame, _panel, _series
 
 
 # ------------------------------------------------------------------ #

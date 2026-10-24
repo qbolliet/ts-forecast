@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 # Objet testé
-from tsforecast.frequency.provenance import (
+from tsforecast.imputation._components.provenance import (
     CELL_ORIGIN_DTYPE,
     max_cell_origin,
     max_origin,
@@ -22,7 +22,7 @@ from tsforecast.frequency.provenance import (
 )
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.provenance.helpers import P, _tracker
+from tests.unit.imputation._components.provenance.helpers import P, _tracker
 
 
 # Les cinq libellés MODEL_* de l'échelle de souillure

@@ -16,13 +16,13 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
-from tsforecast.frequency.covariate_materializer import CovariateMaterializer
-from tsforecast.frequency.provenance import resolve_model_provenance
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation._components.covariate_materializer import CovariateMaterializer
+from tsforecast.imputation._components.provenance import resolve_model_provenance
 
 # Outils de test partagés
 from tests.support.estimators import ConstantEstimator, SpyEstimator
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     FR,
     DE,
     IT,

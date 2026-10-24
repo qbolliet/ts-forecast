@@ -23,7 +23,7 @@ from tests.support.golden.scenarios import GoldenCase, canonicalize, run_case
 from tests.support.golden.store import read_record, write_record
 
 # Membre d'énumération du paquet, pour les contrôles de sérialisation
-from tsforecast.frequency.provenance import ProvenanceType
+from tsforecast.imputation._components.provenance import ProvenanceType
 
 
 def _frame(**overrides) -> pd.DataFrame:

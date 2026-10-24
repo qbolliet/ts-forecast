@@ -37,10 +37,10 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
 # Arithmétique de fréquences : facteur constant et décompte calendaire
-from ..utils.frequency.converter import FrequencyConverter
-from ..utils.frequency.utils import is_higher_frequency, normalize_frequency
+from ...utils.frequency.converter import FrequencyConverter
+from ...utils.frequency.utils import is_higher_frequency, normalize_frequency
 # Normalisation des clés d'entité du panel
-from ..panel.utils import get_entity_codes, normalize_entity_key, normalize_entity_mapping
+from ...panel.utils import get_entity_codes, normalize_entity_key, normalize_entity_mapping
 
 
 # Modalités de mise à l'échelle

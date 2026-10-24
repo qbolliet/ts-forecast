@@ -1,1 +1,1 @@
-::: tsforecast.frequency.stage_scaler
+::: tsforecast.imputation._components.stage_scaler

@@ -1,1 +1,1 @@
-::: tsforecast.frequency.aggregation_constraint
+::: tsforecast.imputation._components.aggregation_constraint

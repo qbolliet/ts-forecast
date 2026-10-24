@@ -22,11 +22,11 @@ import pytest
 from sklearn.preprocessing import FunctionTransformer
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
-from tsforecast.frequency.provenance import ProvenanceType
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation._components.provenance import ProvenanceType
 
 # Outils de test partagés
-from tests.unit.frequency.high_frequency_imputer.helpers import make_imputer
+from tests.unit.imputation.high_frequency_imputer.helpers import make_imputer
 
 # Cible : colonne annuelle a2 du jeu TS
 TARGET = 'a2'

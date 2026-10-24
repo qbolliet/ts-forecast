@@ -17,7 +17,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import LinearRegression
 
 # Composant ajusté
-from tsforecast.frequency import HighFrequencyImputer
+from tsforecast.imputation import HighFrequencyImputer
 
 # Estimateur de chaque stratégie : 'tolerate_nan' exige un estimateur tolérant
 # aux NaN (même choix que les tests unitaires réalistes)

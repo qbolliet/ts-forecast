@@ -1,7 +1,7 @@
 """``HighFrequencyImputer`` inside an ``XYPipeline``, cross-validated and grid-searched.
 
 Chains ``tsforecast.delays.transformers.PublicationDelayTransformer``
-(``strategy='mask'``), ``tsforecast.frequency.HighFrequencyImputer`` and a
+(``strategy='mask'``), ``tsforecast.imputation.HighFrequencyImputer`` and a
 final estimator (the NaN-tolerant ``SpyEstimator`` of
 ``tests/support/estimators.py``, which records what it is fitted on) in a
 ``tsforecast.xy.XYPipeline``, evaluated by ``sklearn.model_selection.cross_validate``
@@ -55,7 +55,7 @@ from tests.support.estimators import SpyEstimator
 # Composants enchaînés
 from tsforecast.crossvals import PanelOutOfSampleSplit, TSOutOfSampleSplit
 from tsforecast.delays.transformers import PublicationDelayTransformer
-from tsforecast.frequency import HighFrequencyImputer
+from tsforecast.imputation import HighFrequencyImputer
 from tsforecast.xy import DropNaNTarget, XYPipeline
 
 # Cible commune aux deux jeux : mensuelle, observée sur toute la grille sauf la dernière ligne

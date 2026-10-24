@@ -18,7 +18,7 @@ from sklearn.linear_model import LinearRegression
 
 # Objets testés
 from tsforecast.tracking import imputation_metrics, delay_metrics, split_summary
-from tsforecast.frequency import HighFrequencyImputer
+from tsforecast.imputation import HighFrequencyImputer
 from tsforecast.delays import PublicationDelayTransformer
 from tsforecast.crossvals import TSOutOfSampleSplit, PanelOutOfSampleSplit
 

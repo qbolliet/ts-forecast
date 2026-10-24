@@ -1,1 +1,1 @@
-"""Tests of ``tsforecast.frequency.imputation_window``, split by theme."""
+"""Tests of ``tsforecast.imputation._components.imputation_window``, split by theme."""

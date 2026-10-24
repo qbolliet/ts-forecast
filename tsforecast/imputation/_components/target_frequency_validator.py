@@ -9,12 +9,12 @@ import warnings
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
 # Utilitaires du package
-from ..utils.frequency.utils import (
+from ...utils.frequency.utils import (
     normalize_frequency,
     is_higher_frequency,
     get_frequency_order,
 )
-from ..panel.utils import normalize_entity_key
+from ...panel.utils import normalize_entity_key
 
 
 # Stratégies admises pour on_frequency_mismatch

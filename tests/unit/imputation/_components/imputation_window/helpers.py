@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 # Objet testé
-from tsforecast.frequency.imputation_window import ImputationWindowCalculator
+from tsforecast.imputation._components.imputation_window import ImputationWindowCalculator
 
 
 # Les trois masques exposés par le calculateur

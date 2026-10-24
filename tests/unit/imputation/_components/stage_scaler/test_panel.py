@@ -17,13 +17,13 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.stage_scaler import StageScaler
+from tsforecast.imputation._components.stage_scaler import StageScaler
 
 # Perturbations partagées
 from tests.support.perturbations import to_three_level_index
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.stage_scaler.helpers import (
+from tests.unit.imputation._components.stage_scaler.helpers import (
     _EXACT,
     _PANEL_F_BLOCKS,
     _monthly_grid,

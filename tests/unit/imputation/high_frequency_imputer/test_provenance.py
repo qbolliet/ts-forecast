@@ -7,10 +7,10 @@ Covers the five ``MODEL_*`` families and the absence of ``DISAGGREGATED``.
 import pytest
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
 
 # Outils de test partagés
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     fit_with_spy,
 )
 

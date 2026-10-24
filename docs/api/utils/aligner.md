@@ -1,1 +1,1 @@
-::: tsforecast.frequency.frequency_aligner
+::: tsforecast.utils.frequency.aligner

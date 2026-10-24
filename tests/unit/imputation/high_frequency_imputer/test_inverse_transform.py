@@ -19,7 +19,7 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
 
 # Outils de test partagés
 from tests.support.perturbations import (
@@ -27,7 +27,7 @@ from tests.support.perturbations import (
     with_index_names,
     with_special_column_names,
 )
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     fit_quietly,
     fit_transform_quietly,
     make_imputer,

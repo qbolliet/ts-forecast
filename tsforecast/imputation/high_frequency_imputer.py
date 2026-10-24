@@ -48,17 +48,17 @@ from ..panel.utils import (
     split_variable_key,
 )
 from ..utils._constants import FREQUENCY_LEVEL_NAME, MONTH_BASED_FREQUENCIES
-from .aggregation_constraint import (
+from ._components.aggregation_constraint import (
     AggregationConstraint,
     ConstraintSetting,
     resolve_aggregation_constraint,
     validate_aggregation_constraint,
 )
-from .covariate_materializer import (
+from ._components.covariate_materializer import (
     DEFAULT_MATERIALIZATION_KEY as DEFAULT_FEATURE_KEY,
     CovariateMaterializer,
 )
-from .imputation_plan import (
+from ._components.imputation_plan import (
     INTERPOLATE_FALLBACK,
     ImputationPlan,
     ImputationStep,
@@ -66,12 +66,12 @@ from .imputation_plan import (
     append_step,
     to_entity_tuple,
 )
-from .imputation_window import (
+from ._components.imputation_window import (
     ImputationScope,
     ImputationWindowCalculator,
     TrainingScope,
 )
-from .provenance import (
+from ._components.provenance import (
     CELL_ORIGIN_DTYPE,
     CellOrigin,
     ImputationProvenanceTracker,
@@ -83,14 +83,14 @@ from .provenance import (
     origin_to_taint,
     provenance_statistics,
 )
-from .stage_scaler import ScaleFeatures, StageScaler
-from .target_frequency_validator import TargetFrequencyValidator
-from .training_set_builder import (
+from ._components.stage_scaler import ScaleFeatures, StageScaler
+from ._components.target_frequency_validator import TargetFrequencyValidator
+from ._components.training_set_builder import (
     TrainingSet,
     TrainingSetBuilder,
     split_training_index,
 )
-from .variable_orderer import VariableOrderer, VariableSpec
+from ._components.variable_orderer import VariableOrderer, VariableSpec
 
 # Type aliases
 VariableCategory = Literal['aggregate', 'impute', 'target_freq']
@@ -583,7 +583,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             to frequency carries no entry. Exposed for tracking.
         provenance_statistics_: Counts and percentages per ``ProvenanceType``,
             ``{'overall': {...}, column: {...}}`` (see
-            :func:`~tsforecast.frequency.provenance.provenance_statistics`) of
+            :func:`~tsforecast.imputation._components.provenance.provenance_statistics`) of
             the **last pass**, like ``imputation_provenance_``: written by
             ``fit``, then overwritten by every ``transform``, which counts the
             target level of its output whatever ``keep_lower_frequencies``
@@ -1510,7 +1510,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> idx = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['entity', 'date'])
             >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
@@ -1653,7 +1653,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
             >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
@@ -1703,7 +1703,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
             >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
@@ -1765,7 +1765,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
             >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
@@ -1864,7 +1864,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
             >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
@@ -1947,7 +1947,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2020-01-31', periods=36, freq='ME')
             >>> data = pd.DataFrame(
             ...     {'m1': np.arange(36.0), 'q1': np.nan, 'a1': np.nan}, index=dates
@@ -2030,7 +2030,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> idx = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['entity', 'date'])
             >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
@@ -2526,7 +2526,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> imputer = HighFrequencyImputer(
             ...     target_frequency='M', estimator={'a1': LinearRegression()}
             ... )
@@ -3851,7 +3851,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
             >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
@@ -4068,7 +4068,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=36, freq='ME')
             >>> fiscal_years = pd.DataFrame(
             ...     {'m1': np.arange(36.0), 'a1': np.nan}, index=dates
@@ -4220,7 +4220,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Frequency label string.
 
         Examples:
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> imputer = HighFrequencyImputer(target_frequency='M')
             >>> imputer._stage_frequency_label('M')
             'M'
@@ -5085,7 +5085,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
             >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
@@ -5211,7 +5211,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
             >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
@@ -5696,7 +5696,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> import numpy as np
             >>> import pandas as pd
             >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.frequency import HighFrequencyImputer
+            >>> from tsforecast.imputation import HighFrequencyImputer
             >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
             >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
             >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10

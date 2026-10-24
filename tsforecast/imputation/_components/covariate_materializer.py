@@ -32,8 +32,8 @@ from .imputation_plan import MaterializationWay
 # Primitives d'origine de cellule
 from .provenance import CELL_ORIGIN_DTYPE, CellOrigin, max_cell_origin
 # Arithmétique et conversion de fréquences
-from ..utils.frequency.converter import FrequencyConverter
-from ..utils.frequency.utils import (
+from ...utils.frequency.converter import FrequencyConverter
+from ...utils.frequency.utils import (
     is_higher_frequency,
     normalize_frequency,
     target_offset_for_index,
@@ -47,7 +47,7 @@ from .aggregation_constraint import (
     validate_aggregation_constraint,
 )
 # Utilitaires de panel : découpage et normalisation des clés d'entité
-from ..panel.utils import iter_entity_blocks, normalize_entity_key, normalize_entity_mapping
+from ...panel.utils import iter_entity_blocks, normalize_entity_key, normalize_entity_mapping
 
 
 # Clé de repli des formes dictionnaire par feature.
@@ -311,7 +311,7 @@ class CovariateMaterializer:
     - :attr:`imputed_store` — mirror of the values produced, per column;
     - :attr:`imputed_freq_store` — production frequency of each cell, needed
       by the per-row divisors;
-    - :attr:`origin_store` — :data:`~tsforecast.frequency.provenance.CellOrigin`
+    - :attr:`origin_store` — :data:`~tsforecast.imputation._components.provenance.CellOrigin`
       of each cell.
 
     Every write goes through ``new.combine_first(existing)``: cells
@@ -337,7 +337,7 @@ class CovariateMaterializer:
             (``str`` dtype).
         origin_store: Mapping column -> :data:`CellOrigin` per cell
             (ordered categorical dtype
-            :data:`~tsforecast.frequency.provenance.CELL_ORIGIN_DTYPE`).
+            :data:`~tsforecast.imputation._components.provenance.CELL_ORIGIN_DTYPE`).
 
     Args:
         covariate_strategy: How a covariate observed at a frequency strictly
@@ -1726,7 +1726,7 @@ class CovariateMaterializer:
                 registries hold what has been IMPUTED, never what was merely
                 prepared as a feature — the mode every stage of
                 ``HighFrequencyImputer`` and
-                :class:`~tsforecast.frequency.training_set_builder.TrainingSetBuilder`
+                :class:`~tsforecast.imputation._components.training_set_builder.TrainingSetBuilder`
                 use for their covariates. Recording a covariate would
                 overwrite in the mirror the imputation its own model just
                 wrote, make the result depend on the processing order, and —

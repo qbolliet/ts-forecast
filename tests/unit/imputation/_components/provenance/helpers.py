@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 # Objet testé
-from tsforecast.frequency.provenance import ImputationProvenanceTracker, ProvenanceType
+from tsforecast.imputation._components.provenance import ImputationProvenanceTracker, ProvenanceType
 
 
 P = ProvenanceType

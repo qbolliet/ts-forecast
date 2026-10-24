@@ -139,5 +139,5 @@ imputer = HighFrequencyImputer(
 ## Voir aussi
 
 - [Concept : imputation multi-fréquences](../concepts/mixed_frequency_imputation.md)
-- [API : HighFrequencyImputer](../api/frequency/HighFrequencyImputer.md)
+- [API : HighFrequencyImputer](../api/imputation/HighFrequencyImputer.md)
 - [Guide MLflow](../guides/mlflow_tracking.md)

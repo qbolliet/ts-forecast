@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.aggregation_constraint import (
+from tsforecast.imputation._components.aggregation_constraint import (
     AggregationConstraint,
     ConstraintKind,
     DEFAULT_CONSTRAINT_KEY,
@@ -26,13 +26,13 @@ from tsforecast.frequency.aggregation_constraint import (
     validate_aggregation_constraint,
     validate_constraint_columns,
 )
-from tsforecast.frequency.covariate_materializer import CovariateMaterializer
+from tsforecast.imputation._components.covariate_materializer import CovariateMaterializer
 
 # Perturbations partagées
 from tests.support.perturbations import to_three_level_index
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.aggregation_constraint.helpers import (
+from tests.unit.imputation._components.aggregation_constraint.helpers import (
     _RAW_2021,
     _annual_observations,
     _monthly_grid,

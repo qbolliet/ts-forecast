@@ -15,14 +15,14 @@ import numpy as np
 import pandas as pd
 
 # Modules du package
-from ..utils.frequency.utils import (
+from ...utils.frequency.utils import (
     detect_dataset_frequency,
     detect_index_frequency,
     target_offset_for_index,
     is_higher_frequency,
     normalize_frequency,
 )
-from ..panel.utils import (
+from ...panel.utils import (
     check_entity_labels,
     get_entity_codes,
     get_entity_mask,
@@ -30,9 +30,9 @@ from ..panel.utils import (
     is_panel_data,
     normalize_entity_key,
 )
-from ..utils.parse.utils import build_frequency_string
-from ..utils.time.utils import get_period_start, get_period_end
-from ..utils.frequency.converter import FrequencyConverter
+from ...utils.parse.utils import build_frequency_string
+from ...utils.time.utils import get_period_start, get_period_end
+from ...utils.frequency.converter import FrequencyConverter
 
 # Type pour le scope d'imputation (fenêtre de prédiction)
 ImputationScope = Literal['strict', 'extended_backward', 'extended_forward', 'extended_both']

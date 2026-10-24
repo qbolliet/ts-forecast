@@ -30,12 +30,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
-from tsforecast.frequency.imputation_window import ImputationScope, TrainingScope
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation._components.imputation_window import ImputationScope, TrainingScope
 
 # Outils de test partagés
 from tests.support.estimators import SpyEstimator
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     fit_quietly,
     fit_transform_quietly,
     fit_with_spy,
@@ -595,7 +595,7 @@ class TestInertCombinations:
         """Under ``'interpolate'``, ``fit_predict_order='cv'`` scores nothing."""
         calls = []
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=lambda *args, **kwargs: calls.append(1) or np.zeros(2),
         ):
             fit_with_spy(reference_timeseries, fit_predict_order='cv', cv=3)

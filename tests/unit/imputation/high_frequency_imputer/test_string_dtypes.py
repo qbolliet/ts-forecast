@@ -14,7 +14,7 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Objets testés
-from tsforecast.frequency import PROVENANCE_DTYPE, HighFrequencyImputer, ProvenanceType
+from tsforecast.imputation import PROVENANCE_DTYPE, HighFrequencyImputer, ProvenanceType
 
 # Jeux de données partagés
 from tests.support.datasets import build_panel_reference

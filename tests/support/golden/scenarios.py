@@ -24,7 +24,7 @@ from sklearn.model_selection import KFold
 from sklearn.pipeline import make_pipeline
 
 # Composant figé
-from tsforecast.frequency import HighFrequencyImputer
+from tsforecast.imputation import HighFrequencyImputer
 
 # Jeux de données partagés
 from tests.support.datasets import (

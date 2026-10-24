@@ -35,11 +35,11 @@ from .imputation_plan import MaterializationWay
 # Primitives d'origine de cellule
 from .provenance import CELL_ORIGIN_DTYPE, CellOrigin, max_origin
 # Normalisation des fréquences détectées
-from ..utils.frequency.utils import normalize_frequency
+from ...utils.frequency.utils import normalize_frequency
 # Nom réservé du niveau de fréquence, partagé avec la sortie de l'imputeur
-from ..utils._constants import FREQUENCY_LEVEL_NAME
+from ...utils._constants import FREQUENCY_LEVEL_NAME
 # Utilitaires de panel : découpage et normalisation des clés d'entité
-from ..panel.utils import get_entity_codes, iter_entity_blocks, normalize_entity_key
+from ...panel.utils import get_entity_codes, iter_entity_blocks, normalize_entity_key
 
 
 # Clé d'entité, tuple normalisé ("()" pour une série temporelle)
@@ -63,7 +63,7 @@ def _empty_rows() -> pd.DataFrame:
 
     Returns:
         Empty frame with columns ``value`` (``float64``), ``freq`` (``str``)
-        and ``origin`` (:data:`~tsforecast.frequency.provenance.CELL_ORIGIN_DTYPE`).
+        and ``origin`` (:data:`~tsforecast.imputation._components.provenance.CELL_ORIGIN_DTYPE`).
 
     Examples:
         >>> _empty_rows().dtypes.astype(str).tolist()
@@ -149,7 +149,7 @@ class TrainingSet:
             cell produced by an earlier stage (``str`` dtype).
         row_origin: :data:`CellOrigin` of each row of :attr:`y`, same two
             sources as :attr:`row_frequency` (ordered categorical dtype
-            :data:`~tsforecast.frequency.provenance.CELL_ORIGIN_DTYPE`).
+            :data:`~tsforecast.imputation._components.provenance.CELL_ORIGIN_DTYPE`).
         blocks: Mapping entity -> ``f_block(e)``, the composition of the
             mutualized set. It does not depend on the stage: only the
             divisors do.
@@ -513,7 +513,7 @@ class TrainingSetBuilder:
 
         Examples:
             >>> import pandas as pd
-            >>> from tsforecast.frequency.training_set_builder import TrainingSetBuilder
+            >>> from tsforecast.imputation._components.training_set_builder import TrainingSetBuilder
             >>> rows = {
             ...     ('FR',): pd.DataFrame({'freq': ['Y', 'Q']}),
             ...     ('DE',): pd.DataFrame({'freq': ['Q', 'Q']}),

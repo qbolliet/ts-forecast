@@ -10,7 +10,7 @@ Elle répond à quatre besoins récurrents :
 |--------|-----------|---------|----------|
 | Évaluer un modèle sans fuite temporelle | `tsforecast.crossvals` | [Cross-validation temporelle](concepts/cross_validation.md) | [Ensembles train/test rigoureux](tutorials/pseudo_real_time_forecast.md) |
 | Reproduire l'information réellement disponible à une date | `tsforecast.delays` | [Délais de publication](concepts/publication_delays.md) | [Délais de publication](tutorials/publication_delays.md) |
-| Combiner des variables de fréquences différentes | `tsforecast.frequency` | [Imputation multi-fréquences](concepts/mixed_frequency_imputation.md) | [Imputation multi-fréquences](tutorials/mixed_frequency_imputation.md) |
+| Combiner des variables de fréquences différentes | `tsforecast.imputation` | [Imputation multi-fréquences](concepts/mixed_frequency_imputation.md) | [Imputation multi-fréquences](tutorials/mixed_frequency_imputation.md) |
 | Enchaîner des transformations qui touchent X *et* y | `tsforecast.xy` | [Pipeline XY](concepts/xy_pipeline.md) | [Pipeline XY](tutorials/xy_pipeline.md) |
 | Appliquer une transformation par entité d'un panel | `tsforecast.panel` | [Transformations par entité](concepts/panelwise_transforms.md) | [Transformations par entité](tutorials/panelwise_transforms.md) |
 | Manipuler fréquences, durées, positions, dates | `tsforecast.utils` | [Utilitaires temporels](concepts/temporal_utils.md) | [Utilitaires temporels](tutorials/temporal_utils.md) |

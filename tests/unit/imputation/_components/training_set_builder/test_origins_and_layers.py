@@ -32,11 +32,11 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import ELIGIBLE_ORIGINS
-from tsforecast.frequency.provenance import CELL_ORIGIN_DTYPE
+from tsforecast.imputation.high_frequency_imputer import ELIGIBLE_ORIGINS
+from tsforecast.imputation._components.provenance import CELL_ORIGIN_DTYPE
 
 # Constantes et fabriques partagées du paquet
-from tests.unit.frequency.training_set_builder.helpers import (
+from tests.unit.imputation._components.training_set_builder.helpers import (
     PANEL_F_BLOCKS,
     build_panel_f,
     build_ts,

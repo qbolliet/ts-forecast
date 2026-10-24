@@ -4,7 +4,7 @@ from typing import Callable, Dict, Tuple, Union
 
 import pytest
 
-from tests.integration.frequency.realistic_runs import DATASET_FIXTURES, build_record
+from tests.integration.imputation.realistic_runs import DATASET_FIXTURES, build_record
 
 
 @pytest.fixture(scope='session')
@@ -13,7 +13,7 @@ def realistic_run(request) -> Callable[[str, str, Union[bool, str]], dict]:
 
     Returns:
         Callable ``(dataset, strategy, modality) -> record`` (see
-        :func:`~tests.integration.frequency.realistic_runs.build_record`). The
+        :func:`~tests.integration.imputation.realistic_runs.build_record`). The
         records are shared between modules: a test must never mutate them.
     """
     cache: Dict[Tuple[str, str, str], dict] = {}

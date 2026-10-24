@@ -469,7 +469,7 @@ def irregular_index_timeseries(_irregular_index_timeseries_session: pd.DataFrame
     history starting in 2015, three years before the monthly grid
     (2018-01-01). The union with the monthly grid introduces isolated annual
     anchors before its start, and the resulting index is genuinely
-    irregular (:func:`tsforecast.frequency.is_regular` is ``False``) — not
+    irregular (:func:`tsforecast.utils.frequency.is_regular` is ``False``) — not
     only a regular grid dotted with NaN, unlike every other fixture in this
     module.
     """

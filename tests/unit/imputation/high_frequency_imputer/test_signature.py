@@ -14,7 +14,7 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Objet testé
-from tsforecast.frequency import HighFrequencyImputer
+from tsforecast.imputation import HighFrequencyImputer
 
 # Lecture des attributs publics partagée avec le golden master
 from tests.support.golden.scenarios import public_attribute_names

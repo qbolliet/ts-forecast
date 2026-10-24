@@ -24,8 +24,8 @@ import pandas as pd
 from sklearn.linear_model import LinearRegression
 
 # Objet testé et collaborateurs publics
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
-from tsforecast.frequency.training_set_builder import TrainingSet, TrainingSetBuilder
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation._components.training_set_builder import TrainingSet, TrainingSetBuilder
 from tsforecast.utils.frequency import normalize_frequency
 
 # Estimateurs factices partagés

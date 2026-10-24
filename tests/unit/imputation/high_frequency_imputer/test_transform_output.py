@@ -13,10 +13,10 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.provenance import ProvenanceType
+from tsforecast.imputation._components.provenance import ProvenanceType
 
 # Outils de test partagés
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     assert_same_state,
     fit_quietly,
     fit_transform_quietly,

@@ -7,7 +7,7 @@ entity, and the ordering of variables on the fitted sets, plus the worked
 examples of the stage plan and of the provenance of the reference time series.
 The module also holds the map from each cross-cutting property to the tests of
 the whole package. Paths are relative to
-``tests/unit/frequency/high_frequency_imputer/``; each property is measured on
+``tests/unit/imputation/high_frequency_imputer/``; each property is measured on
 the time series AND on the panel wherever a panel dataset applies. A test
 marked *xfail* measures the property against a known anomaly.
 
@@ -54,7 +54,7 @@ Aggregation additivity     ``test_invariants::TestAggregationAdditivity`` (TS,
                            test_carried_covariate_sums_to_the_period_total``.
                            Realistic datasets, three strategies, predictions
                            and fallbacks alike:
-                           ``tests/integration/frequency/test_hfi_on_realistic_dataset.py::
+                           ``tests/integration/imputation/test_hfi_on_realistic_dataset.py::
                            TestPeriodTotals`` (irregular TS, heterogeneous
                            panel, three modalities). At transform: the new 2023
                            periods (``test_transform::TestTransformOnLaterDates``,
@@ -92,7 +92,7 @@ No stretching past the     ``test_transform::TestTransformOutsideWindow`` (TS,
 observed coverage          and ``test_transform_outside_fit_window_on_panel``),
                            ``TestTransformOnLaterDates`` (new periods imputed,
                            TS and PANEL-F),
-                           ``tests/integration/frequency/test_hfi_on_realistic_dataset.py::
+                           ``tests/integration/imputation/test_hfi_on_realistic_dataset.py::
                            TestShortEntityCoverage`` (realistic heterogeneous
                            panel fitted to 2023-12: Allemagne never stretched
                            past 2024-04, no cell filled past its column's
@@ -238,7 +238,7 @@ perturbations on ``PANEL-X`` — reversed entities, special column names,
 non-standard index names, three-level index; shuffled rows refused
 (``TestPerturbationInvariance``) —, start-of-period positions
 (``TestPeriodPositions``); the realistic datasets live in
-``tests/integration/frequency/test_hfi_on_realistic_dataset.py``; aggregated
+``tests/integration/imputation/test_hfi_on_realistic_dataset.py``; aggregated
 warnings of phase 5: ``test_fit_phases::TestAggregatedWarnings``.
 Transform side, ``test_transform``: frequency control (one warning naming the
 pair, fit frequencies kept, a missing column — even one entirely empty at fit
@@ -262,11 +262,11 @@ from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import make_pipeline
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
-from tsforecast.frequency.training_set_builder import TrainingSetBuilder
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation._components.training_set_builder import TrainingSetBuilder
 
 # Outils de test partagés
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     AXIS_COMBINATIONS,
     by_entity,
     entity_block,
@@ -291,7 +291,7 @@ class TestStaticInvariants:
         """The source never tests ``impute_intermediate_frequencies`` for truthiness."""
         module_path = (
             Path(__file__).resolve().parents[4]
-            / 'tsforecast' / 'frequency' / 'high_frequency_imputer.py'
+            / 'tsforecast' / 'imputation' / 'high_frequency_imputer.py'
         )
         source = module_path.read_text(encoding='utf-8')
 
@@ -310,7 +310,7 @@ class TestStaticInvariants:
         """Les paramètres supprimés ne réapparaissent nulle part dans le module."""
         module_path = (
             Path(__file__).resolve().parents[4]
-            / 'tsforecast' / 'frequency' / 'high_frequency_imputer.py'
+            / 'tsforecast' / 'imputation' / 'high_frequency_imputer.py'
         )
         source = module_path.read_text(encoding='utf-8')
         for removed in ('cascade_refitting', 'train_on_partial_coverage',
@@ -320,12 +320,12 @@ class TestStaticInvariants:
 
     def test_class_is_exported(self):
         """La classe est exportée sous son nom canonique, sans suffixe."""
-        import tsforecast.frequency as frequency_module
+        import tsforecast.imputation as imputation_module
 
-        assert 'HighFrequencyImputer' in frequency_module.__all__
-        assert 'HighFrequencyImputer2' not in frequency_module.__all__
-        assert not hasattr(frequency_module, 'HighFrequencyImputer2')
-        assert frequency_module.HighFrequencyImputer is HighFrequencyImputer
+        assert 'HighFrequencyImputer' in imputation_module.__all__
+        assert 'HighFrequencyImputer2' not in imputation_module.__all__
+        assert not hasattr(imputation_module, 'HighFrequencyImputer2')
+        assert imputation_module.HighFrequencyImputer is HighFrequencyImputer
 
 
 class TestNaNInvariant:
@@ -494,7 +494,7 @@ class TestOrderingSeesTheFittedSets:
         )
         params.update(overrides)
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=_spy,
         ):
             imputer = fit_with_spy(data, **params)
@@ -601,7 +601,7 @@ class TestOrderingSeesTheFittedSets:
         """Sous l'ordre 'frequency', aucune validation croisée n'est déclenchée."""
         calls = []
         with patch(
-            'tsforecast.frequency.variable_orderer.cross_val_score',
+            'tsforecast.imputation._components.variable_orderer.cross_val_score',
             side_effect=lambda *a, **k: calls.append(1) or np.zeros(2),
         ):
             imputer = fit_with_spy(

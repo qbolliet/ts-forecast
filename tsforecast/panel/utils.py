@@ -295,7 +295,7 @@ def normalize_entity_mapping(mapping: Mapping[Any, Any]) -> Dict[tuple, Any]:
     A scalar key designates a single-level entity, exactly like an entity
     argument passed to :func:`normalize_entity_key`: ``{'FR': 'Q'}`` and
     ``{('FR',): 'Q'}`` are the same binding. The single crossing point for
-    the per-entity bindings read by the components of ``tsforecast.frequency``.
+    the per-entity bindings read by the components of ``tsforecast.imputation``.
 
     Args:
         mapping: Mapping entity key -> value, keys scalar or tuple.

@@ -20,14 +20,14 @@ import pytest
 from sklearn.base import clone
 
 # Objets testés
-from tsforecast.frequency.aggregation_constraint import (
+from tsforecast.imputation._components.aggregation_constraint import (
     AggregationConstraint,
     DEFAULT_CONSTRAINT_KEY,
 )
-from tsforecast.frequency.covariate_materializer import CovariateMaterializer
+from tsforecast.imputation._components.covariate_materializer import CovariateMaterializer
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.aggregation_constraint.helpers import (
+from tests.unit.imputation._components.aggregation_constraint.helpers import (
     _annual_observations,
     _monthly_grid,
     _raw_predictions,

@@ -19,13 +19,13 @@ from sklearn.base import clone
 from sklearn.exceptions import NotFittedError
 
 # Objets testés
-from tsforecast.frequency.stage_scaler import DEFAULT_SCALE_KEY, StageScaler
+from tsforecast.imputation._components.stage_scaler import DEFAULT_SCALE_KEY, StageScaler
 
 # Perturbations partagées
 from tests.support.perturbations import shuffle_rows, with_duplicated_rows
 
 # Outils de test partagés du paquet
-from tests.unit.frequency.stage_scaler.helpers import (
+from tests.unit.imputation._components.stage_scaler.helpers import (
     _EXACT,
     _make_scaler,
     _monthly_grid,

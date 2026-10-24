@@ -1,1 +1,1 @@
-::: tsforecast.frequency.high_frequency_imputer.HighFrequencyImputer
+::: tsforecast.imputation.high_frequency_imputer.HighFrequencyImputer

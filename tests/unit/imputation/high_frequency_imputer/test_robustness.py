@@ -9,7 +9,7 @@ the invariance of the fit to the index perturbations of
 column names, non-standard index names, three-level index; shuffled rows are
 refused); and the start-of-period position, including the absence of an extra
 row on an ``MS`` grid. The realistic datasets of notebook 3
-are integration tests: ``tests/integration/frequency/test_hfi_on_realistic_dataset.py``.
+are integration tests: ``tests/integration/imputation/test_hfi_on_realistic_dataset.py``.
 
 The duplicated index and the unsorted time series are pinned in
 ``test_fit_phases.py::TestPhaseFiveEdgeCases``.
@@ -24,7 +24,7 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.frequency.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
 
 # Outils de test partagés
 from tests.support.datasets import build_panel_reference
@@ -38,7 +38,7 @@ from tests.support.perturbations import (
     with_index_names,
     with_special_column_names,
 )
-from tests.unit.frequency.high_frequency_imputer.helpers import (
+from tests.unit.imputation.high_frequency_imputer.helpers import (
     FR,
     fit_quietly,
     fit_transform_quietly,

@@ -217,7 +217,7 @@ sur ses propres observations quand le `transform` l'observe, sans ancre
 ## Pour aller plus loin
 
 - Tutoriel : [Imputation multi-fréquences](../tutorials/mixed_frequency_imputation.md)
-- API : [HighFrequencyImputer](../api/frequency/HighFrequencyImputer.md),
-  [provenance](../api/frequency/provenance.md),
-  [aggregation_constraint](../api/frequency/aggregation_constraint.md)
+- API : [HighFrequencyImputer](../api/imputation/HighFrequencyImputer.md),
+  [provenance](../api/imputation/provenance.md),
+  [aggregation_constraint](../api/imputation/aggregation_constraint.md)
 - Métriques de tracking : [`imputation_metrics`](../guides/mlflow_tracking.md)

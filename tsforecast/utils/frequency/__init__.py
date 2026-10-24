@@ -19,6 +19,8 @@ from .converter import (
 from .detector import (
     FrequencyDetector
 )
+from .aligner import FrequencyAligner
+from .regularizer import IndexRegularizer, is_regular, regularize
 from .utils import (
     normalize_frequency,
     canonicalize_frequency,
@@ -46,6 +48,10 @@ __all__ = [
     'AggregationMethod',
     'InterpolationMethod',
     'FrequencyDetector',
+    'FrequencyAligner',
+    'IndexRegularizer',
+    'is_regular',
+    'regularize',
     'normalize_frequency',
     'canonicalize_frequency',
     'to_literal',

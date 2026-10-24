@@ -27,11 +27,11 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Doublure d'estimateur et matrice des scénarios partagées
-from tests.integration.frequency.realistic_runs import CASES
+from tests.integration.imputation.realistic_runs import CASES
 from tests.support.estimators import SpyEstimator
 
 # Composants testés
-from tsforecast.frequency import HighFrequencyImputer, ProvenanceType
+from tsforecast.imputation import HighFrequencyImputer, ProvenanceType
 from tsforecast.tracking import imputation_metrics
 from tsforecast.xy import XYPipeline
 
