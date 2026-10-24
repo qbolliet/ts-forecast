@@ -115,7 +115,8 @@ class TargetFrequencyValidator:
 
         Returns:
             Tuple ``(is_panel, entities)`` where ``entities`` is ``None`` for
-            time series data and a list of entity tuples for panel data.
+            time series data and a list of entity tuples for panel data, in
+            their order of first appearance among the keys.
 
         Raises:
             ValueError: If detected_frequencies is empty (structure cannot be
@@ -143,8 +144,10 @@ class TargetFrequencyValidator:
         if not tuple_keys:
             return False, None
 
-        # Cas panel : extraction des entités uniques (tous les niveaux sauf le dernier = variable)
-        entities = list({k[:-1] for k in tuple_keys})
+        # Cas panel : extraction des entités uniques (tous les niveaux sauf le dernier = variable),
+        # dans l'ordre de première apparition : un ensemble rendrait un ordre dépendant du
+        # hachage des chaînes, donc variable d'un processus à l'autre
+        entities = list(dict.fromkeys(k[:-1] for k in tuple_keys))
         return True, entities
 
     # Méthode auxiliaire de validation de la fréquence cible dans le cas de données de séries temporelles
@@ -305,7 +308,8 @@ class TargetFrequencyValidator:
             detected_frequencies: Dict mapping columns to frequencies.
 
         Returns:
-            Highest frequency string.
+            Highest frequency string. Among frequencies of the same order
+            (``'W-SUN'`` and ``'W-MON'``), the first one met in the dict.
 
         Raises:
             ValueError: If no valid frequencies found.
@@ -315,9 +319,11 @@ class TargetFrequencyValidator:
         if not valid_freqs:
             raise ValueError("No valid frequencies detected in the dataset")
 
-        # Détermination de la fréquence avec l'ordre le plus bas (plus granulaire)
+        # Détermination de la fréquence avec l'ordre le plus bas (plus granulaire). Parcours
+        # dans l'ordre de première apparition : à ordre égal ('W-SUN' et 'W-MON', 'ME' et
+        # 'MS'), "min" retient la première rencontrée, indépendamment du hachage des chaînes
         freq_orders = {}
-        for freq in set(valid_freqs):
+        for freq in dict.fromkeys(valid_freqs):
             try:
                 freq_orders[freq] = get_frequency_order(freq)
             except ValueError:

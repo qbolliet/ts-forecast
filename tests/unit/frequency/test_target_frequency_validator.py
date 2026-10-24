@@ -3,8 +3,13 @@
 Tests validation of target frequencies against detected data frequencies,
 for both time series and panel data scenarios.
 """
-import pytest
+import os
+import subprocess
+import sys
 import warnings
+from pathlib import Path
+
+import pytest
 
 from tsforecast.frequency.target_frequency_validator import TargetFrequencyValidator
 from tsforecast.utils.frequency.utils import detect_dataset_frequency
@@ -437,3 +442,74 @@ class TestHeterogeneousCoveragePanel:
         blanked = {k: (None if k[0] == 'Italie' else v) for k, v in detected.items()}
         with pytest.raises(ValueError, match="No valid frequencies detected for entity 'Italie'|Italie"):
             TargetFrequencyValidator().validate('MS', blanked)
+
+
+
+
+# =============================================================================
+# Reproductibilité d'un processus à l'autre
+# =============================================================================
+# Graines de hachage des processus neufs : sous un parcours d'ensemble, elles
+# donnent trois ordres d'entités différents et les deux départages possibles
+# entre 'W-SUN' et 'W-MON'
+_HASH_SEEDS = ('0', '1', '3')
+
+# Script de l'ordre des entités : validation d'un panel de trois entités
+_ENTITY_ORDER_SCRIPT = (
+    "from tsforecast.frequency.target_frequency_validator import TargetFrequencyValidator\n"
+    "detected = {(e, c): f for e in ('FR', 'DE', 'IT') for c, f in (('m1', 'M'), ('q1', 'Q'))}\n"
+    "print(repr(list(TargetFrequencyValidator().validate('M', detected))))\n"
+)
+
+# Script du départage : deux colonnes hebdomadaires de même ordre, cible
+# quotidienne trop fine, ramenée à la plus fine des fréquences détectées
+_TIE_SCRIPT = (
+    "import warnings\n"
+    "from tsforecast.frequency.target_frequency_validator import TargetFrequencyValidator\n"
+    "warnings.simplefilter('ignore')\n"
+    "detected = {'a': 'W-SUN', 'b': 'W-MON'}\n"
+    "print(TargetFrequencyValidator().validate('D', detected, on_frequency_mismatch='warn'))\n"
+)
+
+
+def _outputs_under_hash_seeds(script: str) -> list:
+    """Run a script in fresh processes, one per hash seed, and collect their output.
+
+    Args:
+        script: Python source printing one line.
+
+    Returns:
+        The stripped standard output of each process, in the order of
+        ``_HASH_SEEDS``.
+    """
+    # Racine du dépôt : import de tsforecast depuis les sources
+    root = Path(__file__).resolve().parents[3]
+    outputs = []
+    for seed in _HASH_SEEDS:
+        completed = subprocess.run(
+            [sys.executable, '-c', script],
+            env={**os.environ, 'PYTHONHASHSEED': seed, 'PYTHONPATH': str(root)},
+            capture_output=True, text=True, check=True, cwd=root,
+        )
+        outputs.append(completed.stdout.strip())
+    return outputs
+
+
+@pytest.mark.slow
+class TestReproducibleAcrossProcesses:
+    """The result never depends on the string hashing of the process."""
+
+    def test_entities_in_order_of_first_appearance(self):
+        """The keys of a panel result follow the first appearance of the entities."""
+        # Valeur d'or : FR, DE, IT, ordre des clés des fréquences détectées
+        assert _outputs_under_hash_seeds(_ENTITY_ORDER_SCRIPT) == (
+            ["[('FR',), ('DE',), ('IT',)]"] * len(_HASH_SEEDS)
+        )
+
+    def test_tie_between_same_order_frequencies_goes_to_the_first(self):
+        """Between two frequencies of the same order, the first column's wins.
+
+        ``'W-SUN'`` and ``'W-MON'`` are equally fine: the daily target,
+        finer than both, is brought back to the one met first.
+        """
+        assert _outputs_under_hash_seeds(_TIE_SCRIPT) == ['W-SUN'] * len(_HASH_SEEDS)

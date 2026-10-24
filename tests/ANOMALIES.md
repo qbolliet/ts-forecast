@@ -5295,6 +5295,37 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   (200 000 × 20 cellules) : mémoire 446 Mo → 4 Mo, statistiques 2,1 s → 0,05 s, `mask` 280 ms → 10 ms, avec ou sans
   pyarrow. Le contournement `mask(cond, DataFrame(membre, dtype=object))` disparaît.
 
+### ANO-FREQ-088 — Fréquence cible effective (ordre des entités, départage à ordre égal) variable d'un processus à l'autre
+- **Type** : [CODE] comportement (déterminisme)
+- **Composant** : `tsforecast/frequency/target_frequency_validator.py::TargetFrequencyValidator._infer_structure`
+  et `_get_highest_frequency_timeseries` (lus par `validate`, donc `HighFrequencyImputer.effective_target_frequency_`)
+- **Sévérité** : majeure (le second volet change une valeur, pas seulement un ordre)
+- **Observé** : les entités d'un panel sont extraites par `list({k[:-1] for k in tuple_keys})` : un ensemble, dont
+  l'ordre d'itération dépend du hachage des chaînes, salé par processus (`PYTHONHASHSEED`). Le dictionnaire
+  `{entité: fréquence}` rendu par `validate` change donc d'ordre de clés d'un processus à l'autre
+  (`PYTHONHASHSEED=0` : `IT, DE, FR` ; `=1` : `IT, FR, DE` ; `=2` : `FR, IT, DE`), et avec lui
+  `effective_target_frequency_`, les dictionnaires par entité de `frequency_progression_` et le `pred_freq` de chaque
+  étape du plan. Valeurs, sorties, provenance et avertissements sont identiques : seul l'ordre varie. Relevé par le
+  golden master (deux générations à graines de hachage différentes : 2 148 écarts, tous de cette nature).
+  Second volet, de même cause : `_get_highest_frequency_timeseries` parcourt `set(valid_freqs)` avant un `min` sur
+  l'ordre de fréquence ; à ordre égal (`'W-SUN'` et `'W-MON'` : 8 ; `'ME'` et `'MS'` : 9), la fréquence retenue dépend
+  du hachage. `validate('D', {'a': 'W-SUN', 'b': 'W-MON'}, on_frequency_mismatch='warn')` rend `'W-SUN'` sous
+  `PYTHONHASHSEED=0..2` et `'W-MON'` sous `3..5` : la **fréquence cible effective elle-même** varie.
+- **Attendu** : un résultat reproductible : entités dans l'ordre de première apparition (l'ordre de `entities_`),
+  départage des fréquences de même ordre par première apparition (ordre des colonnes).
+- **Reproduction** :
+  ```python
+  # à lancer sous PYTHONHASHSEED=0, puis 1, puis 2
+  from tsforecast.frequency.target_frequency_validator import TargetFrequencyValidator
+  detected = {(e, c): f for e in ('FR', 'DE', 'IT') for c, f in (('m1', 'M'), ('q1', 'Q'))}
+  print(list(TargetFrequencyValidator().validate('M', detected)))
+  ```
+- **Correctif** (2026-10-24, avant le refactoring) : les deux parcours d'ensemble deviennent des parcours de
+  `dict.fromkeys(...)` (ordre de première apparition). Golden master régénéré après le correctif, sans tri des clés.
+- **Test** : `tests/unit/frequency/test_target_frequency_validator.py::TestReproducibleAcrossProcesses` (trois processus
+  neufs à `PYTHONHASHSEED` fixes ; les deux tests échouent sans le correctif)
+- **Statut** : corrigée (2026-10-24)
+
 ## BASE
 
 ### ANO-BASE-001 — `InverseTransformer` inutilisable après `clone`
