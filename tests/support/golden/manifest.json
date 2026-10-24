@@ -1,0 +1,2848 @@
+{
+  "generator": "tests/support/golden/generate.py",
+  "environment": {
+    "python": "3.13",
+    "platform": "Windows-AMD64",
+    "pandas": "3.0.6",
+    "numpy": "2.3.2",
+    "scikit-learn": "1.9.1",
+    "scipy": "1.16.1"
+  },
+  "common_params": {
+    "target_frequency": "M",
+    "restore_original_values": true
+  },
+  "estimators": {
+    "imputed_linear": "make_pipeline(SimpleImputer(), LinearRegression())",
+    "linear": "LinearRegression()"
+  },
+  "cv": "KFold(n_splits=3, shuffle=True, random_state=0)",
+  "datasets": {
+    "panel_x": {
+      "cutoff": "2023-01-01",
+      "target": "q1"
+    },
+    "ts": {
+      "cutoff": "2023-01-01",
+      "target": "q1"
+    },
+    "panel": {
+      "cutoff": "2023-01-01",
+      "target": "q1"
+    },
+    "panel_f": {
+      "cutoff": "2023-01-01",
+      "target": "q1"
+    },
+    "irregular_ts": {
+      "cutoff": "2023-01-01",
+      "target": "pib_trimestriel"
+    },
+    "heterogeneous_panel": {
+      "cutoff": "2023-01-01",
+      "target": "pib_trimestriel"
+    }
+  },
+  "cases": [
+    {
+      "id": "panel_x__tolerate_nan__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__tolerate_nan__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__tolerate_nan__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__tolerate_nan__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__tolerate_nan__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__tolerate_nan__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__tolerate_nan__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__tolerate_nan__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__interpolate__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__interpolate__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__interpolate__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__interpolate__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__interpolate__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__interpolate__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__interpolate__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__interpolate__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__false__cv__sum__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__false__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__false__cv__none__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__false__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__covariates_only__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__covariates_only__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__covariates_only__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__covariates_only__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__covariates_only__cv__sum__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__covariates_only__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__covariates_only__cv__none__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__covariates_only__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__true__cv__sum__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__true__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__true__cv__none__observed__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__true__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__tolerate_nan__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__tolerate_nan__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__tolerate_nan__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__tolerate_nan__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__tolerate_nan__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__tolerate_nan__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__tolerate_nan__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__tolerate_nan__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__interpolate__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__interpolate__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__interpolate__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__interpolate__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__interpolate__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__interpolate__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__interpolate__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__interpolate__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__false__cv__sum__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__false__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__false__cv__none__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__false__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__covariates_only__frequency__sum__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__covariates_only__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__covariates_only__frequency__none__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__covariates_only__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__covariates_only__cv__sum__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__covariates_only__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__covariates_only__cv__none__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__covariates_only__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__true__cv__sum__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__true__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__true__cv__none__observed__x__imputed_linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__true__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__tolerate_nan__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__tolerate_nan__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__tolerate_nan__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__tolerate_nan__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__tolerate_nan__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__tolerate_nan__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__tolerate_nan__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__tolerate_nan__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__interpolate__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__interpolate__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__interpolate__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__interpolate__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__interpolate__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__interpolate__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__interpolate__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__interpolate__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__false__cv__sum__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__false__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__false__cv__none__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__false__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__covariates_only__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__covariates_only__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__covariates_only__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__covariates_only__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__covariates_only__cv__sum__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__covariates_only__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__covariates_only__cv__none__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__covariates_only__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__true__cv__sum__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__true__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel__model__true__cv__none__observed__x__imputed_linear",
+      "dataset": "panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel__model__true__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__tolerate_nan__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__tolerate_nan__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__tolerate_nan__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__tolerate_nan__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__tolerate_nan__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__tolerate_nan__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__tolerate_nan__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__tolerate_nan__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__interpolate__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__interpolate__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__interpolate__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__interpolate__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__interpolate__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__interpolate__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__interpolate__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__interpolate__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__false__cv__sum__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__false__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__false__cv__none__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__false__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__covariates_only__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__covariates_only__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__covariates_only__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__covariates_only__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__covariates_only__cv__sum__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__covariates_only__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__covariates_only__cv__none__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__covariates_only__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__true__cv__sum__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__true__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_f__model__true__cv__none__observed__x__imputed_linear",
+      "dataset": "panel_f",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_f__model__true__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__tolerate_nan__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__tolerate_nan__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__tolerate_nan__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__tolerate_nan__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__tolerate_nan__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__tolerate_nan__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__tolerate_nan__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__tolerate_nan__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__interpolate__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__interpolate__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__interpolate__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__interpolate__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__interpolate__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__interpolate__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__interpolate__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__interpolate__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__false__cv__sum__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__false__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__false__cv__none__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__false__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__covariates_only__frequency__sum__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__covariates_only__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__covariates_only__frequency__none__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__covariates_only__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__covariates_only__cv__sum__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__covariates_only__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__covariates_only__cv__none__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__covariates_only__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__true__cv__sum__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__true__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__true__cv__none__observed__x__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__true__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__tolerate_nan__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__tolerate_nan__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__tolerate_nan__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__tolerate_nan__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__tolerate_nan__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__tolerate_nan__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__tolerate_nan__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__tolerate_nan__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__interpolate__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__interpolate__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__interpolate__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__interpolate__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__interpolate__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__interpolate__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__interpolate__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__interpolate__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__false__frequency__sum__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__false__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__false__frequency__none__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__false__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__false__cv__sum__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__false__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__false__cv__none__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__false__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__covariates_only__frequency__sum__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__covariates_only__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__covariates_only__frequency__none__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__covariates_only__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__covariates_only__cv__sum__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__covariates_only__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__covariates_only__cv__none__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__covariates_only__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__true__frequency__sum__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__true__frequency__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__true__frequency__none__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__true__frequency__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__true__cv__sum__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__true__cv__sum__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__true__cv__none__observed__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": null,
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__true__cv__none__observed__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__tolerate_nan__false__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/panel_x__tolerate_nan__false__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__tolerate_nan__true__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/panel_x__tolerate_nan__true__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__interpolate__false__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/panel_x__interpolate__false__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__interpolate__true__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/panel_x__interpolate__true__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__false__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/panel_x__model__false__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__false__cv__sum__unobserved__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/panel_x__model__false__cv__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__covariates_only__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/panel_x__model__covariates_only__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__covariates_only__cv__sum__unobserved__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/panel_x__model__covariates_only__cv__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__true__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/panel_x__model__true__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__true__cv__sum__unobserved__x__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/panel_x__model__true__cv__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__tolerate_nan__false__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/heterogeneous_panel__tolerate_nan__false__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__tolerate_nan__true__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/heterogeneous_panel__tolerate_nan__true__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__interpolate__false__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/heterogeneous_panel__interpolate__false__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__interpolate__true__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/heterogeneous_panel__interpolate__true__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__false__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/heterogeneous_panel__model__false__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__false__cv__sum__unobserved__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/heterogeneous_panel__model__false__cv__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__covariates_only__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/heterogeneous_panel__model__covariates_only__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__covariates_only__cv__sum__unobserved__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/heterogeneous_panel__model__covariates_only__cv__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__true__frequency__sum__unobserved__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/heterogeneous_panel__model__true__frequency__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__true__cv__sum__unobserved__x__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": false,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": true
+      },
+      "file": "cases/heterogeneous_panel__model__true__cv__sum__unobserved__x__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__tolerate_nan__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__tolerate_nan__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__tolerate_nan__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__tolerate_nan__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__interpolate__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__interpolate__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__interpolate__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__interpolate__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__false__cv__sum__observed__xy__imputed_linear",
+      "dataset": "ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__false__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__covariates_only__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__covariates_only__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__covariates_only__cv__sum__observed__xy__imputed_linear",
+      "dataset": "ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__covariates_only__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__true__cv__sum__observed__xy__imputed_linear",
+      "dataset": "ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__true__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__tolerate_nan__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__tolerate_nan__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__tolerate_nan__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__tolerate_nan__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__interpolate__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__interpolate__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__interpolate__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__interpolate__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__false__cv__sum__observed__xy__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__false__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__covariates_only__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__covariates_only__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__covariates_only__cv__sum__observed__xy__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__covariates_only__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "irregular_ts__model__true__cv__sum__observed__xy__imputed_linear",
+      "dataset": "irregular_ts",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/irregular_ts__model__true__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__tolerate_nan__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__tolerate_nan__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__tolerate_nan__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__tolerate_nan__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__interpolate__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__interpolate__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__interpolate__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__interpolate__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__false__cv__sum__observed__xy__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__false__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__covariates_only__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__covariates_only__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__covariates_only__cv__sum__observed__xy__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__covariates_only__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__true__cv__sum__observed__xy__imputed_linear",
+      "dataset": "panel_x",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__true__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__tolerate_nan__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__tolerate_nan__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__tolerate_nan__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__tolerate_nan__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__interpolate__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__interpolate__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__interpolate__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__interpolate__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__false__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__false__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__false__cv__sum__observed__xy__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__false__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__covariates_only__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__covariates_only__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__covariates_only__cv__sum__observed__xy__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__covariates_only__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__true__frequency__sum__observed__xy__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__true__frequency__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "heterogeneous_panel__model__true__cv__sum__observed__xy__imputed_linear",
+      "dataset": "heterogeneous_panel",
+      "with_target": true,
+      "estimator": "imputed_linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/heterogeneous_panel__model__true__cv__sum__observed__xy__imputed_linear.pkl.gz"
+    },
+    {
+      "id": "ts__tolerate_nan__false__frequency__sum__observed__x__linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__tolerate_nan__false__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "ts__tolerate_nan__true__frequency__sum__observed__x__linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__tolerate_nan__true__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "ts__interpolate__false__frequency__sum__observed__x__linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__interpolate__false__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "ts__interpolate__true__frequency__sum__observed__x__linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__interpolate__true__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__false__frequency__sum__observed__x__linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__false__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__false__cv__sum__observed__x__linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__false__cv__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__covariates_only__frequency__sum__observed__x__linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__covariates_only__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__covariates_only__cv__sum__observed__x__linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__covariates_only__cv__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__true__frequency__sum__observed__x__linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__true__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "ts__model__true__cv__sum__observed__x__linear",
+      "dataset": "ts",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/ts__model__true__cv__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__tolerate_nan__false__frequency__sum__observed__x__linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__tolerate_nan__false__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__tolerate_nan__true__frequency__sum__observed__x__linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "tolerate_nan",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__tolerate_nan__true__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__interpolate__false__frequency__sum__observed__x__linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__interpolate__false__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__interpolate__true__frequency__sum__observed__x__linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "interpolate",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__interpolate__true__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__false__frequency__sum__observed__x__linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__false__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__false__cv__sum__observed__x__linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": false,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__false__cv__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__covariates_only__frequency__sum__observed__x__linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__covariates_only__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__covariates_only__cv__sum__observed__x__linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": "covariates_only",
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__covariates_only__cv__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__true__frequency__sum__observed__x__linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "frequency",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__true__frequency__sum__observed__x__linear.pkl.gz"
+    },
+    {
+      "id": "panel_x__model__true__cv__sum__observed__x__linear",
+      "dataset": "panel_x",
+      "with_target": false,
+      "estimator": "linear",
+      "params": {
+        "covariate_strategy": "model",
+        "impute_intermediate_frequencies": true,
+        "fit_predict_order": "cv",
+        "aggregation_constraint": "sum",
+        "impute_unobserved_entities": false
+      },
+      "file": "cases/panel_x__model__true__cv__sum__observed__x__linear.pkl.gz"
+    }
+  ]
+}
