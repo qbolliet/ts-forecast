@@ -288,23 +288,29 @@ class TestStaticInvariants:
     """Properties checked on the source text of the module."""
 
     def test_no_boolean_test_on_impute_intermediate_frequencies(self):
-        """The source never tests ``impute_intermediate_frequencies`` for truthiness."""
-        module_path = (
-            Path(__file__).resolve().parents[4]
-            / 'tsforecast' / 'imputation' / 'high_frequency_imputer.py'
-        )
-        source = module_path.read_text(encoding='utf-8')
+        """The sources never test ``impute_intermediate_frequencies`` for truthiness.
+
+        Two modules read the modality: the class itself and the frequency
+        layout, which builds the progression from it.
+        """
+        package = Path(__file__).resolve().parents[4] / 'tsforecast' / 'imputation'
+        sources = {
+            name: (package / name).read_text(encoding='utf-8')
+            for name in ('high_frequency_imputer.py', '_engine/frequency_layout.py')
+        }
 
         # 'covariates_only' est truthy : un test de vérité serait un bug silencieux
         forbidden = [
-            r'if\s+self\.impute_intermediate_frequencies\s*:',
-            r'if\s+not\s+self\.impute_intermediate_frequencies\s*:',
+            r'if\s+(self\.)?impute_intermediate_frequencies\s*:',
+            r'if\s+not\s+(self\.)?impute_intermediate_frequencies\s*:',
         ]
-        for pattern in forbidden:
-            assert re.search(pattern, source) is None, pattern
+        for name, source in sources.items():
+            for pattern in forbidden:
+                assert re.search(pattern, source) is None, (name, pattern)
 
-        # La comparaison retenue est bien une comparaison d'identité/égalité
-        assert 'self.impute_intermediate_frequencies is False' in source
+        # La comparaison retenue est bien une comparaison d'identité, là où la
+        # progression est construite
+        assert 'impute_intermediate_frequencies is False' in sources['_engine/frequency_layout.py']
 
     def test_removed_parameters_absent_from_source(self):
         """Les paramètres supprimés ne réapparaissent nulle part dans le module."""

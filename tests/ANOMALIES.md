@@ -5326,6 +5326,38 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   neufs à `PYTHONHASHSEED` fixes ; les deux tests échouent sans le correctif)
 - **Statut** : corrigée (2026-10-24)
 
+### ANO-FREQ-089 — `target_frequency` en dict sur une série temporelle : `TypeError: 'NoneType' object is not iterable`
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/imputation/_engine/frequency_layout.py::expand_target_frequency` (appelé par
+  `plan_frequencies`, donc `HighFrequencyImputer.fit`) ; avant l'extraction du plan des fréquences :
+  `HighFrequencyImputer._check_target_frequency_covers_entities`
+- **Sévérité** : mineure (l'entrée est refusée dans les deux cas, seul le message est inutilisable)
+- **Observé** : `HighFrequencyImputer(target_frequency={'FR': 'M'}, ...).fit(serie)` lève
+  `TypeError: 'NoneType' object is not iterable`. Le contrôle de couverture des entités parcourt `entities_`, qui vaut
+  `None` sur une série. Le refus prévu dans `TargetFrequencyValidator._validate_timeseries` (« target_frequency cannot be a
+  dict for simple time series data. Use a string frequency instead. ») n'est jamais atteint : le validateur s'exécute
+  après l'expansion de la cible. Le commentaire du contrôle et la docstring de la classification affirmaient qu'un dict
+  sur une série était « refusé par la validation de format », qui accepte pourtant tout dict non vide. Relevé pendant
+  l'extraction du plan des fréquences, où le comportement a d'abord été conservé tel quel.
+- **Attendu** : une `ValueError` qui nomme la cause et le remède, la même que celle du validateur, levée avant la
+  détection des fréquences (une série n'a pas d'entités à lier).
+- **Reproduction** :
+  ```python
+  from sklearn.linear_model import LinearRegression
+  from tests.support.datasets import build_panel_reference
+  from tsforecast.imputation import HighFrequencyImputer
+  serie = build_panel_reference().loc['FR']
+  HighFrequencyImputer(target_frequency={'FR': 'M'}, estimator=LinearRegression()).fit(serie)
+  # TypeError: 'NoneType' object is not iterable
+  ```
+- **Correctif** (2026-10-25) : `expand_target_frequency` refuse un dict sur une série temporelle par une `ValueError`
+  au message du validateur, avant toute détection ; `check_target_frequency_covers_entities` ne reçoit plus que les
+  entités d'un panel (`TypeError` retirée de sa docstring). Docstrings de la classe (`target_frequency`, `fit`) et de
+  `plan_frequencies` mises à jour. Le refus du validateur reste en place pour un appel direct.
+- **Test** : `tests/unit/imputation/_engine/test_frequency_layout.py::TestTargetFrequency::test_dict_target_on_a_time_series_is_refused`,
+  `::test_imputer_refuses_a_dict_target_on_a_time_series` (le second échoue sur la version précédente avec la `TypeError`)
+- **Statut** : corrigée (2026-10-25)
+
 ## BASE
 
 ### ANO-BASE-001 — `InverseTransformer` inutilisable après `clone`

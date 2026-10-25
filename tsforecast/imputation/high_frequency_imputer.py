@@ -40,12 +40,11 @@ from ..panel.utils import (
     factorize_row_keys,
     get_entity_codes,
     get_unique_panel_entities,
-    iter_entity_blocks,
     is_panel_data,
     normalize_entity_key,
     split_variable_key,
 )
-from ..utils._constants import FREQUENCY_LEVEL_NAME, MONTH_BASED_FREQUENCIES
+from ..utils._constants import FREQUENCY_LEVEL_NAME
 from ._components.aggregation_constraint import (
     ConstraintSetting,
     resolve_aggregation_constraint,
@@ -84,7 +83,6 @@ from ._components.provenance import (
     provenance_statistics,
 )
 from ._components.stage_scaler import ScaleFeatures, StageScaler
-from ._components.target_frequency_validator import TargetFrequencyValidator
 from ._components.training_set_builder import (
     TrainingSet,
     split_training_index,
@@ -100,6 +98,12 @@ from ._engine.params import (
     validate_min_cv_train_size,
     validate_target_frequency_format,
     validate_unit_interval,
+)
+from ._engine.frequency_layout import (
+    misaligned_anchor_pairs,
+    plan_frequencies,
+    stage_frequency_label,
+    stage_frequency_of,
 )
 from ._engine.run_context import FittedComponents, _RunContext
 from ._engine.warnings import WarningAccumulator
@@ -381,9 +385,9 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
     Args:
         target_frequency: Target frequency, as a string applying to every
-            entity, or a dict ``{entity: frequency}``. A dict must name
-            **every** entity of the panel, or ``fit`` raises naming the
-            missing ones.
+            entity, or a dict ``{entity: frequency}`` on a panel only. A
+            dict must name **every** entity of the panel, or ``fit`` raises
+            naming the missing ones; on a time series, ``fit`` refuses it.
         estimator: Estimator applied to every variable, or a dict
             ``{column: estimator}`` with an optional ``'__default__'`` key.
             ``None`` (default) sends every variable to interpolation, with a
@@ -1103,396 +1107,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         )
 
     # -------------------------------------------------------------------------
-    # Fréquences détectées et classification des variables
-    # -------------------------------------------------------------------------
-    # Méthode auxiliaire d'extraction des fréquences d'une colonne par entité
-    def _column_frequencies_by_entity(self, column: str) -> Dict[EntityKey, str]:
-        """Return the frequency of one column for each entity observing it.
-
-        Args:
-            column: Bare column name.
-
-        Returns:
-            Mapping from entity key tuple to detected frequency. A time
-            series yields the single key ``()``; a column with no detected
-            frequency yields an empty dict.
-        """
-        # Itération + filtre plutôt qu'une compréhension indexée par le nom nu :
-        # un panel peut porter la même colonne à des fréquences différentes
-        # selon l'entité, et l'indexer par nom nu ferait gagner la dernière
-        # entité rencontrée — donc dépendre de l'ordre des colonnes en entrée
-        return {
-            split_variable_key(key)[0]: freq
-            for key, freq in self.detected_frequencies_.items()
-            if split_variable_key(key)[1] == column
-        }
-
-    # Méthode auxiliaire des fréquences remises au constructeur du jeu d'entraînement
-    def _training_frequencies(
-        self,
-        column: str,
-        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
-    ) -> Dict[str, Any]:
-        """Return the detected frequencies with the target column made explicit.
-
-        :meth:`_detected_frequencies_by_column` folds a column into its scalar
-        form when every DETECTED entity agrees, which lends that frequency to
-        an entity observing the column at an undetectable frequency (a single
-        observation). The training set must not borrow it: ``f_block(e)`` is
-        the entity's OWN frequency, and a lent one would scale its rows by
-        the wrong divisor. The target column is therefore handed over per
-        entity, each undetectable pair — or pair observed off the calendar
-        bounds of its frequency — mapped to None explicitly — the
-        :class:`TrainingSetBuilder` then drops that block, whatever the other
-        entities do. Covariate entries are left untouched.
-
-        Args:
-            column: Column whose training set is composed.
-            freqs_by_column: Output of :meth:`_detected_frequencies_by_column`.
-
-        Returns:
-            ``freqs_by_column`` itself when no pair of ``column`` is
-            undetectable, otherwise a copy whose ``column`` entry is the
-            explicit per-entity mapping.
-        """
-        # Couples indétectables ou observés hors de leur grille calendaire de
-        # la colonne : rien à expliciter sans eux
-        undetected = [
-            split_variable_key(key)[0]
-            for key in (*self._undetected_frequencies_, *self._misaligned_pairs)
-            if split_variable_key(key)[1] == column
-        ]
-        if not self.is_panel_ or not undetected:
-            return freqs_by_column
-
-        # Liaison par entité : fréquences propres, None pour les indétectables
-        binding: Dict[EntityKey, Optional[str]] = dict(
-            self._column_frequencies_by_entity(column)
-        )
-        binding.update({entity: None for entity in undetected})
-        return {**freqs_by_column, column: binding}
-
-    # Méthode auxiliaire de conversion des fréquences détectées à la forme des consommateurs
-    def _detected_frequencies_by_column(
-        self,
-        transform_frequencies: Optional[Mapping[Union[str, tuple], str]] = None,
-    ) -> Dict[str, Union[str, Dict[EntityKey, str]]]:
-        """Return the detected frequencies keyed by column.
-
-        Two shapes coexist on purpose. ``detected_frequencies_`` is the public
-        attribute, keyed by ``(entity..., column)`` on a
-        panel. ``CovariateMaterializer``, ``StageScaler`` and
-        ``TrainingSetBuilder`` all read the other shape,
-        ``{column: frequency | {entity: frequency}}``. This adapter is the
-        single crossing point between the two, so no consumer ever
-        re-implements the split.
-
-        Args:
-            transform_frequencies: Frequencies a replay detected for the pairs
-                the fit never observed (``_RunContext.transform_frequencies``).
-                None or empty at fit time. They never override a pair of the
-                fit.
-
-        Returns:
-            Mapping from column name to a scalar frequency (time series, or a
-            panel where every entity agrees) or to a per-entity mapping.
-
-        Examples:
-            >>> import numpy as np
-            >>> import pandas as pd
-            >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
-            >>> idx = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['entity', 'date'])
-            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
-            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
-            >>> panel.loc[('DE', dates[2::3]), 'v'] = np.arange(8.0) * 5 + 30
-
-            >>> imputer = HighFrequencyImputer(
-            ...     target_frequency='M', estimator=LinearRegression()
-            ... ).fit(panel)
-            >>> imputer._detected_frequencies_by_column()
-            {'m1': 'M', 'v': {('DE',): 'Q', ('FR',): 'Y'}}
-        """
-        # Couples apparus au transform : aucune fréquence de fit ne les porte,
-        # la détection faite sur les données du transform est leur seule
-        # source. Les couples du fit, eux, ne sont jamais recouverts
-        pairs: Dict[Union[str, tuple], str] = {
-            **(transform_frequencies or {}),
-            **self.detected_frequencies_,
-        }
-
-        # Cas des séries temporelles : les clés sont déjà des noms de colonnes
-        if not self.is_panel_:
-            return dict(pairs)
-
-        # Cas du panel : regroupement par colonne, puis repli sur la forme
-        # scalaire quand toutes les entités s'accordent
-        by_column: Dict[str, Dict[EntityKey, str]] = {}
-        for key, freq in pairs.items():
-            entity, column = split_variable_key(key)
-            by_column.setdefault(column, {})[entity] = freq
-
-        result: Dict[str, Union[str, Dict[EntityKey, str]]] = {}
-        for column, per_entity in by_column.items():
-            unique = set(per_entity.values())
-            result[column] = per_entity if len(unique) > 1 else unique.pop()
-        return result
-
-    # Méthode auxiliaire de classification des variables relativement à une fréquence
-    def _classify_variables_at_frequency(
-        self,
-        prediction_frequency: Union[str, Dict[EntityKey, str]],
-    ) -> Dict[str, List[Union[str, tuple]]]:
-        """Classify variables relative to a prediction frequency.
-
-        On a panel the classification is done **per (entity, column) pair**,
-        never per column: the same column may be annual for ``FR``, quarterly
-        for ``DE`` and monthly for ``IT``, hence imputable for the first two
-        and already at target for the third.
-
-        Args:
-            prediction_frequency: Frequency at which predictions will be made
-                (str for a time series, dict entity -> frequency for a panel:
-                a panel target is always expanded into a binding at phase 0,
-                and a dict target on a time series is refused there).
-
-        Returns:
-            Dict with keys ``'aggregate'``, ``'impute'`` and
-            ``'target_freq'``, each holding a list of variable keys.
-        """
-        # Initialisation du dictionnaire résultat
-        result: Dict[str, List[Union[str, tuple]]] = {
-            'aggregate': [], 'impute': [], 'target_freq': []
-        }
-
-        # Distinction suivant la structure des données
-        # Données de panel
-        if self.is_panel_:
-            # Parcours des fréquences détectées, couple par couple
-            for key, freq in self.detected_frequencies_.items():
-                # Décomposition de la clé : entité toujours en tuple
-                entity, _ = split_variable_key(key)
-
-                # Fréquence cible liée à l'entité : une entité que la liaison
-                # ne nomme pas n'est pas classée à cette fréquence
-                pred_freq = prediction_frequency.get(entity)
-                if pred_freq is None:
-                    continue
-
-                # Normalisation des deux fréquences comparées
-                freq_normalized = normalize_frequency(freq)
-                pred_normalized = normalize_frequency(pred_freq)
-
-                # Comparaison des fréquences, POUR CETTE ENTITÉ
-                if is_higher_frequency(freq, pred_freq):
-                    # Agrégation si la fréquence source est plus fine que la cible
-                    result['aggregate'].append(key)
-                elif freq_normalized == pred_normalized:
-                    # Cas d'égalité : déjà à la fréquence cible
-                    result['target_freq'].append(key)
-                else:
-                    # Imputation si la fréquence source est plus basse que la cible
-                    result['impute'].append(key)
-        # Cas des séries temporelles
-        else:
-            # Parcours des fréquences détectées
-            for col, freq in self.detected_frequencies_.items():
-                # Normalisation des deux fréquences comparées
-                freq_normalized = normalize_frequency(freq)
-                pred_normalized = normalize_frequency(prediction_frequency)
-
-                # Comparaison des fréquences
-                if is_higher_frequency(freq, prediction_frequency):
-                    result['aggregate'].append(col)
-                elif freq_normalized == pred_normalized:
-                    result['target_freq'].append(col)
-                else:
-                    result['impute'].append(col)
-
-        return result
-
-    # Méthode auxiliaire de regroupement des couples imputables par fréquence source
-    def _imputable_groups(
-        self,
-        prediction_frequency: Union[str, Dict[EntityKey, str]],
-    ) -> Dict[Tuple[str, Optional[str]], Tuple[EntityKey, ...]]:
-        """Group the imputable ``(entity, column)`` pairs by source frequency.
-
-        Each ``(column, f_var)`` group yields one plan step at the stage,
-        all of them sharing the model fitted on the mutualized training set.
-
-        Under ``impute_unobserved_entities=True`` a further group
-        ``(column, None)`` gathers the entities that never observe the column,
-        at every stage binding them. This is the **single** entry point of
-        that capability: the classification is left untouched, which is
-        exactly what keeps ``variable_categories_`` and
-        ``frequency_progression_`` identical with and without the parameter --
-        such a pair has no source frequency, so it joins no frequency set and,
-        travelling the stages, adds none.
-
-        Args:
-            prediction_frequency: Frequency of the stage.
-
-        Returns:
-            Mapping from ``(column, source frequency)`` to the tuple of
-            entity keys of the group, each tuple sorted for determinism. On a
-            time series the entity key is ``()``. The source frequency is
-            ``None`` for an unanchored group.
-
-        Examples:
-            >>> import numpy as np
-            >>> import pandas as pd
-            >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
-            >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
-            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
-            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
-            >>> imputer = HighFrequencyImputer(
-            ...     target_frequency='M',
-            ...     estimator=LinearRegression(),
-            ...     impute_unobserved_entities=True,
-            ... ).fit(panel)
-            >>> imputer._imputable_groups({('FR',): 'M', ('IT',): 'M'})
-            {('v', 'Y'): (('FR',),), ('v', None): (('IT',),)}
-        """
-        # Regroupement des couples imputables par (colonne, fréquence source)
-        groups: Dict[Tuple[str, Optional[str]], List[EntityKey]] = {}
-        categories = self._classify_variables_at_frequency(prediction_frequency)
-        for key in categories['impute']:
-            entity, column = split_variable_key(key)
-            source_freq = normalize_frequency(
-                self.detected_frequencies_[key], return_format='base'
-            )
-            groups.setdefault((column, source_freq), []).append(entity)
-
-        # Groupes sans ancre, ajoutés après les groupes ancrés : l'ordre du
-        # plan reste celui des fréquences sources, la nouveauté en queue
-        for entity, column in self._unanchored_pairs_at(prediction_frequency):
-            groups.setdefault((column, None), []).append(entity)
-
-        # Tri des entités de chaque groupe : l'ordre du plan ne doit dépendre
-        # ni de l'ordre des colonnes ni de celui des lignes en entrée
-        return {
-            group_key: tuple(sorted(entities, key=repr))
-            for group_key, entities in groups.items()
-        }
-
-    # Méthode auxiliaire de lecture de la fréquence cible d'une entité
-    def _entity_target_frequency(self, entity: Optional[EntityKey]) -> Optional[str]:
-        """Read the target frequency bound to one entity.
-
-        Args:
-            entity: Entity key, None on a time series.
-
-        Returns:
-            The normalized target frequency of that entity, or None when the
-            binding does not name it.
-
-        Examples:
-            >>> import numpy as np
-            >>> import pandas as pd
-            >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
-            >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
-            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
-            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
-            >>> imputer = HighFrequencyImputer(
-            ...     target_frequency='M', estimator=LinearRegression()
-            ... ).fit(panel)
-            >>> imputer._entity_target_frequency(('FR',))
-            'M'
-        """
-        # Les deux formes de la cible, scalaire et par entité, lues ici seulement
-        target = self.effective_target_frequency_
-        frequency = target.get(entity) if isinstance(target, dict) else target
-        if frequency is None:
-            return None
-        return normalize_frequency(frequency, return_format='base')
-
-    # Méthode auxiliaire de sélection des couples imputables sans aucune ancre
-    def _unanchored_pairs_at(
-        self,
-        prediction_frequency: Union[str, Dict[EntityKey, str]],
-    ) -> List[Tuple[EntityKey, str]]:
-        """Select the never-observed pairs imputable at one stage.
-
-        A pair the fit could detect no frequency for joins every stage of its
-        entity's progression, not only the last: the rule is the general one,
-        of which the single stage of
-        ``impute_intermediate_frequencies=False`` is the degenerate case.
-        Reading the binding rather than the target frequency is what keeps the
-        parameter independent of axis 2 -- one rule, whose consequences follow
-        the progression, instead of a behavior that changes with the modality.
-
-        Two conditions gate a pair, beyond ``impute_unobserved_entities``:
-
-        1. the stage binds the entity, which a stage its target-frequency
-           group does not travel through never does;
-        2. at least one other entity observes the column, without which the
-           mutualized training set would be empty and the step would have no
-           model to share.
-
-        No condition is put on the level the entity reaches: the cells
-        produced at an intermediate stage are anchored on nothing, exactly
-        like those of the last one -- being anchored on an earlier prediction
-        of itself is not being anchored -- so every stage rescales nothing and
-        emits ``MODEL_UNANCHORED``.
-
-        Args:
-            prediction_frequency: Frequency of the stage — on a panel, the
-                only case where the capability plays, always a binding per
-                entity.
-
-        Returns:
-            List of ``(entity key, column)`` pairs, in the order of
-            ``_undetected_frequencies_``. Empty under the default parameter,
-            and empty on a time series, which has no other entity to learn
-            from.
-
-        Examples:
-            >>> import numpy as np
-            >>> import pandas as pd
-            >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
-            >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
-            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
-            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
-            >>> imputer = HighFrequencyImputer(
-            ...     target_frequency='M',
-            ...     estimator=LinearRegression(),
-            ...     impute_unobserved_entities=True,
-            ... ).fit(panel)
-            >>> imputer._unanchored_pairs_at({('IT',): 'M'})
-            [(('IT',), 'v')]
-        """
-        # Capacité fermée par défaut, et sans objet sur une série temporelle :
-        # l'imputation sans ancre est apprise sur les AUTRES entités
-        if not self.impute_unobserved_entities or not self.is_panel_:
-            return []
-
-        # Parcours des couples jamais observés
-        pairs: List[Tuple[EntityKey, str]] = []
-        for key in self._undetected_frequencies_:
-            entity, column = split_variable_key(key)
-
-            # Fréquence de prédiction liée à l'entité par l'étape : sur un
-            # panel, une étape est toujours une liaison par entité
-            if prediction_frequency.get(entity) is None:
-                continue
-
-            # Colonne observée par au moins une autre entité : sans elle, le
-            # jeu mutualisé est vide et il n'y a aucun modèle à partager
-            if not self._column_frequencies_by_entity(column):
-                continue
-
-            pairs.append((entity, column))
-        return pairs
-
-    # -------------------------------------------------------------------------
     # Fenêtres
     # -------------------------------------------------------------------------
     # Méthode auxiliaire de mise en correspondance des bornes (start, end) d'une fenêtre
@@ -1616,167 +1230,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         return X_train.loc[kept_rows], y_train.loc[kept_rows]
 
     # -------------------------------------------------------------------------
-    # Progression de fréquences
-    # -------------------------------------------------------------------------
-    # Méthode auxiliaire de construction de la progression d'un groupe d'entités
-    def _group_frequency_progression(
-        self,
-        entities: Optional[Sequence[EntityKey]],
-        target_frequency: str,
-    ) -> List[str]:
-        """Build the stage frequencies of one target-frequency group.
-
-        Args:
-            entities: Entity keys of the group, ``None`` for a time series —
-                the degenerate one-entity case, where nothing is filtered.
-            target_frequency: Target frequency shared by the group.
-
-        Returns:
-            Stage frequencies in base form, from the lowest to the highest,
-            the target frequency last. The lowest frequency of ``F`` is never
-            a stage: nothing is imputable at it.
-
-        Examples:
-            >>> import numpy as np
-            >>> import pandas as pd
-            >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> dates = pd.date_range('2020-01-31', periods=36, freq='ME')
-            >>> data = pd.DataFrame(
-            ...     {'m1': np.arange(36.0), 'q1': np.nan, 'a1': np.nan}, index=dates
-            ... )
-            >>> data.loc[dates[2::3], 'q1'] = np.arange(12.0) * 3 + 10
-            >>> data.loc[dates[11::12], 'a1'] = [100.0, 130.0, 160.0]
-            >>> imputer = HighFrequencyImputer(
-            ...     target_frequency='M',
-            ...     estimator=LinearRegression(),
-            ...     impute_intermediate_frequencies=True,
-            ... ).fit(data)
-            >>> imputer._group_frequency_progression(None, 'M')
-            ['Q', 'M']
-        """
-        # Fréquence cible du groupe, forme canonique de comparaison
-        f_target = normalize_frequency(target_frequency, return_format='base')
-
-        # Ensemble des fréquences des couples (entité, colonne) imputables du
-        # périmètre du groupe, plus la fréquence cible
-        admissible = None if entities is None else set(entities)
-        categories = self._classify_variables_at_frequency(
-            self.effective_target_frequency_
-        )
-        frequencies = {f_target}
-        for key in categories['impute']:
-            entity, _ = split_variable_key(key)
-            if admissible is not None and entity not in admissible:
-                continue
-            frequencies.add(
-                normalize_frequency(
-                    self.detected_frequencies_[key], return_format='base'
-                )
-            )
-
-        # Fréquence la plus basse de l'ensemble précédemment défini : jamais une étape, rien n'y étant à
-        # imputer. "get_frequency_order" croît quand la fréquence baisse
-        lowest = max(frequencies, key=get_frequency_order)
-
-        # Tri de la plus basse à la plus haute, borné des deux côtés :
-        # strictement au-dessus de la plus basse source, au plus à la cible
-        stages = [
-            frequency
-            for frequency in sorted(
-                frequencies, key=get_frequency_order, reverse=True
-            )
-            if is_higher_frequency(frequency, lowest)
-            and (frequency == f_target or is_higher_frequency(f_target, frequency))
-        ]
-
-        # Garantie que la cible est le dernier élément de la progression
-        if f_target in stages:
-            stages.remove(f_target)
-        stages.append(f_target)
-        return stages
-
-    # Méthode auxiliaire de construction de la progression de fréquences
-    def _build_frequency_progression(self) -> List[Union[str, Dict[EntityKey, str]]]:
-        """Build the ordered list of stage frequencies.
-
-        Under ``impute_intermediate_frequencies is False`` the progression is
-        the target frequency alone: the imputed variable jumps straight from
-        its own frequency to the target, with no intermediate stage. Under the
-        two other modalities the progression is complete and **identical**:
-        ``'covariates_only'`` and ``True`` share the very same stage plan and
-        differ only by the origin filter of ``y_train``, held by
-        ``ELIGIBLE_ORIGINS``.
-
-        On a panel the progression is computed **per group of entities sharing
-        the same target frequency**, then merged into global stages: an entity
-        whose group does not travel through a stage is simply absent from that
-        stage's binding, which leaves it unclassified — hence never imputed,
-        and never written — at that stage.
-
-        Returns:
-            Ordered list of stage frequencies, the target frequency last. A
-            time series yields a list of strings; a panel yields a list of
-            ``{entity: frequency}`` bindings.
-
-        Examples:
-            >>> import numpy as np
-            >>> import pandas as pd
-            >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
-            >>> idx = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['entity', 'date'])
-            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
-            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
-            >>> panel.loc[('DE', dates[2::3]), 'v'] = np.arange(8.0) * 5 + 30
-
-            >>> imputer = HighFrequencyImputer(
-            ...     target_frequency='M',
-            ...     estimator=LinearRegression(),
-            ...     impute_intermediate_frequencies=True,
-            ... ).fit(panel)
-            >>> [sorted(stage.items()) for stage in imputer.frequency_progression_]
-            [[(('DE',), 'Q'), (('FR',), 'Q')], [(('DE',), 'M'), (('FR',), 'M')]]
-        """
-        # Modalité sans étape intermédiaire : une seule étape, la cible.
-        if self.impute_intermediate_frequencies is False:
-            return [self.effective_target_frequency_]
-
-        target = self.effective_target_frequency_
-
-        # Cas dégénéré de la série temporelle : un seul groupe, cible scalaire
-        if not isinstance(target, dict):
-            return list(self._group_frequency_progression(None, target))
-
-        # Panel : un groupe d'entités par fréquence cible partagée
-        groups: Dict[str, List[EntityKey]] = {}
-        for entity, frequency in target.items():
-            groups.setdefault(
-                normalize_frequency(frequency, return_format='base'), []
-            ).append(entity)
-        per_group = {
-            f_target: self._group_frequency_progression(entities, f_target)
-            for f_target, entities in groups.items()
-        }
-
-        # Fusion en étapes globales : union ordonnée des fréquences d'étape,
-        # chaque étape ne liant que les entités dont le groupe la traverse
-        stage_order = sorted(
-            {stage for stages in per_group.values() for stage in stages},
-            key=get_frequency_order,
-            reverse=True,
-        )
-        return [
-            {
-                entity: stage
-                for f_target, entities in groups.items()
-                if stage in per_group[f_target]
-                for entity in entities
-            }
-            for stage in stage_order
-        ]
-
-    # -------------------------------------------------------------------------
     # Fit
     # -------------------------------------------------------------------------
     # Méthode auxiliaire d'entraînement
@@ -1786,13 +1239,15 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         Phases of the fitting logic:
 
         - PHASE 0: setup — transform-state purge, columns, panel
-          detection, ``y`` alignment and naming, frequency detection,
-          ``target_frequency`` normalization and validation, variable
-          classification per (entity, column) pair.
+          detection, ``y`` alignment and naming, ``target_frequency``
+          normalization, then the frequency layout
+          (:func:`~tsforecast.imputation._engine.frequency_layout.plan_frequencies`):
+          frequency detection, target validation, variable classification
+          per (entity, column) pair and progression, computed once.
         - PHASE 1: the three window masks, each caller naming its
           ``kind``.
         - PHASE 2: additive transformer.
-        - PHASE 3: frequency progression.
+        - PHASE 3: frequency progression, published from the layout.
         - PHASE 4: provenance tracker, initialized after the additive
           transformer, and the execution context of the fit
           (:class:`_RunContext`), dropped at the end of the pass.
@@ -1810,7 +1265,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         Raises:
             ValueError: If no frequency can be detected, if a
-                ``target_frequency`` dict misses entities, if the
+                ``target_frequency`` dict is given on a time series or
+                misses entities, if the
                 indices of X and y disagree, if an index level bears
                 the reserved name ``'frequency'``, or if the window
                 calculator cannot be fitted — an empty window is not a
@@ -1862,7 +1318,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # le niveau à conserver dans une sortie multi-fréquences
         try:
             index_freq = detect_index_frequency(X_work.index, return_format='base')
-            self._source_index_frequency_label = self._stage_frequency_label(index_freq)
+            self._source_index_frequency_label = stage_frequency_label(index_freq)
         except (ValueError, TypeError):
             # Index irrégulier ou trop court : le repli sur le niveau cible suffit
             self._source_index_frequency_label = None
@@ -1883,95 +1339,24 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             self.target_frequency
         )
 
-        # Expansion de target_frequency en dict si le jeu de données est un panel et la fréquence cible une chaîne de caractères
-        if self.is_panel_ and isinstance(normalized_target_frequency, str) and self.entities_:
-            self.effective_target_frequency_ = {
-                entity: normalized_target_frequency for entity in self.entities_
-            }
-        elif isinstance(normalized_target_frequency, dict):
-            # Un dict incomplet est une erreur nommant les entités
-            # manquantes, et non un silence dont la conséquence n'apparaît
-            # qu'à la classification, sous la forme d'entités jamais imputées
-            self._check_target_frequency_covers_entities(normalized_target_frequency)
-            self.effective_target_frequency_ = normalized_target_frequency.copy()
-        else:
-            self.effective_target_frequency_ = normalized_target_frequency
-
-        # Détection des fréquences par (entité, colonne) : sur un panel, la
-        # même colonne peut porter une fréquence différente selon l'entité
-        # et les clés sont alors des tuples (entité..., colonne). Un couple
-        # indétectable (moins de deux observations) vaut None, sans lever
-        raw_frequencies = detect_frequency(data=X_work)
-
-        # Couples observés hors de la grille calendaire de leur fréquence
-        # (exercice décalé, ancre annuelle au 1er décembre d'un index MS) :
-        # écartés de la classification comme des covariables, et nommés par un
-        # avertissement unique
-        self._misaligned_pairs = self._misaligned_anchor_pairs(X_work, raw_frequencies)
-        if self._misaligned_pairs:
-            warnings.warn(
-                f"{len(self._misaligned_pairs)} (entity, column) pair(s) are observed "
-                f"off the calendar bounds of their own frequency and are left out "
-                f"(neither imputed nor used as covariates): "
-                f"{list(self._misaligned_pairs)}. A monthly, quarterly or yearly "
-                f"value must be dated at the end of its calendar period on a "
-                f"period-end index, at its start on a period-start index: re-date "
-                f"a calendar value dated elsewhere (a yearly value dated 1 December "
-                f"on a period-start index belongs on 1 January). A non-calendar "
-                f"period, such as a fiscal year closing in June, has no calendar "
-                f"reading and cannot be imputed by this class.",
-                UserWarning,
-            )
-
-        # Écartement des couples sans fréquence détectable : une entité
-        # n'observant jamais une colonne n'a pas de fréquence pour elle.
-        # "CovariateMaterializer.eligible_columns" côté covariables et
-        # "_group_frequency_progression" côté cible en tirent chacun les
-        # conséquences
-        self._undetected_frequencies_ = tuple(
-            key for key, freq in raw_frequencies.items() if freq is None
-        )
-        self.detected_frequencies_ = {
-            key: freq for key, freq in raw_frequencies.items()
-            if freq is not None and key not in self._misaligned_pairs
-        }
-        # Vérification que le dictionnaire des fréquences détectées est non vide
-        if not self.detected_frequencies_:
-            raise ValueError("Could not detect frequency for any column")
-        # Avertissement pour les colonnes manquantes par entité
-        if self._undetected_frequencies_:
-            self._log(
-                f"[fit] {len(self._undetected_frequencies_)} (entity, column) "
-                f"pair(s) never observed, left out of the classification: "
-                f"{self._undetected_frequencies_}"
-            )
-
-        # Entités présentes mais jamais observées (entièrement NaN, ou réduites
-        # à une ligne) : sans fréquence détectée, elles n'ont rien à imputer et
-        # le calculateur de fenêtre les nomme déjà. Elles sont retirées de la
-        # cible avant validation, qui les dirait à tort absentes des données ;
-        # une entrée de dict nommant une entité réellement inconnue reste,
-        # elle, signalée par le validateur
-        if self.is_panel_ and isinstance(self.effective_target_frequency_, dict):
-            observed = {split_variable_key(key)[0] for key in self.detected_frequencies_}
-            silent = set(self.entities_ or ()) - observed
-            self.effective_target_frequency_ = {
-                entity: frequency
-                for entity, frequency in self.effective_target_frequency_.items()
-                if entity not in silent
-            }
-
-        # Validation de la fréquence cible contre les fréquences détectées
-        self.effective_target_frequency_ = self._target_freq_validator.validate(
-            target_frequency=self.effective_target_frequency_,
-            detected_frequencies=self.detected_frequencies_,
+        # Plan des fréquences : expansion et validation de la cible, détection
+        # par couple (entité, colonne), classification et progression. Calculé
+        # une fois, sur les données d'avant le transformateur additif, puis lu
+        # tel quel pour l'exécution des étapes et pour chaque rejeu
+        layout = plan_frequencies(
+            X_work,
+            normalized_target_frequency,
+            is_panel=self.is_panel_,
+            entities=self.entities_,
+            impute_intermediate_frequencies=self.impute_intermediate_frequencies,
             on_frequency_mismatch=self.on_frequency_mismatch,
+            log=self._log,
         )
-
-        # Classification des variables, par couple (entité, colonne)
-        self.variable_categories_ = self._classify_variables_at_frequency(
-            self.effective_target_frequency_
-        )
+        self._frequency_layout_ = layout
+        # Attributs ajustés publiés à partir du plan : les mêmes objets
+        self.effective_target_frequency_ = layout.target_frequency
+        self.detected_frequencies_ = layout.detected_frequencies
+        self.variable_categories_ = layout.categories
 
         # Résolution de la stratégie de validation croisée : "cv_" n'existe
         # que sous fit_predict_order='cv'. L'ordonnanceur ne sert qu'au fit :
@@ -2021,7 +1406,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             interpolation_anchor=self.interpolation_anchor,
             aggregation_constraint=self.aggregation_constraint,
             scale_features=self.scale_features,
-            column_frequencies=self._detected_frequencies_by_column(),
+            column_frequencies=layout.frequencies_by_column(),
         )
 
         # =================================================================
@@ -2082,12 +1467,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # =================================================================
         # PHASE 3 — Progression de fréquences
         # =================================================================
-        # Progression des fréquences à imputer
-        self.frequency_progression_ = self._build_frequency_progression()
+        # Progression des fréquences à imputer, établie par le plan des
+        # fréquences : elle ne dépend que des fréquences détectées et de la cible
+        self.frequency_progression_ = layout.progression
         # Logging
         self._log(
             f"[fit] Frequency progression: "
-            f"{[self._stage_frequency_label(f) for f in self.frequency_progression_]}"
+            f"{[stage_frequency_label(f) for f in self.frequency_progression_]}"
         )
 
         # =================================================================
@@ -2665,7 +2051,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
             lowest = (
                 max(anchored, key=get_frequency_order) if anchored
-                else self._entity_target_frequency(entities[0] if entities else None)
+                else self._frequency_layout_.entity_target_frequency(entities[0] if entities else None)
             )
             specs[column] = VariableSpec(
                 name=column,
@@ -2745,12 +2131,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             stage_freq: Frequency of the stage.
         """
         # Étiquette lisible de l'étape, clé du plan et des journaux
-        stage_label = self._stage_frequency_label(stage_freq)
+        stage_label = stage_frequency_label(stage_freq)
         # Détection des fréquences
-        freqs_by_column = self._detected_frequencies_by_column(run.transform_frequencies)
+        freqs_by_column = self._frequency_layout_.frequencies_by_column(run.transform_frequencies)
 
         # Groupes imputables : un par (colonne, fréquence source)
-        groups = self._imputable_groups(stage_freq)
+        groups = self._frequency_layout_.imputable_groups(
+            stage_freq, impute_unobserved_entities=self.impute_unobserved_entities
+        )
         if not groups:
             self._log(f"[fit] stage {stage_label}: no imputable variable")
             return
@@ -2853,7 +2241,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Fréquences remises au constructeur : la colonne cible par entité,
         # couples indétectables explicités, pour qu'aucun bloc n'emprunte la
         # fréquence des autres entités
-        training_freqs = self._training_frequencies(column, freqs_by_column)
+        training_freqs = self._frequency_layout_.training_frequencies(column, freqs_by_column)
 
         # Jeu mutualisé, sonde sans covariable : elle ne matérialise rien et
         # rend déjà les blocs, la cible brute et la grille d'entraînement
@@ -3435,7 +2823,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Extraction du nom de la colonne
         column = step.var_name
         # Détection des fréquences de la colonne (éventuellement pour différentes entités)
-        freqs_by_column = self._detected_frequencies_by_column(run.transform_frequencies)
+        freqs_by_column = self._frequency_layout_.frequencies_by_column(run.transform_frequencies)
 
         # Grille du groupe : la fenêtre d'imputation de ses entités, ancres comprises
         grid = self._prediction_grid(
@@ -3529,7 +2917,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             column,
             written,
             pd.Series(origin, index=written.index, dtype=CELL_ORIGIN_DTYPE),
-            self._stage_frequency_of(stage_freq, written.index),
+            stage_frequency_of(stage_freq, written.index),
         )
         return degraded, len(written)
 
@@ -3665,44 +3053,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
         return values
 
-    # Méthode auxiliaire de la fréquence d'étape ligne à ligne
-    @staticmethod
-    def _stage_frequency_of(
-        stage_freq: Union[str, Dict[EntityKey, str]],
-        index: pd.Index,
-    ) -> pd.Series:
-        """Give the stage frequency of each row of a grid.
-
-        Args:
-            stage_freq: Frequency of the stage, scalar or per entity.
-            index: Grid the frequencies are read on.
-
-        Returns:
-            Series indexed on ``index`` holding the base frequency code of
-            each row (``str`` dtype).
-
-        Examples:
-            >>> idx = pd.MultiIndex.from_product(
-            ...     [['FR', 'DE'], pd.date_range('2021-03-31', periods=2, freq='QE')]
-            ... )
-            >>> HighFrequencyImputer._stage_frequency_of({('FR',): 'QE', ('DE',): 'monthly'}, idx).tolist()
-            ['Q', 'Q', 'M', 'M']
-        """
-        # Fréquence unique : la même pour toutes les lignes
-        if not isinstance(stage_freq, dict):
-            return pd.Series(
-                normalize_frequency(stage_freq, return_format='base'), index=index, dtype='str'
-            )
-
-        # Fréquence par entité : normalisée une fois par entité, puis diffusée
-        # sur ses lignes par le code d'entité
-        entity_codes, entities = get_entity_codes(index)
-        per_entity = pd.array(
-            [normalize_frequency(stage_freq[entity], return_format='base') for entity in entities],
-            dtype='str',
-        )
-        return pd.Series(per_entity.take(entity_codes), index=index)
-
     # Méthode auxiliaire du masque d'entraînement lu à la fréquence des blocs
     def _training_mask_at(
         self,
@@ -3738,120 +3088,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Logging
             self._log(f"[fit] training mask unavailable ({error}); every row kept")
             return None
-
-    # Méthode auxiliaire de repérage des couples observés hors de la grille calendaire
-    def _misaligned_anchor_pairs(
-        self,
-        X_work: pd.DataFrame,
-        frequencies: Mapping[Union[str, tuple], Optional[str]],
-    ) -> Tuple[Union[str, tuple], ...]:
-        """Find the pairs observed off the calendar bounds of their own frequency.
-
-        A monthly, quarterly or yearly value describes a calendar period, and
-        the position of the index says which bound dates it: the last day on
-        a period-end index (``ME``: 31 December for a year), the first day on
-        a period-start index (``MS``: 1 January). A pair observed elsewhere —
-        a fiscal year closing in June, a yearly value dated 1 December on a
-        ``MS`` index — has no consistent reading downstream: the training
-        mask, built on calendar periods, drops every one of its anchors, while
-        the rescaling attaches each of them to its calendar year. Such a pair
-        is left out rather than imputed on a wrong reading.
-
-        Only the monthly, quarterly and yearly frequencies are checked, and
-        only for an entity whose index carries a position: a daily or
-        business-day index implies no calendar bound.
-
-        Args:
-            X_work: Working frame, time series or panel.
-            frequencies: Detected frequency of each pair, keyed like
-                ``detected_frequencies_``, None when undetectable.
-
-        Returns:
-            The keys of the misaligned pairs, sorted for determinism.
-
-        Examples:
-            >>> import numpy as np
-            >>> import pandas as pd
-            >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> dates = pd.date_range('2021-01-31', periods=36, freq='ME')
-            >>> fiscal_years = pd.DataFrame(
-            ...     {'m1': np.arange(36.0), 'a1': np.nan}, index=dates
-            ... )
-            >>> fiscal_years.loc[dates[5::12], 'a1'] = [1.0, 2.0, 3.0]
-            >>> imputer = HighFrequencyImputer(
-            ...     target_frequency='M', estimator=LinearRegression()
-            ... ).fit(fiscal_years)
-            >>> imputer._misaligned_anchor_pairs(fiscal_years, {'a1': 'Y'})
-            ('a1',)
-        """
-        # Initialisation de la liste des couples mal placés
-        misaligned: List[Union[str, tuple]] = []
-        # Parcours des blocs d'entité, indexés par la seule date
-        for entity, _mask, block in iter_entity_blocks(X_work, is_panel=self.is_panel_):
-            prefix = normalize_entity_key(entity) if self.is_panel_ else ()
-
-            # Position de l'index de l'entité : sans position (index journalier,
-            # ouvré, ou fréquence indéterminable), aucune borne n'est impliquée
-            try:
-                parsed = detect_index_frequency(block.index, return_format='components')
-            except (ValueError, TypeError):
-                continue
-            position = getattr(parsed, 'position', None)
-            if position not in ('S', 'E'):
-                continue
-
-            # Contrôle des seules fréquences calendaires de chaque couple
-            for column in block.columns:
-                key = (*prefix, column) if prefix else column
-                frequency = frequencies.get(key)
-                if frequency is None:
-                    continue
-                base = normalize_frequency(frequency, return_format='base')
-                if base not in MONTH_BASED_FREQUENCIES:
-                    continue
-                # Borne attendue de chaque observation : début ou fin de SA période
-                dates = pd.DatetimeIndex(block.index[block[column].notna().to_numpy()])
-                periods = dates.to_period(base)
-                bounds = (
-                    periods.start_time if position == 'S'
-                    else periods.end_time.normalize()
-                )
-                if not bool((dates.normalize() == bounds).all()):
-                    misaligned.append(key)
-        return tuple(sorted(misaligned, key=repr))
-
-    # Méthode auxiliaire de vérification de la couverture des entités
-    def _check_target_frequency_covers_entities(
-        self,
-        normalized_target_frequency: Dict[EntityKey, str],
-    ) -> None:
-        """Check that a ``target_frequency`` dict names every entity.
-
-        Args:
-            normalized_target_frequency: Target frequency dict, entity keys
-                already normalized into tuples.
-
-        Raises:
-            ValueError: If entities of the panel are missing from the dict.
-                The message names them — a silent gap would only surface much
-                later, as entities the classification never imputes.
-        """
-        # Énumération des entités absentes du dictionnaire. Seul un panel
-        # atteint ce contrôle : un dict sur une série temporelle est refusé par
-        # la validation de format, et un panel porte toujours ses entités
-        # (panel_cols converties en index avant le fit)
-        missing = [
-            entity for entity in self.entities_
-            if normalize_entity_key(entity) not in normalized_target_frequency
-        ]
-        if missing:
-            raise ValueError(
-                f"target_frequency dict is incomplete: no frequency given for "
-                f"{len(missing)} entity/entities "
-                f"{tuple(missing)}. A dict target_frequency must name every "
-                f"entity of the panel."
-            )
 
     # Méthode auxiliaire de construction d'un calculateur de fenêtre
     def _make_window_calculator(self) -> ImputationWindowCalculator:
@@ -3908,63 +3144,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         return calculator, None
 
-    # Méthode auxiliaire de construction d'un label de fréquence lisible pour une étape
-    def _stage_frequency_label(self, pred_freq: Union[str, Dict]) -> str:
-        """Build a human-readable frequency label for a stage.
-
-        Labeling rule for panel stages: if every entity of the stage shares
-        the same frequency, that shared frequency is the label; otherwise a
-        composite label lists each entity's frequency, sorted by entity key
-        for determinism.
-
-        Args:
-            pred_freq: Prediction frequency of the stage (str for a time
-                series, dict entity -> frequency for a panel).
-
-        Returns:
-            Frequency label string.
-
-        Examples:
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> imputer = HighFrequencyImputer(target_frequency='M')
-            >>> imputer._stage_frequency_label('M')
-            'M'
-            >>> imputer._stage_frequency_label({('FR',): 'Q', ('DE',): 'Q'})
-            'Q'
-            >>> imputer._stage_frequency_label({('FR',): 'Y', ('DE',): 'Q'})
-            "('DE',)=Q+('FR',)=Y"
-        """
-        # Cas d'une fréquence unique (séries temporelles)
-        if not isinstance(pred_freq, dict):
-            return str(pred_freq)
-
-        # Cas d'un panel : fréquence partagée par toutes les entités de l'étape
-        unique_freqs = {
-            normalize_frequency(freq, return_format='base')
-            for freq in pred_freq.values()
-        }
-        if len(unique_freqs) == 1:
-            return unique_freqs.pop()
-
-        # Fréquences hétérogènes : label composite, trié pour être déterministe
-        parts = sorted(f"{entity}={freq}" for entity, freq in pred_freq.items())
-        return '+'.join(parts)
-
-    # Validateur de fréquence cible, à initialisation paresseuse
-    @property
-    def _target_freq_validator(self) -> TargetFrequencyValidator:
-        """Return the memoized target-frequency validator.
-
-        Returns:
-            Shared :class:`TargetFrequencyValidator` instance. The attribute
-            name carries no trailing underscore, so it never fools
-            ``check_is_fitted``.
-        """
-        # Mémoïsation paresseuse : le validateur est sans état
-        if getattr(self, '_target_freq_validator_cache', None) is None:
-            self._target_freq_validator_cache = TargetFrequencyValidator()
-        return self._target_freq_validator_cache
-
     # -------------------------------------------------------------------------
     # Transform — rejeu du plan figé
     # -------------------------------------------------------------------------
@@ -4001,15 +3180,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             ValueError: If a column known at fit time is absent from the data
                 being transformed. The message names the missing columns.
         """
+        # Plan des fréquences du fit
+        layout = self._frequency_layout_
         # Couples connus du fit, mal placés compris : ils ne sont pas
         # "nouveaux" au transform, seulement écartés
-        misaligned = getattr(self, '_misaligned_pairs', ())
+        misaligned = layout.misaligned
         # Colonnes du fit, couples indétectables compris : une colonne
         # entièrement NaN au fit reste une colonne attendue au transform
         fit_columns = {
             split_variable_key(key)[1]
             for key in (
-                *self.detected_frequencies_, *self._undetected_frequencies_, *misaligned
+                *layout.detected_frequencies, *layout.undetected, *misaligned
             )
         }
         # Colonnes disparues : erreur nommant les colonnes, jamais un silence
@@ -4031,7 +3212,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Divergences, couple par couple, sur les seules clés communes
         diverging: List[Tuple[Any, str, str]] = []
         for key, freq in detected.items():
-            fit_freq = self.detected_frequencies_.get(key)
+            fit_freq = layout.detected_frequencies.get(key)
             if freq is None or fit_freq is None:
                 continue
             if (
@@ -4041,7 +3222,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 diverging.append((key, fit_freq, freq))
 
         # Avertissement uniquement, puis poursuite avec les fréquences du fit :
-        # "_detected_frequencies_by_column" ne lit que "detected_frequencies_"
+        # "FrequencyLayout.frequencies_by_column" ne recouvre jamais un couple du fit
         if diverging:
             listing = ', '.join(
                 f"{key!r}: fit={fit_freq}, transform={freq}"
@@ -4062,7 +3243,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             key: freq
             for key, freq in detected.items()
             if freq is not None
-            and key not in self.detected_frequencies_
+            and key not in layout.detected_frequencies
             and key not in misaligned
             and split_variable_key(key)[1] in fit_columns
         }
@@ -4070,7 +3251,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # des bornes de leur période, ils n'ont pas de lecture cohérente
         if not unknown:
             return {}, ()
-        off_calendar = self._misaligned_anchor_pairs(X_work, unknown)
+        off_calendar = misaligned_anchor_pairs(X_work, unknown, is_panel=self.is_panel_)
         return (
             {key: freq for key, freq in unknown.items() if key not in off_calendar},
             off_calendar,
@@ -4422,7 +3603,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         carried: Dict[EntityKey, str] = {}
         # Parcours des étapes de la progression, rejouée telle quelle
         for stage_freq in self.frequency_progression_:
-            stage_label = self._stage_frequency_label(stage_freq)
+            stage_label = stage_frequency_label(stage_freq)
             # Liaison de fréquence, étendue aux entités nouvelles
             binding = self._extend_stage_binding(
                 run.pending_warnings, stage_freq, new_entities, stage_label
@@ -4471,7 +3652,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             frame = run.materializer.stage_frame(
                 grid_index=grid,
                 stage_freq=output_binding,
-                detected_frequencies=self._detected_frequencies_by_column(
+                detected_frequencies=self._frequency_layout_.frequencies_by_column(
                     run.transform_frequencies
                 ),
                 source_data=X_stage,
@@ -4541,7 +3722,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # fréquence sortirait de la grille de sortie, donc du résultat
             frequency = (
                 carried.get(entity)
-                or self._entity_target_frequency(entity)
+                or self._frequency_layout_.entity_target_frequency(entity)
                 or next(iter(binding.values()), None)
             )
             if frequency is not None:
@@ -4652,7 +3833,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         """
         # Fréquence d'étape et entité de chaque ligne, codées en couples
         # distincts sans construire de tuple par ligne
-        row_frequency = self._stage_frequency_of(output_binding, frame.index)
+        row_frequency = stage_frequency_of(output_binding, frame.index)
         entity_codes, entities = get_entity_codes(frame.index)
         codes, first_rows = factorize_row_keys(entity_codes, row_frequency)
         pairs = [
@@ -4660,7 +3841,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         ]
 
         # Fréquence de chaque colonne, par entité sur un panel
-        column_frequencies = self._detected_frequencies_by_column(transform_frequencies)
+        column_frequencies = self._frequency_layout_.frequencies_by_column(transform_frequencies)
         result = pd.DataFrame(False, index=frame.index, columns=frame.columns)
         # Détection des colonnes à plus haute fréquence que celle de l'étape
         for column in frame.columns:
@@ -4710,7 +3891,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             return frame
 
         # Fréquence d'étape de chaque ligne de la grille
-        row_frequency = self._stage_frequency_of(output_binding, frame.index)
+        row_frequency = stage_frequency_of(output_binding, frame.index)
 
         # Initialisation du jeu de données résultat
         result = frame.copy()
@@ -5219,7 +4400,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             return source_label
 
         # Repli sur le niveau cible, toujours produit
-        target_label = self._stage_frequency_label(self.effective_target_frequency_)
+        target_label = stage_frequency_label(self.effective_target_frequency_)
         if target_label in available:
             return target_label
 

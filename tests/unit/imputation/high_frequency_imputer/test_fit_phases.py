@@ -459,22 +459,6 @@ class TestPerEntityFrequencies:
             if group_key[0] == 'v':
                 assert IT not in entities
 
-    # Interne : adaptateur privé ; son pendant public est
-    # test_detected_frequencies_are_per_entity
-    @pytest.mark.internal
-    def test_detected_frequencies_adapter_keeps_both_shapes(
-        self, mixed_freq_panel_multifrequency
-    ):
-        """L'adaptateur rend la forme par colonne qu'attendent les composants."""
-        imputer = fit_quietly(make_imputer(), mixed_freq_panel_multifrequency)
-        by_column = imputer._detected_frequencies_by_column()
-
-        # Colonne hétérogène : forme par entité
-        assert by_column['v'] == {FR: 'Y', DE: 'Q', IT: 'M'}
-        # Colonnes homogènes : repli sur la forme scalaire
-        assert by_column['q1'] == 'Q'
-        assert by_column['m1'] == 'M'
-
     def test_composite_stage_label_when_entities_diverge(self, mixed_freq_panel_multifrequency):
         """A stage binding different frequencies carries a composite label.
 

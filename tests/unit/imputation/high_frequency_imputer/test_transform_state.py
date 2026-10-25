@@ -247,8 +247,9 @@ class TestTransformLeavesTheFitIntact:
         """The private fitted state is, after a transform, what the fit left.
 
         The transform reads the components the fit configured — aggregation
-        constraint, stage scaler, materializer configuration — and never
-        writes them: its materializer, registers and accumulators are its own.
+        constraint, stage scaler, materializer configuration — and the
+        frequency layout, and never writes them: its materializer, registers
+        and accumulators are its own.
         A deep copy taken right after the fit is compared structurally.
         """
         fit_data, transform_data, unobserved = self._replay_inputs(scenario, request)
@@ -257,8 +258,7 @@ class TestTransformLeavesTheFitIntact:
             fit_data,
         )
         names = (
-            '_fitted_components_', '_undetected_frequencies_', '_misaligned_pairs',
-            '_source_index_frequency_label',
+            '_fitted_components_', '_frequency_layout_', '_source_index_frequency_label',
         )
         snapshot = copy.deepcopy({name: getattr(imputer, name) for name in names})
 

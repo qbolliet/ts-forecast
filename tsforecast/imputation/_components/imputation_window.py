@@ -980,7 +980,7 @@ class ImputationWindowCalculator:
         # couverte par une observation est inconnue. Les garder obligerait à en
         # deviner une — une valeur isolée pourrait alors opposer un veto à la
         # fenêtre ou étirer la grille. Elles sont écartées de la grille comme
-        # du dénominateur, à l'image des "_undetected_frequencies_" de l'imputeur
+        # du dénominateur, à l'image des couples non détectés de l'imputeur
         undetected_columns = tuple(
             col for col in df.columns
             if col_freqs.get(col) is None and bool(df[col].notna().any())
