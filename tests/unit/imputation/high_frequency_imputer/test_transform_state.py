@@ -431,6 +431,20 @@ class TestTransformInputContract:
         assert result.index.equals(one_row.index)
         assert result['m1'].iloc[0] == one_row['m1'].iloc[0]
 
+    def test_unavailable_mask_is_logged_under_the_transform_tag(
+        self, reference_timeseries, capsys
+    ):
+        """A window mask unavailable at transform is logged as a transform, never as a fit."""
+        imputer = fit_quietly(make_imputer(keep_lower_frequencies=False), reference_timeseries)
+        imputer.set_params(verbose=True)
+        capsys.readouterr()
+
+        transform_quietly(imputer, reference_timeseries.iloc[[5]])
+
+        logged = capsys.readouterr().out
+        assert '[transform] imputation mask unavailable' in logged
+        assert '[fit]' not in logged
+
     def test_truncated_period_is_reported_and_restorable(self, reference_timeseries):
         """One month of a quarter cannot carry its total: warned once, restorable.
 

@@ -1403,7 +1403,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # /!\ Cette logique n'est pas déjà présente ailleurs ?
     def _stage_mask(
         self,
-        window_calculator: ImputationWindowCalculator,
+        run: _RunContext,
         X_work: pd.DataFrame,
         stage_freq: Union[str, Dict[EntityKey, str]],
         kind: Literal['imputation', 'training'],
@@ -1418,7 +1418,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         left unrestricted rather than silently losing every one of its rows.
 
         Args:
-            window_calculator: Window calculator of the pass.
+            run: Execution context of the pass, which provides the window
+                calculator and the pass name used in the log.
             X_work: Working frame, the fallback grid.
             stage_freq: Frequency of the stage, scalar or per entity.
             kind: Window read: ``'imputation'`` or ``'training'``.
@@ -1431,9 +1432,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Calculateur non ajusté ou fréquence inconvertible : aucune
         # restriction, la garde de la phase 1 ayant déjà averti
         try:
-            mask = window_calculator.get_mask_at_frequency(stage_freq, kind=kind)
+            mask = run.window_calculator.get_mask_at_frequency(stage_freq, kind=kind)
         except (ValueError, KeyError, TypeError) as error:
-            self._log(f"[fit] {kind} mask unavailable ({error}); every row kept")
+            self._log(
+                f"[{run.pending_warnings.pass_name}] {kind} mask unavailable "
+                f"({error}); every row kept"
+            )
             return pd.Series(True, index=X_work.index)
 
         # Entités omises par le calculateur : rattachées sans restriction
@@ -1450,7 +1454,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire de la grille de prédiction d'une étape
     def _prediction_grid(
         self,
-        window_calculator: ImputationWindowCalculator,
+        run: _RunContext,
         X_work: pd.DataFrame,
         stage_freq: Union[str, Dict[EntityKey, str]],
         entities: Optional[Sequence[EntityKey]],
@@ -1462,7 +1466,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         predicted like any other.
 
         Args:
-            window_calculator: Window calculator of the pass.
+            run: Execution context of the pass.
             X_work: Working frame.
             stage_freq: Frequency of the stage.
             entities: Entities of the group, None for a time series.
@@ -1471,14 +1475,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Index of the rows the step writes on.
         """
         # Masque d'imputation, "kind" nommé explicitement
-        mask = self._stage_mask(window_calculator, X_work, stage_freq, kind='imputation')
+        mask = self._stage_mask(run, X_work, stage_freq, kind='imputation')
         grid = mask.index[mask.to_numpy(dtype=bool)]
         return self._restrict_to_entities(grid, entities)
 
     # Méthode auxiliaire de la grille non restreinte d'un groupe
     def _unrestricted_grid(
         self,
-        window_calculator: ImputationWindowCalculator,
+        run: _RunContext,
         X_work: pd.DataFrame,
         stage_freq: Union[str, Dict[EntityKey, str]],
         entities: Optional[Sequence[EntityKey]],
@@ -1492,7 +1496,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         cannot feed producing a NaN that is simply never written.
 
         Args:
-            window_calculator: Window calculator of the pass.
+            run: Execution context of the pass.
             X_work: Working frame.
             stage_freq: Frequency of the stage.
             entities: Entities of the group, None for a time series.
@@ -1501,7 +1505,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             Index of the rows of those entities at the stage frequency.
         """
         # Index du masque, pris sans sa valeur booléenne : la grille de l'étape
-        mask = self._stage_mask(window_calculator, X_work, stage_freq, kind='imputation')
+        mask = self._stage_mask(run, X_work, stage_freq, kind='imputation')
         return self._restrict_to_entities(mask.index, entities)
 
     # Méthode auxiliaire de liaison de fréquence des blocs
@@ -1907,7 +1911,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # 5a. Frame d'étape : données d'origine, agrégations exactes et miroir
         stage_mask = self._stage_mask(
-            run.window_calculator, X_work, stage_freq, kind='imputation'
+            run, X_work, stage_freq, kind='imputation'
         )
         stage_frame = run.materializer.stage_frame(
             grid_index=stage_mask.index,
@@ -2020,7 +2024,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Grille de prédiction des entités concernées
         pred_grid = self._prediction_grid(
-            run.window_calculator, X_work, stage_freq, entities
+            run, X_work, stage_freq, entities
         )
 
         # Vues des deux fenêtres, chacune à sa fréquence : la grille
@@ -2589,7 +2593,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
 
         # Grille du groupe : la fenêtre d'imputation de ses entités, ancres comprises
         grid = self._prediction_grid(
-            run.window_calculator, X_work, stage_freq, step.entities
+            run, X_work, stage_freq, step.entities
         )
 
         # Sans ancre, la fenêtre stricte d'une entité est vide par
@@ -2600,7 +2604,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # comme "_stage_mask" traite déjà une entité que le calculateur omet
         if step.unanchored and len(grid) == 0:
             grid = self._unrestricted_grid(
-                run.window_calculator, X_work, stage_freq, step.entities
+                run, X_work, stage_freq, step.entities
             )
 
         if len(grid) == 0:
@@ -3176,7 +3180,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             representative = column_steps[0]
             for frequency, entities in anchored.items():
                 grid = self._prediction_grid(
-                    run.window_calculator, X_stage, binding, entities
+                    run, X_stage, binding, entities
                 )
                 scale = self._group_scale_factor(
                     run.stage_scaler, column, frequency, binding, grid
@@ -3347,7 +3351,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # celui de l'entrée (on impose qu'il soit trié)
             grid = self._in_input_order(
                 self._stage_mask(
-                    run.window_calculator, X_stage, output_binding, kind='imputation'
+                    run, X_stage, output_binding, kind='imputation'
                 ).index,
                 X_stage.index,
             )
