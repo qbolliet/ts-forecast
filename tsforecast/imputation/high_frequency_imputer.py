@@ -31,7 +31,6 @@ from sklearn.base import BaseEstimator, TransformerMixin, clone
 from ..xy.transformers import XYPanelTimeSeriesTransformer
 from ..utils.frequency.utils import (
     detect_frequency,
-    detect_index_frequency,
     get_frequency_order,
     is_higher_frequency,
     normalize_frequency,
@@ -39,8 +38,6 @@ from ..utils.frequency.utils import (
 from ..panel.utils import (
     factorize_row_keys,
     get_entity_codes,
-    get_unique_panel_entities,
-    is_panel_data,
     normalize_entity_key,
     split_variable_key,
 )
@@ -73,7 +70,6 @@ from ._components.imputation_window import (
 from ._components.provenance import (
     CELL_ORIGIN_DTYPE,
     CellOrigin,
-    ImputationProvenanceTracker,
     PROVENANCE_DTYPE,
     ProvenanceType,
     Taint,
@@ -104,6 +100,11 @@ from ._engine.frequency_layout import (
     plan_frequencies,
     stage_frequency_label,
     stage_frequency_of,
+)
+from ._engine.preparation import (
+    PreparedData,
+    prepare_work_frame,
+    resolve_target_column_name,
 )
 from ._engine.run_context import FittedComponents, _RunContext
 from ._engine.warnings import WarningAccumulator
@@ -992,147 +993,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         return plan.models()
 
     # -------------------------------------------------------------------------
-    # Alignement de la cible
-    # -------------------------------------------------------------------------
-    # Méthode auxiliaire de résolution du nom de colonne de la cible
-    def _resolve_target_column_name(self, y: pd.Series) -> str:
-        """Resolve the column name used for ``y`` once merged into a frame.
-
-        Single naming rule shared by ``_fit``, ``_transform`` and
-        ``_inverse_transform``. The fit-time name and the transform-time name
-        must be identical: otherwise the target is not found among the stage
-        columns and silently skips imputation.
-
-        Args:
-            y: Target series, possibly unnamed.
-
-        Returns:
-            ``y.name`` if set, else the fallback ``'__target__'``.
-        """
-        return y.name if y.name is not None else '__target__'
-
-    # Méthode auxiliaire d'alignement de l'index de la cible sur celui de X
-    def _align_target_index(self, X: pd.DataFrame, y: pd.Series) -> pd.Series:
-        """Align ``y``'s index onto ``X``'s, tolerating the col->index step.
-
-        The check is an **index equality** check, not a length check.
-        Two series of the same length carrying different labels are a caller
-        bug, not a case to fix silently — ``pd.concat`` aligns on index value,
-        so reindexing would grow the working frame with NaN rows instead of
-        raising.
-
-        When ``time_col``/``panel_cols`` are used, the base transformer
-        converts ``X``'s columns into a Multi/DatetimeIndex before ``_fit``
-        ever sees it, but never touches ``y``. If ``y`` still carries the
-        index recorded before that conversion, it is repositioned onto
-        ``X.index``.
-
-        The same instants stored at another unit (``y`` in nanoseconds, ``X``
-        in seconds) match: ``y`` then takes ``X``'s dates, so that both come
-        out at the unit of ``X``.
-
-        Args:
-            X: Working features, already validated and converted.
-            y: Target series as received by ``fit``.
-
-        Returns:
-            ``y`` repositioned onto ``X.index`` when that is safe to do, its
-            values and index names unchanged.
-
-        Raises:
-            ValueError: If the two indices neither match nor derive from the
-                same pre-conversion index.
-        """
-        # Cas nominal : les deux index coïncident déjà
-        if X.index.equals(y.index):
-            # Mêmes instants exprimés dans une autre unité : y prend les dates de
-            # X, faute de quoi le jeu de travail, concaténé, passerait à la plus
-            # fine des deux unités
-            if self._datetime_units(X.index) != self._datetime_units(y.index):
-                return y.set_axis(X.index.set_names(y.index.names))
-            return y
-
-        # Cas colonnes -> index : la conversion appliquée à X, jamais à y,
-        # est réappliquée à y en réutilisant les métadonnées de conversion des
-        # données de l'appel en cours (fit ou transform)
-        conversion_meta = getattr(self, '_current_conversion_metadata', None)
-        if (
-            conversion_meta is not None
-            and conversion_meta.get('index_was_replaced')
-            and conversion_meta['original_index'].equals(y.index)
-        ):
-            return y.set_axis(X.index)
-
-        # Aucun des deux cas : décompte des libellés divergents, pour que le
-        # message distingue une longueur différente d'un désaccord de valeurs
-        if len(X) != len(y):
-            detail = f"lengths differ ({len(X)} vs {len(y)})"
-        else:
-            mismatches = int((~X.index.isin(y.index)).sum())
-            detail = (
-                f"same length ({len(X)}) but {mismatches} label(s) of X's "
-                f"index are absent from y's"
-            )
-        raise ValueError(
-            f"X and y have different indices: {detail}. y must share X's "
-            f"index, or — for column-based panel/time-series data "
-            f"(time_col/panel_cols) — the index X had before those columns "
-            f"were converted to the index."
-        )
-
-    # Méthode auxiliaire de lecture des unités de stockage des dates d'un index
-    @staticmethod
-    def _datetime_units(index: pd.Index) -> Tuple[Optional[str], ...]:
-        """Return the storage unit of the dates of each level of an index.
-
-        Args:
-            index: Flat index or ``MultiIndex``.
-
-        Returns:
-            One entry per level: the unit (``'s'``, ``'ms'``, ``'us'`` or
-            ``'ns'``) of a date level, None for any other level.
-
-        Examples:
-            >>> import pandas as pd
-            >>> dates = pd.date_range('2024-01-31', periods=2, freq='ME').as_unit('s')
-            >>> HighFrequencyImputer._datetime_units(pd.MultiIndex.from_product([['FR'], dates]))
-            (None, 's')
-        """
-        # Extraction des niveaux de l'index
-        levels = index.levels if isinstance(index, pd.MultiIndex) else [index]
-        # Extraction des unités associées à chaque niveau
-        return tuple(
-            level.unit if isinstance(level, pd.DatetimeIndex) else None
-            for level in levels
-        )
-
-    # -------------------------------------------------------------------------
     # Fenêtres
     # -------------------------------------------------------------------------
-    # Méthode auxiliaire de mise en correspondance des bornes (start, end) d'une fenêtre
-    @staticmethod
-    def _zip_window_bounds(
-        start: Union[pd.Timestamp, Dict[EntityKey, Optional[pd.Timestamp]], None],
-        end: Union[pd.Timestamp, Dict[EntityKey, Optional[pd.Timestamp]], None],
-    ) -> Union[Tuple, Dict[EntityKey, Tuple]]:
-        """Pair per-entity (or scalar) start/end bounds into tuples.
-
-        Args:
-            start: Window start(s), as returned by
-                ``ImputationWindowCalculator`` (scalar for a time series, dict
-                keyed by entity tuple for a panel).
-            end: Window end(s), same shape as ``start``.
-
-        Returns:
-            ``(start, end)`` tuple, or dict mapping entities to
-            ``(start, end)``.
-        """
-        # Cas des données de panel : appariement par entité
-        if isinstance(start, dict):
-            return {entity: (start[entity], end.get(entity)) for entity in start}
-        # Cas des séries temporelles
-        return (start, end)
-
     # Méthode auxiliaire de sélection des colonnes de features
     def _select_feature_columns(
         self,
@@ -1232,52 +1094,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # -------------------------------------------------------------------------
     # Fit
     # -------------------------------------------------------------------------
-    # Méthode auxiliaire d'entraînement
-    def _fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
-        """Learn the imputation plan from X and y.
+    # Méthode auxiliaire de purge de l'état de la dernière passe
+    def _purge_pass_state(self) -> None:
+        """Drop the per-pass state a previous ``transform`` wrote.
 
-        Phases of the fitting logic:
-
-        - PHASE 0: setup — transform-state purge, columns, panel
-          detection, ``y`` alignment and naming, ``target_frequency``
-          normalization, then the frequency layout
-          (:func:`~tsforecast.imputation._engine.frequency_layout.plan_frequencies`):
-          frequency detection, target validation, variable classification
-          per (entity, column) pair and progression, computed once.
-        - PHASE 1: the three window masks, each caller naming its
-          ``kind``.
-        - PHASE 2: additive transformer.
-        - PHASE 3: frequency progression, published from the layout.
-        - PHASE 4: provenance tracker, initialized after the additive
-          transformer, and the execution context of the fit
-          (:class:`_RunContext`), dropped at the end of the pass.
-
-        - PHASE 5: stage execution — one model per (stage, variable),
-          shared by its source-frequency groups, then one plan step per
-          group.
-        - PHASE 6: finalization — frozen plan, provenance matrix and
-          ``unanchored_pairs_``. The multi-frequency output belongs to
-          ``transform``.
-
-        Args:
-            X: Features of shape (n_samples, n_features).
-            y: Target of shape (n_samples,), optional.
-
-        Raises:
-            ValueError: If no frequency can be detected, if a
-                ``target_frequency`` dict is given on a time series or
-                misses entities, if the
-                indices of X and y disagree, if an index level bears
-                the reserved name ``'frequency'``, or if the window
-                calculator cannot be fitted — an empty window is not a
-                failure, it imputes nothing and is warned about.
+        The provenance matrix, its statistics and the input snapshot always
+        describe the last pass: ``fit`` purges those of a previous transform,
+        then writes its own.
         """
-        # =================================================================
-        # PHASE 0 — Setup
-        # =================================================================
-        # Revalidation des paramètres : "set_params" contourne "__init__"
-        self._validate_params()
-
         # Purge de l'état écrit par un précédent "transform"
         for stale_attr in (
             'imputation_provenance_', 'provenance_statistics_', '_original_X_',
@@ -1286,78 +1110,18 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             if stale_attr in self.__dict__:
                 delattr(self, stale_attr)
 
-        # Nom de niveau réservé au niveau de fréquence
-        self._check_reserved_level_name(X)
+    # Méthode auxiliaire de configuration de l'ordonnanceur du fit
+    def _configure_variable_orderer(self) -> VariableOrderer:
+        """Build the orderer of the fit and publish the attributes of the order.
 
-        # Extraction des colonnes d'intérêt
-        self.feature_columns_ = list(X.columns)
-        # Identification de la structure des données
-        self.is_panel_ = bool(self.panel_cols) or is_panel_data(data=X)
+        The orderer depends on the parameters alone. ``cv_`` exists only under
+        ``fit_predict_order='cv'``; ``imputation_order_`` and
+        ``imputation_cv_scores_`` start empty, filled by phase 5 under
+        ``covariate_strategy='model'``.
 
-        # Construction du jeu de données de travail
-        if y is not None:
-            # Alignement de l'index de y sur celui de X.
-            y = self._align_target_index(X, y)
-            # Extraction du nom de y
-            y_col_name = self._resolve_target_column_name(y)
-            # Concaténation en un unique jeu de données
-            X_work = pd.concat([X, y.to_frame(name=y_col_name)], axis=1)
-        else:
-            y_col_name = None
-            X_work = X.copy()
-        # Nom de la colonne que l'on cherche à prédire
-        self.target_column_ = y_col_name
-
-        # Identification des entités
-        if self.is_panel_ and isinstance(X.index, pd.MultiIndex):
-            self.entities_ = get_unique_panel_entities(X)
-        else:
-            self.entities_ = None
-
-        # Label de fréquence de l'index d'entrée : il identifie, à l'inversion,
-        # le niveau à conserver dans une sortie multi-fréquences
-        try:
-            index_freq = detect_index_frequency(X_work.index, return_format='base')
-            self._source_index_frequency_label = stage_frequency_label(index_freq)
-        except (ValueError, TypeError):
-            # Index irrégulier ou trop court : le repli sur le niveau cible suffit
-            self._source_index_frequency_label = None
-
-        # Avertissement unique si aucun estimateur n'est fourni
-        if self.estimator is None:
-            warnings.warn(
-                "No estimator was provided (estimator=None): every variable "
-                "will fall back to linear interpolation.",
-                UserWarning
-            )
-
-        # Clés des dictionnaires par feature absentes des données
-        self._warn_unknown_feature_keys(X_work.columns, self.entities_)
-
-        # Normalisation de target_frequency (la fréquence de prédiction)
-        normalized_target_frequency = validate_target_frequency_format(
-            self.target_frequency
-        )
-
-        # Plan des fréquences : expansion et validation de la cible, détection
-        # par couple (entité, colonne), classification et progression. Calculé
-        # une fois, sur les données d'avant le transformateur additif, puis lu
-        # tel quel pour l'exécution des étapes et pour chaque rejeu
-        layout = plan_frequencies(
-            X_work,
-            normalized_target_frequency,
-            is_panel=self.is_panel_,
-            entities=self.entities_,
-            impute_intermediate_frequencies=self.impute_intermediate_frequencies,
-            on_frequency_mismatch=self.on_frequency_mismatch,
-            log=self._log,
-        )
-        self._frequency_layout_ = layout
-        # Attributs ajustés publiés à partir du plan : les mêmes objets
-        self.effective_target_frequency_ = layout.target_frequency
-        self.detected_frequencies_ = layout.detected_frequencies
-        self.variable_categories_ = layout.categories
-
+        Returns:
+            The orderer, which joins the execution context of the fit.
+        """
         # Résolution de la stratégie de validation croisée : "cv_" n'existe
         # que sous fit_predict_order='cv'. L'ordonnanceur ne sert qu'au fit :
         # il rejoint le contexte d'exécution de la passe
@@ -1390,6 +1154,37 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # puis par variable. Vide hors covariate_strategy='model' +
         # fit_predict_order='cv'. Exposé pour le tracking.
         self.imputation_cv_scores_: Dict[str, Dict[Any, float]] = {}
+        return variable_orderer
+
+    # Méthode auxiliaire de publication de la préparation du fit
+    def _publish_fit_preparation(self, X: pd.DataFrame, prepared: PreparedData) -> None:
+        """Publish the fitted attributes the preparation of the fit derived.
+
+        Columns, structure, target name and entities; frequency layout and
+        the attributes read on it; components shared by every pass; window
+        masks and bounds; fitted additive transformer; frequency progression.
+
+        Args:
+            X: Features of the fit.
+            prepared: Preparation of the fit (``fitting=True``).
+        """
+        # Préparation du fit
+        fit = prepared.fit
+        # Colonnes d'intérêt, structure des données, nom de la cible, entités
+        self.feature_columns_ = list(X.columns)
+        self.is_panel_ = fit.is_panel
+        self.target_column_ = prepared.target_column
+        self.entities_ = fit.entities
+        # Label de fréquence de l'index d'entrée, lu à l'inversion
+        self._source_index_frequency_label = fit.source_index_frequency_label
+
+        # Plan des fréquences, lu tel quel pour l'exécution des étapes et pour
+        # chaque rejeu. Attributs ajustés publiés à partir du plan : les mêmes objets
+        layout = fit.layout
+        self._frequency_layout_ = layout
+        self.effective_target_frequency_ = layout.target_frequency
+        self.detected_frequencies_ = layout.detected_frequencies
+        self.variable_categories_ = layout.categories
 
         # Composants configurés une fois pour toutes et relus tels quels par
         # chaque passe : la contrainte d'agrégation (elle recale les
@@ -1409,64 +1204,17 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             column_frequencies=layout.frequencies_by_column(),
         )
 
-        # =================================================================
-        # PHASE 1 — Fenêtres : les trois masques
-        # =================================================================
-        # Calcul des fenêtres sur les données du fit, par la même fabrique de
-        # calculateur qu'au transform. Un échec lève : un repli sur des masques
-        # tout-vrais imputerait tout le jeu en silence,
-        # et une fenêtre vide n'est jamais un échec (masques
-        # tout-faux et avertissement du calculateur)
-        window_calc = self._make_window_calculator().fit(X_work)
+        # Trois masques de fenêtre, et bornes lisibles : chaque attribut porte
+        # celles de son masque
+        self.strict_window_mask_ = fit.strict_window_mask
+        self.imputation_window_mask_ = fit.imputation_window_mask
+        self.training_window_mask_ = fit.training_window_mask
+        self.imputation_window_ = fit.imputation_window
+        self.training_window_ = fit.training_window
 
-        # Chaque appelant nomme explicitement son masque
-        self.strict_window_mask_ = window_calc.get_imputation_window_mask(
-            X_work, kind='strict'
-        )
-        self.imputation_window_mask_ = window_calc.get_imputation_window_mask(
-            X_work, kind='imputation'
-        )
-        self.training_window_mask_ = window_calc.get_imputation_window_mask(
-            X_work, kind='training'
-        )
+        # Transformateur additif ajusté, None sans transformateur
+        self.additive_transformer_ = fit.additive_transformer
 
-        # Bornes lisibles : chaque attribut porte celles de son masque.
-        self.imputation_window_ = self._zip_window_bounds(
-            window_calc.imputation_window_start_,
-            window_calc.imputation_window_end_,
-        )
-        self.training_window_ = self._zip_window_bounds(
-            window_calc.training_window_start_,
-            window_calc.training_window_end_,
-        )
-
-        # Fenêtre d'entraînement vide : aucun avertissement propre à
-        # l'imputeur. Les masques d'imputation et d'entraînement contiennent
-        # tous deux la fenêtre stricte, et aucune extension ne crée de
-        # fenêtre là où la stricte est vide : une fenêtre d'entraînement
-        # vide implique une fenêtre d'imputation vide, que le calculateur
-        # signale déjà (« no period … where all the variables are
-        # available ») — rien n'est alors imputé, ni par modèle ni par repli
-
-        # =================================================================
-        # PHASE 2 — Transformateur additif
-        # =================================================================
-        # Passage en représentation additive, unique échappatoire à
-        # l'hypothèse d'additivité de la classe entière
-        if self.additive_transformer is not None:
-            # Initialisation du transformer
-            self.additive_transformer_ = clone(self.additive_transformer)
-            # Additivité des données
-            X_work = self.additive_transformer_.fit_transform(X_work)
-            # Déballage du couple (X, y) que renvoie un transformateur XY
-            if isinstance(X_work, tuple):
-                X_work = X_work[0]
-        else:
-            self.additive_transformer_ = None
-
-        # =================================================================
-        # PHASE 3 — Progression de fréquences
-        # =================================================================
         # Progression des fréquences à imputer, établie par le plan des
         # fréquences : elle ne dépend que des fréquences détectées et de la cible
         self.frequency_progression_ = layout.progression
@@ -1476,78 +1224,92 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             f"{[stage_frequency_label(f) for f in self.frequency_progression_]}"
         )
 
-        # =================================================================
-        # PHASE 4 — Provenance
-        # =================================================================
-        # Initialisation après le transformateur additif : le tracker
-        # scanne le jeu de données réellement imputé, et non celui d'avant la
-        # transformation, dont les cellules non nulles ne coïncident pas
-        # nécessairement.
-        tracker = ImputationProvenanceTracker()
-        tracker.initialize(X_work, panel_cols=self.panel_cols)
+    # Méthode auxiliaire d'entraînement
+    def _fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
+        """Learn the imputation plan from X and y.
 
-        # Contexte d'exécution du fit, abandonné en fin de passe. Le
-        # constructeur du jeu d'entraînement mutualisé y est câblé sur le
-        # matérialiseur de la passe ; le "kind" de son masque est nommé ici,
-        # une fois pour toutes : il reçoit un callable, jamais le calculateur,
-        # et ne peut donc pas lire un autre masque que celui d'entraînement.
-        # La contrainte d'agrégation ne lui est pas passée : elle ne joue
-        # aucun rôle dans la composition du jeu et lui parvient de toute
-        # façon par le matérialiseur
+        Phases of the fitting logic:
+
+        - PHASE 0: parameters — revalidation, purge of the last pass, warning
+          without an estimator, orderer of the variables.
+        - PHASES 0-4: preparation, the same code as the transform's
+          (:func:`~tsforecast.imputation._engine.preparation.prepare_work_frame`,
+          ``fitting=True``): ``y`` alignment and naming, working frame,
+          frequency layout
+          (:func:`~tsforecast.imputation._engine.frequency_layout.plan_frequencies`),
+          the three window masks, additive transformer fitted, provenance
+          tracker initialized after it — then published as fitted attributes,
+          with the components every pass shares.
+        - PHASE 4: execution context of the fit (:class:`_RunContext`),
+          dropped at the end of the pass.
+        - PHASE 5: stage execution — one model per (stage, variable),
+          shared by its source-frequency groups, then one plan step per
+          group.
+        - PHASE 6: finalization — frozen plan, provenance matrix and
+          ``unanchored_pairs_``. The multi-frequency output belongs to
+          ``transform``.
+
+        Args:
+            X: Features of shape (n_samples, n_features).
+            y: Target of shape (n_samples,), optional.
+
+        Raises:
+            ValueError: If no frequency can be detected, if a
+                ``target_frequency`` dict is given on a time series or
+                misses entities, if the
+                indices of X and y disagree, if an index level bears
+                the reserved name ``'frequency'``, or if the window
+                calculator cannot be fitted — an empty window is not a
+                failure, it imputes nothing and is warned about.
+        """
+        # PHASE 0 — Paramètres revalidés ("set_params" contourne "__init__"), précédente passe purgée
+        self._validate_params()
+        self._purge_pass_state()
+
+        # PHASE 0 — Configuration sans données : avertissement sans estimateur, ordonnanceur
+        if self.estimator is None:
+            warnings.warn(
+                "No estimator was provided (estimator=None): every variable "
+                "will fall back to linear interpolation.",
+                UserWarning
+            )
+        variable_orderer = self._configure_variable_orderer()
+
+        # PHASES 0-4 — Préparation commune au transform, publiée en attributs ajustés
+        prepared = prepare_work_frame(self, X, y, fitting=True)
+        self._publish_fit_preparation(X, prepared)
+
+        # PHASE 4 — Contexte d'exécution du fit, abandonné en fin de passe. Le
+        # constructeur du jeu d'entraînement reçoit un callable au "kind" nommé
+        # ici, jamais le calculateur : il ne lit que le masque d'entraînement
         run = _RunContext.for_fit(
             self._fitted_components_,
-            window_calculator=window_calc,
-            provenance_tracker=tracker,
+            window_calculator=prepared.window_calculator,
+            provenance_tracker=prepared.provenance_tracker,
             variable_orderer=variable_orderer,
-            training_mask=partial(self._training_mask_at, window_calc),
+            training_mask=partial(self._training_mask_at, prepared.window_calculator),
             log=self._log if self.verbose else None,
         )
 
-        # =================================================================
-        # PHASE 5 — Exécution des étapes
-        # =================================================================
-        # Le plan est l'état ajusté complet : initialisé vide, il est rempli
-        # étape par étape, chaque étape étant construite PUIS exécutée au fil
-        # de l'eau — l'étape k dépend des imputations de l'étape k-1
+        # PHASE 5 — Exécution des étapes, chacune construite PUIS exécutée (l'étape
+        # k dépend des imputations de l'étape k-1), recalages sous un bloc différé :
+        # un avertissement par cas dégénéré, jamais un par variable × étape
         self.imputation_plan_ = ImputationPlan()
-        # Recalages de la phase sous un bloc différé : périodes nulles et
-        # profils inversés — des étapes comme des covariables interpolées —
-        # donnent un avertissement par cas en fin de phase, jamais un par
-        # variable × étape
         with run.aggregation_constraint.deferred_warnings():
-            # Parcours des fréquences
             for stage_freq in self.frequency_progression_:
-                # Exécution de l'imputation à l'étape donnée
-                self._execute_stage(run, X_work, stage_freq)
-
+                self._execute_stage(run, prepared.X_work, stage_freq)
         # Avertissements de la phase, un seul message par famille : étapes
-        # dégradées, puis couples sans ancre restés vides — l'interpolation ne
-        # peut pas servir de repli à ces derniers, il n'y a rien à interpoler
+        # dégradées, puis couples sans ancre restés vides
         run.pending_warnings.emit()
 
-        # =================================================================
-        # PHASE 6 — Finalisation
-        # =================================================================
-        # Le plan est figé et les attributs de sortie sont renseignés. La
-        # sortie multi-fréquences relève du "transform", seul producteur de
-        # frame
+        # PHASE 6 — Finalisation : provenance et statistiques de la passe, couples
+        # imputés sans ancre (toujours écrits, vides compris, pour "check_is_fitted"),
+        # instantané de l'entrée, relu par "inverse_transform" comme dernière passe
         self.imputation_provenance_ = run.provenance_tracker.get_provenance_matrix()
-
-        # Statistiques de provenance (comptes et pourcentages par
-        # "ProvenanceType", au global et par colonne) : exposées telles quelles
-        # pour le tracking, elles évitent à l'utilisateur de reconstruire un
-        # tracker pour les recalculer
         self.provenance_statistics_ = run.provenance_tracker.compute_statistics()
-
-        # Couples imputés sans ancre : toujours écrit, vide compris, ce qui
-        # autorise sa lecture par "check_is_fitted"
         self.unanchored_pairs_ = tuple(sorted(run.unanchored_written, key=repr))
-
-        # Instantané de l'entrée du fit : comme "imputation_provenance_", il
-        # décrit la dernière passe, que "inverse_transform" défait — y compris
-        # sous restore_original_values=True juste après un fit
-        self._original_X_ = X.copy()
-        self._original_y_ = y.copy() if y is not None else None
+        self._original_X_ = prepared.snapshot_X
+        self._original_y_ = prepared.snapshot_y
 
     # -------------------------------------------------------------------------
     # PHASE 5 — Exécution des étapes
@@ -3089,61 +2851,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             self._log(f"[fit] training mask unavailable ({error}); every row kept")
             return None
 
-    # Méthode auxiliaire de construction d'un calculateur de fenêtre
-    def _make_window_calculator(self) -> ImputationWindowCalculator:
-        """Build a window calculator carrying the imputer's hyperparameters.
-
-        Returns:
-            Unfitted :class:`ImputationWindowCalculator` configured with the
-            four window parameters.
-        """
-        # Les deux paramètres d'entraînement retombent sur ceux de prédiction
-        # quand ils valent None : le calculateur porte lui-même cette règle.
-        # Une seule colonne suffit à définir une fenêtre — sa propre
-        # couverture : aucun minimum supérieur n'est imposé
-        return ImputationWindowCalculator(
-            coverage_threshold=self.coverage_threshold,
-            imputation_scope=self.imputation_scope,
-            training_scope=self.training_scope,
-            training_coverage_threshold=self.training_coverage_threshold,
-        )
-
-    # Méthode auxiliaire d'ajustement d'un calculateur de fenêtre d'imputation
-    def _fit_imputation_window(
-        self,
-        data: pd.DataFrame,
-    ) -> Tuple[Optional[ImputationWindowCalculator], Optional[ValueError]]:
-        """Fit a fresh window calculator on the data being transformed.
-
-        The window is a constraint on data availability, not an estimated
-        parameter: it is a deterministic function of the frame it is computed
-        on. ``_fit`` and ``_transform`` therefore build their calculator with
-        the same factory (:meth:`_make_window_calculator`) and each compute
-        the window on their own data, which is what preserves
-        ``fit_transform(X) == fit(X).transform(X)``. Only the transform
-        tolerates a failure — a single row to transform carries no window —
-        and replays the plan without restriction; at ``fit``, a failure
-        raises.
-
-        Args:
-            data: Frame the window is computed on. Must be the frame BEFORE
-                the additive transformer, on both paths, or the two windows
-                would not coincide.
-
-        Returns:
-            Tuple ``(calculator, error)``: the fitted calculator and None, or
-            None and the ``ValueError`` the calculator raised.
-        """
-        # Instanciation avec les hyperparamètres de l'imputeur
-        calculator = self._make_window_calculator()
-        # Estimation de la fenêtre
-        try:
-            calculator.fit(data)
-        except ValueError as error:
-            return None, error
-
-        return calculator, None
-
     # -------------------------------------------------------------------------
     # Transform — rejeu du plan figé
     # -------------------------------------------------------------------------
@@ -4021,11 +3728,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.Series]]:
         """Replay the fitted plan on new data.
 
-        Phases 0'-4' recompute what depends on the data — ``y`` alignment and
-        naming by the same functions as the fit, the additive transformer
-        applied with the fitted object, the provenance tracker initialized
-        after it, the windows recomputed and the frequency check
-        — then every frozen step is replayed by :meth:`_execute_step`,
+        Phases 0'-4' recompute what depends on the data by the very code of
+        the fit (:func:`~tsforecast.imputation._engine.preparation.prepare_work_frame`,
+        ``fitting=False``) — ``y`` alignment and naming, the frequency check
+        against the fit, the windows recomputed before the additive
+        transformer, the fitted transformer applied, the provenance tracker
+        initialized after it — then every frozen step is replayed by
+        :meth:`_execute_step`,
         the very method the fit calls, on an execution context
         (:class:`_RunContext`) built from the fitted state alone. No second
         execution loop, and no
@@ -4076,118 +3785,34 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             >>> imputed.loc['M', 'q1'].iloc[:3].round(1).tolist()
             [3.0, 3.3, 3.7]
         """
-        # =================================================================
-        # PHASE 0' — Setup, contrat d'entrée et instantané
-        # =================================================================
-        if not isinstance(X, pd.DataFrame):
-            raise ValueError(f"X must be a pandas DataFrame, got {type(X).__name__}")
-        # Nom de niveau réservé au niveau de fréquence de la sortie
-        self._check_reserved_level_name(X)
+        # PHASES 0'-4' — Préparation commune au fit : contrôle des fréquences, fenêtres recalculées
+        prepared = prepare_work_frame(self, X, y, fitting=False, prediction=prediction)
+        # Cible alignée et son nom dans la frame de travail, relus par la sortie
+        y, y_col_name = prepared.y, prepared.target_column
 
-        # Alignement de l'index de y sur celui de X, par la même fonction qu'au
-        # fit : deux règles de nommage divergentes ont déjà fait perdre la cible
-        # parmi les colonnes d'étapes
-        if y is not None:
-            y = self._align_target_index(X, y)
-        # Passe de prédiction : aucun modèle de X ne doit lire la cible absente
-        if prediction:
-            self._check_prediction_pass_replayable()
-        # Colonne absente de la passe de prédiction : la cible, jamais lue
-        target_skipped = (self.target_column_,) if prediction else ()
-
-        # Instantané de l'entrée, publié en fin de passe seulement : un appel
-        # qui lève n'est pas une passe, et l'inversion de la précédente doit
-        # continuer de lire l'entrée de celle-ci
-        snapshot_X = X.copy()
-        snapshot_y = y.copy() if y is not None and not prediction else None
-
-        # Concaténation en un unique jeu de travail. L'index est déjà temporel :
-        # la validation de base a converti "time_col" et "panel_cols" en index
-        # et refusé tout autre index. La passe de prédiction n'y met jamais y
-        y_col_name: Optional[str] = None
-        if y is not None and not prediction:
-            y_col_name = self._resolve_target_column_name(y)
-            X_work = pd.concat([X, y.to_frame(name=y_col_name)], axis=1)
-        else:
-            X_work = X.copy()
-
-        # Contrôle des fréquences : erreur sur colonne manquante,
-        # avertissement unique sur divergence, silence sur colonne en trop
-        new_frequencies, new_misaligned = self._check_transform_frequencies(
-            X_work, optional_columns=target_skipped
-        )
-
-        # =================================================================
-        # PHASE 1' — Fenêtres recalculées
-        # =================================================================
-        # Calcul au même stade qu'au fit — avant le transformateur additif —
-        # pour que le recalcul sur les données du fit redonne exactement la
-        # fenêtre du fit, et donc "fit_transform(X) == fit(X).transform(X)"
-        window_calc, window_error = self._fit_imputation_window(X_work)
-        if window_calc is None:
-            warnings.warn(
-                f"Could not calculate the imputation window of the data being "
-                f"transformed: {window_error}. Using all available data.",
-                UserWarning,
-            )
-            # Calculateur non ajusté : les gardes des consommateurs le neutralisent
-            window_calc = self._make_window_calculator()
-        else:
-            self._warn_rows_outside_window(window_calc, X_work)
-
-        # =================================================================
-        # PHASE 2' — Transformateur additif, avec l'objet ajusté
-        # =================================================================
-        if self.additive_transformer_ is not None:
-            # Ajusté sur un jeu portant la cible : elle lui est remise vide en
-            # passe de prédiction, puis retirée
-            additive_input = (
-                X_work.assign(**{self.target_column_: np.nan}) if prediction else X_work
-            )
-            X_stage = self.additive_transformer_.transform(additive_input)
-            # Déballage du couple (X, y) que renvoie un transformateur XY
-            if isinstance(X_stage, tuple):
-                X_stage = X_stage[0]
-            if prediction and self.target_column_ in X_stage.columns:
-                X_stage = X_stage.drop(columns=[self.target_column_])
-        else:
-            X_stage = X_work.copy()
-
-        # =================================================================
-        # PHASE 3'-4' — Provenance, initialisée après lui
-        # =================================================================
-        tracker = ImputationProvenanceTracker()
-        tracker.initialize(X_stage, panel_cols=self.panel_cols)
-
-        # =================================================================
-        # PHASE 5' — Rejeu du plan
-        # =================================================================
-        # Contexte d'exécution neuf, construit depuis l'état ajusté seul :
-        # composants partagés du fit, matérialiseur et registres vides,
-        # fenêtre et traceur de ce transform. Le rejeu ne lit ni n'altère
-        # aucun état d'exécution du fit
+        # PHASE 5' — Rejeu du plan sur un contexte d'exécution neuf, construit
+        # depuis l'état ajusté seul : composants partagés du fit, matérialiseur
+        # et registres vides, fenêtre et traceur de ce transform. Le rejeu ne
+        # lit ni n'altère aucun état d'exécution du fit
         run = _RunContext.for_transform(
             self._fitted_components_,
-            window_calculator=window_calc,
-            provenance_tracker=tracker,
-            transform_frequencies=new_frequencies,
-            transform_misaligned=new_misaligned,
+            window_calculator=prepared.window_calculator,
+            provenance_tracker=prepared.provenance_tracker,
+            transform_frequencies=prepared.new_frequencies,
+            transform_misaligned=prepared.new_misaligned,
         )
         # Recalages du rejeu sous un bloc différé, comme au fit : un
         # avertissement par cas dégénéré pour tout le rejeu
         with run.aggregation_constraint.deferred_warnings():
             frames, provenances = self._replay_plan(
-                run, X_stage, skip_columns=frozenset(target_skipped)
+                run, prepared.X_work, skip_columns=prepared.skipped_columns
             )
-
         # Avertissements agrégés, un message par famille
         run.pending_warnings.emit()
 
-        # =================================================================
-        # PHASE 6' — Sortie multi-fréquences et provenance
-        # =================================================================
-        # La progression porte toujours l'étape cible : la dernière frame est
-        # le niveau cible, quelle que soit la forme de la sortie
+        # PHASE 6' — Sortie multi-fréquences et provenance. La progression porte
+        # toujours l'étape cible : la dernière frame est le niveau cible, quelle
+        # que soit la forme de la sortie
         final_label = list(frames)[-1]
         # Profondeur de l'index empilé, notée au moment de l'empilement : c'est
         # elle, et non le nom d'un niveau, qui identifie à l'inversion une
@@ -4212,8 +3837,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Publication de l'état de la passe, d'un seul tenant et seulement
         # maintenant que rien ne peut plus lever. Les statistiques décrivent le
         # niveau cible : "keep_lower_frequencies" n'est qu'un affichage
-        self._original_X_ = snapshot_X
-        self._original_y_ = snapshot_y
+        self._original_X_ = prepared.snapshot_X
+        self._original_y_ = prepared.snapshot_y
         self._stacked_index_nlevels: Optional[int] = stacked_nlevels
         self.imputation_provenance_ = provenance
         self.provenance_statistics_ = provenance_statistics(
@@ -4300,38 +3925,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             )
 
         return combined.set_axis(new_index)
-
-    # Méthode auxiliaire de contrôle du nom de niveau réservé
-    def _check_reserved_level_name(self, X: pd.DataFrame) -> None:
-        """Reject an input whose index would carry the reserved level name.
-
-        :data:`FREQUENCY_LEVEL_NAME` names the frequency level of the
-        multi-frequency output and of the training grid. An input level of the
-        same name would give the stacked index two levels of one name — an
-        ambiguity for anyone addressing the level by name. The check does not
-        depend on the configuration, so a ``set_params`` between two calls
-        never turns an accepted input into an ambiguous output.
-
-        Args:
-            X: Input of ``fit`` or ``transform``, before any index setting.
-
-        Raises:
-            ValueError: If an index level, a ``panel_cols`` entry or
-                ``time_col`` is named :data:`FREQUENCY_LEVEL_NAME`.
-        """
-        # Noms des niveaux d'index, présents ou à venir (colonnes de panel et
-        # colonne temporelle passées en index)
-        names = [name for name in X.index.names if name is not None]
-        panel_cols = self.panel_cols or []
-        names += [panel_cols] if isinstance(panel_cols, str) else list(panel_cols)
-        if self.time_col:
-            names.append(self.time_col)
-        if FREQUENCY_LEVEL_NAME in names:
-            raise ValueError(
-                f"The index level name {FREQUENCY_LEVEL_NAME!r} is reserved for "
-                f"the frequency level of the multi-frequency output; rename that "
-                f"level (or column) of X before calling fit / transform."
-            )
 
     # -------------------------------------------------------------------------
     # Transformation inverse
@@ -4563,7 +4156,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Concaténation X / y, symétrique de "_transform"
         y_col_name: Optional[str] = None
         if y is not None:
-            y_col_name = self._resolve_target_column_name(y)
+            y_col_name = resolve_target_column_name(y)
             data_work = pd.concat([X, y.to_frame(name=y_col_name)], axis=1)
         else:
             data_work = X.copy()
