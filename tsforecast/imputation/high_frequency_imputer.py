@@ -1,11 +1,10 @@
 """Mixed-frequency imputer ``HighFrequencyImputer``, which imputes low-frequency columns
-onto a finer target grid in cascade and records the provenance of every imputed value.
-Also holds the private per-variable fit record."""
+onto a finer target grid in cascade and records the provenance of every imputed value."""
 # Importation des modules
 # Modules de base
 import warnings
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import partial
 from typing import (
     Any,
@@ -26,12 +25,11 @@ from typing import (
 import numpy as np
 import pandas as pd
 # Sklearn
-from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.base import BaseEstimator, TransformerMixin
 # Utilitaires du package
 from ..xy.transformers import XYPanelTimeSeriesTransformer
 from ..utils.frequency.utils import (
     detect_frequency,
-    get_frequency_order,
     is_higher_frequency,
     normalize_frequency,
 )
@@ -44,7 +42,6 @@ from ..panel.utils import (
 from ..utils._constants import FREQUENCY_LEVEL_NAME
 from ._components.aggregation_constraint import (
     ConstraintSetting,
-    resolve_aggregation_constraint,
     validate_aggregation_constraint,
 )
 from ._components.covariate_materializer import (
@@ -55,10 +52,8 @@ from ._components.covariate_materializer import (
     CovariateMaterializer,
 )
 from ._components.imputation_plan import (
-    INTERPOLATE_FALLBACK,
     ImputationPlan,
     ImputationStep,
-    MaterializationWay,
     append_step,
     to_entity_tuple,
 )
@@ -68,19 +63,12 @@ from ._components.imputation_window import (
     TrainingScope,
 )
 from ._components.provenance import (
-    CELL_ORIGIN_DTYPE,
-    CellOrigin,
     PROVENANCE_DTYPE,
     ProvenanceType,
-    Taint,
-    max_cell_origin,
-    max_origin,
-    origin_to_taint,
     provenance_statistics,
 )
 from ._components.stage_scaler import ScaleFeatures, StageScaler
-from ._components.training_set_builder import TrainingSet
-from ._components.variable_orderer import FIT_PREDICT_ORDERS, VariableOrderer, VariableSpec
+from ._components.variable_orderer import FIT_PREDICT_ORDERS, VariableOrderer
 from ._engine.params import (
     validate_additive_transformer,
     validate_cv,
@@ -103,8 +91,13 @@ from ._engine.preparation import (
     prepare_work_frame,
     resolve_target_column_name,
 )
-from ._engine.row_scaling import RowScaler, TrainingRows
 from ._engine.run_context import FittedComponents, _RunContext
+from ._engine.stage_runner import (
+    StageParams,
+    StageRunner,
+    group_scale_factor,
+    training_mask_at,
+)
 from ._engine.warnings import WarningAccumulator
 
 # Type aliases
@@ -135,57 +128,6 @@ _FITTED_ATTRIBUTES: Tuple[str, ...] = (
     'unanchored_pairs_',
     'imputation_plan_',
 )
-
-# Origines de cellule admissibles dans "y_train", par modalité de l'axe 2.
-# Table plutôt qu'une suite de tests : la modalité n'est
-# jamais évaluée comme un booléen ('covariates_only' est truthy)
-ELIGIBLE_ORIGINS: Dict[Any, Tuple[CellOrigin, ...]] = {
-    False: ('observed',),
-    'covariates_only': ('observed',),
-    True: ('observed', 'interpolated', 'model'),
-}
-
-
-# Contexte d'ajustement d'une variable à une étape
-@dataclass(frozen=True)
-class _VariableFit:
-    """Everything one (stage, variable) needs before an estimator is fitted.
-
-    Composed by :meth:`HighFrequencyImputer._prepare_variable` and consumed
-    by two callers, which is exactly why it exists: the ordering of PHASE 5b
-    and the fit of PHASE 5c must rank and estimate on the SAME problem - same
-    covariates, same materialization, same rows, same scale. Whatever the
-    ordering scores, the fit then estimates.
-
-    The two callers share the code, never the result: PHASE 5b runs before any
-    variable of the stage has been imputed, so a context it composed is stale
-    as soon as the first variable has been written to the mirror. PHASE 5c
-    therefore recomposes its own.
-
-    Attributes:
-        training: The mutualized :class:`TrainingSet`, raw target included -
-            the source of ``row_origin`` and of the ``ways`` the plan step
-            freezes.
-        blocks: Mapping entity -> ``f_block(e)``, composition of the
-            mutualized set.
-        pred_grid: Prediction grid of the stage, restricted to the entities of
-            the variable's groups.
-        feature_cols: Covariates retained by :meth:`_select_feature_columns`,
-            i.e. those available at prediction time.
-        ways: Materialization way of each covariate, decided on the prediction
-            grid and imposed on both grids.
-        X_train: Scaled features, rows carrying no observed covariate and rows
-            of missing target already dropped.
-        y_train: Scaled target, sharing ``X_train``'s index.
-    """
-
-    training: TrainingSet
-    blocks: Dict[EntityKey, str]
-    pred_grid: pd.Index
-    feature_cols: Tuple[str, ...]
-    ways: Dict[str, MaterializationWay]
-    X_train: pd.DataFrame
-    y_train: pd.Series
 
 
 # Classe d'imputation multi-fréquences à deux axes orthogonaux
@@ -991,105 +933,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         return plan.models()
 
     # -------------------------------------------------------------------------
-    # Fenêtres
-    # -------------------------------------------------------------------------
-    # Méthode auxiliaire de sélection des colonnes de features
-    def _select_feature_columns(
-        self,
-        materializer: CovariateMaterializer,
-        candidates: Sequence[str],
-        training_frame: pd.DataFrame,
-        prediction_frame: pd.DataFrame,
-    ) -> Tuple[str, ...]:
-        """Select the covariates kept for one stage, per the window rules.
-
-        **Widening ``training_scope`` adds rows, never columns**.
-        Feature selection stays governed by availability at prediction
-        time, independently of the training window. The two adjustments of
-        follow from it:
-
-        - a column is kept only if it is non-empty on **both** windows — a
-          column observed only on rows the training scope added would train a
-          coefficient the prediction grid can never feed;
-        - per-entity eligibility is delegated to
-          ``CovariateMaterializer.eligible_columns``, which carries
-          ``covariate_eligibility``.
-
-        The symmetric row rule — training rows carrying no observed covariate
-        at all are dropped — is applied by :meth:`_drop_empty_training_rows`.
-
-        Args:
-            materializer: Materializer of the pass, carrier of
-                ``covariate_eligibility``.
-            candidates: Candidate covariate columns, in output order.
-            training_frame: Frame restricted to the training grid.
-            prediction_frame: Frame restricted to the prediction grid.
-
-        Returns:
-            Kept columns, in the order of ``candidates``.
-
-        Examples:
-            >>> import numpy as np
-            >>> import pandas as pd
-            >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
-            >>> data = pd.DataFrame({'m1': np.arange(24.0), 'q1': np.nan}, index=dates)
-            >>> data.loc[dates[2::3], 'q1'] = np.arange(8.0) * 3 + 10
-            >>> imputer = HighFrequencyImputer(
-            ...     target_frequency='M', estimator=LinearRegression()
-            ... ).fit(data)
-            >>> pred_frame = data.assign(q1=np.nan)
-            >>> materializer = imputer._fitted_components_.new_materializer()
-            >>> imputer._select_feature_columns(materializer, ['m1', 'q1'], data, pred_frame)
-            ('m1',)
-        """
-        # Éligibilité par entité, portée par le matérialiseur
-        eligible = set(
-            materializer.eligible_columns(candidates, prediction_frame)
-        )
-
-        # Non-vacuité sur les deux fenêtres : une colonne vide sur l'une des
-        # deux grilles n'apporte aucune information exploitable. Les deux
-        # trames d'étape portent toutes les colonnes du jeu de travail
-        return tuple(
-            column for column in candidates
-            if column in eligible
-            and training_frame[column].notna().any()
-            and prediction_frame[column].notna().any()
-        )
-
-    # Méthode auxiliaire d'élimination des lignes d'entraînement sans covariable
-    @staticmethod
-    def _drop_empty_training_rows(
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-    ) -> Tuple[pd.DataFrame, pd.Series]:
-        """Drop the training rows carrying no observed covariate at all.
-
-        Second adjustment : symmetric to
-        :meth:`_select_feature_columns`: a row whose every covariate is NaN
-        teaches the estimator nothing and, under an estimator that does not
-        tolerate NaN, sends the whole fit to the fallback.
-
-        Args:
-            X_train: Materialized training features.
-            y_train: Raw training target, sharing ``X_train``'s index.
-
-        Returns:
-            The pair restricted to the rows carrying at least one observed
-            covariate. An empty ``X_train`` (no covariate at all) is returned
-            untouched: there is no row to discriminate on.
-        """
-        # Aucune covariable : rien à filtrer, la garde de taille du fit joue
-        if X_train.shape[1] == 0:
-            return X_train, y_train
-
-        # Conservation des lignes portant au moins une covariable observée
-        kept_rows = X_train.notna().any(axis=1)
-        return X_train.loc[kept_rows], y_train.loc[kept_rows]
-
-    # -------------------------------------------------------------------------
     # Fit
     # -------------------------------------------------------------------------
     # Méthode auxiliaire de purge de l'état de la dernière passe
@@ -1222,6 +1065,35 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             f"{[stage_frequency_label(f) for f in self.frequency_progression_]}"
         )
 
+    # Méthode auxiliaire de construction de l'exécuteur d'étapes d'une passe
+    def _stage_runner(self, run: _RunContext) -> StageRunner:
+        """Build the stage runner of one pass, fit or replay.
+
+        The only place where the parameters of the imputer become the
+        :class:`StageParams` the stage execution reads, so the fit and every
+        replay execute their steps under the very same parameters.
+
+        Args:
+            run: Execution context of the pass.
+
+        Returns:
+            A :class:`StageRunner` on that context, the frequency layout of the
+            fit and the parameters of the imputer.
+        """
+        params = StageParams(
+            covariate_strategy=self.covariate_strategy,
+            fit_predict_order=self.fit_predict_order,
+            estimator=self.estimator,
+            impute_intermediate_frequencies=self.impute_intermediate_frequencies,
+            aggregation_constraint=self.aggregation_constraint,
+            impute_unobserved_entities=self.impute_unobserved_entities,
+            target_column=self.target_column_,
+            target_as_covariate=self.target_as_covariate,
+        )
+        return StageRunner(
+            run, self._frequency_layout_, params, log=self._log if self.verbose else None
+        )
+
     # Méthode auxiliaire d'entraînement
     def _fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
         """Learn the imputation plan from X and y.
@@ -1240,9 +1112,11 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
           with the components every pass shares.
         - PHASE 4: execution context of the fit (:class:`_RunContext`),
           dropped at the end of the pass.
-        - PHASE 5: stage execution — one model per (stage, variable),
-          shared by its source-frequency groups, then one plan step per
-          group.
+        - PHASE 5: stage execution
+          (:meth:`~tsforecast.imputation._engine.stage_runner.StageRunner.fit_stage`)
+          — one model per (stage, variable), shared by its source-frequency
+          groups, then one plan step per group, executed by the method every
+          replay uses.
         - PHASE 6: finalization — frozen plan, provenance matrix and
           ``unanchored_pairs_``. The multi-frequency output belongs to
           ``transform``.
@@ -1278,24 +1152,35 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self._publish_fit_preparation(X, prepared)
 
         # PHASE 4 — Contexte d'exécution du fit, abandonné en fin de passe. Le
-        # constructeur du jeu d'entraînement reçoit un callable au "kind" nommé
-        # ici, jamais le calculateur : il ne lit que le masque d'entraînement
+        # constructeur du jeu reçoit un callable au "kind" figé par "training_mask_at",
+        # jamais le calculateur : il ne lit que le masque d'entraînement
         run = _RunContext.for_fit(
             self._fitted_components_,
             window_calculator=prepared.window_calculator,
             provenance_tracker=prepared.provenance_tracker,
             variable_orderer=variable_orderer,
-            training_mask=partial(self._training_mask_at, prepared.window_calculator),
+            training_mask=partial(
+                training_mask_at, prepared.window_calculator,
+                is_panel=self.is_panel_, log=self._log,
+            ),
             log=self._log if self.verbose else None,
         )
 
         # PHASE 5 — Exécution des étapes, chacune construite PUIS exécutée (l'étape
         # k dépend des imputations de l'étape k-1), recalages sous un bloc différé :
-        # un avertissement par cas dégénéré, jamais un par variable × étape
+        # un avertissement par cas dégénéré, jamais un par variable × étape. Le
+        # plan et l'ordre de chaque étape sont publiés au fil de la progression
+        runner = self._stage_runner(run)
         self.imputation_plan_ = ImputationPlan()
         with run.aggregation_constraint.deferred_warnings():
             for stage_freq in self.frequency_progression_:
-                self._execute_stage(run, prepared.X_work, stage_freq)
+                stage = runner.fit_stage(prepared.X_work, stage_freq)
+                for step in stage.steps:
+                    self.imputation_plan_ = append_step(self.imputation_plan_, step)
+                if stage.order is not None:
+                    self.imputation_order_[stage.stage_label] = stage.order
+                if stage.cv_scores:
+                    self.imputation_cv_scores_[stage.stage_label] = stage.cv_scores
         # Avertissements de la phase, un seul message par famille : étapes
         # dégradées, puis couples sans ancre restés vides
         run.pending_warnings.emit()
@@ -1308,1297 +1193,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         self.unanchored_pairs_ = tuple(sorted(run.unanchored_written, key=repr))
         self._original_X_ = prepared.snapshot_X
         self._original_y_ = prepared.snapshot_y
-
-    # -------------------------------------------------------------------------
-    # PHASE 5 — Exécution des étapes
-    # -------------------------------------------------------------------------
-    # Méthode auxiliaire de résolution de l'estimateur d'une colonne
-    def _estimator_for(self, column: str) -> Optional[BaseEstimator]:
-        """Resolve the estimator of one column, under the dict form too.
-
-        Args:
-            column: Column being imputed.
-
-        Returns:
-            A fresh clone of the estimator covering that column, or None when
-            none does — the interpolation fallback then applies.
-
-        Examples:
-            >>> import numpy as np
-            >>> import pandas as pd
-            >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> imputer = HighFrequencyImputer(
-            ...     target_frequency='M', estimator={'a1': LinearRegression()}
-            ... )
-            >>> imputer._estimator_for('a1')
-            LinearRegression()
-            >>> imputer._estimator_for('m1') is None
-            True
-        """
-        # Initialisation de l'estimateur à la valeur de l'attribut
-        estimator = self.estimator
-        # Dictionnaire indexé par colonne : la colonne nommée, puis le défaut explicite
-        if isinstance(estimator, dict):
-            estimator = estimator.get(column, estimator.get('__default__'))
-        # Cas où l'estimateur n'est pas spécifiée
-        if estimator is None:
-            return None
-        # Copie indépendant de l'estimateur sklearn
-        return clone(estimator)
-
-    # Méthode auxiliaire d'extraction des entités portées par un index /!\ Est ce que ce n'est pas faisable avec une fonction de tsforecast/panel/utils ?
-    @staticmethod
-    def _index_entities(index: pd.Index) -> List[EntityKey]:
-        """List the distinct entities of an index, in order of appearance.
-
-        Args:
-            index: ``DatetimeIndex`` of a time series, or panel
-                ``MultiIndex`` ``(entity..., date)``.
-
-        Returns:
-            Normalized entity keys; ``[()]`` for a time series.
-        """
-        # Série temporelle : entité dégénérée unique
-        if not isinstance(index, pd.MultiIndex) or index.nlevels < 2:
-            return [()]
-
-        # Panel : parcours des niveaux d'entité, dédupliqué sans tri
-        levels = [index.get_level_values(level) for level in range(index.nlevels - 1)]
-        seen: Dict[EntityKey, None] = {}
-        for values in zip(*levels):
-            seen.setdefault(normalize_entity_key(tuple(values)), None)
-        return list(seen)
-
-    # Méthode auxiliaire de restriction d'un index aux entités d'un groupe
-    @staticmethod
-    def _restrict_to_entities(
-        index: pd.Index,
-        entities: Optional[Sequence[EntityKey]],
-    ) -> pd.Index:
-        """Restrict an index to the rows of a group of entities.
-
-        Args:
-            index: Index to restrict.
-            entities: Entity keys kept, None keeping everything (time series).
-
-        Returns:
-            The restricted index, in its original order.
-        """
-        # Série temporelle, ou groupe couvrant tout le panel
-        if entities is None or not isinstance(index, pd.MultiIndex):
-            return index
-
-        # Appartenance ligne à ligne aux entités du groupe
-        kept = {normalize_entity_key(entity) for entity in entities}
-        levels = [index.get_level_values(level) for level in range(index.nlevels - 1)]
-        rows = [
-            normalize_entity_key(tuple(values)) in kept for values in zip(*levels)
-        ]
-        return index[np.asarray(rows, dtype=bool)]
-
-    # Méthode auxiliaire de lecture d'un masque de fenêtre à la fréquence d'étape
-    # /!\ Cette logique n'est pas déjà présente ailleurs ?
-    def _stage_mask(
-        self,
-        run: _RunContext,
-        X_work: pd.DataFrame,
-        stage_freq: Union[str, Dict[EntityKey, str]],
-        kind: Literal['imputation', 'training'],
-    ) -> pd.Series:
-        """Read one window mask at the frequency of a stage.
-
-        The ``kind`` is named by the caller, never defaulted. Only the two
-        windows the fit actually restricts on are read here: the strict
-        window is diagnostic (``strict_window_mask_``) and governs nothing
-        in the stage execution.
-        An entity the calculator omits — one without a valid fitted mask — is
-        left unrestricted rather than silently losing every one of its rows.
-
-        Args:
-            run: Execution context of the pass, which provides the window
-                calculator and the pass name used in the log.
-            X_work: Working frame, the fallback grid.
-            stage_freq: Frequency of the stage, scalar or per entity.
-            kind: Window read: ``'imputation'`` or ``'training'``.
-
-        Returns:
-            Boolean Series at the stage frequency, on a ``DatetimeIndex`` for
-            a time series and on a ``(entity..., date)`` ``MultiIndex``
-            otherwise.
-        """
-        # Calculateur non ajusté ou fréquence inconvertible : aucune
-        # restriction, la garde de la phase 1 ayant déjà averti
-        try:
-            mask = run.window_calculator.get_mask_at_frequency(stage_freq, kind=kind)
-        except (ValueError, KeyError, TypeError) as error:
-            self._log(
-                f"[{run.pending_warnings.pass_name}] {kind} mask unavailable "
-                f"({error}); every row kept"
-            )
-            return pd.Series(True, index=X_work.index)
-
-        # Entités omises par le calculateur : rattachées sans restriction
-        covered = set(self._index_entities(mask.index))
-        missing = [
-            entity for entity in self._index_entities(X_work.index)
-            if entity not in covered
-        ]
-        if missing:
-            extra = self._restrict_to_entities(X_work.index, missing)
-            mask = pd.concat([mask, pd.Series(True, index=extra)])
-        return mask
-
-    # Méthode auxiliaire de la grille de prédiction d'une étape
-    def _prediction_grid(
-        self,
-        run: _RunContext,
-        X_work: pd.DataFrame,
-        stage_freq: Union[str, Dict[EntityKey, str]],
-        entities: Optional[Sequence[EntityKey]],
-    ) -> pd.Index:
-        """Build the prediction grid of a stage, restricted to one group.
-
-        The grid spans the whole imputation window of the entities, anchor
-        rows included: a period holding no observation is
-        predicted like any other.
-
-        Args:
-            run: Execution context of the pass.
-            X_work: Working frame.
-            stage_freq: Frequency of the stage.
-            entities: Entities of the group, None for a time series.
-
-        Returns:
-            Index of the rows the step writes on.
-        """
-        # Masque d'imputation, "kind" nommé explicitement
-        mask = self._stage_mask(run, X_work, stage_freq, kind='imputation')
-        grid = mask.index[mask.to_numpy(dtype=bool)]
-        return self._restrict_to_entities(grid, entities)
-
-    # Méthode auxiliaire de la grille non restreinte d'un groupe
-    def _unrestricted_grid(
-        self,
-        run: _RunContext,
-        X_work: pd.DataFrame,
-        stage_freq: Union[str, Dict[EntityKey, str]],
-        entities: Optional[Sequence[EntityKey]],
-    ) -> pd.Index:
-        """Build the stage grid of a group, window restriction lifted.
-
-        Reserved to the unanchored steps, whose entities have
-        no window to speak of: the prediction window of such an entity is
-        empty, since the imputed column carries no anchor to bound it. Every
-        row of the stage grid is kept; the covariates then decide, a row they
-        cannot feed producing a NaN that is simply never written.
-
-        Args:
-            run: Execution context of the pass.
-            X_work: Working frame.
-            stage_freq: Frequency of the stage.
-            entities: Entities of the group, None for a time series.
-
-        Returns:
-            Index of the rows of those entities at the stage frequency.
-        """
-        # Index du masque, pris sans sa valeur booléenne : la grille de l'étape
-        mask = self._stage_mask(run, X_work, stage_freq, kind='imputation')
-        return self._restrict_to_entities(mask.index, entities)
-
-    # Méthode auxiliaire d'ordonnancement des colonnes d'une étape
-    def _order_columns(
-        self,
-        run: _RunContext,
-        by_column: Dict[str, Dict[Tuple[str, str], Tuple[EntityKey, ...]]],
-        X_work: pd.DataFrame,
-        stage_label: str,
-        stage_freq: Union[str, Dict[EntityKey, str]],
-        stage_frame: pd.DataFrame,
-        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
-    ) -> List[str]:
-        """Order the imputable columns of one stage.
-
-        The order is computed by :class:`VariableOrderer` only under
-        ``covariate_strategy='model'``: it is the only modality where ranks 2
-        and 3 of the precedence are reachable, hence the only one where the
-        order changes a value. Otherwise the input column
-        order is used and ``imputation_order_`` stays empty.
-
-        Under the ``'cv'`` order, each column is scored on the very
-        ``(X_train, y_train)`` pair phase 5c will fit it on, composed here by
-        :meth:`_prepare_variable`: same covariate selection, same
-        materialization ways, same mutualized rows and same scale. Scoring a
-        raw view of ``X_work`` instead would rank a variable on covariates
-        the selection may drop before the fit, on panel rows whose
-        magnitudes are those of different frequencies, and on the strict
-        window rather than the training one.
-
-        One thing the ordering cannot see, and it is inherent: nothing of the
-        stage has been imputed yet, so the sets are those of the start of the
-        stage, whereas the variable of rank *k* will be fitted on what ranks
-        *1..k-1* produced. The order defines the context that would define
-        the order — the ranking is a heuristic, and phase 5c recomposes its
-        own context rather than reusing these.
-
-        Args:
-            run: Execution context of the fit.
-            by_column: Imputable groups of the stage, keyed by column.
-            X_work: Working frame.
-            stage_label: Readable label of the stage.
-            stage_freq: Frequency of the stage.
-            stage_frame: Stage frame of 5a.
-            freqs_by_column: Detected frequencies, keyed by column.
-
-        Returns:
-            The columns to impute, in processing order.
-        """
-        # Ordre d'entrée des colonnes : le défaut, sans effet sur les valeurs
-        columns = [column for column in X_work.columns if column in by_column]
-        if self.covariate_strategy != 'model' or len(columns) <= 1:
-            return columns
-
-        # Une spécification par colonnes : la fréquence retenue est la plus
-        # basse de ses groupes, celle qui décide de son rang
-        specs: Dict[str, VariableSpec] = {}
-        # Parcours des colonnes
-        for column in columns:
-            groups = by_column[column]
-            # Les groupes sans ancre n'ont pas de fréquence source à comparer :
-            # ils sont écartés du rang, et une colonne qui n'aurait qu'eux se
-            # range à la fréquence cible de ses entités
-            anchored = [
-                source_freq
-                for _column, source_freq in groups
-                if source_freq is not None
-            ]
-            entities = tuple(
-                sorted({e for group in groups.values() for e in group}, key=repr)
-            )
-            lowest = (
-                max(anchored, key=get_frequency_order) if anchored
-                else self._frequency_layout_.entity_target_frequency(entities[0] if entities else None)
-            )
-            specs[column] = VariableSpec(
-                name=column,
-                frequency=lowest,
-                entities=entities if self.is_panel_ else None,
-            )
-
-        # Ajustement paresseux de l'ordonnanceur, sous l'ordre 'frequency'
-        # seulement — la phase 0 l'ajuste déjà sous 'cv' : l'avertissement
-        # croisé qu'il émet ne concerne que la validation croisée et n'aurait
-        # ici aucun sens
-        if not hasattr(run.variable_orderer, 'cv_'):
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', UserWarning)
-                run.variable_orderer.fit()
-
-        # Jeux de scoring de l'ordre 'cv' : ceux-là mêmes que la 5c ajustera.
-        # Rien n'est préparé sous l'ordre 'frequency', qui n'en lit aucun
-        training_sets: Optional[Dict[str, Tuple[pd.DataFrame, pd.Series]]] = None
-        if self.fit_predict_order == 'cv':
-            # Initialisation à un dictionnaire vide
-            training_sets = {}
-            # Parcours des colonnes
-            for column in columns:
-                # Union des entités des groupes, à l'identique de la 5c : la
-                # grille de prédiction, donc la sélection des covariables, en
-                # dépendent
-                group_entities = sorted(
-                    {
-                        entity
-                        for group in by_column[column].values()
-                        for entity in group
-                    },
-                    key=repr,
-                )
-                prepared = self._prepare_variable(
-                    run,
-                    column=column,
-                    entities=group_entities if self.is_panel_ else None,
-                    stage_freq=stage_freq,
-                    X_work=X_work,
-                    stage_frame=stage_frame,
-                    freqs_by_column=freqs_by_column,
-                )
-                training_sets[column] = (prepared.X_train, prepared.y_train)
-
-        # Les lignes scorées sont celles du jeu mutualisé, déjà restreintes à la fenêtre 'training'
-        ordered = list(run.variable_orderer.order(
-            specs,
-            estimator=self.estimator,
-            log=self._log if self.verbose else None,
-            training_sets=training_sets,
-        ))
-        self.imputation_order_[stage_label] = list(ordered)
-        # Report des scores CV qui ont décidé du rang, pour le tracking. Sous
-        # l'ordre 'frequency' l'ordonnanceur laisse "scores_" vide
-        stage_scores = dict(getattr(run.variable_orderer, 'scores_', {}) or {})
-        if stage_scores:
-            self.imputation_cv_scores_[stage_label] = stage_scores
-        return ordered
-
-    # Méthode d'exécution d'une étape de fréquence
-    def _execute_stage(
-        self,
-        run: _RunContext,
-        X_work: pd.DataFrame,
-        stage_freq: Union[str, Dict[EntityKey, str]],
-    ) -> None:
-        """Run one frequency stage of the progression.
-
-        Three moves, in this exact order: the stage frame, the imputable
-        variables and their order, then one pass per variable.
-
-        Args:
-            run: Execution context of the fit.
-            X_work: Working frame, after the additive transformer.
-            stage_freq: Frequency of the stage.
-        """
-        # Étiquette lisible de l'étape, clé du plan et des journaux
-        stage_label = stage_frequency_label(stage_freq)
-        # Détection des fréquences
-        freqs_by_column = self._frequency_layout_.frequencies_by_column(run.transform_frequencies)
-
-        # Groupes imputables : un par (colonne, fréquence source)
-        groups = self._frequency_layout_.imputable_groups(
-            stage_freq, impute_unobserved_entities=self.impute_unobserved_entities
-        )
-        if not groups:
-            self._log(f"[fit] stage {stage_label}: no imputable variable")
-            return
-
-        # 5a. Frame d'étape : données d'origine, agrégations exactes et miroir
-        stage_mask = self._stage_mask(
-            run, X_work, stage_freq, kind='imputation'
-        )
-        stage_frame = run.materializer.stage_frame(
-            grid_index=stage_mask.index,
-            stage_freq=stage_freq,
-            detected_frequencies=freqs_by_column,
-            source_data=X_work,
-        )
-
-        # 5b. Variables imputables à l'étape, regroupées puis ordonnées
-        by_column: Dict[str, Dict[Tuple[str, str], Tuple[EntityKey, ...]]] = {}
-        for group_key, entities in groups.items():
-            by_column.setdefault(group_key[0], {})[group_key] = entities
-        ordered = self._order_columns(
-            run,
-            by_column,
-            X_work,
-            stage_label,
-            stage_freq=stage_freq,
-            stage_frame=stage_frame,
-            freqs_by_column=freqs_by_column,
-        )
-
-        # 5c. Une variable à la fois, un seul ajustement par (étape, variable)
-        for column in ordered:
-            self._fit_variable(
-                run,
-                column=column,
-                groups=by_column[column],
-                stage_freq=stage_freq,
-                stage_label=stage_label,
-                X_work=X_work,
-                stage_frame=stage_frame,
-                freqs_by_column=freqs_by_column,
-            )
-
-    # Méthode auxiliaire de composition du contexte d'ajustement d'une variable
-    def _prepare_variable(
-        self,
-        run: _RunContext,
-        *,
-        column: str,
-        entities: Optional[Sequence[EntityKey]],
-        stage_freq: Union[str, Dict[EntityKey, str]],
-        X_work: pd.DataFrame,
-        stage_frame: pd.DataFrame,
-        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
-    ) -> _VariableFit:
-        """Compose everything one (stage, variable) needs before fitting.
-
-        The single implementation of the mutualized training grid, the covariates that will still
-        be there at prediction time, the way each of them is materialized,
-        and the two scales. **The ordering of phase 5b and the fit of phase
-        5c both go through it**, so the order ranks variables on the very
-        sets they are then fitted on - not on a raw view of the data whose
-        covariates the selection may never keep, whose panel rows carry
-        incomparable magnitudes, and whose rows come from another window.
-
-        Nothing is written to the three stores: the stage frames are views
-        and every materialization here runs under ``record=False``. The
-        prediction grid is deliberately NOT materialized - that production
-        only feeds ``covariate_taint``, which is the caller's business.
-
-        Args:
-            run: Execution context of the fit.
-            column: Column being imputed.
-            entities: Entities of the variable's groups, None for a time
-                series. The prediction grid is restricted to them, so a
-                caller passing a different set gets a different covariate
-                selection.
-            stage_freq: Frequency of the stage.
-            X_work: Working frame.
-            stage_frame: Stage frame of 5a.
-            freqs_by_column: Detected frequencies, keyed by column.
-
-        Returns:
-            The :class:`_VariableFit` of that (stage, variable).
-        """
-        # Constructeur du jeu de données d'entraînement
-        builder = run.training_set_builder
-        # Matérialiseur des résultats des étapes précédentes
-        materializer = run.materializer
-        # Origines acceptées pour la target et les covariables
-        eligible = ELIGIBLE_ORIGINS[self.impute_intermediate_frequencies]
-
-        # Départage des cellules coïncidentes, lu par colonne : le
-        # paramètre admet une forme dictionnaire, la valeur n'est donc jamais
-        # globale. Le constructeur du jeu ne reçoit que ce booléen : il ignore
-        # tout de "aggregation_constraint", comme il ignore tout de l'axe 2
-        keep_coincident = resolve_aggregation_constraint(
-            self.aggregation_constraint, column
-        ) is None
-
-        # Fréquences remises au constructeur : la colonne cible par entité,
-        # couples indétectables explicités, pour qu'aucun bloc n'emprunte la
-        # fréquence des autres entités
-        training_freqs = self._frequency_layout_.training_frequencies(column, freqs_by_column)
-
-        # Jeu mutualisé, sonde sans covariable : elle ne matérialise rien et
-        # rend déjà les blocs, la cible brute et la grille d'entraînement
-        probe = builder.build(
-            column=column,
-            feature_cols=(),
-            stage_freq=stage_freq,
-            detected_frequencies=training_freqs,
-            source_data=X_work,
-            eligible_origins=eligible,
-            keep_coincident_cells=keep_coincident,
-        )
-        blocks = dict(probe.blocks)
-
-        # Grille de prédiction des entités concernées
-        pred_grid = self._prediction_grid(
-            run, X_work, stage_freq, entities
-        )
-
-        # Mise à l'échelle par ligne, partagée par la vue d'entraînement et
-        # les diviseurs du jeu complet
-        row_scaler = RowScaler(run.stage_scaler, self._frequency_layout_)
-
-        # Vues des deux fenêtres, chacune à sa fréquence : la grille
-        # d'entraînement au pas de chaque couche de lignes, la grille de
-        # prédiction au pas de l'étape
-        train_view = self._training_view(
-            materializer, row_scaler, probe, stage_freq, freqs_by_column, X_work
-        )
-        pred_view = stage_frame.reindex(pred_grid)
-
-        # Sélection des covariables : disponibilité sur les deux fenêtres, puis
-        # éligibilité par entité. Seules les colonnes dotées d'une fréquence
-        # détectée pour au moins une entité sont candidates : sans fréquence
-        # (une seule observation, ancres hors de leur grille calendaire), une
-        # colonne ne peut être ni agrégée ni interpolée et n'apporterait que
-        # des NaN — un couple inutilisable ne fait pas échouer l'ajustement des
-        # autres. La cible y n'est candidate que sous target_as_covariate=True :
-        # la passe de prédiction ne la voit jamais, un modèle qui la lirait n'y
-        # serait pas rejouable
-        excluded_target = None if self.target_as_covariate else self.target_column_
-        candidates = [
-            name for name in X_work.columns
-            if name != column and name != excluded_target and name in freqs_by_column
-        ]
-        feature_cols = self._select_feature_columns(
-            materializer, candidates, train_view, pred_view
-        )
-
-        # Voie de matérialisation : décidée une seule, sur la grille de
-        # prédiction puis imposée aux deux grilles : une covariable servie par
-        # le repli au predict doit être préparée par le même chemin au fit,
-        # même lorsque ses ancres suffiraient. Le matérialiseur ramène ensuite
-        # la voie à ce que la fréquence de chaque bloc autorise
-        ways = materializer.decide_ways(
-            columns=feature_cols,
-            grid_index=pred_grid,
-            stage_freq=stage_freq,
-            detected_frequencies=freqs_by_column,
-        )
-
-        # Jeu mutualisé complet, matérialisé par les voies imposées
-        training = builder.build(
-            column=column,
-            feature_cols=feature_cols,
-            stage_freq=stage_freq,
-            detected_frequencies=training_freqs,
-            source_data=X_work,
-            eligible_origins=eligible,
-            materialization=ways,
-            keep_coincident_cells=keep_coincident,
-        )
-
-        # Mise à l'échelle : diviseurs de la cible et des features par ligne,
-        # lus couche par couche
-        X_train, y_train = training.X, training.y
-        if len(training) > 0:
-            # Décomposition unique de la grille d'entraînement : la grille
-            # réelle que lisent le matérialiseur et le scaler, l'entité de
-            # chaque ligne
-            rows = TrainingRows.of(training)
-            y_train = run.stage_scaler.apply(
-                y_train,
-                row_scaler.target_divisors(rows, column=column, stage_freq=stage_freq),
-            )
-            if feature_cols:
-                X_train = run.stage_scaler.apply(
-                    X_train,
-                    row_scaler.feature_divisors(
-                        rows,
-                        feature_cols=feature_cols,
-                        freqs_by_column=freqs_by_column,
-                        ways=ways,
-                        stage_freq=stage_freq,
-                    ),
-                )
-
-        # Lignes sans aucune covariable observée, puis cible manquante
-        X_train, y_train = self._drop_empty_training_rows(X_train, y_train)
-        usable = y_train.notna()
-        X_train, y_train = X_train.loc[usable], y_train.loc[usable]
-
-        # La division par un diviseur nommé autrement efface le nom de la
-        # cible : il est rétabli, seul lien entre la série ajustée (ou scorée)
-        # et la colonne qu'elle impute
-        y_train = y_train.rename(column)
-
-        return _VariableFit(
-            training=training,
-            blocks=blocks,
-            pred_grid=pred_grid,
-            feature_cols=feature_cols,
-            ways=dict(ways),
-            X_train=X_train,
-            y_train=y_train,
-        )
-
-    # Méthode auxiliaire de la vue d'entraînement, lue couche par couche
-    def _training_view(
-        self,
-        materializer: CovariateMaterializer,
-        row_scaler: RowScaler,
-        probe: TrainingSet,
-        stage_freq: Union[str, Dict[EntityKey, str]],
-        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
-        X_work: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """Build the frame the covariate selection reads on the training grid.
-
-        Read layer by layer: a row produced at an earlier stage,
-        finer than its block, is read at its own frequency and never at the
-        block's — read at the block frequency, a covariate full on those rows
-        would look empty there and be dropped. A single layer, the case as
-        soon as axis 2 injects nothing, gives the block binding on the whole
-        grid.
-
-        Args:
-            materializer: Materializer of the pass, sole producer of the
-                stage frames.
-            row_scaler: Row scaler of the pass, which shapes the binding of
-                each layer.
-            probe: Covariate-free training set of the variable, carrying the
-                rows, their production frequency and the blocks.
-            stage_freq: Frequency of the stage, used when there is no row.
-            freqs_by_column: Detected frequencies, keyed by column.
-            X_work: Working frame.
-
-        Returns:
-            The stage frames of every layer, stacked; rows are never written
-            back, only read for their non-emptiness.
-        """
-        # Grille réelle de la sonde, entité de chaque ligne et couches : le
-        # niveau de fréquence n'est jamais lu par le matérialiseur
-        rows = TrainingRows.of(probe)
-
-        # Une trame par couche, sur sa sous-grille dédoublonnée : deux cellules
-        # coïncidentes partagent par définition une date
-        frames: List[pd.DataFrame] = []
-        if rows.blocks:
-            for layer, in_layer in rows.layers:
-                sub_grid = rows.real_index[in_layer]
-                sub_grid = sub_grid[~sub_grid.duplicated()]
-                frames.append(materializer.stage_frame(
-                    grid_index=sub_grid,
-                    stage_freq=row_scaler.layer_binding(layer),
-                    detected_frequencies=freqs_by_column,
-                    source_data=X_work,
-                ))
-
-        # Aucune ligne : trame vide à la forme de l'étape
-        if not frames:
-            return materializer.stage_frame(
-                grid_index=rows.real_index[:0],
-                stage_freq=stage_freq,
-                detected_frequencies=freqs_by_column,
-                source_data=X_work,
-            )
-        return pd.concat(frames)
-
-    # Méthode d'ajustement d'une variable à une étape
-    def _fit_variable(
-        self,
-        run: _RunContext,
-        *,
-        column: str,
-        groups: Dict[Tuple[str, str], Tuple[EntityKey, ...]],
-        stage_freq: Union[str, Dict[EntityKey, str]],
-        stage_label: str,
-        X_work: pd.DataFrame,
-        stage_frame: pd.DataFrame,
-        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
-    ) -> None:
-        """Fit one model for one (stage, variable), then execute its groups.
-
-        The training set is mutualized across every entity observing the
-        column: it does not depend on the source-frequency
-        group, hence one single fit shared by the plan steps, which differ
-        only by their ``source_frequency``, their entities and their
-        rescaling.
-
-        Args:
-            run: Execution context of the fit.
-            column: Column being imputed.
-            groups: Imputable groups of that column, keyed by
-                ``(column, source frequency)``.
-            stage_freq: Frequency of the stage.
-            stage_label: Readable label of the stage.
-            X_work: Working frame.
-            stage_frame: Stage frame of 5a.
-            freqs_by_column: Detected frequencies, keyed by column.
-        """
-        # Union des entités des groupes : la grille de prédiction, et à
-        # travers elle la sélection des covariables, en dépendent
-        group_entities = sorted(
-            {entity for entities in groups.values() for entity in entities}, key=repr
-        )
-        entities = group_entities if self.is_panel_ else None
-
-        # Contexte d'ajustement. Il est recomposé ici même lorsque la 5b l'a
-        # déjà composé pour ordonner : depuis, les variables de rang inférieur
-        # ont écrit dans le miroir, et c'est précisément ce que la cascade
-        # cherche à exploiter
-        prepared = self._prepare_variable(
-            run,
-            column=column,
-            entities=entities,
-            stage_freq=stage_freq,
-            X_work=X_work,
-            stage_frame=stage_frame,
-            freqs_by_column=freqs_by_column,
-        )
-        training = prepared.training
-        blocks = prepared.blocks
-        pred_grid = prepared.pred_grid
-        feature_cols = prepared.feature_cols
-        ways = prepared.ways
-        X_train, y_train = prepared.X_train, prepared.y_train
-
-        # Souillure de la cible : lue par le filtre d'origine, jamais codée en
-        # dur — le lot de l'axe 2 n'aura qu'à élargir ELIGIBLE_ORIGINS
-        target_taint = origin_to_taint(
-            max_cell_origin(training.row_origin)
-        )
-
-        # Matérialisation de la grille de prédiction en mode rejeu des voies
-        # retenues sur la grille d'entraînement. Elle ne sert qu'à la souillure
-        # des covariables : aucune donnée d'entraînement n'en sort, ce qui est
-        # la raison pour laquelle la 5b n'en a pas besoin pour ordonner
-        pred_origins: Dict[str, CellOrigin] = {}
-        if feature_cols and len(training) > 0:
-            _X_pred, _ways, pred_origins = run.materializer.materialize(
-                columns=feature_cols,
-                grid_index=pred_grid,
-                stage_freq=stage_freq,
-                detected_frequencies=freqs_by_column,
-                source_data=X_work,
-                materialization=ways,
-                record=False,
-            )
-
-        # Souillure des covariables : origines des cellules effectivement lues
-        # sur les deux grilles, restreintes aux feature_cols du modèle — jamais
-        # l'état global du registre
-        covariate_taint = origin_to_taint(max_origin(
-            [training.column_origins.get(name, 'observed') for name in feature_cols]
-            + [pred_origins.get(name, 'observed') for name in feature_cols]
-        ))
-
-        # Ajustement unique, quel que soit le nombre de groupes. Grille de
-        # prédiction vide et aucun groupe sans ancre (qui prédit, lui, hors
-        # fenêtre) : ce fit n'écrit rien, et un repli éventuel n'est pas
-        # annoncé — l'absence de fenêtre d'imputation l'est déjà par le
-        # calculateur de fenêtre
-        writes_something = len(pred_grid) > 0 or any(
-            source_frequency is None for _column, source_frequency in groups
-        )
-        model, is_fallback = self._fit_estimator(
-            run.pending_warnings, column, X_train, y_train, feature_cols, stage_label,
-            announce=writes_something,
-        )
-        # Logging
-        self._log(
-            f"[fit] stage {stage_label}, {column!r}: {len(y_train)} pooled "
-            f"training rows from blocks {blocks}, {len(groups)} group(s)"
-        )
-
-        # Une étape de plan par groupe, partageant le modèle ajusté ci-dessus
-        multi_frequency = len(groups) > 1
-        # Parcours des groupes
-        for group_key, group in groups.items():
-            # Extraction des entités du groupe
-            group_entities_or_none = group if self.is_panel_ else None
-            # Construction de l'étape
-            step = self._build_step(
-                run,
-                column=column,
-                source_frequency=group_key[1],
-                entities=group_entities_or_none,
-                grid=self._restrict_to_entities(pred_grid, group_entities_or_none),
-                stage_freq=stage_freq,
-                stage_label=stage_label,
-                model=model,
-                feature_cols=() if is_fallback else feature_cols,
-                materialization={} if is_fallback else dict(training.ways),
-                covariate_taint='none' if is_fallback else covariate_taint,
-                target_taint='none' if is_fallback else target_taint,
-                is_fallback=is_fallback,
-                training_blocks=blocks,
-                multi_frequency=multi_frequency,
-                n_training_rows=len(y_train),
-                unanchored=group_key[1] is None,
-            )
-            # Exécution, puis gel : un échec de prédiction dégrade l'étape en
-            # repli, de sorte que le plan dise ce qui a réellement été fait.
-            # La volumétrie écrite n'est connue qu'après coup : elle est gelée
-            # sur l'étape au même titre que la dégradation
-            degraded, n_written = self._execute_step(
-                run, step, X_work=X_work, stage_freq=stage_freq
-            )
-            step = replace(step, n_written=n_written)
-            if degraded:
-                step = replace(
-                    step,
-                    model=INTERPOLATE_FALLBACK,
-                    feature_cols=(),
-                    materialization={},
-                    covariate_taint='none',
-                    target_taint='none',
-                    is_fallback=True,
-                )
-            self.imputation_plan_ = append_step(self.imputation_plan_, step)
-
-    # Méthode auxiliaire d'ajustement de l'estimateur d'une variable
-    def _fit_estimator(
-        self,
-        pending_warnings: WarningAccumulator,
-        column: str,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        feature_cols: Tuple[str, ...],
-        stage_label: str,
-        announce: bool = True,
-    ) -> Tuple[Any, bool]:
-        """Fit the estimator of one variable, or fall back on interpolation.
-
-        Args:
-            pending_warnings: Pending warnings of the pass, which receive the
-                announced fallbacks.
-            column: Column being imputed.
-            X_train: Scaled training features.
-            y_train: Scaled training target.
-            feature_cols: Covariates retained.
-            stage_label: Readable label of the stage, for the messages.
-            announce: Whether a fallback is worth announcing. False when the
-                fit has nothing to write with the step — an empty prediction
-                grid, whose cause the window calculator already reports.
-
-        Returns:
-            Tuple ``(model, is_fallback)``: the fitted estimator and False, or
-            the ``INTERPOLATE_FALLBACK`` sentinel and True. Every failure
-            message is accumulated, never emitted here.
-        """
-        # Repli d'interpolation, annoncé par l'avertissement agrégé de la phase
-        def _fallback(reason: str) -> Tuple[Any, bool]:
-            if announce:
-                pending_warnings.add_degraded_step(
-                    f"{column!r} at stage {stage_label}: {reason}, "
-                    f"interpolation fallback"
-                )
-            return INTERPOLATE_FALLBACK, True
-
-        # Extraction de l'estimateur
-        estimator = self._estimator_for(column)
-        # Aucun estimateur pour cette colonne : le repli est la règle, et
-        # l'avertissement global de la phase 0 a déjà été émis
-        if estimator is None:
-            if self.estimator is not None:
-                return _fallback("no estimator covers this column")
-            return INTERPOLATE_FALLBACK, True
-
-        # Jeu d'entraînement inexploitable : aucune covariable, ou aucune ligne
-        if not feature_cols or len(y_train) == 0:
-            return _fallback(
-                f"empty training set ({len(y_train)} row(s), "
-                f"{len(feature_cols)} covariate(s))"
-            )
-
-        # Échec d'ajustement : repli, jamais une exception qui ferait perdre
-        # les autres variables de l'étape
-        try:
-            estimator.fit(X_train, y_train)
-        except Exception as error:
-            return _fallback(f"estimator fit failed ({type(error).__name__}: {error})")
-
-        return estimator, False
-
-    # Méthode auxiliaire de construction d'une étape de plan
-    def _build_step(
-        self,
-        run: _RunContext,
-        *,
-        column: str,
-        source_frequency: Optional[str],
-        entities: Optional[Sequence[EntityKey]],
-        grid: pd.Index,
-        stage_freq: Union[str, Dict[EntityKey, str]],
-        stage_label: str,
-        model: Any,
-        feature_cols: Sequence[str],
-        materialization: Dict[str, Any],
-        covariate_taint: Taint,
-        target_taint: Taint,
-        is_fallback: bool,
-        training_blocks: Dict[EntityKey, str],
-        multi_frequency: bool,
-        n_training_rows: int,
-        unanchored: bool = False,
-    ) -> ImputationStep:
-        """Freeze one plan step of a (stage, variable, source frequency) group.
-
-        Args:
-            run: Execution context of the fit.
-            column: Column imputed by the step.
-            source_frequency: Detected frequency of the column for the group,
-                None for an unanchored group.
-            entities: Entities of the group, None for a time series.
-            grid: Prediction grid of the group, read by the ``'calendar'``
-                scale mode.
-            stage_freq: Frequency of the stage.
-            stage_label: Readable label of the stage.
-            model: Estimator shared by every group of the variable, or the
-                interpolation sentinel.
-            feature_cols: Covariates of the model, empty for a fallback.
-            materialization: Way retained for each covariate.
-            covariate_taint: Worst covariate taint of the step.
-            target_taint: Worst target taint of the step.
-            is_fallback: Whether the step interpolates instead of predicting.
-            training_blocks: Composition of the mutualized training set.
-            multi_frequency: Whether the column carries several source
-                frequencies at this stage, which is what makes the frequency
-                part of the registry key.
-            n_training_rows: Size of the mutualized ``y_train`` the model was
-                fitted on, shared by every group of the variable.
-            unanchored: Whether the entities of the group never observe the
-                column, so the step predicts without any anchor.
-
-        Returns:
-            The frozen :class:`ImputationStep`.
-        """
-        # Groupe sans ancre : aucune fréquence source, donc aucune conversion.
-        # La prédiction est produite directement à l'échelle de l'étape et les
-        # deux facteurs valent 1.0 — le report reste neutre, exactement comme
-        # pour les groupes ancrés dont les deux facteurs coïncident déjà
-        if unanchored:
-            scale = 1.0
-        else:
-            scale = self._group_scale_factor(
-                run.stage_scaler, column, source_frequency, stage_freq, grid
-            )
-
-        # Clé de registre : la fréquence n'entre dans la clé que lorsque les
-        # entités divergent sur la fréquence de cette colonne
-        var_key = (column, source_frequency) if multi_frequency else column
-
-        return ImputationStep(
-            pred_freq_label=stage_label,
-            pred_freq=stage_freq,
-            var_key=var_key,
-            var_name=column,
-            model=model,
-            feature_cols=tuple(feature_cols),
-            scale_factor=scale,
-            fit_scale_factor=scale,
-            source_frequency=source_frequency,
-            entities=to_entity_tuple(entities),
-            covariate_taint=covariate_taint,
-            target_taint=target_taint,
-            materialization=materialization,
-            is_fallback=is_fallback,
-            interpolation_method=run.materializer.resolve_method(column),
-            interpolation_anchor=run.materializer.resolve_anchor(column),
-            training_blocks=training_blocks,
-            unanchored=unanchored,
-            n_training_rows=n_training_rows,
-        )
-
-    # Méthode auxiliaire du facteur d'échelle d'un groupe ancré
-    def _group_scale_factor(
-        self,
-        stage_scaler: StageScaler,
-        column: str,
-        source_frequency: str,
-        stage_freq: Union[str, Dict[EntityKey, str]],
-        grid: pd.Index,
-    ) -> Union[float, pd.Series]:
-        """Compute the scale factor of one anchored group.
-
-        The target having been scaled row by row, the predictions already come
-        out at the pace of the stage: ``scale_factor`` and ``fit_scale_factor``
-        coincide and the carry is 1.0.
-
-        Args:
-            stage_scaler: Stage scaler of the pass.
-            column: Column imputed by the step.
-            source_frequency: Detected frequency of the column for the group.
-            stage_freq: Frequency of the stage.
-            grid: Prediction grid of the group, read by the ``'calendar'``
-                scale mode.
-
-        Returns:
-            The factor. A conversion the scaler refuses raises: a silent
-            ``1.0`` would mis-scale every prediction of the group.
-        """
-        return stage_scaler.fit_scale_factor(
-            column,
-            source_freq=source_frequency,
-            pred_freq=stage_freq,
-            index=grid,
-        )
-
-    # Méthode unique d'exécution d'une étape du plan
-    def _execute_step(
-        self,
-        run: _RunContext,
-        step: ImputationStep,
-        *,
-        X_work: pd.DataFrame,
-        stage_freq: Union[str, Dict[EntityKey, str]],
-    ) -> Tuple[bool, int]:
-        """Execute one frozen plan step.
-
-        The step is already frozen: this method decides nothing and only
-        writes — values, rescaling, provenance and the three stores. ``fit``
-        builds the step then calls it; ``transform`` will replay the plan
-        through this very method, which is what makes the two paths identical
-        by construction.
-
-        An unanchored step departs from the common path on
-        three points, and on three only: it is never rescaled to a period
-        total, its cells carry ``MODEL_UNANCHORED``, and it has no
-        interpolation fallback — there is nothing to interpolate for an
-        entity that never observes the column, so a failure leaves its cells
-        NaN and unmarked and is reported by the aggregated warning of the
-        end of the pass.
-
-        Args:
-            run: Execution context of the pass, fit or replay.
-            step: Frozen step to execute.
-            X_work: Working frame the values are read from.
-            stage_freq: Frequency of the stage.
-
-        Returns:
-            Tuple ``(degraded, n_written)``. ``degraded`` is True when the
-            step had to fall back on interpolation at execution time — a
-            prediction failure — so the caller can degrade the plan step
-            accordingly; False otherwise, an unanchored failure included:
-            such a step is never degraded into a fallback, it is simply not
-            executed. ``n_written`` counts the cells actually written, after
-            rescaling, and is 0 whenever nothing was produced. The replay at
-            ``transform`` discards both.
-        """
-        # Extraction du matérisaliseur des étapes précédentes
-        materializer = run.materializer
-        # Extraction du nom de la colonne
-        column = step.var_name
-        # Détection des fréquences de la colonne (éventuellement pour différentes entités)
-        freqs_by_column = self._frequency_layout_.frequencies_by_column(run.transform_frequencies)
-
-        # Grille du groupe : la fenêtre d'imputation de ses entités, ancres comprises
-        grid = self._prediction_grid(
-            run, X_work, stage_freq, step.entities
-        )
-
-        # Sans ancre, la fenêtre stricte d'une entité est vide par
-        # construction : elle est l'intervalle où toutes ses colonnes sont
-        # couvertes, et la colonne imputée n'y en couvre aucune. La subordonner
-        # à la couverture de la colonne même que l'étape produit serait
-        # circulaire ; l'entité est donc laissée sans restriction, exactement
-        # comme "_stage_mask" traite déjà une entité que le calculateur omet
-        if step.unanchored and len(grid) == 0:
-            grid = self._unrestricted_grid(
-                run, X_work, stage_freq, step.entities
-            )
-
-        if len(grid) == 0:
-            return False, 0
-
-        # Production des valeurs : modèle, ou repli d'interpolation
-        values: Optional[pd.Series] = None
-        if not step.is_fallback:
-            values = self._predict_step(
-                run, step, grid, X_work, freqs_by_column, stage_freq
-            )
-        degraded = values is None and not step.is_fallback
-
-        # Absence d'ancre : l'interpolation ne peut pas être le repli, faute
-        # d'observation à interpoler. Les couples restent NaN et non marqués,
-        # et l'avertissement agrégé de la fin de la passe les nomme
-        if step.unanchored and values is None:
-            run.pending_warnings.add_unimputed_pairs(self._step_pairs(step))
-            return False, 0
-
-        if values is None:
-            # « Le repli matérialise » : "interpolate_column" alimente déjà les
-            # trois registres, avec l'origine 'interpolated'
-            values = materializer.interpolate_column(
-                column=column,
-                grid_index=grid,
-                stage_freq=stage_freq,
-                detected_frequencies=freqs_by_column,
-                source_data=X_work,
-            )
-            origin: CellOrigin = 'interpolated'
-            provenance = ProvenanceType.INTERPOLATED
-        else:
-            origin = 'model'
-            # Provenance tranchée par l'étape elle-même : c'est là, et là
-            # seulement, que l'absence d'ancre prime sur les cinq familles
-            provenance = step.emitted_provenance
-
-        # Recalage aux totaux de la fréquence source du groupe : annuels pour
-        # une entité annuelle, trimestriels pour une entité trimestrielle.
-        # Court-circuité sans ancre, quelle que soit la valeur du paramètre :
-        # il n'existe aucun total de période à imposer, et ces cellules sont
-        # des prédictions libres là où les autres sont des désagrégations
-        if not step.unanchored:
-            observations = X_work[column].reindex(
-                self._restrict_to_entities(X_work.index, step.entities)
-            )
-            values, _rescaled_mask = run.aggregation_constraint.rescale(
-                values, observations, step.source_frequency, column=column,
-                grid_freq=stage_freq,
-            )
-
-        # Ecriture : cellules effectivement produites. Une étape sans ancre
-        # n'arrive jamais ici vide : "_predict_step" rend None sur
-        # une prédiction entièrement NaN, et aucun recalage ne vide la sienne
-        written = values[values.notna()]
-        if written.empty:
-            return degraded, 0
-
-        # Couples effectivement imputés sans ancre, source de unanchored_pairs_
-        if step.unanchored:
-            run.unanchored_written.update(self._step_pairs(step))
-
-        # Marquage de provenance : identique pour les cellules recalées et non
-        # recalées, lignes d'ancres comprises — le recalage ne change aucune
-        # provenance. Une ligne d'ancre ré-exprimée ne reste jamais original : elle ne porte plus
-        # l'observation. La grille densifiée peut porter des dates absentes de
-        # l'entrée (index irrégulier, fenêtre étendue vers des périodes où
-        # seules des observations basse fréquence isolées existent) : la
-        # matrice, initialisée sur l'index d'entrée, est donc étendue d'abord
-        run.provenance_tracker.extend_index(written.index)
-        run.provenance_tracker.mark_imputed(column, written.index, provenance)
-
-        # Mise à jour des trois registres, y compris en repli
-        materializer.record_production(
-            column,
-            written,
-            pd.Series(origin, index=written.index, dtype=CELL_ORIGIN_DTYPE),
-            stage_frequency_of(stage_freq, written.index),
-        )
-        return degraded, len(written)
-
-    # Méthode auxiliaire des clés de couple d'une étape
-    @staticmethod
-    def _step_pairs(step: ImputationStep) -> List[tuple]:
-        """Render the ``(entity..., column)`` keys covered by one step.
-
-        The shape is that of the keys of ``detected_frequencies_`` and of the
-        never-observed pairs, so ``unanchored_pairs_`` is directly comparable
-        with them.
-
-        Args:
-            step: Executed step.
-
-        Returns:
-            One key per entity of the step, empty on a time series, which
-            carries no entity level.
-
-        Examples:
-            >>> import numpy as np
-            >>> import pandas as pd
-            >>> from sklearn.linear_model import LinearRegression
-            >>> from tsforecast.imputation import HighFrequencyImputer
-            >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
-            >>> idx = pd.MultiIndex.from_product([['FR', 'IT'], dates], names=['entity', 'date'])
-            >>> panel = pd.DataFrame({'m1': np.arange(48.0), 'v': np.nan}, index=idx)
-            >>> panel.loc[('FR', dates[11::12]), 'v'] = [120.0, 132.0]
-            >>> imputer = HighFrequencyImputer(
-            ...     target_frequency='M',
-            ...     estimator=LinearRegression(),
-            ...     impute_unobserved_entities=True,
-            ... ).fit(panel)
-            >>> HighFrequencyImputer._step_pairs(imputer.imputation_plan_.steps[-1])
-            [('IT', 'v')]
-        """
-        # Série temporelle : aucune entité, donc aucun couple à nommer
-        return [
-            (*entity, step.var_name) for entity in (step.entities or ())
-        ]
-
-    # Méthode auxiliaire de prédiction d'une étape à modèle
-    def _predict_step(
-        self,
-        run: _RunContext,
-        step: ImputationStep,
-        grid: pd.Index,
-        X_work: pd.DataFrame,
-        freqs_by_column: Dict[str, Union[str, Dict[EntityKey, str]]],
-        stage_freq: Union[str, Dict[EntityKey, str]],
-    ) -> Optional[pd.Series]:
-        """Produce the predictions of one model step on its grid.
-
-        Args:
-            run: Execution context of the pass, fit or replay.
-            step: Frozen step, holding the model and the ways to replay.
-            grid: Prediction grid of the group.
-            X_work: Working frame.
-            freqs_by_column: Detected frequencies, keyed by column.
-            stage_freq: Frequency of the stage.
-
-        Returns:
-            The predictions at the scale of the stage, or None when the
-            prediction failed or produced nothing but NaN — the caller then
-            falls back on interpolation, or, for an unanchored step, reports
-            the pair. A failure is announced by the aggregated warning of the
-            degraded steps, an unanchored step excepted: having no fallback,
-            it is named by the warning of the unimputed pairs only.
-        """
-        # Covariables produites en mode rejeu des voies de l'étape : c'est le
-        # seul chemin autorisé pour X_pred.
-        # "record=False" : les registres ne portent qie ce qui a été imputé,
-        # jamais ce qui a été préparé comme feature. Y inscrire la
-        # matérialisation d'une covariable écraserait l'imputation que son
-        # propre modèle vient d'écrire, et rendrait le résultat dépendant de
-        # l'ordre de traitement
-        X_pred, _ways, _origins = run.materializer.materialize(
-            columns=step.feature_cols,
-            grid_index=grid,
-            stage_freq=stage_freq,
-            detected_frequencies=freqs_by_column,
-            source_data=X_work,
-            materialization=step.materialization,
-            record=False,
-        )
-
-        # Mise à l'échelle des features à la fréquence source du groupe, puis
-        # prédiction
-        try:
-            divisors = run.stage_scaler.feature_divisors(
-                columns=step.feature_cols,
-                column_frequencies=freqs_by_column,
-                ways=step.materialization,
-                grid_freq=stage_freq,
-                stage_freq=stage_freq,
-                index=grid,
-            )
-            predictions = step.model.predict(
-                run.stage_scaler.apply(X_pred, divisors)
-            )
-        except Exception as error:
-            # Sans ancre, aucun repli n'existe : seul l'avertissement des
-            # couples non imputés le dira, jamais un « repli » qui n'a pas lieu
-            if not step.unanchored:
-                run.pending_warnings.add_degraded_step(
-                    f"{step.var_name!r} at stage {step.pred_freq_label}: prediction "
-                    f"failed ({type(error).__name__}: {error}), interpolation fallback"
-                )
-            return None
-
-        # Prédictions à l'échelle de l'étape : le modèle est toujours ajusté
-        # pour l'étape courante (aucune réutilisation inter-étapes), et la
-        # cible l'a été ligne à ligne — aucune remise à l'échelle à appliquer
-        values = pd.Series(
-            np.asarray(predictions, dtype=float).ravel(), index=grid, name=step.var_name
-        )
-
-        # Prédictions entièrement NaN : rien n'est produit, l'étape est traitée
-        # comme un échec de prédiction. Des NaN épars restent des cellules non
-        # écrites, signalées par le même avertissement agrégé
-        n_missing = int(values.isna().sum())
-        if n_missing == len(values):
-            if not step.unanchored:
-                run.pending_warnings.add_degraded_step(
-                    f"{step.var_name!r} at stage {step.pred_freq_label}: the model "
-                    f"predicted only NaN, interpolation fallback"
-                )
-            return None
-        if n_missing and not step.unanchored:
-            run.pending_warnings.add_degraded_step(
-                f"{step.var_name!r} at stage {step.pred_freq_label}: {n_missing} of "
-                f"{len(values)} prediction(s) are NaN and stay unimputed"
-            )
-        return values
-
-    # Méthode auxiliaire du masque d'entraînement lu à la fréquence des blocs
-    def _training_mask_at(
-        self,
-        window_calculator: ImputationWindowCalculator,
-        frequencies: Dict[EntityKey, str],
-    ) -> Optional[pd.Series]:
-        """Read the ``'training'`` window mask at one frequency per block.
-
-        Injected into :class:`TrainingSetBuilder`, bound to the calculator of
-        the fit: the builder therefore receives a callable and never the
-        calculator, so it cannot read a window other than the training one,
-        whose ``kind`` is named here once and for all.
-
-        Args:
-            window_calculator: Window calculator of the fit.
-            frequencies: Mapping entity -> block frequency ``f_block(e)``.
-
-        Returns:
-            Boolean mask at those frequencies, on a ``DatetimeIndex`` for a
-            time series and on a ``(entity..., date)`` MultiIndex otherwise;
-            None when no window is computable — an unfitted calculator, or a
-            block frequency it cannot convert to — which the builder reads as
-            "no restriction at all".
-        """
-        # Série temporelle : le calculateur attend la fréquence scalaire du
-        # bloc unique, une liaison par entité n'ayant pas de sens sans entité
-        binding: Union[str, Dict[EntityKey, str]] = frequencies
-        if not self.is_panel_ and isinstance(frequencies, dict):
-            binding = next(iter(frequencies.values()))
-        try:
-            return window_calculator.get_mask_at_frequency(binding, kind='training')
-        except (ValueError, KeyError, TypeError) as error:
-            # Logging
-            self._log(f"[fit] training mask unavailable ({error}); every row kept")
-            return None
 
     # -------------------------------------------------------------------------
     # Transform — rejeu du plan figé
@@ -2757,7 +1351,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             return
 
         # Entités concernées, nommées dans le message agrégé
-        entities = tuple(self._index_entities(outside)) if self.is_panel_ else ()
+        entities = tuple(get_entity_codes(outside)[1]) if self.is_panel_ else ()
         warnings.warn(
             f"{len(outside)} row(s) of the data being transformed fall outside "
             f"the imputation window recomputed on them"
@@ -2785,7 +1379,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         known = {normalize_entity_key(entity) for entity in self.entities_}
         return tuple(
             entity
-            for entity in self._index_entities(X_work.index)
+            for entity in get_entity_codes(X_work.index)[1]
             if entity not in known
         )
 
@@ -2838,7 +1432,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode auxiliaire des étapes rejouées à une étape de fréquence
     def _replay_steps(
         self,
-        run: _RunContext,
+        runner: StageRunner,
         steps: Sequence[ImputationStep],
         new_entities: Sequence[EntityKey],
         binding: Union[str, Dict[EntityKey, str]],
@@ -2870,7 +1464,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         pairs stay as given.
 
         Args:
-            run: Execution context of the replay.
+            runner: Stage runner of the replay, on its execution context.
             steps: Plan steps of the stage, in plan order.
             new_entities: Entities the fit never saw.
             binding: Stage binding, already extended (or not) to them.
@@ -2908,7 +1502,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 remaining = []
                 for entity in step.entities:
                     if not self._route_transform_pair(
-                        run, entity, column, binding, anchored
+                        runner.run, entity, column, binding, anchored
                     ):
                         remaining.append(entity)
                 if remaining:
@@ -2917,18 +1511,16 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # Entités nouvelles : ancrées si observées, sans ancre sinon
             for entity in bound:
                 if not self._route_transform_pair(
-                    run, entity, column, binding, anchored
+                    runner.run, entity, column, binding, anchored
                 ):
                     unanchored.append(entity)
 
             # Étapes dérivées, juste après celles de la colonne
             representative = column_steps[0]
             for frequency, entities in anchored.items():
-                grid = self._prediction_grid(
-                    run, X_stage, binding, entities
-                )
-                scale = self._group_scale_factor(
-                    run.stage_scaler, column, frequency, binding, grid
+                grid = runner.prediction_grid(X_stage.index, binding, entities)
+                scale = group_scale_factor(
+                    runner.run.stage_scaler, column, frequency, binding, grid
                 )
                 composed.append(
                     replace(
@@ -3002,7 +1594,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     # Méthode de rejeu du plan, étape de fréquence par étape de fréquence
     def _replay_plan(
         self,
-        run: _RunContext,
+        runner: StageRunner,
         X_stage: pd.DataFrame,
         skip_columns: FrozenSet[str] = frozenset(),
     ) -> Tuple["OrderedDict[str, pd.DataFrame]", "OrderedDict[str, pd.DataFrame]"]:
@@ -3012,10 +1604,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         variable order, the models, the ``feature_cols``, the materialization
         ways and the taints all come from the plan. Only the windows, the stage
         frames, the interpolated values, the predictions, the rescaling and the
-        provenance are recomputed.
+        provenance are recomputed. Every step, derived ones included, is
+        executed by :meth:`StageRunner.replay_step`, hence by the very
+        :meth:`StageRunner.execute_step` of the fit.
 
         Args:
-            run: Execution context of the replay.
+            runner: Stage runner of the replay, on its execution context.
             X_stage: Working frame after the additive transformer. Never
                 modified: the imputations travel through the registers of
                 :class:`CovariateMaterializer`, exactly as at fit time.
@@ -3030,6 +1624,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             progression order — the stacking order of the multi-frequency
             output.
         """
+        # Contexte d'exécution du rejeu
+        run = runner.run
         # Initialisation des jeux de données et des provenances
         frames: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
         provenances: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
@@ -3072,14 +1668,14 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
                 step for step in by_stage.get(stage_label, ())
                 if step.var_name not in skip_columns
             )
-            steps = self._replay_steps(run, stage_steps, new_entities, binding, X_stage)
+            steps = self._replay_steps(runner, stage_steps, new_entities, binding, X_stage)
             # Logging
             self._log(
                 f"[transform] stage {stage_label}: replaying {len(steps)} step(s)"
             )
             # Exécution par la même méthode qu'au fit
             for step in steps:
-                self._execute_step(run, step, X_work=X_stage, stage_freq=binding)
+                runner.replay_step(step, X_work=X_stage, stage_freq=binding)
 
             # Liaison complète, pour la sortie : une entité que l'étape ne
             # concerne pas garde les lignes de son dernier passage, et une
@@ -3095,9 +1691,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             # période, et l'inversion rend l'index d'entrée. L'ordre est
             # celui de l'entrée (on impose qu'il soit trié)
             grid = self._in_input_order(
-                self._stage_mask(
-                    run, X_stage, output_binding, kind='imputation'
-                ).index,
+                runner.stage_mask(X_stage.index, output_binding, kind='imputation').index,
                 X_stage.index,
             )
 
@@ -3170,7 +1764,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             return binding
 
         completed = dict(binding)
-        for entity in self._index_entities(X_stage.index):
+        for entity in get_entity_codes(X_stage.index)[1]:
             if entity in completed:
                 continue
             # Report du dernier passage, à défaut la cible de l'entité, à
@@ -3210,7 +1804,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # Panel : rang de chaque entité dans l'entrée, puis date
         rank = {
             entity: position
-            for position, entity in enumerate(cls._index_entities(reference))
+            for position, entity in enumerate(get_entity_codes(reference)[1])
         }
         levels = [grid.get_level_values(level) for level in range(grid.nlevels - 1)]
         entity_rank = np.asarray([
@@ -3483,7 +2077,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         against the fit, the windows recomputed before the additive
         transformer, the fitted transformer applied, the provenance tracker
         initialized after it — then every frozen step is replayed by
-        :meth:`_execute_step`,
+        :meth:`~tsforecast.imputation._engine.stage_runner.StageRunner.execute_step`,
         the very method the fit calls, on an execution context
         (:class:`_RunContext`) built from the fitted state alone. No second
         execution loop, and no
@@ -3542,7 +2136,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         # PHASE 5' — Rejeu du plan sur un contexte d'exécution neuf, construit
         # depuis l'état ajusté seul : composants partagés du fit, matérialiseur
         # et registres vides, fenêtre et traceur de ce transform. Le rejeu ne
-        # lit ni n'altère aucun état d'exécution du fit
+        # lit ni n'altère aucun état d'exécution du fit. Les étapes passent par
+        # l'exécuteur d'étapes du fit, construit sur ce contexte
         run = _RunContext.for_transform(
             self._fitted_components_,
             window_calculator=prepared.window_calculator,
@@ -3550,11 +2145,12 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             transform_frequencies=prepared.new_frequencies,
             transform_misaligned=prepared.new_misaligned,
         )
+        runner = self._stage_runner(run)
         # Recalages du rejeu sous un bloc différé, comme au fit : un
         # avertissement par cas dégénéré pour tout le rejeu
         with run.aggregation_constraint.deferred_warnings():
             frames, provenances = self._replay_plan(
-                run, prepared.X_work, skip_columns=prepared.skipped_columns
+                runner, prepared.X_work, skip_columns=prepared.skipped_columns
             )
         # Avertissements agrégés, un message par famille
         run.pending_warnings.emit()

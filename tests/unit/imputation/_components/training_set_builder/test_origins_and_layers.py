@@ -32,7 +32,7 @@ import pandas as pd
 import pytest
 
 # Objets testés
-from tsforecast.imputation.high_frequency_imputer import ELIGIBLE_ORIGINS
+from tsforecast.imputation._engine.stage_runner import ELIGIBLE_ORIGINS
 from tsforecast.imputation._components.provenance import CELL_ORIGIN_DTYPE
 
 # Constantes et fabriques partagées du paquet

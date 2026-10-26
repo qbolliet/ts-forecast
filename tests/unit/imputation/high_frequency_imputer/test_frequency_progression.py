@@ -11,7 +11,7 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 # Objets testés
-from tsforecast.imputation.high_frequency_imputer import ELIGIBLE_ORIGINS
+from tsforecast.imputation._engine.stage_runner import ELIGIBLE_ORIGINS
 from tsforecast.imputation._components.provenance import ProvenanceType
 
 # Outils de test partagés
