@@ -36,6 +36,11 @@ from .._components.imputation_window import ImputationWindowCalculator
 from .._components.provenance import ImputationProvenanceTracker
 from .frequency_layout import FrequencyLayout, plan_frequencies, stage_frequency_label
 from .params import validate_target_frequency_format
+from .replay import (
+    check_prediction_pass_replayable,
+    check_transform_frequencies,
+    warn_rows_outside_window,
+)
 from .run_context import PairKey
 
 if TYPE_CHECKING:
@@ -230,7 +235,7 @@ def prepare_work_frame(
         )
     # Passe de prédiction : aucun modèle de X ne doit lire la cible absente
     if prediction:
-        imputer._check_prediction_pass_replayable()
+        check_prediction_pass_replayable(imputer.imputation_plan_, imputer.target_column_)
     # Colonne du fit absente de la passe de prédiction : la cible, jamais lue
     skipped_columns = frozenset((imputer.target_column_,)) if prediction else frozenset()
     # Cible fusionnée au jeu de travail, sauf en passe de prédiction
@@ -262,8 +267,8 @@ def prepare_work_frame(
             imputer, X, X_work, is_panel=is_panel
         )
     else:
-        new_frequencies, new_misaligned = imputer._check_transform_frequencies(
-            X_work, optional_columns=skipped_columns
+        new_frequencies, new_misaligned = check_transform_frequencies(
+            imputer._frequency_layout_, X_work, optional_columns=skipped_columns
         )
 
     # Fenêtres, calculées au même stade dans les deux passes : avant le
@@ -408,7 +413,8 @@ def _fit_window(
 
     Args:
         imputer: Imputer whose four window parameters are read; at transform,
-            also the warner of the rows left out.
+            also its data structure, which names the entities of the rows
+            left out.
         X_work: Working frame of the pass, before the additive transformer.
         fitting: True for the fit, False for a transform.
 
@@ -448,7 +454,7 @@ def _fit_window(
         return _window_calculator_of(imputer)
 
     # Avertissement unique sur les lignes laissées hors de la fenêtre recalculée
-    imputer._warn_rows_outside_window(calculator, X_work)
+    warn_rows_outside_window(calculator, X_work, is_panel=imputer.is_panel_)
     return calculator
 
 
