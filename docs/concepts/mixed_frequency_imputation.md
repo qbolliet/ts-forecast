@@ -214,10 +214,85 @@ s'il avait été présent au `fit`, par le modèle figé de sa colonne : **ancr�
 sur ses propres observations quand le `transform` l'observe, sans ancre
 (`MODEL_UNANCHORED`) sinon.
 
+## Architecture du code : un plan, un exécuteur
+
+`HighFrequencyImputer` est un orchestrateur : la classe valide les paramètres, publie les attributs
+ajustés et enchaîne les phases ; chaque phase vit dans un module de `tsforecast/imputation/_engine/`.
+Le `fit` et le `transform` partagent la **même préparation** et la **même exécution d'étape** : le
+`fit` construit chaque étape puis l'exécute, le `transform` rejoue le plan figé par cette même
+méthode (`StageRunner.execute_step`).
+
+```text
+fit(X, y)                                         transform(X)
+─────────                                         ────────────
+validate_params, purge de la passe précédente
+        │                                                 │
+        ▼                                                 ▼
+prepare_work_frame(fitting=True)  ◄── une seule ──►  prepare_work_frame(fitting=False)
+  alignement de y, frame de travail,                   contrôle des fréquences contre le fit,
+  plan des fréquences (FrequencyLayout),               fenêtres recalculées sur les données,
+  fenêtres, transformateur additif,                    transformateur additif ajusté appliqué,
+  traceur de provenance                                traceur de provenance
+        │                                                 │
+        ▼                                                 ▼
+_RunContext.for_fit(FittedComponents, …)          _RunContext.for_transform(FittedComponents, …)
+        │                                                 │
+        ▼                                                 ▼
+StageRunner.fit_stage(…)  par étape               replay_plan(runner, imputation_plan_, …)
+  prepare_variable → ordre → ajustement             pour chaque étape du plan figé
+  → build_step → execute_step ───────┐         ┌──► execute_step (prédire avec le modèle figé)
+        │                            └─ même ──┘          │
+        ▼                               méthode           ▼
+ImputationPlan figé (imputation_plan_)            assemble_output(…) : niveau cible, empilement
+                                                  multi-fréquences, provenance, statistiques
+```
+
+Extraits de la classe (`high_frequency_imputer.py`), réduits aux appels :
+
+```python
+# fit : préparation, contexte d'exécution neuf, étapes l'une après l'autre
+prepared = prepare_work_frame(self, X, y, fitting=True)
+self._publish_fit_preparation(X, prepared)
+run = _RunContext.for_fit(self._fitted_components_, window_calculator=..., ...)
+runner = self._stage_runner(run)
+for stage_freq in self.frequency_progression_:
+    stage = runner.fit_stage(prepared.X_work, stage_freq)
+    ...  # les étapes de `stage.steps` rejoignent `imputation_plan_`
+
+# transform : même préparation, contexte construit depuis l'état ajusté seul
+prepared = prepare_work_frame(self, X, y, fitting=False, prediction=prediction)
+run = _RunContext.for_transform(self._fitted_components_, ...)
+frames, provenances = replay_plan(runner, self.imputation_plan_, prepared.X_work, ...)
+output = assemble_output(frames, provenances, prediction=prediction, ...)
+```
+
+Le contexte d'exécution (`_RunContext`) n'est jamais stocké sur l'imputeur : chaque passe reçoit
+son matérialiseur, ses registres, son calculateur de fenêtre, son traceur de provenance et ses
+avertissements en attente. Un `transform` ne lit donc ni n'altère aucun état d'exécution du `fit`.
+
+| Module (`_engine/`) | Rôle |
+|---------------------|------|
+| `params` | validateurs purs des paramètres du constructeur |
+| `frequency_layout` | `FrequencyLayout` figé et `plan_frequencies` : fréquence de chaque couple (entité, colonne), catégories de variables, progression des étapes |
+| `preparation` | `prepare_work_frame` : phases communes au `fit` et au `transform` |
+| `run_context` | `FittedComponents` (configurés au `fit`, relus par toute passe) et `_RunContext` (état d'une passe) |
+| `grids` | grilles de prédiction et masques de fenêtre d'une étape |
+| `row_scaling` | `RowScaler` : diviseurs par ligne des jeux d'entraînement mutualisés |
+| `stage_runner` | `StageRunner` : ajustement d'une étape (`fit_stage`) et exécution d'une étape du plan (`execute_step`) |
+| `replay` | rejeu du plan, contrôles du `transform`, entités nées au `transform` |
+| `output` | assemblage de la sortie et gestes de l'inversion |
+| `warnings` | `WarningAccumulator` : un avertissement par famille et par passe |
+
+Les composants réutilisables (`_components/`) sont décrits plus haut ; `_engine/` regroupe les
+étapes propres à l'algorithme de `HighFrequencyImputer`. Les deux sont des détails
+d'implémentation : l'API publique est celle de la classe et des types réexportés par
+`tsforecast.imputation`.
+
 ## Pour aller plus loin
 
 - Tutoriel : [Imputation multi-fréquences](../tutorials/mixed_frequency_imputation.md)
 - API : [HighFrequencyImputer](../api/imputation/HighFrequencyImputer.md),
   [provenance](../api/imputation/provenance.md),
-  [aggregation_constraint](../api/imputation/aggregation_constraint.md)
+  [aggregation_constraint](../api/imputation/aggregation_constraint.md),
+  [stage_runner](../api/imputation/engine/stage_runner.md) (internals)
 - Métriques de tracking : [`imputation_metrics`](../guides/mlflow_tracking.md)

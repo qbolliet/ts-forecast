@@ -2247,6 +2247,51 @@ principale restant un orchestrateur mince :
 `HighFrequencyImputer`) est un chantier ultérieur, hors périmètre de ce document. Seule exception
 à la non-régression de `hfi` : la suppression de `MODEL_ON_MIXED` (§6.7).
 
+### 12.2 bis — Architecture du code après refactoring (2026-10-27)
+
+> Section ajoutée après le découpage de `HighFrequencyImputer`. Les §12.1 à 12.5 décrivent le
+> principe et les phases ; cette section dit **où** chaque morceau de l'ancienne classe vit
+> désormais. Le comportement est inchangé (golden master au bit près, signature figée). Le paquet
+> `tsforecast/frequency/` est devenu `tsforecast/imputation/` ; les chemins ci-dessus (§12.2) sont
+> ceux de la spécification d'origine.
+
+```
+tsforecast/imputation/
+├── __init__.py                 # HighFrequencyImputer + types lus dans les attributs ajustés
+├── high_frequency_imputer.py   # la classe : __init__, fit / transform / inverse_transform orchestrés
+├── _components/                # briques réutilisables à API propre (§12.2) :
+│                               #   provenance, imputation_plan, imputation_window, covariate_materializer,
+│                               #   aggregation_constraint, stage_scaler, variable_orderer,
+│                               #   training_set_builder, target_frequency_validator
+└── _engine/                    # étapes de l'algorithme, extraites de la classe (table ci-dessous)
+```
+
+`FrequencyAligner` et `IndexRegularizer`, non utilisés par l'imputeur, vivent dans
+`tsforecast/utils/frequency/` (`aligner.py`, `regularizer.py`).
+
+| Méthode d'origine (`HighFrequencyImputer`) | Destination (`tsforecast/imputation/…`) |
+|---|---|
+| `__init__`, `_log`, `_validate_params`, `_warn_unknown_feature_keys`, `__sklearn_is_fitted__`, `_check_feature_names`, `imputation_models_` | restent dans `high_frequency_imputer.py` |
+| `_fit`, `fit_transform`, `_transform` / `_replay_pass`, `_inverse_transform` | restent dans `high_frequency_imputer.py`, réduits à l'orchestration ; aides `_purge_pass_state`, `_configure_variable_orderer`, `_publish_fit_preparation`, `_stage_runner` |
+| `_validate_literal`, `_validate_intermediate_frequencies`, `_validate_unit_interval`, `_validate_cv`, `_validate_cv_scoring`, `_validate_target_frequency_format`, `_validate_estimator`, `_validate_additive_transformer` | `_engine/params.py` : `validate_*` (fonctions pures) |
+| `_resolve_target_column_name`, `_align_target_index`, `_datetime_units`, `_check_reserved_level_name`, `_make_window_calculator`, `_fit_imputation_window`, `_zip_window_bounds` | `_engine/preparation.py` (`prepare_work_frame`, phases 0-4 communes au fit et au transform) |
+| `_detected_frequencies_by_column`, `_target_freq_validator`, `_column_frequencies_by_entity`, `_training_frequencies`, `_classify_variables_at_frequency`, `_imputable_groups`, `_entity_target_frequency`, `_unanchored_pairs_at`, `_group_frequency_progression`, `_build_frequency_progression`, `_misaligned_anchor_pairs`, `_check_target_frequency_covers_entities`, `_stage_frequency_label`, `_stage_frequency_of` | `_engine/frequency_layout.py` : `plan_frequencies`, `FrequencyLayout` et ses méthodes, fonctions libres du même nom sans préfixe |
+| `_replay_state` (échange puis restauration d'attributs) | supprimée : `_engine/run_context.py` (`FittedComponents`, `_RunContext.for_fit` / `for_transform`) construit un contexte neuf par passe |
+| `_restrict_to_entities`, `_stage_mask`, `_prediction_grid`, `_unrestricted_grid`, `_training_mask_at` | `_engine/grids.py` |
+| `_index_entities`, `_row_layers`, `_block_binding`, `_feature_divisors_per_row`, `_target_divisors_per_row` | `_engine/row_scaling.py` : `row_layers`, `TrainingRows` (codes d'entités), `RowScaler` (`layer_binding`, `target_divisors`, `feature_divisors`) |
+| `_execute_stage`, `_order_columns`, `_prepare_variable`, `_training_view`, `_fit_variable`, `_fit_estimator`, `_build_step`, `_execute_step`, `_predict_step` | `_engine/stage_runner.py` : `StageRunner` (`fit_stage`, `prepare_variable`, `execute_step`, …) |
+| `_select_feature_columns`, `_drop_empty_training_rows`, `_estimator_for`, `_group_scale_factor`, `_step_pairs` | `_engine/stage_runner.py` : fonctions libres sans préfixe |
+| `_check_transform_frequencies`, `_warn_rows_outside_window`, `_check_prediction_pass_replayable`, `_new_entities`, `_extend_stage_binding`, `_replay_steps`, `_route_transform_pair`, `_replay_plan` | `_engine/replay.py` (`replay_plan`, `replay_steps`, contrôles du transform) |
+| `_output_binding`, `_in_input_order`, `_stage_provenance`, `_aggregated_cells`, `_overlay_imputations`, `_build_multifreq_output` | `_engine/output.py` (assemblage : `assemble_output`, `PassOutput`) |
+| `_has_frequency_level`, `_select_inverse_frequency_level`, `_drop_frequency_level`, `_restore_original_values` | `_engine/output.py` (gestes de l'inversion) |
+| accumulateurs d'avertissements (`self._…` de `_fit` et `_replay_state`) | `_engine/warnings.py` : `WarningAccumulator`, porté par `_RunContext.pending_warnings` |
+
+Ce qui ne change pas : la signature de `__init__`, `get_params()`, les attributs ajustés publics
+(suffixe `_`), les messages et catégories d'avertissements et d'erreurs, les sorties de `fit` /
+`transform` / `inverse_transform`. Ce qui change : les attributs privés `self._…` (un imputeur
+picklé avant le découpage ne se relit pas nécessairement après) et les tests marqués `internal`,
+déplacés vers les tests de l'extrait correspondant (`tests/unit/imputation/_engine/`).
+
 ### 12.3 — Squelette de `fit`
 
 ```

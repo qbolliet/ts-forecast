@@ -1173,7 +1173,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   Un jeu de données vide lève la même `ValueError`.
 - **Attendu** : la clé présente, associée à `None`, comme pour un couple (entité, colonne) depuis
   le commit `906da2e` (« rather than being silently dropped »). C'est aussi la convention de
-  `HighFrequencyImputer._detect_frequencies_robustly` / `_undetected_frequencies_`, qui contourne
+  `tsforecast/imputation/_engine/frequency_layout.py::plan_frequencies` / `_undetected_frequencies_`, qui contourne
   aujourd'hui l'exception par une détection colonne par colonne.
 - **Reproduction** :
   ```python
@@ -3417,7 +3417,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   détectée `None`. `_build_index_freq_grid` se replie alors sur la fréquence de l'index (`col_freqs.get(col) or
   index_freq`), mais `_build_coverage_matrix` lit `col_freqs[col]` sans repli et passe `None` à `get_period_start` :
   `ValueError: Frequency must be a string, got <class 'NoneType'>`. Sur un panel, une seule entité dans ce cas fait
-  échouer le `fit` de tout le panel ; `HighFrequencyImputer._fit_imputation_window` rattrape la `ValueError` et
+  échouer le `fit` de tout le panel ; `tsforecast/imputation/_engine/preparation.py::_fit_window` rattrape la `ValueError` et
   poursuit **sans fenêtre**, silencieusement.
 - **Attendu** : pas d'exception ; traitement cohérent entre la grille et la matrice — soit le même repli sur la
   fréquence de l'index, soit (plus cohérent avec `_undetected_frequencies_` de l'imputeur et D39) une exclusion du
@@ -3711,7 +3711,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Observé** : avec `grid_freq` en liaison par entité, le retour est une `DataFrame` par ligne si les diviseurs
   diffèrent d'une entité à l'autre, mais une `Series` par colonne s'ils coïncident (blocs identiques, liaison à une
   seule entrée, colonnes toutes en `'raw_anchors'`…). La forme dépend des **valeurs** calculées ;
-  `HighFrequencyImputer._feature_divisors_per_row` doit d'ailleurs traiter les deux formes.
+  `tsforecast/imputation/_engine/row_scaling.py::RowScaler.feature_divisors` doit d'ailleurs traiter les deux formes.
 - **Attendu** : §9.2 — `feature_divisors` « reçoit `grid_freq` sous forme de liaison par entité … et retourne
   **alors** une `DataFrame` de diviseurs par ligne » ; règle de forme de la campagne : la forme dépend de la
   configuration, jamais des valeurs.
@@ -4118,7 +4118,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-046 — Entité à fréquence indétectable : elle emprunte la fréquence des autres quand elles s'accordent
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._detected_frequencies_by_column`
+- **Composant** : `tsforecast/imputation/_engine/frequency_layout.py::plan_frequencies`
   (repli sur la forme scalaire), lu par `TrainingSetBuilder.blocks_of`
 - **Sévérité** : mineure
 - **Observé** : une entité qui observe la variable une seule fois a une fréquence indétectable
@@ -4139,13 +4139,13 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   ```
 - **Test** : `tests/unit/imputation/_components/training_set_builder/test_blocks_and_rows.py::TestScopeOfContributors::test_imputer_never_lends_a_frequency_to_an_undetectable_entity`
 - **Statut** : corrigé (2026-10-12) — arbitrage de l'auteur : écarter toujours
-- **Correction** : `HighFrequencyImputer._training_frequencies` remet au constructeur la colonne cible sous forme par
+- **Correction** : `tsforecast/imputation/_engine/frequency_layout.py::FrequencyLayout.training_frequencies` remet au constructeur la colonne cible sous forme par
   entité, chaque couple indétectable explicitement à `None` ; `blocks_of` écarte alors le bloc (journalisé). Les
   entrées des covariables ne changent pas. Docstring de `blocks_of` : forme `None` explicite documentée.
 
 ### ANO-FREQ-047 — Niveau de fréquence repéré par son nom
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._has_frequency_level`,
+- **Composant** : `tsforecast/imputation/_engine/output.py::has_frequency_level`,
   `::_select_inverse_frequency_level`, `::_drop_frequency_level` ; `tsforecast/imputation/_components/training_set_builder.py::TrainingSetBuilder.build`
 - **Sévérité** : mineure
 - **Observé** : `inverse_transform` reconnaissait une sortie multi-fréquences au nom `'frequency'` d'un de ses niveaux
@@ -4245,7 +4245,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-051 — `inverse_transform(restore_original_values=True)` juste après un `fit` : `AttributeError`
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._restore_original_values`
+- **Composant** : `tsforecast/imputation/_engine/output.py::restore_original_values`
 - **Sévérité** : mineure
 - **Observé** : `AttributeError: 'HighFrequencyImputer' object has no attribute '_original_X_'`.
   `_restore_original_values` lit `self._original_X_` sans garde ; seul `transform` écrit cet instantané, et
@@ -4334,7 +4334,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-055 — Avertissement `estimator=None` : `__init__` (spec) ou `fit` (code)
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._validate_estimator`
+- **Composant** : `tsforecast/imputation/_engine/params.py::validate_estimator`
 - **Sévérité** : à arbitrer
 - **Observé** : `__init__` n'émet rien sous `estimator=None` ; l'avertissement unique est émis au `fit`. Le
   code le justifie (« pour ne pas se répéter à chaque clone ») et la docstring le dit (« a single warning at
@@ -4451,7 +4451,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-060 — Colonne à fréquence indétectable retenue comme covariable : les autres variables retombent en repli
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._select_feature_columns`
+- **Composant** : `tsforecast/imputation/_engine/stage_runner.py::select_feature_columns`
   (via `_prepare_variable`)
 - **Sévérité** : majeure
 - **Observé** : une colonne observée une seule fois (cible `y` à une observation, ou colonne de X) a une fréquence
@@ -4481,7 +4481,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 ### ANO-FREQ-061 — Entité réduite à une ligne : la fenêtre de tout le panel est perdue
 - **Type** : [CODE] comportement
 - **Composant** : `tsforecast/imputation/_components/imputation_window.py::ImputationWindowCalculator.fit` (détection de la
-  fréquence d'index sur tout le `MultiIndex`), via `HighFrequencyImputer._fit_imputation_window`
+  fréquence d'index sur tout le `MultiIndex`), via `tsforecast/imputation/_engine/preparation.py::_fit_window`
 - **Sévérité** : mineure
 - **Observé** : une entité qui ne compte qu'une ligne fait échouer `detect_index_frequency` sur l'index entier ; le
   calculateur lève, et l'imputeur avertit « Could not calculate imputation window: Series has only 1 non-null
@@ -4532,7 +4532,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-063 — Échec de prédiction d'une étape sans ancre annoncé comme repli d'interpolation
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._predict_step` (message
+- **Composant** : `tsforecast/imputation/_engine/stage_runner.py::StageRunner._predict_step` (message
   accumulé quel que soit `step.unanchored`)
 - **Sévérité** : cosmétique
 - **Observé** : sous `impute_unobserved_entities=True`, quand la prédiction d'une étape sans ancre lève (covariable
@@ -4552,7 +4552,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-064 — Prédictions entièrement NaN : rien n'est écrit, ni repli, ni avertissement
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._execute_step`
+- **Composant** : `tsforecast/imputation/_engine/stage_runner.py::StageRunner.execute_step`
 - **Sévérité** : à arbitrer
 - **Observé** : un estimateur dont `predict` rend des NaN (sans lever) produit une étape figée comme un succès
   (`is_fallback=False`, `n_written=0`) ; aucune cellule n'est écrite et aucun avertissement n'est émis. Une prédiction
@@ -4574,7 +4574,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-065 — Ancres basse fréquence hors du calendrier civil : aucune ligne d'entraînement
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._training_mask_at` /
+- **Composant** : `tsforecast/imputation/_engine/grids.py::training_mask_at` /
   `TrainingSetBuilder` (masque 'training' lu par date exacte), face à
   `tsforecast/imputation/_components/aggregation_constraint.py` (rattachement par période)
 - **Sévérité** : à arbitrer
@@ -4610,7 +4610,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-066 — Sélection des covariables lue à la fréquence du bloc, et non par couche (D30)
 - **Type** : [SPEC] code ≠ spec
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._prepare_variable`
+- **Composant** : `tsforecast/imputation/_engine/stage_runner.py::StageRunner.prepare_variable`
   (vue `train_view` construite à `_block_binding(blocks, …)`, lue par `_select_feature_columns`)
 - **Sévérité** : mineure
 - **Observé** : sous `impute_intermediate_frequencies=True`, la vue d'entraînement qui décide de la sélection des
@@ -4692,7 +4692,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-070 — Frame à une seule colonne : « Could not calculate imputation window … min_columns=2 »
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._make_window_calculator`
+- **Composant** : `tsforecast/imputation/_engine/preparation.py::make_window_calculator`
 - **Sévérité** : cosmétique
 - **Observé** : l'imputeur imposait `min_columns=2` au calculateur (depuis l'implémentation initiale, sans
   justification) ; un frame d'une seule colonne émettait « Could not calculate imputation window: Data has 1 columns,
@@ -4762,7 +4762,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-073 — Entité née au `transform` : ses colonnes observées sont servies sans ancre, ses observations écrasées
 - **Type** : [SPEC] code ≠ spec (D34 appliqué à la lettre, contraire à I4 et I7)
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._new_entity_steps`
+- **Composant** : `tsforecast/imputation/_engine/replay.py::replay_steps`
   (et `_execute_step` pour les étapes `unanchored=True`)
 - **Sévérité** : majeure
 - **Observé** : sous `impute_unobserved_entities=True`, une entité absente du `fit` reçoit, pour **chaque** colonne
@@ -4853,7 +4853,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-075 — Lignes d'entrée ajoutées à l'étape finale (D38) : sortie non triée, entités non contiguës
 - **Type** : [CODE] comportement
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
+- **Composant** : `tsforecast/imputation/_engine/replay.py::replay_plan`
   (`grid = grid.append(absent)` à l'étape finale)
 - **Sévérité** : majeure
 - **Observé** : la grille de l'étape finale est complétée des lignes d'entrée qu'elle ne couvre pas (D38) par un
@@ -4981,7 +4981,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-079 — Lignes complétant l'étape finale (D38) : vides en sortie, marquées `ORIGINAL`
 - **Type** : [CODE] comportement (et question de spec à arbitrer sur le contenu de ces lignes)
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
+- **Composant** : `tsforecast/imputation/_engine/replay.py::replay_plan`
   (instantané de provenance réindexé sur la grille complétée)
 - **Sévérité** : mineure
 - **Observé** : sous `target_frequency={'FR': 'M', 'DE': 'Q', 'IT': 'M'}` sur `PANEL-F`, les 24 mois de `DE` hors fin
@@ -5017,7 +5017,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 
 ### ANO-FREQ-080 — Imputeur ajusté avec `y` : `transform(X)` sans `y` lève, `XYPipeline.predict` et les scorers textuels échouent
 - **Type** : [SPEC] code ≠ spec (I9 : conformité `Pipeline`)
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._check_transform_frequencies`
+- **Composant** : `tsforecast/imputation/_engine/replay.py::check_transform_frequencies`
   (colonne de `y` fusionnée dans le plan au `fit` par `_fit`, exigée au `transform`)
 - **Sévérité** : majeure
 - **Observé** : au `fit(X, y)`, `y` est fusionnée dans la frame de travail sous son nom et entre dans le plan figé. Un
@@ -5089,7 +5089,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   test ne dépend plus de sa cible.
 ### ANO-FREQ-082 — Pli d'entraînement ou de test qui coupe une période : la grille de l'imputeur la complète
 - **Type** : [CODE] à arbitrer (interaction imputeur × validation croisée)
-- **Composant** : `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._replay_plan`
+- **Composant** : `tsforecast/imputation/_engine/replay.py::replay_plan`
   (sortie = index du masque d'imputation, grille complète par période, D38 / D43)
 - **Sévérité** : à arbitrer
 - **Observé** : la sortie de l'imputeur court jusqu'à la fin de la dernière période observée. Dans un `XYPipeline`
@@ -5126,7 +5126,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 ### ANO-FREQ-083 — Sous `covariate_strategy='model'`, les ancres hors fenêtre des couples imputés sont effacées
 - **Type** : [SPEC] code ≠ spec (I7 : « ne détruit jamais une observation d'entrée »)
 - **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::CovariateMaterializer.stage_frame` (voie miroir,
-  rangs 2-3, propre à `'model'`), lue par `HighFrequencyImputer._replay_plan`
+  rangs 2-3, propre à `'model'`), lue par `tsforecast/imputation/_engine/replay.py::replay_plan`
 - **Sévérité** : majeure
 - **Observé** : sur `irregular_index_timeseries` (fenêtre d'imputation 2019-01 → 2024-06, faute de
   `production_industrielle` avant 2019), les observations de `pib_trimestriel` (2018-01, 04, 07, 10, 2024-01, 04) et
@@ -5163,7 +5163,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 ### ANO-FREQ-084 — Notebook 5 : la cellule 33 lit `_check_transform_frequencies` comme un dict
 - **Type** : [DOC] notebook ≠ code
 - **Composant** : `notebooks/5 - QB - HighFrequencyImputer pas a pas.ipynb` (cellule 33), face à
-  `tsforecast/imputation/high_frequency_imputer.py::HighFrequencyImputer._check_transform_frequencies`
+  `tsforecast/imputation/_engine/replay.py::check_transform_frequencies`
 - **Sévérité** : mineure
 - **Observé** : la cellule appelle la méthode **privée** `REF_T._check_transform_frequencies(PANEL_X.copy())` et
   passe le résultat à `dict(...)`. Depuis `c9ecf79` (D42, correction d'ANO-FREQ-073), la méthode renvoie un tuple
@@ -5330,7 +5330,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
 - **Type** : [CODE] comportement
 - **Composant** : `tsforecast/imputation/_engine/frequency_layout.py::expand_target_frequency` (appelé par
   `plan_frequencies`, donc `HighFrequencyImputer.fit`) ; avant l'extraction du plan des fréquences :
-  `HighFrequencyImputer._check_target_frequency_covers_entities`
+  `tsforecast/imputation/_engine/frequency_layout.py::check_target_frequency_covers_entities`
 - **Sévérité** : mineure (l'entrée est refusée dans les deux cas, seul le message est inutilisable)
 - **Observé** : `HighFrequencyImputer(target_frequency={'FR': 'M'}, ...).fit(serie)` lève
   `TypeError: 'NoneType' object is not iterable`. Le contrôle de couverture des entités parcourt `entities_`, qui vaut
@@ -5434,7 +5434,7 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   structure (colonnes déplacées, positions, noms : `original_index` à `None`) ; `transform` ne le modifie plus, et un
   nouveau `fit` sans conversion le retire. Les colonnes rendues reçoivent un `RangeIndex` neuf (même règle qu'après
   un tri, ANO-UTILS-024). Les métadonnées de l'appel en cours (index d'origine compris) sont gardées dans l'attribut
-  privé `_current_conversion_metadata`, que `HighFrequencyImputer._align_target_index` lit pour réaligner `y` sur `X`.
+  privé `_current_conversion_metadata`, que `tsforecast/imputation/_engine/preparation.py::align_target_index` lit pour réaligner `y` sur `X`.
 - **Test** : `tests/unit/base/transformers/test_reversible.py::TestRestoreStructure::test_inverse_does_not_depend_on_later_transforms`,
   `::test_transform_leaves_the_fitted_structure_untouched`, `::test_restored_columns_get_a_fresh_range_index`,
   `::test_refit_without_conversion_drops_the_structure`

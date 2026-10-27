@@ -20,7 +20,7 @@ tsforecast/
 ├── base/          # Classes de base des transformateurs temporels
 ├── crossvals/     # Validation croisée respectant l'ordre temporel
 ├── delays/        # Délais de publication (inférence, application, inversion)
-├── imputation/    # Imputation multi-fréquences (HighFrequencyImputer) + composants
+├── imputation/    # Imputation multi-fréquences (HighFrequencyImputer), _components/, _engine/
 ├── panel/         # Transformations par entité + utilitaires panel
 ├── xy/            # Pipeline et mixin pour transformateurs (X, y)
 ├── tracking/      # Constructeurs de métriques pour trackers (MLflow, ...)
@@ -64,13 +64,35 @@ passe d'entraînement (`X` et `y` sur la grille), `transform` la passe de prédi
 (`X` seul, sur ses lignes d'entrée, `y` rendu inchangé) ; `y` n'est pas covariable
 de `X` sauf `target_as_covariate=True` (décisions D47 / D48 de la spec).
 
+`high_frequency_imputer.py` ne contient que la classe : `__init__`, attributs ajustés et
+orchestration de `fit` / `transform` / `inverse_transform`. `fit` et `transform` partagent la même
+préparation (`prepare_work_frame`) et la même exécution d'étape (`StageRunner.execute_step`) :
+le `fit` construit chaque étape puis l'exécute, le `transform` rejoue le plan figé.
+
 `__init__.py` réexporte `HighFrequencyImputer` et les types lus dans les attributs ajustés
 (`ImputationPlan`, `ImputationStep`, `MaterializationWay`, `ProvenanceType`, `PROVENANCE_DTYPE`,
-`CellOrigin`, `CELL_ORIGIN_DTYPE`, `Taint`) ; `__all__` est explicite. `_engine/` est réservé
-aux morceaux extraits de la classe (détail d'implémentation, préfixe `_`).
+`CellOrigin`, `CELL_ORIGIN_DTYPE`, `Taint`) ; `__all__` est explicite. `_components/` et
+`_engine/` sont des détails d'implémentation (préfixe `_`), importés par chemin de module :
+`_components/` rassemble des briques réutilisables à API propre, `_engine/` les étapes de
+l'algorithme de `HighFrequencyImputer` extraites de la classe.
 
-Composants auxiliaires de `HighFrequencyImputer`, dans `_components/` (détail d'implémentation,
-importés par chemin de module : `tsforecast.imputation._components.<module>`) :
+Étapes de l'algorithme, dans `_engine/` (`tsforecast.imputation._engine.<module>`) :
+- `params.py` : validateurs purs des paramètres du constructeur (`validate_*`)
+- `frequency_layout.py` : `FrequencyLayout` (figé) et `plan_frequencies` — fréquence de chaque
+  couple (entité, colonne), catégories de variables, progression des étapes
+- `preparation.py` : `prepare_work_frame(imputer, X, y, fitting=...)` — phases communes au fit et
+  au transform (alignement de `y`, frame de travail, fenêtres, transformateur additif, provenance)
+- `run_context.py` : `FittedComponents` (configurés une fois au fit, relus par toute passe) et
+  `_RunContext` (état d'une passe, jamais stocké sur l'imputeur)
+- `grids.py` : grilles de prédiction et masques de fenêtre d'une étape
+- `row_scaling.py` : `TrainingRows`, `RowScaler` — diviseurs par ligne des jeux mutualisés
+- `stage_runner.py` : `StageRunner` — `fit_stage`, `execute_step` (unique, fit et rejeu)
+- `replay.py` : `replay_plan` et contrôles du transform (fréquences, fenêtre, entités nouvelles)
+- `output.py` : assemblage de la sortie (`assemble_output`) et gestes de l'inversion
+- `warnings.py` : `WarningAccumulator` — un avertissement par famille et par passe
+
+Composants auxiliaires de `HighFrequencyImputer`, dans `_components/`
+(`tsforecast.imputation._components.<module>`) :
 - `imputation_plan.py` : `ImputationPlan`, `ImputationStep` — état ajusté complet
 - `provenance.py` : `ImputationProvenanceTracker`, `ProvenanceType` (10 niveaux),
   `PROVENANCE_DTYPE` (dtype catégoriel des matrices de provenance), `CELL_ORIGIN_DTYPE`
@@ -375,11 +397,12 @@ def validate_temporal_data(
   │   └── golden/          # golden master de HighFrequencyImputer : generate.py (à la main),
   │                        #   manifest.json, cases/*.pkl.gz ; comparé par
   │                        #   tests/integration/imputation/test_golden_master.py (slow)
-  ├── unit/               # miroir EXACT de tsforecast/
+  ├── unit/               # miroir EXACT de tsforecast/ (+ scripts/ : tests de scripts/)
   │   ├── base/  crossvals/  panel/  tracking/  xy/
   │   ├── delays/           # test_calculator.py, test_data_manager.py, ...
   │   ├── imputation/       # high_frequency_imputer/ (paquet) ; _components/ : un test_<module>.py
-  │   │                     #   ou un paquet par module de tsforecast/imputation/_components/
+  │   │                     #   ou un paquet par module de tsforecast/imputation/_components/ ;
+  │   │                     #   _engine/ : un test_<module>.py par module de _engine/
   │   └── utils/
   │       ├── abc/  duration/  parse/  position/  time/  validation/
   │       └── frequency/     # test_normalizer.py, test_utils.py, test_regularizer.py,

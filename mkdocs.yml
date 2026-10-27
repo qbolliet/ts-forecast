@@ -126,14 +126,27 @@ nav:
     - Rapports (détection, ajustement): api/delays/report.md
   - imputation:
     - HighFrequencyImputer: api/imputation/HighFrequencyImputer.md
-    - provenance: api/imputation/provenance.md
-    - imputation_plan: api/imputation/imputation_plan.md
-    - covariate_materializer: api/imputation/covariate_materializer.md
-    - aggregation_constraint: api/imputation/aggregation_constraint.md
-    - stage_scaler: api/imputation/stage_scaler.md
-    - variable_orderer: api/imputation/variable_orderer.md
-    - imputation_window: api/imputation/imputation_window.md
-    - target_frequency_validator: api/imputation/target_frequency_validator.md
+    - Internals - composants:
+      - provenance: api/imputation/provenance.md
+      - imputation_plan: api/imputation/imputation_plan.md
+      - covariate_materializer: api/imputation/covariate_materializer.md
+      - aggregation_constraint: api/imputation/aggregation_constraint.md
+      - stage_scaler: api/imputation/stage_scaler.md
+      - variable_orderer: api/imputation/variable_orderer.md
+      - training_set_builder: api/imputation/training_set_builder.md
+      - imputation_window: api/imputation/imputation_window.md
+      - target_frequency_validator: api/imputation/target_frequency_validator.md
+    - Internals - moteur (_engine):
+      - params: api/imputation/engine/params.md
+      - frequency_layout: api/imputation/engine/frequency_layout.md
+      - preparation: api/imputation/engine/preparation.md
+      - run_context: api/imputation/engine/run_context.md
+      - grids: api/imputation/engine/grids.md
+      - row_scaling: api/imputation/engine/row_scaling.md
+      - stage_runner: api/imputation/engine/stage_runner.md
+      - replay: api/imputation/engine/replay.md
+      - output: api/imputation/engine/output.md
+      - warnings: api/imputation/engine/warnings.md
   - xy:
     - XYPipeline: api/xy/XYPipeline.md
     - XYTransformerMixin: api/xy/XYTransformerMixin.md
