@@ -1,9 +1,8 @@
-"""Tests of ``StageRunner`` and of the grid, mask and step helpers of ``tsforecast.imputation._engine.stage_runner``.
+"""Tests of ``StageRunner``, ``StageParams`` and the step helpers of ``tsforecast.imputation._engine.stage_runner``.
 
-Scenarios: restriction of an index to a group of entities (order, scalar keys, two entity levels),
-stage masks (entity omitted by the calculator, unavailable mask), prediction and unrestricted grids,
-training mask binding; covariate selection, empty training rows, estimator resolution, group scale
-factor, pairs of a step; the parameter defaults; composition of a (stage, variable) on PANEL-F (51
+Scenarios: the prediction grid of the pass on PANEL-F; covariate selection, empty training rows,
+estimator resolution, group scale factor, pairs of a step; the parameters (every field required,
+the imputer's own values passed through); composition of a (stage, variable) on PANEL-F (51
 pooled rows, golden scaled targets at stages M and Q, no register written); the fit of a stage (one
 fit per (stage, variable) shared by its groups, order and CV scores, fallback, degraded step,
 unanchored groups, replay context refused, plan identical to the imputer's); the execution of a step
@@ -12,7 +11,7 @@ on PANEL-X (call counts, neutralized execution, identical prediction frames).
 """
 # Modules de base
 import warnings
-from dataclasses import replace
+from dataclasses import fields, replace
 from functools import partial
 from typing import List, Tuple
 
@@ -37,6 +36,7 @@ from tsforecast.imputation._components.stage_scaler import StageScaler
 from tsforecast.imputation._components.variable_orderer import VariableOrderer
 from tsforecast.imputation._engine.preparation import prepare_work_frame
 from tsforecast.imputation._engine.run_context import FittedComponents, _RunContext
+from tsforecast.imputation._engine.grids import training_mask_at
 from tsforecast.imputation._engine.stage_runner import (
     StageOutcome,
     StageParams,
@@ -44,13 +44,8 @@ from tsforecast.imputation._engine.stage_runner import (
     drop_empty_training_rows,
     estimator_for,
     group_scale_factor,
-    prediction_grid,
-    restrict_to_entities,
     select_feature_columns,
-    stage_mask,
     step_pairs,
-    training_mask_at,
-    unrestricted_grid,
 )
 
 # Clés d'entité des jeux de référence
@@ -247,95 +242,11 @@ def _transformed(imputer: HighFrequencyImputer, data: pd.DataFrame) -> pd.DataFr
         return imputer.transform(data)
 
 
-# Index de panel de trois entités sur trois mois
-def _panel_index() -> pd.MultiIndex:
-    """Build a ``(country, date)`` index: FR, DE, IT over three month ends."""
-    dates = pd.date_range('2021-01-31', periods=3, freq='ME')
-    return pd.MultiIndex.from_product([['FR', 'DE', 'IT'], dates], names=['country', 'date'])
-
-
 # =============================================================================
-# Grilles et masques
+# Grilles de la passe
 # =============================================================================
-class TestRestrictToEntities:
-    """Restriction of an index to the rows of a group, decided per entity."""
-
-    def test_rows_of_the_group_keep_their_order(self):
-        index = _panel_index()
-        restricted = restrict_to_entities(index, [IT, FR])
-        assert restricted.get_level_values('country').tolist() == ['FR'] * 3 + ['IT'] * 3
-        assert restricted.equals(index[np.r_[0:3, 6:9]])
-
-    def test_scalar_keys_designate_single_level_entities(self):
-        index = _panel_index()
-        assert restrict_to_entities(index, ['DE']).equals(restrict_to_entities(index, [DE]))
-
-    def test_time_series_and_none_are_left_untouched(self):
-        index = _panel_index()
-        dates = index.get_level_values('date')[:3]
-        assert restrict_to_entities(index, None) is index
-        assert restrict_to_entities(dates, [FR]) is dates
-
-    def test_empty_group_gives_an_empty_index(self):
-        restricted = restrict_to_entities(_panel_index(), [])
-        assert len(restricted) == 0
-        assert restricted.names == ['country', 'date']
-
-    def test_two_entity_levels(self):
-        dates = pd.date_range('2021-01-31', periods=2, freq='ME')
-        index = pd.MultiIndex.from_product(
-            [['EU'], ['FR', 'DE'], dates], names=['zone', 'country', 'date']
-        )
-        restricted = restrict_to_entities(index, [('EU', 'DE')])
-        assert restricted.get_level_values('country').tolist() == ['DE', 'DE']
-
-
-class TestStageMask:
-    """Window masks read at the frequency of a stage."""
-
-    def test_entity_omitted_by_the_calculator_is_left_unrestricted(self):
-        index = _panel_index()
-        fr_rows = index[:3]
-        calculator = _FixedMaskCalculator(pd.Series([False, True, True], index=fr_rows))
-
-        mask = stage_mask(calculator, index, {FR: 'M'}, 'imputation', pass_name='fit')
-
-        # Le "kind" est transmis tel quel ; FR garde son masque, DE et IT sont rattachées
-        assert calculator.calls == [({FR: 'M'}, 'imputation')]
-        assert mask.tolist() == [False, True, True] + [True] * 6
-        assert mask.index[3:].equals(index[3:])
-
-    def test_unavailable_mask_keeps_every_row_and_logs(self):
-        index = _panel_index()
-        messages = []
-        mask = stage_mask(
-            ImputationWindowCalculator(), index, 'M', 'training',
-            pass_name='transform', log=messages.append,
-        )
-        assert mask.index.equals(index) and mask.all()
-        assert messages == [
-            '[transform] training mask unavailable (Calculator not fitted. Call fit() '
-            'first.); every row kept'
-        ]
-
-    def test_unavailable_mask_without_log_is_silent(self):
-        index = _panel_index()
-        mask = stage_mask(ImputationWindowCalculator(), index, 'M', 'imputation', pass_name='fit')
-        assert mask.index.equals(index) and mask.all()
-
-    def test_prediction_grid_keeps_the_true_rows_of_the_group(self):
-        index = _panel_index()
-        mask = pd.Series([True, False, True, True, True, False, True, True, True], index=index)
-        calculator = _FixedMaskCalculator(mask)
-        grid = prediction_grid(calculator, index, 'M', [DE], pass_name='fit')
-        assert grid.equals(index[[3, 4]])
-
-    def test_unrestricted_grid_keeps_every_row_of_the_group(self):
-        index = _panel_index()
-        mask = pd.Series(False, index=index)
-        grid = unrestricted_grid(_FixedMaskCalculator(mask), index, 'M', [IT], pass_name='fit')
-        assert grid.equals(index[6:])
-        assert len(prediction_grid(_FixedMaskCalculator(mask), index, 'M', [IT], pass_name='fit')) == 0
+class TestPassGrids:
+    """The grids of the pass, read on the window calculator of the pass."""
 
     def test_grid_of_a_real_calculator_on_panel_f(self, mixed_freq_panel_multifrequency):
         runner, X_work = _fit_runner(_imputer(), mixed_freq_panel_multifrequency)
@@ -343,32 +254,6 @@ class TestStageMask:
         grid = runner.prediction_grid(X_work.index, stage, [FR, DE])
         assert set(grid.get_level_values('country')) == {'FR', 'DE'}
         assert len(grid) == 72
-
-
-class TestTrainingMaskAt:
-    """The training mask injected into the training-set builder."""
-
-    def test_time_series_reads_the_scalar_block_frequency(self):
-        calculator = _FixedMaskCalculator(pd.Series(dtype=bool))
-        training_mask_at(calculator, {(): 'QE'}, is_panel=False)
-        assert calculator.calls == [('QE', 'training')]
-
-    def test_panel_passes_the_binding_as_given(self):
-        calculator = _FixedMaskCalculator(pd.Series(dtype=bool))
-        blocks = {FR: 'YE', DE: 'QE'}
-        training_mask_at(calculator, blocks, is_panel=True)
-        assert calculator.calls == [(blocks, 'training')]
-
-    def test_unavailable_mask_means_no_restriction(self):
-        messages = []
-        result = training_mask_at(
-            ImputationWindowCalculator(), {(): 'QE'}, is_panel=False, log=messages.append
-        )
-        assert result is None
-        assert messages == [
-            '[fit] training mask unavailable (Calculator not fitted. Call fit() first.); '
-            'every row kept'
-        ]
 
 
 # =============================================================================
@@ -432,16 +317,40 @@ class TestStepHelpers:
 class TestStageParams:
     """The parameters the stage execution reads."""
 
-    def test_defaults_are_those_of_the_imputer(self):
-        defaults = HighFrequencyImputer(target_frequency='M').get_params()
-        params = StageParams()
-        for name in (
-            'covariate_strategy', 'fit_predict_order', 'estimator',
-            'impute_intermediate_frequencies', 'aggregation_constraint',
-            'impute_unobserved_entities', 'target_as_covariate',
-        ):
-            assert getattr(params, name) == defaults[name], name
-        assert params.target_column is None
+    def test_every_field_is_required_and_named(self):
+        """No default: a parameter left out, or passed by position, fails at construction."""
+        with pytest.raises(TypeError, match='missing 7 required keyword-only arguments'):
+            StageParams(covariate_strategy='model')
+        with pytest.raises(TypeError):
+            StageParams('interpolate', 'frequency', None, False, 'sum', False, None, False)
+
+    def test_the_imputer_passes_its_own_values(self, reference_timeseries):
+        """Each field holds the very object of the imputer parameter of the same name."""
+        imputer = _fitted(
+            _imputer(
+                covariate_strategy='model', impute_intermediate_frequencies='covariates_only',
+                aggregation_constraint=None, impute_unobserved_entities=True,
+            ),
+            reference_timeseries,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            prepared = prepare_work_frame(imputer, reference_timeseries, fitting=False)
+        run = _RunContext.for_transform(
+            imputer._fitted_components_,
+            window_calculator=prepared.window_calculator,
+            provenance_tracker=prepared.provenance_tracker,
+            transform_frequencies=prepared.new_frequencies,
+            transform_misaligned=prepared.new_misaligned,
+        )
+        params = imputer._stage_runner(run).params
+        imputer_params = imputer.get_params(deep=False)
+        for field in fields(StageParams):
+            expected = (
+                imputer.target_column_ if field.name == 'target_column'
+                else imputer_params[field.name]
+            )
+            assert getattr(params, field.name) is expected, field.name
 
 
 # =============================================================================

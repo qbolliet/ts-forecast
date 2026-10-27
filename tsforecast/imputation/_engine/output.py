@@ -24,7 +24,7 @@ import pandas as pd
 from sklearn.base import TransformerMixin
 
 # Utilitaires du package
-from ...panel.utils import factorize_row_keys, get_entity_codes, normalize_entity_key
+from ...panel.utils import factorize_row_keys, get_entity_codes
 from ...utils._constants import FREQUENCY_LEVEL_NAME
 from ...utils.frequency.utils import is_higher_frequency
 # Composants de l'imputation
@@ -121,7 +121,9 @@ def in_input_order(grid: pd.Index, reference: pd.Index) -> pd.Index:
     the calculator omits is appended last —, so their index carries no
     guaranteed order. The output must keep the order of its input:
     an unsorted input is refused, and a component cannot produce what it
-    refuses.
+    refuses. The rank of an entity is decided once per distinct entity,
+    then broadcast to its rows through their integer entity codes; an
+    entity absent from the input comes after the others, in its own block.
 
     Args:
         grid: Grid of a stage frame.
@@ -144,16 +146,19 @@ def in_input_order(grid: pd.Index, reference: pd.Index) -> pd.Index:
     if not isinstance(grid, pd.MultiIndex):
         return grid.sort_values()
 
-    # Panel : rang de chaque entité dans l'entrée, puis date
+    # Panel : rang dans l'entrée de chaque entité distincte de la grille,
+    # diffusé à ses lignes par les codes d'entité. Une entité absente de
+    # l'entrée prend un rang propre après les autres : un rang partagé
+    # mêlerait ses lignes à celles d'une autre au tri par date
     rank = {
         entity: position
         for position, entity in enumerate(get_entity_codes(reference)[1])
     }
-    levels = [grid.get_level_values(level) for level in range(grid.nlevels - 1)]
-    entity_rank = np.asarray([
-        rank.get(normalize_entity_key(tuple(values)), len(rank))
-        for values in zip(*levels)
-    ])
+    codes, entities = get_entity_codes(grid)
+    entity_rank = np.asarray(
+        [rank.get(entity, len(rank) + position) for position, entity in enumerate(entities)],
+        dtype=np.intp,
+    )[codes]
     order = np.lexsort((grid.get_level_values(-1).to_numpy(), entity_rank))
     return grid[order]
 

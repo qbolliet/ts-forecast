@@ -2,7 +2,7 @@
 
 Scenarios: the output binding of a stage (time series, carried frequency, target frequency, stage
 frequency, entity without any frequency); the input order of a grid (time series, entity blocks,
-entity unknown to the input, two entity levels); the provenance of a stage frame and its aggregated
+entities unknown to the input in their own blocks, empty grid, two entity levels); the provenance of a stage frame and its aggregated
 cells (finer column, unmarked filled cell, empty cell, per-entity frequencies of PANEL-F, pairs
 unknown to the fit); the overlay of the imputations (no production, frequency filter, priority over
 the anchor, input untouched); the frame and provenance of a replayed stage on PANEL-F; the
@@ -182,6 +182,20 @@ class TestInInputOrder:
         grid = _panel_index(('IT', 'DE'))
         ordered = in_input_order(grid, reference)
         assert ordered.get_level_values(0).tolist() == ['DE'] * 3 + ['IT'] * 3
+
+    def test_entities_unknown_to_the_input_keep_their_own_blocks(self):
+        """Two entities absent from the input are never interleaved by the date sort."""
+        reference = _panel_index(('DE',))
+        grid = _panel_index(('IT', 'ES', 'DE'))
+        ordered = in_input_order(grid, reference)
+        assert ordered.get_level_values(0).tolist() == ['DE'] * 3 + ['IT'] * 3 + ['ES'] * 3
+        assert ordered.get_level_values(1).equals(pd.DatetimeIndex(np.tile(_DATES, 3)))
+
+    def test_empty_panel_grid(self):
+        """An empty grid comes back empty, its levels untouched."""
+        grid = _panel_index()[:0]
+        ordered = in_input_order(grid, _panel_index())
+        assert len(ordered) == 0 and ordered.names == ['country', 'date']
 
     def test_two_entity_levels(self):
         """Composite entities are ranked as normalized tuples."""

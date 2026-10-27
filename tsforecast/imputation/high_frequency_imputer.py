@@ -53,6 +53,7 @@ from ._engine.params import (
     validate_unit_interval,
 )
 from ._engine.frequency_layout import stage_frequency_label
+from ._engine.grids import training_mask_at
 from ._engine.output import (
     assemble_output,
     drop_frequency_level,
@@ -70,7 +71,7 @@ from ._engine.preparation import (
 )
 from ._engine.replay import replay_plan
 from ._engine.run_context import FittedComponents, _RunContext
-from ._engine.stage_runner import StageParams, StageRunner, training_mask_at
+from ._engine.stage_runner import StageParams, StageRunner
 
 # Type aliases
 VariableCategory = Literal['aggregate', 'impute', 'target_freq']

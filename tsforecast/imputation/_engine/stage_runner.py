@@ -3,9 +3,9 @@ frozen plan step shared by the fit and the replay.
 
 ``StageRunner`` runs phase 5 of the fit — stage frame, order of the variables, one fit per
 (stage, variable) shared by its source-frequency groups — and executes every plan step, the
-replayed ones included, through its single :meth:`StageRunner.execute_step`. The module also
-holds the pure functions reading the grids and window masks of a stage, and the per-step helpers
-(covariate selection, estimator resolution, scale factor of a group, pairs of a step).
+replayed ones included, through its single :meth:`StageRunner.execute_step`, on the grids and
+window masks of ``grids``. The module also holds the per-step helpers (covariate selection,
+estimator resolution, scale factor of a group, pairs of a step).
 """
 # Importation des modules
 # Modules de base
@@ -23,7 +23,6 @@ import pandas as pd
 from sklearn.base import BaseEstimator, clone
 
 # Utilitaires du package
-from ...panel.utils import get_entity_codes, normalize_entity_key
 from ...utils.frequency.utils import get_frequency_order
 from .._components.aggregation_constraint import resolve_aggregation_constraint
 from .._components.covariate_materializer import CovariateMaterializer
@@ -33,7 +32,6 @@ from .._components.imputation_plan import (
     MaterializationWay,
     to_entity_tuple,
 )
-from .._components.imputation_window import ImputationWindowCalculator
 from .._components.provenance import (
     CELL_ORIGIN_DTYPE,
     CellOrigin,
@@ -55,6 +53,7 @@ from .frequency_layout import (
     stage_frequency_label,
     stage_frequency_of,
 )
+from .grids import prediction_grid, restrict_to_entities, stage_mask, unrestricted_grid
 from .row_scaling import RowScaler, TrainingRows
 from .run_context import _RunContext
 
@@ -69,242 +68,6 @@ ELIGIBLE_ORIGINS: Dict[Any, Tuple[CellOrigin, ...]] = {
     'covariates_only': ('observed',),
     True: ('observed', 'interpolated', 'model'),
 }
-
-
-# =============================================================================
-# Grilles et masques d'une étape
-# =============================================================================
-# Fonction de restriction d'un index aux entités d'un groupe
-def restrict_to_entities(
-    index: pd.Index,
-    entities: Optional[Sequence[EntityKey]],
-) -> pd.Index:
-    """Restrict an index to the rows of a group of entities.
-
-    The membership is decided once per distinct entity, then broadcast to the
-    rows through their integer entity codes: no key is built per row.
-
-    Args:
-        index: Index to restrict.
-        entities: Entity keys kept, None keeping everything (time series).
-
-    Returns:
-        The restricted index, in its original order.
-
-    Examples:
-        >>> dates = pd.date_range('2021-01-31', periods=2, freq='ME')
-        >>> index = pd.MultiIndex.from_product([['FR', 'DE'], dates], names=['country', 'date'])
-        >>> restrict_to_entities(index, [('DE',)]).get_level_values('country').tolist()
-        ['DE', 'DE']
-        >>> restrict_to_entities(dates, None).equals(dates)
-        True
-    """
-    # Série temporelle, ou groupe couvrant tout le panel
-    if entities is None or not isinstance(index, pd.MultiIndex):
-        return index
-
-    # Appartenance décidée par entité distincte, diffusée aux lignes par leurs codes
-    kept = {normalize_entity_key(entity) for entity in entities}
-    codes, index_entities = get_entity_codes(index)
-    selected = np.array([entity in kept for entity in index_entities], dtype=bool)
-    return index[selected[codes]]
-
-
-# Fonction de lecture d'un masque de fenêtre à la fréquence d'une étape
-def stage_mask(
-    window_calculator: ImputationWindowCalculator,
-    index: pd.Index,
-    stage_freq: StageFrequency,
-    kind: Literal['imputation', 'training'],
-    *,
-    pass_name: str,
-    log: Optional[LogCallback] = None,
-) -> pd.Series:
-    """Read one window mask at the frequency of a stage.
-
-    The ``kind`` is named by the caller, never defaulted. Only the two
-    windows the fit actually restricts on are read here: the strict
-    window is diagnostic (``strict_window_mask_``) and governs nothing
-    in the stage execution.
-    An entity the calculator omits — one without a valid fitted mask — is
-    left unrestricted rather than silently losing every one of its rows.
-
-    Args:
-        window_calculator: Window calculator fitted on the data of the pass.
-        index: Index of the working frame, the fallback grid.
-        stage_freq: Frequency of the stage, scalar or per entity.
-        kind: Window read: ``'imputation'`` or ``'training'``.
-        pass_name: Name of the pass, prefixed to the log message.
-        log: Logging callback, or None.
-
-    Returns:
-        Boolean Series at the stage frequency, on a ``DatetimeIndex`` for
-        a time series and on a ``(entity..., date)`` ``MultiIndex``
-        otherwise.
-
-    Examples:
-        >>> dates = pd.date_range('2021-01-31', periods=6, freq='ME')
-        >>> data = pd.DataFrame({'m1': np.arange(6.0)}, index=dates)
-        >>> calculator = ImputationWindowCalculator().fit(data)
-        >>> stage_mask(calculator, data.index, 'QE', 'imputation', pass_name='fit').tolist()
-        [True, True]
-        >>> stage_mask(ImputationWindowCalculator(), data.index, 'QE', 'imputation',
-        ...            pass_name='fit', log=print).all()
-        [fit] imputation mask unavailable (Calculator not fitted. Call fit() first.); every row kept
-        np.True_
-    """
-    # Calculateur non ajusté ou fréquence inconvertible : aucune
-    # restriction, la garde de la phase 1 ayant déjà averti
-    try:
-        mask = window_calculator.get_mask_at_frequency(stage_freq, kind=kind)
-    except (ValueError, KeyError, TypeError) as error:
-        if log is not None:
-            log(f"[{pass_name}] {kind} mask unavailable ({error}); every row kept")
-        return pd.Series(True, index=index)
-
-    # Entités omises par le calculateur : rattachées sans restriction
-    covered = set(get_entity_codes(mask.index)[1])
-    missing = [entity for entity in get_entity_codes(index)[1] if entity not in covered]
-    if missing:
-        extra = restrict_to_entities(index, missing)
-        mask = pd.concat([mask, pd.Series(True, index=extra)])
-    return mask
-
-
-# Fonction de la grille de prédiction d'une étape
-def prediction_grid(
-    window_calculator: ImputationWindowCalculator,
-    index: pd.Index,
-    stage_freq: StageFrequency,
-    entities: Optional[Sequence[EntityKey]],
-    *,
-    pass_name: str,
-    log: Optional[LogCallback] = None,
-) -> pd.Index:
-    """Build the prediction grid of a stage, restricted to one group.
-
-    The grid spans the whole imputation window of the entities, anchor
-    rows included: a period holding no observation is
-    predicted like any other.
-
-    Args:
-        window_calculator: Window calculator fitted on the data of the pass.
-        index: Index of the working frame.
-        stage_freq: Frequency of the stage.
-        entities: Entities of the group, None for a time series.
-        pass_name: Name of the pass, for the log message.
-        log: Logging callback, or None.
-
-    Returns:
-        Index of the rows the step writes on.
-
-    Examples:
-        >>> dates = pd.date_range('2021-01-31', periods=6, freq='ME')
-        >>> data = pd.DataFrame({'m1': [np.nan, 1.0, 2.0, 3.0, 4.0, 5.0]}, index=dates)
-        >>> calculator = ImputationWindowCalculator().fit(data)
-        >>> prediction_grid(calculator, data.index, 'QE', None, pass_name='fit').strftime('%Y-%m').tolist()
-        ['2021-06']
-    """
-    # Masque d'imputation, "kind" nommé explicitement
-    mask = stage_mask(
-        window_calculator, index, stage_freq, kind='imputation', pass_name=pass_name, log=log
-    )
-    grid = mask.index[mask.to_numpy(dtype=bool)]
-    return restrict_to_entities(grid, entities)
-
-
-# Fonction de la grille non restreinte d'un groupe
-def unrestricted_grid(
-    window_calculator: ImputationWindowCalculator,
-    index: pd.Index,
-    stage_freq: StageFrequency,
-    entities: Optional[Sequence[EntityKey]],
-    *,
-    pass_name: str,
-    log: Optional[LogCallback] = None,
-) -> pd.Index:
-    """Build the stage grid of a group, window restriction lifted.
-
-    Reserved to the unanchored steps, whose entities have
-    no window to speak of: the prediction window of such an entity is
-    empty, since the imputed column carries no anchor to bound it. Every
-    row of the stage grid is kept; the covariates then decide, a row they
-    cannot feed producing a NaN that is simply never written.
-
-    Args:
-        window_calculator: Window calculator fitted on the data of the pass.
-        index: Index of the working frame.
-        stage_freq: Frequency of the stage.
-        entities: Entities of the group, None for a time series.
-        pass_name: Name of the pass, for the log message.
-        log: Logging callback, or None.
-
-    Returns:
-        Index of the rows of those entities at the stage frequency.
-
-    Examples:
-        >>> dates = pd.date_range('2021-01-31', periods=6, freq='ME')
-        >>> data = pd.DataFrame({'m1': [np.nan, 1.0, 2.0, 3.0, 4.0, 5.0]}, index=dates)
-        >>> calculator = ImputationWindowCalculator().fit(data)
-        >>> unrestricted_grid(calculator, data.index, 'QE', None, pass_name='fit').strftime('%Y-%m').tolist()
-        ['2021-03', '2021-06']
-    """
-    # Index du masque, pris sans sa valeur booléenne : la grille de l'étape
-    mask = stage_mask(
-        window_calculator, index, stage_freq, kind='imputation', pass_name=pass_name, log=log
-    )
-    return restrict_to_entities(mask.index, entities)
-
-
-# Fonction du masque d'entraînement lu à la fréquence des blocs
-def training_mask_at(
-    window_calculator: ImputationWindowCalculator,
-    frequencies: Dict[EntityKey, str],
-    *,
-    is_panel: bool,
-    log: Optional[LogCallback] = None,
-) -> Optional[pd.Series]:
-    """Read the ``'training'`` window mask at one frequency per block.
-
-    Injected into :class:`TrainingSetBuilder`, bound to the calculator of
-    the fit: the builder therefore receives a callable and never the
-    calculator, so it cannot read a window other than the training one,
-    whose ``kind`` is named here once and for all.
-
-    Args:
-        window_calculator: Window calculator of the fit.
-        frequencies: Mapping entity -> block frequency ``f_block(e)``.
-        is_panel: Whether the data is a panel.
-        log: Logging callback, or None.
-
-    Returns:
-        Boolean mask at those frequencies, on a ``DatetimeIndex`` for a
-        time series and on a ``(entity..., date)`` MultiIndex otherwise;
-        None when no window is computable — an unfitted calculator, or a
-        block frequency it cannot convert to — which the builder reads as
-        "no restriction at all".
-
-    Examples:
-        >>> dates = pd.date_range('2021-01-31', periods=6, freq='ME')
-        >>> data = pd.DataFrame({'m1': np.arange(6.0)}, index=dates)
-        >>> calculator = ImputationWindowCalculator().fit(data)
-        >>> training_mask_at(calculator, {(): 'QE'}, is_panel=False).tolist()
-        [True, True]
-        >>> training_mask_at(ImputationWindowCalculator(), {(): 'QE'}, is_panel=False) is None
-        True
-    """
-    # Série temporelle : le calculateur attend la fréquence scalaire du
-    # bloc unique, une liaison par entité n'ayant pas de sens sans entité
-    binding: StageFrequency = frequencies
-    if not is_panel and isinstance(frequencies, dict):
-        binding = next(iter(frequencies.values()))
-    try:
-        return window_calculator.get_mask_at_frequency(binding, kind='training')
-    except (ValueError, KeyError, TypeError) as error:
-        # Logging
-        if log is not None:
-            log(f"[fit] training mask unavailable ({error}); every row kept")
-        return None
 
 
 # =============================================================================
@@ -514,13 +277,15 @@ def step_pairs(step: ImputationStep) -> List[tuple]:
 # Paramètres, contexte d'ajustement, résultat d'une étape
 # =============================================================================
 # Paramètres de l'imputeur lus par l'exécution des étapes
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class StageParams:
     """Parameters of ``HighFrequencyImputer`` the stage execution reads.
 
     The values are those of the imputer, untouched — the dict forms
     included — so the runner resolves them exactly where the imputer did.
-    The defaults are the imputer's.
+    Every field is required and named: a parameter left out fails at
+    construction, instead of silently taking a value the imputer may not
+    hold.
 
     Attributes:
         covariate_strategy: Materialization strategy of the covariates; the
@@ -540,19 +305,27 @@ class StageParams:
             other columns.
 
     Examples:
-        >>> params = StageParams(covariate_strategy='model')
-        >>> params.fit_predict_order, params.aggregation_constraint
-        ('frequency', 'sum')
+        >>> params = StageParams(
+        ...     covariate_strategy='model', fit_predict_order='frequency', estimator=None,
+        ...     impute_intermediate_frequencies=False, aggregation_constraint='sum',
+        ...     impute_unobserved_entities=False, target_column=None, target_as_covariate=False,
+        ... )
+        >>> params.covariate_strategy, params.aggregation_constraint
+        ('model', 'sum')
+        >>> StageParams(covariate_strategy='model')
+        Traceback (most recent call last):
+        ...
+        TypeError: StageParams.__init__() missing 7 required keyword-only arguments: ...
     """
 
-    covariate_strategy: str = 'interpolate'
-    fit_predict_order: str = 'frequency'
-    estimator: Any = None
-    impute_intermediate_frequencies: Any = False
-    aggregation_constraint: Any = 'sum'
-    impute_unobserved_entities: bool = False
-    target_column: Optional[str] = None
-    target_as_covariate: bool = False
+    covariate_strategy: str
+    fit_predict_order: str
+    estimator: Any
+    impute_intermediate_frequencies: Any
+    aggregation_constraint: Any
+    impute_unobserved_entities: bool
+    target_column: Optional[str]
+    target_as_covariate: bool
 
 
 # Contexte d'ajustement d'une variable à une étape
@@ -652,6 +425,7 @@ class StageRunner:
         >>> from sklearn.linear_model import LinearRegression
         >>> from tsforecast.imputation import HighFrequencyImputer
         >>> from tsforecast.imputation._components.variable_orderer import VariableOrderer
+        >>> from tsforecast.imputation._engine.grids import training_mask_at
         >>> from tsforecast.imputation._engine.preparation import prepare_work_frame
         >>> from tsforecast.imputation._engine.run_context import FittedComponents
         >>> dates = pd.date_range('2021-01-31', periods=24, freq='ME')
@@ -675,7 +449,13 @@ class StageRunner:
         ...         training_mask_at, prepared.window_calculator, is_panel=False
         ...     ),
         ... )
-        >>> runner = StageRunner(run, layout, StageParams(estimator=LinearRegression()))
+        >>> params = StageParams(
+        ...     covariate_strategy='interpolate', fit_predict_order='frequency',
+        ...     estimator=LinearRegression(), impute_intermediate_frequencies=False,
+        ...     aggregation_constraint='sum', impute_unobserved_entities=False,
+        ...     target_column=None, target_as_covariate=False,
+        ... )
+        >>> runner = StageRunner(run, layout, params)
         >>> stage = runner.fit_stage(prepared.X_work, 'M')
         >>> [(step.var_name, step.source_frequency, step.n_written) for step in stage.steps]
         [('q1', 'Q', 24)]
