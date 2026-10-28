@@ -174,7 +174,8 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     predicts sub-period values, while the test target keeps its observed
     period totals; a score compares the two on different scales. Aggregate
     downstream to the target frequency — e.g. rolling three-month sums for a
-    quarterly target, by an XY step aggregating ``y`` at the training pass only —
+    quarterly target, by :class:`tsforecast.xy.RollingAggregator`
+    (``window='Q'``), which aggregates ``y`` at the training pass only —
     before scoring (see ``docs/concepts/mixed_frequency_imputation.md``).
 
     **Inert combinations, documented and never warned about**

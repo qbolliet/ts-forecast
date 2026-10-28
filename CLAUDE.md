@@ -136,6 +136,11 @@ détection de fréquence (`FrequencyDetector`, `detect_frequency()`, ...).
   les paramètres par ligne (`sample_weight`) suivent les lignes gardées (lues sur l'index) ;
   `memory=` met en cache les étapes ; compatible `GridSearchCV`, `cross_validate`,
   metadata routing
+- `rolling.py` : `RollingAggregator` — étape XY d'agrégation sur une période calendaire
+  glissante (`window='Q'`), par entité ; `fit_transform` agrège `X` et `y`, `transform`
+  agrège `X` seul et rend `y` inchangé (même convention que `HighFrequencyImputer`) ;
+  fenêtre passée sur une grille de fin de période, future sur une grille de début
+  (`alignment='auto'`) ; fenêtres incomplètes → NaN
 
 ### `tsforecast/tracking/`
 - `metrics.py` : `imputation_metrics()`, `delay_metrics()`, `detection_metrics()`,

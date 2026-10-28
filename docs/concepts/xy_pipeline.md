@@ -68,6 +68,70 @@ Les méthodes de prédiction (`predict`, `predict_proba`, `predict_log_proba`,
 toujours une valeur par ligne de `X`. Pour évaluer le pipeline sur une cible,
 utiliser `score(X, y)`.
 
+## Agréger en fenêtres glissantes
+
+[`RollingAggregator`](../api/xy/RollingAggregator.md) remplace chaque colonne
+par son agrégat (somme par défaut) sur une **période calendaire glissante**,
+entité par entité. Sur une grille mensuelle, `window='Q'` fait de chaque mois un
+**trimestre glissant**. Placée après un `HighFrequencyImputer` qui a porté une
+cible trimestrielle au mois, l'étape remet le modèle à l'échelle de la cible
+observée, avec trois fois plus de lignes d'entraînement qu'un jeu trimestriel.
+
+```python
+pipe = XYPipeline([
+    ("imputer", HighFrequencyImputer(target_frequency="M", estimator=LinearRegression(),
+                                     keep_lower_frequencies=False)),
+    ("roll", RollingAggregator(window="Q", agg={"taux_chomage": "mean"})),
+    ("drop", DropNaNTarget()),
+    ("model", HistGradientBoostingRegressor()),
+])
+```
+
+**Deux passes**, comme l'imputeur :
+
+- `fit_transform(X, y)` (entraînement) agrège `X` **et** `y` (`target_agg`) ;
+- `transform(X, y)` (prédiction, `score`) agrège `X` seul et rend `y`
+  **inchangé** : la cible observée est déjà un total de période.
+
+**Sens de la fenêtre** (`alignment='auto'`) : il suit la position des dates de
+la grille. Une grille de fin de période (`ME`) reçoit une fenêtre **passée**
+`[t-2, t]`, une grille de début de période (`MS`) une fenêtre **future**
+`[t, t+2]`. Dans les deux cas, la ligne d'ancre d'un trimestre somme exactement
+les trois mois de ce trimestre. Une grille sans position (jours, semaines)
+demande `alignment='past'` ou `'future'`.
+
+**Taille de la fenêtre** : `window` est une fréquence (`'Q'`, `'Y'`, `'3M'`...)
+comptée en pas de la grille de chaque entité, lue au `fit`. La grille doit être
+de même base que la fenêtre ou s'y emboîter exactement : `Y` sur `Q`, `M` ou
+`SM` ; `Q` sur `M` ou `SM` ; `M` sur `SM` ; `W` sur `D`. Les dates sont lues
+comme des numéros de période : une date absente de la grille laisse un trou, et
+jamais la fenêtre ne glisse sur une autre période.
+
+**Fenêtres complètes seulement** : une fenêtre à laquelle il manque une valeur
+(NaN, date absente, bord des données) donne NaN. À l'entraînement,
+`DropNaNTarget` retire ces lignes. À la prédiction, les premières lignes d'un
+jeu de test (fenêtre passée) ou ses dernières lignes (fenêtre future) sortent
+en NaN, sauf si le jeu de test commence et finit sur des bornes de période.
+Il faut donc découper la validation croisée sur des trimestres entiers, ou
+utiliser un estimateur qui tolère les NaN.
+
+**Composer avec d'autres transformations** : l'étape ne fait que l'agrégation.
+
+- Pour un log ou une évolution de `X` après agrégation, ajouter une étape
+  ordinaire du pipeline (`FunctionTransformer`, enveloppé dans
+  `PanelwiseTransformer` pour un calcul par entité comme `pct_change`).
+- Pour un log de la cible, envelopper le modèle dans un
+  `TransformedTargetRegressor` : ses prédictions sont ramenées à l'échelle de
+  la cible observée.
+- Ne jamais transformer la cible au seul entraînement autrement que par une
+  agrégation qui reconstruit la quantité observée. Un log ou une évolution
+  appliqués ainsi mettraient le modèle et `y_test` sur deux échelles
+  différentes, sans aucun avertissement.
+
+`suffix='_q'` garde les colonnes d'origine et ajoute les agrégats après elles ;
+`agg` accepte un dictionnaire par colonne avec une clé `'__default__'` (somme
+pour un flux, moyenne pour un taux).
+
 ## Paramètres par ligne : poids d'échantillon
 
 Un paramètre d'ajustement qui compte une valeur par ligne de `X` (la règle de
@@ -135,5 +199,6 @@ comme `y`.
   [XYTransformerMixin](../api/xy/XYTransformerMixin.md),
   [XYPanelTimeSeriesTransformer](../api/xy/XYPanelTimeSeriesTransformer.md),
   [DropNaNTarget](../api/xy/DropNaNTarget.md),
+  [RollingAggregator](../api/xy/RollingAggregator.md),
   [is_xy_transformer](../api/xy/is_xy_transformer.md)
 - Classes de base : [Classes de base des transformateurs](base_transformers.md)

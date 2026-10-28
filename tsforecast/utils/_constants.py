@@ -76,6 +76,15 @@ CALENDAR_SUBPERIODS: Dict[Tuple[str, str], int] = {
     ('W', 'D'): 7,
 }
 
+# Paires emboîtées de la table précédente : chaque période basse y compte
+# toujours exactement le même nombre de sous-périodes
+EXACT_CALENDAR_SUBPERIOD_PAIRS: FrozenSet[Tuple[str, str]] = frozenset({
+    ('Y', 'Q'), ('Y', 'M'), ('Y', 'SM'),
+    ('Q', 'M'), ('Q', 'SM'),
+    ('M', 'SM'),
+    ('W', 'D'),
+})
+
 # ---------------------------------------------------------------------------
 # Résolution des dates
 # ---------------------------------------------------------------------------

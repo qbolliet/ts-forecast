@@ -107,8 +107,29 @@ pipe.fit(X, y_gaps, model__sample_weight=weights)   # 46 poids pour 46 lignes ga
 
 Les poids suivent les lignes gardées, localisées sur l'index de `y` (ou de `X`).
 
+## 7. Trimestres glissants : `y` agrégé à l'entraînement seulement
+
+```python
+from tsforecast.xy import RollingAggregator
+
+months = pd.date_range("2024-01-31", periods=6, freq="ME")   # fin de mois : fenêtre passée
+X_m = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]}, index=months)
+y_m = pd.Series([10.0, 20.0, 30.0, 40.0, 50.0, 60.0], index=months)
+
+step = RollingAggregator(window="Q")
+X_t, y_t = step.fit_transform(X_m, y_m)   # passe d'entraînement
+y_t.tolist()                              # [nan, nan, 60.0, 90.0, 120.0, 150.0]
+
+_, y_p = step.transform(X_m, y_m)         # passe de prédiction : y inchangé
+y_p.tolist()                              # [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+```
+
+Sur une grille de début de mois (`MS`), la fenêtre est future : la ligne du
+1er janvier somme janvier, février et mars.
+
 ## Voir aussi
 
 - [Concept : pipeline XY](../concepts/xy_pipeline.md)
 - [API : XYPipeline](../api/xy/XYPipeline.md),
-  [XYTransformerMixin](../api/xy/XYTransformerMixin.md)
+  [XYTransformerMixin](../api/xy/XYTransformerMixin.md),
+  [RollingAggregator](../api/xy/RollingAggregator.md)

@@ -188,7 +188,8 @@ trimestriel : il s'exécute, mais **son échelle est fausse**.
 
 Montage suggéré : agréger, **en aval** de l'imputeur, les données à la
 fréquence de la cible, par exemple en **trimestres glissants** (sommes sur trois
-mois). Chaque ligne mensuelle porte alors une quantité trimestrielle : la passe
+mois), avec [`RollingAggregator`](../api/xy/RollingAggregator.md)
+(`window='Q'`, voir [Pipeline XY](xy_pipeline.md#agreger-en-fenetres-glissantes)). Chaque ligne mensuelle porte alors une quantité trimestrielle : la passe
 d'entraînement garde trois fois plus de lignes qu'un jeu trimestriel, et, sur
 les lignes d'ancre du test, la prédiction d'un trimestre glissant se compare
 directement au total observé. Deux points de vigilance :
@@ -203,6 +204,20 @@ directement au total observé. Deux points de vigilance :
   **passée** (`[t-2, t]`) pour des ancres de fin de période (`ME`, `QE`), une
   fenêtre **future** (`[t, t+2]`) pour des ancres de début de période (`MS`,
   `QS`), sans quoi la somme ne couvre pas le trimestre observé.
+
+`RollingAggregator` suit ces deux règles : il agrège `y` à la seule passe
+d'entraînement, et `alignment='auto'` choisit le sens de la fenêtre d'après la
+position de la grille.
+
+```python
+pipeline = XYPipeline([
+    ('imputer', HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                                     keep_lower_frequencies=False)),
+    ('roll', RollingAggregator(window='Q')),
+    ('drop', DropNaNTarget()),
+    ('model', HistGradientBoostingRegressor()),
+])
+```
 
 ## Entités et couples inconnus du `fit`
 
