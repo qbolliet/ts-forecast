@@ -3,27 +3,27 @@
 ## Table des matières
 
 - [Introduction](#introduction)
-- [1. Comprendre les délais de publication](#1-comprendre-les-délais-de-publication)
-  - [1.1 Qu'est-ce qu'un délai de publication ?](#11-quest-ce-quun-délai-de-publication-)
-  - [1.2 Impact sur la prévision](#12-impact-sur-la-prévision)
-- [2. Deux approches pour gérer les délais](#2-deux-approches-pour-gérer-les-délais)
+- [1. Comprendre les délais de publication](#1-comprendre-les-delais-de-publication)
+  - [1.1 Qu'est-ce qu'un délai de publication ?](#11-quest-ce-quun-delai-de-publication)
+  - [1.2 Impact sur la prévision](#12-impact-sur-la-prevision)
+- [2. Deux approches pour gérer les délais](#2-deux-approches-pour-gerer-les-delais)
   - [2.1 Vue d'ensemble](#21-vue-densemble)
-  - [2.2 Approche 1 : Conservation de l'acquis (strategy `mask`)](#22-approche-1--conservation-de-lacquis-strategy-mask)
-  - [2.3 Approche 2 : Décalage des séries (strategy `shift`)](#23-approche-2--décalage-des-séries-strategy-shift)
+  - [2.2 Approche 1 : Conservation de l'acquis (strategy `mask`)](#22-approche-1-conservation-de-lacquis-strategy-mask)
+  - [2.3 Approche 2 : Décalage des séries (strategy `shift`)](#23-approche-2-decalage-des-series-strategy-shift)
 - [3. Comparaison visuelle des deux approches](#3-comparaison-visuelle-des-deux-approches)
-  - [3.1 Données brutes avant transformation](#31-données-brutes-avant-transformation)
-  - [3.2 Après application de la stratégie `mask`](#32-après-application-de-la-stratégie-mask)
-  - [3.3 Après application de la stratégie `shift`](#33-après-application-de-la-stratégie-shift)
-- [4. Détails de l'implémentation](#4-détails-de-limplémentation)
-  - [4.1 Détection des délais : `compare_and_detect_delays`](#41-détection-des-délais--compare_and_detect_delays)
-  - [4.2 Calcul des délais applicables : `calculate_applicable_delay`](#42-calcul-des-délais-applicables--calculate_applicable_delay)
-  - [4.3 Application des délais : `PublicationDelayTransformer`](#43-application-des-délais--publicationdelaytransformer)
-- [5. Utilisation pratique dans un pipeline de prédiction](#5-utilisation-pratique-dans-un-pipeline-de-prédiction)
+  - [3.1 Données brutes avant transformation](#31-donnees-brutes-avant-transformation)
+  - [3.2 Après application de la stratégie `mask`](#32-apres-application-de-la-strategie-mask)
+  - [3.3 Après application de la stratégie `shift`](#33-apres-application-de-la-strategie-shift)
+- [4. Détails de l'implémentation](#4-details-de-limplementation)
+  - [4.1 Détection des délais : `compare_and_detect_delays`](#41-detection-des-delais-compare_and_detect_delays)
+  - [4.2 Calcul des délais applicables : `calculate_applicable_delay`](#42-calcul-des-delais-applicables-calculate_applicable_delay)
+  - [4.3 Application des délais : `PublicationDelayTransformer`](#43-application-des-delais-publicationdelaytransformer)
+- [5. Utilisation pratique dans un pipeline de prédiction](#5-utilisation-pratique-dans-un-pipeline-de-prediction)
   - [5.1 Pipeline complet](#51-pipeline-complet)
-  - [5.2 Validation croisée réaliste](#52-validation-croisée-réaliste)
-- [6. Cas d'usage avancés](#6-cas-dusage-avancés)
-  - [6.1 Délais variables par entité (données de panel)](#61-délais-variables-par-entité-données-de-panel)
-- [7. Erreurs courantes à éviter](#7-erreurs-courantes-à-éviter)
+  - [5.2 Validation croisée réaliste](#52-validation-croisee-realiste)
+- [6. Cas d'usage avancés](#6-cas-dusage-avances)
+  - [6.1 Délais variables par entité (données de panel)](#61-delais-variables-par-entite-donnees-de-panel)
+- [7. Erreurs courantes à éviter](#7-erreurs-courantes-a-eviter)
 - [8. Conclusion](#8-conclusion)
 
 ## Introduction
@@ -209,7 +209,9 @@ df_delays = compare_and_detect_delays(
     reference_point: str = 'start',
     delay_unit: Literal['us', 's', 'D', 'microsecond', 'second', 'day'] = 'day',
     time_col: Optional[str] = None,
-    panel_cols: Optional[List[str]] = None
+    panel_cols: Optional[List[str]] = None,
+    *,
+    return_report: bool = False
 )
 ```
 
@@ -223,6 +225,7 @@ df_delays = compare_and_detect_delays(
 | `delay_unit` | `str` | Unité du délai retourné : `'day'`/`'D'`, `'second'`/`'s'`, ou `'microsecond'`/`'us'`. |
 | `time_col` | `str` ou `None` | Nom de la colonne temporelle (si non présente dans l'index). |
 | `panel_cols` | `List[str]` ou `None` | Liste des colonnes identifiant les entités panel (si non présentes dans l'index). |
+| `return_report` | `bool` | Argument nommé uniquement. Si `True`, la fonction renvoie le tuple `(délais, rapport)`, où le rapport est un `DelayDetectionReport` : colonnes comparées et ignorées, observations nouvelles, révisées et disparues, fréquences détectées, statistiques des délais. Défaut : `False` (le `DataFrame` seul). |
 
 #### 4.1.2 Valeur retournée
 
@@ -334,8 +337,8 @@ Le choix du point de référence affecte la valeur du délai calculé.
 # Avec reference_point='start'
 # delay = 15 mai - 1er jan = 135 jours
 
-# Avec reference_point='end'
-# delay = 15 mai - 31 mars = 45 jours
+# Avec reference_point='end' (period_end : borne exclusive, 1er avril)
+# delay = 15 mai - 1er avr = 44 jours
 ```
 
 ---
@@ -411,7 +414,7 @@ calculate_applicable_delay(df_delays, reference_point='start', frequency='Q')  #
 ```
 
 `PublicationDelayTransformer` relit la colonne `frequency` du résultat comme la fréquence à laquelle les délais
-sont exprimés (`delay_frequency`, §4.3.1) et applique la même règle : un délai converti à n'importe quelle
+sont exprimés (`delay_frequency`, voir [4.3.1](#431-signature-et-arguments)) et applique la même règle : un délai converti à n'importe quelle
 fréquence redonne les mêmes dates de publication.
 
 **Une fréquence cible par couple (entité, indicateur)** :
@@ -499,13 +502,13 @@ transformer = PublicationDelayTransformer(
 
 | Argument | Type | Description |
 |----------|------|-------------|
-| `delays` | `Dict` ou `pd.DataFrame` | Délais par variable. Si DataFrame : une ligne par variable, colonne `'delay'`, variable dans une colonne `'column'` ou dans l'index (niveau `'column'`, à défaut le dernier) — la sortie de `calculate_applicable_delay` convient telle quelle ; colonnes optionnelles `'unit'`, `'reference_point'`, `'frequency'`. Un délai `NaN` est inconnu. Une variable listée plusieurs fois (délais par entité) est refusée : voir §6.1. |
+| `delays` | `Dict` ou `pd.DataFrame` | Délais par variable. Si DataFrame : une ligne par variable, colonne `'delay'`, variable dans une colonne `'column'` ou dans l'index (niveau `'column'`, à défaut le dernier) — la sortie de `calculate_applicable_delay` convient telle quelle ; colonnes optionnelles `'unit'`, `'reference_point'`, `'frequency'`. Un délai `NaN` est inconnu. Une variable listée plusieurs fois (délais par entité) est refusée : voir [6.1](#61-delais-variables-par-entite-donnees-de-panel). |
 | `prediction_date` | `str` ou `datetime` | Date de prédiction de référence. Accepte `'today'` pour la date courante. |
 | `strategy` | `str` ou `Dict` | Stratégie d'application : `'shift'` (décalage) ou `'mask'` (masquage). Peut être spécifié par variable ; une variable retardée absente du dictionnaire est laissée telle quelle (avec un avertissement). |
 | `target_frequency` | `str`, `Dict` ou `None` | Fréquence cible pour la stratégie `'mask'`. Ignoré pour `'shift'`. |
 | `delay_unit` | `str`, `Dict` ou `None` | Unité des délais, globale ou par variable. Si `None`, inférée depuis le DataFrame, puis `default_values`. Une colonne retardée sans unité lève une `ValueError`. |
 | `reference_point` | `str`, `Dict` ou `None` | Point de référence des délais (`'start'` / `'end'`), global ou par variable. Si `None`, inféré depuis le DataFrame, puis `default_values`. |
-| `delay_frequency` | `str`, `Dict` ou `None` | Fréquence à laquelle les délais sont exprimés, globale ou par variable. Si `None`, lue dans la colonne `frequency` du tableau, sinon fréquence de la colonne. Un délai `'end'` est le retard après la fin de chaque observation, à toute fréquence ; un délai `'start'` se compte depuis la fin de l'observation moins la période de `delay_frequency` qui contient son dernier jour (règle de §4.2.3). |
+| `delay_frequency` | `str`, `Dict` ou `None` | Fréquence à laquelle les délais sont exprimés, globale ou par variable. Si `None`, lue dans la colonne `frequency` du tableau, sinon fréquence de la colonne. Un délai `'end'` est le retard après la fin de chaque observation, à toute fréquence ; un délai `'start'` se compte depuis la fin de l'observation moins la période de `delay_frequency` qui contient son dernier jour (règle de la section [4.2.3](#423-conversion-de-frequence)). |
 | `handle_missing_delays` | `str` | Variables de `X` sans délai connu (laissées telles quelles) : `'warn'` (défaut) les signale, `'error'` lève une `ValueError`, `'ignore'` se tait. |
 | `default_values` | `Dict` ou `None` | Valeurs par défaut des colonnes de `X` qui en manquent : clés `'delay'`, `'unit'`, `'reference_point'` (et `'target_frequency'` pour `'mask'`). Avec lui, toutes les colonnes de `X` reçoivent un délai. Ignoré avec une stratégie par variable. |
 
@@ -525,7 +528,7 @@ l'union des dates décalées des colonnes (il s'allonge, et les dates qu'aucune 
 trié par date (pour un panel : par entité, dans l'ordre d'entrée, puis par date).
 `inverse_transform` supprime les lignes ajoutées par `transform`, si bien que `inverse_transform(transform(X))`
 restitue `X` à l'identique. Un panel peut être passé directement : les **mêmes délais** s'appliquent à toutes les
-entités (un avertissement le rappelle) ; pour des délais propres à chaque entité, voir (§6.1).
+entités (un avertissement le rappelle) ; pour des délais propres à chaque entité, voir la section [6.1](#61-delais-variables-par-entite-donnees-de-panel).
 
 **Pipeline avec une cible.** Seul `X` est transformé : dans une `XYPipeline` suivie d'un estimateur, le décalage
 change les lignes de `X` sans toucher à `y`, et une étape ultérieure doit réaligner `y` sur le nouvel index. La
@@ -589,7 +592,7 @@ période cible :
 - Prédiction en cours de période : au moins la première position doit être publiée (`n_obs <= p`). 
 
 Si `can_mask = False`, rien de la période cible de `prediction_date` n'est encore
-publié : la colonne est automatiquement basculée vers la stratégie `'shift'` avec un avertissement et reçoit le décalage calculé comme au §4.3.3.
+publié : la colonne est automatiquement basculée vers la stratégie `'shift'` avec un avertissement et reçoit le décalage calculé comme en [4.3.3](#433-calcul-du-nombre-de-periodes-a-decaler-strategie-shift).
 
 **Exemples** (index et colonne mensuels, cible `'Q'`, `'end'`) :
 

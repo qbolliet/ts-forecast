@@ -3,10 +3,10 @@
 ## Le problème
 
 Une observation datée du 1ᵉʳ janvier n'est pas forcément *connue* le 1ᵉʳ janvier.
-Le PIB d'un trimestre est publié 45 jours après sa fin ; un indice mensuel, deux
+Le PIB d'un trimestre est publié 45 jours après sa fin ; un indice mensuel, souvent deux
 semaines après. Si l'on entraîne et évalue un modèle sur des données « telles
 qu'elles existent aujourd'hui », on lui donne accès à une information qu'il
-n'aurait pas eue en temps réel — c'est une fuite.
+n'aurait pas eue en temps réel.
 
 `tsforecast.delays` sert à **reconstruire l'état de l'information à une date de
 prévision donnée** : quelles valeurs étaient publiées, lesquelles ne l'étaient
@@ -14,11 +14,9 @@ pas encore.
 
 ## Vocabulaire
 
-- **Délai de publication (*publication lag*)** : temps entre la période couverte
-  par une observation et sa mise à disposition.
+- **Délai de publication** : temps entre la période couverte par une observation et sa mise à disposition.
 - **Point de référence (`reference_point`)** : le délai se compte-t-il depuis le
-  **début** (`'start'`) ou la **fin** (`'end'`) de la période ? La convention du
-  package : la date en index désigne toujours le **début** de la période.
+  **début** (`'start'`) ou la **fin** (`'end'`) de la période ?
 - **Date de prévision (`prediction_date`)** : la date à laquelle on se place pour
   décider ce qui est connu.
 
@@ -30,7 +28,7 @@ pas encore.
 
 À partir de deux extractions datées d'un même jeu de données (ou d'une seule :
 la dernière observation de chaque variable est alors retenue), la fonction déduit
-le délai observé par variable et par observation. Deux modes : `new_only`
+le délai observé par variable et par observation. Il y a deux modes : `new_only`
 (nouvelles valeurs) et `all_changes` (révisions comprises). Le délai se compte
 toujours depuis le même point de la période (`reference_point`), quel que soit le
 mode : le délai entre la première publication et une révision s'obtient par
@@ -38,25 +36,23 @@ différence entre les deux résultats.
 
 ### 2. Calculer le délai applicable — `calculate_applicable_delay()`
 
-Convertit un délai d'une fréquence / d'un point de référence à un autre (ex.
+`calculate_applicable_delay()` convertit un délai d'une fréquence / d'un point de référence à un autre (ex.
 « 45 jours depuis la fin du trimestre » → « 76 jours depuis le début de son dernier
 mois »), selon une règle unique : une période est publiée avec sa dernière
-sous-période, chaque sous-période au même retard après sa fin. Le délai depuis la
+sous-période, chaque sous-période à le même retard après sa fin. Le délai depuis la
 fin est donc le même à toute fréquence ; le délai depuis le début lui ajoute la
-durée de la période cible. Le transformateur relit la fréquence du tableau
+durée de la période cible. Le transformeur relit la fréquence du tableau
 (`delay_frequency`) avec la même règle.
 
 ![Conversion du point de référence](../assets/reference_point_conversion.png)
 
 ### 3. Appliquer / inverser — `PublicationDelayTransformer`
 
-Transformateur sklearn (réversible) qui, connaissant les délais et la
-`prediction_date`, ré-exprime le jeu de données comme il était connu à cette
-date. Deux stratégies :
+Le transformeur sklearn (réversible) `PublicationDelayTransformer` ré-exprime le jeu de données comme il était connu à cette date à partir des délais et et de la `prediction_date`. Il existe deux stratégies :
 
 | Stratégie | Effet | Quand |
 |-----------|-------|-------|
-| `mask` | met à `NaN`, dans chaque période cible (`target_frequency`), les valeurs non encore publiées ou pas encore observées au même point de la période que `prediction_date` ; laisse les dates en place | conserver l'acquis, gérer les trous en aval |
+| `mask` | met à `NaN`, dans chaque période cible (`target_frequency`), les valeurs non encore publiées ou pas encore observées au même point de la période que `prediction_date` ; laisse les dates en place | conserver l'acquis, gérer les valeurs manquantes en aval |
 | `shift` | décale chaque série de son délai (la valeur de *t* apparaît à *t + délai*) | aligner toutes les séries sur ce qui est réellement disponible à chaque ligne |
 
 ![Comparaison des deux stratégies](../assets/approach_comparison.png)
@@ -85,10 +81,9 @@ telle quelle (avec un avertissement).
   si bien qu'un aller-retour restitue l'entrée à l'identique.
 - **Panel** : un panel peut être passé directement, mais les **mêmes délais**
   s'appliquent alors à toutes les entités (un avertissement le rappelle) ; le
-  transformateur s'enveloppe en interne dans un
-  [`PanelwiseTransformer`](panelwise_transforms.md). Pour des délais propres à
-  chaque entité (sortie de `calculate_applicable_delay(..., aggregate_by_panel=True)`),
-  utiliser `create_delay_transformer_factory` (ou `prepare_entity_kwargs_from_delays`)
+  transformeur s'enveloppe dans un
+  [`PanelwiseTransformer`](panelwise_transforms.md) pour l'application de délais différents à chaque entité. Dans ce cas il est préférable d'utiliser `calculate_applicable_delay(..., aggregate_by_panel=True)`,
+  puis `create_delay_transformer_factory` (ou `prepare_entity_kwargs_from_delays`)
   avec un `PanelwiseTransformer`.
 
 Les briques bas niveau `ShiftTransformer` et `MaskTransformer` restent accessibles.
@@ -130,7 +125,7 @@ entité par entité via `PanelwiseTransformer`.
 
 ## Observabilité : rapports de détection et d'ajustement
 
-Pour une utilisation en production, deux rapports immuables rassemblent ce qu'on
+Pour une utilisation en production, deux rapports rassemblent ce qu'on
 voudrait logger (dans des logs ou dans MLflow) :
 
 - `compare_and_detect_delays(..., return_report=True)` renvoie `(délais, rapport)`
@@ -138,12 +133,12 @@ voudrait logger (dans des logs ou dans MLflow) :
   nouvelles, révisées et **disparues** (non nulles avant, `NaN` maintenant :
   jamais reportées par la fonction), fréquences détectées (et non détectées),
   statistiques des délais ;
-- `PublicationDelayTransformer.fit_report_` (`DelayFitReport`) : paramétrage résolu
+- `PublicationDelayTransformer.fit_report_` (`DelayFitReport`) : paramétrage
   de chaque colonne et **origine** de chaque paramètre (explicite, inféré,
   par défaut), colonnes non affectées ou ignorées, valeurs par défaut imputées,
   replis du masquage vers le décalage.
 
-Chaque rapport se rend en une ligne (`summary()`), en dictionnaire compatible JSON
+Chaque rapport se rend en une ligne (`summary()`), en dictionnaire compatible avec JSON
 (`to_dict()`) et en `DataFrame` (`to_frame()`). Les métriques plates sont produites
 par `detection_metrics()` et `delay_metrics()` ; les deux composants écrivent aussi
 `report.summary()` au niveau `INFO` du logger standard
