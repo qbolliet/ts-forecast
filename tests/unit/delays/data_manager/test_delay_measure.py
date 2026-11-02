@@ -286,17 +286,17 @@ class TestFrequencyAndPeriodBoundaries:
         ('index', 'download_date', 'delay_unit', 'frequency', 'period_start', 'period_end', 'delay_from_start', 'delay_from_end'),
         [
             (pd.date_range('2023-03-01', '2023-03-10', freq='D'), '2023-03-20', 'day',
-             'daily', '2023-03-10', '2023-03-11', 10.0, 9.0),
+             'D', '2023-03-10', '2023-03-11', 10.0, 9.0),
             (pd.date_range('2023-02-26', periods=4, freq='W-SUN'), '2023-03-20', 'day',
-             'weekly', '2023-03-13', '2023-03-20', 7.0, 0.0),
+             'W-SUN', '2023-03-13', '2023-03-20', 7.0, 0.0),
             (pd.date_range('2023-01-01', periods=4, freq='MS'), '2023-06-15', 'day',
-             'monthly', '2023-04-01', '2023-05-01', 75.0, 45.0),
+             'MS', '2023-04-01', '2023-05-01', 75.0, 45.0),
             (pd.date_range('2023-01-01', periods=4, freq='QS'), '2024-02-15', 'day',
-             'quarterly', '2023-10-01', '2024-01-01', 137.0, 45.0),
+             'QS-JAN', '2023-10-01', '2024-01-01', 137.0, 45.0),
             (pd.date_range('2020-01-01', periods=4, freq='YS'), '2024-02-15', 'day',
-             'annual', '2023-01-01', '2024-01-01', 410.0, 45.0),
+             'YS-JAN', '2023-01-01', '2024-01-01', 410.0, 45.0),
             (pd.date_range('2023-03-01 00:00', periods=5, freq='h'), '2023-03-01 06:30', 'second',
-             'hourly', '2023-03-01 04:00', '2023-03-01 05:00', 9000.0, 5400.0),
+             'h', '2023-03-01 04:00', '2023-03-01 05:00', 9000.0, 5400.0),
         ],
         ids=['daily', 'weekly', 'monthly', 'quarterly', 'annual', 'hourly'],
     )
@@ -326,15 +326,15 @@ class TestFrequencyAndPeriodBoundaries:
         #   trimestr. : période [1er oct. 2023, ...)            -> 15 fév. : 31 + 30 + 31 + 31 + 14 = 137 j
         #   annuel    : période [1er janv. 2023, ...)           -> 15 fév. : 365 + 31 + 14 = 410 j
         assert _records(result, 'frequency', 'period_start', 'delay') == _expected(
-            ('DE', 'm1', 'monthly', TS('2023-12-01'), 76.0),
-            ('FR', 'm1', 'monthly', TS('2023-12-01'), 76.0),
-            ('IT', 'm1', 'monthly', TS('2023-12-01'), 76.0),
-            ('DE', 'q1', 'quarterly', TS('2023-10-01'), 137.0),
-            ('FR', 'q1', 'quarterly', TS('2023-10-01'), 137.0),
-            ('IT', 'q1', 'quarterly', TS('2023-10-01'), 137.0),
-            ('FR', 'v', 'annual', TS('2023-01-01'), 410.0),
-            ('DE', 'v', 'quarterly', TS('2023-10-01'), 137.0),
-            ('IT', 'v', 'monthly', TS('2023-12-01'), 76.0),
+            ('DE', 'm1', 'ME', TS('2023-12-01'), 76.0),
+            ('FR', 'm1', 'ME', TS('2023-12-01'), 76.0),
+            ('IT', 'm1', 'ME', TS('2023-12-01'), 76.0),
+            ('DE', 'q1', 'QE-DEC', TS('2023-10-01'), 137.0),
+            ('FR', 'q1', 'QE-DEC', TS('2023-10-01'), 137.0),
+            ('IT', 'q1', 'QE-DEC', TS('2023-10-01'), 137.0),
+            ('FR', 'v', 'YE-DEC', TS('2023-01-01'), 410.0),
+            ('DE', 'v', 'QE-DEC', TS('2023-10-01'), 137.0),
+            ('IT', 'v', 'ME', TS('2023-12-01'), 76.0),
         )
 
     def test_one_column_per_frequency_in_a_time_series(self):
@@ -352,8 +352,8 @@ class TestFrequencyAndPeriodBoundaries:
         # Valeurs d'or : mensuelle -> décembre 2023, 15 fév. : 76 j ;
         # trimestrielle -> dernier trimestre observé = octobre 2023 : 137 j
         assert _records(result, 'frequency', 'period_start', 'delay') == _expected(
-            ('mensuelle', 'monthly', TS('2023-12-01'), 76.0),
-            ('trimestrielle', 'quarterly', TS('2023-10-01'), 137.0),
+            ('mensuelle', 'MS', TS('2023-12-01'), 76.0),
+            ('trimestrielle', 'QS-JAN', TS('2023-10-01'), 137.0),
         )
 
     @pytest.mark.parametrize(
@@ -370,6 +370,76 @@ class TestFrequencyAndPeriodBoundaries:
 
         assert result[['observation_date', 'period_start', 'period_end', 'delay']].iloc[0].tolist() == [
             TS(last_observation), TS('2023-04-01'), TS('2023-05-01'), 75.0,
+        ]
+
+    @pytest.mark.parametrize(
+        ('index', 'frequency', 'period_start', 'period_end'),
+        [
+            # Semaines du jeudi au mercredi, étiquetées par leur dernier jour
+            (pd.date_range('2023-11-01', periods=4, freq='W-WED'), 'W-WED', '2023-11-16', '2023-11-23'),
+            # Trimestres de septembre à novembre (écrits comme pandas les canonise)
+            (pd.date_range('2023-02-28', periods=4, freq='QE-NOV'), 'QE-FEB', '2023-09-01', '2023-12-01'),
+            # Trimestres commençant en décembre
+            (pd.date_range('2023-03-01', periods=4, freq='QS-DEC'), 'QS-MAR', '2023-12-01', '2024-03-01'),
+            # Exercices annuels de juillet à juin
+            (pd.date_range('2020-06-30', periods=4, freq='YE-JUN'), 'YE-JUN', '2022-07-01', '2023-07-01'),
+        ],
+        ids=['week-wednesday', 'quarter-november', 'quarter-start-december', 'fiscal-year-june'],
+    )
+    def test_detected_anchor_sets_the_periods(self, index, frequency, period_start, period_end):
+        """The anchor detected on the dates is kept in the frequency and sets the period bounds."""
+        data = pd.DataFrame({'v': np.arange(len(index), dtype=float)}, index=index)
+
+        result = compare_and_detect_delays(data, None, '2024-01-15', reference_point='end')
+
+        # Valeur d'or : délai depuis la fin exclusive de la période jusqu'au 15 janvier 2024
+        expected_delay = float((TS('2024-01-15') - TS(period_end)).days)
+        assert result[['frequency', 'period_start', 'period_end', 'delay']].iloc[0].tolist() == [
+            frequency, TS(period_start), TS(period_end), expected_delay,
+        ]
+
+    @pytest.mark.parametrize(
+        ('index', 'frequency', 'period_start', 'period_end'),
+        [
+            # Étiquette de début de période : la période multipliée commence à la date
+            (pd.date_range('2023-02-01', periods=4, freq='2MS'), '2MS', '2023-08-01', '2023-10-01'),
+            # Étiquette de fin de période : la période multipliée finit avec le mois de la date
+            (pd.date_range('2023-02-28', periods=4, freq='2ME'), '2ME', '2023-07-01', '2023-09-01'),
+            # Fréquence sans position : la période commence à la date
+            (pd.date_range('2023-01-02', periods=4, freq='3D'), '3D', '2023-01-11', '2023-01-14'),
+            # Semaines multipliées : la période finit avec la semaine de la date
+            (pd.date_range('2023-01-01', periods=4, freq='2W-SUN'), '2W-SUN', '2023-01-30', '2023-02-13'),
+        ],
+        ids=['2MS', '2ME', '3D', '2W-SUN'],
+    )
+    def test_multiplied_period_is_the_one_of_the_data_grid(self, index, frequency, period_start, period_end):
+        """A multiplied frequency gives periods aligned on the data grid, not on the epoch."""
+        data = pd.DataFrame({'v': np.arange(len(index), dtype=float)}, index=index)
+
+        result = compare_and_detect_delays(data, None, '2024-01-15')
+
+        assert result[['frequency', 'period_start', 'period_end']].iloc[0].tolist() == [
+            frequency, TS(period_start), TS(period_end),
+        ]
+
+    @pytest.mark.parametrize(
+        ('dates', 'frequency', 'period_start', 'period_end'),
+        [
+            # Hebdomadaire étiqueté le lundi : semaine du mardi au lundi
+            (['2023-11-06', '2023-11-13', '2023-11-20'], 'W-MON', '2023-11-14', '2023-11-21'),
+            # Trimestriel étiqueté au 1er de son dernier mois : trimestres commençant en mars
+            (['2023-03-01', '2023-06-01', '2023-09-01', '2023-12-01'], 'QS-MAR', '2023-12-01', '2024-03-01'),
+        ],
+        ids=['week-labelled-on-monday', 'quarter-labelled-in-its-last-month'],
+    )
+    def test_anchor_is_read_from_the_labels_as_pandas_reads_it(self, dates, frequency, period_start, period_end):
+        """The labels set the anchor: a Monday ends its week, a March 1st starts its quarter."""
+        data = pd.DataFrame({'v': np.arange(len(dates), dtype=float)}, index=pd.DatetimeIndex(dates))
+
+        result = compare_and_detect_delays(data, None, '2024-01-15')
+
+        assert result[['frequency', 'period_start', 'period_end']].iloc[0].tolist() == [
+            frequency, TS(period_start), TS(period_end),
         ]
 
     @pytest.mark.parametrize('reference_point', ['start', 'end'])
@@ -397,7 +467,7 @@ class TestFrequencyAndPeriodBoundaries:
             result = compare_and_detect_delays(panel, None, '2023-06-15')
 
         rows = {key: row for key, row in result.iterrows()}
-        assert rows[('A', 'PIB')][['frequency', 'delay']].tolist() == ['monthly', 75.0]
+        assert rows[('A', 'PIB')][['frequency', 'delay']].tolist() == ['MS', 75.0]
         assert pd.isna(rows[('B', 'PIB')]['frequency']) and pd.isna(rows[('B', 'PIB')]['delay'])
         # Le message ne cite que le couple indétectable
         assert "('A', 'PIB')" not in str(caught[0].message)

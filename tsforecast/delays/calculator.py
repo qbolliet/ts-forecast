@@ -6,6 +6,7 @@ by converting frequencies and aggregating delays across time series.
 # Importation des modules
 # Modules de base
 from fractions import Fraction
+from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -71,12 +72,18 @@ def calculate_applicable_delay(
             which is exclusive (the period of March ends on April 1st).
         frequency: Target frequency for delay calculation. Either a single
             frequency applied to all indicators ('monthly', 'M', 'quarterly',
-            'Q', ...), or a dict whose keys are indicators (``{'GDP': 'monthly'}``)
+            'QE-DEC', ...), or a dict whose keys are indicators (``{'GDP': 'monthly'}``)
             and/or full index keys of a panel, ``(entity, ..., indicator)`` tuples
             (``{('FR', 'GDP'): 'monthly'}``). The tuple key of a row takes
             precedence over its indicator key; every row of the (filtered) data must
-            be covered. Without ``aggregate_by_panel``, the entities of an indicator
-            must share the same target frequency.
+            be covered. A complete pandas code is honoured: its anchor sets the
+            target periods (``'QE-NOV'``: quarters from September to November,
+            ``'W-WED'``: weeks from Thursday to Wednesday), its position does not
+            change them (``'MS'``, ``'ME'`` and ``'M'`` are the same months). A
+            multiplied frequency (``'2MS'``) has periods only on the data grid: it
+            can only be the frequency of the observation itself, its periods then
+            starting at ``period_start``. Without ``aggregate_by_panel``, the entities
+            of an indicator must share the same target periods.
         unit: Unit for output delays. If None, keeps the unit of the input data
             (its label is then unchanged, e.g. ``'day'``). Otherwise any duration
             supported by ``convert_duration`` ('us'/'microsecond', 's'/'second',
@@ -109,7 +116,8 @@ def calculate_applicable_delay(
             row, if reference_point is not 'start' or 'end', if none of the requested
             indicators is found, if a frequency or a unit is not supported, if
             ``frequency`` is a dict that does not cover every row (the uncovered keys
-            are named), if the entities of an indicator have different target
+            are named), if a multiplied target frequency is not the frequency of
+            the observation, if the entities of an indicator have different target
             frequencies without ``aggregate_by_panel``, if aggregated rows have
             different units, or if ``aggregation_method`` is an unknown method name
         TypeError: If frequency is neither a string nor a dict, or if
@@ -361,12 +369,42 @@ def _resolve_target_frequencies(index: pd.Index, frequency: Dict[Union[str, tupl
     return [targets[code] for code in codes]
 
 
+# Date de référence des clés de période : une période d'une grille calendaire régulière la fixe tout entière
+_PERIOD_KEY_DATE = pd.Timestamp('2001-01-17 12:00')
+
+
+# Fonction auxiliaire de clé des périodes d'une fréquence cible
+def _period_key(frequency: str) -> Any:
+    """Return a key equal for two frequencies cutting the calendar into the same periods.
+
+    A single-period frequency is identified by its period around the reference date
+    ``_PERIOD_KEY_DATE``, which sets its whole grid ('M', 'MS' and 'monthly' share it, as 'QE-NOV' and
+    'QS-DEC'); a multiplied one, whose periods follow the data grid, by its string.
+
+    Args:
+        frequency: Complete frequency string
+
+    Returns:
+        A hashable key
+
+    Examples:
+        >>> _period_key('QE-NOV') == _period_key('QS-DEC'), _period_key('M') == _period_key('MS')
+        (True, True)
+        >>> _period_key('Q') == _period_key('QE-NOV')
+        False
+    """
+    if normalize_frequency(frequency, return_format='components').multiplier != 1:
+        return frequency
+    return get_period_boundaries(_PERIOD_KEY_DATE, frequency)
+
+
 # Fonction auxiliaire de validation de l'unicité de la fréquence cible par indicateur
 def _validate_single_frequency_per_indicator(delays: pd.DataFrame, indicator_level: int) -> None:
     """Validate that each indicator has a single target frequency.
 
     Delays counted against different target frequencies cannot be aggregated across
-    entities.
+    entities. Two spellings of the same periods (``'M'``, ``'MS'`` and ``'monthly'``;
+    ``'QE-NOV'`` and ``'QS-DEC'``) are the same target frequency.
 
     Args:
         delays: Converted delays, holding ``target_frequency_normalized``
@@ -375,8 +413,9 @@ def _validate_single_frequency_per_indicator(delays: pd.DataFrame, indicator_lev
     Raises:
         ValueError: If the entities of an indicator have different target frequencies
     """
-    # Extraction des fréquences
-    frequencies = delays['target_frequency_normalized'].groupby(level=indicator_level).nunique()
+    # Périodes cibles de chaque ligne, comparées par leur clé
+    keys = _map_distinct(delays['target_frequency_normalized'], _period_key)
+    frequencies = keys.groupby(level=indicator_level).nunique()
     # Vérification de l'unicité
     ambiguous = frequencies[frequencies > 1].index.tolist()
     if ambiguous:
@@ -419,9 +458,10 @@ def _convert_to_target_frequency_and_reference(
     # Ajout d'une colonne pour la fréquence cible
     delays['target_frequency'] = target_frequencies
 
-    # Normalisation des fréquences (une fréquence source indéterminée reste telle quelle)
-    delays['target_frequency_normalized'] = _map_distinct(delays['target_frequency'], normalize_frequency)
-    delays['current_frequency_normalized'] = _map_distinct(delays['frequency'], normalize_frequency)
+    # Normalisation des fréquences en code complet (une fréquence source indéterminée reste telle
+    # quelle) : l'ancrage et le multiplicateur fixent la fin de l'observation et les périodes cibles
+    delays['target_frequency_normalized'] = _map_distinct(delays['target_frequency'], partial(normalize_frequency, return_format='full'))
+    delays['current_frequency_normalized'] = _map_distinct(delays['frequency'], partial(normalize_frequency, return_format='full'))
     delays['target_reference_point'] = target_reference_point
 
     # Lignes au délai et à la fréquence source connus : seules converties, les
@@ -562,8 +602,15 @@ def _calculate_converted_delay(
         delay: Numeric delay value
         unit: Duration name or code of the delay ('day'/'D', 'second'/'s',
             'microsecond'/'us', ...; plural forms such as 'days' are rejected)
-        target_frequency: Target frequency, as a base code ('M')
-        current_frequency: Current frequency, as a base code ('Q')
+        target_frequency: Target frequency, as a complete pandas string ('M',
+            'QE-NOV') or any form accepted by
+            :func:`~tsforecast.utils.frequency.normalize_frequency`; its anchor sets
+            the target periods. A multiplied target must be ``current_frequency``:
+            its periods then start at ``period_start``
+        current_frequency: Frequency of the observation, as a complete pandas string
+            ('QE-DEC', 'W-WED', '2MS') or any form accepted by
+            :func:`~tsforecast.utils.frequency.normalize_frequency`; its anchor sets the
+            period of ``period_start``, and a multiplied period starts at ``period_start``
         target_reference_point: Target reference point ('start' or 'end')
 
     Returns:
@@ -572,7 +619,8 @@ def _calculate_converted_delay(
         period, the end being exclusive
 
     Raises:
-        ValueError: If the unit of a known delay is not a supported duration
+        ValueError: If the unit of a known delay is not a supported duration, or
+            if a multiplied target frequency is not ``current_frequency``
 
     Examples:
         >>> # Q1 2024 data (Jan 1 - Mar 31), published 45 days after quarter end
@@ -614,15 +662,28 @@ def _calculate_converted_delay(
     # Calcul de la date de téléchargement
     download_date = original_reference_date + delay_timedelta
 
-    # Fin exacte (exclusive) de la période de l'observation, à sa propre fréquence
-    _, observation_end = get_period_boundaries(date=period_start, frequency=current_frequency)
+    # Fin exacte (exclusive) de la période de l'observation, à sa propre fréquence (une période
+    # multipliée débute à period_start : grille des données, et non grille alignée sur l'epoch)
+    multiplied = normalize_frequency(current_frequency, return_format='components').multiplier != 1
+    _, observation_end = get_period_boundaries(
+        date=period_start, frequency=current_frequency, origin=period_start if multiplied else None
+    )
 
     # Période cible : celle de la fréquence cible qui contient le dernier instant de l'observation
     # (sa période englobante pour une fréquence cible plus faible, sa dernière sous-période pour une
-    # fréquence cible plus élevée)
+    # fréquence cible plus élevée). Une période cible multipliée n'existe que sur la grille des données :
+    # elle est celle de l'observation elle-même
+    target_multiplied = normalize_frequency(target_frequency, return_format='components').multiplier != 1
+    if target_multiplied and target_frequency != current_frequency:
+        raise ValueError(
+            f"The multiplied target frequency '{target_frequency}' has periods only on the data grid: it can "
+            f"only be the frequency of the observation ('{current_frequency}'). Give a single-period target "
+            f"frequency instead"
+        )
     target_period_start, target_period_end = get_period_boundaries(
         date=observation_end - pd.Timedelta(1, unit='ns'),
-        frequency=target_frequency
+        frequency=target_frequency,
+        origin=period_start if target_multiplied else None
     )
 
     # Nouvelle date de référence : une période cible est publiée avec sa dernière sous-période, chaque

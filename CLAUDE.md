@@ -165,7 +165,8 @@ Utilitaires transversaux, organisés en sous-paquets (chacun expose une classe
   `normalize_position()`, `flip_position()`, ...
 - `utils/time/` : `resolve_date()`, `timeseries_to_string()` /
   `string_to_timeseries()`, `get_period_start()` / `get_period_end()`,
-  `get_period_boundaries()`, `as_exact_unit()` (`resolution.py` : unité de stockage des
+  `get_period_boundaries()`, `get_labelled_period()` (période qu'étiquette une date d'une
+  grille de données : une période multipliée suit la grille, non l'epoch), `as_exact_unit()` (`resolution.py` : unité de stockage des
   dates sans arrondi, source unique de la règle d'unité de sortie)
 - `utils/validation/` : `validate_temporal_data()`, `restore_original_structure()`,
   `validate_entities_grouped()`, `validate_sorted_within_groups()`

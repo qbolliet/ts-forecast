@@ -352,7 +352,7 @@ class TestEmptyAndDegenerateInputs:
 
         # Valeur d'or : dernière observation = février, période [1er fév., 1er mars) -> 15 avril :
         # 28 + 31 + 14 = 73 j depuis le début
-        assert _records(result, 'frequency', 'delay') == _expected(('PIB', 'monthly', 73.0))
+        assert _records(result, 'frequency', 'delay') == _expected(('PIB', 'MS', 73.0))
 
     def test_delay_from_end_is_exact_for_two_observations(self):
         """Gold value of the former 'precision' test, now exact (44 days after the end of February)."""
@@ -478,7 +478,7 @@ class TestDetectionReport:
         _, report = compare_and_detect_delays(new, existing, '2023-06-15', return_report=True)
         assert report.n_entities == 2
         assert report.n_detected == 2
-        assert report.frequencies == {('DE', 'PIB'): 'monthly', ('FR', 'PIB'): 'monthly'}
+        assert report.frequencies == {('DE', 'PIB'): 'MS', ('FR', 'PIB'): 'MS'}
         assert report.undetected_keys == ()
 
     def test_undetectable_frequency_is_reported(self):

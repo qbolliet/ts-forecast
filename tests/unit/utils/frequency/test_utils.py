@@ -201,19 +201,19 @@ class TestCanonicalizeFrequency:
 # (code, position, ancre, multiplicateur)
 RETURN_FORMAT_TABLE = [
     pytest.param('D', 'D', 'D', 'D', ('D', None, None, 1), id="daily-code"),
-    pytest.param('monthly', 'M', 'M', 'monthly', ('M', None, None, 1), id="monthly-literal"),
+    pytest.param('monthly', 'M', 'M', 'M', ('M', None, None, 1), id="monthly-literal"),
     pytest.param('MS', 'M', 'MS', 'MS', ('M', 'S', None, 1), id="month-start"),
     pytest.param('ME', 'M', 'ME', 'ME', ('M', 'E', None, 1), id="month-end"),
     pytest.param('QE-DEC', 'Q', 'QE', 'QE-DEC', ('Q', 'E', 'DEC', 1), id="quarter-end-december"),
     pytest.param('QS-FEB', 'Q', 'QS', 'QS-FEB', ('Q', 'S', 'FEB', 1), id="quarter-start-february"),
     pytest.param('YS-JAN', 'Y', 'YS', 'YS-JAN', ('Y', 'S', 'JAN', 1), id="year-start-january"),
     pytest.param('YE-DEC', 'Y', 'YE', 'YE-DEC', ('Y', 'E', 'DEC', 1), id="year-end-december"),
-    pytest.param('annual', 'Y', 'Y', 'annual', ('Y', None, None, 1), id="annual-literal"),
+    pytest.param('annual', 'Y', 'Y', 'Y', ('Y', None, None, 1), id="annual-literal"),
     pytest.param('W-SUN', 'W', 'W', 'W-SUN', ('W', None, 'SUN', 1), id="week-sunday"),
     pytest.param('SMS', 'SM', 'SMS', 'SMS', ('SM', 'S', None, 1), id="semi-month-start"),
     pytest.param('SME', 'SM', 'SME', 'SME', ('SM', 'E', None, 1), id="semi-month-end"),
-    pytest.param('business_daily', 'B', 'B', 'business_daily', ('B', None, None, 1), id="business-daily-literal"),
-    pytest.param('minute', 'min', 'min', 'minute', ('min', None, None, 1), id="minute-literal"),
+    pytest.param('business_daily', 'B', 'B', 'B', ('B', None, None, 1), id="business-daily-literal"),
+    pytest.param('minute', 'min', 'min', 'min', ('min', None, None, 1), id="minute-literal"),
     pytest.param('ms', 'ms', 'ms', 'ms', ('ms', None, None, 1), id="millisecond-code"),
     pytest.param('2MS', 'M', 'MS', '2MS', ('M', 'S', None, 2), id="multiplied-month-start"),
     pytest.param('3QS-FEB', 'Q', 'QS', '3QS-FEB', ('Q', 'S', 'FEB', 3), id="multiplied-anchored-quarter"),
@@ -237,7 +237,7 @@ class TestNormalizeFrequencyReturnFormats:
 
     @pytest.mark.parametrize("frequency, base, with_position, full, components", RETURN_FORMAT_TABLE)
     def test_full(self, frequency, base, with_position, full, components):
-        """'full' validates then hands back the input string (multiplier included), literals unchanged."""
+        """'full' gives the complete pandas code: multiplier kept, a literal name turned into its base code."""
         assert normalize_frequency(frequency, return_format='full') == full
 
     @pytest.mark.parametrize("frequency, base, with_position, full, components", RETURN_FORMAT_TABLE)

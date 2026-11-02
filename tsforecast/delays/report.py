@@ -210,7 +210,8 @@ class DelayDetectionReport(_Report):
             missing in ``new_data``. Neither mode reports them.
         n_detected_by_column: Number of detected observations per variable.
         columns_without_detection: Compared variables with no detected observation.
-        frequencies: Detected frequency (literal) of each variable, or of each
+        frequencies: Detected frequency (complete pandas string: 'MS', 'W-WED',
+            '2MS', ...) of each variable, or of each
             ``(entity, ..., column)`` key for a panel; ``None`` when undetectable.
             Empty when nothing is detected.
         undetected_keys: Keys of the detected observations whose frequency could not be
@@ -340,7 +341,8 @@ class ColumnDelayRecord:
         delay: Raw delay value of the ``delays`` specification.
         delay_unit: Unit of the delay, as resolved.
         reference_point: ``'start'`` or ``'end'``, as resolved.
-        frequency: Detected frequency of the variable (base code).
+        frequency: Detected frequency of the variable (complete pandas string:
+            'MS', 'W-WED', '2MS', ...).
         n_periods: Number of periods shifted (``'shift'`` strategy).
         n_obs: Number of index periods unpublished at the prediction date, masked
             in every target period (``'mask'`` strategy; the positions not observed

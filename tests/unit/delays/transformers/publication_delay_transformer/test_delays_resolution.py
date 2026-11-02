@@ -81,7 +81,7 @@ class TestDelayUnit:
         """30 days and 720 hours give the same shift: November is published on December 1, -1."""
         days = _fit(_monthly(('GDP',)), delays={'GDP': 30.0}, delay_unit='D', reference_point='start')
         hours = _fit(_monthly(('GDP',)), delays={'GDP': 720.0}, delay_unit='h', reference_point='start')
-        assert days.shift_params == hours.shift_params == {'GDP': {'n_periods': -1, 'frequency': 'M'}}
+        assert days.shift_params == hours.shift_params == {'GDP': {'n_periods': -1, 'frequency': 'MS'}}
 
     @pytest.mark.parametrize(
         ('weeks', 'expected'),
@@ -121,7 +121,7 @@ class TestDelaysFormat:
         from_dict = _fit(_monthly(), delays={'GDP': 45.0, 'CPI': 20.0}, delay_unit='D', reference_point='start')
         from_table = _fit(_monthly(), delays=_delays_frame(delays=(45.0, 20.0)))
         assert from_dict.shift_params == from_table.shift_params == {
-            'GDP': {'n_periods': -2, 'frequency': 'M'}, 'CPI': {'n_periods': -1, 'frequency': 'M'}}
+            'GDP': {'n_periods': -2, 'frequency': 'MS'}, 'CPI': {'n_periods': -1, 'frequency': 'MS'}}
 
     def test_inferred_parameters_of_a_table(self):
         """Unit, reference point and frequency (of the delay and of the mask) are read per variable from the table."""
@@ -318,7 +318,7 @@ class TestDelayFrequency:
         """Without ``delay_frequency``, 75 days count from the quarter start: Q1 published March 16 (-1)."""
         transformer = _fit(_quarterly_column(), delays={'GDP': 75.0}, delay_unit='D', reference_point='start',
                            prediction_date='2024-04-10')
-        assert (transformer.shift_params['GDP']['n_periods'], transformer.delay_frequencies_) == (-1, {'GDP': 'Q'})
+        assert (transformer.shift_params['GDP']['n_periods'], transformer.delay_frequencies_) == (-1, {'GDP': 'QS-JAN'})
 
 
 # =============================================================================
@@ -332,7 +332,7 @@ class TestDefaultValues:
         defaults = {'delay': 20.0, 'unit': 'D', 'reference_point': 'start'}
         transformer = _fit(_monthly(), delays={'GDP': 45.0}, delay_unit='D', reference_point='start',
                            default_values=defaults)
-        assert transformer.shift_params['CPI'] == {'n_periods': -1, 'frequency': 'M'}
+        assert transformer.shift_params['CPI'] == {'n_periods': -1, 'frequency': 'MS'}
 
     def test_default_delay_is_reported(self):
         """The default delay is listed among the defaults imputed, with its origin."""

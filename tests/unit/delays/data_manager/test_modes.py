@@ -65,7 +65,7 @@ class TestOutputContract:
         # délai depuis le début = 75 j (30 + 31 + 14)
         expected = {
             'observation_date': TS('2023-04-01'), 'has_changes': True,
-            'download_date': TS('2023-06-15'), 'frequency': 'monthly',
+            'download_date': TS('2023-06-15'), 'frequency': 'MS',
             'period_start': TS('2023-04-01'), 'period_end': TS('2023-05-01'),
             'reference_point': 'start', 'delay': 75.0, 'unit': 'day',
         }
@@ -122,7 +122,7 @@ class TestFirstDownload:
 
         result = compare_and_detect_delays(data, None, '2023-08-15')
 
-        assert _records(result, 'observation_date', 'frequency') == _expected(('PIB', TS('2023-05-01'), 'monthly'))
+        assert _records(result, 'observation_date', 'frequency') == _expected(('PIB', TS('2023-05-01'), 'MS'))
 
     def test_all_null_column_is_left_out(self):
         """A column without any observation produces no row; the others are unaffected."""
@@ -361,10 +361,10 @@ class TestDetectionModes:
 
         # Valeurs d'or : février, mars, mai et juin apparaissent ; chaque période est un mois (début = date)
         assert _records(result, 'frequency', 'period_start', 'period_end') == _expected(
-            ('PIB', 'monthly', TS('2023-02-01'), TS('2023-03-01')),
-            ('PIB', 'monthly', TS('2023-03-01'), TS('2023-04-01')),
-            ('PIB', 'monthly', TS('2023-05-01'), TS('2023-06-01')),
-            ('PIB', 'monthly', TS('2023-06-01'), TS('2023-07-01')),
+            ('PIB', 'MS', TS('2023-02-01'), TS('2023-03-01')),
+            ('PIB', 'MS', TS('2023-03-01'), TS('2023-04-01')),
+            ('PIB', 'MS', TS('2023-05-01'), TS('2023-06-01')),
+            ('PIB', 'MS', TS('2023-06-01'), TS('2023-07-01')),
         )
 
     def test_invalid_detection_mode_raises(self, monthly_series):
@@ -403,7 +403,7 @@ class TestDocumentedExample:
         # Valeurs d'or : fin du T4 2023 = 1er janv. 2024 -> 20 avril 2024 = 31 + 29 + 31 + 19 = 110 j ;
         # fin du T1 2024 = 1er avril -> 20 avril = 19 j
         assert _records(result, 'observation_date', 'frequency', 'delay') == _expected(
-            ('GDP', TS('2023-10-01'), 'quarterly', 110.0), ('GDP', TS('2024-01-01'), 'quarterly', 19.0),
+            ('GDP', TS('2023-10-01'), 'QS-JAN', 110.0), ('GDP', TS('2024-01-01'), 'QS-JAN', 19.0),
         )
 
     def test_all_changes_adds_the_revised_quarter(self):

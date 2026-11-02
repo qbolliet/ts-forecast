@@ -37,17 +37,17 @@ TS = pd.Timestamp
 
 # Fréquence de chaque colonne du panel hétérogène (``depenses_publiques_pib`` dépend de l'entité)
 COLUMN_FREQUENCY = {
-    'production_industrielle': 'monthly',
-    'inflation_ipc': 'monthly',
-    'taux_chomage': 'monthly',
-    'climat_affaires': 'monthly',
-    'pib_trimestriel': 'quarterly',
-    'balance_commerciale_annuelle': 'annual',
+    'production_industrielle': 'MS',
+    'inflation_ipc': 'MS',
+    'taux_chomage': 'MS',
+    'climat_affaires': 'MS',
+    'pib_trimestriel': 'QS-JAN',
+    'balance_commerciale_annuelle': 'YS-JAN',
 }
-DEPENSES_FREQUENCY = {'France': 'annual', 'Allemagne': 'quarterly', 'Italie': 'annual'}
+DEPENSES_FREQUENCY = {'France': 'YS-JAN', 'Allemagne': 'QS-JAN', 'Italie': 'YS-JAN'}
 
 # Longueur de chaque période, en mois
-PERIOD_MONTHS = {'monthly': 1, 'quarterly': 3, 'annual': 12}
+PERIOD_MONTHS = {'MS': 1, 'QS-JAN': 3, 'YS-JAN': 12}
 
 # Dates masquées par les délais simulés du notebook : dernière valeur de la grille propre à
 # chaque entité (France et Italie jusqu'en 2024-07, Allemagne jusqu'en 2024-04)
@@ -176,11 +176,11 @@ class TestFirstDownloadOnRealisticDatasets:
         #   inflation / chômage : 2024-07 masqué -> 2024-06 ;
         #   PIB : 2024-07 masqué -> 2024-04 ; balance annuelle : 2024-01 masqué -> 2023-01
         assert {key: (row['frequency'], row['observation_date']) for key, row in _as_dict_series(result).items()} == {
-            'production_industrielle': ('monthly', TS('2024-07-01')),
-            'inflation_ipc': ('monthly', TS('2024-06-01')),
-            'taux_chomage': ('monthly', TS('2024-06-01')),
-            'pib_trimestriel': ('quarterly', TS('2024-04-01')),
-            'balance_commerciale_annuelle': ('annual', TS('2023-01-01')),
+            'production_industrielle': ('MS', TS('2024-07-01')),
+            'inflation_ipc': ('MS', TS('2024-06-01')),
+            'taux_chomage': ('MS', TS('2024-06-01')),
+            'pib_trimestriel': ('QS-JAN', TS('2024-04-01')),
+            'balance_commerciale_annuelle': ('YS-JAN', TS('2023-01-01')),
         }
 
 
@@ -353,15 +353,46 @@ class TestPerturbedRealisticPanel:
         restored = result.rename(index={new: old for old, new in mapping.items()}, level='column').sort_index()
         pd.testing.assert_frame_equal(restored, reference)
 
-    def test_month_end_labels(self, heterogeneous_coverage_panel, reference):
-        """End-of-period labels designate the same periods: same bounds, frequencies and delays."""
+    @pytest.fixture
+    def month_end_result(self, heterogeneous_coverage_panel) -> pd.DataFrame:
+        """First download of the panel relabelled at month end (every label moved to the end of its month)."""
         end_labelled = perturb.to_period_end(heterogeneous_coverage_panel)
-
         result = compare_and_detect_delays(end_labelled, None, '2024-10-15').sort_index()
-
         # Garde-fou : la conversion a bien eu lieu (une conversion silencieusement sans effet
-        # ferait réussir ce test pour la mauvaise raison) — chaque étiquette est une fin de mois ;
-        # une valeur trimestrielle ou annuelle y est étiquetée à la fin de son premier mois
+        # ferait réussir ces tests pour la mauvaise raison) — chaque étiquette est une fin de mois
         assert result['observation_date'].dt.is_month_end.all()
-        columns = ['frequency', 'period_start', 'period_end', 'delay']
-        pd.testing.assert_frame_equal(result[columns], reference[columns])
+        return result
+
+    def test_month_end_labels_of_monthly_columns(self, month_end_result, reference):
+        """A month-end label designates the same month: same bounds and delays, end-positioned frequency."""
+        monthly = (reference['frequency'] == 'MS').to_numpy()
+
+        result = month_end_result[monthly]
+
+        assert (result['frequency'] == 'ME').all()
+        columns = ['period_start', 'period_end', 'delay']
+        pd.testing.assert_frame_equal(result[columns], reference[monthly][columns])
+
+    def test_month_end_label_of_a_first_month_ends_its_period(self, month_end_result, reference):
+        """A quarterly or annual value labelled at the end of its first month is read as the period ending there.
+
+        The labels January 31st, April 30th, July 31st and October 31st form the grid of quarters
+        ending in January (``'QE-JAN'``), the January 31st of every year the grid of years ending
+        in January (``'YE-JAN'``): the periods end with the labelled month.
+        """
+        lower = (reference['frequency'] != 'MS').to_numpy()
+
+        result = month_end_result[lower]
+
+        # Valeurs d'or : fin exclusive au lendemain de l'étiquette, début n mois plus tôt
+        months = reference[lower]['frequency'].map(PERIOD_MONTHS)
+        period_end = result['observation_date'] + pd.Timedelta(days=1)
+        period_start = pd.Series(
+            [end - pd.DateOffset(months=n) for end, n in zip(period_end, months)], index=result.index,
+        ).astype(period_end.dtype)
+        expected_frequency = reference[lower]['frequency'].map({'QS-JAN': 'QE-JAN', 'YS-JAN': 'YE-JAN'})
+        assert result['frequency'].tolist() == expected_frequency.tolist()
+        assert result['period_end'].tolist() == period_end.tolist()
+        assert result['period_start'].tolist() == period_start.tolist()
+        # Délai depuis le début de la période : 15 octobre 2024 moins le début
+        assert result['delay'].tolist() == (TS('2024-10-15') - period_start).dt.days.astype(float).tolist()

@@ -39,7 +39,7 @@ def _row(observation, start, end, delay, *, reference_point='end', unit='day', f
         delay: Delay counted from ``reference_point``, in ``unit``.
         reference_point: Reference point of the delay (``'start'`` or ``'end'``).
         unit: Unit of the delay.
-        frequency: Frequency of the (entity, indicator) couple, as a literal.
+        frequency: Frequency of the (entity, indicator) couple, as a literal or a pandas code.
 
     Returns:
         A dictionary holding the required columns; the download date is rebuilt as

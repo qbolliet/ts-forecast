@@ -32,6 +32,7 @@ import pytest
 # Fonctions à tester
 from tsforecast.delays.calculator import calculate_applicable_delay
 from tsforecast.delays.data_manager import compare_and_detect_delays
+from tsforecast.utils.frequency import normalize_frequency
 
 # Le chemin « colonnes » émet systématiquement un avertissement de remplacement
 # d'index : le bruit est masqué pour garder une sortie lisible.
@@ -69,13 +70,15 @@ def _last_observations(data: pd.DataFrame) -> dict:
     return last
 
 
-# Code de période pandas de chaque fréquence détectée
-_PERIOD_CODES = {'monthly': 'M', 'quarterly': 'Q', 'annual': 'Y'}
+# Code de période pandas d'une fréquence détectée (ancrages calendaires par défaut dans ces jeux)
+def _period_code(frequency: str) -> str:
+    """Return the pandas period code ('M', 'Q', 'Y') of a detected frequency ('MS', 'QS-JAN', 'YS-JAN')."""
+    return normalize_frequency(frequency)
 
 
 def _days_after_end(date: pd.Timestamp, frequency: str) -> int:
     """Return the days from the (exclusive) end of the period of ``date`` at ``frequency`` to the download date."""
-    end = (date.to_period(_PERIOD_CODES[frequency]) + 1).start_time
+    end = (date.to_period(_period_code(frequency)) + 1).start_time
     return (DOWNLOAD - end).days
 
 
@@ -84,13 +87,13 @@ def _days_after_start(date: pd.Timestamp, frequency: str, target: str) -> int:
 
     Args:
         date: Observation date (start of its period).
-        frequency: Detected frequency of the observation ('monthly', 'quarterly', 'annual').
+        frequency: Detected frequency of the observation ('MS', 'QS-JAN', 'YS-JAN').
         target: Pandas period code of the target frequency ('M', 'Q', 'Y').
 
     Returns:
         The lag after the end of the observation period plus the length of that target period.
     """
-    last_day = (date.to_period(_PERIOD_CODES[frequency]) + 1).start_time - pd.Timedelta(days=1)
+    last_day = (date.to_period(_period_code(frequency)) + 1).start_time - pd.Timedelta(days=1)
     period = last_day.to_period(target)
     return _days_after_end(date, frequency) + ((period + 1).start_time - period.start_time).days
 

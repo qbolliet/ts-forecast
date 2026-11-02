@@ -9,7 +9,8 @@ period boundary, leap day, year rollover; anchored (``W-WED``, ``QE-JAN``,
 ``YS-JUL``) and multiplied (``2MS``, ``3D``, ``2h``) frequencies, the ``origin``
 grid; ``ns`` / ``ms`` precision, time zones and DST; ``Period`` / ``datetime64``
 inputs; invalid frequencies, anchors and dates; ``start <= date < end``
-properties).
+properties) and ``get_labelled_period`` (multiplied periods aligned on the data grid
+for start- and end-labelled frequencies, single periods as ``get_period_boundaries``).
 
 Nanosecond, millisecond, time zone, ``Period`` input and anchor behaviours are covered
 by ``TestNanosecond``, ``TestMillisecond``, ``TestTimezone``, ``TestPeriodInput``,
@@ -34,6 +35,7 @@ from tests.support.perturbations import DATETIME_UNITS
 
 # Fonctions à tester
 from tsforecast.utils.time.utils import (
+    get_labelled_period,
     get_period_boundaries,
     get_period_end,
     get_period_start,
@@ -805,6 +807,56 @@ class TestPeriodOrigin:
         """A ``NaT`` origin is rejected."""
         with pytest.raises(ValueError, match="origin"):
             get_period_start(_THURSDAY, "2D", origin=pd.NaT)
+
+
+# =============================================================================
+# Période étiquetée par une date d'une grille de données
+# =============================================================================
+class TestLabelledPeriod:
+    """``get_labelled_period``: multiplied periods follow the data grid, single ones the calendar."""
+
+    @pytest.mark.parametrize(
+        ('date', 'frequency', 'start', 'end'),
+        [
+            # Début de période : la période multipliée commence à la date, hors phase avec l'epoch
+            ('2023-02-01', '2MS', '2023-02-01', '2023-04-01'),
+            ('2023-02-01', '3MS', '2023-02-01', '2023-05-01'),
+            # Fin de période : la période multipliée finit avec le mois de la date
+            ('2023-02-28', '2ME', '2023-01-01', '2023-03-01'),
+            ('2023-06-30', '2QE', '2023-01-01', '2023-07-01'),
+            # Semaines (étiquetées par leur dernier jour) : la période finit avec la semaine de la date
+            ('2023-01-15', '2W-SUN', '2023-01-02', '2023-01-16'),
+            # Sans position : la période commence à la date
+            ('2023-01-02', '3D', '2023-01-02', '2023-01-05'),
+            ('2023-01-01 00:05', '15min', '2023-01-01 00:05', '2023-01-01 00:20'),
+        ],
+        ids=['2MS', '3MS', '2ME', '2QE', '2W-SUN', '3D', '15min'],
+    )
+    def test_multiplied_period_is_aligned_on_the_date(self, date, frequency, start, end):
+        """The labelled period is the one of the grid the date belongs to."""
+        assert get_labelled_period(pd.Timestamp(date), frequency) == (pd.Timestamp(start), pd.Timestamp(end))
+
+    @pytest.mark.parametrize('frequency', ['MS', 'ME', 'W-WED', 'QE-NOV', 'QS-DEC', 'YE-JUN', 'D', 'h'])
+    def test_single_period_is_the_one_containing_the_date(self, frequency):
+        """Without multiplier, the labelled period is the period of ``get_period_boundaries``."""
+        date = pd.Timestamp('2023-11-22 10:30')
+
+        assert get_labelled_period(date, frequency) == get_period_boundaries(date, frequency)
+
+    def test_every_date_of_a_grid_labels_its_own_period(self):
+        """Consecutive dates of a '2MS' grid label consecutive, contiguous periods."""
+        dates = pd.date_range('2023-02-01', periods=4, freq='2MS')
+
+        periods = [get_labelled_period(date, '2MS') for date in dates]
+
+        assert [start for start, _ in periods] == list(dates)
+        assert all(end == next_start for (_, end), (next_start, _) in zip(periods, periods[1:]))
+
+    def test_unit_of_the_date_is_kept(self):
+        """The bounds are at the unit of the date, as those of ``get_period_boundaries``."""
+        date = pd.Timestamp('2023-02-28').as_unit('s')
+
+        assert {bound.unit for bound in get_labelled_period(date, '2ME')} == {'s'}
 
 
 class TestPeriodProperties:

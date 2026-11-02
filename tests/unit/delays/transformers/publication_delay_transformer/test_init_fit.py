@@ -166,7 +166,7 @@ class TestPublicationDelayTransformerFit:
     def test_fit_sets_the_fitted_attributes(self, sample_time_series, delays_dict_simple):
         """Frequencies are detected per column, nothing is inferred from a dictionary."""
         transformer = _fit(sample_time_series, delays=delays_dict_simple, delay_unit='D', reference_point='end')
-        assert transformer.detected_frequencies_ == {'GDP': 'M', 'inflation': 'M', 'unemployment': 'M'}
+        assert transformer.detected_frequencies_ == {'GDP': 'MS', 'inflation': 'MS', 'unemployment': 'MS'}
         assert transformer.inferred_params_ == {'delay_unit': {}, 'reference_point': {}, 'target_frequency': {},
                                                 'delay_frequency': {}}
         # Sans tableau, chaque délai est lu à la fréquence de sa colonne
@@ -182,9 +182,9 @@ class TestPublicationDelayTransformerFit:
         """
         transformer = _fit(sample_time_series, delays=delays_dict_simple, delay_unit='D', reference_point='end')
         assert transformer.shift_params == {
-            'GDP': {'n_periods': -3, 'frequency': 'M'},
-            'inflation': {'n_periods': -2, 'frequency': 'M'},
-            'unemployment': {'n_periods': -2, 'frequency': 'M'},
+            'GDP': {'n_periods': -3, 'frequency': 'MS'},
+            'inflation': {'n_periods': -2, 'frequency': 'MS'},
+            'unemployment': {'n_periods': -2, 'frequency': 'MS'},
         }
 
     def test_fit_shift_leaves_no_mask(self, sample_time_series, delays_dict_simple):
@@ -207,7 +207,7 @@ class TestPublicationDelayTransformerFit:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             transformer.fit(_monthly(('CPI',)))
-        assert transformer.shift_params == {'CPI': {'n_periods': -1, 'frequency': 'M'}}
+        assert transformer.shift_params == {'CPI': {'n_periods': -1, 'frequency': 'MS'}}
 
 
 # =============================================================================
@@ -294,7 +294,7 @@ class TestInputTypes:
         empty_cpi = _monthly().assign(CPI=np.nan)
         transformer = _fit(self._panel(FR=_monthly(), DE=empty_cpi), delays={'GDP': 45.0, 'CPI': 20.0},
                            delay_unit='D', reference_point='start')
-        assert transformer.shift_params['CPI'] == {'n_periods': -1, 'frequency': 'M'}
+        assert transformer.shift_params['CPI'] == {'n_periods': -1, 'frequency': 'MS'}
 
     def test_panel_mask_with_different_index_frequencies_is_rejected(self):
         """Masking needs one index frequency: a monthly and a quarterly index need per-entity delays.
@@ -316,7 +316,7 @@ class TestInputTypes:
     def test_series_is_accepted(self):
         """A named ``Series`` is handled like a one-column frame."""
         transformer = _fit(_monthly(('GDP',))['GDP'], delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
-        assert transformer.shift_params == {'GDP': {'n_periods': -2, 'frequency': 'M'}}
+        assert transformer.shift_params == {'GDP': {'n_periods': -2, 'frequency': 'MS'}}
 
     def test_series_in_series_out(self):
         """``transform`` and ``inverse_transform`` of a Series return a Series with its name."""

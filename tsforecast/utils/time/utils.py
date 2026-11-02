@@ -8,7 +8,7 @@ from datetime import datetime
 
 # Import des utilitaires de fréquence
 from ..frequency import normalize_frequency, FrequencyType, UserFrequencyType
-from ..parse import parse_frequency
+from ..parse import parse_frequency, build_frequency_string
 from .._constants import (
     MONTH_ABBREVIATIONS, WEEKDAY_ABBREVIATIONS, MONTH_BASED_FREQUENCIES, SUBDAILY_NS,
 )
@@ -687,3 +687,56 @@ def get_period_boundaries(
     """
     start, end = _period_bounds(date, frequency, origin)
     return _at_date_unit(start, date), _at_date_unit(end, date)
+
+
+# Fonction retournant les bornes de la période qu'étiquette une date d'une grille de données
+def get_labelled_period(
+    date: Union[pd.Timestamp, datetime, pd.Period],
+    frequency: Union[FrequencyType, UserFrequencyType],
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Get the bounds of the period that a date of a data grid labels.
+
+    Without multiplier, the period is the one of ``frequency`` (anchor included)
+    containing ``date``, as :func:`get_period_boundaries` returns it. A multiplied
+    period is aligned on the data grid, that is on ``date`` itself, following the
+    pandas labelling convention: it starts with the period of ``date`` at the
+    single frequency for a start-positioned or unpositioned frequency (``'2MS'``,
+    ``'3D'``, ``'15min'``), and ends with it for an end-positioned or weekly one
+    (``'2ME'``, ``'2QE'``, ``'2W-SUN'``). :func:`get_period_boundaries` aligns a
+    multiplied period on the Unix epoch instead (or on an explicit ``origin``).
+
+    Args:
+        date: Date of the grid labelling the period.
+        frequency: Frequency of the grid (pandas codes or user-friendly names).
+
+    Returns:
+        Tuple ``(start, end)``, ``end`` being excluded from the period; same time
+        zone and unit rules as :func:`get_period_boundaries`.
+
+    Raises:
+        ValueError: If the frequency or its anchor is unsupported, or if ``date``
+            is ``NaT``.
+        TypeError: If ``date`` is not a datetime, Timestamp, datetime64 or Period.
+
+    Examples:
+        >>> import pandas as pd
+        >>> get_labelled_period(pd.Timestamp('2023-02-01'), '2MS')  # February and March
+        (Timestamp('2023-02-01 00:00:00'), Timestamp('2023-04-01 00:00:00'))
+        >>> get_labelled_period(pd.Timestamp('2023-02-28'), '2ME')  # January and February
+        (Timestamp('2023-01-01 00:00:00'), Timestamp('2023-03-01 00:00:00'))
+        >>> get_labelled_period(pd.Timestamp('2023-11-22'), 'W-WED')  # Thursday to Wednesday
+        (Timestamp('2023-11-16 00:00:00'), Timestamp('2023-11-23 00:00:00'))
+    """
+    # Fréquence non multipliée : période (ancrage compris) contenant la date
+    parsed = normalize_frequency(frequency, return_format='components')
+    if parsed.multiplier == 1:
+        return get_period_boundaries(date, frequency)
+
+    # Fréquence multipliée : grille alignée sur la date, à partir de la période simple qui la contient
+    single_frequency = build_frequency_string(parsed.freq, parsed.position, parsed.suffix)
+    origin = get_period_start(date, single_frequency)
+    if parsed.position == 'E' or parsed.freq == 'W':
+        # Étiquette de fin de période : la période simple de la date est la dernière de la période multipliée
+        for _ in range(parsed.multiplier - 1):
+            origin = get_period_start(origin - pd.Timedelta(1, unit='ns'), single_frequency)
+    return get_period_boundaries(date, frequency, origin=origin)

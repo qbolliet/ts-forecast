@@ -44,7 +44,7 @@ TS = pd.Timestamp
 PREDICTION = TS('2024-10-15')
 
 # Longueur d'une période en mois, par fréquence détectée
-PERIOD_MONTHS = {'monthly': 1, 'quarterly': 3, 'annual': 12}
+PERIOD_MONTHS = {'MS': 1, 'QS-JAN': 3, 'YS-JAN': 12}
 
 
 def _release(panel: pd.DataFrame, couples) -> pd.DataFrame:

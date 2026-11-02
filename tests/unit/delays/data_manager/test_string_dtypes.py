@@ -71,7 +71,7 @@ class TestNonEmptyResult:
             )
 
         assert result['frequency'].dtype == 'str'
-        assert result.loc['PIB', 'frequency'] == 'monthly'
+        assert result.loc['PIB', 'frequency'] == 'MS'
         assert result.loc['CPI', 'frequency'] is not None and pd.isna(result.loc['CPI', 'frequency'])
 
 

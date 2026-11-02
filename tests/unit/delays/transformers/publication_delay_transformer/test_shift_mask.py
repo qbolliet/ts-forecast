@@ -81,12 +81,12 @@ class TestShiftGoldValues:
         """
         quarterly = _monthly(('GDP',)).iloc[::3]
         transformer = _fit(quarterly, delays={'GDP': 45.0}, delay_unit='D', reference_point='start')
-        assert transformer.shift_params['GDP'] == {'n_periods': 0, 'frequency': 'Q'}
+        assert transformer.shift_params['GDP'] == {'n_periods': 0, 'frequency': 'QS-JAN'}
 
     def test_frequency_is_the_detected_one(self):
         """The shift frequency of each column is its detected frequency."""
         transformer = _fit(_monthly(('GDP',)), delays={'GDP': 30.0}, delay_unit='D', reference_point='end')
-        assert transformer.shift_params['GDP']['frequency'] == transformer.detected_frequencies_['GDP'] == 'M'
+        assert transformer.shift_params['GDP']['frequency'] == transformer.detected_frequencies_['GDP'] == 'MS'
 
     def test_ordered_delays_give_ordered_shifts(self):
         """Increasing delays (10, 30, 60 days from the start) give shifts 0, -1, -2."""
@@ -164,7 +164,7 @@ class TestCalendarBoundaries:
         X = pd.DataFrame({'GDP': np.arange(8.0)}, index=pd.date_range('2022-01-01', periods=8, freq='QS'))
         transformer = _fit(X, delays={'GDP': 45.0}, delay_unit='D', reference_point='end',
                            prediction_date='2024-02-15')
-        assert transformer.shift_params['GDP'] == {'n_periods': -1, 'frequency': 'Q'}
+        assert transformer.shift_params['GDP'] == {'n_periods': -1, 'frequency': 'QS-JAN'}
 
 
 # =============================================================================
@@ -361,7 +361,7 @@ class TestMaskAtThePredictionPosition:
                                                   prediction_date='2021-02-15')
         with pytest.warns(UserWarning, match="Could not mask the column 'GDP'"):
             transformer.fit(X)
-        assert (transformer.mask_params, transformer.shift_params) == ({}, {'GDP': {'n_periods': -2, 'frequency': 'M'}})
+        assert (transformer.mask_params, transformer.shift_params) == ({}, {'GDP': {'n_periods': -2, 'frequency': 'MS'}})
 
     @pytest.mark.parametrize('reference_point', ['start', 'end'])
     @pytest.mark.parametrize('delay', [5.0, 20.0, 40.0, 70.0])
@@ -417,7 +417,7 @@ class TestStrategy:
         transformer = _fit(_monthly(), delays={'GDP': 45.0, 'CPI': 20.0}, strategy={'GDP': 'shift', 'CPI': 'mask'},
                            delay_unit='D', reference_point='start', target_frequency={'CPI': 'Q'})
         assert (transformer.shift_params, transformer.mask_params) == (
-            {'GDP': {'n_periods': -2, 'frequency': 'M'}},
+            {'GDP': {'n_periods': -2, 'frequency': 'MS'}},
             {'CPI': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last', 'last_position': None}})
 
     def test_delayed_column_without_strategy_is_left_unchanged(self):

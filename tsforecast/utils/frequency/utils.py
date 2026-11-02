@@ -101,8 +101,9 @@ def normalize_frequency(
         return_format: Output format level (default: 'base' for backward compatibility):
             - 'base': Base frequency only → 'Q'
             - 'with_position': Base + position if present → 'QE'
-            - 'full': Complete validated string → 'QE-DEC' (a leading
-              multiplier is kept: '2MS' → '2MS')
+            - 'full': Complete pandas code → 'QE-DEC' (a leading
+              multiplier is kept: '2MS' → '2MS'; a literal name gives its
+              base code: 'quarterly' → 'Q')
             - 'components': ParsedFrequency (base, position, anchor,
               multiplier) → ('Q', 'E', 'DEC', 1)
             A leading multiplier is accepted by every format: 'base' and
@@ -132,9 +133,11 @@ def normalize_frequency(
         >>> normalize_frequency('MS', return_format='with_position')
         'MS'
 
-        >>> # Full: validated original string
+        >>> # Full: complete pandas code
         >>> normalize_frequency('QE-DEC', return_format='full')
         'QE-DEC'
+        >>> normalize_frequency('quarterly', return_format='full')
+        'Q'
 
         >>> # Components: complete parsing
         >>> normalize_frequency('QE-DEC', return_format='components')
@@ -162,9 +165,11 @@ def normalize_frequency(
 
     # Format complet
     if return_format == 'full':
-        # Chaîne d'entrée telle quelle, multiplicateur en tête compris
-        # ('2MS', détecté par pandas sur un index bimestriel)
-        return frequency
+        # Code pandas complet : un nom littéral passe à son code de base, une chaîne déjà
+        # complète garde position, ancre et multiplicateur en tête ('2MS', détecté par
+        # pandas sur un index bimestriel)
+        parsed = normalize_frequency(frequency, return_format='components')
+        return build_frequency_string(parsed.freq, parsed.position, parsed.suffix, parsed.multiplier)
 
     # Parsing pour les composants
     try:

@@ -224,6 +224,55 @@ class TestFrequencyConversion:
         # Valeur d'or : mars 2024 -> début le 1er mars : 75 j
         assert _delay(delays, 'start', 'M') == [75]
 
+    def test_anchor_of_the_source_frequency_sets_the_end_of_the_observation(self):
+        """A Thursday-to-Wednesday week ends on Thursday 23rd, not with the Monday-to-Sunday week of its start.
+
+        Valeurs d'or : semaine du jeudi 16 au mercredi 22 novembre 2023 (fin exclusive le 23),
+        téléchargée 10 j après son début (26 novembre) : 3 j après sa fin.
+        """
+        delays = _frame([_row('2023-11-22', '2023-11-16', '2023-11-23', 10, reference_point='start',
+                              frequency='W-WED')])
+
+        assert _delay(delays, 'end', 'W-WED') == [3]
+
+    def test_multiplied_source_period_starts_at_its_period_start(self):
+        """A two-month period starting in February ends on April 1st, whatever the epoch alignment of '2MS'.
+
+        Valeurs d'or : période février-mars 2023 (fin exclusive le 1er avril), téléchargée 10 j
+        après sa fin (11 avril) ; le dernier mois, mars, a 31 j : 41 j depuis son début.
+        """
+        delays = _frame([_row('2023-02-01', '2023-02-01', '2023-04-01', 10, frequency='2MS')])
+
+        assert _delay(delays, 'end', 'M') == [10]
+        assert _delay(delays, 'start', 'M') == [41]
+
+    def test_anchor_of_the_target_frequency_sets_the_target_period(self):
+        """November 2023 converted to quarters from September to November: 91 days of quarter, not 92.
+
+        Valeurs d'or : novembre (fin exclusive le 1er décembre) téléchargé le 11 décembre, 10 j
+        après sa fin ; trimestre fiscal septembre-novembre de 91 j (30 + 31 + 30) : 101 j depuis
+        son début, contre 102 j pour le trimestre calendaire octobre-décembre (92 j).
+        """
+        delays = _frame([_row('2023-11-15', '2023-11-01', '2023-12-01', 10)])
+
+        assert _delay(delays, 'start', 'QE-NOV') == [101]
+        assert _delay(delays, 'start', 'Q') == [102]
+
+    def test_multiplied_target_equal_to_the_source_follows_the_data_grid(self):
+        """A '2MS' observation converted to '2MS' keeps its own period, February-March.
+
+        Valeurs d'or : période du 1er février au 1er avril 2023 (59 j), téléchargée 10 j après sa
+        fin : 69 j depuis son début (une grille alignée sur l'epoch, mars-avril, en donnerait 71).
+        """
+        delays = _frame([_row('2023-02-01', '2023-02-01', '2023-04-01', 10, frequency='2MS')])
+
+        assert _delay(delays, 'start', '2MS') == [69]
+
+    def test_multiplied_target_other_than_the_source_is_rejected(self):
+        """A multiplied target period exists only on the data grid: a monthly row cannot be read at '2MS'."""
+        with pytest.raises(ValueError, match="multiplied target frequency '2MS'"):
+            _delay(_frame([_monthly('2023-11', 10, frequency='MS')]), 'start', '2MS')
+
     def test_mixed_source_frequencies_are_converted_row_by_row(self):
         """Rows of different source frequencies for the same indicator are each converted to the target one."""
         delays = _frame([_quarterly('2024-03-15'), _monthly('2024-03', 14)])
@@ -436,6 +485,21 @@ class TestTargetFrequencyDictionary:
         result = calculate_applicable_delay(panel_gdp, 'start', {('FR', 'GDP'): 'M', ('DE', 'GDP'): 'monthly', 'CPI': 'M'})
 
         assert result['delay'].to_dict() == {'CPI': 45, 'GDP': 75}
+
+    def test_equivalent_anchors_are_the_same_target_frequency(self, panel_gdp):
+        """'QE-NOV' and 'QS-DEC' cut the same quarters: the entities of GDP share their target periods.
+
+        Valeurs d'or : T1 2024 (fin exclusive le 1er avril) téléchargé le 15 mai ; trimestre fiscal
+        mars-mai (92 j) contenant mars : 136 j depuis le 31 décembre ; CPI de mars en mensuel : 45 j.
+        """
+        result = calculate_applicable_delay(panel_gdp, 'start', {('FR', 'GDP'): 'QE-NOV', ('DE', 'GDP'): 'QS-DEC', 'CPI': 'M'})
+
+        assert result['delay'].to_dict() == {'CPI': 45, 'GDP': 136}
+
+    def test_different_anchors_are_different_target_frequencies(self, panel_gdp):
+        """Calendar quarters and quarters ending in November are different target periods."""
+        with pytest.raises(ValueError, match=r"differs between the entities of the indicators \['GDP'\]"):
+            calculate_applicable_delay(panel_gdp, 'start', {('FR', 'GDP'): 'Q', ('DE', 'GDP'): 'QE-NOV', 'CPI': 'M'})
 
     def test_uncovered_couple_is_named(self, panel_gdp):
         """A couple covered by neither its own key nor its indicator key is named in the error."""

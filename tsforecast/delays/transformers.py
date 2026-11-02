@@ -29,7 +29,9 @@ from tsforecast.utils.frequency import (
     detect_index_frequency,
     detect_frequency,
 )
-from tsforecast.utils.time import resolve_date, get_period_start, get_period_end, get_period_boundaries
+from tsforecast.utils.time import (
+    resolve_date, get_period_start, get_period_end, get_period_boundaries, get_labelled_period
+)
 from tsforecast.utils.duration import get_duration_nanoseconds, DurationConverter
 from ..panel import PanelwiseTransformer, normalize_entity_key, is_panel_data, get_entity_levels
 from ..panel.utils import split_variable_key
@@ -115,7 +117,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             Columns with a delay but absent from the dictionary are left unchanged
             (with a warning), and ``default_values`` is ignored.
         target_frequency: Frequency of the masked periods ('mask' strategy), for all
-            columns or per column. Ignored by the shift.
+            columns or per column; its anchor sets the periods (``'QE-NOV'``: quarters
+            from September to November). Ignored by the shift.
         delay_unit: Unit of the delays ('D', 'h', 'W', 'day', ...), for all columns or
             per column.
         reference_point: Origin of the delays, ``'start'`` or ``'end'`` of the period,
@@ -143,12 +146,18 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         inferred_params_: Parameters read from the delays table: ``{'delay_unit': ...,
             'reference_point': ..., 'target_frequency': ...}``, each a
             ``{column: value}`` dictionary.
-        detected_frequencies_: Detected frequency (base code) of each column of ``X``,
-            ``None`` when undetectable (for a panel, the frequency shared by the
-            entities).
-        delay_frequencies_: Frequency (base code) at which the delay of each delayed
-            column is read: ``delay_frequency``, else the ``frequency`` column of the
-            delays table, else the detected frequency of the column.
+        detected_frequencies_: Detected frequency of each column of ``X``, as a
+            complete pandas string with its position, anchor and multiplier ('MS',
+            'W-WED', 'QE-FEB', '2MS'), ``None`` when undetectable (for a panel, the
+            frequency shared by the entities). Its anchor sets the periods of the
+            column.
+        grid_origins_: Start of a period of the data grid of each column with a
+            multiplied frequency (its periods are aligned on the data, a start-positioned
+            '2MS' starting at its dates, an end-positioned '2ME' ending with their month),
+            ``None`` for the other columns.
+        delay_frequencies_: Frequency (complete pandas string) at which the delay of
+            each delayed column is read: ``delay_frequency``, else the ``frequency``
+            column of the delays table, else the detected frequency of the column.
         shift_params: ``{column: {'n_periods': int, 'frequency': str}}`` of the
             shifted columns.
         mask_params: ``{column: {'n_obs': int, 'mask_frequency': str, 'how': 'last',
@@ -185,7 +194,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         >>> transformer = PublicationDelayTransformer(delays=delays, prediction_date='2023-12-15')
         >>> shifted = transformer.fit_transform(X)
         >>> transformer.shift_params['GDP']
-        {'n_periods': -2, 'frequency': 'M'}
+        {'n_periods': -2, 'frequency': 'MS'}
         >>> float(shifted.loc['2023-12-01', 'GDP'])  # value of October, published by December 15
         9.0
         >>> transformer.inverse_transform(shifted).equals(X)
@@ -291,9 +300,10 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             ValueError: If the delays table is invalid, if a delayed column has no
                 resolved unit, reference point or (mask) target frequency, if
                 ``handle_missing_delays='error'`` and a column has no delay, if no
-                column of ``X`` has a detectable frequency, or, for a panel, if a
-                delayed column (or the index, for the mask) has different
-                frequencies across entities.
+                column of ``X`` has a detectable frequency, if the delay of a column
+                is expressed at a multiplied frequency other than its own, or, for a
+                panel, if a delayed column (or the index, for the mask) has different
+                frequencies (or multiplied grids out of phase) across entities.
         """
         # Conversion d'une Series en DataFrame et détection de la structure de panel
         X, _ = _as_frame(X)
@@ -344,8 +354,10 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         self._check_resolved(delayed_columns, 'reference_point', reference_point_dict)
         self._check_resolved(mask_columns, 'target_frequency', target_frequency_dict)
 
-        # Détection des fréquences par colonne (fréquence commune aux entités pour un panel)
+        # Détection des fréquences par colonne (fréquence commune aux entités pour un panel), et origine
+        # de la grille des données de chaque colonne à fréquence multipliée
         self.detected_frequencies_ = self._detect_column_frequencies(X, delayed_columns, is_panel)
+        self.grid_origins_ = self._grid_origins(X, self.detected_frequencies_, is_panel)
 
         # Les variables sans fréquence détectable sont laissées telles quelles
         undetected = [col for col in delayed_columns if self.detected_frequencies_[col] is None]
@@ -363,10 +375,11 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             columns=delayed_columns, param_name='delay_frequency', explicit_value=self.delay_frequency,
             inferred_key='delay_frequency', default_key='delay_frequency')
         self.delay_frequencies_ = {
-            col: normalize_frequency(delay_frequency_dict[col]) if col in delay_frequency_dict
+            col: normalize_frequency(delay_frequency_dict[col], return_format='full') if col in delay_frequency_dict
             else self.detected_frequencies_[col]
             for col in shift_columns + mask_columns
         }
+        self._check_delay_frequencies()
 
         # Calcul du nombre de périodes à shifter pour chaque variable
         self.shift_params = {}
@@ -639,7 +652,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         delayed_columns: List[Any],
         is_panel: bool
     ) -> Dict[Any, Optional[str]]:
-        """Detect the frequency (base code) of each column of ``X``.
+        """Detect the frequency (complete pandas string) of each column of ``X``.
 
         For a panel, the frequency of a column is the one its entities share.
 
@@ -656,7 +669,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                 panel has different frequencies across entities.
         """
         # Détecttion des fréquences
-        detected = detect_frequency(data=X, time_col=None, panel_cols=None, check_consistency=False, strict=False)
+        detected = detect_frequency(data=X, time_col=None, panel_cols=None, check_consistency=False, strict=False,
+                                    return_format='full')
         if not is_panel:
             frequencies = {col: detected.get(col) for col in X.columns}
         else:
@@ -683,6 +697,83 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             )
         return frequencies
 
+
+    # Méthode auxiliaire de calcul de l'origine des grilles multipliées
+    @staticmethod
+    def _grid_origins(
+        X: pd.DataFrame,
+        frequencies: Dict[Any, Optional[str]],
+        is_panel: bool
+    ) -> Dict[Any, Optional[pd.Timestamp]]:
+        """Return the start of a period of the data grid of each column with a multiplied frequency.
+
+        The period is the one labelled by the first observed date of the column
+        (:func:`~tsforecast.utils.time.get_labelled_period`); for a panel, the
+        entities must share the grid.
+
+        Args:
+            X: Data to fit on.
+            frequencies: Detected frequency (complete string) of each column, or None.
+            is_panel: Whether ``X`` is panel data.
+
+        Returns:
+            ``{column: origin or None}``, None for a single-period or undetected frequency.
+
+        Raises:
+            ValueError: If the entities of a panel have multiplied grids out of phase.
+        """
+        # Initialisation du dictionnaire
+        origins: Dict[Any, Optional[pd.Timestamp]] = {}
+        # Parcours des colonnes
+        for col, frequency in frequencies.items():
+            # Fréquence indétectable ou non multipliée : périodes calendaires, sans origine
+            if frequency is None or normalize_frequency(frequency, return_format='components').multiplier == 1:
+                origins[col] = None
+                continue
+            observed = X[col].dropna()
+            dates = observed.index.get_level_values(-1)
+            if isinstance(dates, pd.PeriodIndex):
+                dates = dates.to_timestamp()
+            if not is_panel:
+                origins[col] = get_labelled_period(dates.min(), frequency)[0]
+                continue
+            # Première date observée de chaque entité (un niveau d'entité unique se passe en scalaire)
+            entity_index = observed.index.droplevel(-1)
+            levels = 0 if entity_index.nlevels == 1 else list(range(entity_index.nlevels))
+            firsts = pd.Series(dates, index=entity_index).groupby(level=levels).min()
+            starts = [get_labelled_period(first, frequency)[0] for first in firsts]
+            # Grille commune : la période de chaque entité débute sur la grille de la première
+            reference = starts[0]
+            if any(get_period_start(start, frequency, origin=reference) != start for start in starts):
+                raise ValueError(
+                    f"The entities of the column '{col}' have '{frequency}' grids out of phase: use "
+                    f"create_delay_transformer_factory with a PanelwiseTransformer to apply per-entity delays."
+                )
+            origins[col] = reference
+        return origins
+
+    # Méthode auxiliaire de vérification des fréquences des délais
+    def _check_delay_frequencies(self) -> None:
+        """Reject a delay expressed at a multiplied frequency other than the frequency of its column.
+
+        A multiplied period exists only on the data grid: a delay can be expressed at
+        '2MS' only for a column observed at '2MS'.
+
+        Raises:
+            ValueError: If such a delay frequency is found, naming the columns.
+        """
+        invalid = {
+            col: frequency for col, frequency in self.delay_frequencies_.items()
+            if normalize_frequency(frequency, return_format='components').multiplier != 1
+            and frequency != self.detected_frequencies_[col]
+        }
+        if invalid:
+            raise ValueError(
+                f"The delays of {invalid} are expressed at a multiplied frequency other than the frequency of "
+                f"their column: a multiplied period exists only on the data grid. Give a single-period "
+                f"delay frequency instead"
+            )
+
     # Méthode auxiliaire de détection de la fréquence de l'index
     @staticmethod
     def _index_frequency(X: pd.DataFrame) -> str:
@@ -692,13 +783,14 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             X: Data to fit on.
 
         Returns:
-            Base code of the index frequency.
+            Index frequency, as a complete pandas string (its anchor sets the index
+            periods counted by the mask).
 
         Raises:
             ValueError: If the entities of a panel have different index frequencies.
         """
         # Détection de la fréquence de l'index
-        detected = detect_index_frequency(X.index)
+        detected = detect_index_frequency(X.index, return_format='full')
         if not isinstance(detected, dict):
             return detected
         # Tri et unicisation des fréquences renseignées
@@ -717,11 +809,11 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
 
         Args:
             X: Data to fit on (dates of every entity of a panel together).
-            index_frequency: Base code of the index frequency.
+            index_frequency: Index frequency (complete pandas string).
 
         Returns:
             The offset of one index period, with the position and anchor of the index
-            (the base frequency alone when they cannot be detected on the dates).
+            (those of ``index_frequency`` when they cannot be detected on the dates).
         """
         # Dates distinctes de l'index (toutes entités confondues), triées
         dates = X.index.get_level_values(-1)
@@ -731,7 +823,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         try:
             return _index_offset(*_detect_index_components(dates))
         except ValueError:
-            return _index_offset(index_frequency, None, None)
+            parsed = normalize_frequency(index_frequency, return_format='components')
+            return _index_offset(parsed.freq, parsed.position, parsed.suffix)
 
     # Méthode auxiliaire de construction du rapport d'ajustement
     def _build_fit_report(
@@ -952,7 +1045,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             delay=_delay_to_timedelta(delays_dict[col], delay_unit_dict[col]),
             reference_point=reference_point_dict[col],
             reference_frequency=frequency,
-            delay_frequency=self.delay_frequencies_[col]
+            delay_frequency=self.delay_frequencies_[col],
+            step_origin=self.grid_origins_[col],
+            reference_origin=self.grid_origins_[col]
         )
 
     # Méthode auxiliaire de calcul du nombre de périodes à masquer
@@ -988,10 +1083,11 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
                   when the prediction date is in the last index period of its own.
                 - 'target_frequency': Normalized target frequency.
                 - 'can_mask': Whether masking leaves at least one index period in every target
-                  period covered by ``index_dates`` (calendar count: February holds 28 or 29 days).
+                  period covered by ``index_dates`` (positions of the index grid, as
+                  :class:`MaskTransformer` counts them: February holds 28 or 29 days).
         """
-        # Normalisation de la fréquence cible
-        target_frequency = normalize_frequency(target_frequency_dict[col])
+        # Normalisation de la fréquence cible (code complet : son ancrage fixe les périodes cibles)
+        target_frequency = normalize_frequency(target_frequency_dict[col], return_format='full')
 
         # Décompte calendaire des périodes de l'index non encore publiées à la date de prédiction :
         # c'est le nombre de dernières observations à masquer dans chaque période cible. Le point de
@@ -1002,7 +1098,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             delay=_delay_to_timedelta(delays_dict[col], delay_unit_dict[col]),
             reference_point=reference_point_dict[col],
             reference_frequency=self.detected_frequencies_[col],
-            delay_frequency=self.delay_frequencies_[col]
+            delay_frequency=self.delay_frequencies_[col],
+            reference_origin=self.grid_origins_[col]
         )
 
         # Position de la période de l'index de la date de prédiction dans sa période cible
@@ -1014,7 +1111,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             # est vue à sa fin. Le nombre d'observations à masquer doit rester strictement inférieur au
             # plus petit nombre de périodes de l'index dans une période cible (décompte calendaire)
             last_position = None
-            can_mask = _min_subperiods(index_dates, target_frequency, index_frequency) > n_periods
+            can_mask = _min_subperiods(index_dates, target_frequency, index_offset) > n_periods
         else:
             # Prédiction en cours de période cible : chaque période cible est coupée à la même position.
             # Un délai négatif rend visibles les positions suivantes déjà publiées
@@ -1221,36 +1318,45 @@ def _delay_to_timedelta(delay: float, unit: str) -> pd.Timedelta:
 
 
 # Fonction de décompte du nombre minimal de périodes de l'index dans une période cible
-def _min_subperiods(dates: pd.Index, target_frequency: str, index_frequency: str) -> float:
+def _min_subperiods(dates: pd.Index, target_frequency: str, index_offset: pd.DateOffset) -> float:
     """Return the smallest number of index periods in a target period covered by ``dates``.
 
-    Counted on the calendar by
-    :meth:`~tsforecast.utils.frequency.FrequencyConverter.count_subperiods_per_period`
-    (28 days in February 2023, 3 months in a quarter, business days per month...).
+    The index periods of a target period are the points of the regular grid of
+    the index in it, as :class:`MaskTransformer` counts the positions (28 days in
+    February 2023, 3 months in a quarter, business days per month...); the anchor
+    of ``target_frequency`` sets the target periods.
 
     Args:
         dates: Dates of the data (``DatetimeIndex`` or ``PeriodIndex``).
-        target_frequency: Base frequency of the target periods ('Q', 'M', ...).
-        index_frequency: Base frequency of the index ('M', 'D', 'B', ...).
+        target_frequency: Frequency of the target periods ('Q', 'QE-NOV', 'M', ...).
+        index_offset: Offset of the regular grid of the index.
 
     Returns:
-        The smallest count.
+        The smallest count (``inf`` without any date).
 
     Examples:
-        >>> _min_subperiods(pd.date_range('2023-01-01', '2023-03-31', freq='D'), 'M', 'D')
+        >>> _min_subperiods(pd.date_range('2023-01-01', '2023-03-31', freq='D'), 'M', pd.offsets.Day())
         28.0
+        >>> # Quarters from December to February: 90 days in the winter 2022-2023
+        >>> _min_subperiods(pd.date_range('2023-01-01', '2023-06-30', freq='D'), 'QE-NOV', pd.offsets.Day())
+        90.0
     """
     # Dates sans valeur manquante, périodes représentées par leur début
     if isinstance(dates, pd.PeriodIndex):
         dates = dates.to_timestamp()
-    dates = pd.DatetimeIndex(dates).dropna()
-    # Une date par période cible couverte (décompte constant si la base n'est pas une Period pandas)
-    try:
-        target_index = dates.to_period(target_frequency).unique().to_timestamp()
-    except (ValueError, AttributeError):
-        target_index = dates[:1]
-    counts = FrequencyConverter().count_subperiods_per_period(target_index, target_frequency, index_frequency)
-    return float(np.min(counts))
+    dates = pd.DatetimeIndex(dates).dropna().unique().sort_values()
+    if len(dates) == 0:
+        return float('inf')
+
+    # Parcours des périodes cibles contenant au moins une date, en sautant de la fin de l'une à la date suivante
+    counts = []
+    position = 0
+    while position < len(dates):
+        period_start, period_end = get_period_boundaries(dates[position], target_frequency)
+        grid = pd.date_range(start=period_start, end=period_end, freq=index_offset, inclusive='left')
+        counts.append(len(grid))
+        position = max(int(dates.searchsorted(period_end, side='left')), position + 1)
+    return float(min(counts))
 
 
 # Fonction de décompte calendaire des périodes non publiées à une date
@@ -1260,7 +1366,9 @@ def _count_unpublished_periods(
     delay: pd.Timedelta,
     reference_point: str,
     reference_frequency: str,
-    delay_frequency: Optional[str] = None
+    delay_frequency: Optional[str] = None,
+    step_origin: Optional[pd.Timestamp] = None,
+    reference_origin: Optional[pd.Timestamp] = None
 ) -> int:
     """Count the periods separating the period of a date from the last period published at that date.
 
@@ -1270,8 +1378,10 @@ def _count_unpublished_periods(
     expressed at ``delay_frequency``. The result is the smallest integer ``k`` such that
     the period starting ``k`` periods of ``step_frequency`` before the period
     containing ``prediction_date`` is published by ``prediction_date``. Periods
-    are calendar periods (:func:`~tsforecast.utils.time.get_period_start`), business
-    days for ``'B'``: months of 28 to 31 days, leap years, etc.
+    are calendar periods (:func:`~tsforecast.utils.time.get_period_start`), anchor
+    included, business days for ``'B'``: months of 28 to 31 days, leap years, etc.
+    The periods of a multiplied frequency are aligned on the data grid through its
+    origin.
 
     ``k`` is negative when periods after the one of ``prediction_date`` are
     already published (negative delay).
@@ -1284,6 +1394,10 @@ def _count_unpublished_periods(
         reference_frequency: Frequency of the column, whose periods are published.
         delay_frequency: Frequency at which the delay is expressed (None: the
             frequency of the column).
+        step_origin: Start of a period of the grid of a multiplied ``step_frequency``
+            (None otherwise).
+        reference_origin: Start of a period of the grid of a multiplied
+            ``reference_frequency`` (None otherwise).
 
     Returns:
         The number of periods ``k``.
@@ -1309,23 +1423,23 @@ def _count_unpublished_periods(
         """Return the start of the period preceding the one starting at ``start``."""
         if business_days:
             return start - BDay()
-        return get_period_start(start - pd.Timedelta(1, unit='ns'), step_frequency)
+        return get_period_start(start - pd.Timedelta(1, unit='ns'), step_frequency, step_origin)
 
     def next_start(start: pd.Timestamp) -> pd.Timestamp:
         """Return the start of the period following the one starting at ``start``."""
         if business_days:
             return start + BDay()
-        return get_period_end(start, step_frequency)
+        return get_period_end(start, step_frequency, step_origin)
 
     def is_published(start: pd.Timestamp) -> bool:
         """Tell whether the observation of the period starting at ``start`` is published by the prediction date."""
         origin = _delay_origin(start, step_frequency, reference_frequency, reference_point,
-                               delay_frequency or reference_frequency)
+                               delay_frequency or reference_frequency, reference_origin)
         return origin + delay <= prediction_date
 
     # Période de la date de prédiction (jours ouvrés : dernier jour ouvré, un week-end appartient au vendredi)
     start = (BDay().rollback(prediction_date.normalize()) if business_days
-             else get_period_start(prediction_date, step_frequency))
+             else get_period_start(prediction_date, step_frequency, step_origin))
 
     # Parcours période par période depuis celle de la date de prédiction : la date de publication
     # croît avec la période, le parcours s'arrête à la dernière période publiée
@@ -1346,7 +1460,8 @@ def _delay_origin(
     step_frequency: str,
     column_frequency: str,
     reference_point: str,
-    delay_frequency: str
+    delay_frequency: str,
+    column_origin: Optional[pd.Timestamp] = None
 ) -> pd.Timestamp:
     """Return the date from which the delay of an observation is counted.
 
@@ -1360,14 +1475,17 @@ def _delay_origin(
       ``delay_frequency`` containing the last instant of the observation (its
       start when both frequencies are equal; the start of its last month for a
       quarterly observation and a monthly delay; the end of a monthly observation
-      minus its quarter for a quarterly delay).
+      minus its quarter for a quarterly delay). A multiplied ``delay_frequency``
+      must be ``column_frequency``.
 
     Args:
         start: Start of a period of ``step_frequency``, within the observation.
         step_frequency: Base frequency of the counted periods ('M', 'D', 'B', ...).
         column_frequency: Base frequency of the column (its observation periods).
         reference_point: 'start' or 'end'.
-        delay_frequency: Base frequency at which the delay is expressed.
+        delay_frequency: Frequency at which the delay is expressed.
+        column_origin: Start of a period of the grid of a multiplied
+            ``column_frequency`` (None otherwise).
 
     Returns:
         The origin of the delay.
@@ -1382,14 +1500,15 @@ def _delay_origin(
     """
     # Délai compté depuis la fin de l'observation : indépendant de la fréquence du délai
     if reference_point == 'end':
-        return get_period_end(start, column_frequency)
+        return get_period_end(start, column_frequency, column_origin)
 
     # Délai compté depuis le début, exprimé à la fréquence de la colonne : début de l'observation
-    if normalize_frequency(delay_frequency) == normalize_frequency(column_frequency):
-        return start if step_frequency == column_frequency else get_period_start(start, column_frequency)
+    if normalize_frequency(delay_frequency, return_format='full') == normalize_frequency(column_frequency, return_format='full'):
+        return start if step_frequency == column_frequency else get_period_start(start, column_frequency, column_origin)
 
     # Autre fréquence : fin de l'observation moins la période du délai contenant son dernier instant
-    observation_end = get_period_end(start, column_frequency)
+    # (à fréquence de délai non multipliée, les périodes de même découpage donnent le début de l'observation)
+    observation_end = get_period_end(start, column_frequency, column_origin)
     period_start, period_end = get_period_boundaries(observation_end - pd.Timedelta(1, unit='ns'), delay_frequency)
     return observation_end - (period_end - period_start)
 

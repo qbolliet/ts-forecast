@@ -236,8 +236,8 @@ La fonction retourne un `DataFrame` indexé par les niveaux d'entité des donné
 | `observation_date` | Date de l'observation détectée |
 | `has_changes` | Toujours `True` (marque les observations détectées) |
 | `download_date` | Date de téléchargement des données à partir de laquelle est calculé le délai |
-| `frequency` | Fréquence détectée du couple (entité, variable), en toutes lettres (`'daily'`, `'weekly'`, `'monthly'`, `'quarterly'`, `'annual'`, ...) ; manquante (`NaN`) si elle est indétectable (une seule observation) — un avertissement est alors émis et `period_start`, `period_end` et `delay` valent `NaT` / `NaN` |
-| `period_start` | Date de début de la période de référence de l'observation à la fréquence détectée |
+| `frequency` | Fréquence détectée du couple (entité, variable), en code pandas complet avec position, ancrage et multiplicateur (`'D'`, `'W-WED'`, `'MS'`, `'QE-DEC'`, `'2MS'`, ...) ; les ancrages équivalents sont écrits comme pandas les canonise (trimestres finissant en novembre : `'QE-FEB'`). Manquante (`NaN`) si elle est indétectable (une seule observation) — un avertissement est alors émis et `period_start`, `period_end` et `delay` valent `NaT` / `NaN` |
+| `period_start` | Date de début de la période de référence de l'observation à la fréquence détectée. L'ancrage fixe les périodes (les semaines `'W-WED'` vont du jeudi au mercredi, les trimestres `'QS-MAR'` commencent en mars, juin, septembre et décembre). Une période multipliée est celle de la grille des données : elle commence à la date d'observation pour une fréquence de début de période ou sans position (`'2MS'`, `'3D'`), elle finit avec la période de la date pour une fréquence de fin de période ou hebdomadaire (`'2ME'`, `'2W-SUN'`) |
 | `period_end` | Borne de fin **exclusive** de la période de référence (premier instant de la période suivante : `2023-05-01` pour avril) |
 | `reference_point` | Point de référence utilisé (`'start'` ou `'end'`) |
 | `delay` | Délai de publication calculé (arrondi à l'entier supérieur de l'unité) entre le point de référence de la période de l'observation et la date de téléchargement ; négatif si le téléchargement précède ce point (par exemple une prévision utilisée comme observation) |
@@ -252,6 +252,25 @@ colonne à unité plus fine si nécessaire, sans arrondi. Les colonnes de texte
 porte les noms des variables dans le dtype que pandas en infère (`str` pour des
 chaînes). Un résultat vide a les mêmes dtypes (dates, texte, niveaux d'index)
 qu'un résultat non vide.
+
+!!! warning "Les étiquettes fixent l'ancrage des périodes"
+    La fréquence est celle que pandas lit sur les dates de chaque couple (entité, variable),
+    ancrage compris : les bornes de période suivent la convention de pandas pour cet ancrage,
+    et non le calendrier par défaut. La position d'une étiquette mensuelle ne change rien
+    (`2023-04-01` et `2023-04-30` désignent tous deux avril), mais l'emplacement d'une valeur
+    de plus basse fréquence en change la période :
+
+    | Étiquettes | Fréquence lue | Période de la dernière étiquette |
+    |------------|---------------|----------------------------------|
+    | hebdomadaire, le lundi (`2023-11-20`) | `'W-MON'` | du mardi 14 au lundi 20 novembre |
+    | trimestrielle, au 1er du dernier mois (`2023-12-01`) | `'QS-MAR'` | de décembre à février |
+    | trimestrielle, au dernier jour du premier mois (`2023-10-31`) | `'QE-JAN'` | d'août à octobre |
+    | annuelle, au 1er décembre (`2023-12-01`) | `'YS-DEC'` | de décembre 2023 à novembre 2024 |
+
+    Pour obtenir des périodes calendaires, étiquetez chaque valeur par le premier jour de sa
+    période (`'QS'`, `'YS'` : le 1er du premier mois) ou par son dernier jour (`'QE'`, `'YE'` :
+    le dernier jour du dernier mois ; une semaine du lundi au dimanche : le dimanche, `'W-SUN'`).
+    `calculate_applicable_delay` et `PublicationDelayTransformer` lisent les mêmes périodes.
 
 #### 4.1.3 Cas d'usage 1 : Comparaison de deux jeux de données
 
@@ -367,7 +386,7 @@ df_applicable = calculate_applicable_delay(
 |----------|------|-------------|
 | `publication_delays` | `pd.DataFrame` | DataFrame retourné par `compare_and_detect_delays()`. |
 | `reference_point` | `'start'` ou `'end'` | Point de référence cible pour le délai converti (la fin est la borne exclusive). |
-| `frequency` | `str` ou `Dict` | Fréquence cible (`'M'`, `'Q'`, `'Y'`, `'monthly'`, etc.) ou dictionnaire : clés = indicateurs (`{'GDP': 'M'}`) et/ou couples complets de l'index `(entité, ..., indicateur)` (`{('FR', 'GDP'): 'M'}`), la clé du couple l'emportant sur celle de l'indicateur. Chaque ligne doit être couverte. |
+| `frequency` | `str` ou `Dict` | Fréquence cible (`'M'`, `'Q'`, `'QE-NOV'`, `'W-WED'`, `'monthly'`, etc.) ou dictionnaire : clés = indicateurs (`{'GDP': 'M'}`) et/ou couples complets de l'index `(entité, ..., indicateur)` (`{('FR', 'GDP'): 'M'}`), la clé du couple l'emportant sur celle de l'indicateur. Chaque ligne doit être couverte. Le code pandas est lu en entier : son ancrage fixe les périodes cibles (`'QE-NOV'` : trimestres de septembre à novembre), sa position ne les change pas (`'M'`, `'MS'` et `'ME'` désignent les mêmes mois). Une fréquence multipliée (`'2MS'`) n'a de périodes que sur la grille des données : elle n'est acceptée que comme fréquence de l'observation elle-même. Sans `aggregate_by_panel`, les entités d'un indicateur doivent partager les mêmes périodes cibles (`'QE-NOV'` et `'QS-DEC'` sont la même cible, `'Q'` et `'QE-NOV'` non). |
 | `unit` | `str` ou `None` | Unité cible (toute durée : `'D'`, `'h'`, `'W'`, `'s'`, ...), arrondie au supérieur. Si `None`, utilise l'unité des données d'entrée (les lignes agrégées ensemble doivent alors en partager une). |
 | `indicators` | `List[str]` ou `None` | Liste des indicateurs à traiter. Si `None`, traite tous les indicateurs. |
 | `aggregate_by_panel` | `bool` | Si `True`, calcule des délais séparés par entité panel. Sinon, agrège sur toutes les entités. |
@@ -505,10 +524,10 @@ transformer = PublicationDelayTransformer(
 | `delays` | `Dict` ou `pd.DataFrame` | Délais par variable. Si DataFrame : une ligne par variable, colonne `'delay'`, variable dans une colonne `'column'` ou dans l'index (niveau `'column'`, à défaut le dernier) — la sortie de `calculate_applicable_delay` convient telle quelle ; colonnes optionnelles `'unit'`, `'reference_point'`, `'frequency'`. Un délai `NaN` est inconnu. Une variable listée plusieurs fois (délais par entité) est refusée : voir [6.1](#61-delais-variables-par-entite-donnees-de-panel). |
 | `prediction_date` | `str` ou `datetime` | Date de prédiction de référence. Accepte `'today'` pour la date courante. |
 | `strategy` | `str` ou `Dict` | Stratégie d'application : `'shift'` (décalage) ou `'mask'` (masquage). Peut être spécifié par variable ; une variable retardée absente du dictionnaire est laissée telle quelle (avec un avertissement). |
-| `target_frequency` | `str`, `Dict` ou `None` | Fréquence cible pour la stratégie `'mask'`. Ignoré pour `'shift'`. |
+| `target_frequency` | `str`, `Dict` ou `None` | Fréquence cible pour la stratégie `'mask'`, dont l'ancrage fixe les périodes masquées (`'QE-NOV'` : trimestres de septembre à novembre). Ignoré pour `'shift'`. |
 | `delay_unit` | `str`, `Dict` ou `None` | Unité des délais, globale ou par variable. Si `None`, inférée depuis le DataFrame, puis `default_values`. Une colonne retardée sans unité lève une `ValueError`. |
 | `reference_point` | `str`, `Dict` ou `None` | Point de référence des délais (`'start'` / `'end'`), global ou par variable. Si `None`, inféré depuis le DataFrame, puis `default_values`. |
-| `delay_frequency` | `str`, `Dict` ou `None` | Fréquence à laquelle les délais sont exprimés, globale ou par variable. Si `None`, lue dans la colonne `frequency` du tableau, sinon fréquence de la colonne. Un délai `'end'` est le retard après la fin de chaque observation, à toute fréquence ; un délai `'start'` se compte depuis la fin de l'observation moins la période de `delay_frequency` qui contient son dernier jour (règle de la section [4.2.3](#423-conversion-de-frequence)). |
+| `delay_frequency` | `str`, `Dict` ou `None` | Fréquence à laquelle les délais sont exprimés, globale ou par variable. Si `None`, lue dans la colonne `frequency` du tableau, sinon fréquence de la colonne. Un délai `'end'` est le retard après la fin de chaque observation, à toute fréquence ; un délai `'start'` se compte depuis la fin de l'observation moins la période de `delay_frequency` qui contient son dernier jour (règle de la section [4.2.3](#423-conversion-de-frequence)). Une fréquence multipliée (`'2MS'`) n'est acceptée que si c'est celle de la colonne. |
 | `handle_missing_delays` | `str` | Variables de `X` sans délai connu (laissées telles quelles) : `'warn'` (défaut) les signale, `'error'` lève une `ValueError`, `'ignore'` se tait. |
 | `default_values` | `Dict` ou `None` | Valeurs par défaut des colonnes de `X` qui en manquent : clés `'delay'`, `'unit'`, `'reference_point'` (et `'target_frequency'` pour `'mask'`). Avec lui, toutes les colonnes de `X` reçoivent un délai. Ignoré avec une stratégie par variable. |
 
@@ -517,7 +536,9 @@ transformer = PublicationDelayTransformer(
 | Attribut | Description |
 |----------|-------------|
 | `prediction_date_` | Date de prédiction résolue (objet `datetime`) |
-| `detected_frequencies_` | Dictionnaire des fréquences détectées par colonne |
+| `detected_frequencies_` | Fréquence détectée de chaque colonne, en code pandas complet (`'MS'`, `'W-WED'`, `'QE-FEB'`, `'2MS'`) : son ancrage fixe les périodes comptées par le décalage et le masque |
+| `grid_origins_` | Début d'une période de la grille des données de chaque colonne à fréquence multipliée (`None` pour les autres) : une colonne `'2MS'` observée en février, avril, ... compte des périodes février-mars, avril-mai, ..., et non des périodes alignées sur l'epoch. Pour un panel, les entités doivent partager cette grille |
+| `delay_frequencies_` | Fréquence, en code pandas complet, à laquelle le délai de chaque colonne est lu |
 | `shift_params` | Paramètres de décalage par colonne : `{'n_periods': int, 'frequency': str}` |
 | `mask_params` | Paramètres de masquage par colonne (ceux de `MaskTransformer`) : `{'n_obs': int, 'mask_frequency': str, 'how': str, 'last_position': int ou None}` |
 | `fit_report_` | `DelayFitReport` : paramétrage résolu de chaque colonne et son origine |

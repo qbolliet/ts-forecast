@@ -240,7 +240,7 @@ class TestMultiFrequencyWorkflow:
 
     def test_frequency_detected_per_column(self, detected):
         """Each column gets its own frequency, the quarterly one despite the NaN of the monthly grid."""
-        assert detected['frequency'].to_dict() == {'monthly_indicator': 'monthly', 'quarterly_indicator': 'quarterly'}
+        assert detected['frequency'].to_dict() == {'monthly_indicator': 'MS', 'quarterly_indicator': 'QS-JAN'}
 
     def test_quarterly_delay_from_the_period_start_is_longer(self, detected):
         """Each indicator in its own frequency: 44 days for June, 105 days for the second quarter.

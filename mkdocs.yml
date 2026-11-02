@@ -35,6 +35,7 @@ theme:
 
 markdown_extensions:
   - tables
+  - admonition
   - pymdownx.highlight:
       anchor_linenums: true
       line_spans: __span

@@ -73,7 +73,7 @@ class TestDetectionReportRendering:
     def test_to_dict_is_json_serializable_with_string_keys(self, detection_report):
         payload = detection_report.to_dict()
         json.dumps(payload, allow_nan=False)
-        assert payload['frequencies'] == {'DE/PIB': 'monthly', 'FR/PIB': 'monthly'}
+        assert payload['frequencies'] == {'DE/PIB': 'MS', 'FR/PIB': 'MS'}
         assert payload['download_date'] == '2023-06-15T00:00:00'
         assert payload['columns_compared'] == ['PIB']
 

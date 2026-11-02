@@ -11,12 +11,12 @@ from typing import Dict, Optional, Union, Tuple, List, Any, Literal, cast, overl
 from datetime import datetime, timedelta
 import logging
 import warnings
-# Module de détection de la fréquence des séries et de conversion en littéral
-from ..utils.frequency import detect_frequency, to_literal
+# Module de détection de la fréquence des séries
+from ..utils.frequency import detect_frequency
 # Module de validation des données temporelles
 from ..utils.validation import validate_temporal_data
 # Module de manipulation temporelle (bornes de période, unité de stockage des dates rendues)
-from ..utils.time import resolve_date, get_period_boundaries, as_exact_unit
+from ..utils.time import resolve_date, get_labelled_period, as_exact_unit
 # Module de conversion des durées (le calcul des délais se fait en nanosecondes entières :
 # un produit flottant par 1e6 fausserait le dernier chiffre au-delà de ~800 jours)
 from ..utils.duration import to_code as duration_to_code, to_literal as duration_to_literal, get_duration_nanoseconds
@@ -95,10 +95,17 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
         - 'observation_date': The date of the observation
         - 'has_changes': Always True (marks the detected observations)
         - 'download_date': Date when data was downloaded
-        - 'frequency': Detected frequency of the (entity, column) couple, as a literal
-            ('daily', 'weekly', 'monthly', 'quarterly', 'annual', ...), missing (NaN) if it
-            could not be detected
-        - 'period_start': Start boundary of the period (NaT if the frequency is missing)
+        - 'frequency': Detected frequency of the (entity, column) couple, as a complete
+            pandas frequency string with its position, anchor and multiplier ('D', 'W-WED',
+            'MS', 'QE-DEC', '2MS', ...), missing (NaN) if it could not be detected. Equivalent
+            anchors are written as pandas canonicalizes them (quarters ending in November:
+            'QE-FEB')
+        - 'period_start': Start boundary of the period labelled by the observation date
+            (NaT if the frequency is missing). The anchor of the frequency sets the periods
+            (weeks of 'W-WED' run Thursday to Wednesday); a multiplied period is the one of
+            the data grid that the date labels: it starts at the date for a start-positioned
+            or unpositioned frequency ('2MS', '3D'), and ends with the period of the date for
+            an end-positioned or weekly one ('2ME', '2W-SUN')
         - 'period_end': Exclusive end boundary of the period (NaT if the frequency is missing)
         - 'reference_point': Reference point used ('start' or 'end')
         - 'delay': Calculated publication delay (ceil-rounded to the unit; NaN if the
@@ -135,7 +142,7 @@ def compare_and_detect_delays(new_data: pd.DataFrame, existing_data: Optional[pd
         >>> new = pd.DataFrame({'GDP': [1.0, 2.0, 3.0, 4.0]}, index=dates)
         >>> result = compare_and_detect_delays(new, existing, download_date='2023-06-15')
         >>> result.index.tolist(), result['frequency'].tolist(), result['delay'].tolist(), result['unit'].tolist()
-        (['GDP'], ['monthly'], [75.0], ['day'])
+        (['GDP'], ['MS'], [75.0], ['day'])
         >>> result['observation_date'].dt.strftime('%Y-%m-%d').tolist()
         ['2023-04-01']
         >>> compare_and_detect_delays(new, existing, '2023-06-15', reference_point='end')['delay'].tolist()
@@ -514,7 +521,8 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
         - 'observation_date': The date of the observation
         - 'has_changes': Always True
         - 'download_date': Date when data was downloaded
-        - 'frequency': Detected frequency (literal), NaN if it could not be detected
+        - 'frequency': Detected frequency (complete pandas string), NaN if it could not
+          be detected
         - 'period_start': Start boundary of the period (NaT without frequency)
         - 'period_end': Exclusive end boundary of the period (NaT without frequency)
         - 'reference_point': Reference point used ('start' or 'end')
@@ -522,7 +530,8 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
         - 'unit': Unit of the delay value
 
         ``frequency_map`` maps each (entity, column) key of ``new_data`` to its detected
-        frequency literal (None if undetectable); it is empty when nothing is detected.
+        frequency, as a complete pandas string (None if undetectable); it is empty when
+        nothing is detected.
 
     Raises:
         ValueError: If unit is not one of 'us', 's', 'D', 'microsecond', 'second', 'day'
@@ -568,10 +577,10 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
     publication_delays["download_date"] = download_date
 
     # Fréquence
-    # Détection de la fréquence de chaque couple (entité, colonne) dans new_data : pour un DataFrame
-    # le résultat est toujours un dictionnaire, la valeur None marquant un couple indétectable
-    frequency_map_raw = cast(Dict[Any, Any], detect_frequency(new_data))
-    frequency_map = {k: to_literal(v) if v is not None else None for k, v in frequency_map_raw.items()}
+    # Détection de la fréquence de chaque couple (entité, colonne) dans new_data, en code pandas
+    # complet : la position, l'ancrage et le multiplicateur fixent les bornes des périodes. Pour un
+    # DataFrame le résultat est toujours un dictionnaire, la valeur None marquant un couple indétectable
+    frequency_map = cast(Dict[Any, Optional[str]], detect_frequency(new_data, return_format='full'))
 
     # Conversion du dictionnaire en DataFrame (clés de panel aplaties en tuples : MultiIndex) ;
     # fréquence en dtype chaîne, un couple indétectable y étant manquant (NaN)
@@ -597,7 +606,7 @@ def _calculate_publication_delays(new_observations: pd.DataFrame,
     # Dates de début et de fin de la période sur laquelle porte l'observation
     # Calcul des bornes de période en fonction de la fréquence
     boundaries = [
-        get_period_boundaries(date=date, frequency=frequency) if is_detected else (pd.NaT, pd.NaT)
+        get_labelled_period(date=date, frequency=frequency) if is_detected else (pd.NaT, pd.NaT)
         for date, frequency, is_detected in zip(
             publication_delays["observation_date"], publication_delays["frequency"], detected
         )
