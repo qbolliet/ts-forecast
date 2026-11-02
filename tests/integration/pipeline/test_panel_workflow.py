@@ -42,7 +42,7 @@ TS = pd.Timestamp
 TARGET = 'production_industrielle'
 
 # Date de prédiction commune à tous les plis (paramètre fixe du transformateur de délais)
-PREDICTION_DATE = '2024-08-15'
+PREDICTION_DATE = '2024-09-15'
 
 # Délais en jours depuis le début du mois (inflation : 20 jours, chômage : 50 jours)
 DELAYS = {'inflation_ipc': 20.0, 'taux_chomage': 50.0}
@@ -252,8 +252,9 @@ class TestGlobalPanelCrossValidation:
     def test_delays_mask_three_cells_per_complete_quarter(self, panel_xy, global_results):
         """Cells hidden by the delays step, per entity and fold, on the training rows.
 
-        Gold values: on 2024-08-15, the last month of each quarter of inflation
-        (20 days) and the last two of unemployment (50 days) are unpublished:
+        Gold values: on 2024-09-15, last month of its quarter, the last month of
+        each quarter of inflation (20 days) and the last two of unemployment
+        (50 days) are unpublished:
         3 cells per complete quarter of each entity's monthly grid. Complete
         training quarters of the first fold (training ends January 2023):
         France 2018Q1-2022Q4 (20), Allemagne 2018Q3-2022Q4 (18), Italie

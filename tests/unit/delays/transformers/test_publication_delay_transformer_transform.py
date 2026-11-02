@@ -131,14 +131,18 @@ class TestTransformGoldValues:
         pd.testing.assert_frame_equal(_fit_transform(transformer, _monthly()), expected)
 
     def test_daily_mask_gold(self):
-        """Daily series, 5 days from the day end, target month: the last 6 calendar days of each month are hidden."""
+        """Daily series, 5 days from the day end, target month, on March 15: days 10 onwards of each month are hidden.
+
+        Gold value: on March 15, March 9 (end March 10) is published, March 10 -> 15
+        are not (6 days) and March 16 -> 31 are not observed yet: every month keeps its
+        first 9 days (the series stops on March 30).
+        """
         X = pd.DataFrame({'GDP': np.arange(90.0)}, index=pd.date_range('2024-01-01', periods=90, freq='D'))
         transformer = _transformer({'GDP': 5.0}, strategy='mask', reference_point='end', target_frequency='M',
                                    prediction_date='2024-03-15')
         result = _fit_transform(transformer, X)
-        # Valeur d'or : 26-31 janvier, 24-29 février, 26-31 mars (la série s'arrête le 30 mars)
-        expected = (list(pd.date_range('2024-01-26', '2024-01-31')) + list(pd.date_range('2024-02-24', '2024-02-29'))
-                    + list(pd.date_range('2024-03-26', '2024-03-30')))
+        expected = (list(pd.date_range('2024-01-10', '2024-01-31')) + list(pd.date_range('2024-02-10', '2024-02-29'))
+                    + list(pd.date_range('2024-03-10', '2024-03-30')))
         assert list(result.index[result['GDP'].isna()]) == expected
 
     def test_column_without_delay_is_untouched_and_order_kept(self):

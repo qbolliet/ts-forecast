@@ -104,14 +104,15 @@ class TestPanelTransformersRestoreLabels:
         """Per-entity delays keyed by special names reach their entity; labels are kept."""
         # Un délai par entité (la fabrique exige chaque entité du panel)
         delays = pd.DataFrame(
-            {'delay': [20.0, 50.0, 50.0], 'unit': 'D', 'reference_point': 'start', 'frequency': 'Q'},
+            # Délais trimestriels comptés depuis la fin : 5 et 20 jours après la fin de chaque mois
+            {'delay': [5.0, 20.0, 20.0], 'unit': 'D', 'reference_point': 'end', 'frequency': 'Q'},
             index=pd.MultiIndex.from_tuples(
                 [(ENTITIES['France'], COLUMNS['inflation_ipc']), (ENTITIES['Allemagne'], COLUMNS['taux_chomage']),
                  (ENTITIES['Italie'], COLUMNS['taux_chomage'])],
                 names=['pays (zone)', 'column'],
             ),
         )
-        factory = create_delay_transformer_factory(delays, strategy='mask', prediction_date='2024-08-15')
+        factory = create_delay_transformer_factory(delays, strategy='mask', prediction_date='2024-09-15')
         transformer = PanelwiseTransformer(transformer=factory, time_col=None, panel_cols=None)
 
         output = _quiet(transformer.fit_transform, panel)

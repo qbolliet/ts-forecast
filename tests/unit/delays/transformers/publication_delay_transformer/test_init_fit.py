@@ -167,7 +167,10 @@ class TestPublicationDelayTransformerFit:
         """Frequencies are detected per column, nothing is inferred from a dictionary."""
         transformer = _fit(sample_time_series, delays=delays_dict_simple, delay_unit='D', reference_point='end')
         assert transformer.detected_frequencies_ == {'GDP': 'M', 'inflation': 'M', 'unemployment': 'M'}
-        assert transformer.inferred_params_ == {'delay_unit': {}, 'reference_point': {}, 'target_frequency': {}}
+        assert transformer.inferred_params_ == {'delay_unit': {}, 'reference_point': {}, 'target_frequency': {},
+                                                'delay_frequency': {}}
+        # Sans tableau, chaque délai est lu à la fréquence de sa colonne
+        assert transformer.delay_frequencies_ == transformer.detected_frequencies_
 
     def test_fit_creates_shift_params(self, sample_time_series, delays_dict_simple):
         """One shift per delayed column, in periods of its detected frequency.
@@ -341,7 +344,7 @@ class TestSklearnProtocol:
         transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, delay_unit='D')
         assert set(transformer.get_params()) == {
             'delays', 'prediction_date', 'strategy', 'target_frequency', 'delay_unit', 'reference_point',
-            'handle_missing_delays', 'default_values'}
+            'handle_missing_delays', 'default_values', 'delay_frequency'}
 
     def test_clone_keeps_the_parameters_and_drops_the_fit(self):
         """A clone has the same parameters and no fitted attribute."""
@@ -457,8 +460,9 @@ class TestFitReport:
         assert {r.reference_point_source for r in report.columns} == {'default'}
 
     def test_mask_strategy_records_the_masked_observations(self):
+        """Quarterly delays of 10 days from the end: November (published December 11) is, December is not -> 1."""
         X = self._monthly()
-        delays = self._delays(delays=(20.0, 20.0))
+        delays = self._delays(delays=(10.0, 10.0), reference_point=['end', 'end'])
         report = PublicationDelayTransformer(
             delays=delays, strategy='mask', prediction_date='2023-12-15').fit(X).fit_report_
         for record in report.columns:

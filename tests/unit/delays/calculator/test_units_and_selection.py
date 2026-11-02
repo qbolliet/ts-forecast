@@ -334,16 +334,25 @@ class TestContractWithDataManager:
         assert result['delay'].tolist() == [101, 70, 70, 40]
 
     def test_monthly_to_quarterly_from_the_start(self, monthly_publication_delays):
-        """April, May and June are all in Q2: counted from April 1st, 131 d for every observation."""
+        """Lag after each month end, plus the 91 d of Q2: April 192, May 161, June 131 d; median per couple.
+
+        Valeurs d'or : 10 août - 1er mai = 101 j, - 1er juin = 70 j, - 1er juillet = 40 j, plus 91 j (T2 2023) ;
+        médianes : (FR, PIB) avril, mai, juin -> 161 ; (FR, inflation) et (DE, PIB) mai, juin -> 146 ;
+        (DE, inflation) juin -> 131.
+        """
         result = calculate_applicable_delay(monthly_publication_delays, 'start', 'Q', aggregate_by_panel=True)
 
-        assert result['delay'].tolist() == [131, 131, 131, 131]
+        assert result['delay'].tolist() == [161, 146, 146, 131]
 
     def test_monthly_to_quarterly_from_the_end(self, monthly_publication_delays):
-        """Counted from the Q2 end (July 1st): 31 + 9 = 40 d to August 10th, for every observation."""
+        """From the end, the quarterly delay is the lag after each month end: medians over the countries.
+
+        Valeurs d'or : PIB -> médiane de 101, 70, 40 (France) et 70, 40 (Allemagne) = 70 ; inflation -> médiane de
+        70, 40 (France) et 40 (Allemagne) = 40.
+        """
         result = calculate_applicable_delay(monthly_publication_delays, 'end', 'Q')
 
-        assert result['delay'].tolist() == [40, 40]
+        assert result['delay'].tolist() == [70, 40]
 
     def test_counts_of_the_detected_observations(self, monthly_publication_delays):
         """Observations per couple: 3, 2, 2 and 1 (the rows detected by ``compare_and_detect_delays``)."""
@@ -352,20 +361,21 @@ class TestContractWithDataManager:
         assert result['n_observations'].tolist() == [3, 2, 2, 1]
 
     def test_quarterly_delays_dated_at_period_start(self, quarterly_publication_delays):
-        """Quarter-start dates map onto the first month: Q1 2023 -> January, Q2 2023 -> April; from the start unchanged."""
+        """Quarter-start dates map onto the last month of their quarter: Q1 2023 -> March, Q2 2023 -> June."""
         result = calculate_applicable_delay(quarterly_publication_delays, 'start', 'M', aggregate_by_panel=True,
                                             aggregation_method='max')
 
-        # Valeurs d'or : 221 j (1er janv.) et 131 j (1er avril) pour la France, 131 j pour l'Allemagne
-        assert result['delay'].tolist() == [221, 131]
+        # Valeurs d'or : T1 -> 1er mars : 131 + 31 = 162 j ; T2 -> 1er juin : 40 + 30 = 70 j ;
+        # maximum France 162, Allemagne 70
+        assert result['delay'].tolist() == [162, 70]
 
     def test_quarterly_to_monthly_from_the_end(self, quarterly_publication_delays):
-        """From the end of the first month: Feb 1st (190 d) and May 1st (101 d)."""
+        """From the end of the last month, i.e. of the quarter: April 1st (131 d) and July 1st (40 d)."""
         result = calculate_applicable_delay(quarterly_publication_delays, 'end', 'M', aggregate_by_panel=True,
                                             aggregation_method='mean')
 
-        # France : (190 + 101) / 2 = 145,5 ; Allemagne : 101
-        assert result['delay'].tolist() == [145.5, 101]
+        # France : (131 + 40) / 2 = 85,5 ; Allemagne : 40
+        assert result['delay'].tolist() == [85.5, 40]
 
     def test_quarterly_to_quarterly_from_the_end(self, quarterly_publication_delays):
         """Quarter ends are April 1st (131 d) and July 1st (40 d)."""
@@ -387,10 +397,10 @@ class TestContractWithDataManager:
         assert result['delay'].to_dict() == {'PIB': 45, 'inflation': 45, 'unemployment': 75}
 
     def test_time_series_to_quarterly(self, simple_time_series_delays):
-        """November and December belong to Q4 (October 1st = 106 d before the 15th of January)."""
+        """Lag after the month end plus the 92 d of Q4: December 14 + 92 = 106 d, November 45 + 92 = 137 d."""
         result = calculate_applicable_delay(simple_time_series_delays, 'start', 'Q')
 
-        assert result['delay'].to_dict() == {'PIB': 106, 'inflation': 106, 'unemployment': 106}
+        assert result['delay'].to_dict() == {'PIB': 106, 'inflation': 106, 'unemployment': 137}
 
     def test_seconds_from_the_data_manager(self, delays_in_seconds):
         """Delays detected in seconds keep their unit through the calculator."""

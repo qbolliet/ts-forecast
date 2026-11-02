@@ -13,11 +13,12 @@ hand from that date, with the calendar only, never from the output of the code:
 
 * the delay is counted from the start of the observation period, which is the
   observation date;
-* converted to a target frequency, the delay is counted again from the start or
-  from the (exclusive) end of the target period containing the observation date,
-  which is, for a source period starting on that date, the target period starting
-  on it when the target frequency is higher (the first sub-period), and the
-  target period that contains it when it is equal or lower.
+* converted to a target frequency, a period is published with its last
+  sub-period, every sub-period at the same lag after its end: from the end, the
+  delay is the lag between the (exclusive) end of the observation period, at its
+  own frequency, and the download, at any target frequency; from the start, it
+  adds the length of the target period containing the last day of the
+  observation period (the last month of a quarter, the quarter of a month).
 
 Notably the same column (``depenses_publiques_pib``) is annual for two entities
 and quarterly for the third, and ``climat_affaires`` is absent for one entity: a
@@ -68,19 +69,35 @@ def _last_observations(data: pd.DataFrame) -> dict:
     return last
 
 
-def _days_from_start_of_month(date: pd.Timestamp) -> int:
-    """Return the days from the start of the month following ``date`` to the download date (month end, exclusive)."""
-    return (DOWNLOAD - (date + pd.DateOffset(months=1))).days
+# Code de période pandas de chaque fréquence détectée
+_PERIOD_CODES = {'monthly': 'M', 'quarterly': 'Q', 'annual': 'Y'}
 
 
-def _days_from_start_of_quarter(date: pd.Timestamp) -> int:
-    """Return the days from the start of the quarter containing ``date`` to the download date."""
-    return (DOWNLOAD - date.to_period('Q').start_time).days
+def _days_after_end(date: pd.Timestamp, frequency: str) -> int:
+    """Return the days from the (exclusive) end of the period of ``date`` at ``frequency`` to the download date."""
+    end = (date.to_period(_PERIOD_CODES[frequency]) + 1).start_time
+    return (DOWNLOAD - end).days
 
 
-def _days_from_end_of_year(date: pd.Timestamp) -> int:
-    """Return the days from the (exclusive) end of the year containing ``date`` to the download date (negative if later)."""
-    return (DOWNLOAD - TS(year=date.year + 1, month=1, day=1)).days
+def _days_after_start(date: pd.Timestamp, frequency: str, target: str) -> int:
+    """Return the days from the start of the ``target`` period containing the last day of the period of ``date``.
+
+    Args:
+        date: Observation date (start of its period).
+        frequency: Detected frequency of the observation ('monthly', 'quarterly', 'annual').
+        target: Pandas period code of the target frequency ('M', 'Q', 'Y').
+
+    Returns:
+        The lag after the end of the observation period plus the length of that target period.
+    """
+    last_day = (date.to_period(_PERIOD_CODES[frequency]) + 1).start_time - pd.Timedelta(days=1)
+    period = last_day.to_period(target)
+    return _days_after_end(date, frequency) + ((period + 1).start_time - period.start_time).days
+
+
+def _frequencies(delays: pd.DataFrame) -> dict:
+    """Return the detected frequency of each couple (or column) of a first download, as given to the calculator."""
+    return delays['frequency'].to_dict()
 
 
 @pytest.fixture
@@ -102,44 +119,55 @@ class TestHeterogeneousPanel:
     """Per-entity and per-indicator delays of the notebook 3 panel."""
 
     def test_monthly_target_counted_from_the_end(self, heterogeneous_coverage_panel, panel_delays):
-        """Monthly target, from the month end: every couple gets the days since the end of its first month.
+        """Monthly target, from the end: every couple gets the days since the end of its own period.
 
-        Annual and quarterly observations, dated on the first day of their period, fall in the first month.
+        A quarterly or annual observation is published with its last month, whose end is the end of the period.
         """
         result = calculate_applicable_delay(panel_delays, 'end', 'monthly', aggregate_by_panel=True)
 
-        expected = {key: _days_from_start_of_month(date)
+        frequencies = _frequencies(panel_delays)
+        expected = {key: _days_after_end(date, frequencies[key])
                     for key, date in _last_observations(heterogeneous_coverage_panel).items()}
         assert result['delay'].to_dict() == expected
 
-    def test_monthly_target_counted_from_the_start_is_the_detected_delay(self, heterogeneous_coverage_panel, panel_delays):
-        """Monthly target from the start: for observations dated on a period start, the detected delay is unchanged."""
+    def test_monthly_target_counted_from_the_start_of_the_last_month(self, heterogeneous_coverage_panel, panel_delays):
+        """Monthly target from the start: the start of the last month of each observation period.
+
+        For monthly couples, the detected delay is unchanged; quarterly and annual ones count from the start of
+        March, June, ... or December.
+        """
         result = calculate_applicable_delay(panel_delays, 'start', 'M', aggregate_by_panel=True)
 
-        expected = {key: (DOWNLOAD - date).days for key, date in _last_observations(heterogeneous_coverage_panel).items()}
+        frequencies = _frequencies(panel_delays)
+        expected = {key: _days_after_start(date, frequencies[key], 'M')
+                    for key, date in _last_observations(heterogeneous_coverage_panel).items()}
         assert result['delay'].to_dict() == expected
 
     def test_quarterly_target_counted_from_the_start(self, heterogeneous_coverage_panel, panel_delays):
-        """Quarterly target from the start: the quarter containing the observation (monthly sources) or starting on it."""
+        """Quarterly target from the start: the quarter containing the last day of each observation period."""
         result = calculate_applicable_delay(panel_delays, 'start', 'quarterly', aggregate_by_panel=True)
 
-        expected = {key: _days_from_start_of_quarter(date)
+        frequencies = _frequencies(panel_delays)
+        expected = {key: _days_after_start(date, frequencies[key], 'Q')
                     for key, date in _last_observations(heterogeneous_coverage_panel).items()}
         assert result['delay'].to_dict() == expected
 
-    def test_annual_target_counted_from_the_end_can_be_negative(self, heterogeneous_coverage_panel, panel_delays):
-        """Annual target from the year end: the 2024 observations are published before their year ends (negative delays)."""
-        result = calculate_applicable_delay(panel_delays, 'end', 'annual', aggregate_by_panel=True)
+    def test_annual_target_counted_from_the_start(self, heterogeneous_coverage_panel, panel_delays):
+        """Annual target from the start: the year containing the last day of each observation period."""
+        result = calculate_applicable_delay(panel_delays, 'start', 'annual', aggregate_by_panel=True)
 
-        expected = {key: _days_from_end_of_year(date)
+        frequencies = _frequencies(panel_delays)
+        expected = {key: _days_after_start(date, frequencies[key], 'Y')
                     for key, date in _last_observations(heterogeneous_coverage_panel).items()}
         assert result['delay'].to_dict() == expected
 
-    def test_annual_target_counted_from_the_end_is_negative_for_the_current_year(self, panel_delays):
-        """Observations of 2024 (Jan 1st 2025 - 15 Oct 2024 = -78 d at most) give negative delays, those of 2023 positive."""
-        result = calculate_applicable_delay(panel_delays, 'end', 'annual', aggregate_by_panel=True)
+    @pytest.mark.parametrize('target', ['monthly', 'quarterly', 'annual'])
+    def test_delay_from_the_end_does_not_depend_on_the_target_frequency(self, panel_delays, target):
+        """From the end, the delay is the lag after the end of the observation period: the same at every target."""
+        result = calculate_applicable_delay(panel_delays, 'end', target, aggregate_by_panel=True)
+        own = calculate_applicable_delay(panel_delays, 'end', 'monthly', aggregate_by_panel=True)
 
-        assert (result['delay'] < 0).any() and (result['delay'] > 0).any()
+        assert result['delay'].to_dict() == own['delay'].to_dict()
 
     def test_one_row_per_couple(self, heterogeneous_coverage_panel, panel_delays):
         """20 couples: 3 entities x 7 columns, ``climat_affaires`` being absent for Italy."""
@@ -151,7 +179,8 @@ class TestHeterogeneousPanel:
         """Default aggregation: median over the countries of each column (two of them for ``climat_affaires``)."""
         result = calculate_applicable_delay(panel_delays, 'start', 'M')
 
-        by_column = pd.Series({key: (DOWNLOAD - date).days for key, date in
+        frequencies = _frequencies(panel_delays)
+        by_column = pd.Series({key: _days_after_start(date, frequencies[key], 'M') for key, date in
                                _last_observations(heterogeneous_coverage_panel).items()})
         expected = by_column.groupby(level=1).median()
         assert result['delay'].to_dict() == expected.to_dict()
@@ -174,11 +203,10 @@ class TestHeterogeneousPanel:
 
         result = calculate_applicable_delay(panel_delays, 'start', target, aggregate_by_panel=True)
 
-        # Valeurs d'or : mensuel = début de la période de l'observation (la date elle-même) ; trimestriel = début
-        # du trimestre contenant la date ; annuel = 1er janvier de son année
-        start_of_period = {'monthly': lambda d: d, 'quarterly': lambda d: d.to_period('Q').start_time,
-                           'annual': lambda d: TS(year=d.year, month=1, day=1)}
-        expected = {key: (DOWNLOAD - start_of_period[target[key[1]]](date)).days for key, date in last.items()}
+        # Valeurs d'or : début de la période cible contenant le dernier jour de la période de l'observation
+        frequencies = _frequencies(panel_delays)
+        codes = {'monthly': 'M', 'quarterly': 'Q', 'annual': 'Y'}
+        expected = {key: _days_after_start(date, frequencies[key], codes[target[key[1]]]) for key, date in last.items()}
         assert result['delay'].to_dict() == expected
 
     def test_target_frequency_column_reports_each_indicator_frequency(self, panel_delays):
@@ -201,7 +229,8 @@ class TestHeterogeneousPanel:
         result = calculate_applicable_delay(panel_delays, 'start', 'M', aggregate_by_panel=True, unit=unit)
 
         # Valeurs d'or : 24 h ou 86 400 s par jour ; une semaine = 7 jours, arrondie au supérieur
-        expected = {key: from_days((DOWNLOAD - date).days)
+        frequencies = _frequencies(panel_delays)
+        expected = {key: from_days(_days_after_start(date, frequencies[key], 'M'))
                     for key, date in _last_observations(heterogeneous_coverage_panel).items()}
         assert result['delay'].to_dict() == expected
 
@@ -237,15 +266,17 @@ class TestIrregularTimeSeries:
         """One row per column, the isolated annual anchors not disturbing the monthly or quarterly columns."""
         result = calculate_applicable_delay(series_delays, 'end', 'M')
 
-        expected = {column: _days_from_start_of_month(date)
+        frequencies = _frequencies(series_delays)
+        expected = {column: _days_after_end(date, frequencies[column])
                     for column, date in _last_observations(irregular_index_timeseries).items()}
         assert result['delay'].to_dict() == expected
 
     def test_quarterly_target_counted_from_the_start(self, irregular_index_timeseries, series_delays):
-        """Quarterly target from the start of the quarter containing the last observation of each column."""
+        """Quarterly target from the start of the quarter containing the last day of each observation period."""
         result = calculate_applicable_delay(series_delays, 'start', 'Q')
 
-        expected = {column: _days_from_start_of_quarter(date)
+        frequencies = _frequencies(series_delays)
+        expected = {column: _days_after_start(date, frequencies[column], 'Q')
                     for column, date in _last_observations(irregular_index_timeseries).items()}
         assert result['delay'].to_dict() == expected
 

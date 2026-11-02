@@ -1,7 +1,7 @@
 """Resolution of delay parameters by ``PublicationDelayTransformer``.
 
-Scenarios: reference point, delay unit, accepted forms of ``delays``, missing delays and
-``default_values``.
+Scenarios: reference point, delay unit, frequency of the delays, accepted forms of ``delays``,
+missing delays and ``default_values``.
 """
 
 # Modules de base
@@ -124,12 +124,13 @@ class TestDelaysFormat:
             'GDP': {'n_periods': -2, 'frequency': 'M'}, 'CPI': {'n_periods': -1, 'frequency': 'M'}}
 
     def test_inferred_parameters_of_a_table(self):
-        """Unit, reference point and target frequency are read per variable from the table."""
+        """Unit, reference point and frequency (of the delay and of the mask) are read per variable from the table."""
         transformer = _fit(_monthly(), delays=_delays_frame())
         assert transformer.inferred_params_ == {
             'delay_unit': {'GDP': 'D', 'CPI': 'D'},
             'reference_point': {'GDP': 'start', 'CPI': 'start'},
-            'target_frequency': {'GDP': 'Q', 'CPI': 'Q'},
+            'target_frequency': {'GDP': 'M', 'CPI': 'M'},
+            'delay_frequency': {'GDP': 'M', 'CPI': 'M'},
         }
 
     def test_table_without_frequency_column(self):
@@ -256,6 +257,71 @@ class TestMissingDelays:
 
 
 # =============================================================================
+# Fréquence à laquelle les délais sont exprimés
+# =============================================================================
+def _quarterly_column() -> pd.DataFrame:
+    """Build a quarterly (``QS``) frame of 2022-2024 with a single ``GDP`` column."""
+    return pd.DataFrame({'GDP': np.arange(12.0)}, index=pd.date_range('2022-01-01', periods=12, freq='QS'))
+
+
+class TestDelayFrequency:
+    """A delay expressed at another frequency than its column: a period is published with its last sub-period.
+
+    From the end, the delay is the lag after the end of each observation, whatever its
+    frequency; from the start, it counts from the end of the observation minus the
+    period of the delay frequency containing its last day.
+    """
+
+    def test_quarterly_delay_from_the_end_is_the_monthly_lag(self):
+        """19 days after the quarter end = 19 days after each month end: same mask on 2024-03-15.
+
+        Valeur d'or : janvier (publié le 20 février) l'est, février (20 mars) et mars non -> n_obs = 2.
+        """
+        delays = _delays_frame(columns=('GDP',), delays=(19.0,), reference_point='end', frequency='Q')
+        from_table = _fit(_monthly(('GDP',)), delays=delays, strategy='mask', prediction_date='2024-03-15')
+        from_dict = _fit(_monthly(('GDP',)), delays={'GDP': 19.0}, delay_unit='D', reference_point='end',
+                         strategy='mask', target_frequency='Q', prediction_date='2024-03-15')
+        assert from_table.mask_params == from_dict.mask_params == {
+            'GDP': {'n_obs': 2, 'mask_frequency': 'Q', 'how': 'last', 'last_position': None}}
+
+    def test_quarterly_delay_from_the_start_counts_from_the_quarter(self):
+        """110 days from the start of Q1 2024 (91 days) = 19 days after each month end: -2 on 2024-03-15."""
+        transformer = _fit(_monthly(('GDP',)), delays={'GDP': 110.0}, delay_unit='D', reference_point='start',
+                           delay_frequency='Q', prediction_date='2024-03-15')
+        assert (transformer.shift_params['GDP']['n_periods'], transformer.delay_frequencies_) == (-2, {'GDP': 'Q'})
+
+    def test_explicit_delay_frequency_overrides_the_table(self):
+        """The table reads 110 days from the month start (November is the last published month, -4); 'Q' gives -2."""
+        delays = _delays_frame(columns=('GDP',), delays=(110.0,), frequency='M')
+        from_table = _fit(_monthly(('GDP',)), delays=delays, prediction_date='2024-03-15')
+        explicit = _fit(_monthly(('GDP',)), delays=delays, delay_frequency='Q', prediction_date='2024-03-15')
+        assert (from_table.shift_params['GDP']['n_periods'], explicit.shift_params['GDP']['n_periods']) == (-4, -2)
+
+    @pytest.mark.parametrize(
+        ('delays', 'kwargs'),
+        [
+            # Valeur d'or : 75 j depuis le début du dernier mois (1er mars + 75 j = 15 mai)
+            pytest.param({'GDP': 75.0}, {'reference_point': 'start', 'delay_frequency': 'M'}, id='monthly-start'),
+            # Valeur d'or : 44 j après la fin du trimestre (1er avril + 44 j = 15 mai)
+            pytest.param({'GDP': 44.0}, {'reference_point': 'end'}, id='quarterly-end'),
+        ],
+    )
+    def test_quarterly_column_with_a_monthly_delay(self, delays, kwargs):
+        """Q1 2024 published on May 15: on April 10, Q4 2023 is the last published quarter (-2).
+
+        Read from the start of the quarter, 75 days would publish Q1 on March 16 (-1).
+        """
+        transformer = _fit(_quarterly_column(), delays=delays, delay_unit='D', prediction_date='2024-04-10', **kwargs)
+        assert transformer.shift_params['GDP']['n_periods'] == -2
+
+    def test_quarterly_column_read_at_its_own_frequency(self):
+        """Without ``delay_frequency``, 75 days count from the quarter start: Q1 published March 16 (-1)."""
+        transformer = _fit(_quarterly_column(), delays={'GDP': 75.0}, delay_unit='D', reference_point='start',
+                           prediction_date='2024-04-10')
+        assert (transformer.shift_params['GDP']['n_periods'], transformer.delay_frequencies_) == (-1, {'GDP': 'Q'})
+
+
+# =============================================================================
 # Valeurs par défaut
 # =============================================================================
 class TestDefaultValues:
@@ -291,4 +357,5 @@ class TestDefaultValues:
                                                   prediction_date=PREDICTION)
         with pytest.warns(UserWarning, match="Imputed default target_frequency value 'Q' for column 'GDP'"):
             transformer.fit(_monthly(('GDP',)))
-        assert transformer.mask_params == {'GDP': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last'}}
+        assert transformer.mask_params == {
+            'GDP': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last', 'last_position': None}}

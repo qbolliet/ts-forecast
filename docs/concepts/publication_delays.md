@@ -39,8 +39,12 @@ différence entre les deux résultats.
 ### 2. Calculer le délai applicable — `calculate_applicable_delay()`
 
 Convertit un délai d'une fréquence / d'un point de référence à un autre (ex.
-« 45 jours depuis la fin du trimestre » → « n mois depuis le début »), en
-sélectionnant la sous-période qui contient la date d'observation.
+« 45 jours depuis la fin du trimestre » → « 76 jours depuis le début de son dernier
+mois »), selon une règle unique : une période est publiée avec sa dernière
+sous-période, chaque sous-période au même retard après sa fin. Le délai depuis la
+fin est donc le même à toute fréquence ; le délai depuis le début lui ajoute la
+durée de la période cible. Le transformateur relit la fréquence du tableau
+(`delay_frequency`) avec la même règle.
 
 ![Conversion du point de référence](../assets/reference_point_conversion.png)
 
@@ -52,7 +56,7 @@ date. Deux stratégies :
 
 | Stratégie | Effet | Quand |
 |-----------|-------|-------|
-| `mask` | met à `NaN` les valeurs non encore publiées, laisse les dates en place | conserver l'acquis, gérer les trous en aval |
+| `mask` | met à `NaN`, dans chaque période cible (`target_frequency`), les valeurs non encore publiées ou pas encore observées au même point de la période que `prediction_date` ; laisse les dates en place | conserver l'acquis, gérer les trous en aval |
 | `shift` | décale chaque série de son délai (la valeur de *t* apparaît à *t + délai*) | aligner toutes les séries sur ce qui est réellement disponible à chaque ligne |
 
 ![Comparaison des deux stratégies](../assets/approach_comparison.png)
@@ -64,7 +68,9 @@ telle quelle (avec un avertissement).
 - **Délais** : un dictionnaire `{colonne: délai}`, ou un tableau avec une ligne par
   variable (colonne `delay`, et en option `unit`, `reference_point`, `frequency`),
   la variable étant dans une colonne `column` ou dans l'index — la sortie de
-  `calculate_applicable_delay` s'utilise donc telle quelle. Un délai `NaN` est un
+  `calculate_applicable_delay` s'utilise donc telle quelle. La colonne `frequency`
+  est la fréquence à laquelle les délais sont exprimés (`delay_frequency`) et,
+  par défaut, la fréquence cible du masque. Un délai `NaN` est un
   délai inconnu. Chaque paramètre se résout par variable : argument explicite
   (valeur unique ou dictionnaire par variable), puis tableau, puis
   `default_values` (clés `delay`, `unit`, `reference_point`, et `target_frequency`
@@ -102,10 +108,16 @@ acceptent ensuite une seule observation.
   *t* apparaisse à *t + délai*. Le décalage est une arithmétique calendaire date
   par date : il reste exact sur un index lacunaire ou irrégulier, et
   `inverse_transform` restitue l'entrée à l'identique.
-- **`MaskTransformer(n_obs, mask_frequency, how)`** met à `NaN` les
+- **`MaskTransformer(n_obs, mask_frequency, how, last_position)`** met à `NaN` les
   observations situées sur les `n_obs` dernières (`how='last'`) ou premières
   (`how='first'`) **positions calendaires** de chaque période de
-  `mask_frequency`, comptées sur la grille régulière de l'index. Une position
+  `mask_frequency`, comptées sur la grille régulière de l'index. `last_position`
+  coupe chaque période à une position comptée depuis son début : les positions
+  suivantes sont masquées, et `how='last'` compte ses `n_obs` positions à rebours
+  depuis elle. `PublicationDelayTransformer` s'en sert pour une prédiction en cours
+  de période : chaque période de l'historique est vue au même point de son cours
+  que la date de prédiction dans la sienne (au 15 février, chaque trimestre est vu
+  à son deuxième mois), sans jamais montrer une valeur non encore publiée. Une position
   absente des données (bord de série, lacune, index irrégulier) ne masque rien :
   aucune observation n'est masquée parce qu'une voisine manque. Les cellules
   masquées par chaque `transform` depuis le `fit` sont conservées ;

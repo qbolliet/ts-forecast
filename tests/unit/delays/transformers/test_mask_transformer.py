@@ -1,7 +1,7 @@
 """Unit tests for ``MaskTransformer`` (``tsforecast.delays.transformers``).
 
 Covers the public API of the class: ``__init__`` (``n_obs``, ``mask_frequency``,
-``how``), the sklearn protocol (``get_params`` / ``set_params``, ``clone``,
+``how``, ``last_position``), the sklearn protocol (``get_params`` / ``set_params``, ``clone``,
 ``check_is_fitted``), ``fit``, ``transform`` and ``inverse_transform``. The
 private helpers ``_mask_n_obs_per_period``, ``_extend_period_if_incomplete`` and
 ``_generate_periods`` are exercised through ``transform`` only.
@@ -12,11 +12,12 @@ observations on the last ``n_obs`` **positions** of the regular grid of the
 index frequency detected at ``fit``, ``how='first'`` those on the first ones.
 Positions are calendar positions everywhere: a position absent from the data
 (start or end of the series, gap, irregular index) masks nothing, and an
-observation is never masked because a neighbouring one is missing. This is the
-purpose of the class within ``PublicationDelayTransformer``: reproduce, in every
-period of the history, the information missing at the same position of the
-period as the prediction date, without treating as unavailable an observation
-that is.
+observation is never masked because a neighbouring one is missing.
+``last_position`` cuts every period at a position counted from its start (later
+positions masked, ``how='last'`` counted back from it). This is the purpose of
+the class within ``PublicationDelayTransformer``: reproduce, in every period of
+the history, the information missing at the same position of the period as the
+prediction date, without treating as unavailable an observation that is.
 
 Gold values are computed from the calendar, never copied from the output of the
 code. The masked cells are stored at each ``transform`` call since ``fit`` (the
@@ -132,9 +133,9 @@ class TestSklearnProtocol:
     """``MaskTransformer`` follows the sklearn estimator conventions."""
 
     def test_get_params_returns_the_constructor_arguments(self):
-        """``get_params`` exposes ``n_obs``, ``mask_frequency`` and ``how``."""
+        """``get_params`` exposes ``n_obs``, ``mask_frequency``, ``how`` and ``last_position``."""
         params = MaskTransformer(n_obs=2, mask_frequency='Q', how='first').get_params()
-        assert params == {'n_obs': 2, 'mask_frequency': 'Q', 'how': 'first'}
+        assert params == {'n_obs': 2, 'mask_frequency': 'Q', 'how': 'first', 'last_position': None}
 
     def test_how_defaults_to_last(self):
         """``how`` defaults to ``'last'``."""
@@ -148,8 +149,8 @@ class TestSklearnProtocol:
 
     def test_clone_keeps_the_parameters(self):
         """``clone`` rebuilds an estimator with the same parameters."""
-        params = clone(MaskTransformer(n_obs=3, mask_frequency='M', how='first')).get_params()
-        assert params == {'n_obs': 3, 'mask_frequency': 'M', 'how': 'first'}
+        params = clone(MaskTransformer(n_obs=3, mask_frequency='M', how='first', last_position=20)).get_params()
+        assert params == {'n_obs': 3, 'mask_frequency': 'M', 'how': 'first', 'last_position': 20}
 
     def test_clone_drops_the_masked_cells(self):
         """A clone of a transformed masker is unfitted and stores nothing."""
@@ -260,6 +261,64 @@ class TestMaskGoldValues:
         original = _series()
         MaskTransformer(n_obs=2, mask_frequency='Q').fit_transform(original)
         assert original.notna().all()
+
+
+# =============================================================================
+# Coupure des périodes à une position (last_position)
+# =============================================================================
+class TestLastPosition:
+    """``last_position`` cuts every period: later positions masked, ``how='last'`` counted back from it."""
+
+    @pytest.mark.parametrize(
+        'n_obs, how, expected',
+        [
+            # Valeur d'or : trimestres vus à leur deuxième mois, un mois non publié -> seul le premier mois reste
+            pytest.param(1, 'last', ['2024-01', '2024-04', '2024-07', '2024-10'], id='1-last'),
+            # Valeur d'or : rien de non publié -> les deux premiers mois restent, le troisième n'est pas encore observé
+            pytest.param(0, 'last', ['2024-01', '2024-02', '2024-04', '2024-05', '2024-07', '2024-08',
+                                     '2024-10', '2024-11'], id='0-last'),
+            # Valeur d'or : premier mois masqué, troisième non observé -> seul le deuxième mois reste
+            pytest.param(1, 'first', ['2024-02', '2024-05', '2024-08', '2024-11'], id='1-first'),
+        ],
+    )
+    def test_quarters_cut_at_their_second_month(self, n_obs, how, expected):
+        """Monthly series, quarters cut at position 1: the visible months of each quarter."""
+        masked = MaskTransformer(n_obs=n_obs, mask_frequency='Q', how=how, last_position=1).fit_transform(_series())
+        assert masked.dropna().index.strftime('%Y-%m').tolist() == expected
+
+    def test_positions_are_counted_from_the_period_start(self):
+        """Daily series, months cut at position 29 (the 30th), two unpublished days: the 29th onwards is masked.
+
+        Gold value: positions 28 onwards are masked in every month, February 2024
+        included (its 29th, position 28, is its last day): positions are counted from
+        the start of the period, not from its end.
+        """
+        masked = MaskTransformer(n_obs=2, mask_frequency='M', last_position=29).fit_transform(
+            _daily('2024-01-01', '2024-03-31'))
+        assert _masked_dates(masked) == (_days('2024-01', range(29, 32)) + ['2024-02-29']
+                                         + _days('2024-03', range(29, 32)))
+
+    def test_last_position_beyond_every_period_keeps_the_whole_periods(self):
+        """A cut after the last position of every period behaves like no cut: the last ``n_obs`` counted from it."""
+        masked = MaskTransformer(n_obs=0, mask_frequency='Q', last_position=5).fit_transform(_series())
+        assert masked.equals(_series())
+
+    def test_round_trip(self):
+        """``inverse_transform`` puts back the cells hidden by the cut."""
+        series = _series()
+        masker = MaskTransformer(n_obs=1, mask_frequency='Q', last_position=1)
+        assert masker.inverse_transform(masker.fit_transform(series)).equals(series)
+
+    def test_negative_last_position_raises(self):
+        """A negative position is rejected."""
+        with pytest.raises(ValueError, match="'last_position' must be a non-negative integer, got -1"):
+            MaskTransformer(n_obs=1, mask_frequency='Q', last_position=-1).fit(_series())
+
+    @pytest.mark.parametrize('value', [pytest.param(1.5, id='float'), pytest.param(True, id='bool')])
+    def test_non_integer_last_position_raises(self, value):
+        """``last_position`` must be an integer."""
+        with pytest.raises(TypeError, match="'last_position' must be an integer"):
+            MaskTransformer(n_obs=1, mask_frequency='Q', last_position=value).fit(_series())
 
 
 # =============================================================================

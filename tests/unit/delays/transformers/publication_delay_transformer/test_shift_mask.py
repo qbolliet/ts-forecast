@@ -1,6 +1,7 @@
 """Shift and mask resolution of ``PublicationDelayTransformer``.
 
-Scenarios: gold shift values, calendar boundaries, mask parameters, strategy per
+Scenarios: gold shift values, calendar boundaries, mask parameters, position of the
+prediction date in its target period (no unpublished value visible), strategy per
 variable and masks with nothing to hide.
 """
 
@@ -173,9 +174,13 @@ class TestMaskParams:
     """Mask strategy: number of index observations hidden in each target period.
 
     ``n_obs`` is the number of index periods not yet published at the prediction
-    date, counted on the calendar; masking is possible while
-    ``n_obs`` is below the number of column periods in a target period, otherwise
-    the column falls back to a shift.
+    date, counted on the calendar. A prediction in the last index period of its
+    target period sees every target period at its end (``last_position=None``):
+    masking is possible while ``n_obs`` is below the number of index periods in
+    a target period. A prediction at position ``p`` of its target period cuts every
+    target period at ``p`` (``last_position=p``): masking is possible while at least
+    the first position is published (``n_obs <= p``). Otherwise the column falls
+    back to a shift.
     """
 
     @pytest.mark.parametrize(
@@ -185,15 +190,27 @@ class TestMaskParams:
             pytest.param(5.0, 'start', 5, id='5d-start'),
             # Valeur d'or : depuis la fin du jour, le 9 mars est publié le 15 ; 10 -> 15 mars -> 6
             pytest.param(5.0, 'end', 6, id='5d-end'),
-            # Valeur d'or : le 28 février (fin le 29) est publié le 15 mars ; 29 février -> 15 mars -> 16
-            pytest.param(15.0, 'end', 16, id='15d-end'),
         ],
     )
     def test_daily_series_masked_by_month(self, delay, reference_point, expected):
-        """On a daily series, one day is masked per day of delay not yet elapsed."""
+        """On a daily series, one day is masked per day of delay not yet elapsed, months cut at the 15th.
+
+        The 15th of March is position 14 of its month: every month is seen as on its 15th.
+        """
         transformer = _fit(_daily(), delays={'GDP': delay}, strategy='mask', delay_unit='D',
                            reference_point=reference_point, target_frequency='M', prediction_date='2024-03-15')
-        assert transformer.mask_params == {'GDP': {'n_obs': expected, 'mask_frequency': 'M', 'how': 'last'}}
+        assert transformer.mask_params == {
+            'GDP': {'n_obs': expected, 'mask_frequency': 'M', 'how': 'last', 'last_position': 14}}
+
+    def test_daily_series_without_published_day_of_the_month_falls_back(self):
+        """15 days from the day end: no day of March is published on March 15, the column is shifted.
+
+        Gold value: March 1 (end March 2) is published on March 17; February 28 (end
+        February 29) on March 15: 16 unpublished days, more than the 15 elapsed.
+        """
+        transformer = _fit(_daily(), delays={'GDP': 15.0}, strategy='mask', delay_unit='D', reference_point='end',
+                           target_frequency='M', prediction_date='2024-03-15')
+        assert (transformer.mask_params, transformer.shift_params) == ({}, {'GDP': {'n_periods': -16, 'frequency': 'D'}})
 
     @pytest.mark.parametrize(
         'target_frequency',
@@ -207,29 +224,35 @@ class TestMaskParams:
         """
         transformer = _fit(_monthly(('GDP',)), delays={'GDP': 20.0}, strategy='mask', delay_unit='D',
                            reference_point='start', target_frequency=target_frequency)
-        assert transformer.mask_params == {'GDP': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last'}}
+        assert transformer.mask_params == {
+            'GDP': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last', 'last_position': None}}
 
     def test_target_frequency_inferred_from_the_table(self):
-        """The ``frequency`` column of the delays table is the target frequency."""
-        transformer = _fit(_monthly(('GDP',)), delays=_delays_frame(columns=('GDP',), delays=(20.0,)), strategy='mask')
-        assert transformer.mask_params['GDP']['mask_frequency'] == 'Q'
+        """The ``frequency`` column of the delays table is the target frequency (and the frequency of the delay).
+
+        Valeur d'or : 10 jours après la fin de chaque mois ; au 15 décembre, novembre (publié le 11) l'est,
+        décembre non -> un mois masqué par trimestre.
+        """
+        delays = _delays_frame(columns=('GDP',), delays=(10.0,), reference_point='end', frequency='Q')
+        transformer = _fit(_monthly(('GDP',)), delays=delays, strategy='mask')
+        assert (transformer.mask_params['GDP']['mask_frequency'], transformer.mask_params['GDP']['n_obs']) == ('Q', 1)
 
     @pytest.mark.parametrize(
         ('delay', 'masked'),
         [
-            # Valeur d'or : 27 jours, le 16 février est publié le 15 mars ; 17 février -> 15 mars non publiés :
-            # 12 + 15 = 27 jours < 28 jours de février 2023 -> masquage
+            # Valeur d'or : 27 jours, le 4 mars est publié le 31 ; 5 -> 31 mars non publiés :
+            # 27 jours < 28 jours de février 2023 -> masquage
             pytest.param(27.0, True, id='27d-masked'),
-            # Valeur d'or : 28 jours, 16 février -> 15 mars non publiés : 13 + 15 = 28 jours, tout février
+            # Valeur d'or : 28 jours, 4 -> 31 mars non publiés : 28 jours, tout février
             # serait masqué -> repli sur le décalage (un mois de 30 jours le laissait masquer)
             pytest.param(28.0, False, id='28d-whole-february'),
         ],
     )
     def test_whole_february_cannot_be_masked(self, delay, masked):
-        """Daily series masked by month: the check counts the 28 days of February 2023, not 30 days."""
+        """Daily series masked by month at a month end: the check counts the 28 days of February 2023, not 30."""
         X = pd.DataFrame({'GDP': np.arange(90.0)}, index=pd.date_range('2023-01-01', periods=90, freq='D'))
         transformer = _fit(X, delays={'GDP': delay}, strategy='mask', delay_unit='D', reference_point='start',
-                           target_frequency='M', prediction_date='2023-03-15')
+                           target_frequency='M', prediction_date='2023-03-31')
         assert ('GDP' in transformer.mask_params, 'GDP' in transformer.shift_params) == (masked, not masked)
 
     def test_period_index_is_masked_like_its_month_starts(self):
@@ -238,22 +261,23 @@ class TestMaskParams:
         X.index = X.index.to_period('M')
         transformer = _fit(X, delays={'GDP': 20.0}, strategy='mask', delay_unit='D', reference_point='start',
                            target_frequency='Q')
-        assert transformer.mask_params == {'GDP': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last'}}
+        assert transformer.mask_params == {
+            'GDP': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last', 'last_position': None}}
 
     @pytest.mark.parametrize(
         ('delay', 'masked'),
         [
-            # Valeur d'or : 3 jours non publiés au 20 février (18 -> 20) : moins qu'une quinzaine -> masquage
+            # Valeur d'or : 3 jours non publiés au 29 février (27 -> 29) : moins qu'une quinzaine -> masquage
             pytest.param(3.0, True, id='3d-masked'),
-            # Valeur d'or : 1er -> 20 février non publiés, 20 jours, plus qu'aucune quinzaine -> décalage
+            # Valeur d'or : 10 -> 29 février non publiés, 20 jours, plus qu'aucune quinzaine -> décalage
             pytest.param(20.0, False, id='20d-whole-semi-month'),
         ],
     )
     def test_semi_monthly_target(self, delay, masked):
-        """Semi-monthly target periods (no pandas ``Period``): the check uses a semi-month of 15 days."""
+        """Semi-monthly target periods (no pandas ``Period``), seen at their end: a semi-month of 15 days."""
         X = pd.DataFrame({'GDP': np.arange(60.0)}, index=pd.date_range('2024-01-01', periods=60, freq='D'))
         transformer = _fit(X, delays={'GDP': delay}, strategy='mask', delay_unit='D', reference_point='start',
-                           target_frequency='SM', prediction_date='2024-02-20')
+                           target_frequency='SM', prediction_date='2024-02-29')
         assert ('GDP' in transformer.mask_params, 'GDP' in transformer.shift_params) == (masked, not masked)
 
     def test_last_maskable_number_of_months(self):
@@ -287,6 +311,87 @@ class TestMaskParams:
 
 
 # =============================================================================
+# Position de la date de prédiction dans sa période cible
+# =============================================================================
+def _quarterly_view(X: pd.DataFrame, delay: float, reference_point: str, prediction_date: str):
+    """Fit a quarterly mask on ``X`` and return the fitted transformer and its output (warnings silenced)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        transformer = PublicationDelayTransformer(delays={'GDP': delay}, strategy='mask', delay_unit='D',
+                                                  reference_point=reference_point, target_frequency='Q',
+                                                  prediction_date=prediction_date)
+        return transformer, transformer.fit_transform(X)
+
+
+def _publication_date(month: pd.Timestamp, delay: float, reference_point: str) -> pd.Timestamp:
+    """Publication date of a monthly observation: its start (or the start of the next month) plus the delay."""
+    origin = month if reference_point == 'start' else month + pd.offsets.MonthBegin()
+    return origin + pd.Timedelta(days=delay)
+
+
+class TestMaskAtThePredictionPosition:
+    """Every target period is seen as it is at the position of the prediction date in its own period.
+
+    The mask never leaves visible a value of the prediction's target period that is
+    not published at the prediction date, and every other target period keeps the
+    same positions.
+    """
+
+    def test_mid_quarter_prediction_keeps_the_published_months_only(self):
+        """February 15, 10 days from the end: January is published (February 11), February is not.
+
+        Gold value: each quarter keeps its first month only; its second month is
+        unpublished and its third one not observed yet on February 15.
+        """
+        X = pd.DataFrame({'GDP': np.arange(13.0)}, index=pd.date_range('2020-01-01', periods=13, freq='MS'))
+        transformer, masked = _quarterly_view(X, 10.0, 'end', '2021-02-15')
+        assert (transformer.mask_params['GDP'], masked['GDP'].dropna().index.month.unique().tolist()) == (
+            {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last', 'last_position': 1}, [1, 4, 7, 10])
+
+    def test_mid_quarter_prediction_without_published_month_falls_back_to_the_shift(self):
+        """February 15, 45 days from the end: January is published on March 18, nothing of Q1 is known.
+
+        A mask keeping January of every quarter would show January 2021 on February 15,
+        before its publication: the column is shifted instead (December, published
+        February 15, is the last visible value), with a warning.
+        """
+        X = pd.DataFrame({'GDP': np.arange(13.0)}, index=pd.date_range('2020-01-01', periods=13, freq='MS'))
+        transformer = PublicationDelayTransformer(delays={'GDP': 45.0}, strategy='mask', delay_unit='D',
+                                                  reference_point='end', target_frequency='Q',
+                                                  prediction_date='2021-02-15')
+        with pytest.warns(UserWarning, match="Could not mask the column 'GDP'"):
+            transformer.fit(X)
+        assert (transformer.mask_params, transformer.shift_params) == ({}, {'GDP': {'n_periods': -2, 'frequency': 'M'}})
+
+    @pytest.mark.parametrize('reference_point', ['start', 'end'])
+    @pytest.mark.parametrize('delay', [5.0, 20.0, 40.0, 70.0])
+    def test_no_unpublished_value_is_visible(self, delay, reference_point):
+        """Prediction on the 10th and the 25th of every month of 2024, monthly series, quarterly mask.
+
+        For each date: masked iff a month of its quarter is published; the visible
+        months of its quarter are exactly the published ones; every quarter of the
+        history keeps the same positions.
+        """
+        X = pd.DataFrame({'GDP': np.arange(48.0)}, index=pd.date_range('2021-01-01', periods=48, freq='MS'))
+        prediction_dates = [TS(f'2024-{month:02d}-{day}') for month in range(1, 13) for day in (10, 25)]
+        for prediction_date in prediction_dates:
+            transformer, masked = _quarterly_view(X, delay, reference_point, str(prediction_date.date()))
+            quarter = X.index[X.index.to_period('Q') == prediction_date.to_period('Q')]
+            published = [month for month in quarter if month <= prediction_date
+                         and _publication_date(month, delay, reference_point) <= prediction_date]
+            # Masquage possible si et seulement si un mois du trimestre est publié
+            assert ('GDP' in transformer.mask_params) == bool(published), prediction_date
+            if not published:
+                continue
+            visible = masked['GDP'].dropna().index
+            # Mois visibles du trimestre de la prédiction : exactement les mois publiés
+            assert list(visible[visible.to_period('Q') == prediction_date.to_period('Q')]) == published, prediction_date
+            # Mêmes positions dans tous les trimestres
+            positions = {(month.month - 1) % 3 for month in published}
+            assert set((visible.month - 1) % 3) == positions, prediction_date
+
+
+# =============================================================================
 # Stratégie
 # =============================================================================
 class TestStrategy:
@@ -313,7 +418,7 @@ class TestStrategy:
                            delay_unit='D', reference_point='start', target_frequency={'CPI': 'Q'})
         assert (transformer.shift_params, transformer.mask_params) == (
             {'GDP': {'n_periods': -2, 'frequency': 'M'}},
-            {'CPI': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last'}})
+            {'CPI': {'n_obs': 1, 'mask_frequency': 'Q', 'how': 'last', 'last_position': None}})
 
     def test_delayed_column_without_strategy_is_left_unchanged(self):
         """A column with a delay but absent from the strategy dict is announced and left unchanged."""

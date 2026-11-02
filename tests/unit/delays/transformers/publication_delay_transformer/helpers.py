@@ -54,7 +54,7 @@ def _fit(X: pd.DataFrame, **kwargs) -> PublicationDelayTransformer:
 
 
 def _delays_frame(columns=('GDP', 'CPI'), delays=(45.0, 20.0), unit='D', reference_point='start',
-                  frequency='Q') -> pd.DataFrame:
+                  frequency='M') -> pd.DataFrame:
     """Build a flat delays table with the columns expected by the transformer.
 
     Args:
@@ -62,7 +62,8 @@ def _delays_frame(columns=('GDP', 'CPI'), delays=(45.0, 20.0), unit='D', referen
         delays: Delay of each variable.
         unit: Unit of every delay.
         reference_point: Reference point of every delay.
-        frequency: Target frequency of every delay.
+        frequency: Frequency at which every delay is expressed (and default target
+            frequency of the mask).
 
     Returns:
         Table with the columns ``column``, ``delay``, ``unit``, ``reference_point``, ``frequency``.

@@ -3114,6 +3114,88 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   et entiers ; deux causes de vide ; rapport)
 - **Statut** : corrigée (dates : 2026-10-20 ; chaînes : 2026-10-21)
 
+### ANO-DELAYS-046 — Stratégie `'mask'` : une valeur non publiée à la date de prédiction reste visible en cours de période
+- **Type** : [CODE] fuite d'information
+- **Composant** : `tsforecast/delays/transformers.py::PublicationDelayTransformer._compute_mask_periods`,
+  `MaskTransformer._rows_to_mask`
+- **Sévérité** : majeure (fuite silencieuse dans toute évaluation utilisant le masque)
+- **Observé** : le masque cachait les `n_obs` **dernières** positions de chaque période cible, `n_obs` étant le nombre
+  de périodes de l'index non publiées à `prediction_date`. Ce n'est l'information disponible que si `prediction_date`
+  tombe dans la dernière période de l'index de sa période cible. En cours de période, les positions cachées sont
+  décalées vers la fin : index mensuel, cible `'Q'`, délai de 45 jours depuis la fin, prédiction au 15 février 2021 →
+  `n_obs=2`, février et mars masqués, **janvier 2021 visible** alors qu'il n'est publié que le 18 mars ; idem à
+  l'échelle du jour (au 15 mars, 5 jours de délai : les 27–31 de chaque mois cachés, les 11–15 visibles). La
+  documentation présentait ce cas comme un masquage valide (« seul le premier mois est conservé »).
+- **Attendu** : chaque période cible vue au même point de son cours que `prediction_date` dans la sienne : positions
+  postérieures à celle de la prédiction masquées (pas encore observées), ainsi que les `n_obs` positions qui la
+  précèdent ; repli sur le décalage quand rien de la période cible n'est publié.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays import PublicationDelayTransformer
+  X = pd.DataFrame({'ip': np.arange(13.0)}, index=pd.date_range('2020-01-01', periods=13, freq='MS'))
+  t = PublicationDelayTransformer(delays={'ip': 45}, prediction_date='2021-02-15', strategy='mask',
+                                  target_frequency='Q', delay_unit='D', reference_point='end')
+  t.fit_transform(X).loc['2021-01-01', 'ip']   # 12.0, attendu : non visible (repli sur le décalage)
+  ```
+- **Test** : `tests/unit/delays/transformers/publication_delay_transformer/test_shift_mask.py::TestMaskAtThePredictionPosition`
+  (cas signalé, repli, propriété « aucune valeur non publiée visible » sur 24 dates × 4 délais × 2 points de
+  référence) ; `tests/unit/delays/transformers/test_mask_transformer.py::TestLastPosition`
+- **Correctif** (2026-10-30) : `MaskTransformer` reçoit `last_position` (dernière position visible de chaque période,
+  comptée depuis son début ; positions suivantes masquées, `how='last'` compté à rebours depuis elle).
+  `PublicationDelayTransformer` situe la période de l'index de `prediction_date` dans sa période cible
+  (`_period_position`) : dans la dernière, comportement inchangé (`last_position=None`, contrôle par le plus petit
+  nombre de sous-périodes) ; sinon `last_position` = position de la prédiction, masquage possible si `n_obs <= p`,
+  repli sur le décalage sinon. `mask_params` porte la clé `last_position`. Scénarios d'intégration
+  (`test_cross_validation.py`, `test_panel_workflow.py`, `test_string_labels.py::test_delay_factory`) : date de
+  prédiction passée du 15 août au 15 septembre 2024, qui réalise le masque qu'ils décrivent (1 et 2 mois cachés par
+  trimestre, valeurs d'or inchangées) ; au 15 août le chômage (2 mois non publiés en position 1) bascule désormais
+  vers le décalage. Tutoriel §4.3.4 / §4.3.5 et page concept mis à jour.
+- **Statut** : corrigée
+
+### ANO-DELAYS-047 — Délais exprimés à une autre fréquence : conversion dépendant de la position, relecture à la fréquence de la colonne
+- **Type** : [CODE] fuite d'information / incohérence entre composants
+- **Composant** : `tsforecast/delays/calculator.py::_calculate_converted_delay`,
+  `tsforecast/delays/transformers.py::_count_unpublished_periods`, `PublicationDelayTransformer`, `_entity_kwargs`
+- **Sévérité** : majeure
+- **Observé** : (1) vers une fréquence plus faible, `calculate_applicable_delay` comptait chaque délai depuis la période
+  englobante : un indice publié 19 jours après chaque fin de mois valait −41 j (janvier), ≈ −10 j (février), +19 j
+  (mars) au pas trimestriel `'end'`, et l'agrégation mélangeait ces positions ; (2) vers une fréquence plus élevée, la
+  sous-période retenue était celle de `observation_date`, soit le **premier** mois d'un trimestre daté de son début
+  (convention du paquet) ; (3) `PublicationDelayTransformer` comptait toujours le délai depuis la période de la
+  colonne et ne lisait la colonne `frequency` du tableau que comme fréquence du masque. Un délai mensuel converti à
+  `frequency='Q'` (−41 j) était relu depuis la fin du mois : au 15 mars, aucun mois masqué alors que février et mars
+  ne sont pas publiés.
+- **Attendu** (arbitrage de l'auteur, 2026-10-30) : la fréquence cible est la fréquence de référence du délai et du
+  masque ; une période plus faible est formée de ses sous-périodes.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from tsforecast.delays import compare_and_detect_delays, calculate_applicable_delay, PublicationDelayTransformer
+  idx = pd.date_range('2023-01-01', periods=13, freq='MS')
+  new = pd.DataFrame({'ipc': np.arange(13.0)}, index=idx); old = new.copy(); old.iloc[-1] = np.nan
+  d = compare_and_detect_delays(new, old, download_date='2024-02-20', reference_point='end')
+  table = calculate_applicable_delay(d, reference_point='end', frequency='Q')   # -41 j
+  PublicationDelayTransformer(delays=table, prediction_date='2024-03-15', strategy='mask').fit(new).mask_params
+  # n_obs = 0, attendu 2
+  ```
+- **Test** : `tests/integration/delays/test_workflow.py::TestDelaysAtAnotherFrequency` (détection exacte → délai
+  applicable à M, Q, Y → décalage et masque identiques à ceux des vrais retards ; depuis le début, jamais de valeur
+  avancée) ; `tests/unit/delays/transformers/publication_delay_transformer/test_delays_resolution.py::TestDelayFrequency` ;
+  valeurs d'or recalculées de `tests/unit/delays/calculator/test_frequency_conversion.py`,
+  `test_units_and_selection.py::TestContractWithDataManager`, `tests/integration/delays/test_applicable_delay_realistic.py`
+- **Correctif** (2026-10-30) : règle unique — une période est publiée avec sa dernière sous-période, chaque
+  sous-période au même retard après sa fin. `_calculate_converted_delay` : délai `'end'` = téléchargement − fin
+  (exclusive) de la période de l'observation, à toute fréquence cible ; `'start'` = idem + durée de la période cible
+  contenant le dernier instant de l'observation (la date d'étiquetage n'intervient plus). `PublicationDelayTransformer`
+  reçoit `delay_frequency` (explicite > colonne `frequency` du tableau > fréquence de la colonne ; attribut
+  `delay_frequencies_`) et calcule l'origine du délai par `_delay_origin` selon la même règle ; les fabriques par entité
+  transmettent `delay_frequency`. Effet de bord : un délai `'start'` d'une colonne plus grossière que l'index (masque)
+  part du début de la période de la colonne, non plus de celui de la période de l'index. Tableaux de délais des tests
+  qui portaient `frequency='Q'` pour des délais mensuels comptés depuis le début : exprimés au mois (`_delays_frame`)
+  ou en délais trimestriels comptés depuis la fin.
+- **Statut** : corrigée
+
 ### Arbitrages de l'auteur (2026-10-04) sur `compare_and_detect_delays`
 - **Fuseaux horaires** : une date sans fuseau est lue en UTC face à une date avec fuseau ; deux dates avec fuseaux sont
   comparées comme des instants ; la colonne `download_date` garde la date telle que fournie. (Auparavant : `TypeError`

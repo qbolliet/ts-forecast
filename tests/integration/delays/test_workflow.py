@@ -8,6 +8,9 @@ forecast would:
   ``PublicationDelayTransformer`` (directly, or per entity through
   ``PanelwiseTransformer``), on small time series / panels with gold values
   computed by hand from the calendar;
+- the same chain with delays converted to another frequency (monthly columns,
+  delays expressed at M, Q or Y): the transformer reads them back to the true
+  publication dates;
 - the same chain on the realistic panel of notebook 3
   (``heterogeneous_coverage_panel``): two downloads, delays measured per
   (entity, column), one delay per column applied to the whole panel, and a
@@ -249,6 +252,85 @@ class TestMultiFrequencyWorkflow:
             detected, reference_point='start',
             frequency={'monthly_indicator': 'M', 'quarterly_indicator': 'Q'}, aggregation_method='median')
         assert applicable['delay'].to_dict() == {'monthly_indicator': 44.0, 'quarterly_indicator': 105.0}
+
+
+# =============================================================================
+# Délais exprimés à une autre fréquence que celle des colonnes
+# =============================================================================
+# Retard de publication après la fin de chaque mois, en jours
+MONTHLY_LAGS = {'ipc': 19, 'production': 50}
+
+
+class TestDelaysAtAnotherFrequency:
+    """Delays converted by ``calculate_applicable_delay`` to M, Q or Y, then applied: the same publications.
+
+    Each month is published a constant number of days after its end; every publication is
+    downloaded the instant it happens, so that the detected delays are exact. A period is
+    published with its last sub-period, every sub-period at the same lag after its end: the
+    delay from the end is the monthly lag at every frequency, and the transformer reads a
+    table at its ``frequency`` back to the same publication dates.
+    """
+
+    @pytest.fixture(scope='class')
+    def detections(self):
+        """Detected delays (from the start and from the end) of two monthly columns, 2022-2024."""
+        index = pd.date_range('2022-01-01', '2024-12-01', freq='MS')
+        data = pd.DataFrame({column: np.arange(len(index), dtype=float) for column in MONTHLY_LAGS}, index=index)
+        published = pd.DataFrame({column: index + pd.offsets.MonthBegin() + pd.Timedelta(days=lag)
+                                  for column, lag in MONTHLY_LAGS.items()}, index=index)
+        downloads = sorted(set(published.stack()) - {published.min().min()})
+        detected = {}
+        for reference_point in ('start', 'end'):
+            detected[reference_point] = pd.concat([
+                compare_and_detect_delays(new_data=data.where(published <= current),
+                                          existing_data=data.where(published <= previous),
+                                          download_date=current, reference_point=reference_point)
+                for previous, current in zip([published.min().min()] + downloads[:-1], downloads)
+            ])
+        return data, detected
+
+    @staticmethod
+    def _parameters(data, delays, prediction_date, **kwargs):
+        """Fit a shift and a quarterly mask, return their parameters (fallback warnings silenced)."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            shifter = PublicationDelayTransformer(delays=delays, prediction_date=prediction_date, **kwargs).fit(data)
+            masker = PublicationDelayTransformer(delays=delays, prediction_date=prediction_date, strategy='mask',
+                                                 target_frequency='Q', **kwargs).fit(data)
+        return shifter.shift_params, masker.mask_params, masker.shift_params
+
+    @pytest.mark.parametrize('frequency', ['M', 'Q', 'Y'])
+    def test_delay_from_the_end_is_the_monthly_lag(self, detections, frequency):
+        """From the end, every detection gives the monthly lag (19 and 50 days) at every frequency: so does the median."""
+        _, detected = detections
+        applicable = calculate_applicable_delay(detected['end'], reference_point='end', frequency=frequency,
+                                                aggregation_method='median')
+        assert applicable['delay'].to_dict() == MONTHLY_LAGS
+
+    @pytest.mark.parametrize('frequency', ['M', 'Q', 'Y'])
+    def test_table_from_the_end_gives_the_true_publications(self, detections, frequency):
+        """Shift and quarterly mask of the converted table equal those of the true lags, on 2024 prediction dates."""
+        data, detected = detections
+        table = calculate_applicable_delay(detected['end'], reference_point='end', frequency=frequency,
+                                           aggregation_method='median')
+        for prediction_date in pd.date_range('2024-01-10', '2024-12-31', freq='SMS') + pd.Timedelta(days=9):
+            truth = self._parameters(data, MONTHLY_LAGS, prediction_date, delay_unit='D', reference_point='end')
+            assert self._parameters(data, table, prediction_date) == truth, prediction_date
+
+    @pytest.mark.parametrize('frequency', ['M', 'Q', 'Y'])
+    def test_table_from_the_start_never_shows_an_unpublished_value(self, detections, frequency):
+        """From the start, the maximum over months of unequal lengths may delay a value, never advance it.
+
+        The number of unpublished periods of the converted table is at least the true one.
+        """
+        data, detected = detections
+        table = calculate_applicable_delay(detected['start'], reference_point='start', frequency=frequency,
+                                           aggregation_method='max')
+        for prediction_date in pd.date_range('2024-01-10', '2024-12-31', freq='SMS') + pd.Timedelta(days=9):
+            truth, _, _ = self._parameters(data, MONTHLY_LAGS, prediction_date, delay_unit='D', reference_point='end')
+            shift, _, _ = self._parameters(data, table, prediction_date)
+            assert all(shift[column]['n_periods'] <= truth[column]['n_periods'] for column in MONTHLY_LAGS), \
+                prediction_date
 
 
 # =============================================================================

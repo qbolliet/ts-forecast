@@ -12,7 +12,7 @@ import pandas as pd
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Literal
 
 # Modules du package
-from ..utils.frequency import normalize_frequency, is_higher_frequency, to_pandas_freq
+from ..utils.frequency import normalize_frequency
 from ..utils.time.utils import get_period_boundaries
 from ..utils.duration import to_code as duration_to_code, get_duration_nanoseconds
 from ..panel.utils import factorize_row_keys
@@ -33,19 +33,22 @@ def calculate_applicable_delay(
     frequency and reference point, then aggregates delays according to the
     specified method.
 
-    **Important behavior for higher frequency conversions:**
+    **Frequency conversion.** A period is published with its last sub-period,
+    every sub-period being published at the same lag after its end (the months of
+    a quarter sum up to the quarter):
 
-    When converting to a higher frequency (e.g., quarterly to monthly), the
-    sub-period used as reference is determined by identifying which sub-period
-    contains the observation_date.
+    - the delay from the end (``reference_point='end'``) is the lag between the end
+      of the observation period and its publication, at any target frequency: a
+      monthly index published 19 days after each month end has a quarterly delay
+      of 19 days from the quarter end;
+    - the delay from the start adds the length of the target period containing the
+      end of the observation: the quarter for a monthly observation, the **last**
+      month for a quarterly one (Q1 GDP published 45 days after March 31 is
+      published 75 days after March 1st), whatever the date labelling it.
 
-    For example, when converting quarterly data (Q1 = Jan-Feb-Mar) to monthly:
-    - If observation_date is in January: The target period is January
-    - If observation_date is in February: The target period is February
-    - If observation_date is in March: The target period is March
-
-    This ensures that the delay is calculated relative to the specific
-    sub-period when the observation actually occurred.
+    The delays of a column are thus independent of the position of its
+    observations in the target periods, and ``PublicationDelayTransformer`` reads
+    them back at the frequency given in the ``frequency`` column of the result.
 
     **Unknown delays.** A row whose delay is ``NaN`` or whose frequency is
     undetermined (``None``), as returned by ``compare_and_detect_delays`` for a
@@ -532,24 +535,21 @@ def _calculate_converted_delay(
        (e.g., "45 days after period end") into an absolute download date
        by adding the delay to the original reference date.
 
-    2. **Determination of target period**: Calculates the period boundaries
-       at the target frequency, the end being **exclusive** (the period of
-       March ends on April 1st). The logic differs based on frequency conversion:
+    2. **Determination of target period**: the period of the target frequency
+       containing the last instant of the observation period (computed from
+       ``period_start`` at ``current_frequency``, the end being **exclusive**: the
+       period of March ends on April 1st). For a higher target frequency
+       (quarterly → monthly), it is the **last sub-period** of the observation
+       (March for Q1), whatever the date labelling the observation; for an equal
+       or lower one (monthly → quarterly), the period containing it.
 
-       - **Higher frequency** (e.g., quarterly → monthly): Identifies the sub-period
-         that contains the observation_date. For example, if converting Q1 (Jan-Mar)
-         to monthly:
-         * If observation_date is in January: Uses January as target period
-         * If observation_date is in February: Uses February as target period
-         * If observation_date is in March: Uses March as target period
-
-       - **Equal/lower frequency** (e.g., monthly → quarterly): Uses the period
-         containing the observation_date at the target frequency.
-
-    3. **Calculation of converted delay**: Computes the delay between the
-       download date and the new reference date (start or end of target period),
-       then converts back to the original time unit using ceiling rounding.
-       The calculation is made with integer nanoseconds, hence exact.
+    3. **Calculation of converted delay**: a period of the target frequency is
+       published with its last sub-period, every sub-period being published at the
+       same lag after its end. The delay from the end (``'end'``) is thus the lag
+       between the end of the observation period and the download date, at any
+       target frequency; the delay from the start (``'start'``) adds the length of
+       the target period. The result is converted back to the original time unit
+       with ceiling rounding, computed with integer nanoseconds, hence exact.
 
     A delay or a source frequency unknown (``NaN`` / ``None``) gives a ``NaN``
     converted delay and ``NaT`` target period bounds.
@@ -582,12 +582,19 @@ def _calculate_converted_delay(
         ...     'end', 45, 'day', 'M', 'Q', 'start',
         ... )
         >>> # Download date: Mar 31 + 45 days = May 15
-        >>> # Target period: March 2024 because observation_date is in March
+        >>> # Target period: March 2024, last month of the quarter
         >>> start, end
         (Timestamp('2024-03-01 00:00:00'), Timestamp('2024-04-01 00:00:00'))
-        >>> # Converted delay: May 15 - Mar 1 = 75 days
+        >>> # Converted delay: May 15 - Apr 1 (end of Q1) + 31 days (March) = 75 days
         >>> converted_delay
         75
+        >>> # A monthly observation (January, downloaded Feb 20) seen at the quarterly frequency:
+        >>> # 19 days after its end, i.e. 19 days after the end of a quarter whose last month it would be
+        >>> _calculate_converted_delay(
+        ...     pd.Timestamp('2024-01-01'), pd.Timestamp('2024-01-01'), pd.Timestamp('2024-02-01'),
+        ...     'end', 19, 'day', 'Q', 'M', 'end',
+        ... )[0]
+        19
     """
     # Délai ou fréquence source inconnus : délai inconnu, sans période cible
     if pd.isna(delay) or pd.isna(current_frequency):
@@ -607,51 +614,24 @@ def _calculate_converted_delay(
     # Calcul de la date de téléchargement
     download_date = original_reference_date + delay_timedelta
 
-    # Détermination de la période de référence pour la fréquence cible
-    if is_higher_frequency(target_frequency, current_frequency):
-        # Fréquence plus élevée : on identifie la sous-période qui coïncide avec observation_date
-        # Génération de toutes les sous-périodes dans la période originale
-        target_freq_pandas = to_pandas_freq(target_frequency)
-        subperiods = pd.date_range(
-            start=period_start,
-            end=period_end,
-            freq=target_freq_pandas
-        )
+    # Fin exacte (exclusive) de la période de l'observation, à sa propre fréquence
+    _, observation_end = get_period_boundaries(date=period_start, frequency=current_frequency)
 
-        # Identification de la sous-période qui contient observation_date
-        # On cherche la sous-période dont les bornes englobent observation_date
-        reference_date_for_subperiod = None
+    # Période cible : celle de la fréquence cible qui contient le dernier instant de l'observation
+    # (sa période englobante pour une fréquence cible plus faible, sa dernière sous-période pour une
+    # fréquence cible plus élevée)
+    target_period_start, target_period_end = get_period_boundaries(
+        date=observation_end - pd.Timedelta(1, unit='ns'),
+        frequency=target_frequency
+    )
 
-        for subperiod_date in subperiods:
-            subperiod_start, subperiod_end = get_period_boundaries(
-                date=subperiod_date,
-                frequency=target_frequency
-            )
-            # Vérification si observation_date se trouve dans cette sous-période
-            if subperiod_start <= observation_date < subperiod_end:
-                reference_date_for_subperiod = subperiod_date
-                break
-
-        # Si aucune sous-période ne correspond (cas limite), on utilise la dernière
-        if reference_date_for_subperiod is None:
-            reference_date_for_subperiod = subperiods[-1]
-
-        target_period_start, target_period_end = get_period_boundaries(
-            date=reference_date_for_subperiod,
-            frequency=target_frequency
-        )
-    else:
-        # Fréquence égale ou inférieure : on garde la même période
-        target_period_start, target_period_end = get_period_boundaries(
-            date=observation_date,
-            frequency=target_frequency
-        )
-
-    # Calcul de la nouvelle date de référence selon le point de référence cible
+    # Nouvelle date de référence : une période cible est publiée avec sa dernière sous-période, chaque
+    # sous-période au même retard après sa fin. Le délai depuis la fin est celui de l'observation ; le
+    # délai depuis le début lui ajoute la durée de la période cible
     if target_reference_point == 'start':
-        new_reference_date = target_period_start
+        new_reference_date = observation_end - (target_period_end - target_period_start)
     else:
-        new_reference_date = target_period_end
+        new_reference_date = observation_end
 
     # Calcul du nouveau délai, en nanosecondes entières
     new_delay_nanoseconds = (download_date - new_reference_date) // pd.Timedelta(1, unit='ns')

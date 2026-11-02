@@ -28,7 +28,7 @@
 
 ## Introduction
 
-Les **délais de publication** (ou *publication delays*) des variables utilisées pour construire un modèle de prévision sur séries temporelles constituent un écueil dont il faut tenir compte pour simuler justement la performance prédictive de modèles en production. En pratique, les données économiques, financières ou opérationnelles ne sont en effet pas disponibles instantanément : elles sont publiées avec un retard qui peut aller de quelques jours à plusieurs mois. Ignorer ces délais lors de l'entraînement et de l'évaluation des modèles conduit à une surestimation systématique des performances.
+Les **délais de publication** (ou *publication delays*) des variables utilisées pour construire un modèle de prévision sur séries temporelles constituent un paramètre dont il faut tenir compte pour simuler de manière réaliste la performance prédictive de modèles en production. En pratique, les données économiques, financières ou opérationnelles ne sont en effet pas disponibles instantanément : elles sont publiées avec un retard qui peut aller de quelques jours à plusieurs mois. Ignorer ces délais lors de l'entraînement et de l'évaluation des modèles conduit à une surestimation systématique des performances.
 
 Ce tutoriel présente deux approches complémentaires pour gérer ces délais : la **conservation de l'acquis** et le **décalage des séries**.
 
@@ -37,24 +37,26 @@ Ce tutoriel présente deux approches complémentaires pour gérer ces délais : 
 ### 1.1 Qu'est-ce qu'un délai de publication ?
 
 Le délai de publication est le temps qui s'écoule entre :
+
 - La fin de la période de référence d'une observation
 - Le moment où cette observation devient disponible
 
 **Exemples** :
+
 - Le PIB du T1 2024 (janvier-mars) est publié fin avril → délai de ~30 jours
 - Les ventes d'un magasin du 15 janvier sont consolidées le 18 janvier → délai de 3 jours
 - Le taux de chômage de septembre est publié début octobre → délai de ~7 jours
 
 ### 1.2 Impact sur la prévision
 
-Au moment de faire une prévision à la date $t$, nous disposons uniquement des observations publiées avant $t$. Pour une série avec un délai de publication $d$ :
+Au moment de faire une prévision à la date $t$, on dispose uniquement des observations publiées avant $t$. Pour une série avec un délai de publication $d$ :
 
 - **Dernière observation disponible** : $y_{t-d}$
 - **Observations non disponibles** : $y_{t-d+1}, ..., y_{t-1}, y_t$
 
 ![Impact du délai de publication](../assets/release_delay_impact.png)
 
-**Conséquence** : Si nous entraînons un modèle sur des données sans tenir compte des délais, nous créons un **data leakage temporel** en utilisant des informations qui ne seraient pas disponibles en production.
+**Conséquence** : Si on entraîne un modèle sur des données sans tenir compte des délais, on créée un **data leakage temporel** en utilisant des informations qui ne seraient pas disponibles en production.
 
 ## 2. Deux approches pour gérer les délais
 
@@ -114,11 +116,13 @@ data_masked = transformer.fit_transform(data)
 ```
 
 **Avantages** :
+
 - ✅ Alignement temporel préservé : `X_t` correspond toujours à la date `t`
 - ✅ Simulation réaliste en production
 - ✅ Facile à inverser
 
 **Inconvénients** :
+
 - ❌ Perte d'information (observations masquées)
 - ❌ Nécessite des modèles robustes aux valeurs manquantes
 
@@ -154,12 +158,14 @@ data_shifted = transformer.fit_transform(data)
 ```
 
 **Avantages** :
+
 - ✅ Aucune perte d'information
 - ✅ Utilise la dernière observation disponible
 - ✅ Pas de valeurs manquantes générées
 - ✅ Permet de tenir compte des effets d'entraînement
 
 **Inconvénients** :
+
 - ❌ Perd l'alignement temporel naturel
 - ❌ Interprétation moins intuitive
 
@@ -168,6 +174,7 @@ data_shifted = transformer.fit_transform(data)
 ### 3.1 Données brutes avant transformation
 
 Supposons deux séries avec des délais différents :
+
 - Série A (bleu foncé) : délai de 5 jours
 - Série B (bleu clair) : délai de 15 jours
 
@@ -183,7 +190,7 @@ Les séries sont décalées vers le futur. Aucune observation n'est perdue, mais
 
 ## 4. Détails de l'implémentation
 
-Cette section décrit en profondeur les trois composants clés du module de gestion des délais de publication : la fonction de détection `compare_and_detect_delays`, la fonction de calcul `calculate_applicable_delay`, et le transformeur `PublicationDelayTransformer`.
+Cette section décrit en détail les trois composants clés du module de gestion des délais de publication : la fonction de détection `compare_and_detect_delays`, la fonction de calcul `calculate_applicable_delay`, et le transformeur `PublicationDelayTransformer`.
 
 ### 4.1 Détection des délais : `compare_and_detect_delays`
 
@@ -208,7 +215,7 @@ df_delays = compare_and_detect_delays(
 
 | Argument | Type | Description |
 |----------|------|-------------|
-| `new_data` | `pd.DataFrame` | Nouveau jeu de données à analyser. L'index doit contenir les dates (ou un MultiIndex pour les données panel). |
+| `new_data` | `pd.DataFrame` | Nouveau jeu de données à analyser. L'index doit contenir les dates (ou un MultiIndex avec les dates en dernier niveau pour les données panel). |
 | `existing_data` | `pd.DataFrame` ou `None` | Jeu de données existant pour comparaison. Si `None`, identifie l'observation non nulle la plus récente par variable. |
 | `download_date` | `str` ou `datetime` | Date de téléchargement des données (`'today'` accepté). Si `None`, utilise `datetime.now()`. Une date sans fuseau horaire est lue en UTC face à une date avec fuseau (et réciproquement) ; deux dates avec fuseaux sont comparées comme des instants. |
 | `detection_mode` | `'new_only'` ou `'all_changes'` | Mode de détection : `'new_only'` détecte uniquement les transitions NaN→valeur, `'all_changes'` détecte aussi les révisions. |
@@ -219,7 +226,7 @@ df_delays = compare_and_detect_delays(
 
 #### 4.1.2 Valeur retournée
 
-La fonction retourne un `DataFrame` indexé par les niveaux d'entité des données (aucun pour une série) suivis d'un niveau `column` portant le nom de la variable ; une variable peut figurer sur plusieurs lignes. Les colonnes, dans l'ordre :
+La fonction retourne un `DataFrame` indexé par les niveaux d'entité des données (aucun pour une série temporelle) suivis d'un niveau `column` portant le nom de la variable ; une variable peut figurer sur plusieurs lignes. Les colonnes de ce jeu de données sont, dans l'ordre :
 
 | Colonne | Description |
 |---------|-------------|
@@ -237,7 +244,7 @@ Les quatre colonnes de dates sont stockées dans l'unité des dates de `new_data
 (`s`, `ms`, `us` ou `ns`), quelles que soient celles de `existing_data` et de
 `download_date` ; une date que cette unité ne représente pas exactement (une
 heure de téléchargement à la microseconde sur des données en secondes) porte sa
-colonne à l'unité plus fine nécessaire, sans arrondi. Les colonnes de texte
+colonne à unité plus fine si nécessaire, sans arrondi. Les colonnes de texte
 (`frequency`, `reference_point`, `unit`) sont en dtype `str` ; le niveau `column`
 porte les noms des variables dans le dtype que pandas en infère (`str` pour des
 chaînes). Un résultat vide a les mêmes dtypes (dates, texte, niveaux d'index)
@@ -305,13 +312,14 @@ df_delays = compare_and_detect_delays(
 ```
 
 Ce mode est utile pour :
+
 - L'initialisation d'un système de suivi des délais
 - L'estimation des délais à partir d'un snapshot
 - La calibration sans historique de versions
 
 #### 4.1.5 Impact du paramètre `reference_point`
 
-Le choix du point de référence affecte significativement la valeur du délai calculé.
+Le choix du point de référence affecte la valeur du délai calculé.
 
 ![Impact du point de référence](../assets/reference_point_impact.png)
 
@@ -370,7 +378,7 @@ Le DataFrame retourné est indexé par indicateur (ou par entité et indicateur 
 |---------|-------------|
 | `delay` | Délai calculé après conversion et agrégation |
 | `unit` | Unité du délai (son code, `'D'`, si `unit` est fourni) |
-| `frequency` | Fréquence cible utilisée, telle que fournie |
+| `frequency` | Fréquence cible utilisée (identique à celle passée en argument), relue par `PublicationDelayTransformer` |
 | `reference_point` | Point de référence cible |
 | `n_observations` | Nombre d'observations (de délai connu) utilisées dans l'agrégation |
 | `aggregation_method` | Méthode d'agrégation utilisée |
@@ -379,28 +387,32 @@ Une ligne dont le délai est `NaN` ou la fréquence `None` (couple à fréquence
 
 #### 4.2.3 Conversion de fréquence
 
-Lors de la conversion vers une fréquence différente, la fonction identifie la sous-période pertinente en utilisant la date d'observation (`observation_date`).
+La conversion repose sur une règle unique : **une période est publiée avec sa dernière sous-période, chaque
+sous-période étant publiée au même retard après sa fin** (les mois d'un trimestre forment le trimestre).
+
+- **Depuis la fin** (`reference_point='end'`), le délai est le retard entre la fin de la période de l'observation
+  (à sa propre fréquence, borne exclusive) et la publication, **quelle que soit la fréquence cible** : un indice
+  mensuel publié 19 jours après chaque fin de mois a un délai trimestriel de 19 jours après la fin du trimestre.
+- **Depuis le début** (`'start'`), le délai ajoute la durée de la période cible qui contient le dernier jour de
+  l'observation : le trimestre pour une observation mensuelle (19 + 91 = 110 jours au T1 2024), le **dernier
+  mois** pour une observation trimestrielle (un PIB du T1 publié le 15 mai : 75 jours depuis le 1er mars).
+
+La date qui étiquette l'observation (début ou fin de période) n'intervient pas, et le délai d'une variable ne
+dépend pas de la position de ses observations dans la période cible : l'agrégation de plusieurs observations
+garde un sens.
 
 ![Conversion de fréquence](../assets/frequency_conversion_delay.png)
 
-**Cas de conversion vers une fréquence plus élevée** (ex: trimestriel → mensuel) :
-
-La sous-période sélectionnée est celle qui contient `observation_date`. Par exemple, pour des données Q1 2024 avec `observation_date` au 15 mars :
-- La période cible est **mars** (et non janvier ou février)
-- Le délai est recalculé par rapport aux bornes de mars
-
 ```python
-# Données trimestrielles avec observation_date = 15 mars
-# Conversion Q → M
-
-df_applicable = calculate_applicable_delay(
-    publication_delays=df_delays,
-    reference_point='end',
-    frequency='M',  # Mensuel
-    aggregation_method='median'
-)
-# La sous-période mars est sélectionnée car elle contient observation_date
+# PIB du T1 2024 publié le 15 mai, détecté avec reference_point='end' (44 jours après le 1er avril)
+calculate_applicable_delay(df_delays, reference_point='end', frequency='M')    # 44 jours
+calculate_applicable_delay(df_delays, reference_point='start', frequency='M')  # 75 jours (depuis le 1er mars)
+calculate_applicable_delay(df_delays, reference_point='start', frequency='Q')  # 135 jours (depuis le 1er janvier)
 ```
+
+`PublicationDelayTransformer` relit la colonne `frequency` du résultat comme la fréquence à laquelle les délais
+sont exprimés (`delay_frequency`, §4.3.1) et applique la même règle : un délai converti à n'importe quelle
+fréquence redonne les mêmes dates de publication.
 
 **Une fréquence cible par couple (entité, indicateur)** :
 
@@ -416,10 +428,6 @@ df_applicable = calculate_applicable_delay(
 
 Sans `aggregate_by_panel`, les entités d'un même indicateur doivent partager la même fréquence cible (leurs délais sont agrégés ensemble) ; sinon une `ValueError` demande d'agréger par entité.
 
-**Cas de conversion vers une fréquence plus basse** (ex: trimestriel → annuel) :
-
-La période englobante à la fréquence cible est utilisée.
-
 #### 4.2.4 Conversion du point de référence
 
 La conversion entre points de référence suit un processus en trois étapes.
@@ -427,15 +435,15 @@ La conversion entre points de référence suit un processus en trois étapes.
 ![Conversion du point de référence](../assets/reference_point_conversion.png)
 
 1. **Reconstruction de la date de téléchargement `download_date`** : À partir du délai original et du point de référence original
-2. **Détermination de la période cible** : Identification des bornes à la fréquence cible
-3. **Calcul du délai converti** : Par rapport au nouveau point de référence
+2. **Détermination de la période cible** : période de la fréquence cible contenant le dernier jour de l'observation
+3. **Calcul du délai converti** : retard après la fin de l'observation, plus la durée de la période cible pour `'start'`
 
 ```python
-# Conversion reference_point='end' (45 jours) → reference_point='start'
+# Conversion reference_point='end' (44 jours) → reference_point='start', fréquence trimestrielle
 
-# Étape 1: download_date = period_end + 45 jours = 31 mars + 45 = 15 mai
-# Étape 2: period_start (Q1) = 1er janvier
-# Étape 3: converted_delay = 15 mai - 1er jan = 135 jours
+# Étape 1: download_date = 1er avril + 44 jours = 15 mai
+# Étape 2: période cible = T1 2024 (1er janvier -> 1er avril, 91 jours)
+# Étape 3: converted_delay = 44 + 91 = 135 jours (15 mai - 1er janvier)
 ```
 
 #### 4.2.5 Exemple complet
@@ -491,12 +499,13 @@ transformer = PublicationDelayTransformer(
 
 | Argument | Type | Description |
 |----------|------|-------------|
-| `delays` | `Dict` ou `pd.DataFrame` | Délais par variable. Si DataFrame : une ligne par variable, colonne `'delay'`, variable dans une colonne `'column'` ou dans l'index (niveau `'column'`, à défaut le dernier) — la sortie de `calculate_applicable_delay` convient telle quelle ; colonnes optionnelles `'unit'`, `'reference_point'`, `'frequency'`. Un délai `NaN` est inconnu. Une variable listée plusieurs fois (délais par entité) est refusée : voir §6.1 (fabrique). |
+| `delays` | `Dict` ou `pd.DataFrame` | Délais par variable. Si DataFrame : une ligne par variable, colonne `'delay'`, variable dans une colonne `'column'` ou dans l'index (niveau `'column'`, à défaut le dernier) — la sortie de `calculate_applicable_delay` convient telle quelle ; colonnes optionnelles `'unit'`, `'reference_point'`, `'frequency'`. Un délai `NaN` est inconnu. Une variable listée plusieurs fois (délais par entité) est refusée : voir §6.1. |
 | `prediction_date` | `str` ou `datetime` | Date de prédiction de référence. Accepte `'today'` pour la date courante. |
-| `strategy` | `str` ou `Dict` | Stratégie d'application : `'shift'` (décalage) ou `'mask'` (masquage). Peut être spécifié par variable ; une variable retardée absente du dictionnaire est laissée telle quelle (avertissement). |
+| `strategy` | `str` ou `Dict` | Stratégie d'application : `'shift'` (décalage) ou `'mask'` (masquage). Peut être spécifié par variable ; une variable retardée absente du dictionnaire est laissée telle quelle (avec un avertissement). |
 | `target_frequency` | `str`, `Dict` ou `None` | Fréquence cible pour la stratégie `'mask'`. Ignoré pour `'shift'`. |
 | `delay_unit` | `str`, `Dict` ou `None` | Unité des délais, globale ou par variable. Si `None`, inférée depuis le DataFrame, puis `default_values`. Une colonne retardée sans unité lève une `ValueError`. |
 | `reference_point` | `str`, `Dict` ou `None` | Point de référence des délais (`'start'` / `'end'`), global ou par variable. Si `None`, inféré depuis le DataFrame, puis `default_values`. |
+| `delay_frequency` | `str`, `Dict` ou `None` | Fréquence à laquelle les délais sont exprimés, globale ou par variable. Si `None`, lue dans la colonne `frequency` du tableau, sinon fréquence de la colonne. Un délai `'end'` est le retard après la fin de chaque observation, à toute fréquence ; un délai `'start'` se compte depuis la fin de l'observation moins la période de `delay_frequency` qui contient son dernier jour (règle de §4.2.3). |
 | `handle_missing_delays` | `str` | Variables de `X` sans délai connu (laissées telles quelles) : `'warn'` (défaut) les signale, `'error'` lève une `ValueError`, `'ignore'` se tait. |
 | `default_values` | `Dict` ou `None` | Valeurs par défaut des colonnes de `X` qui en manquent : clés `'delay'`, `'unit'`, `'reference_point'` (et `'target_frequency'` pour `'mask'`). Avec lui, toutes les colonnes de `X` reçoivent un délai. Ignoré avec une stratégie par variable. |
 
@@ -507,7 +516,7 @@ transformer = PublicationDelayTransformer(
 | `prediction_date_` | Date de prédiction résolue (objet `datetime`) |
 | `detected_frequencies_` | Dictionnaire des fréquences détectées par colonne |
 | `shift_params` | Paramètres de décalage par colonne : `{'n_periods': int, 'frequency': str}` |
-| `mask_params` | Paramètres de masquage par colonne : `{'n_obs': int, 'mask_frequency': str, 'how': str}` |
+| `mask_params` | Paramètres de masquage par colonne (ceux de `MaskTransformer`) : `{'n_obs': int, 'mask_frequency': str, 'how': str, 'last_position': int ou None}` |
 | `fit_report_` | `DelayFitReport` : paramétrage résolu de chaque colonne et son origine |
 | `auxiliary_transformers_` | Transformeurs auxiliaires du dernier `transform`, utilisés par `inverse_transform` (qui exige donc un `transform` préalable) |
 
@@ -516,7 +525,7 @@ l'union des dates décalées des colonnes (il s'allonge, et les dates qu'aucune 
 trié par date (pour un panel : par entité, dans l'ordre d'entrée, puis par date).
 `inverse_transform` supprime les lignes ajoutées par `transform`, si bien que `inverse_transform(transform(X))`
 restitue `X` à l'identique. Un panel peut être passé directement : les **mêmes délais** s'appliquent à toutes les
-entités (un avertissement le rappelle) ; pour des délais propres à chaque entité, voir la fabrique (§6.1).
+entités (un avertissement le rappelle) ; pour des délais propres à chaque entité, voir (§6.1).
 
 **Pipeline avec une cible.** Seul `X` est transformé : dans une `XYPipeline` suivie d'un estimateur, le décalage
 change les lignes de `X` sans toucher à `y`, et une étape ultérieure doit réaligner `y` sur le nouvel index. La
@@ -530,7 +539,7 @@ référence `'start'`) ou à la fin (exclusive) de sa période + délai (`'end'`
 périodes entre la période de `prediction_date` et la **dernière période publiée à `prediction_date`** (une
 période publiée le jour même compte comme publiée). La durée réelle des mois (28 à 31 jours) et les années
 bissextiles sont prises en compte ; le délai, lui, est une durée (un délai en mois compte 30 jours par mois,
-comme partout dans le paquet).
+comme partout dans le package).
 
 ![Calcul des périodes à décaler](../assets/compute_shift_periods.png)
 
@@ -556,37 +565,48 @@ reference_point = 'end'
 | Trimestriel (Q) | T4 2023 (fin 1er janv. + 45 j = 15 févr.) | -1 |
 | Annuel (Y) | 2023 (fin 1er janv. + 45 j = 15 févr.) | -1 |
 
-Une formule approchée (`-ceil((délai - écoulé) / durée)` avec un mois de 30 jours) se trompait d'une période
-près des frontières calendaires, dans les deux sens : une valeur publiée le jour de la prédiction était repoussée
-après elle, ou une valeur publiée le lendemain devenait visible (ANO-DELAYS-042, corrigée).
 
 #### 4.3.4 Calcul du nombre d'observations à masquer (stratégie `'mask'`)
 
-La stratégie `'mask'` compte de la même façon, sur le calendrier, les **périodes de l'index** (pas celles de la
-série) non encore publiées à `prediction_date` : c'est le nombre de dernières observations masquées dans chaque
-période cible. Avec `'end'`, le délai part de la fin de la période de la série contenant l'observation.
+La stratégie `'mask'` reproduit, dans **chaque** période de l'historique, l'information disponible à la même date dans la période de `prediction_date`. Elle compte de la même façon, sur le calendrier, les
+**périodes de l'index** (pas celles de la série) non encore publiées à `prediction_date` (`n_obs`). Elle situe ensuite la période de l'index
+de `prediction_date` dans sa période cible (position `p`, comptée depuis 0) :
+
+- **prédiction dans la dernière période de l'index de sa période cible** (mars pour un trimestre, 31 mars pour un
+  mois) : chaque période cible est vue à sa fin, ses `n_obs` dernières positions sont masquées
+  (`last_position=None`) ;
+- **prédiction en cours de période cible** : chaque période cible est coupée à la position `p`
+  (`last_position=p`) ; les positions postérieures (pas encore observées) et les `n_obs` positions qui précèdent
+  jusqu'à `p` incluse (pas encore publiées) sont masquées. Les positions se comptent depuis le début de la période :
+  au 15 mars, chaque mois est vu comme à son 15.
 
 ![Calcul des observations à masquer](../assets/compute_mask_periods.png)
 
-**Vérification de faisabilité (`can_mask`) :** le masquage doit laisser au moins une observation dans chaque
-période cible. Le nombre d'observations à masquer est comparé au plus petit nombre de périodes de l'index dans
-une période cible couverte par les données, compté sur le calendrier (`FrequencyConverter.count_subperiods_per_period` :
-28 jours en février 2023, 3 mois par trimestre). Si `can_mask = False`, la colonne est automatiquement basculée
-vers la stratégie `'shift'` avec un avertissement : elle reçoit alors le décalage calculé comme au §4.3.3.
+**Vérification de faisabilité (`can_mask`) :** le masque doit laisser au moins une observation dans chaque
+période cible :
 
-**Exemples** (index mensuel, colonne trimestrielle de cible `'Q'`, `'end'`, prédiction au 15 février 2024) :
+- Prédiction en fin de période : `n_obs` est comparé au plus petit nombre de périodes de l'index dans une période cible couverte par les données, compté sur le calendrier (`FrequencyConverter.count_subperiods_per_period` : 28 jours en février 2023, 3 mois par trimestre). 
+- Prédiction en cours de période : au moins la première position doit être publiée (`n_obs <= p`). 
+
+Si `can_mask = False`, rien de la période cible de `prediction_date` n'est encore
+publié : la colonne est automatiquement basculée vers la stratégie `'shift'` avec un avertissement et reçoit le décalage calculé comme au §4.3.3.
+
+**Exemples** (index et colonne mensuels, cible `'Q'`, `'end'`) :
 
 ```python
-# Cas 1 : délai de 45 jours
-# - décembre 2023 (T4, fin 1er janv. + 45 j = 15 févr.) est publié le jour même
-# - janvier et février 2024 (T1, fin 1er avr. + 45 j = 16 mai) ne sont pas publiés
-# -> n_periods = 2 ; can_mask = 3 mois par trimestre > 2 = True : masquage possible
-#    (dans chaque trimestre, seul le premier mois est conservé)
+# Cas 1 : prédiction au 15 février 2024 (position 1 du T1), délai de 10 jours
+# - janvier (fin 1er févr. + 10 j = 11 févr.) est publié, février ne l'est pas -> n_obs = 1
+# -> last_position = 1 : dans chaque trimestre, seul le premier mois est conservé
+#    (deuxième mois non publié, troisième pas encore observé)
 
-# Cas 2 : délai de 100 jours
-# - septembre 2023 (T3, fin 1er oct. + 100 j = 9 janv.) est publié
-# - d'octobre 2023 à février 2024 (T4 : 10 avr., T1 : 10 juil.) ne sont pas publiés
-# -> n_periods = 5 ; can_mask = 3 > 5 = False : bascule vers 'shift' (n_periods = -2, dernier trimestre publié : T3 2023)
+# Cas 2 : prédiction au 15 février 2024, délai de 45 jours
+# - décembre 2023 (fin 1er janv. + 45 j = 15 févr.) est publié le jour même
+# - janvier (fin 1er févr. + 45 j = 17 mars) ne l'est pas : rien du T1 n'est publié
+# -> n_obs = 2 > p = 1 : bascule vers 'shift' (n_periods = -2)
+
+# Cas 3 : prédiction au 20 mars 2024 (dernier mois du T1), délai de 45 jours
+# - janvier (17 mars) est publié, février (fin 1er mars + 45 j = 15 avril) ne l'est pas -> n_obs = 2
+# -> last_position = None : les deux derniers mois de chaque trimestre sont masqués
 ```
 
 #### 4.3.5 Exemple d'utilisation complète
@@ -622,29 +642,32 @@ transformer_shift = PublicationDelayTransformer(
 
 data_shifted = transformer_shift.fit_transform(data)
 
-# Vérification des paramètres calculés
+# Vérification des paramètres calculés (jours non publiés au 15 mars : depuis le 30 janvier pour le PIB)
 print(transformer_shift.shift_params)
-# {'GDP': {'n_periods': -2, 'frequency': 'D'},
-#  'inflation': {'n_periods': -1, 'frequency': 'D'},
-#  'retail_sales': {'n_periods': -1, 'frequency': 'D'}}
+# {'GDP': {'n_periods': -46, 'frequency': 'D'},
+#  'inflation': {'n_periods': -31, 'frequency': 'D'},
+#  'retail_sales': {'n_periods': -21, 'frequency': 'D'}}
 
-# 3b. Stratégie 'mask' : masquage des observations récentes
+# 3b. Stratégie 'mask' : chaque trimestre vu comme au 15 mars (position 74 du T1)
 transformer_mask = PublicationDelayTransformer(
     delays=delays,
     strategy='mask',
     prediction_date='2024-03-15',
     delay_unit='D',
     reference_point='end',
-    target_frequency='M'
+    target_frequency='Q'
 )
 
 data_masked = transformer_mask.fit_transform(data)
 
 # Vérification des paramètres calculés
 print(transformer_mask.mask_params)
-# {'GDP': {'n_obs': 45, 'mask_frequency': 'M', 'how': 'last'},
-#  'inflation': {'n_obs': 30, 'mask_frequency': 'M', 'how': 'last'},
-#  'retail_sales': {'n_obs': 20, 'mask_frequency': 'M', 'how': 'last'}}
+# {'GDP': {'n_obs': 46, 'mask_frequency': 'Q', 'how': 'last', 'last_position': 74},
+#  'inflation': {'n_obs': 31, 'mask_frequency': 'Q', 'how': 'last', 'last_position': 74},
+#  'retail_sales': {'n_obs': 21, 'mask_frequency': 'Q', 'how': 'last', 'last_position': 74}}
+# PIB : les 29 premiers jours de chaque trimestre restent visibles (1er -> 29 janvier, 1er -> 9 avril).
+# Avec target_frequency='M', aucun jour de mars n'est publié au 15 mars : les trois colonnes
+# basculent vers le décalage.
 
 # 4. Transformation inverse
 data_original = transformer_shift.inverse_transform(data_shifted)
@@ -794,6 +817,7 @@ print(f"Score moyen : {mean_score:.4f} ± {std_score:.4f}")
 ```
 
 **Pourquoi cette approche ?**
+
 - ✅ **Réalisme** : Simule exactement les données disponibles au moment de la prédiction
 - ✅ **Cohérence** : Train et test reflètent les mêmes contraintes de publication
 - ✅ **Prévention du data leakage** : Aucune observation future n'est utilisée
@@ -832,7 +856,7 @@ y_pred = pipeline.predict(X_test)
 
 ### 6.1 Délais variables par entité (données de panel)
 
-Pour les données de panel, chaque entité peut avoir des délais différents. Passé directement à un `PublicationDelayTransformer`, un panel reçoit les mêmes délais pour toutes les entités (avec un avertissement), et un tableau de délais par entité est refusé. On utilise alors `PanelwiseTransformer` avec les fonctions helper pour appliquer les délais adéquats à chaque entité grâce à un `PublicationDelayTransformer` différent (une entité absente du tableau lève une `KeyError` avec la fabrique, ou garde le transformeur de base avec `entity_kwargs`) :
+Dans des données de panel, une même variable peut avoir des délais de publication différents pour chaque entité. Passé directement à un `PublicationDelayTransformer`, un panel reçoit les mêmes délais pour toutes les entités (avec un avertissement), et un tableau de délais par entité est refusé. On utilise alors `PanelwiseTransformer` pour appliquer les délais adéquats à chaque entité grâce à un `PublicationDelayTransformer` différent :
 
 **Méthode 1 : Factory pattern avec `create_delay_transformer_factory`**
 

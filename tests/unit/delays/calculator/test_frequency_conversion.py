@@ -42,22 +42,28 @@ def multi_observation_delays() -> pd.DataFrame:
 # Conversions de fréquence
 # =============================================================================
 class TestFrequencyConversion:
-    """Delays recomputed for another target frequency, hand-computed gold values."""
+    """Delays recomputed for another target frequency, hand-computed gold values.
+
+    A period is published with its last sub-period, every sub-period at the same lag
+    after its end: the delay from the end is the lag after the end of the observation
+    period, at any target frequency; the delay from the start adds the length of the
+    target period containing the end of the observation.
+    """
 
     @pytest.mark.parametrize(
         ('observation', 'target', 'expected'),
         [
-            ('2024-01-15', 'start', 135), ('2024-01-15', 'end', 104),
-            ('2024-02-15', 'start', 104), ('2024-02-15', 'end', 75),
+            ('2024-01-15', 'start', 75), ('2024-01-15', 'end', 44),
+            ('2024-02-15', 'start', 75), ('2024-02-15', 'end', 44),
             ('2024-03-15', 'start', 75), ('2024-03-15', 'end', 44),
         ],
         ids=['jan-start', 'jan-end', 'feb-start', 'feb-end', 'mar-start', 'mar-end'],
     )
-    def test_quarterly_to_monthly_follows_the_observation_month(self, observation, target, expected):
-        """Q1 2024 observation downloaded on 2024-05-15 (April 1st + 44 d): the target month is the one of the observation.
+    def test_quarterly_to_monthly_counts_from_the_last_month(self, observation, target, expected):
+        """Q1 2024 observation downloaded on 2024-05-15 (April 1st + 44 d): the target month is March, the last one.
 
-        Valeurs d'or, 2024 étant bissextile : 1er janv. -> 15 mai = 31 + 29 + 31 + 30 + 14 = 135 j ;
-        1er févr. -> 104 j ; 1er mars -> 75 j ; 1er avril -> 44 j (fin de janvier = 1er février, etc.).
+        Valeurs d'or : le trimestre est publié avec son dernier mois, mars : 44 j depuis sa fin (1er avril),
+        44 + 31 = 75 j depuis son début (1er mars), quelle que soit la date de l'observation dans le trimestre.
         """
         delays = _frame([_quarterly(observation)])
 
@@ -77,18 +83,17 @@ class TestFrequencyConversion:
     @pytest.mark.parametrize(
         ('month', 'target', 'expected'),
         [
-            ('2023-10', 'start', 45), ('2023-10', 'end', -47),
-            ('2023-11', 'start', 75), ('2023-11', 'end', -17),
+            ('2023-10', 'start', 106), ('2023-10', 'end', 14),
+            ('2023-11', 'start', 106), ('2023-11', 'end', 14),
             ('2023-12', 'start', 106), ('2023-12', 'end', 14),
         ],
         ids=['oct-start', 'oct-end', 'nov-start', 'nov-end', 'dec-start', 'dec-end'],
     )
-    def test_monthly_to_quarterly_counts_from_the_quarter_bounds(self, month, target, expected):
-        """Each month of Q4 2023, published 14 d after its end, recounted over the quarter ``[Oct 1st, Jan 1st)``.
+    def test_monthly_to_quarterly_keeps_the_lag_after_the_month_end(self, month, target, expected):
+        """Each month of Q4 2023, published 14 d after its end: the same quarterly delay, whatever its position.
 
-        Valeurs d'or : octobre -> téléchargé le 15 nov. : 45 j depuis le 1er oct. (31 + 14), -47 j depuis la fin du
-        trimestre (15 nov. -> 1er janv.) ; novembre -> 15 déc. : 75 j (31 + 30 + 14) et -17 j ; décembre -> 15 janv. :
-        106 j (31 + 30 + 31 + 14) et 14 j. Un mois publié avant la fin du trimestre donne un délai négatif.
+        Valeurs d'or : un trimestre dont chaque mois paraît 14 j après sa fin est complet 14 j après sa propre fin,
+        soit 14 + 92 = 106 j après son début (T4 2023 : 31 + 30 + 31 j).
         """
         delays = _frame([_monthly(month, 14)])
 
@@ -97,8 +102,8 @@ class TestFrequencyConversion:
     @pytest.mark.parametrize(
         ('target_frequency', 'target', 'expected'),
         [
-            ('M', 'start', 288), ('M', 'end', 258),
-            ('Q', 'start', 349), ('Q', 'end', 258),
+            ('M', 'start', 105), ('M', 'end', 74),
+            ('Q', 'start', 166), ('Q', 'end', 74),
             ('Y', 'start', 439), ('Y', 'end', 74),
         ],
         ids=['M-start', 'M-end', 'Q-start', 'Q-end', 'Y-start', 'Y-end'],
@@ -106,9 +111,8 @@ class TestFrequencyConversion:
     def test_annual_observation_converted(self, target_frequency, target, expected):
         """2023 observation of June 15th, downloaded 2024-03-15 (January 1st 2024 + 74 d: 31 + 29 + 14).
 
-        Valeurs d'or : mois de juin -> début 1er juin 2023 : 274 + 14 = 288 j (de juin 2023 à fin février 2024 :
-        30 + 31 + 31 + 30 + 31 + 30 + 31 + 31 + 29 = 274), fin 1er juillet : 258 j ; trimestre T2 -> début 1er avril :
-        258 + 91 = 349 j ; année -> début 1er janv. 2023 : 365 + 74 = 439 j, fin : 74 j.
+        Valeurs d'or : 74 j depuis la fin de l'année, à toute fréquence cible ; depuis le début : décembre
+        (dernier mois) 74 + 31 = 105 j, T4 (dernier trimestre, 92 j) 166 j, année 2023 : 365 + 74 = 439 j.
         """
         delays = _frame([_annual('2023-06-15')])
 
@@ -116,14 +120,14 @@ class TestFrequencyConversion:
 
     @pytest.mark.parametrize(
         ('target_frequency', 'target', 'expected'),
-        [('D', 'start', 31), ('D', 'end', 30), ('W', 'start', 35), ('W', 'end', 28)],
+        [('D', 'start', 15), ('D', 'end', 14), ('W', 'start', 21), ('W', 'end', 14)],
         ids=['D-start', 'D-end', 'W-start', 'W-end'],
     )
     def test_monthly_to_daily_and_weekly(self, target_frequency, target, expected):
-        """December 2023 observation of the 15th (a Friday), downloaded 2024-01-15.
+        """December 2023 observation, downloaded 2024-01-15 (14 d after the month end).
 
-        Valeurs d'or : jour -> début le 15 déc. = 31 j, fin le 16 déc. = 30 j ; semaine du lundi 11 au lundi 18 déc. ->
-        début : 21 + 14 = 35 j, fin : 14 + 14 = 28 j.
+        Valeurs d'or : 14 j depuis la fin du mois (1er janv.) ; depuis le début du dernier jour (31 déc.) : 15 j ;
+        depuis le début de la dernière semaine (lundi 25 déc. -> lundi 1er janv.) : 14 + 7 = 21 j.
         """
         delays = _frame([_monthly('2023-12', 14)])
 
@@ -131,20 +135,24 @@ class TestFrequencyConversion:
 
     @pytest.mark.parametrize(
         ('target_frequency', 'target', 'expected'),
-        [('W', 'start', 9), ('W', 'end', 2), ('D', 'start', 5), ('D', 'end', 4)],
+        [('W', 'start', 9), ('W', 'end', 2), ('D', 'start', 3), ('D', 'end', 2)],
         ids=['W-start', 'W-end', 'D-start', 'D-end'],
     )
     def test_weekly_observation(self, target_frequency, target, expected):
-        """Week of Monday 2023-12-11, observed on the 15th, published 2 d after its (exclusive) end: download 2023-12-20."""
+        """Week of Monday 2023-12-11, published 2 d after its (exclusive) end: download 2023-12-20.
+
+        Valeurs d'or : 2 j depuis la fin ; depuis le début de la semaine : 2 + 7 = 9 j ; depuis le début de son
+        dernier jour (dimanche 17) : 2 + 1 = 3 j.
+        """
         delays = _frame([_row('2023-12-15', '2023-12-11', '2023-12-18', 2, frequency='weekly')])
 
         assert _delay(delays, target, target_frequency) == [expected]
 
-    @pytest.mark.parametrize(('target', 'expected'), [('start', 7), ('end', 0)], ids=['start', 'end'])
+    @pytest.mark.parametrize(('target', 'expected'), [('start', 9), ('end', 2)], ids=['start', 'end'])
     def test_daily_to_weekly(self, target, expected):
-        """Day of Friday 2023-12-15 downloaded 2 d after its end (December 18th), recounted over its week.
+        """Day of Friday 2023-12-15 downloaded 2 d after its end (December 18th), seen at the weekly frequency.
 
-        Valeurs d'or : semaine du lundi 11 au lundi 18 déc. -> début : 18 - 11 = 7 j, fin : 18 - 18 = 0 j.
+        Valeurs d'or : 2 j après la fin du jour ; depuis le début de sa semaine (lundi 11 -> lundi 18) : 2 + 7 = 9 j.
         """
         delays = _frame([_row('2023-12-15', '2023-12-15', '2023-12-16', 2, frequency='daily')])
 
@@ -186,18 +194,18 @@ class TestFrequencyConversion:
         with pytest.raises(ValueError, match="Unsupported frequency: zz"):
             calculate_applicable_delay(delays, 'end', 'M')
 
-    def test_observation_outside_its_period_falls_back_on_the_last_subperiod(self):
-        """An observation date outside the source period selects the last sub-period (documented edge case).
+    def test_observation_date_outside_its_period_is_ignored(self):
+        """The period is the one of ``period_start``: an observation date outside it changes nothing.
 
-        Q1 2024 row dated 2024-06-15 (after its period): the last month of the quarter, March, is used, hence the
-        delays of the March observation (75 d from March 1st, 44 d from April 1st).
+        Q1 2024 row dated 2024-06-15 (after its period): the last month of the quarter, March, is used
+        (75 d from March 1st, 44 d from April 1st).
         """
         delays = _frame([_quarterly('2024-06-15')])
 
         assert (_delay(delays, 'start', 'M'), _delay(delays, 'end', 'M')) == ([75], [44])
 
-    def test_observation_before_its_period_falls_back_on_the_last_subperiod(self):
-        """Same fallback for an observation date before the source period."""
+    def test_observation_date_before_its_period_is_ignored(self):
+        """Same for an observation date before the source period."""
         delays = _frame([_quarterly('2023-06-15')])
 
         assert _delay(delays, 'start', 'M') == [75]
@@ -209,12 +217,12 @@ class TestFrequencyConversion:
         # Valeur d'or : mars 2024 -> début le 1er mars : 75 j
         assert _delay(delays, 'start', 'M') == [75]
 
-    def test_quarterly_dated_at_period_start_maps_onto_the_first_month(self):
-        """A quarter labelled on its first day (``QS``) is converted to the first month of the quarter."""
+    def test_quarterly_dated_at_period_start_maps_onto_the_last_month_too(self):
+        """A quarter labelled on its first day (``QS``, convention of the package) is converted like a ``QE`` one."""
         delays = _frame([_quarterly('2024-01-01')])
 
-        # Valeur d'or : janvier 2024 -> début le 1er janv. : 135 j
-        assert _delay(delays, 'start', 'M') == [135]
+        # Valeur d'or : mars 2024 -> début le 1er mars : 75 j
+        assert _delay(delays, 'start', 'M') == [75]
 
     def test_mixed_source_frequencies_are_converted_row_by_row(self):
         """Rows of different source frequencies for the same indicator are each converted to the target one."""

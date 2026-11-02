@@ -40,7 +40,7 @@ from tsforecast.xy import XYPipeline
 TS = pd.Timestamp
 
 # Date de prédiction commune à tous les plis (paramètre fixe du transformateur)
-PREDICTION_DATE = '2024-08-15'
+PREDICTION_DATE = '2024-09-15'
 
 # Délais en jours depuis le début du mois (inflation : 20 jours, chômage : 50 jours)
 DELAYS = {'inflation_ipc': 20.0, 'taux_chomage': 50.0}
@@ -117,10 +117,11 @@ class TestMaskedPipelineCrossValidation:
     def test_delays_are_applied_on_each_training_fold(self, masked_cv):
         """Cells hidden at ``fit``: 3 per complete quarter of the monthly grid, 60 / 66 / 72 per fold.
 
-        Gold values: on 2024-08-15, August inflation (20 days) is published on
-        August 21, July on July 21: 1 unpublished month; July unemployment (50
-        days) is published on August 20, June on July 21: 2 unpublished months.
-        The last 1 and 2 months of each quarter are hidden, i.e. 3 cells per
+        Gold values: on 2024-09-15, September inflation (20 days) is published on
+        September 21, August on August 21: 1 unpublished month; August
+        unemployment (50 days) is published on September 20, July on August 20:
+        2 unpublished months. September being the last month of its quarter,
+        the last 1 and 2 months of each quarter are hidden, i.e. 3 cells per
         quarter. The complete quarters of the training folds
         are 2018Q1 -> 2022Q4 (20), -> 2023Q2 (22), -> 2023Q4 (24); the last,
         incomplete quarter (January 2023, July 2023, January 2024 alone) has no
@@ -173,8 +174,8 @@ class TestShiftedPipelineCrossValidation:
     def test_shift_moves_training_values_onto_dates_of_the_test_fold(self, irregular_index_timeseries):
         """The rows reaching the estimator end one month after the training fold: 2023-02-01 for the first fold.
 
-        Gold value: on 2024-08-15, the last published months of inflation (20 days)
-        and unemployment (50 days) are July and June, hence shifts of one and two
+        Gold value: on 2024-09-15, the last published months of inflation (20 days)
+        and unemployment (50 days) are August and July, hence shifts of one and two
         months: the
         January 2023 unemployment value lands on 2023-03-01, the last date seen
         at ``fit`` for a training fold ending in January 2023.

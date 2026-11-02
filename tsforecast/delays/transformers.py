@@ -49,8 +49,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
     given the prediction date: with the ``'shift'`` strategy, the values are
     moved to the dates at which they are published (``n_periods`` periods of the
     detected frequency of the column, negative: later dates); with the
-    ``'mask'`` strategy, the last ``n_obs`` observations of every period of the
-    target frequency are hidden. ``transform`` applies these settings through
+    ``'mask'`` strategy, every period of the target frequency is reduced to what
+    is published at the same point of its course as the prediction date in its
+    own period (see below). ``transform`` applies these settings through
     :class:`ShiftTransformer` / :class:`MaskTransformer` (wrapped in a
     :class:`~tsforecast.panel.PanelwiseTransformer` for a panel) and
     ``inverse_transform`` reverses them.
@@ -63,6 +64,16 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
     prediction date itself counts as published). Months of 28 to 31 days and leap
     years are taken into account; the delay itself is a duration (a delay in
     months counts 30 days per month, as everywhere in the package).
+
+    The mask counts the same unpublished periods, as periods of the index
+    (``n_obs``), and locates the index period of the prediction date in its
+    target period. Prediction in the last index period of its target period:
+    every target period is seen at its end, its last ``n_obs`` positions are
+    masked. Prediction at position ``p`` (from 0) of its target period: every
+    target period is cut at position ``p``, the later positions (not yet
+    observed) and the ``n_obs`` positions up to ``p`` (not yet published) are
+    masked. When nothing of the target period would be left, the column falls
+    back to the shift.
 
     The prediction date only sets the point of the period at which the forecast is
     made: the fitted numbers of periods apply as such to any data passed to
@@ -84,8 +95,9 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
       variable being either in a column ``column`` or in the index (level
       ``'column'``, or the last level), as returned by
       ``calculate_applicable_delay``. The optional columns ``unit``,
-      ``reference_point`` and ``frequency`` (target frequency of the mask)
-      provide the parameters of each variable. A variable listed several times
+      ``reference_point`` and ``frequency`` (frequency at which the delay is
+      expressed, and default target frequency of the mask) provide the
+      parameters of each variable. A variable listed several times
       (per-entity delays) is rejected: use :func:`create_delay_transformer_factory`
       with a :class:`~tsforecast.panel.PanelwiseTransformer`.
 
@@ -115,6 +127,16 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             keys ``'delay'``, ``'unit'``, ``'reference_point'`` (and
             ``'target_frequency'`` for the 'mask' strategy). With it, every column of
             ``X`` gets a delay. Ignored when ``strategy`` is a dictionary.
+        delay_frequency: Frequency at which the delays are expressed, for all columns
+            or per column; None (default) reads it in the ``frequency`` column of the
+            delays table, else takes the frequency of the column. A period is
+            published with its last sub-period, every sub-period at the same lag after
+            its end: a delay from the end is the lag after the end of each
+            observation, at any frequency; a delay from the start counts from the
+            end of the observation minus the period of ``delay_frequency``
+            containing its last instant (110 days from the start of a quarter is
+            19 days after the end of each month). This is how
+            ``calculate_applicable_delay`` converts the delays to its ``frequency``.
 
     Attributes:
         prediction_date_: Resolved prediction date.
@@ -124,10 +146,15 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         detected_frequencies_: Detected frequency (base code) of each column of ``X``,
             ``None`` when undetectable (for a panel, the frequency shared by the
             entities).
+        delay_frequencies_: Frequency (base code) at which the delay of each delayed
+            column is read: ``delay_frequency``, else the ``frequency`` column of the
+            delays table, else the detected frequency of the column.
         shift_params: ``{column: {'n_periods': int, 'frequency': str}}`` of the
             shifted columns.
-        mask_params: ``{column: {'n_obs': int, 'mask_frequency': str, 'how': 'last'}}``
-            of the masked columns.
+        mask_params: ``{column: {'n_obs': int, 'mask_frequency': str, 'how': 'last',
+            'last_position': int or None}}`` of the masked columns (parameters of
+            :class:`MaskTransformer`; ``last_position`` is None for a prediction in the
+            last index period of its target period).
         fit_report_: :class:`~tsforecast.delays.DelayFitReport` of the last ``fit``:
             resolved setting of each column and its origin, columns ignored or
             unaffected, defaults imputed, mask-to-shift fallbacks.
@@ -175,7 +202,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         delay_unit: Optional[Union[str, Dict[str, str]]] = None,
         reference_point: Optional[Union[Literal['start', 'end'], Dict[str, Literal['start', 'end']]]] = None,
         handle_missing_delays: Literal['ignore', 'warn', 'error'] = 'warn',
-        default_values: Optional[Dict[str, Union[int, float, str]]] = None
+        default_values: Optional[Dict[str, Union[int, float, str]]] = None,
+        delay_frequency: Optional[Union[str, Dict[str, str]]] = None
     ):
         """Initialize PublicationDelayTransformer.
 
@@ -188,6 +216,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             reference_point: 'start' or 'end', for all or per column.
             handle_missing_delays: 'ignore', 'warn' or 'error'.
             default_values: Defaults for the columns lacking a value.
+            delay_frequency: Frequency at which the delays are expressed, for all or
+                per column.
 
         Raises:
             ValueError: If a parameter has an invalid value.
@@ -236,6 +266,7 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         self.reference_point = reference_point
         self.handle_missing_delays = handle_missing_delays
         self.default_values = default_values
+        self.delay_frequency = delay_frequency
 
         # Warnings
         if isinstance(strategy, dict) and (default_values is not None):
@@ -327,6 +358,16 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             shift_columns = [col for col in shift_columns if col not in undetected]
             mask_columns = [col for col in mask_columns if col not in undetected]
 
+        # Fréquence à laquelle chaque délai est exprimé : explicite, tableau, sinon celle de la colonne
+        delay_frequency_dict, _ = self._resolve_parameter(
+            columns=delayed_columns, param_name='delay_frequency', explicit_value=self.delay_frequency,
+            inferred_key='delay_frequency', default_key='delay_frequency')
+        self.delay_frequencies_ = {
+            col: normalize_frequency(delay_frequency_dict[col]) if col in delay_frequency_dict
+            else self.detected_frequencies_[col]
+            for col in shift_columns + mask_columns
+        }
+
         # Calcul du nombre de périodes à shifter pour chaque variable
         self.shift_params = {}
         for col in shift_columns:
@@ -342,10 +383,12 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         self.mask_params = {}
         mask_fallbacks: List[str] = []
         index_frequency = self._index_frequency(X) if mask_columns else None
+        index_offset = self._index_grid_offset(X, index_frequency) if mask_columns else None
         for col in mask_columns:
             result = self._compute_mask_periods(
                 col=col,
                 index_frequency=index_frequency,
+                index_offset=index_offset,
                 index_dates=X.index.get_level_values(-1),
                 delays_dict=delays_dict,
                 delay_unit_dict=delay_unit_dict,
@@ -354,11 +397,11 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             )
             # Distinction suivant que le masquage est possible ou non
             if result['can_mask']:
-                # Un nombre négatif signifie une donnée déjà publiée : rien à masquer
                 self.mask_params[col] = {
-                    'n_obs': max(0, result['n_periods']),
+                    'n_obs': result['n_obs'],
                     'mask_frequency': result['target_frequency'],
-                    'how': 'last'
+                    'how': 'last',
+                    'last_position': result['last_position']
                 }
             else:
                 # Warning
@@ -427,17 +470,20 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
 
     # Méthode auxiliaire d'inférence des paramètres d'unité du délai, de point de référence et de fréquence cible
     def _infer_parameters_from_delays(self, delays_table: Optional[pd.DataFrame]) -> Dict[str, Any]:
-        """Read delay_unit, reference_point and target_frequency from the delays table.
+        """Read delay_unit, reference_point, target_frequency and delay_frequency from the delays table.
 
         Args:
             delays_table: Flat delays table, or None.
 
         Returns:
-            Dict with the keys 'delay_unit', 'reference_point' and 'target_frequency',
-            each mapping the variables to their value (missing values left out).
+            Dict with the keys 'delay_unit', 'reference_point', 'target_frequency' and
+            'delay_frequency' (both read from the ``frequency`` column), each mapping the
+            variables to their value (missing values left out).
         """
-        # Association entre colonne du tableau et paramètre inféré
-        sources = {'delay_unit': 'unit', 'reference_point': 'reference_point', 'target_frequency': 'frequency'}
+        # Association entre colonne du tableau et paramètre inféré : la fréquence du tableau est celle à
+        # laquelle les délais sont exprimés, et la fréquence cible du masque par défaut
+        sources = {'delay_unit': 'unit', 'reference_point': 'reference_point', 'target_frequency': 'frequency',
+                   'delay_frequency': 'frequency'}
         inferred: Dict[str, Dict[str, Any]] = {key: {} for key in sources}
         if delays_table is None:
             return inferred
@@ -664,6 +710,29 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             )
         return found[0] if found else None
 
+    # Méthode auxiliaire de construction de la grille de l'index
+    @staticmethod
+    def _index_grid_offset(X: pd.DataFrame, index_frequency: str) -> pd.DateOffset:
+        """Return the offset of the regular grid of the index, as ``MaskTransformer`` builds it.
+
+        Args:
+            X: Data to fit on (dates of every entity of a panel together).
+            index_frequency: Base code of the index frequency.
+
+        Returns:
+            The offset of one index period, with the position and anchor of the index
+            (the base frequency alone when they cannot be detected on the dates).
+        """
+        # Dates distinctes de l'index (toutes entités confondues), triées
+        dates = X.index.get_level_values(-1)
+        if isinstance(dates, pd.PeriodIndex):
+            dates = dates.to_timestamp()
+        dates = pd.DatetimeIndex(dates.unique()).dropna().sort_values()
+        try:
+            return _index_offset(*_detect_index_components(dates))
+        except ValueError:
+            return _index_offset(index_frequency, None, None)
+
     # Méthode auxiliaire de construction du rapport d'ajustement
     def _build_fit_report(
         self,
@@ -882,7 +951,8 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             step_frequency=frequency,
             delay=_delay_to_timedelta(delays_dict[col], delay_unit_dict[col]),
             reference_point=reference_point_dict[col],
-            reference_frequency=frequency
+            reference_frequency=frequency,
+            delay_frequency=self.delay_frequencies_[col]
         )
 
     # Méthode auxiliaire de calcul du nombre de périodes à masquer
@@ -890,17 +960,19 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
         self,
         col: str,
         index_frequency: str,
+        index_offset: pd.DateOffset,
         index_dates: pd.Index,
         delays_dict: Dict[str, float],
         delay_unit_dict: Dict[str, str],
         reference_point_dict: Dict[str, str],
         target_frequency_dict: Dict[str, str]
     ) -> Dict[str, Any]:
-        """Compute the number of observations to mask for a given column.
+        """Compute the mask of a given column.
 
         Args:
             col: Column name to compute mask periods for.
             index_frequency: Frequency of the index of ``X``.
+            index_offset: Offset of the regular grid of the index.
             index_dates: Dates of ``X`` (last index level for a panel), whose target
                 periods bound the number of observations that can be masked.
             delays_dict: Dictionary mapping column names to delay values.
@@ -910,7 +982,10 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
 
         Returns:
             Dictionary with keys:
-                - 'n_periods': Number of index observations to mask.
+                - 'n_obs': Number of index periods unpublished at the prediction date
+                  (non-negative).
+                - 'last_position': Last visible position of every target period, None
+                  when the prediction date is in the last index period of its own.
                 - 'target_frequency': Normalized target frequency.
                 - 'can_mask': Whether masking leaves at least one index period in every target
                   period covered by ``index_dates`` (calendar count: February holds 28 or 29 days).
@@ -926,15 +1001,30 @@ class PublicationDelayTransformer(BaseEstimator, TransformerMixin):
             step_frequency=index_frequency,
             delay=_delay_to_timedelta(delays_dict[col], delay_unit_dict[col]),
             reference_point=reference_point_dict[col],
-            reference_frequency=self.detected_frequencies_[col]
+            reference_frequency=self.detected_frequencies_[col],
+            delay_frequency=self.delay_frequencies_[col]
         )
 
-        # Vérification que le nombre d'observations à masquer est strictement inférieur au plus petit
-        # nombre de périodes de l'index dans une période cible des données (décompte calendaire)
-        can_mask = _min_subperiods(index_dates, target_frequency, index_frequency) > n_periods
+        # Position de la période de l'index de la date de prédiction dans sa période cible
+        position, n_positions = _period_position(
+            self.prediction_date_, target_frequency, index_frequency, index_offset)
+
+        if position >= n_positions - 1:
+            # Prédiction dans la dernière période de l'index de sa période cible : chaque période cible
+            # est vue à sa fin. Le nombre d'observations à masquer doit rester strictement inférieur au
+            # plus petit nombre de périodes de l'index dans une période cible (décompte calendaire)
+            last_position = None
+            can_mask = _min_subperiods(index_dates, target_frequency, index_frequency) > n_periods
+        else:
+            # Prédiction en cours de période cible : chaque période cible est coupée à la même position.
+            # Un délai négatif rend visibles les positions suivantes déjà publiées
+            last_position = position + max(0, -n_periods)
+            # Au moins la première position de la période cible doit être publiée
+            can_mask = n_periods <= position
 
         return {
-            'n_periods': n_periods,
+            'n_obs': max(0, n_periods),
+            'last_position': last_position,
             'target_frequency': target_frequency,
             'can_mask': can_mask
         }
@@ -1080,7 +1170,7 @@ def _restore_series(frame: pd.DataFrame, series_name: Any) -> Union[pd.Series, p
 
 # Fonction de filtrage des paramètres sans effet
 def _active_params(params_dict: Dict[str, Dict], transformer_type: str) -> Dict[str, Dict]:
-    """Drop the mask parameters that mask nothing (``n_obs == 0``).
+    """Drop the mask parameters that mask nothing (``n_obs == 0``, periods seen whole).
 
     A zero mask is a no-op: no ``MaskTransformer`` is built for it, which also
     spares the check of its mask frequency (equal to the index frequency when
@@ -1094,14 +1184,17 @@ def _active_params(params_dict: Dict[str, Dict], transformer_type: str) -> Dict[
         The parameters to apply.
 
     Examples:
-        >>> _active_params({'a': {'n_obs': 0}, 'b': {'n_obs': 2}}, 'mask')
-        {'b': {'n_obs': 2}}
+        >>> _active_params({'a': {'n_obs': 0}, 'b': {'n_obs': 2}, 'c': {'n_obs': 0, 'last_position': 1}}, 'mask')
+        {'b': {'n_obs': 2}, 'c': {'n_obs': 0, 'last_position': 1}}
     """
     # Retourne les paramètres intacts pour le mode 'shift'
     if transformer_type != 'mask':
         return params_dict
-    # Filtre des colonnes pour lesquelles le nombre d'observations masquées est non nul
-    return {col: params for col, params in params_dict.items() if params['n_obs'] != 0}
+    # Filtre des colonnes dont le masque cache au moins une position (observations ou fin de période)
+    return {
+        col: params for col, params in params_dict.items()
+        if params['n_obs'] != 0 or params.get('last_position') is not None
+    }
 
 
 # Fonction de conversion d'un délai en durée exacte
@@ -1166,13 +1259,15 @@ def _count_unpublished_periods(
     step_frequency: str,
     delay: pd.Timedelta,
     reference_point: str,
-    reference_frequency: str
+    reference_frequency: str,
+    delay_frequency: Optional[str] = None
 ) -> int:
     """Count the periods separating the period of a date from the last period published at that date.
 
-    The observation of the period starting at ``s`` is published at ``s + delay``
-    (``'start'``) or at the end (exclusive) of its period of ``reference_frequency``
-    plus ``delay`` (``'end'``). The result is the smallest integer ``k`` such that
+    The observation of the period starting at ``s`` belongs to the period of
+    ``reference_frequency`` (the column) containing ``s``; its publication date is
+    the origin given by :func:`_delay_origin` plus ``delay``, the delay being
+    expressed at ``delay_frequency``. The result is the smallest integer ``k`` such that
     the period starting ``k`` periods of ``step_frequency`` before the period
     containing ``prediction_date`` is published by ``prediction_date``. Periods
     are calendar periods (:func:`~tsforecast.utils.time.get_period_start`), business
@@ -1186,8 +1281,9 @@ def _count_unpublished_periods(
         step_frequency: Base frequency of the counted periods ('M', 'D', 'B', ...).
         delay: Publication delay.
         reference_point: 'start' or 'end' of the period.
-        reference_frequency: Frequency of the period whose end is the origin of the
-            delay with ``'end'`` (the frequency of the column).
+        reference_frequency: Frequency of the column, whose periods are published.
+        delay_frequency: Frequency at which the delay is expressed (None: the
+            frequency of the column).
 
     Returns:
         The number of periods ``k``.
@@ -1199,6 +1295,10 @@ def _count_unpublished_periods(
         >>> # February + 69 days = April 11 (2023): at April 10, January is the last published month
         >>> _count_unpublished_periods(pd.Timestamp('2023-04-10'), 'M', pd.Timedelta(days=69), 'start', 'M')
         3
+        >>> # Monthly column, 110 days from the start of a quarter (19 days after each month end):
+        >>> # on 2024-03-15, January (published February 20) is the last published month
+        >>> _count_unpublished_periods(pd.Timestamp('2024-03-15'), 'M', pd.Timedelta(days=110), 'start', 'M', 'Q')
+        2
     """
     # Date de prédiction en Timestamp (resolve_date renvoie un datetime)
     prediction_date = pd.Timestamp(prediction_date)
@@ -1219,7 +1319,8 @@ def _count_unpublished_periods(
 
     def is_published(start: pd.Timestamp) -> bool:
         """Tell whether the observation of the period starting at ``start`` is published by the prediction date."""
-        origin = start if reference_point == 'start' else get_period_end(start, reference_frequency)
+        origin = _delay_origin(start, step_frequency, reference_frequency, reference_point,
+                               delay_frequency or reference_frequency)
         return origin + delay <= prediction_date
 
     # Période de la date de prédiction (jours ouvrés : dernier jour ouvré, un week-end appartient au vendredi)
@@ -1237,6 +1338,104 @@ def _count_unpublished_periods(
         while not is_published(start):
             start, k = previous_start(start), k + 1
     return k
+
+
+# Fonction de calcul de l'origine du délai d'une observation
+def _delay_origin(
+    start: pd.Timestamp,
+    step_frequency: str,
+    column_frequency: str,
+    reference_point: str,
+    delay_frequency: str
+) -> pd.Timestamp:
+    """Return the date from which the delay of an observation is counted.
+
+    The observation is the period of ``column_frequency`` containing ``start``. A
+    period is published with its last sub-period, every sub-period at the same
+    lag after its end (the months of a quarter sum up to the quarter):
+
+    - ``'end'``: the delay counts from the (exclusive) end of the observation
+      period, whatever ``delay_frequency``;
+    - ``'start'``: the delay counts from that end minus the length of the period of
+      ``delay_frequency`` containing the last instant of the observation (its
+      start when both frequencies are equal; the start of its last month for a
+      quarterly observation and a monthly delay; the end of a monthly observation
+      minus its quarter for a quarterly delay).
+
+    Args:
+        start: Start of a period of ``step_frequency``, within the observation.
+        step_frequency: Base frequency of the counted periods ('M', 'D', 'B', ...).
+        column_frequency: Base frequency of the column (its observation periods).
+        reference_point: 'start' or 'end'.
+        delay_frequency: Base frequency at which the delay is expressed.
+
+    Returns:
+        The origin of the delay.
+
+    Examples:
+        >>> # Q1 2024 GDP, monthly delay from the start: start of March
+        >>> _delay_origin(pd.Timestamp('2024-01-01'), 'Q', 'Q', 'start', 'M')
+        Timestamp('2024-03-01 00:00:00')
+        >>> # January 2024, quarterly delay from the start: February 1st minus the 91 days of Q1
+        >>> _delay_origin(pd.Timestamp('2024-01-01'), 'M', 'M', 'start', 'Q')
+        Timestamp('2023-11-02 00:00:00')
+    """
+    # Délai compté depuis la fin de l'observation : indépendant de la fréquence du délai
+    if reference_point == 'end':
+        return get_period_end(start, column_frequency)
+
+    # Délai compté depuis le début, exprimé à la fréquence de la colonne : début de l'observation
+    if normalize_frequency(delay_frequency) == normalize_frequency(column_frequency):
+        return start if step_frequency == column_frequency else get_period_start(start, column_frequency)
+
+    # Autre fréquence : fin de l'observation moins la période du délai contenant son dernier instant
+    observation_end = get_period_end(start, column_frequency)
+    period_start, period_end = get_period_boundaries(observation_end - pd.Timedelta(1, unit='ns'), delay_frequency)
+    return observation_end - (period_end - period_start)
+
+
+# Fonction de localisation d'une date dans sa période cible
+def _period_position(
+    prediction_date: Union[pd.Timestamp, datetime],
+    target_frequency: str,
+    index_frequency: str,
+    index_offset: pd.DateOffset
+) -> Tuple[int, int]:
+    """Locate the index period of a date within its period of the target frequency.
+
+    The index period of the date is the one from which
+    :func:`_count_unpublished_periods` counts (business days: the last business
+    day, a week-end belongs to the Friday). Positions are those of the regular
+    grid of the index in the target period, as :class:`MaskTransformer` counts
+    them.
+
+    Args:
+        prediction_date: Date to locate.
+        target_frequency: Base frequency of the target periods ('Q', 'M', ...).
+        index_frequency: Base frequency of the index ('M', 'D', 'B', ...).
+        index_offset: Offset of the regular grid of the index.
+
+    Returns:
+        Tuple ``(position, n_positions)``: position (from 0) of the index period of
+        the date, and number of index periods of its target period.
+
+    Examples:
+        >>> _period_position(pd.Timestamp('2024-02-15'), 'Q', 'M', pd.offsets.MonthBegin())
+        (1, 3)
+        >>> _period_position(pd.Timestamp('2024-03-31'), 'Q', 'M', pd.offsets.MonthEnd())
+        (2, 3)
+    """
+    # Début de la période de l'index contenant la date
+    prediction_date = pd.Timestamp(prediction_date)
+    start = (BDay().rollback(prediction_date.normalize()) if normalize_frequency(index_frequency) == 'B'
+             else get_period_start(prediction_date, index_frequency))
+
+    # Grille régulière de la période cible, et point de grille de la période de l'index (le premier
+    # qui ne la précède pas : son début, ou sa fin pour une grille ancrée en fin de période)
+    period_start, period_end = get_period_boundaries(start, target_frequency)
+    grid = pd.date_range(start=period_start, end=period_end, freq=index_offset, inclusive='left')
+    position = min(int(grid.searchsorted(start, side='left')), max(len(grid) - 1, 0))
+    return position, len(grid)
 
 
 # Fonction de détection des composantes de la fréquence d'un index
@@ -1419,8 +1618,10 @@ def create_delay_transformer_factory(
 def _entity_kwargs(params: Dict[str, Any], entity_strategy: Union[str, Dict[str, str]]) -> Dict[str, Any]:
     """Build the ``PublicationDelayTransformer`` arguments of an entity.
 
-    The target frequency only matters to the mask: it is not passed with the
-    'shift' strategy (where the transformer would announce it as ignored).
+    The frequency of the table is the frequency at which the delays are expressed
+    (``delay_frequency``, for both strategies) and the target frequency of the
+    mask: as such, it is not passed with the 'shift' strategy (where the
+    transformer would announce it as ignored).
 
     Args:
         params: Parameters of the entity (``_build_entity_params``).
@@ -1428,18 +1629,20 @@ def _entity_kwargs(params: Dict[str, Any], entity_strategy: Union[str, Dict[str,
 
     Returns:
         Keyword arguments ``delays``, ``delay_unit``, ``reference_point``,
-        ``target_frequency`` and ``strategy``.
+        ``target_frequency``, ``delay_frequency`` and ``strategy``.
 
     Examples:
-        >>> _entity_kwargs({'delays': {'GDP': 45.0}, 'delay_unit': 'D', 'reference_point': 'end',
-        ...                 'target_frequency': 'Q'}, 'shift')['target_frequency'] is None
-        True
+        >>> kwargs = _entity_kwargs({'delays': {'GDP': 45.0}, 'delay_unit': 'D', 'reference_point': 'end',
+        ...                          'target_frequency': 'Q'}, 'shift')
+        >>> kwargs['target_frequency'] is None, kwargs['delay_frequency']
+        (True, 'Q')
     """
     return {
         'delays': params['delays'],
         'delay_unit': params['delay_unit'],
         'reference_point': params['reference_point'],
         'target_frequency': None if entity_strategy == 'shift' else params['target_frequency'],
+        'delay_frequency': params['target_frequency'],
         'strategy': entity_strategy
     }
 
@@ -2028,9 +2231,15 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
     observations on the last ``n_obs`` positions, ``how='first'`` those on the
     first ones. A position absent from the data (start or end of the series, gap,
     irregular index) masks nothing, and an observation is never masked because
-    a neighbouring one is missing. This reproduces, in every period of the
-    history, the information missing at the same position of the period as the
-    prediction date (``PublicationDelayTransformer``, strategy ``'mask'``).
+    a neighbouring one is missing.
+
+    ``last_position`` cuts every period at a position counted from its start: the
+    later positions are masked, and ``how='last'`` counts its ``n_obs`` positions
+    back from ``last_position`` instead of the end of the period. Each period is
+    then seen as it is at that point of its course. ``PublicationDelayTransformer``
+    (strategy ``'mask'``) uses it to reproduce, in every period of the history,
+    the information available at the position of the prediction date in its own
+    period.
 
     Masked cells are set to NaN and stored; ``inverse_transform`` puts their
     original values back. The store accumulates the cells masked by every
@@ -2044,6 +2253,8 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
             strictly coarser than the index frequency.
         how: ``'last'`` (default) masks the last positions of each period,
             ``'first'`` the first ones.
+        last_position: Last visible position of each period (0-based, counted from
+            its start; non-negative integer), or None (default) for the whole period.
 
     Attributes:
         index_frequency_: Base code of the index frequency detected at ``fit``.
@@ -2065,21 +2276,33 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         ['2024-03', '2024-06']
         >>> masker.inverse_transform(masked).equals(series)
         True
+        >>> # Quarters seen in their second month, whose last month is not published yet
+        >>> cut = MaskTransformer(n_obs=1, mask_frequency='Q', last_position=1).fit_transform(series)
+        >>> cut.dropna().index.strftime('%Y-%m').tolist()
+        ['2024-01', '2024-04']
     """
 
     # Initialisation
-    def __init__(self, n_obs: int, mask_frequency: str, how: Literal['first', 'last'] = 'last'):
+    def __init__(
+        self,
+        n_obs: int,
+        mask_frequency: str,
+        how: Literal['first', 'last'] = 'last',
+        last_position: Optional[int] = None
+    ):
         """Initialize MaskTransformer.
 
         Args:
             n_obs: Number of positions to mask per period.
             mask_frequency: Frequency of the periods ('W', 'M', 'Q', ...).
             how: ``'first'`` or ``'last'`` positions of each period.
+            last_position: Last visible position of each period, or None.
         """
         # Initialisation des attributs (aucun attribut ajusté avant fit, convention sklearn)
         self.n_obs = n_obs
         self.mask_frequency = mask_frequency
         self.how = how
+        self.last_position = last_position
 
     # Méthode d'entraînement
     def fit(self, X: Union[pd.Series, pd.DataFrame], y: Any = None) -> 'MaskTransformer':
@@ -2093,15 +2316,17 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
             self
 
         Raises:
-            TypeError: If ``n_obs`` is not an integer.
-            ValueError: If ``n_obs`` is negative, ``how`` is not ``'first'`` or
-                ``'last'``, ``mask_frequency`` is unknown or not strictly coarser
+            TypeError: If ``n_obs`` or ``last_position`` is not an integer.
+            ValueError: If ``n_obs`` or ``last_position`` is negative, ``how`` is not
+                ``'first'`` or ``'last'``, ``mask_frequency`` is unknown or not strictly coarser
                 than the index frequency, or if ``X`` is invalid (not pandas,
                 ``MultiIndex``, non-date or duplicated index, fewer than two
                 observations, undetectable or multiplied frequency).
         """
         # Validation des paramètres
         _validate_integer(self.n_obs, 'n_obs', allow_negative=False)
+        if self.last_position is not None:
+            _validate_integer(self.last_position, 'last_position', allow_negative=False)
         if self.how not in ('first', 'last'):
             raise ValueError(f"how must be 'first' or 'last', got {self.how!r}")
 
@@ -2209,7 +2434,10 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
 
     # Méthode auxiliaire de repérage des lignes à masquer
     def _rows_to_mask(self, index: pd.DatetimeIndex) -> np.ndarray:
-        """Flag the dates on the first / last ``n_obs`` positions of their period.
+        """Flag the dates on the masked positions of their period.
+
+        Masked positions: the first / last ``n_obs`` ones and, with
+        ``last_position``, those after it (the last ones then counted back from it).
 
         Args:
             index: Sorted dates of the data.
@@ -2220,7 +2448,7 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
         # Initialisation du masque
         n_dates = len(index)
         rows = np.zeros(n_dates, dtype=bool)
-        if self.n_obs == 0 or n_dates == 0:
+        if (self.n_obs == 0 and self.last_position is None) or n_dates == 0:
             return rows
 
         # Parcours des périodes contenant au moins une observation
@@ -2235,10 +2463,12 @@ class MaskTransformer(BaseEstimator, TransformerMixin):
             if len(grid) > 0:
                 # Position de chaque observation : dernier point de grille qui la précède ou l'égale
                 positions = np.clip(grid.searchsorted(index[start_pos:end_pos], side='right') - 1, 0, None)
+                # Dernière position visible : fin de la période, ou coupure à last_position
+                last = len(grid) - 1 if self.last_position is None else self.last_position
                 if self.how == 'first':
-                    rows[start_pos:end_pos] = positions < self.n_obs
+                    rows[start_pos:end_pos] = (positions < self.n_obs) | (positions > last)
                 else:
-                    rows[start_pos:end_pos] = (len(grid) - 1 - positions) < self.n_obs
+                    rows[start_pos:end_pos] = positions > last - self.n_obs
 
             start_pos = end_pos
 

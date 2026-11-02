@@ -276,9 +276,9 @@ class TestPrepareEntityKwargs:
         """One kwargs dict per entity, built from its rows."""
         assert prepare_entity_kwargs_from_delays(_entity_delays()) == {
             ('FR',): {'delays': {'GDP': 45.0, 'CPI': 20.0}, 'delay_unit': 'day', 'reference_point': 'start',
-                      'target_frequency': None, 'strategy': 'shift'},
+                      'target_frequency': None, 'delay_frequency': 'M', 'strategy': 'shift'},
             ('DE',): {'delays': {'GDP': 80.0, 'CPI': 20.0}, 'delay_unit': 'day', 'reference_point': 'start',
-                      'target_frequency': None, 'strategy': 'shift'},
+                      'target_frequency': None, 'delay_frequency': 'M', 'strategy': 'shift'},
         }
 
     def test_same_configuration_as_the_factory(self):
@@ -386,11 +386,12 @@ class TestPanelwiseIntegration:
     def test_per_entity_strategy(self):
         """``FR`` shifted, ``DE`` masked (target quarter): ``DE`` keeps its dates, ``FR`` gets later ones.
 
-        Gold values for ``DE`` (45 / 20 days from the start): GDP masked 2 months per quarter (8 cells),
-        CPI 1 month per quarter (4 cells).
+        Quarterly delays from the end, i.e. 20 and 10 days after each month end. Gold values on December 15:
+        GDP, November published on December 21 -> 2 unpublished months, masked in every quarter (8 cells) or
+        shifted by -2 (``FR``, last date 2024-02-01); CPI, November published on December 11 -> 1 month (4 cells).
         """
-        rows = {('FR', 'GDP'): 45.0, ('FR', 'CPI'): 20.0, ('DE', 'GDP'): 45.0, ('DE', 'CPI'): 20.0}
-        factory = create_delay_transformer_factory(_entity_delays(rows, frequency='Q'),
+        rows = {('FR', 'GDP'): 20.0, ('FR', 'CPI'): 10.0, ('DE', 'GDP'): 20.0, ('DE', 'CPI'): 10.0}
+        factory = create_delay_transformer_factory(_entity_delays(rows, frequency='Q', reference_point='end'),
                                                    strategy={'FR': 'shift', 'DE': 'mask'}, prediction_date=PREDICTION)
         result = _fit_transform(_panelwise(factory), _panel())
         de = result.loc['DE']
@@ -398,8 +399,12 @@ class TestPanelwiseIntegration:
             12, {'GDP': 8, 'CPI': 4}, TS('2024-02-01'))
 
     def test_per_variable_strategy(self):
-        """A per-variable strategy dict shifts ``GDP`` and masks ``CPI`` in every entity."""
-        factory = create_delay_transformer_factory(_entity_delays(frequency='Q'),
+        """A per-variable strategy dict shifts ``GDP`` and masks ``CPI`` in every entity.
+
+        Quarterly delays of 20 (GDP) and 10 days (CPI) after each month end: GDP shifted by -2 on December 15.
+        """
+        rows = {('FR', 'GDP'): 20.0, ('FR', 'CPI'): 10.0, ('DE', 'GDP'): 20.0, ('DE', 'CPI'): 10.0}
+        factory = create_delay_transformer_factory(_entity_delays(rows, frequency='Q', reference_point='end'),
                                                    strategy={'GDP': 'shift', 'CPI': 'mask'}, prediction_date=PREDICTION)
         result = _fit_transform(_panelwise(factory), _panel())
         assert result.loc['FR', 'GDP'].last_valid_index() == TS('2024-02-01')

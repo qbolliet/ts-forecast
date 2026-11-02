@@ -342,7 +342,9 @@ class ColumnDelayRecord:
         reference_point: ``'start'`` or ``'end'``, as resolved.
         frequency: Detected frequency of the variable (base code).
         n_periods: Number of periods shifted (``'shift'`` strategy).
-        n_obs: Number of observations masked (``'mask'`` strategy).
+        n_obs: Number of index periods unpublished at the prediction date, masked
+            in every target period (``'mask'`` strategy; the positions not observed
+            yet at the prediction date are masked too, see ``mask_params``).
         target_frequency: Frequency of the masked periods (``'mask'`` strategy).
         delay_unit_source: Origin of the unit: ``'explicit'`` (constructor argument),
             ``'inferred'`` (``delays`` DataFrame), ``'default'`` (``default_values``)
