@@ -220,8 +220,9 @@ class TestInterpolate:
             source_data=reference_timeseries,
         )
 
-        # 'nearest' sans ancrage recopie l'ancre sur toute la période
-        assert set(np.round(features['a1'].dropna().unique(), 6)) <= {120.0, 132.0, 150.0}
+        # 'nearest' sans ancrage recopie l'ancre sur toute la période, répartie
+        # sur ses douze mois
+        assert set(np.round(features['a1'].dropna().unique(), 6)) <= {10.0, 11.0, 12.5}
 
         # Référence linéaire sans ancrage, pour montrer que 0.5 déplace la forme
         reference = CovariateMaterializer()
@@ -450,7 +451,8 @@ class TestUniquenessOfTheWay:
         # Cas numériquement visible : avec un ancrage à mi-période, le repli
         # du fit ne redonne PAS les ancres 60 / 66 de a2. Valeur d'or : 60 est
         # atteint le 2021-07-02 (milieu de 2021), 66 le 2022-07-02, 365 jours
-        # plus loin ; le 2021-12-31 en est à 182 jours : 60 + 6 · 182 / 365
+        # plus loin ; le 2021-12-31 en est à 182 jours : 60 + 6 · 182 / 365,
+        # réparti sur les quatre trimestres de l'année
         anchored = CovariateMaterializer(
             covariate_strategy='model',
             interpolation_anchor={'a2': 0.5, DEFAULT_MATERIALIZATION_KEY: None},
@@ -464,7 +466,7 @@ class TestUniquenessOfTheWay:
         )
         assert ways_anchored == {'a2': 'interpolate'}
         np.testing.assert_allclose(
-            x_anchored['a2'].to_numpy(), [60 + 6 * 182 / 365, 66 + 6 * 182 / 365]
+            x_anchored['a2'].to_numpy(), [(60 + 6 * 182 / 365) / 4, (66 + 6 * 182 / 365) / 4]
         )
 
     @pytest.mark.parametrize(
@@ -504,7 +506,7 @@ class TestUniquenessOfTheWay:
         np.testing.assert_allclose(features.loc[entity, column].to_numpy(), expected)
 
     def test_interpolated_block_passes_through_its_anchors(self, mixed_freq_panel_multifrequency):
-        """IT block: q1 interpolated monthly keeps its quarter-end anchors."""
+        """IT block: q1 interpolated monthly keeps its quarter-end anchors, a third each."""
         features, _ways, _origins = CovariateMaterializer().materialize(
             columns=['q1'],
             grid_index=block_grid({'FR': annual_grid(), 'DE': quarterly_grid(), 'IT': monthly_grid()}),
@@ -514,7 +516,7 @@ class TestUniquenessOfTheWay:
             materialization={'q1': 'interpolate'},
         )
         italian = features.loc['IT', 'q1']
-        np.testing.assert_allclose(italian.loc[quarterly_grid()].to_numpy(), 10.0 * np.arange(1, 13))
+        np.testing.assert_allclose(italian.loc[quarterly_grid()].to_numpy(), 10.0 * np.arange(1, 13) / 3)
 
     def test_each_entity_records_the_origin_of_its_own_way(self, mixed_freq_panel_multifrequency):
         """One effective way per (column, entity, stage): one origin per entity block."""
@@ -758,8 +760,8 @@ class TestReferenceExampleTable:
         assert origins['a2'] == 'interpolated'
         assert x_train['a2'].isna().mean() == pytest.approx(0.0)
         assert x_pred['a2'].isna().mean() == pytest.approx(0.0)
-        # Valeurs d'or de a2 aux trois ancres annuelles
-        np.testing.assert_allclose(x_train['a2'].to_numpy(), [60.0, 66.0, 72.0])
+        # Valeurs d'or de a2 aux trois ancres annuelles, un trimestre de chacune
+        np.testing.assert_allclose(x_train['a2'].to_numpy(), [15.0, 16.5, 18.0])
 
 
 class TestAggregationConstraintApplier:
@@ -868,6 +870,26 @@ class TestAggregationConstraintApplier:
         )
         yearly = features['a1'].groupby(features.index.year).sum()
         np.testing.assert_allclose(yearly.to_numpy(), [120.0, 132.0, 150.0], rtol=0, atol=1e-9)
+
+    def test_unconstrained_interpolation_spans_one_grid_step(self, reference_timeseries):
+        """Without rescaling, a1 interpolated monthly carries a twelfth of each anchor.
+
+        The interpolation attributes each annual value to its anchor date; the
+        cell of that date spans one month of the year, hence 120 / 12, 132 / 12
+        and 150 / 12.
+        """
+        features, _, _ = self._materialize(
+            CovariateMaterializer(
+                aggregation_constraint=None,
+                aggregation_constraint_applier=AggregationConstraint('sum'),
+            ),
+            reference_timeseries,
+            columns=['a1'],
+            grid=monthly_grid(),
+            stage='M',
+        )
+        anchors = features['a1'].loc[pd.to_datetime(['2021-12-31', '2022-12-31', '2023-12-31'])]
+        np.testing.assert_allclose(anchors.to_numpy(), [10.0, 11.0, 12.5], rtol=0, atol=1e-9)
 
     def test_training_value_is_the_exact_aggregate_of_the_prediction_values(
         self, reference_timeseries

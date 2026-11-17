@@ -704,6 +704,29 @@ class TestTrainPredictScale:
                     f'{step.var_name}/{column}'
                 )
 
+    @pytest.mark.parametrize('intermediate', [False, 'covariates_only'])
+    @pytest.mark.parametrize('strategy', ['interpolate', 'model'])
+    def test_scales_agree_without_aggregation_constraint(
+        self, reference_timeseries, strategy, intermediate
+    ):
+        """Sans recalage, une covariable interpolée garde l'échelle d'un pas de grille.
+
+        Non recalée sur ses totaux, la covariable interpolée n'a plus exactement
+        la moyenne de son agrégat d'entraînement, mais reste du même ordre : une
+        valeur laissée à l'échelle de sa période l'écarterait d'un facteur 3 ou 12.
+        """
+        imputer = fit_with_spy(
+            reference_timeseries,
+            covariate_strategy=strategy,
+            impute_intermediate_frequencies=intermediate,
+            aggregation_constraint=None,
+        )
+        for step in imputer.imputation_plan_:
+            for column, trained, predicted in self._means(step):
+                assert trained == pytest.approx(predicted, rel=0.2), (
+                    f'{step.pred_freq_label}/{step.var_name}/{column}'
+                )
+
     def test_mixed_calendar_feature_and_constant_target(self, reference_timeseries):
         """Mixed case: feature scaled by 'calendar', target by 'constant'."""
         imputer = fit_with_spy(

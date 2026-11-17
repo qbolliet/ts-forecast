@@ -207,14 +207,14 @@ class TestInterpolateColumn:
         pd.testing.assert_series_equal(shuffled, reference)
 
     def test_month_start_grid_passes_through_the_january_anchors(self):
-        """Start-anchored data: the values are kept at their January anchors."""
+        """Start-anchored data: the values land on their January anchors, a twelfth each."""
         dates = pd.date_range('2021-01-01', periods=36, freq='MS')
         data = pd.DataFrame({'a1': np.nan}, index=dates)
         data.loc[dates[dates.month == 1], 'a1'] = [120.0, 132.0, 150.0]
 
         values = CovariateMaterializer().interpolate_column('a1', dates, 'M', {'a1': 'Y'}, data)
         assert (values.notna().all(), values.loc[dates[dates.month == 1]].tolist()) == (
-            True, [120.0, 132.0, 150.0],
+            True, [10.0, 11.0, 12.5],
         )
 
 

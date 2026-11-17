@@ -5440,6 +5440,38 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   `::test_imputer_refuses_a_dict_target_on_a_time_series` (le second échoue sur la version précédente avec la `TypeError`)
 - **Statut** : corrigée (2026-10-25)
 
+### ANO-FREQ-090 — Interpolation non recalée laissée à l'échelle de sa période (`aggregation_constraint=None`)
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py::CovariateMaterializer._interpolate_series`
+  (voie `'interpolate'`, `covariate_fallback`, repli par interpolation d'une variable imputée, voie `'carried_model'`)
+- **Sévérité** : majeure (sorties fausses d'un facteur 3 ou 12, sans avertissement)
+- **Observé** : sous `aggregation_constraint=None`, une valeur interpolée garde le niveau de sa période d'origine : sur
+  une grille mensuelle, chaque mois d'un PIB trimestriel vaut le total du trimestre. `StageScaler.feature_divisors`
+  suppose au contraire qu'une cellule interpolée couvre un pas de grille (diviseur 1) ; seul le recalage `'sum'`, qui
+  répartit le total, tenait cette promesse. Conséquences : covariable divisée au `fit` (agrégat exact du bloc
+  d'entraînement) mais pas au `predict` (PIB moyen 897 contre 2 696 dans le modèle de la balance commerciale du
+  notebook 2) ; sortie d'`estimator=None` au niveau trimestriel sur chaque mois ; voie `'carried_model'` trois fois trop
+  grande au `predict`. Les cellules que `'sum'` ne recale pas (périodes tronquées ou de somme nulle) gardaient la même
+  échelle de période. Le test d'échelle `TestTrainPredictScale` ne couvrait que `'sum'`.
+- **Attendu** : toute cellule interpolée couvre un pas de la grille, que le recalage s'applique ou non ;
+  `aggregation_constraint=None` ne retire que le recalage sur les totaux.
+- **Reproduction** :
+  ```python
+  from tests.support.datasets import build_panel_reference
+  from tsforecast.imputation import HighFrequencyImputer
+  serie = build_panel_reference().loc['FR', ['m1', 'q1', 'a1', 'a2']]
+  out = HighFrequencyImputer(target_frequency='M', estimator=None, aggregation_constraint=None,
+                             keep_lower_frequencies=False).fit_transform(serie)
+  out.loc['2021-12-31', 'a1']   # 120.0 (total annuel) au lieu de 10.0
+  ```
+- **Correctif** (2026-11-02) : `_interpolate_series` divise chaque valeur interpolée par le nombre calendaire de pas
+  de grille de sa période d'origine (`_spread_over_subperiods`, rapport constant pour une fréquence sans période
+  pandas), avant le recalage. Le recalage étant proportionnel, les périodes recalées sous `'sum'` sont inchangées.
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_invariants.py::TestTrainPredictScale::test_scales_agree_without_aggregation_constraint`,
+  `tests/unit/imputation/_components/covariate_materializer/test_materialize.py::TestAggregationConstraintApplier::test_unconstrained_interpolation_spans_one_grid_step`
+  (tous deux échouent sur la version précédente)
+- **Statut** : corrigée (2026-11-02)
+
 ## BASE
 
 ### ANO-BASE-001 — `InverseTransformer` inutilisable après `clone`

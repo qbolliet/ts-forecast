@@ -355,9 +355,11 @@ class CovariateMaterializer:
               ``Pipeline`` including a ``SimpleImputer``). Nothing filters
               those NaN out downstream.
             - ``'interpolate'`` (default): the covariate is interpolated over
-              the grid from its observed values, then rescaled to preserve
-              the period aggregate named by ``aggregation_constraint`` when
-              that parameter is active.
+              the grid from its observed values, each value spread over the
+              grid steps of its period (a quarterly total divided by three on
+              a monthly grid), then rescaled to preserve the period aggregate
+              named by ``aggregation_constraint`` when that parameter is
+              active.
               Looking downstream: linear interpolation between two
               anchors uses the future anchor — in a pseudo-real-time setting
               that is information from the future. It is not a defect for
@@ -1232,12 +1234,21 @@ class CovariateMaterializer:
     ) -> pd.Series:
         """Carry one date-indexed series onto a finer grid, by interpolation.
 
-        The interpolation way of ``column`` — its method, its anchor, then the
+        The interpolation way of ``column`` — its method, its anchor, the
+        spreading of each value over the grid steps of its period, then the
         rescaling to the totals of ``f_source`` — applied to whatever series
         is handed over: the column's raw observations for the
         ``'interpolate'`` way, its mirror cells produced at the earlier stage
         ``f'`` for the ``'carried_model'`` way. The rescaling therefore bears
         on the totals of the origin stage, never on those of the current one.
+
+        Every returned cell spans one period of the grid, whether the
+        rescaling applies or not: a quarterly total interpolated onto months
+        is divided by the three months of its quarter. The rescaling is
+        proportional, so the spreading leaves the cells of a rescaled period
+        unchanged; it is what keeps the scale of the cells that the rescaling
+        does not reach (``aggregation_constraint=None``, truncated or zero
+        periods).
 
         Args:
             column: Column being carried, driving ``resolve_method`` and
@@ -1264,6 +1275,9 @@ class CovariateMaterializer:
             source_freq=f_source,
             anchor_fraction=self.resolve_anchor(column),
         )
+        # Répartition sur les pas de la grille : une cellule couvre un pas,
+        # jamais la période entière de la valeur interpolée
+        interpolated = self._spread_over_subperiods(interpolated, f_source, f_target)
 
         # Recalage aux totaux de période de la fréquence D'ORIGINE : inerte
         # tant que l'objet n'est pas fourni
@@ -1276,6 +1290,57 @@ class CovariateMaterializer:
         # Réindexation sur la grille demandée : les timestamps décalés par
         # anchor_fraction ne tombent pas sur la grille, seule celle-ci est retenue
         return interpolated.reindex(dates)
+
+    # Méthode auxiliaire de répartition d'une interpolation sur les pas de la grille
+    def _spread_over_subperiods(
+        self,
+        values: pd.Series,
+        f_source: Optional[str],
+        f_target: Optional[str],
+    ) -> pd.Series:
+        """Divide each interpolated value by the grid steps of its source period.
+
+        An interpolated value carries the level of one ``f_source`` period;
+        on a finer grid, one cell spans a single ``f_target`` step of it. The
+        count is calendar, read off each period (three months in a quarter,
+        28 to 31 days in a month), the count the aggregation constraint uses
+        to spread a total; a constant ratio replaces it when the frequencies
+        cannot be expressed as pandas periods (multiplied frequencies).
+
+        Args:
+            values: Interpolated values, date-indexed.
+            f_source: Frequency of the interpolated values.
+            f_target: Frequency of the grid.
+
+        Returns:
+            The values divided by their count, unchanged when either frequency
+            is unknown or when the grid is not finer than ``f_source``.
+
+        Examples:
+            >>> months = pd.date_range('2024-01-31', periods=4, freq='ME')
+            >>> values = pd.Series([300.0, 300.0, 300.0, 330.0], index=months)
+            >>> CovariateMaterializer()._spread_over_subperiods(values, 'Q', 'M').tolist()
+            [100.0, 100.0, 100.0, 110.0]
+        """
+        # Fréquence inconnue, ou grille qui n'est pas plus fine : rien à répartir
+        if (
+            values.empty or f_source is None or f_target is None
+            or not is_higher_frequency(f_target, f_source)
+        ):
+            return values
+
+        # Décompte calculé une fois par période distincte, puis diffusé sur les dates
+        dates = pd.DatetimeIndex(values.index)
+        try:
+            periods = dates.to_period(normalize_frequency(f_source, return_format='base'))
+            codes, uniques = pd.factorize(periods)
+            counts = self._conv.count_subperiods_per_period(
+                uniques.to_timestamp(), f_source, f_target
+            )[codes]
+        except (ValueError, AttributeError):
+            # Fréquences sans période pandas : rapport constant
+            counts = np.full(len(dates), float(self._conv.get_conversion_factor(f_target, f_source)))
+        return values / counts
 
     # Méthode publique d'interpolation d'une colonne
     def interpolate_column(

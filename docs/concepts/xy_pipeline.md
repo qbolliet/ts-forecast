@@ -7,8 +7,9 @@ traverse le pipeline sans jamais être transformé. Or, en prévision, beaucoup 
 transformations touchent **les deux** :
 
 - passage en log ou différenciation de la cible comme des features ;
-- application d'un délai de publication qui décale `X` et `y` ;
-- imputation multi-fréquences qui produit un `(X, y)` ré-indexé.
+- imputation multi-fréquences qui produit un `(X, y)` ré-indexé ;
+- agrégation de la cible et des features en fenêtres glissantes ;
+- retrait des lignes sans cible juste avant l'estimateur.
 
 ## La solution
 
@@ -29,18 +30,42 @@ soient sa signature et sa sortie : `transform(X)` sans la cible, et la sortie
 transmise telle quelle comme `X` de l'étape suivante.
 
 ```python
-from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
-from tsforecast.xy import XYPipeline
+from sklearn.preprocessing import StandardScaler
 from tsforecast.delays import PublicationDelayTransformer
+from tsforecast.xy import DropNaNTarget, XYPipeline
+
+# Délais de publication appliqués à X seul, ramené aux lignes de y
+X_delayed = (
+    PublicationDelayTransformer(delays=delays, strategy="shift", prediction_date="2024-01-15")
+    .fit_transform(X)
+    .reindex(X.index)
+)
 
 pipe = XYPipeline([
-    ("delays", PublicationDelayTransformer(delays=delays, strategy="shift")),
-    ("scaler", StandardScaler()),      # étape sklearn standard
+    ("drop", DropNaNTarget()),       # étape XY : reçoit et rend (X, y)
+    ("fill", SimpleImputer()),       # étapes sklearn standard : X seul
+    ("scaler", StandardScaler()),
     ("model", Ridge()),
 ])
-pipe.fit(X, y)
+pipe.fit(X_delayed, y)
 ```
+
+`PublicationDelayTransformer` n'est pas une étape XY : il ne transforme que `X`. Sous `'shift'`,
+il ré-indexe `X` sur les dates de publication, en ajoute à la fin et laisse NaN les premières
+périodes, pas encore publiées : dans le pipeline, `X` ne partagerait plus l'index de `y`. Il
+s'applique donc à `X` avant le pipeline (`.reindex(X.index)` revient aux lignes de `y`, et
+`SimpleImputer` comble les périodes non publiées). Le décalage ne dépend que de la table des
+délais et de la date de prédiction, jamais de la cible : l'appliquer en amont d'une validation
+croisée n'introduit aucune fuite.
+
+`prediction_date` fixe le décalage de toute la série : chaque colonne recule du nombre de périodes
+qui sépare la période de cette date de la dernière période publiée à cette date. Au 15 du mois, une
+série mensuelle publiée 20 jours après la fin du mois recule de deux mois (le mois précédent n'est
+pas encore publié) ; au 25, d'un seul. La date choisie représente donc la position, dans sa
+période, des prévisions que l'on évalue. Laissée à sa valeur par défaut, `'today'`, elle rend le
+décalage dépendant du jour d'exécution.
 
 ## Écrire un transformateur XY
 

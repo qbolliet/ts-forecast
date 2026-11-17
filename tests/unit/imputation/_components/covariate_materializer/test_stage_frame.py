@@ -203,7 +203,7 @@ class TestStageFrameMirror:
         """Rank 3 reads the mirror: the cap leaves it, only an interpolation way is capped.
 
         Imputation trimestrielle constante (5.0), reportée sur la grille
-        mensuelle : la vue d'étape la porte sur les 36 mois.
+        mensuelle : la vue d'étape en porte le tiers sur les 36 mois.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(5.0, index=quarterly_grid()), 'Q', 'model')
@@ -215,7 +215,7 @@ class TestStageFrameMirror:
             source_data=reference_timeseries,
             columns=['a1'],
         )
-        assert set(frame['a1'].round(12)) == {5.0}
+        assert set(frame['a1'].round(12)) == {round(5 / 3, 12)}
 
 
 class TestStageFramePanel:

@@ -323,8 +323,8 @@ class TestStartAndEndPositions:
             ('m1', 'Q', 'interpolate', 303.0 + 9.0 * np.arange(12)),
             # Ancres brutes : les 3 valeurs annuelles, et elles seules
             ('a1', 'M', 'tolerate_nan', np.array([120.0, 132.0, 150.0])),
-            # Interpolation : les 3 ancres traversées telles quelles
-            ('a1', 'M', 'interpolate', np.array([120.0, 132.0, 150.0])),
+            # Interpolation : les 3 ancres traversées, au douzième (un mois de l'année)
+            ('a1', 'M', 'interpolate', np.array([10.0, 11.0, 12.5])),
         ],
         ids=['identity', 'aggregate', 'raw_anchors', 'interpolate'],
     )

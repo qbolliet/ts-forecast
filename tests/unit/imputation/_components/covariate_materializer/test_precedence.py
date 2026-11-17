@@ -245,11 +245,12 @@ class TestPrecedenceRanks:
         # Une seule voie pour la colonne, la plus dégradée des verdicts
         assert ways == {'a1': 'stage_model'}
         assert origins == {'a1': 'model'}
-        # FR lit le miroir ; DE et IT dégradent au rang 4 (repli interpolé)
+        # FR lit le miroir ; DE et IT dégradent au rang 4 (repli interpolé,
+        # un douzième de l'ancre annuelle par mois)
         np.testing.assert_allclose(
             features.loc['FR', 'a1'].to_numpy(), 7.0 + np.arange(len(dates))
         )
-        assert features.loc['DE', 'a1'].iloc[0] == pytest.approx(120.0)
+        assert features.loc['DE', 'a1'].iloc[0] == pytest.approx(120.0 / 12)
         assert features['a1'].notna().all()
         # Chaque entité porte l'origine de la voie qui l'a effectivement servie
         assert set(materializer.origin_store['a1'].unique()) == {'model', 'interpolated'}
@@ -343,7 +344,7 @@ class TestTwoCandidateRanks:
         assert (ways, set(features['a1'])) == ({'a1': 'stage_model'}, {7.0})
 
     def test_rank_three_beats_the_fallback(self, reference_timeseries):
-        """A carry of the constant quarterly imputation 5.0 is constant, never the anchors."""
+        """A carry of the constant quarterly imputation 5.0 is constant (5 / 3 a month)."""
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(5.0, index=quarterly_grid()), 'Q', 'model')
 
@@ -354,7 +355,7 @@ class TestTwoCandidateRanks:
             detected_frequencies=TS_FREQUENCIES,
             source_data=reference_timeseries,
         )
-        assert (ways, set(features['a1'].round(12))) == ({'a1': 'carried_model'}, {5.0})
+        assert (ways, set(features['a1'].round(12))) == ({'a1': 'carried_model'}, {round(5 / 3, 12)})
 
     def test_carry_starts_from_the_closest_earlier_stage(self, reference_timeseries):
         """Mirror cells at Q and at Y: the carry onto M starts from Q.
@@ -375,7 +376,7 @@ class TestTwoCandidateRanks:
             detected_frequencies=TS_FREQUENCIES,
             source_data=reference_timeseries,
         )
-        assert set(features['a1'].dropna().round(12)) == {5.0}
+        assert set(features['a1'].dropna().round(12)) == {round(5 / 3, 12)}
 
     def test_mirror_cell_without_production_frequency_grants_no_model_rank(self):
         """A mirror cell of unknown production frequency is neither rank 2 nor rank 3."""
@@ -457,8 +458,9 @@ class TestModelWaysPerEntity:
         [
             # FR ne porte que des cellules de l'étape M : rang 2, ses valeurs
             ('FR', [1.0] * 36),
-            # DE ne porte que des cellules Q : rang 3, report de la constante
-            ('DE', [5.0] * 36),
+            # DE ne porte que des cellules Q : rang 3, report de la constante,
+            # répartie sur les trois mois de chaque trimestre
+            ('DE', [5.0 / 3] * 36),
         ],
         ids=['FR-stage-cells', 'DE-carry'],
     )
