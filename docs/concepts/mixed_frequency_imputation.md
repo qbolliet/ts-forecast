@@ -57,10 +57,25 @@ l'estimateur pour imputer la cible, l'axe 2 les **lignes** de sa cible.
 `'interpolate'` est le réglage le moins coûteux en calcul ; `'model'` réduit généralement l'erreur d'imputation,
 au prix d'une cascade computationnellement plus coûteuse et qui dépend de l'ordre des variables.
 
-Sous `'model'`, une covariable déjà imputée à l'étape courante est lue :
+**Règle de lecture des covariables.** Pour une variable imputée à une étape, chaque covariable est lue ainsi :
 
-- imputée telle quelle telle quelle sur la grille de prédiction, 
-- comme l'agrégat de cette imputation sur une ligne d'entraînement (nécessairement à une fréquence plus faible que celle de la grille de prédiction) — sous `'sum'` et `'denton'`, l'imputation agrégée coïncide avec l'observation elle-même à cette fréquence. 
+1. **La covariable est déjà imputée à cette étape** (sous `'model'`) : elle est alors lue imputée sur la grille de prédiction (elle n'est jamais
+   interpolée ni écartée). Sur la grille d'entraînement, elle est :
+    - observée, si la ligne est à la même fréquence  ;
+    - agrégée si la ligne est à une plus basse fréquence ; sous
+      `'sum'` et `'denton'`, l'agrégation des valeurs imputées à une fréquence plus fine correspond exactement aux valeurs imputées à cette fréquence plus faible, elles peuvent donc lues directement plutôt que recalculées.
+2. **La covariable est interpolée ou brute sur la grille de prédiction** (stratégies `'interpolate'`
+   et `'tolerate_nan'`, ou covariable pas encore imputée, servie par `covariate_fallback`). Elle est :
+    - **écartée** si elle est observée à la fréquence des ancres de la variable (sur un panel, par
+      au moins une entité). En effet, les valeurs de la variable sont exactes sur la grille d'entraînement mais approchée sur la grille de prédiction ce qui pourrait engendrer une importante erreur d'imputation ;
+    - **conservée** sinon, toujours depuis ses ancres d'origine, jamais depuis l'imputation d'une
+      étape antérieure. A une fréquence plus faible que celle de l'étape, la covariable est interpolée sur les deux grilles. A une fréquence plus élevée que l'étape d'entrainement et plus faible que celle de prédiction, elle est agrégée exactement à
+      l'entraînement et interpolée à la prédiction (le PIB pour la balance annuelle) : sa qualité
+      diffère entre les deux grilles, mais elle porte encore au mois son profil trimestre par
+      trimestre.
+
+Le plan nomme les covariables écartées dans `ImputationStep.dropped_covariates` et dans la colonne
+`dropped_covariates` de `imputation_plan_.to_diagnostic_frame()`.
 
 Une covariable pas encore imputée à l'étape passe par `covariate_fallback`
 (`'interpolate'` par défaut, ou `'tolerate_nan'`), depuis ses ancres d'origine. L'ordre des variables d'une étape
@@ -77,13 +92,6 @@ détermine donc quelles variables sont utilisées imputées pour l'imputation d'
 
 Ces paramètres sont sans effet hors de `'model'`. `interpolation_method` et `interpolation_anchor` règlent la forme de toute
 interpolation (covariables, replis, `estimator=None`).
-
-**Covariables écartées.** Quelle que soit la stratégie, une covariable observée à sa propre fréquence et interpolée sur la grille de prédiction est écartée. Cette variable serait en effet exacte sur chaque ligne d'entraînement et bruitée sur sa ligne de prédiction, le modèle apprendrait alors à l'entrainement une relation entre cette covariable et la variable à imputer qui n'est plus vraie à la prédiction, ce qui augmenterait l'erreur d'imputation. Ainsi, sous `covariate_fallback='interpolate'`, une balance annuelle n'est pas une
-covariable d'une autre variable annuelle mais elle reste une covariable du PIB trimestriel (interpolée
-sur les grilles d'entraînement et de prédiction), et le PIB reste une covariable des variables annuelles (plus fin que leurs
-ancres, il porte encore ses valeurs trimestrielles au mois). Une covariable imputée à une étape n'est
-jamais écartée. Le plan nomme les covariables écartées dans `ImputationStep.dropped_covariates` et
-dans la colonne `dropped_covariates` de `imputation_plan_.to_diagnostic_frame()`.
 
 !!! warning "Regard vers le futur"
     Une interpolation entre deux ancres lit l'ancre **future**. L'imputer est destiné à reconstruire l'historique du jeu de données d'entraînement et non à réaliser une simulation en pseudo temps réel.
