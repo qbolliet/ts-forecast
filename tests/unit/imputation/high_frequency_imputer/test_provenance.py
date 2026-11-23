@@ -38,11 +38,11 @@ class TestProvenanceFamilies:
     def test_model_on_imputed_only_under_model_strategy(self, reference_timeseries):
         """MODEL_ON_IMPUTED n'est émis que sous covariate_strategy='model'."""
         under_model = fit_with_spy(reference_timeseries, covariate_strategy='model')
-        # 'a1' est imputée la première : ses covariables ne sont qu'interpolées
-        assert self._families(under_model, 'a1') == {'model_on_interpolated'}
-        # 'a2' et 'q1' lisent ensuite l'imputation de 'a1' dans le miroir
+        # 'q1' est imputée la première : ses covariables ne sont qu'interpolées
+        assert self._families(under_model, 'q1') == {'model_on_interpolated'}
+        # 'a1' et 'a2' lisent ensuite l'imputation de 'q1' dans le miroir
+        assert self._families(under_model, 'a1') == {'model_on_imputed'}
         assert self._families(under_model, 'a2') == {'model_on_imputed'}
-        assert self._families(under_model, 'q1') == {'model_on_imputed'}
 
         for strategy in ('interpolate', 'tolerate_nan'):
             imputer = fit_with_spy(reference_timeseries, covariate_strategy=strategy)

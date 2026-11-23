@@ -1,8 +1,9 @@
 """``HighFrequencyImputer.transform`` against the fit window.
 
 Scenarios: transform outside the fit window, extended window on an irregular index,
-dates after the fit, a column without anchor at transform and the reserved
-``'frequency'`` level name.
+dates after the fit, a column without anchor at transform, the reserved
+``'frequency'`` level name, and the period totals of the imputed columns emptied
+outside the window (target level, stacked levels, inversion, untouched entity).
 """
 
 # Modules de base
@@ -366,3 +367,70 @@ class TestReservedFrequencyLevel:
         restored = imputer.inverse_transform(transformed)
 
         assert restored.index.equals(transformed.index)
+
+
+class TestPeriodTotalsOutsideTheWindow:
+    """Outside the window, the period totals of the imputed columns leave the finer rows."""
+
+    @staticmethod
+    def _window_from_2022(data: pd.DataFrame, column: str) -> pd.DataFrame:
+        """Empty one column over 2021: the common coverage, hence the window, starts in 2022."""
+        frame = data.copy()
+        frame.loc['2021', column] = np.nan
+        return frame
+
+    def test_totals_are_emptied_at_the_target_level(self, reference_timeseries):
+        """The 2021 annual totals are absent from the monthly row of December, and unmarked."""
+        data = self._window_from_2022(reference_timeseries, 'q1')
+        imputer = make_imputer(keep_lower_frequencies=False)
+        output = fit_transform_quietly(imputer, data)
+
+        assert imputer.imputation_window_[0] == pd.Timestamp('2022-01-31')
+        assert output.loc['2021', ['a1', 'a2']].isna().all().all()
+        assert imputer.imputation_provenance_.loc['2021', ['a1', 'a2']].isna().all().all()
+
+    def test_column_at_the_target_frequency_keeps_its_rows(self, reference_timeseries):
+        """The monthly column keeps every 2021 observation, marked ORIGINAL."""
+        data = self._window_from_2022(reference_timeseries, 'q1')
+        imputer = make_imputer(keep_lower_frequencies=False)
+        output = fit_transform_quietly(imputer, data)
+
+        pd.testing.assert_series_equal(output.loc['2021', 'm1'], data.loc['2021', 'm1'])
+        assert (imputer.imputation_provenance_.loc['2021', 'm1'] == ProvenanceType.ORIGINAL).all()
+
+    @pytest.mark.parametrize('restore, expected', [(True, [120.0, 60.0]), (False, [np.nan, np.nan])])
+    def test_inverse_transform_gives_the_totals_back_on_request(
+        self, reference_timeseries, restore, expected
+    ):
+        """``restore_original_values=True`` refills the totals, the ORIGINAL mask alone does not."""
+        data = self._window_from_2022(reference_timeseries, 'q1')
+        imputer = make_imputer(keep_lower_frequencies=False, restore_original_values=restore)
+        restored = imputer.inverse_transform(fit_transform_quietly(imputer, data))
+
+        np.testing.assert_array_equal(
+            restored.loc['2021-12-31', ['a1', 'a2']].to_numpy(dtype=float), expected
+        )
+
+    def test_level_at_the_own_frequency_keeps_the_totals(self, reference_timeseries):
+        """Stacked, the quarterly level keeps the 2021 quarters of q1; the monthly level does not."""
+        data = self._window_from_2022(reference_timeseries, 'a2')
+        imputer = make_imputer(impute_intermediate_frequencies=True)
+        output = fit_transform_quietly(imputer, data)
+
+        quarterly = output.xs('Q', level='frequency').loc['2021', 'q1']
+        pd.testing.assert_series_equal(quarterly, data['q1'].dropna().loc['2021'], check_freq=False)
+        assert output.xs('M', level='frequency').loc['2021', 'q1'].isna().all()
+        # L'annuelle, plus grossière que le trimestre, quitte aussi ce niveau
+        assert output.xs('Q', level='frequency').loc['2021', 'a1'].isna().all()
+
+    def test_entity_left_untouched_keeps_its_totals(self, mixed_freq_panel_multifrequency):
+        """An entity absent from the fit, not imputed, keeps its raw totals at transform."""
+        data = mixed_freq_panel_multifrequency
+        fit_data = data.drop(index='IT', level='country')
+        imputer = fit_quietly(make_imputer(keep_lower_frequencies=False), fit_data)
+        output = transform_quietly(imputer, data)
+
+        observed = data.loc['IT', 'q1'].dropna()
+        pd.testing.assert_series_equal(
+            output.loc['IT', 'q1'].loc[observed.index], observed, check_freq=False
+        )

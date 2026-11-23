@@ -2,9 +2,8 @@
 
 The origin filter decides WHICH cells of an entity are eligible, the
 mutualization WHICH entities contribute: the two compose without knowing each
-other. ``ELIGIBLE_ORIGINS`` of every modality of
-``impute_intermediate_frequencies`` (``False`` and ``'covariates_only'``
-share literally one filter), the per-row production frequency of an imputed
+other. ``ELIGIBLE_ORIGINS`` of both modalities of
+``impute_intermediate_frequencies``, the per-row production frequency of an imputed
 row, NaN mirror cells ignored, the ``str`` dtype of the row frequencies and origins.
 
 Layers: the ``'training'`` window is read once per layer —
@@ -84,15 +83,14 @@ class TestOriginFilter:
         'modality, expected_rows, expected_origins',
         [
             (False, 51, {'observed'}),
-            ('covariates_only', 51, {'observed'}),
             (True, 56, {'observed', 'interpolated', 'model'}),
         ],
-        ids=['False', 'covariates_only', 'True'],
+        ids=['False', 'True'],
     )
     def test_eligible_origins_of_each_modality(
         self, mixed_freq_panel_multifrequency, modality, expected_rows, expected_origins
     ):
-        """``False`` and ``'covariates_only'`` share LITERALLY the same filter."""
+        """``False`` keeps the observed anchors only, ``True`` the earlier imputations too."""
         # Miroir de FR : trois cellules 'model' (étape Q) et deux cellules
         # 'interpolated' (repli d'un modèle en échec), hors fins d'année
         builder = seed_panel_mirror(make_builder(), [

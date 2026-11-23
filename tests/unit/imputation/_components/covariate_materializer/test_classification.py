@@ -1,7 +1,7 @@
 """Tests of the classification of covariates against a stage grid.
 
 Covers ``classify`` — the classification made entity by entity, and
-the four-rank precedence as one entity sees it — and ``decide_ways``
+the three-rank precedence as one entity sees it — and ``decide_ways``
 — one way per column, the most degraded of the per-entity verdicts,
 decided without producing nor recording anything. Both read the per-entity
 forms of ``detected_frequencies`` (a frequency belongs to the
@@ -70,7 +70,7 @@ class TestClassifyTable:
         [
             ('tolerate_nan', 'interpolate', 'raw_anchors'),
             ('interpolate', 'interpolate', 'interpolate'),
-            # Registres vides : la stratégie 'model' tombe au rang 4, son repli
+            # Registres vides : la stratégie 'model' tombe au rang 3, son repli
             ('model', 'interpolate', 'interpolate'),
             ('model', 'tolerate_nan', 'raw_anchors'),
         ],
@@ -390,9 +390,8 @@ class TestReductionOrder:
         """FR holds cells at the stage: it reads them, whichever entity comes first.
 
         FR : cellules d'étape M en 2022-2023 (1.0) et cellules Q en 2021 (99.0)
-        — rang 2 applicable ; DE : cellules Q seules (5.0) — rang 3. Les deux
-        verdicts partagent le rang 3 de ``_WAY_RANK`` : quelle que soit la voie
-        de modèle retenue pour la colonne, FR suit sa propre précédence et lit
+        — rang 2 applicable ; DE : cellules Q seules (5.0), une production
+        antérieure jamais reportée — repli. FR suit sa propre précédence et lit
         les cellules de son étape.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
@@ -424,8 +423,8 @@ class TestReductionOrder:
     def test_tied_model_verdicts_reduce_to_one_way_in_any_order(self):
         """FR at rank 2, DE at rank 3: the column way is the same in both orders.
 
-        Rangs égaux départagés par un ordre fixe : le report d'une étape
-        antérieure, moins direct, l'emporte.
+        La voie de colonne est la plus dégradée des verdicts au sens de
+        ``_WAY_RANK`` : celle du modèle, que DE ramène ensuite à son repli.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(1.0, index=entity_grid(['FR'], monthly_grid())), 'M', 'model')
@@ -439,4 +438,4 @@ class TestReductionOrder:
             )
             for order in (['FR', 'DE'], ['DE', 'FR'])
         ]
-        assert decided == [{'a1': 'carried_model'}, {'a1': 'carried_model'}]
+        assert decided == [{'a1': 'stage_model'}, {'a1': 'stage_model'}]

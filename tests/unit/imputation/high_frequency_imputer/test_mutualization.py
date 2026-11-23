@@ -85,7 +85,7 @@ class TestMutualizedTrainingSet:
         """
         _, fits = capture_variable_fits(
             mixed_freq_panel_multifrequency,
-            impute_intermediate_frequencies='covariates_only',
+            impute_intermediate_frequencies=True,
         )
         y_train = fits[('Q', 'v')].y_train
 
@@ -316,7 +316,7 @@ class TestUnobservedEntities:
             france = self._imputed(imputer, panel_f_without_it_v, 'FR')
             assert france.loc['2021'].sum() == pytest.approx(120.0)
 
-    @pytest.mark.parametrize('modality', [False, 'covariates_only', True])
+    @pytest.mark.parametrize('modality', [False, True])
     @pytest.mark.slow
     def test_progression_is_unchanged_by_the_parameter(
         self, panel_f_without_it_v, modality
@@ -551,9 +551,9 @@ class TestUnobservedEntities:
         """Sous 'model', une colonne sans groupe ancré se range à la fréquence cible de ses entités.
 
         FR et DE observent v chaque mois, IT jamais : à l'étape M, le seul
-        groupe de v est ``(v, None) → (IT,)``. Sans fréquence source à
-        comparer, l'ordre 'frequency' la place à la fréquence cible d'IT (M),
-        donc APRÈS q1, trimestrielle.
+        groupe de v est ``(v, None) → (IT,)``. Sans ancre, l'ordre
+        'frequency' la place après toute colonne ancrée, donc APRÈS q1,
+        trimestrielle, bien que la fréquence cible d'IT (M) soit plus élevée.
         """
         data = mixed_freq_panel_multifrequency.copy()
         monthly_v = data.loc[('IT',), 'v'].to_numpy()

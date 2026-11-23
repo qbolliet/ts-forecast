@@ -54,14 +54,39 @@ l'estimateur pour imputer la cible, l'axe 2 les **lignes** de sa cible.
 | `'tolerate_nan'` | la covariable telle qu'observée, trous compris | **l'estimateur doit tolérer les NaN**, sinon l'étape part en repli par interpolation |
 | `'model'` | la covariable imputée par son propre modèle, en cascade sur les variables dans l'ordre `fit_predict_order` | — |
 
-Sous `'model'`, une covariable pas encore imputée à l'étape courante passe par `covariate_fallback`
-(`'interpolate'` par défaut, ou `'tolerate_nan'`). `fit_predict_order='cv'` ordonne les variables par
-score de validation croisée (`cv`, `cv_scoring`, `min_cv_train_size`) ; ces paramètres sont sans
-effet hors de `'model'`. `interpolation_method` et `interpolation_anchor` règlent la forme de toute
+`'interpolate'` est le réglage le moins coûteux en calcul ; `'model'` réduit généralement l'erreur d'imputation,
+au prix d'une cascade computationnellement plus coûteuse et qui dépend de l'ordre des variables.
+
+Sous `'model'`, une covariable déjà imputée à l'étape courante est lue :
+
+- imputée telle quelle telle quelle sur la grille de prédiction, 
+- comme l'agrégat de cette imputation sur une ligne d'entraînement (nécessairement à une fréquence plus faible que celle de la grille de prédiction) — sous `'sum'` et `'denton'`, l'imputation agrégée coïncide avec l'observation elle-même à cette fréquence. 
+
+Une covariable pas encore imputée à l'étape passe par `covariate_fallback`
+(`'interpolate'` par défaut, ou `'tolerate_nan'`), depuis ses ancres d'origine. L'ordre des variables d'une étape
+détermine donc quelles variables sont utilisées imputées pour l'imputation d'une autre variable :
+
+- `fit_predict_order='frequency'` (défaut) impute d'abord la variable de **fréquence source la plus
+  élevée** : à l'étape mensuelle, un PIB trimestriel avant une balance annuelle. La variable la mieux
+  ancrée (le plus d'observations, donc le modèle le mieux estimé) est imputée à partir de covariables
+  interpolées, puis sert de covariable imputée aux variables les moins ancrées, les plus incertaines.
+  Une colonne dont les entités suivent plusieurs fréquences se range à la plus basse ; une colonne
+  sans aucune ancre (`impute_unobserved_entities=True`) passe après toutes les autres ;
+- `fit_predict_order='cv'` ordonne les variables par score de validation croisée (`cv`, `cv_scoring`,
+  `min_cv_train_size`).
+
+Ces paramètres sont sans effet hors de `'model'`. `interpolation_method` et `interpolation_anchor` règlent la forme de toute
 interpolation (covariables, replis, `estimator=None`).
 
+**Covariables écartées.** Quelle que soit la stratégie, une covariable observée à sa propre fréquence et interpolée sur la grille de prédiction est écartée. Cette variable serait en effet exacte sur chaque ligne d'entraînement et bruitée sur sa ligne de prédiction, le modèle apprendrait alors à l'entrainement une relation entre cette covariable et la variable à imputer qui n'est plus vraie à la prédiction, ce qui augmenterait l'erreur d'imputation. Ainsi, sous `covariate_fallback='interpolate'`, une balance annuelle n'est pas une
+covariable d'une autre variable annuelle mais elle reste une covariable du PIB trimestriel (interpolée
+sur les grilles d'entraînement et de prédiction), et le PIB reste une covariable des variables annuelles (plus fin que leurs
+ancres, il porte encore ses valeurs trimestrielles au mois). Une covariable imputée à une étape n'est
+jamais écartée. Le plan nomme les covariables écartées dans `ImputationStep.dropped_covariates` et
+dans la colonne `dropped_covariates` de `imputation_plan_.to_diagnostic_frame()`.
+
 !!! warning "Regard vers le futur"
-    Une interpolation entre deux ancres lit l'ancre **future**. L'imputer est destiné à reconstruire l'histoirique du jeu de données d'entraînement et non à réaliser une simulation en pseudo temps réel.
+    Une interpolation entre deux ancres lit l'ancre **future**. L'imputer est destiné à reconstruire l'historique du jeu de données d'entraînement et non à réaliser une simulation en pseudo temps réel.
 
 ### Axe 2 — `impute_intermediate_frequencies` : passer par des fréquences intermédiaires ?
 
@@ -70,20 +95,33 @@ interpolation (covariables, replis, `estimator=None`).
 | Valeur | Étapes (annuel → mensuel) | `y_train` |
 |--------|---------------------------|-----------|
 | `False` (défaut) | directe : `['M']` | ancres observées seulement |
-| `'covariates_only'` | en cascade : `['Q', 'M']` | ancres observées seulement |
 | `True` | en cascade : `['Q', 'M']` | ancres **et** imputations antérieures de la variable |
 
-Trois subtilités :
+`False` est le réglage le moins coûteux en calcul ; `True` réduit généralement l'erreur d'imputation, sous chacune
+des trois stratégies. Une imputation intermédiaire ne sert qu'à la variable qu'elle impute : les
+autres variables lisent une covariable à l'étape courante (axe 1).
 
-- `'covariates_only'` ne change les valeurs que sous `covariate_strategy='model'`, et seulement
-  lorsqu'une covariable plus grossière est imputée **après** la variable qui l'utilise : sinon, sa
-  valeur déjà imputée à l'étape courante prime sur celle de l'étape intermédiaire.
-- Avec un estimateur linéaire non pénalisé, `True` redonne les valeurs de `False` : les imputations
-  intermédiaires se trouvent sur l'hyperplan ajusté. L'écart n'apparaît qu'avec un estimateur
-  pénalisé ou non linéaire.
-- Sous `True`, `aggregation_constraint` agit aussi sur `y_train` : sous `'sum'`, une imputation
-  antérieure tombant sur une date d'ancre en est retirée (elle serait une combinaison exacte des
-  autres lignes) ; sous `None`, elle est conservée.
+Deux subtilités :
+
+- Avec un estimateur linéaire non pénalisé et `aggregation_constraint=None`, `True` redonne les
+  valeurs de `False` : les imputations intermédiaires se trouvent sur l'hyperplan
+  ajusté, et les ré-apprendre redonne le même hyperplan. Sous `'sum'` ou `'denton'`, le recalage
+  les en écarte et l'égalité disparaît, sauf lorsque le modèle intermédiaire reproduit déjà ses
+  ancres (autant de paramètres que d'ancres) : le recalage est alors neutre. Un estimateur pénalisé
+  ou non linéaire rompt toujours cette équivalence.
+- Sous `True`, `aggregation_constraint` agit aussi sur `y_train` : sous `'sum'` et `'denton'`, une
+  imputation antérieure tombant sur une date d'ancre en est retirée (elle serait une combinaison
+  exacte des autres lignes) ; sous `None`, elle est conservée.
+
+!!! note "Pourquoi une imputation intermédiaire ne sert pas toujours de covariable aux autres variables"
+    À l'étape trimestrielle, le modèle de la balance commerciale annuelle lit le PIB trimestriel
+    **observé**. Si, à l'étape mensuelle, le modèle du PIB lisait cette balance trimestrielle
+    imputée sur ses ancres trimestrielles, la covariable contiendrait sa propre cible ; et au mois,
+    faute d'imputation mensuelle de la balance, il ne pourrait la lire qu'interpolée. Avec un
+    estimateur linéaire peu pénalisé, le modèle du PIB inverserait la relation, s'ajusterait presque
+    sans résidu, puis prédirait au mois une interpolation de ses propres totaux trimestriels :
+    l'erreur pourrait alors fortement augmenter. Pour d'autre classes de modèles, l'ajout de cette variable ne présente pas vraiment d'intérêt car elle synthétise une information disponible dans les autres covariables. La balance commerciale n'est donc lue, à l'étape mensuelle, que depuis
+    ses ancres annuelles tant qu'elle n'y est pas imputée, et imputée dès qu'elle l'est.
 
 ## Provenance
 
@@ -111,15 +149,32 @@ La provenance ne voit que ce que l'imputeur produit : des NaN comblés à l'int�
 ## Contrainte d'agrégation
 
 Laissées libres, les sous-périodes prédites n'ont aucune raison de sommer à l'observation qu'elles
-décrivent. Sous `aggregation_constraint='sum'` (défaut), les sous-périodes d'une période sont
-multipliées par le rapport total observé / somme prédite : une prédiction libre devient une vraie
-**désagrégation** de l'observation. `None` laisse les prédictions telles quelles ; un dictionnaire
-permet de paramétrer ce comportement par colonne.
+décrivent. La contrainte en fait une vraie **désagrégation** de l'observation, de deux façons :
+
+| Valeur | Recalage | Forme de la série |
+|---|---|---|
+| `'sum'` (défaut) | au prorata : chaque période est multipliée par le rapport total observé / somme prédite | une **marche** aux frontières de deux périodes de rapports différents, très visible après une interpolation, dont le profil est lisse |
+| `'denton'` | étalonnage de Denton additif : on ajoute aux prédictions la correction la plus lisse (moindres carrés de ses différences premières) qui respecte tous les totaux, calculée par entité sur toute la série | aucune marche ; les mouvements des prédictions sont conservés |
+| `None` | aucun | prédictions libres |
+
+Un dictionnaire paramètre la contrainte par colonne. Les deux recalages respectent exactement les
+totaux des périodes complètes. Le recalage additif ne divise par rien : une variable qui change de
+signe (une balance commerciale) n'a ni période de somme nulle ni profil inversé, deux cas où le
+prorata laisse les prédictions brutes ou retourne le signe de chaque sous-période. Sous `'denton'`,
+la valeur d'un mois dépend aussi des totaux des périodes voisines, et les cellules qu'aucun total ne
+contraint (bords de la fenêtre) reçoivent, à plat, la correction de la période la plus proche.
+
+Les marches sont généralement plus marquées après une interpolation qu'après un modèle car le modèle
+s'entraîne sur les ancres elles-mêmes, si bien que la somme de ses prédictions à haute fréquence est déjà
+proche du total observé (un modèle linéaire restitue sa valeur ajustée ; elle est exacte s'il a autant
+de paramètres que d'ancres) ; la somme d'une interpolation, décalée d'une demi-période, s'en écarte au
+contraire structurellement. Le profil d'un modèle bouge en outre d'un mois à l'autre, ce qui rend une
+marche de même taille moins visible.
 
 Le recalage ne change jamais la provenance d'une cellule. Une période que les bornes des données ou
-de la fenêtre tronquent n'est pas recalée : un total annuel ne s'impose pas à dix mois sur douze. Un
-avertissement unique par passe le signale, comme pour les périodes dont la somme prédite est nulle, qui
-laissées inchangées.
+de la fenêtre tronquent ne se voit pas imposer son total : un total annuel ne s'impose pas à dix mois
+sur douze. Un avertissement unique par passe le signale, comme, sous `'sum'`, les périodes dont la
+somme prédite est nulle, laissées inchangées.
 
 ## Fenêtres
 
@@ -171,6 +226,14 @@ La sortie suit l'ordre de l'entrée et porte les lignes de la grille cible : une
 (index irrégulier) en ajoute ; une cible plus grossière que l'index en retire, la valeur d'une ligne retirée étant agrégée sur la ligne de sa période. `inverse_transform` défait la dernière passe et 
 rend l'index de son entrée : sans `restore_original_values`, seules les cellules `ORIGINAL` y
 reviennent ; avec, toutes les valeurs observées.
+
+Une colonne ne mêle jamais, à un niveau de fréquence, des totaux de période et des valeurs de
+sous-période. Dans la fenêtre, la ligne d'ancre reçoit la valeur de sous-période produite ; **hors de
+la fenêtre**, les lignes gardent leurs valeurs d'entrée, sauf les totaux des colonnes imputées, qui
+restent vides : le total trimestriel d'un PIB n'a pas sa place sur une ligne mensuelle. Ces totaux se
+retrouvent par `inverse_transform` sous `restore_original_values=True`, et au niveau empilé de leur
+propre fréquence quand la progression en comporte un. Une entité laissée intacte (absente du `fit`
+sous `impute_unobserved_entities=False`) garde ses valeurs d'entrée.
 
 Les dates de toute passe sont dans l'unité des dates du `X` de cette passe (`s`, `ms`, `us` ou
 `ns`), y compris pour `y` ; les valeurs ne changent jamais.

@@ -217,6 +217,7 @@ class TestImputationPlan:
             'covariate_taint', 'target_taint',
             'emitted_provenance', 'is_fallback', 'interpolation_method',
             'interpolation_anchor', 'materialization', 'training_blocks',
+            'dropped_covariates',
         ]
         assert len(frame) == 3
 
@@ -552,10 +553,10 @@ class TestFallbackSentinelAndWays:
                 model='interpolate_fallback', feature_cols=(), materialization={}, is_fallback=False
             )
 
-    def test_six_ways_in_rank_order(self):
-        """The literal lists the six ways, ordered by precedence rank."""
+    def test_five_ways_in_rank_order(self):
+        """The literal lists the five ways, ordered by precedence rank."""
         assert typing.get_args(MaterializationWay) == (
-            'identity', 'aggregate', 'stage_model', 'carried_model', 'interpolate', 'raw_anchors',
+            'identity', 'aggregate', 'stage_model', 'interpolate', 'raw_anchors',
         )
 
     @pytest.mark.parametrize('way', typing.get_args(MaterializationWay))
@@ -659,7 +660,7 @@ _DIAGNOSTIC_COLUMNS = [
     'n_training_rows', 'n_written',
     'covariate_taint', 'target_taint',
     'emitted_provenance', 'is_fallback', 'interpolation_method',
-    'interpolation_anchor', 'materialization', 'training_blocks',
+    'interpolation_anchor', 'materialization', 'training_blocks', 'dropped_covariates',
 ]
 
 
@@ -828,10 +829,17 @@ class TestDiagnosticFrame:
         """The ``col=way`` rendering follows the order of ``feature_cols``."""
         step = _make_step(
             feature_cols=('q1', 'm1'),
-            materialization={'m1': 'identity', 'q1': 'carried_model'},
+            materialization={'m1': 'identity', 'q1': 'interpolate'},
         )
         frame = ImputationPlan((step,)).to_diagnostic_frame()
-        assert frame.loc[0, 'materialization'] == 'q1=carried_model, m1=identity'
+        assert frame.loc[0, 'materialization'] == 'q1=interpolate, m1=identity'
+
+    def test_dropped_covariates_are_named_in_their_order(self):
+        """The dropped covariates are rendered comma-separated, ``''`` when none was."""
+        step = _make_step(dropped_covariates={'a2': 'reason', 'q2': 'reason'})
+        frame = ImputationPlan((step, _make_step())).to_diagnostic_frame()
+        assert frame['dropped_covariates'].tolist() == ['a2, q2', '']
+        assert frame['dropped_covariates'].dtype == 'str'
 
     def test_frame_is_a_fresh_object(self):
         """Mutating the frame does not alter the plan, and each call rebuilds it."""
@@ -937,3 +945,28 @@ class TestToEntityTuple:
         """The tuple is directly storable in a step."""
         step = _make_step(entities=to_entity_tuple([('FR',)]))
         assert step.entities == (('FR',),)
+
+
+class TestDroppedCovariates:
+    """The covariates left out of a step are a frozen diagnostic field."""
+
+    def test_defaults_to_an_empty_frozen_mapping(self):
+        """Without covariates left out, the field is an empty read-only mapping."""
+        step = _make_step()
+        assert dict(step.dropped_covariates) == {}
+        with pytest.raises(TypeError):
+            step.dropped_covariates['a2'] = 'reason'
+
+    def test_enters_the_equality_of_two_steps(self):
+        """Two steps differing by their dropped covariates only are not equal."""
+        model = LinearRegression()
+        assert _make_step(model=model) == _make_step(model=model)
+        assert _make_step(model=model) != _make_step(model=model, dropped_covariates={'a2': 'reason'})
+
+    def test_survives_a_pickle_round_trip_frozen(self):
+        """Pickled and restored, the mapping keeps its content and stays read-only."""
+        import pickle
+        step = pickle.loads(pickle.dumps(_make_step(dropped_covariates={'a2': 'reason'})))
+        assert dict(step.dropped_covariates) == {'a2': 'reason'}
+        with pytest.raises(TypeError):
+            step.dropped_covariates['q2'] = 'reason'

@@ -76,7 +76,6 @@ from ._engine.stage_runner import StageParams, StageRunner
 # Type aliases
 VariableCategory = Literal['aggregate', 'impute', 'target_freq']
 EntityKey = Tuple[Any, ...]
-IntermediateFrequencies = Literal[False, 'covariates_only', True]
 
 # Valeurs admissibles des littéraux.
 _IMPUTATION_SCOPES: Tuple[str, ...] = get_args(ImputationScope)
@@ -182,15 +181,6 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
     — a ``UserWarning`` per combination would make
     hyperparameter search unbearable:
 
-    - ``impute_intermediate_frequencies='covariates_only'`` **without**
-      ``covariate_strategy='model'`` changes **no** final value: materialization
-      ranks 2 and 3 are then structurally out of reach — a covariate is served
-      from its own observations before any register is read — so the stage
-      carry that gives ``'covariates_only'`` its whole point never happens. The
-      intermediate stages still cost compute and still show up in the
-      multi-frequency output when ``keep_lower_frequencies=True``, and that is
-      all they do. ``True``, by contrast, has an effect under **every**
-      strategy: it changes ``y_train`` itself.
     - ``covariate_fallback`` is inert outside ``covariate_strategy='model'``.
     - ``fit_predict_order`` — and with it ``cv``, ``cv_scoring`` and
       ``min_cv_train_size`` as ordering devices — is inert outside
@@ -315,9 +305,23 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             as observed (see the hard prerequisite above); ``'interpolate'``
             (default) materializes them by interpolation; ``'model'`` imputes
             them by model, cascading over the variables in
-            ``fit_predict_order``.
-        covariate_fallback: Way used when the ``'model'`` route fails. Inert
-            outside ``covariate_strategy='model'``.
+            ``fit_predict_order``: a covariate already imputed at the stage is
+            read imputed on the prediction grid and, on a training row, as the
+            exact aggregation of that imputation, never interpolated.
+            ``'interpolate'`` is the computationally cheapest choice;
+            ``'model'`` gives a lower imputation error, at the cost of an
+            order-dependent cascade. Under every strategy, a covariate the
+            prediction grid only receives interpolated (or as raw anchors)
+            while the variable's own anchors observe it at their frequency is
+            left out: it would be exact on every training row and, at
+            prediction, bring nothing below the anchors' resolution. The plan
+            names it in ``ImputationStep.dropped_covariates``.
+        covariate_fallback: Form of a covariate not yet imputed at the current
+            stage under ``covariate_strategy='model'``: its interpolation from
+            its original anchors (``'interpolate'``, default) or its raw
+            anchors (``'tolerate_nan'``). An imputation of an earlier stage is
+            never carried onto the current grid. Inert outside
+            ``covariate_strategy='model'``.
         covariate_eligibility: How a covariate's availability is aggregated
             over the entities of a panel. ``'any_entity'`` (default) keeps a
             column observed by at least one entity; ``'all_entities'`` is the
@@ -331,27 +335,22 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             value of a column covered by neither — keeps the detected
             anchoring.
         impute_intermediate_frequencies: Axis 2. ``False`` (default) goes
-            straight to the target frequency; ``'covariates_only'`` walks the
-            intermediate stages but applies the very same origin filter as
-            ``False`` — ``y_train`` holds observed anchors only, so the benefit
-            of the cascade reaches the covariates and never the target;
-            ``True`` also trains on the target's own earlier imputations and on
-            the interpolated cells that replaced them on failure. **Never
-            tested for truth**: ``'covariates_only'`` is truthy.
-            ``'covariates_only'`` and ``True`` build the very same stage plan
-            and differ only by that origin filter; ``False`` and
-            ``'covariates_only'`` apply the very same filter and differ only
-            by the plan. ``'covariates_only'`` is inert on the final values
-            outside ``covariate_strategy='model'``, ``True`` never is (see
-            the inert combinations above). **Not orthogonal to**
+            straight to the target frequency, ``y_train`` holding the observed
+            anchors only; ``True`` walks the intermediate stages and trains
+            each variable on its own earlier imputations too, and on the
+            interpolated cells that replaced them on failure. An intermediate
+            imputation only ever serves the variable it imputes: another
+            variable reads a covariate at the current stage. ``False`` is the
+            computationally cheapest choice; ``True`` gives a lower
+            imputation error, under every strategy. **Not orthogonal to**
             ``aggregation_constraint`` under ``True``: an earlier stage's
             imputation falling on the date of an anchor — the 31st of
             December is both a quarter end and a year end — is dropped from
-            ``y_train`` under ``'sum'``, the rescaling making it an exact
+            ``y_train`` under ``'sum'`` or ``'denton'``, the rescaling making it an exact
             linear combination of the other rows, and kept under ``None``,
             where the training index then gains a ``'frequency'`` level. The
             link is algebraic, not conventional, and is assumed as such.
-            Under ``False`` and ``'covariates_only'`` no coincidence is
+            Under ``False`` no coincidence is
             possible and ``aggregation_constraint`` has no effect whatsoever
             on the composition of ``y_train``.
         target_as_covariate: Whether ``y``, when given at ``fit``, may be a
@@ -403,9 +402,13 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             **anchored** on its own observations when the transform observes
             it (frequency detected on the transformed data, rescaling,
             ``MODEL_*``), unanchored otherwise.
-        fit_predict_order: Order in which variables are imputed,
-            ``'frequency'`` (default) or ``'cv'``. Inert outside
-            ``covariate_strategy='model'``. Under ``'cv'`` each variable is
+        fit_predict_order: Order in which the variables of one stage are
+            imputed, ``'frequency'`` (default) or ``'cv'``. Inert outside
+            ``covariate_strategy='model'``. Under ``'frequency'`` the highest
+            source frequency comes first — at the monthly stage a quarterly
+            variable before an annual one: the best anchored variable is
+            imputed first, from interpolated covariates, and then serves as
+            an imputed covariate to the less anchored ones. Under ``'cv'`` each variable is
             scored on the very training set it will then be fitted on — the
             covariates still available at prediction time, materialized the
             same way, on the mutualized rows of the **training** window and
@@ -436,21 +439,28 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
             dict ``{entity: 'constant' | 'calendar'}`` with an optional
             nested ``'__default__'``: closed on itself, without ``False``,
             keyed by full entities (see the class docstring).
-        aggregation_constraint: ``'sum'`` (default), ``None``, or a dict of
-            these two values keyed by column with an optional
-            ``'__default__'`` key. Beyond the rescaling of the predictions, it
+        aggregation_constraint: ``'sum'`` (default), ``'denton'``,
+            ``None``, or a dict of these values keyed by column with an
+            optional ``'__default__'`` key. ``'sum'`` rescales each period pro
+            rata onto its observed total, so the series steps where two
+            neighbouring periods receive different ratios; ``'denton'`` adds
+            the smoothest additive correction meeting every total, computed
+            per entity over the whole series — no step at the period
+            boundaries, no division, hence no degenerate period for a
+            variable crossing zero, and the cells no total constrains (edges
+            of the window) carry the correction of the nearest period.
+            Beyond the rescaling of the predictions, it
             also governs the composition of ``y_train`` under
             ``impute_intermediate_frequencies=True``, and therefore **ceases
-            to be orthogonal** to it: under ``'sum'`` an earlier stage's
+            to be orthogonal** to it: under ``'sum'`` and ``'denton'`` an earlier stage's
             imputation coinciding with an anchor is dropped — the rescaling
             imposes that the sub-periods sum to the observed total, so the
             coarser row is the sum of the finer ones and keeping both counts
             the period total twice; under ``None`` nothing is rescaled, the
             collinearity is broken, every cell is kept and the training index
             gains a ``'frequency'`` level on the entity side. The read is
-            per column, the dict form included. Under ``False`` and
-            ``'covariates_only'`` the effect is nil: ``y_train`` holds
-            anchors only and no coincidence can occur.
+            per column, the dict form included. Under ``False`` the effect is
+            nil: ``y_train`` holds anchors only and no coincidence can occur.
         keep_lower_frequencies: Pure display parameter, see above.
         on_frequency_mismatch: ``'error'`` (default) or ``'warn'`` when
             ``target_frequency`` is higher than the data allows.
@@ -565,7 +575,7 @@ class HighFrequencyImputer(XYPanelTimeSeriesTransformer):
         interpolation_method: Union[str, Dict[str, str]] = 'linear',
         interpolation_anchor: Union[None, float, Dict[str, Optional[float]]] = None,
         # --- Axe 2 : fréquences intermédiaires ---
-        impute_intermediate_frequencies: IntermediateFrequencies = False,
+        impute_intermediate_frequencies: bool = False,
         impute_unobserved_entities: bool = False,
         # --- Rôle de y ---
         target_as_covariate: bool = False,

@@ -49,9 +49,9 @@ Aggregation additivity     ``test_invariants::TestAggregationAdditivity`` (TS,
                            interpolated covariate of
                            ``test_materialization::TestPerEntityMaterialization::
                            test_one_covariate_takes_three_ways_on_the_pooled_grid``,
-                           and the covariate carried from an earlier stage:
+                           and the stage imputation read on coarser rows:
                            ``TestAggregationAdditivity::
-                           test_carried_covariate_sums_to_the_period_total``.
+                           test_stage_imputation_read_on_coarser_rows_is_its_aggregate``.
                            Realistic datasets, three strategies, predictions
                            and fallbacks alike:
                            ``tests/integration/imputation/test_hfi_on_realistic_dataset.py::
@@ -146,15 +146,10 @@ Processing order           ``test_invariants::TestOrderInvariance::
 Materialization replay     ``test_materialization::TestMaterializationReplay``
                            (fit vs replay frames one by one, TS and PANEL-F),
                            ``TestMaterializationWays``.
-``covariates_only``        ``test_frequency_progression::TestOriginFilter::
-                           test_covariates_only_differs_from_true`` (TS) and
-                           ``::test_covariates_only_differs_from_true_on_panel``
-                           (PANEL; final values equal to False under
-                           ``'interpolate'``).
 No boolean test on         ``test_invariants::TestStaticInvariants::
 ``impute_intermediate_     test_no_boolean_test_on_impute_intermediate_frequencies``,
 frequencies``              ``test_sklearn::TestParameterContract::
-                           test_impute_intermediate_frequencies_covariates_only_is_not_true``.
+                           test_impute_intermediate_frequencies_accepts_booleans_only``.
 Pooled training set        ``test_mutualization::TestMutualizedTrainingSet::
                            test_pooled_training_set_on_panel_f`` (stage M: 51
                            rows, gold values),
@@ -299,7 +294,8 @@ class TestStaticInvariants:
             for name in ('high_frequency_imputer.py', '_engine/frequency_layout.py')
         }
 
-        # 'covariates_only' est truthy : un test de vérité serait un bug silencieux
+        # Comparaison par identité : un test de vérité accepterait toute valeur
+        # truthy que la validation n'aurait pas vue
         forbidden = [
             r'if\s+(self\.)?impute_intermediate_frequencies\s*:',
             r'if\s+not\s+(self\.)?impute_intermediate_frequencies\s*:',
@@ -465,7 +461,7 @@ class TestOrderInvariance:
         assert not fit_with_spy(reference_timeseries).imputation_order_
         assert fit_with_spy(
             reference_timeseries, covariate_strategy='model'
-        ).imputation_order_ == {'M': ['a1', 'a2', 'q1']}
+        ).imputation_order_ == {'M': ['q1', 'a1', 'a2']}
 
 
 class TestOrderingSeesTheFittedSets:
@@ -614,7 +610,7 @@ class TestOrderingSeesTheFittedSets:
                 reference_timeseries, covariate_strategy='model',
             )
         assert not calls
-        assert imputer.imputation_order_ == {'M': ['a1', 'a2', 'q1']}
+        assert imputer.imputation_order_ == {'M': ['q1', 'a1', 'a2']}
 
 
 class TestAggregationAdditivity:
@@ -653,29 +649,35 @@ class TestAggregationAdditivity:
         assert germany.loc['2021-01':'2021-03'].sum() == pytest.approx(28.0)
         assert germany.loc['2021-04':'2021-06'].sum() == pytest.approx(30.0)
 
-    def test_carried_covariate_sums_to_the_period_total(self, reference_timeseries):
-        """A covariate CARRIED from an earlier stage sums to the observed total.
+    def test_stage_imputation_read_on_coarser_rows_is_its_aggregate(self, reference_timeseries):
+        """A covariate imputed at the stage enters a coarser training row as its exact aggregate.
 
-        Under 'model' and 'covariates_only', ``a2`` imputed at stage Q is
-        carried onto the monthly grid of ``a1`` (way ``'carried_model'``,
-        rank 3): its twelve months sum to the observed annual total.
+        Under 'model' and True, the monthly model of ``a2`` trains on its
+        annual anchors and on its quarterly imputations; ``a1``, already
+        imputed at the monthly stage, is read there as the annual (anchor
+        rows) and quarterly sums of its monthly imputation — the very values
+        the prediction grid reads, never an interpolation nor the imputation
+        of the quarterly stage.
         """
         imputer = fit_with_spy(
             reference_timeseries,
             covariate_strategy='model',
-            impute_intermediate_frequencies='covariates_only',
+            impute_intermediate_frequencies=True,
             scale_features=False,
         )
         step = next(
             step for step in imputer.imputation_plan_
-            if (step.pred_freq_label, step.var_name) == ('M', 'a1')
+            if (step.pred_freq_label, step.var_name) == ('M', 'a2')
         )
-        assert step.materialization['a2'] == 'carried_model'
+        assert step.materialization['a1'] == 'stage_model'
 
-        carried = step.model.predict_X_[0]['a2']
-        assert carried.notna().all()
-        totals = carried.groupby(carried.index.year).sum()
-        assert totals.to_dict() == pytest.approx({2021: 60.0, 2022: 66.0, 2023: 72.0})
+        monthly, _provenance = replay(imputer, reference_timeseries)
+        monthly = monthly['a1']
+        trained = step.model.fit_X_['a1']
+        for date, value in trained.items():
+            period = 'Y' if date.month == 12 else 'Q'
+            covered = monthly[monthly.index.to_period(period) == date.to_period(period)]
+            assert value == pytest.approx(covered.sum()), date
 
 
 class TestTrainPredictScale:
@@ -704,7 +706,7 @@ class TestTrainPredictScale:
                     f'{step.var_name}/{column}'
                 )
 
-    @pytest.mark.parametrize('intermediate', [False, 'covariates_only'])
+    @pytest.mark.parametrize('intermediate', [False, True])
     @pytest.mark.parametrize('strategy', ['interpolate', 'model'])
     def test_scales_agree_without_aggregation_constraint(
         self, reference_timeseries, strategy, intermediate
@@ -756,11 +758,11 @@ class TestReferenceExamples:
     """Les exemples chiffrés du document, repris comme cas d'or."""
 
     def test_reference_plan_under_false(self, reference_timeseries):
-        """Under False, the reference plan has one stage M with three models, in the order a1, a2, q1."""
+        """Under False, the reference plan has one stage M with three models, in the order q1, a1, a2."""
         imputer = fit_with_spy(reference_timeseries, covariate_strategy='model')
         plan = list(imputer.imputation_plan_)
 
-        assert [step.var_name for step in plan] == ['a1', 'a2', 'q1']
+        assert [step.var_name for step in plan] == ['q1', 'a1', 'a2']
         assert {step.pred_freq_label for step in plan} == {'M'}
         assert len(imputer.imputation_models_) == 3
 
@@ -769,20 +771,20 @@ class TestReferenceExamples:
         assert rows == {'a1': 3, 'a2': 3, 'q1': 12}
 
         ways = {step.var_name: dict(step.materialization) for step in plan}
-        # 'a1' d'abord : rien n'est encore imputé, ses deux covariables basses
-        # passent par le repli
-        assert ways['a1'] == {
-            'm1': 'identity', 'q1': 'interpolate', 'a2': 'interpolate'
-        }
-        # 'a2' ensuite : seule 'a1' est imputée, donc seule 'a1' est lue dans
-        # le miroir — les registres ne portent que ce qui a été IMPUTÉ,
-        # jamais la matérialisation d'une covariable
-        assert ways['a2'] == {
-            'm1': 'identity', 'q1': 'interpolate', 'a1': 'stage_model'
-        }
-        # 'q1' enfin : les deux annuelles sont imputées
+        # 'q1' d'abord, la plus fréquente : rien n'est encore imputé, ses
+        # deux covariables basses passent par le repli
         assert ways['q1'] == {
-            'm1': 'identity', 'a1': 'stage_model', 'a2': 'stage_model'
+            'm1': 'identity', 'a1': 'interpolate', 'a2': 'interpolate'
+        }
+        # 'a1' ensuite : seule 'q1' est imputée, donc seule 'q1' est lue dans
+        # le miroir — les registres ne portent que ce qui a été IMPUTÉ,
+        # jamais la matérialisation d'une covariable. 'a2', annuelle comme les
+        # ancres de 'a1' et seulement interpolée au mois, est écartée
+        assert ways['a1'] == {'m1': 'identity', 'q1': 'stage_model'}
+        assert set(plan[1].dropped_covariates) == {'a2'}
+        # 'a2' enfin : 'q1' et 'a1' sont imputées
+        assert ways['a2'] == {
+            'm1': 'identity', 'q1': 'stage_model', 'a1': 'stage_model'
         }
 
     def test_reference_provenance_of_a1(self, reference_timeseries):
@@ -857,12 +859,12 @@ class TestTransformSymmetry:
 
     @pytest.mark.slow
     @pytest.mark.parametrize(
-        'intermediate', [False, 'covariates_only', True],
-        ids=['False', 'covariates_only', 'True'],
+        'intermediate', [False, True],
+        ids=['False', 'True'],
     )
     @pytest.mark.parametrize('strategy', ['tolerate_nan', 'interpolate', 'model'])
     def test_symmetry_on_panel_x(self, strategy, intermediate, panel_reference_full):
-        """Symmetry on PANEL-X, the nine (strategy × modality) pairs: values, provenances, plan.
+        """Symmetry on PANEL-X, the six (strategy × modality) pairs: values, provenances, plan.
 
         Every kind of column at once — monthly, quarterly, annual, a covariate
         ``IT`` never observes, a column whose frequency differs per entity.

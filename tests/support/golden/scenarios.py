@@ -13,7 +13,7 @@ import dataclasses
 import warnings
 from collections.abc import Mapping
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -167,19 +167,15 @@ def has_unobserved_pairs(data: pd.DataFrame) -> bool:
 # Matrice des configurations
 # =============================================================================
 # Classes d'équivalence des deux axes et de l'ordre d'imputation :
-# - 'covariates_only' ne change aucune valeur finale hors covariate_strategy='model'
-#   (les rangs de matérialisation qui lui donnent un effet sont hors d'atteinte) ;
-# - fit_predict_order est inerte hors covariate_strategy='model'.
-# Restent 2 + 2 modalités hors 'model' et 3 x 2 sous 'model' : 10 classes.
-AXIS_CLASSES: Tuple[Tuple[str, Union[bool, str], str], ...] = (
+# fit_predict_order est inerte hors covariate_strategy='model'.
+# Restent 2 + 2 modalités hors 'model' et 2 x 2 sous 'model' : 8 classes.
+AXIS_CLASSES: Tuple[Tuple[str, bool, str], ...] = (
     ('tolerate_nan', False, 'frequency'),
     ('tolerate_nan', True, 'frequency'),
     ('interpolate', False, 'frequency'),
     ('interpolate', True, 'frequency'),
     ('model', False, 'frequency'),
     ('model', False, 'cv'),
-    ('model', 'covariates_only', 'frequency'),
-    ('model', 'covariates_only', 'cv'),
     ('model', True, 'frequency'),
     ('model', True, 'cv'),
 )
@@ -210,8 +206,7 @@ class GoldenCase:
     Attributes:
         dataset: Key of :data:`DATASETS`.
         covariate_strategy: Axis 1.
-        impute_intermediate_frequencies: Axis 2 (``False``,
-            ``'covariates_only'`` or ``True``).
+        impute_intermediate_frequencies: Axis 2 (``False`` or ``True``).
         fit_predict_order: ``'frequency'`` or ``'cv'``.
         aggregation_constraint: ``'sum'`` or ``None``.
         impute_unobserved_entities: Whether unobserved pairs are imputed.
@@ -222,7 +217,7 @@ class GoldenCase:
 
     dataset: str
     covariate_strategy: str
-    impute_intermediate_frequencies: Union[bool, str]
+    impute_intermediate_frequencies: bool
     fit_predict_order: str
     aggregation_constraint: Optional[str]
     impute_unobserved_entities: bool
@@ -234,8 +229,8 @@ class GoldenCase:
         """Readable identifier, also the stem of the case's golden file.
 
         Examples:
-            >>> GoldenCase('ts', 'model', 'covariates_only', 'cv', None, False, True).case_id
-            'ts__model__covariates_only__cv__none__observed__xy__imputed_linear'
+            >>> GoldenCase('ts', 'model', True, 'cv', None, False, True).case_id
+            'ts__model__true__cv__none__observed__xy__imputed_linear'
         """
         modality = str(self.impute_intermediate_frequencies).lower()
         constraint = str(self.aggregation_constraint).lower()
@@ -264,7 +259,7 @@ class GoldenCase:
 def build_cases() -> List[GoldenCase]:
     """Build the matrix of the golden master, pruned to distinct combinations.
 
-    Four groups, each running the 10 axis classes of :data:`AXIS_CLASSES`:
+    Four groups, each running the 8 axis classes of :data:`AXIS_CLASSES`:
 
     - main: every dataset x both aggregation constraints, ``X`` alone,
       NaN-tolerant estimator;
@@ -288,7 +283,7 @@ def build_cases() -> List[GoldenCase]:
     Examples:
         >>> cases = build_cases()
         >>> len(cases), len({case.case_id for case in cases})
-        (200, 200)
+        (160, 160)
     """
     cases: List[GoldenCase] = []
     for name in DATASETS:

@@ -52,11 +52,11 @@ class TestValidateLiteral:
 
 
 class TestValidateIntermediateFrequencies:
-    @pytest.mark.parametrize('value', [False, True, 'covariates_only'])
+    @pytest.mark.parametrize('value', [False, True])
     def test_admitted(self, value):
         validate_intermediate_frequencies(value)
 
-    @pytest.mark.parametrize('value', [0, 1, None, 'yes', 'True'])
+    @pytest.mark.parametrize('value', [0, 1, None, 'yes', 'True', 'covariates_only'])
     def test_rejected_without_truth_conflation(self, value):
         with pytest.raises(ValueError, match='impute_intermediate_frequencies must be one of'):
             validate_intermediate_frequencies(value)

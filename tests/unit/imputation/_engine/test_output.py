@@ -5,7 +5,8 @@ frequency, entity without any frequency); the input order of a grid (time series
 entities unknown to the input in their own blocks, empty grid, two entity levels); the provenance of a stage frame and its aggregated
 cells (finer column, unmarked filled cell, empty cell, per-entity frequencies of PANEL-F, pairs
 unknown to the fit); the overlay of the imputations (no production, frequency filter, priority over
-the anchor, input untouched); the frame and provenance of a replayed stage on PANEL-F; the
+the anchor, input untouched); the period totals emptied from finer rows (produced pair, pair not
+produced, column at the row frequency, production at another frequency, no frequency); the frame and provenance of a replayed stage on PANEL-F; the
 multi-frequency stack (time series, one or two entity levels, names); the output of a pass
 (prediction, stacked, flat, statistics of the target level); the merge and split of the target;
 and the moves of the inversion (stacked-frame test, level selection and its fallbacks, level
@@ -33,6 +34,7 @@ from tsforecast.imputation._engine.output import (
     assemble_output,
     build_multifreq_output,
     drop_frequency_level,
+    drop_period_totals,
     has_frequency_level,
     in_input_order,
     invert_additive_transformer,
@@ -319,6 +321,81 @@ class TestOverlayImputations:
         assert frame['v'].isna().all()
 
 
+class TestDropPeriodTotals:
+    """The raw period totals of a produced coarser pair are emptied from the finer rows."""
+
+    def test_no_production_returns_the_frame_itself(self):
+        """Without any production there is no produced pair: the frame is returned as is."""
+        frame = pd.DataFrame({'v': [12.0]}, index=_DATES[:1])
+        result = drop_period_totals(CovariateMaterializer(), _layout({'v': 'Q'}), {}, frame, 'M')
+        assert result is frame
+
+    def test_raw_total_of_a_produced_pair_is_emptied(self):
+        """A quarterly total left on a monthly row goes, the produced cells and finer columns stay."""
+        dates = pd.date_range('2021-01-31', periods=6, freq='ME')
+        materializer = _materializer(
+            pd.Series([4.0, 5.0, 6.0], index=dates[3:]), pd.Series(['M'] * 3, index=dates[3:])
+        )
+        frame = pd.DataFrame(
+            {'v': [np.nan, np.nan, 12.0, 4.0, 5.0, 6.0], 'm1': np.arange(6.0)}, index=dates
+        )
+        result = drop_period_totals(
+            materializer, _layout({'v': 'Q', 'm1': 'M'}), {}, frame, 'M'
+        )
+        assert result['v'].tolist()[3:] == [4.0, 5.0, 6.0]
+        assert result['v'].iloc[:3].isna().all()
+        assert result['m1'].tolist() == list(np.arange(6.0))
+
+    def test_pair_not_produced_keeps_its_input(self):
+        """On a panel, an entity the stage does not produce keeps its raw totals."""
+        index = _panel_index(('FR', 'DE'))
+        fr_rows = index[:3]
+        materializer = _materializer(
+            pd.Series([4.0, 4.0], index=fr_rows[1:]), pd.Series(['M', 'M'], index=fr_rows[1:])
+        )
+        frame = pd.DataFrame({'v': [12.0, 4.0, 4.0, 12.0, np.nan, np.nan]}, index=index)
+        layout = _layout({(FR + ('v',)): 'Q', (DE + ('v',)): 'Q'}, is_panel=True)
+        result = drop_period_totals(materializer, layout, {}, frame, {FR: 'M', DE: 'M'})
+        assert np.isnan(result.loc[('FR', _DATES[0]), 'v'])
+        assert result.loc[('DE', _DATES[0]), 'v'] == 12.0
+
+    def test_column_at_the_row_frequency_is_never_emptied(self):
+        """A column as fine as the row carries no period total, produced or not."""
+        materializer = _materializer(
+            pd.Series([4.0], index=_DATES[2:]), pd.Series(['M'], index=_DATES[2:])
+        )
+        frame = pd.DataFrame({'v': [1.0, 2.0, 4.0]}, index=_DATES)
+        result = drop_period_totals(materializer, _layout({'v': 'M'}), {}, frame, 'M')
+        assert result is frame
+
+    def test_production_at_another_frequency_does_not_count(self):
+        """Cells produced at a coarser stage do not make the pair produced on this frame."""
+        materializer = _materializer(
+            pd.Series([4.0], index=_DATES[2:]), pd.Series(['Q'], index=_DATES[2:])
+        )
+        frame = pd.DataFrame({'v': [12.0, np.nan, np.nan]}, index=_DATES)
+        result = drop_period_totals(materializer, _layout({'v': 'Y'}), {}, frame, 'M')
+        assert result['v'].tolist()[0] == 12.0
+
+    def test_column_without_frequency_is_left_alone(self):
+        """A produced column the layout gives no frequency is never emptied."""
+        materializer = _materializer(
+            pd.Series([4.0], index=_DATES[2:]), pd.Series(['M'], index=_DATES[2:])
+        )
+        frame = pd.DataFrame({'v': [12.0, np.nan, 4.0]}, index=_DATES)
+        result = drop_period_totals(materializer, _layout({}), {}, frame, 'M')
+        assert result['v'].tolist()[0] == 12.0
+
+    def test_frame_is_not_modified(self):
+        """The frame received is never written to."""
+        materializer = _materializer(
+            pd.Series([4.0], index=_DATES[2:]), pd.Series(['M'], index=_DATES[2:])
+        )
+        frame = pd.DataFrame({'v': [12.0, np.nan, 4.0]}, index=_DATES)
+        drop_period_totals(materializer, _layout({'v': 'Q'}), {}, frame, 'M')
+        assert frame['v'].tolist()[0] == 12.0
+
+
 class TestStageOutput:
     """The frame and provenance of one replayed stage, on PANEL-F."""
 
@@ -363,9 +440,10 @@ class TestStageOutput:
         assert provenance.dtypes.eq(PROVENANCE_DTYPE).all()
         assert frame.notna().equals(provenance.notna())
         assert frame['q1'].notna().all()
-        # Covariable v de FR annuelle, donc interpolée : souillure de l'étape
+        # v, observée par DE à la fréquence des ancres trimestrielles de q1 et
+        # seulement interpolée au mois, est écartée : q1 ne lit que m1, observée
         assert set(provenance.loc['FR', 'q1'].unique()) == {
-            ProvenanceType.MODEL_ON_INTERPOLATED.value
+            ProvenanceType.MODEL_ON_TRUE.value
         }
 
     def test_output_matches_the_transform(self, mixed_freq_panel_multifrequency):

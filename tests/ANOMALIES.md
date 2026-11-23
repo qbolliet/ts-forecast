@@ -5472,6 +5472,224 @@ absent. En cas de doute entre (a) et (b), l'historique git tranche ; à défaut,
   (tous deux échouent sur la version précédente)
 - **Statut** : corrigée (2026-11-02)
 
+### ANO-FREQ-091 — Totaux de période laissés sur les lignes fines hors de la fenêtre d'imputation
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/imputation/_engine/output.py::stage_output` (assemblage de chaque niveau de la sortie)
+- **Sévérité** : majeure (colonne de sortie hétérogène, sans avertissement)
+- **Observé** : hors de la fenêtre d'imputation, une colonne imputée gardait ses observations brutes sur la grille de
+  l'étape : au niveau mensuel du notebook 2, `pib_trimestriel` valait 2 519,7 (total du trimestre) en 2018-10 puis
+  861,0 (valeur mensuelle) en 2019-01, marqué `original`. La règle de `AggregationConstraint` (« une colonne ne mêle
+  jamais, à une fréquence d'imputation, un total de période et des valeurs de sous-période ») n'était tenue que dans la
+  fenêtre. Conséquences : graphiques reliant un total à des valeurs mensuelles (notebook 2, § 5.5), provenance
+  `original` comptée sur des cellules qui ne sont pas des valeurs de leur ligne (§ 3 et § 4.2), toute agrégation aval
+  faussée.
+- **Attendu** : un total de période n'a pas sa place sur une ligne plus fine. Pour chaque couple (entité, colonne) que
+  l'étape produit, plus grossier que la ligne, les cellules non produites sont vidées (et non marquées) ; un couple
+  laissé intact (entité absente du fit sous `impute_unobserved_entities=False`, entité sans fenêtre) garde ses
+  valeurs. Les totaux restent récupérables par `inverse_transform` sous `restore_original_values=True`, et au niveau
+  empilé de leur propre fréquence lorsqu'il existe.
+- **Reproduction** :
+  ```python
+  import numpy as np
+  from tests.support.datasets import build_panel_reference
+  from tsforecast.imputation import HighFrequencyImputer
+  from sklearn.linear_model import LinearRegression
+  data = build_panel_reference().loc['FR', ['m1', 'q1', 'a1', 'a2']]
+  data.loc['2021', 'q1'] = np.nan          # la fenêtre commence en 2022
+  out = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(),
+                             keep_lower_frequencies=False).fit_transform(data)
+  out.loc['2021-12-31', 'a1']               # 120.0 (total annuel) au lieu de NaN
+  ```
+- **Correctif** (2026-11-18) : `drop_period_totals` (`_engine/output.py`), appelée par `stage_output` après le
+  recouvrement par les imputations, vide ces cellules à chaque niveau ; avertissement des lignes hors fenêtre et
+  docstrings mis à jour (« rien n'est jamais effacé » ne vaut plus pour ces totaux). Golden master régénéré.
+- **Test** : `tests/unit/imputation/_engine/test_output.py::TestDropPeriodTotals`,
+  `tests/unit/imputation/high_frequency_imputer/test_transform_window.py::TestPeriodTotalsOutsideTheWindow`,
+  `tests/integration/imputation/test_hfi_on_realistic_dataset.py::TestResidualNaN::test_input_rows_outside_the_window_are_left_as_is`
+- **Statut** : corrigée (2026-11-18)
+
+### ANO-FREQ-092 — Voie `carried_model` : la covariable reportée contient la cible de la variable qui la lit
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py` (voie `'carried_model'`), sous
+  `covariate_strategy='model'` et `impute_intermediate_frequencies='covariates_only'` (ou `True`)
+- **Sévérité** : mineure (fuite de la cible concentrée sur les estimateurs linéaires faiblement régularisés,
+  réglage non défaut ; documentée)
+- **Observé** : à l'étape Q, le modèle de la variable annuelle `a` lit comme covariable la variable trimestrielle `q`
+  observée (voie `identity`). À l'étape M, le modèle de `q` s'entraîne sur ses ancres trimestrielles et lit `a`
+  reportée de l'étape Q : sur ces lignes, la covariable contient les totaux trimestriels de `q`, c'est-à-dire la
+  cible. Le coefficient de `a` est gonflé (1,88 contre 0,09 sans report, sur données synthétiques), ceux des
+  covariables mensuelles faussés ; au `predict`, la valeur reportée est interpolée au mois et la relation apprise ne
+  tient plus. Erreur quadratique mensuelle de `q` (40 tirages synthétiques à bruit propre, vérité mensuelle
+  connue) : 1,80 sans report, 5,10 avec (`LinearRegression`), 34 avec `Ridge`. Sans bruit propre à `q` et `a`
+  (reproduction ci-dessous), le report réduit au contraire l'erreur (1,19 → 0,83) : la valeur reportée y transmet le
+  profil lisse de `q`, que l'interpolation approche bien. La voie n'est atteinte que lorsque `q` est imputée avant
+  `a` à l'étape M : sous l'ordre `'frequency'` (fréquence source la plus élevée d'abord), c'est le cas dès que
+  `'covariates_only'` est demandé. Sous l'ancien ordre `'frequency'`, seul l'ordre `'cv'` l'atteignait (écart de 701
+  au § 5.3 du notebook 2).
+- **Dépendance à l'estimateur** (2026-11-18, 20 tirages, trois jeux synthétiques : bruit propre, sans bruit propre,
+  facteur caché ; RMSE moyenne de `q`, `'covariates_only'` / `False`) : `LinearRegression` ×2,25 à ×3,46 ;
+  `Ridge(alpha=10)` sur covariables standardisées 0,98 à 1,03 ; KNN(5) 0,98 à 1,00 ; forêt aléatoire 1,02 à 1,05 ;
+  `HistGradientBoostingRegressor` 0,97 à 1,03. Cause : sous un estimateur linéaire, la valeur trimestrielle de `a`
+  est une combinaison linéaire presque exacte de `q` observée et des covariables mensuelles agrégées (exacte sous
+  `aggregation_constraint=None`) ; le modèle mensuel de `q` l'inverse et s'ajuste presque sans résidu. L'effet suit
+  la force effective de la pénalité (10 tirages, bruit propre) : `Ridge(alpha=1)` brut ×1,9, `Ridge(alpha=10)` brut
+  ×2,1, `Ridge(alpha=1)` standardisé ×1,6, `Ridge(alpha=10)` standardisé ×1,02. Le chiffre `Ridge` ci-dessus (34)
+  provient d'un `Ridge(alpha=1)` sur covariables non standardisées.
+- **Attendu** : arbitré (2026-11-18) : comportement conservé et documenté (page concept, notebook 2) ;
+  `'covariates_only'` n'apporte aucun gain mesurable sous les estimateurs pénalisés ou non linéaires, et les
+  réglages `False`, `'interpolate'` et `'tolerate_nan'` n'empruntent pas la voie. Pistes écartées : refus de la
+  covariable `carried_model` dont le modèle d'origine a lu la variable en cours, retrait de la variable en cours
+  des covariables du modèle d'origine, ajustement croisé.
+  Réarbitré (2026-11-22) : la voie `'carried_model'` est retirée par la règle de cohérence des covariables
+  (ANO-FREQ-094) ; une covariable pas encore imputée à l'étape est interpolée depuis ses ancres d'origine.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from sklearn.linear_model import LinearRegression
+  from tsforecast.imputation import HighFrequencyImputer
+  rng = np.random.default_rng(0); dates = pd.date_range('2010-01-01', '2024-12-01', freq='MS')
+  f = np.cumsum(rng.normal(size=len(dates))) * 0.3
+  df = pd.DataFrame({f'm{k}': f + rng.normal(0, 0.7, len(dates)) for k in range(3)}, index=dates)
+  q, a = pd.Series(100 + 5 * f, dates), pd.Series(10 + 3 * f, dates)
+  df['q'] = np.where(dates.month.isin([1, 4, 7, 10]), q.groupby(dates.to_period('Q')).transform('sum'), np.nan)
+  df['a'] = np.where(dates.month == 1, a.groupby(dates.to_period('Y')).transform('sum'), np.nan)
+  imp = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression(), covariate_strategy='model',
+                             impute_intermediate_frequencies=True).fit(df)
+  step = next(s for s in imp.imputation_plan_ if s.var_name == 'q' and s.pred_freq_label == 'M')
+  step.materialization['a']   # 'interpolate' ; avant la refonte, sous 'covariates_only' : 'carried_model'
+  ```
+- **Test** : `tests/unit/imputation/_components/covariate_materializer/test_precedence.py::TestPrecedenceRanks::test_earlier_stage_production_is_never_carried`,
+  `tests/unit/imputation/high_frequency_imputer/test_frequency_progression.py::TestStagePlanAxis2::test_intermediate_imputation_never_serves_another_variable`
+- **Statut** : corrigée (2026-11-22) par la refonte d'ANO-FREQ-094
+
+### ANO-FREQ-093 — Couche d'une étape antérieure : une covariable déjà imputée à l'étape courante y est interpolée
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py` (miroir `imputed_store` indexé par
+  date, `_applicable_way`), lu couche par couche par `training_set_builder.py`, sous
+  `impute_intermediate_frequencies=True`, `covariate_strategy='model'` et au moins trois fréquences
+- **Sévérité** : mineure (incohérence interne au jeu d'entraînement ; le correctif expose la fuite d'ANO-FREQ-092,
+  documentée)
+- **Observé** : progression `Y → Q → M`, ordre de l'étape M : `q`, `a1`, `a2` (`a1`, `a2` annuelles). À l'étape M,
+  le jeu d'entraînement de `a2` a deux couches : 15 lignes annuelles (ancres observées) et 45 lignes trimestrielles
+  (imputations de `a2` à l'étape Q, produites en lisant `a1` imputée au trimestre, voie `stage_model`). Quand `a2`
+  est ajustée, `a1` vient d'être imputée au mensuel : ses 180 cellules mensuelles ont remplacé dans le miroir ses
+  60 cellules trimestrielles (mêmes dates, la nouvelle production l'emporte). Sur la couche trimestrielle,
+  `_applicable_way` ne trouve plus de cellule produite à `Q` ni de report possible et retombe sur
+  `covariate_fallback` : `a1` y vaut l'interpolation de ses ancres annuelles (origine `'interpolated'`), ni son
+  imputation trimestrielle ni l'agrégat trimestriel de son imputation mensuelle. La cible de ces lignes a donc été
+  produite à partir d'une autre version de `a1` que celle que le modèle lit. Le registre d'origines est exact (il
+  décrit la valeur servie) ; le résultat dépend de l'ordre (`a2` avant `a1` : voie `stage_model`, origine `'model'`).
+- **Attendu** : arbitré (2026-11-19) : une production par fréquence. Le miroir garde la dernière production par date
+  et range dans `covered_store` les cellules qu'une production ultérieure recouvre à une autre fréquence ; les voies
+  modèle (`stage_model`, `carried_model`) lisent la production à la fréquence demandée (`_production_blocks`), d'où
+  un résultat indépendant de l'ordre. Piste écartée : servir l'agrégat de l'imputation de l'étape courante.
+- **Effet sur l'erreur** (2026-11-19, 15 tirages, `covariate_strategy='model'`, séries à bruit propre et à facteur
+  caché, panel où une entité observe `q` au trimestre et deux à l'année ; RMSE de la vérité mensuelle, avant →
+  après) : sur les séries, seule `a2` sous `True` bouge (médiane +2 à +10 % dans 12 cellules sur 15, 2 en baisse).
+  Sur le panel, `q` de l'entité trimestrielle lit la production trimestrielle de `a1`, calculée à partir de sa propre
+  valeur observée : même boucle qu'ANO-FREQ-092, voie `stage_model`. Médianes : `'covariates_only'` OLS 2,02 → 2,76,
+  `Ridge(10)` standardisé 1,97 → 1,99, forêt 2,34 → 2,38 ; `True` OLS 1,97 → 2,56, `Ridge(10)` 2,01 → 1,97, forêt
+  2,29 → 2,55, KNN(5) 2,22 → 2,36, boosting 2,48 → 2,52. Arbitré : comportement conservé, couvert par
+  l'avertissement de la page concept. Piste écartée : refuser à une ligne la production d'une covariable calculée à
+  partir de sa cible (repli sur l'interpolation).
+- **Réarbitrage** (2026-11-22, ANO-FREQ-094) : la couche antérieure lit l'**agrégat exact** de l'imputation de
+  l'étape courante, la piste d'abord écartée : elle sert sur ces lignes ce que la grille de prédiction lit, et ne
+  relit jamais une production intermédiaire qui aurait lu la cible. Le registre par fréquence (`covered_store`,
+  `_production_blocks`) est retiré : aucune voie ne lit plus une production intermédiaire comme covariable.
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from sklearn.linear_model import Ridge
+  import tsforecast.imputation._components.training_set_builder as tsb
+  from tsforecast.imputation import HighFrequencyImputer
+  seen, build = {}, tsb.TrainingSetBuilder.build
+  def spy(self, *a, **k):
+      t = build(self, *a, **k)
+      if k['column'] == 'a2' and k['stage_freq'] == 'M' and k['feature_cols']:
+          seen['a1'], seen['freq'] = t.X['a1'], t.row_frequency.to_numpy()
+      return t
+  tsb.TrainingSetBuilder.build = spy
+  rng = np.random.default_rng(0); dates = pd.date_range('2010-01-01', '2024-12-01', freq='MS')
+  f = np.cumsum(rng.normal(size=len(dates))) * 0.3
+  df = pd.DataFrame({'m0': f + rng.normal(0, 0.5, len(dates))}, index=dates)
+  for name, months in (('q', (1, 4, 7, 10)), ('a1', (1,)), ('a2', (1,))):
+      s = pd.Series(10 + 2 * f + rng.normal(0, 0.5, len(dates)), dates)
+      df[name] = np.where(dates.month.isin(months), s.groupby(dates.to_period('Q' if name == 'q' else 'Y'))
+                          .transform('sum'), np.nan)
+  out = HighFrequencyImputer(target_frequency='M', estimator=Ridge(1.0), covariate_strategy='model',
+                             impute_intermediate_frequencies=True, keep_lower_frequencies=False).fit_transform(df)
+  rows = seen['a1'][seen['freq'] == 'Q']
+  sums = out['a1'].groupby(out.index.to_period('Q')).sum()
+  float((rows - sums.reindex(rows.index.to_period('Q')).to_numpy()).abs().max())
+  # 0.0 : sur les lignes trimestrielles de a2, a1 vaut la somme trimestrielle de son imputation mensuelle
+  ```
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_frequency_progression.py::TestStagePlanAxis2::test_quarterly_rows_read_the_aggregate_of_a_covariate_imputed_at_the_stage`,
+  `tests/unit/imputation/high_frequency_imputer/test_invariants.py::TestAggregationAdditivity::test_stage_imputation_read_on_coarser_rows_is_its_aggregate`,
+  `tests/unit/imputation/_components/covariate_materializer/test_precedence.py::TestTwoCandidateRanks::test_coarser_grid_reads_the_latest_production_aggregated`
+- **Statut** : corrigé (2026-11-22) par la refonte d'ANO-FREQ-094
+
+### ANO-FREQ-094 — Covariable lue autrement à l'entraînement qu'à la prédiction
+- **Type** : [CODE] comportement
+- **Composant** : `tsforecast/imputation/_components/covariate_materializer.py` (précédence des voies,
+  `uninformative_covariates`), `tsforecast/imputation/_engine/stage_runner.py` (`prepare_variable`)
+- **Sévérité** : majeure (erreur d'imputation)
+- **Observé** : deux cas où une covariable porte plus d'information sur les lignes d'entraînement que sur la grille
+  de prédiction. (1) Report d'une imputation intermédiaire (`'carried_model'`, ANO-FREQ-092) : sur ses ancres
+  trimestrielles, le modèle mensuel de `q` lisait l'imputation trimestrielle de `a`, calculée à partir de `q`
+  observée, et au mois son interpolation. (2) Covariable observée à la fréquence des ancres : sur ses ancres
+  annuelles, le modèle de `a1` lit `a2` annuelle exacte, au mois sa seule interpolation, sans aucune information
+  infra-annuelle ; le modèle s'appuie sur elle et perd le profil mensuel des covariables mensuelles.
+- **Attendu** : arbitré (2026-11-22) : règle de cohérence. Une covariable imputée à l'étape est lue imputée sur la
+  grille de prédiction et, sur une ligne d'entraînement plus grossière, comme l'agrégat exact de cette imputation
+  (jamais interpolée). Une covariable que la prédiction ne reçoit qu'interpolée (ou par ses ancres brutes) est
+  interpolée depuis ses ancres d'origine sur les deux grilles, et écartée si les ancres de la variable l'observent
+  à leur propre fréquence (`ImputationStep.dropped_covariates`, colonne `dropped_covariates` du diagnostic), quelle
+  que soit la stratégie. Conséquences d'API : voie `'carried_model'` retirée, `'covariates_only'` retiré
+  (identique à `False` sous la règle : ses imputations intermédiaires n'avaient plus de lecteur),
+  `impute_intermediate_frequencies` booléen ; défauts conservés (`'interpolate'`, `False`), les docstrings disant
+  que `'model'` et `True` réduisent l'erreur.
+- **Mesure** (2026-11-22, 15 tirages ; séries à bruit propre et à facteur caché, panel où une entité observe `q`
+  au trimestre ; cinq estimateurs : OLS, `Ridge(10)` standardisé, KNN(5), forêt, boosting ; médiane de la RMSE
+  de la vérité mensuelle, moyenne géométrique des rapports au défaut `'interpolate'`/`False` sur 15 cellules) :
+
+  | Réglage | q | a1 | a2 |
+  |---|---|---|---|
+  | `'interpolate'`, `False`, avant | 1,00 | 1,00 | 1,00 |
+  | `'interpolate'`, `False`, règle | 0,99 | 0,87 | 0,90 |
+  | `'interpolate'`, `True`, règle | 0,99 | 0,82 | 0,88 |
+  | `'model'`, `False`, avant | 1,00 | 0,95 | 0,92 |
+  | `'model'`, `True`, avant (report) | 1,10 | 0,99 | 0,98 |
+  | `'model'`, `False`, règle | 1,00 | 0,82 | 0,88 |
+  | `'model'`, `True`, règle | 0,99 | 0,78 | 0,84 |
+
+  Sous la règle, aucune cellule n'est dégradée de plus de 2 % (une seule sous `'interpolate'`/`True`). Variantes
+  écartées : refus de la seule covariable bouclée (`q` corrigée, gain moindre sur `a1`, `a2`) ; retrait de toute
+  covariable non disponible à la prédiction (+31 % sur `q` du jeu à facteur caché sous boosting : une covariable
+  interpolée des deux côtés y portait une information utile) ; retrait des covariables observées sur une couche
+  quelconque (sous `True`, les lignes trimestrielles retiraient `q` de `a1` : +17 à +19 % sur le jeu à facteur
+  caché).
+- **Reproduction** :
+  ```python
+  import numpy as np, pandas as pd
+  from sklearn.linear_model import LinearRegression
+  from tsforecast.imputation import HighFrequencyImputer
+  rng = np.random.default_rng(0); dates = pd.date_range('2010-01-01', '2024-12-01', freq='MS')
+  f = np.cumsum(rng.normal(size=len(dates))) * 0.3
+  df = pd.DataFrame({'m0': f + rng.normal(0, 0.5, len(dates))}, index=dates)
+  for name, months in (('q', (1, 4, 7, 10)), ('a1', (1,)), ('a2', (1,))):
+      s = pd.Series(10 + 2 * f + rng.normal(0, 0.5, len(dates)), dates)
+      df[name] = np.where(dates.month.isin(months), s.groupby(dates.to_period('Q' if name == 'q' else 'Y'))
+                          .transform('sum'), np.nan)
+  imp = HighFrequencyImputer(target_frequency='M', estimator=LinearRegression()).fit(df)
+  imp.imputation_plan_.to_diagnostic_frame()[['variable', 'materialization', 'dropped_covariates']]
+  # a1 : m0, q interpolée, a2 écartée ; a2 : m0, q interpolée, a1 écartée ; q : m0, a1 et a2 interpolées
+  ```
+- **Test** : `tests/unit/imputation/high_frequency_imputer/test_materialization.py::TestUninformativeCovariates`,
+  `::TestImputedCovariateOnBothGrids`, `tests/unit/imputation/_components/covariate_materializer/test_precedence.py`,
+  `tests/unit/imputation/_engine/test_stage_runner.py::TestPrepareVariable::test_stage_m_pools_51_rows_at_the_monthly_scale`,
+  `tests/unit/imputation/_components/test_imputation_plan.py::TestDroppedCovariates`
+- **Statut** : corrigée (2026-11-22)
+
 ## BASE
 
 ### ANO-BASE-001 — `InverseTransformer` inutilisable après `clone`

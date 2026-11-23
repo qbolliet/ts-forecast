@@ -34,15 +34,13 @@ from tests.support.estimators import SpyEstimator
 # Clés d'entité du jeu PANEL-F, sous forme de tuples
 FR, DE, IT = ('FR',), ('DE',), ('IT',)
 
-# Les six combinaisons significatives des deux axes : 'tolerate_nan' est
+# Les quatre combinaisons significatives des deux axes : 'tolerate_nan' est
 # exclue, son prérequis dur (un estimateur tolérant les NaN) relevant d'un
 # autre test
 AXIS_COMBINATIONS: List[Tuple[str, object]] = [
     ('interpolate', False),
-    ('interpolate', 'covariates_only'),
     ('interpolate', True),
     ('model', False),
-    ('model', 'covariates_only'),
     ('model', True),
 ]
 

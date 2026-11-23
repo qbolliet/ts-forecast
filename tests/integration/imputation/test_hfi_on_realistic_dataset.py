@@ -20,11 +20,13 @@ never from the output:
   on input observations;
 - residual NaN only where they are documented: rows outside the imputation
   window, and (``Italie``, ``climat_affaires``);
+- outside the window, the input rows are untouched save the period totals of
+  the imputed pairs, which have no place on a row of the target grid and are
+  emptied;
 - no (entity, column) is filled outside the periods its own observations
   cover: a short entity is never stretched;
-- the ``impute_intermediate_frequencies`` axis: ``'covariates_only'`` equals
-  ``False`` under ``'interpolate'``; ``*_TARGET`` / ``*_BOTH`` marks only
-  under ``True``;
+- the ``impute_intermediate_frequencies`` axis: ``*_TARGET`` / ``*_BOTH``
+  marks only under ``True``;
 - one warning per family at most, at fit as at transform;
 - a transform beyond the fit never stretches the short entity.
 
@@ -40,6 +42,7 @@ import re
 import warnings
 from typing import List, Tuple
 
+import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LinearRegression
@@ -363,20 +366,35 @@ class TestResidualNaN:
     def test_input_rows_outside_the_window_are_left_as_is(
         self, record, dataset, strategy, modality
     ):
-        """Input rows outside the imputation window keep their input values, NaN included.
+        """Input rows outside the window keep their input values, save the totals of the imputed pairs.
 
-        No input observation is ever destroyed, under every strategy.
-        Under ``'model'`` the stage frame serves an imputed column from the
-        mirror of the produced cells, which overlays its raw anchors without
-        replacing them.
+        An observation of an imputed pair is the total of its period: on a row
+        of the target grid it is not a value of that row, and nothing
+        overwrites it outside the window, so it is emptied. Every other input
+        cell is untouched, NaN included, under every strategy — the
+        observations of the columns already at the target frequency above all.
         """
         data = record['data']
+        imputer = record['imputer']
         values = _target_level(record, record['output'])
-        mask = record['imputer'].imputation_window_mask_
+        mask = imputer.imputation_window_mask_
         outside = mask.index[~mask.to_numpy()]
 
+        # Attendu : l'entrée, totaux des couples imputés vidés
+        expected = data.loc[outside].copy()
+        for key in imputer.variable_categories_['impute']:
+            if isinstance(expected.index, pd.MultiIndex):
+                *entity, column = key
+                rows = np.logical_and.reduce([
+                    expected.index.get_level_values(level) == label
+                    for level, label in enumerate(entity)
+                ])
+                expected.loc[rows, column] = np.nan
+            else:
+                expected[key] = np.nan
+
         pd.testing.assert_frame_equal(
-            values.loc[outside, data.columns], data.loc[outside], check_freq=False
+            values.loc[outside, data.columns], expected, check_freq=False
         )
 
     @pytest.mark.parametrize('dataset, strategy, modality', CASES)
@@ -453,39 +471,8 @@ class TestCoverageIsNotStretched:
 # =============================================================================
 # P6 — Axe impute_intermediate_frequencies
 # =============================================================================
-# Paires (False, 'covariates_only') comparables : stratégie 'interpolate'
-_INTERPOLATE_PAIRS = [
-    pytest.param(dataset, marks=[pytest.mark.slow] if dataset == 'panel' else [], id=dataset)
-    for dataset in DATASET_FIXTURES
-]
-
-
 class TestIntermediateFrequencyAxis:
     """What the ``impute_intermediate_frequencies`` modality changes."""
-
-    @pytest.mark.parametrize('dataset', _INTERPOLATE_PAIRS)
-    def test_covariates_only_equals_false_under_interpolate(self, realistic_run, dataset):
-        """Under ``'interpolate'``, ``'covariates_only'`` changes no target value."""
-        direct = realistic_run(dataset, 'interpolate', False)
-        walked = realistic_run(dataset, 'interpolate', 'covariates_only')
-
-        pd.testing.assert_frame_equal(
-            _target_level(walked, walked['output']),
-            _target_level(direct, direct['output']),
-            check_freq=False,
-        )
-
-    @pytest.mark.parametrize('dataset', _INTERPOLATE_PAIRS)
-    def test_covariates_only_marks_equal_false_under_interpolate(self, realistic_run, dataset):
-        """Under ``'interpolate'``, ``'covariates_only'`` changes no target provenance either."""
-        direct = realistic_run(dataset, 'interpolate', False)
-        walked = realistic_run(dataset, 'interpolate', 'covariates_only')
-
-        pd.testing.assert_frame_equal(
-            _target_level(walked, walked['provenance']),
-            _target_level(direct, direct['provenance']),
-            check_freq=False,
-        )
 
     @pytest.mark.parametrize('dataset, strategy, modality', CASES)
     def test_imputed_target_marks_only_under_true(self, record, dataset, strategy, modality):

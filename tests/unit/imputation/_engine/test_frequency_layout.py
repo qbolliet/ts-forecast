@@ -132,12 +132,9 @@ class TestPanelX:
             ('IT', 'climat_affaires') not in keys for keys in layout.categories.values()
         )
 
-    @pytest.mark.parametrize('modality', ['covariates_only', True])
-    def test_complete_progression_under_both_cascading_modalities(
-        self, panel_reference_full, modality
-    ):
-        """``'covariates_only'`` and ``True`` share the very same stage plan."""
-        layout = _plan(panel_reference_full, modality=modality)
+    def test_complete_progression_under_the_cascading_modality(self, panel_reference_full):
+        """Under ``True`` every intermediate stage is walked."""
+        layout = _plan(panel_reference_full, modality=True)
 
         assert layout.progression == [
             {DE: 'Q', FR: 'Q', IT: 'Q'},
@@ -313,7 +310,7 @@ class TestMergedProgression:
 
     @pytest.mark.parametrize(
         ('modality', 'expected'),
-        [(False, ['M']), ('covariates_only', ['Q', 'M']), (True, ['Q', 'M'])],
+        [(False, ['M']), (True, ['Q', 'M'])],
     )
     def test_time_series_progression(self, reference_timeseries, modality, expected):
         """``TS``: Y is the lowest frequency, never a stage."""

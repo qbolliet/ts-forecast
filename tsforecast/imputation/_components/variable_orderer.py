@@ -59,11 +59,18 @@ class VariableSpec:
             fallback score of the ``'cv'`` order.
         entities: Entity tuples backing this group, ``None`` for a time
             series. An empty tuple is treated identically to ``None``.
+        anchored: Whether the variable holds at least one observation to
+            anchor its imputation on. An unanchored variable — imputed from
+            the other entities alone — ranks after every anchored one under
+            the ``'frequency'`` order and in the fallback group of the
+            ``'cv'`` order, whatever its ``frequency``: it is the least
+            reliable covariate the others could read.
     """
 
     name: str
     frequency: str
     entities: Optional[Tuple[Any, ...]] = None
+    anchored: bool = True
 
 
 # Composant d'ordonnancement des variables
@@ -72,8 +79,15 @@ class VariableOrderer(BaseEstimator):
 
     Two orders are available, selected by ``fit_predict_order``:
 
-    - ``'frequency'``: lowest frequency first, then ascending entity count,
-      then alphabetical variable name — deterministic tie-break.
+    - ``'frequency'``: anchored variables first, then highest source
+      frequency first, then ascending entity count, then alphabetical
+      variable name — deterministic tie-break. The
+      order holds within one stage of the cascade, whose stages themselves go
+      from the coarsest frequency to the finest: at a given stage, the
+      variable observed most often — the one with the most anchors, hence
+      the best estimated model — is imputed first, and its imputations then
+      serve as covariates to the variables observed less often, the most
+      uncertain ones.
     - ``'cv'``: variables best predicted by cross-validation first (sklearn's
       "greater is better" convention), scores tied (``NaN`` included) broken
       alphabetically. A variable that cannot be scored falls back to the
@@ -121,7 +135,7 @@ class VariableOrderer(BaseEstimator):
         ...     'q1': VariableSpec(name='q1', frequency='Q'),
         ... }
         >>> orderer.order(variables)
-        ['a1', 'a2', 'q1']
+        ['q1', 'a1', 'a2']
     """
     # Initialisation
     def __init__(
@@ -135,8 +149,8 @@ class VariableOrderer(BaseEstimator):
 
         Args:
             fit_predict_order: Order used to sort variables:
-                - ``'frequency'`` (default): lowest frequency first, then
-                  ascending entity count, then alphabetical name.
+                - ``'frequency'`` (default): highest source frequency first,
+                  then ascending entity count, then alphabetical name.
                 - ``'cv'``: highest cross-validated score first (any value
                   accepted by ``sklearn.metrics.check_scoring`` — a registry
                   string, a ``make_scorer`` scorer, or a callable — higher is
@@ -347,12 +361,12 @@ class VariableOrderer(BaseEstimator):
             variables, X, estimator, scoring_mask, log, training_sets
         )
 
-    # Ordre par fréquence (croissant en nombre d'entités) puis tie-break alphabétique
+    # Ordre par fréquence (décroissante), nombre d'entités croissant, puis tie-break alphabétique
     def _order_by_frequency(
         self,
         variables: Mapping[VariableKey, VariableSpec],
     ) -> List[VariableKey]:
-        """Order variables by frequency, then ascending entity count, then name.
+        """Order variables: anchored first, by descending frequency, ascending entity count, name.
 
         Args:
             variables: Mapping of ``VariableKey`` -> :class:`VariableSpec`.
@@ -361,15 +375,15 @@ class VariableOrderer(BaseEstimator):
             List of keys of ``variables``, ordered.
         """
         # Fonction de tri
-        def sort_key(var_key: VariableKey) -> Tuple[float, int, str]:
+        def sort_key(var_key: VariableKey) -> Tuple[bool, float, int, str]:
             # Spécification de la clé (contient son nom, sa fréquence et ses entités)
             spec = variables[var_key]
             # Calcul du nombre d'entités
             n_entities = len(spec.entities) if spec.entities else 0
-            # Fréquence la plus faible d'abord : ordre décroissant de
-            # "get_frequency_order" (plus grand = fréquence plus faible),
-            # obtenu par une clé croissante sur son opposé
-            return (-get_frequency_order(spec.frequency), n_entities, spec.name)
+            # Variables ancrées d'abord, puis fréquence la plus élevée d'abord :
+            # ordre croissant de "get_frequency_order" (plus petit = fréquence
+            # plus élevée)
+            return (not spec.anchored, get_frequency_order(spec.frequency), n_entities, spec.name)
 
         return sorted(variables, key=sort_key)
 
@@ -403,8 +417,9 @@ class VariableOrderer(BaseEstimator):
 
         Returns:
             List of keys of ``variables``, CV-scored variables first
-            (highest score first), then the fallback group (lowest frequency
-            first) — the two groups are sorted separately and never merged :
+            (highest score first), then the fallback group (anchored variables
+            first, then highest frequency first, as under ``'frequency'``) —
+            the two groups are sorted separately and never merged :
             their scores live on unrelated scales (a "scoring" value versus a
             frequency-order integer), so sorting them together would send
             fallback variables to an arbitrary rank depending on that scale.
@@ -510,7 +525,11 @@ class VariableOrderer(BaseEstimator):
         # de chaque groupe, tie-break alphabétique explicite sur le nom de
         # variable
         cv_scored.sort(key=lambda item: (-item[1], variables[item[0]].name))
-        fallback_scored.sort(key=lambda item: (-item[1], variables[item[0]].name))
+        # Groupe de repli : rangé comme sous l'ordre 'frequency', variables
+        # ancrées d'abord puis fréquence la plus élevée d'abord
+        fallback_scored.sort(
+            key=lambda item: (not variables[item[0]].anchored, item[1], variables[item[0]].name)
+        )
 
         # Diagnostics de l'appel : le score CV par clé effectivement scorée, et
         # les clés du groupe de repli (non comparables, cf. docstring)

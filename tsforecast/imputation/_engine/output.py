@@ -1,7 +1,8 @@
 """Output assembly of a ``HighFrequencyImputer`` pass, and the moves of its inversion.
 
 Assembly: ``stage_output`` builds the frame and the provenance of one replayed stage (grid in input
-order, imputations laid over, cells described as the frame carries them), ``assemble_output`` turns
+order, imputations laid over, period totals emptied from finer rows by ``drop_period_totals``, cells
+described as the frame carries them), ``assemble_output`` turns
 the stage frames into the output of the pass — target level, multi-frequency stack
 (``build_multifreq_output``) or prediction-pass rows — and ``split_target`` separates ``y``.
 Inversion: the frequency level to keep and its removal, the mask of the ``ORIGINAL`` cells, the
@@ -178,7 +179,9 @@ def stage_output(
     imputations of the mirror are laid over it (:func:`overlay_imputations`):
     ``stage_frame`` reads the mirror only under
     ``covariate_strategy='model'``, and the output must carry it under every
-    strategy. The provenance is a snapshot of the tracker taken at the same
+    strategy. The period totals still sitting on finer rows — the anchors a
+    produced column holds outside the window — are then emptied
+    (:func:`drop_period_totals`). The provenance is a snapshot of the tracker taken at the same
     instant, reindexed on the grid and made to describe the cells of the
     frame (:func:`stage_provenance`): the matrix thus shares the index of the
     output, which the inversion reads mask against mask.
@@ -209,8 +212,15 @@ def stage_output(
     # l'entrée — empilée ou non
     if grid.nlevels == X_stage.index.nlevels:
         frame = frame.rename_axis(X_stage.index.names)
-    # Recouvrement par les imputations, sous toutes les stratégies
-    overlaid = overlay_imputations(run.materializer, frame, complete_binding)
+    # Recouvrement par les imputations, sous toutes les stratégies, puis
+    # retrait des totaux de période restés sur des lignes plus fines
+    overlaid = drop_period_totals(
+        run.materializer,
+        layout,
+        run.transform_frequencies,
+        overlay_imputations(run.materializer, frame, complete_binding),
+        complete_binding,
+    )
 
     # Instantané de provenance, pris au même instant et réindexé sur la grille
     snapshot = run.provenance_tracker.get_provenance_matrix()
@@ -414,6 +424,112 @@ def overlay_imputations(
             values.notna() & produced_frequency.eq(row_frequency)
         )
         result[column] = kept.combine_first(result[column])
+    return result
+
+
+# Fonction de retrait des totaux de période laissés sur des lignes plus fines
+def drop_period_totals(
+    materializer: CovariateMaterializer,
+    layout: FrequencyLayout,
+    transform_frequencies: Mapping[PairKey, str],
+    frame: pd.DataFrame,
+    complete_binding: StageFrequency,
+) -> pd.DataFrame:
+    """Empty the raw period totals a stage frame keeps for the columns it produces.
+
+    A lower-frequency observation is the total of its period. On a finer
+    row it is not a value of that row: a column must never hold, at one
+    frequency, period totals next to sub-period values — the column would
+    be unusable as a covariate, any downstream aggregation would be false,
+    and the scale of a row would depend on its position within the period.
+    Inside the window the anchor rows are overwritten by the values the
+    stage produces; outside it, nothing overwrites them, and they are
+    emptied here.
+
+    The rule bears on the ``(entity, column)`` pairs the stage produces at
+    the frequency of the row, and on them only when the column is coarser
+    than the row: a pair left untouched — an entity absent from the fit
+    under ``impute_unobserved_entities=False``, an entity without window —
+    keeps its input values. The observed totals stay recoverable through
+    ``inverse_transform`` under ``restore_original_values=True``, and, when
+    a stacked level has their own frequency, at that level.
+
+    Args:
+        materializer: Materializer of the pass, holder of the mirror.
+        layout: Frequency layout of the fit.
+        transform_frequencies: Frequencies the replay detected for the
+            pairs the fit never observed.
+        frame: Stage frame, imputations laid over.
+        complete_binding: Complete frequency binding of the frame's grid.
+
+    Returns:
+        The frame, without any period total on a finer row of a produced
+        pair; ``frame`` itself when nothing is emptied.
+
+    Examples:
+        >>> import numpy as np
+        >>> import pandas as pd
+        >>> from tsforecast.imputation._components.covariate_materializer import (
+        ...     CovariateMaterializer,
+        ... )
+        >>> from tsforecast.imputation._engine.frequency_layout import FrequencyLayout
+        >>> layout = FrequencyLayout(
+        ...     is_panel=False, detected_frequencies={'q1': 'Q'}, undetected=(),
+        ...     misaligned=(), target_frequency='M', categories={}, progression=[],
+        ... )
+        >>> index = pd.date_range('2021-01-31', periods=4, freq='ME')
+        >>> materializer = CovariateMaterializer()
+        >>> materializer.imputed_store['q1'] = pd.Series([4.0, 5.0], index=index[2:])
+        >>> materializer.imputed_freq_store['q1'] = pd.Series(['M', 'M'], index=index[2:])
+        >>> frame = pd.DataFrame({'q1': [12.0, np.nan, 4.0, 5.0]}, index=index)
+        >>> drop_period_totals(materializer, layout, {}, frame, 'M')['q1'].tolist()
+        [nan, nan, 4.0, 5.0]
+    """
+    # Aucune production : aucun couple produit, rien à retirer
+    if not materializer.imputed_store:
+        return frame
+
+    # Fréquence d'étape et entité de chaque ligne, codées en couples
+    # distincts sans construire de tuple par ligne
+    row_frequency = stage_frequency_of(complete_binding, frame.index)
+    entity_codes, entities = get_entity_codes(frame.index)
+    codes, first_rows = factorize_row_keys(entity_codes, row_frequency)
+    pairs = [
+        (entities[entity_codes[row]], row_frequency.iat[row]) for row in first_rows
+    ]
+    # Fréquence de chaque colonne, par entité sur un panel
+    column_frequencies = layout.frequencies_by_column(transform_frequencies)
+
+    # Parcours des colonnes produites
+    result = frame
+    for column in frame.columns:
+        produced = materializer.imputed_store.get(column)
+        frequencies = column_frequencies.get(column)
+        if produced is None or frequencies is None:
+            continue
+        # Cellules produites à la fréquence de leur ligne
+        produced_frequency = materializer.imputed_freq_store[column].reindex(frame.index)
+        here = (
+            produced.reindex(frame.index).notna() & produced_frequency.eq(row_frequency)
+        ).to_numpy(dtype=bool)
+        # Couples (entité, fréquence de ligne) produits, puis plus grossiers que la ligne
+        pair_produced = np.bincount(codes, weights=here, minlength=len(pairs)) > 0
+        coarser = []
+        for entity, stage in pairs:
+            own = frequencies.get(entity) if isinstance(frequencies, dict) else frequencies
+            coarser.append(own is not None and is_higher_frequency(stage, own))
+        # Totaux bruts d'un couple produit : cellules renseignées non produites
+        blank = (
+            pair_produced[codes]
+            & np.asarray(coarser, dtype=bool)[codes]
+            & ~here
+            & frame[column].notna().to_numpy()
+        )
+        if blank.any():
+            # Copie à la première modification seulement : la frame reçue n'est jamais modifiée
+            if result is frame:
+                result = frame.copy()
+            result[column] = result[column].mask(blank)
     return result
 
 

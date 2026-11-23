@@ -449,7 +449,7 @@ def plan_frequencies(
     *,
     is_panel: bool,
     entities: Optional[Sequence[EntityKey]],
-    impute_intermediate_frequencies: Any,
+    impute_intermediate_frequencies: bool,
     on_frequency_mismatch: str,
     log: Optional[LogCallback] = None,
 ) -> FrequencyLayout:
@@ -475,8 +475,7 @@ def plan_frequencies(
         is_panel: Whether ``X_work`` is a panel.
         entities: Normalized entity keys of the panel, None on a time series.
         impute_intermediate_frequencies: Axis-2 modality: ``False`` yields a
-            single stage, the target; ``'covariates_only'`` and ``True`` the
-            complete progression.
+            single stage, the target; ``True`` the complete progression.
         on_frequency_mismatch: ``'error'`` or ``'warn'``, handed to the
             target-frequency validation.
         log: Logging callback, or None.
@@ -935,16 +934,16 @@ def build_frequency_progression(
     imputable: Sequence[PairKey],
     target_frequency: StageFrequency,
     *,
-    impute_intermediate_frequencies: Any,
+    impute_intermediate_frequencies: bool,
 ) -> List[StageFrequency]:
     """Build the ordered list of stage frequencies.
 
     Under ``impute_intermediate_frequencies is False`` the progression is
     the target frequency alone: the imputed variable jumps straight from
-    its own frequency to the target, with no intermediate stage. Under the
-    two other modalities the progression is complete and **identical**:
-    ``'covariates_only'`` and ``True`` share the very same stage plan and
-    differ only by the origin filter of ``y_train``.
+    its own frequency to the target, with no intermediate stage. Under
+    ``True`` the progression is complete: every intermediate stage imputes
+    the variables coarser than it, and those imputations enrich the
+    ``y_train`` of the same variable at the next stages.
 
     On a panel the progression is computed **per group of entities sharing
     the same target frequency**, then merged into global stages: an entity
@@ -957,9 +956,8 @@ def build_frequency_progression(
         imputable: Pairs classified ``'impute'`` at the target frequency.
         target_frequency: Effective target frequency, a string on a time
             series, a binding per entity on a panel.
-        impute_intermediate_frequencies: Axis-2 modality; only ``False``
-            (tested by identity, ``'covariates_only'`` being truthy) yields
-            a single stage.
+        impute_intermediate_frequencies: Axis-2 modality; ``False`` yields a
+            single stage.
 
     Returns:
         Ordered list of stage frequencies, the target frequency last. A

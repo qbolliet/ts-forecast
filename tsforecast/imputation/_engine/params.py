@@ -21,7 +21,7 @@ from ...panel.utils import normalize_entity_key
 from ...utils.frequency.utils import normalize_frequency
 
 # Modalités admissibles de "impute_intermediate_frequencies"
-INTERMEDIATE_MODALITIES: Tuple[Any, ...] = (False, 'covariates_only', True)
+INTERMEDIATE_MODALITIES: Tuple[bool, ...] = (False, True)
 
 
 # Prédicat d'entier strict, booléens exclus
@@ -84,27 +84,25 @@ def validate_literal(
 def validate_intermediate_frequencies(value: Any) -> None:
     """Check ``impute_intermediate_frequencies`` without truth testing.
 
-    The three modalities are compared by identity for the booleans and by
-    equality for the string. A membership test against a tuple would
-    conflate ``0`` with ``False`` and ``1`` with ``True``; a truth test
-    would silently promote ``'covariates_only'`` — which is truthy — into
-    ``True``.
+    The two modalities are compared by identity: a membership test against a
+    tuple would conflate ``0`` with ``False`` and ``1`` with ``True``, and a
+    truth test would accept any truthy value.
 
     Args:
         value: Value handed to ``__init__``.
 
     Raises:
-        ValueError: If the value is not one of the three modalities.
+        ValueError: If the value is neither ``False`` nor ``True``.
 
     Examples:
-        >>> validate_intermediate_frequencies('covariates_only')
+        >>> validate_intermediate_frequencies(True)
         >>> validate_intermediate_frequencies(1)
         Traceback (most recent call last):
             ...
-        ValueError: impute_intermediate_frequencies must be one of (False, 'covariates_only', True), got 1
+        ValueError: impute_intermediate_frequencies must be one of (False, True), got 1
     """
-    # Comparaison modalité par modalité, jamais par vérité booléenne
-    if value is False or value is True or value == 'covariates_only':
+    # Comparaison par identité, jamais par vérité booléenne
+    if value is False or value is True:
         return
     raise ValueError(
         f"impute_intermediate_frequencies must be one of "

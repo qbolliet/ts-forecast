@@ -433,7 +433,7 @@ class TestUniquenessOfTheWay:
             materialization=ways,
         )
 
-        # Rang 4 des deux côtés, jamais le rang 1 que les ancres autoriseraient
+        # Rang 3 des deux côtés, jamais le rang 1 que les ancres autoriseraient
         assert ways['a2'] == 'interpolate'
         assert ways_pred == ways
         # La NATURE des valeurs, pas seulement le motif de NaN
@@ -562,10 +562,10 @@ class TestUniquenessOfTheWay:
         ],
         ids=['tolerate_nan', 'interpolate', 'model-interpolate', 'model-tolerate_nan'],
     )
-    def test_rank_one_way_imposed_on_a_finer_grid_falls_back_to_rank_four(
+    def test_rank_one_way_imposed_on_a_finer_grid_falls_back_to_rank_three(
         self, reference_timeseries, strategy, fallback, filled, origin
     ):
-        """``'identity'`` replayed on a grid finer than the column is the rank 4."""
+        """``'identity'`` replayed on a grid finer than the column is the rank 3."""
         materializer = CovariateMaterializer(covariate_strategy=strategy, covariate_fallback=fallback)
         features, _ways, origins = materializer.materialize(
             columns=['a1'],
@@ -610,7 +610,7 @@ class TestRecordFlag:
     def test_unreplayed_second_call_reads_the_first_recorded_production(self, reference_timeseries):
         """Under ``record=True``, a second decision reads what the first one wrote.
 
-        La première matérialisation (rang 4, interpolation) s'enregistre au
+        La première matérialisation (rang 3, interpolation) s'enregistre au
         pas M ; la seconde, sans rejeu, y lit un rang 2. C'est pourquoi la
         voie d'une étape n'est jamais redécidée, et pourquoi l'enregistrement
         n'est pas le défaut.
@@ -752,7 +752,7 @@ class TestReferenceExampleTable:
         assert x_pred['a2'].isna().mean() == pytest.approx(0.0)
 
         # Ligne 4 — 'model', ordre a1 avant a2 : a2 servie par covariate_fallback
-        # (rang 4), des deux côtés. C'est le cas qui produisait 33-67 % de NaN
+        # (rang 3), des deux côtés. C'est le cas qui produisait 33-67 % de NaN
         # silencieux dans hfi
         unordered = CovariateMaterializer(covariate_strategy='model')
         x_train, x_pred, ways, origins = self._fit_and_predict(unordered, data)

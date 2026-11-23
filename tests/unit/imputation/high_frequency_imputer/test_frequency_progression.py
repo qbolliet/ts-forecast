@@ -5,7 +5,6 @@ Covers the frequency progression, the stage plan, the origin filter of
 """
 
 # Modules de base
-import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LinearRegression
@@ -42,23 +41,20 @@ class TestFrequencyProgression:
 
     @pytest.mark.slow
     def test_frequency_progression_on_reference_ts(self, reference_timeseries):
-        """The three modalities on the TS dataset, exact values."""
+        """The two modalities on the TS dataset, exact values."""
         # F = {Q, Y, M} : sous False, la cible seule
         imputer = fit_with_spy(reference_timeseries, impute_intermediate_frequencies=False)
         assert imputer.frequency_progression_ == ['M']
 
-        # Sous les deux autres modalités, LE MÊME plan : Y, la plus basse
-        # fréquence, n'est pas une étape — rien n'est à y imputer
-        for modality in ('covariates_only', True):
-            imputer = fit_with_spy(
-                reference_timeseries, impute_intermediate_frequencies=modality
-            )
-            assert imputer.frequency_progression_ == ['Q', 'M']
+        # Sous True : Y, la plus basse fréquence, n'est pas une étape — rien
+        # n'est à y imputer
+        imputer = fit_with_spy(reference_timeseries, impute_intermediate_frequencies=True)
+        assert imputer.frequency_progression_ == ['Q', 'M']
 
     def test_imputable_variables_of_each_stage_on_reference_ts(self, reference_timeseries):
         """Stage Q: {a1, a2}; stage M: {q1, a1, a2}."""
         imputer = fit_with_spy(
-            reference_timeseries, impute_intermediate_frequencies='covariates_only'
+            reference_timeseries, impute_intermediate_frequencies=True
         )
         # Groupes imputables lus sur le plan figé : une étape par groupe
         assert {column for column, _ in plan_groups(imputer, 'Q')} == {'a1', 'a2'}
@@ -71,7 +67,7 @@ class TestFrequencyProgression:
         """On PANEL-F, F is read per (entity, column) pair."""
         imputer = fit_with_spy(
             mixed_freq_panel_multifrequency,
-            impute_intermediate_frequencies='covariates_only',
+            impute_intermediate_frequencies=True,
         )
         # v est annuelle pour FR, trimestrielle pour DE, mensuelle pour IT :
         # une lecture par colonne n'aurait vu qu'une fréquence et manqué Q
@@ -142,26 +138,11 @@ class TestStagePlanAxis2:
     @pytest.mark.slow
     def test_reference_stage_plan(self, reference_timeseries):
         """2 stages, 5 models, y_train filtered by origin."""
+        # Ordre 'frequency' : la fréquence source la plus élevée d'abord, q1 ouvre l'étape M
         expected_pairs = [
-            ('Q', 'a1'), ('Q', 'a2'), ('M', 'a1'), ('M', 'a2'), ('M', 'q1'),
+            ('Q', 'a1'), ('Q', 'a2'), ('M', 'q1'), ('M', 'a1'), ('M', 'a2'),
         ]
-        # Sous 'covariates_only', y_train tient les 3 ancres partout : le
-        # filtre est celui de False, seul le plan diffère
-        imputer, fits = capture_variable_fits(
-            reference_timeseries,
-            covariate_strategy='model',
-            fit_predict_order='frequency',
-            impute_intermediate_frequencies='covariates_only',
-        )
-        assert imputer.frequency_progression_ == ['Q', 'M']
-        assert plan_pairs(imputer) == expected_pairs
-        assert SpyEstimator.n_fits == 5
-        for stage in ('Q', 'M'):
-            for column in ('a1', 'a2'):
-                assert len(fits[(stage, column)].y_train) == 3
-        assert len(fits[('M', 'q1')].y_train) == 12
-
-        # Sous True, les étapes M de a1 et a2 gagnent leurs imputations Q.
+        # Les étapes M de a1 et a2 gagnent leurs imputations Q.
         # Douze lignes et non quinze : la quatrième imputation trimestrielle
         # de chaque année tombe sur l'ancre annuelle, où l'observation gagne
         imputer, fits = capture_variable_fits(
@@ -170,8 +151,10 @@ class TestStagePlanAxis2:
             fit_predict_order='frequency',
             impute_intermediate_frequencies=True,
         )
+        assert imputer.frequency_progression_ == ['Q', 'M']
         assert plan_pairs(imputer) == expected_pairs
         assert SpyEstimator.n_fits == 5
+        assert len(fits[('M', 'q1')].y_train) == 12
         for column in ('a1', 'a2'):
             assert len(fits[('Q', column)].y_train) == 3
             training = fits[('M', column)].training
@@ -182,31 +165,27 @@ class TestStagePlanAxis2:
                 ('model', 9), ('observed', 3)
             ]
 
-    def test_carried_model_rank_reached_under_covariates_only(self, reference_timeseries):
-        """Rank 3 — stage carry-over — becomes reachable."""
-        imputer = fit_with_spy(
-            reference_timeseries,
-            covariate_strategy='model',
-            impute_intermediate_frequencies='covariates_only',
-        )
-        ways = [
-            way
-            for step in imputer.imputation_plan_.steps
-            for way in step.materialization.values()
-        ]
-        assert 'carried_model' in ways
-        # Sous False, aucune étape antérieure : le rang 3 reste hors d'atteinte
-        without = fit_with_spy(
-            reference_timeseries,
-            covariate_strategy='model',
-            impute_intermediate_frequencies=False,
-        )
-        assert 'carried_model' not in [
-            way
-            for step in without.imputation_plan_.steps
-            for way in step.materialization.values()
-        ]
+    def test_intermediate_imputation_never_serves_another_variable(self, reference_timeseries):
+        """The quarterly imputations of a1 and a2 never reach the monthly model of q1.
 
+        q1 is imputed first at the monthly stage: a1 and a2 are not yet imputed
+        there and are interpolated from their annual anchors, on its quarterly
+        training rows as on its monthly prediction grid — exactly as without
+        intermediate stage. Their quarterly imputations only serve their own
+        ``y_train``.
+        """
+        def q1_fit(modality):
+            _imputer, fits = capture_variable_fits(
+                reference_timeseries,
+                covariate_strategy='model',
+                impute_intermediate_frequencies=modality,
+            )
+            return fits[('M', 'q1')]
+
+        cascaded, direct = q1_fit(True), q1_fit(False)
+        assert dict(cascaded.training.ways)['a1'] == 'interpolate'
+        pd.testing.assert_frame_equal(cascaded.training.X, direct.training.X)
+        pd.testing.assert_series_equal(cascaded.y_train, direct.y_train)
 
     def test_x_train_is_full_on_the_quarterly_rows(self, reference_timeseries):
         """Under True, at stage M of ``a1``, ``X_train`` is full on the Q rows.
@@ -234,103 +213,54 @@ class TestStagePlanAxis2:
         for date in quarterly:
             assert x_train.loc[date, 'm1'] == pytest.approx(quarter_sums.loc[date] / 3)
 
+    def test_quarterly_rows_read_the_aggregate_of_a_covariate_imputed_at_the_stage(
+        self, reference_timeseries
+    ):
+        """Under True and ``'model'``, the Q rows of the second annual variable read the first one summed.
+
+        La première variable annuelle est imputée au mensuel avant la seconde :
+        sur les lignes trimestrielles de la seconde, elle vaut la somme
+        trimestrielle de son imputation mensuelle — celle que lit la grille de
+        prédiction —, ramenée à l'échelle de l'étape (diviseur 3).
+        """
+        imputer, fits = capture_variable_fits(
+            reference_timeseries, covariate_strategy='model', impute_intermediate_frequencies=True,
+        )
+        first, second = [column for column in imputer.imputation_order_['M'] if column in ('a1', 'a2')]
+        training = fits[('M', second)].training
+        quarterly = training.row_frequency[training.row_frequency == 'Q'].index
+        assert len(quarterly) > 0
+        assert training.column_origins[first] == 'model'
+
+        step = next(
+            step for step in imputer.imputation_plan_
+            if (step.pred_freq_label, step.var_name) == ('M', second)
+        )
+        assert step.materialization[first] == 'stage_model'
+        monthly = replay(imputer, reference_timeseries)[0][first]
+        for date in quarterly:
+            quarter = monthly[monthly.index.to_period('Q') == date.to_period('Q')]
+            assert step.model.fit_X_.loc[date, first] == pytest.approx(quarter.sum() / 3)
+
 
 class TestOriginFilter:
     """The origin filter of y_train, and its trap."""
 
     @pytest.mark.slow
-    def test_covariates_only_differs_from_true_on_panel(self, mixed_freq_panel_heterogeneous):
-        """Sur panel, filtre 'observed' seul, valeurs finales distinctes de True."""
-        data = mixed_freq_panel_heterogeneous
-        _, covariates_only = capture_variable_fits(
-            data, covariate_strategy='model',
-            impute_intermediate_frequencies='covariates_only',
+    @pytest.mark.parametrize('dataset', ['reference_timeseries', 'mixed_freq_panel_heterogeneous'])
+    def test_true_adds_earlier_imputations_to_y_train(self, dataset, request):
+        """Under False, observed anchors only; under True, rows of origin 'model' and other values."""
+        data = request.getfixturevalue(dataset)
+        _, direct = capture_variable_fits(
+            data, covariate_strategy='model', impute_intermediate_frequencies=False,
         )
-        for fit in covariates_only.values():
+        for fit in direct.values():
             assert set(fit.training.row_origin.unique()) <= {'observed'}
         _, cascaded = capture_variable_fits(
             data, covariate_strategy='model', impute_intermediate_frequencies=True,
         )
-        assert any(
-            'model' in set(fit.training.row_origin.unique()) for fit in cascaded.values()
-        )
-
-        # La cascade change y_train : lignes 'model' en plus sous True
-        assert len(cascaded[('M', 'a1')].y_train) != len(
-            covariates_only[('M', 'a1')].y_train
-        )
-
-        # Valeurs finales lues au niveau cible de la sortie publique
-        def _final(modality, strategy):
-            imputer = fit_quietly(
-                make_imputer(
-                    covariate_strategy=strategy,
-                    impute_intermediate_frequencies=modality,
-                ),
-                data,
-            )
-            values, _ = replay(imputer, data)
-            return values[['q1', 'a1', 'a2']]
-
-        # Sous 'interpolate', 'covariates_only' rend les valeurs de False
-        pd.testing.assert_frame_equal(
-            _final('covariates_only', 'interpolate'), _final(False, 'interpolate')
-        )
-
-    @pytest.mark.slow
-    def test_covariates_only_differs_from_true(self, reference_timeseries):
-        """Same plan, different filter, different values."""
-        # Sous 'model', aucune ligne d'origine 'model' n'entre dans y_train
-        _, covariates_only = capture_variable_fits(
-            reference_timeseries,
-            covariate_strategy='model',
-            impute_intermediate_frequencies='covariates_only',
-        )
-        for fit in covariates_only.values():
-            assert set(fit.training.row_origin.unique()) <= {'observed'}
-
-        # ... et les valeurs finales diffèrent de celles de True
-        _, cascaded = capture_variable_fits(
-            reference_timeseries,
-            covariate_strategy='model',
-            impute_intermediate_frequencies=True,
-        )
         assert 'model' in set(cascaded[('M', 'a1')].training.row_origin.unique())
-        assert not np.allclose(
-            covariates_only[('M', 'a1')].y_train.to_numpy()[:3],
-            cascaded[('M', 'a1')].y_train.to_numpy()[:3],
-        ) or len(cascaded[('M', 'a1')].y_train) != len(
-            covariates_only[('M', 'a1')].y_train
-        )
-
-        # Sous 'interpolate', les rangs 2 et 3 sont hors d'atteinte :
-        # 'covariates_only' rend exactement les valeurs FINALES de False, lues
-        # au niveau cible de la sortie publique
-        values_false, _ = replay(
-            fit_with_spy(
-                reference_timeseries,
-                covariate_strategy='interpolate',
-                impute_intermediate_frequencies=False,
-            ),
-            reference_timeseries,
-        )
-        values_only, _ = replay(
-            fit_with_spy(
-                reference_timeseries,
-                covariate_strategy='interpolate',
-                impute_intermediate_frequencies='covariates_only',
-            ),
-            reference_timeseries,
-        )
-        for column in ('a1', 'a2', 'q1'):
-            # "check_freq=False" : l'attribut de fréquence de l'index diffère
-            # après deux étapes, les valeurs sont ce qui est comparé
-            pd.testing.assert_series_equal(
-                values_false[column],
-                values_only[column],
-                check_names=False,
-                check_freq=False,
-            )
+        assert len(cascaded[('M', 'a1')].y_train) > len(direct[('M', 'a1')].y_train)
 
     def test_y_train_filter_reads_origin_store_not_provenance(self, reference_timeseries):
         """The filter reads origin_store, never the public provenance.
@@ -365,9 +295,9 @@ class TestOriginFilter:
             )
             return training.row_origin.reindex(dates).dropna().to_list()
 
-        # Sous 'covariates_only', seule la cellule observée entre ; la cellule
-        # de repli 'interpolated' est exclue au même titre que celle de modèle
-        assert _origins('covariates_only') == ['observed']
+        # Sous False, seule la cellule observée entre ; la cellule de repli
+        # 'interpolated' est exclue au même titre que celle de modèle
+        assert _origins(False) == ['observed']
         # Sous True, les trois entrent
         assert sorted(_origins(True)) == ['interpolated', 'model', 'observed']
 
@@ -378,15 +308,14 @@ class TestOriginFilter:
             ProvenanceType.MODEL_ON_IMPUTED_TARGET,
             ProvenanceType.MODEL_ON_IMPUTED_BOTH,
         }
-        for modality in (False, 'covariates_only'):
-            imputer = fit_with_spy(
-                reference_timeseries,
-                covariate_strategy='model',
-                impute_intermediate_frequencies=modality,
-            )
-            for step in imputer.imputation_plan_.steps:
-                assert step.target_taint == 'none'
-                assert step.emitted_provenance not in tainted
+        imputer = fit_with_spy(
+            reference_timeseries,
+            covariate_strategy='model',
+            impute_intermediate_frequencies=False,
+        )
+        for step in imputer.imputation_plan_.steps:
+            assert step.target_taint == 'none'
+            assert step.emitted_provenance not in tainted
 
         imputer = fit_with_spy(
             reference_timeseries,
@@ -526,14 +455,11 @@ class TestCoincidentCells:
         assert scaled[('Y', anchor)] == pytest.approx(10.0)
         assert scaled[('Q', anchor)] == pytest.approx(10.0, rel=0.1)
 
-    @pytest.mark.parametrize('modality', [False, 'covariates_only'])
     @pytest.mark.slow
-    def test_constraint_is_inert_on_y_train_without_axis_2(
-        self, reference_timeseries, modality
-    ):
+    def test_constraint_is_inert_on_y_train_without_axis_2(self, reference_timeseries):
         """Hors axe 2, aucune coïncidence n'est possible : l'effet est nul."""
-        _, under_sum = self._cascade(reference_timeseries, 'sum', modality=modality)
-        _, under_none = self._cascade(reference_timeseries, None, modality=modality)
+        _, under_sum = self._cascade(reference_timeseries, 'sum', modality=False)
+        _, under_none = self._cascade(reference_timeseries, None, modality=False)
         assert set(under_sum) == set(under_none)
         for key, fit in under_sum.items():
             pd.testing.assert_series_equal(fit.y_train, under_none[key].y_train)

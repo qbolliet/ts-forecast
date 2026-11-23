@@ -47,9 +47,9 @@ from tests.unit.imputation._components.aggregation_constraint.helpers import (
 class TestPublicVocabulary:
     """Public constants of the module."""
 
-    def test_constraint_kind_admits_only_sum(self):
-        """ConstraintKind is Literal['sum']: 'mean' and 'last' are gone."""
-        assert typing.get_args(ConstraintKind) == ('sum',)
+    def test_constraint_kind_admits_sum_and_denton(self):
+        """ConstraintKind is Literal['sum', 'denton']: both additive, 'mean' and 'last' are not."""
+        assert typing.get_args(ConstraintKind) == ('sum', 'denton')
 
     def test_default_constraint_key(self):
         """The fallback key of the dict form is '__default__'."""
@@ -63,10 +63,11 @@ class TestPublicVocabulary:
 # =============================================================================
 # Validation du paramètre public
 # =============================================================================
-# Réglages admissibles : deux scalaires, et les dicts qui les associent à une
+# Réglages admissibles : trois scalaires, et les dicts qui les associent à une
 # colonne, clé de repli comprise
 _ACCEPTED_SETTINGS = {
     'sum': 'sum',
+    'denton': 'denton',
     'none': None,
     'dict-sum': {'a1': 'sum'},
     'dict-none': {'a1': None},
@@ -145,7 +146,7 @@ class TestValidateAggregationConstraint:
     def test_withdrawn_aggregator_message_lists_admissible_forms(self, setting):
         """The message of a withdrawn aggregator lists the forms and names additive_transformer.
 
-        The message lists the admissible forms ('sum', None, the dict
+        The message lists the admissible forms ('sum', 'denton', None, the dict
         form with its '__default__' key) and names ``additive_transformer`` as
         the answer to a non-additive column, and repeats the value.
         """
@@ -155,7 +156,7 @@ class TestValidateAggregationConstraint:
 
         # Formes admises, échappatoire et valeur reçue, toutes nommées
         expected_fragments = [
-            "('sum', None)", 'dict', repr(DEFAULT_CONSTRAINT_KEY),
+            "('sum', 'denton', None)", 'dict', repr(DEFAULT_CONSTRAINT_KEY),
             'additive_transformer', f'got {setting!r}',
         ]
         assert [fragment for fragment in expected_fragments if fragment not in message] == []

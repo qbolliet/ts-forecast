@@ -227,7 +227,7 @@ class TestQuarterlyStage:
         """IT trains the stage-``Q`` model of ``v`` but no step of ``v`` predicts IT.
 
         End to end through ``HighFrequencyImputer`` under
-        ``impute_intermediate_frequencies='covariates_only'`` (stage ``Q``
+        ``impute_intermediate_frequencies=True`` (stage ``Q``
         exists): the training sets of ``v`` are captured at their source.
         """
         # Espion sur la composition : jeux de `v` complets (hors sonde)
@@ -244,7 +244,7 @@ class TestQuarterlyStage:
         imputer = HighFrequencyImputer(
             estimator=LinearRegression(),
             target_frequency='M',
-            impute_intermediate_frequencies='covariates_only',
+            impute_intermediate_frequencies=True,
         )
         imputer.fit(mixed_freq_panel_multifrequency)
 
@@ -296,20 +296,20 @@ class TestSingleMaterialization:
 
         assert snapshots_equal(before, builder.materializer.snapshot())
 
-    def test_no_carry_phantom_after_build(self, mixed_freq_panel_multifrequency):
-        """No rank 3 becomes eligible merely because of ``build`` (R4)."""
+    def test_no_model_rank_phantom_after_build(self, mixed_freq_panel_multifrequency):
+        """No rank 2 becomes eligible merely because of ``build`` (R4)."""
         builder = make_builder(covariate_strategy='model')
 
         build_panel_f(builder, mixed_freq_panel_multifrequency)
 
         # Le miroir reste vide : rien n'a jamais été imputé
         assert builder.materializer.imputed_store == {}
-        # Et la classification ne peut donc pas conclure au report d'étape
+        # Et la classification ne peut donc pas conclure à une production
         for entity in (('FR',), ('DE',), ('IT',)):
             way = builder.materializer.classify(
                 'q1', 'M', PANEL_F_FREQUENCIES, entity
             )
-            assert way != 'carried_model'
+            assert way != 'stage_model'
 
     def test_covariates_of_each_block_at_its_own_frequency(
         self, mixed_freq_panel_multifrequency

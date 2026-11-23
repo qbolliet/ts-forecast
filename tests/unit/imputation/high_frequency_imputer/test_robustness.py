@@ -372,9 +372,9 @@ def _canonical_diagnostic(diagnostic: pd.DataFrame, names: Dict[str, str]) -> pd
         names: Mapping from perturbed column name to original name.
 
     Returns:
-        The frame with original column names in ``variable`` and
-        ``materialization``, and the region prefix dropped from the entity
-        columns.
+        The frame with original column names in ``variable``,
+        ``materialization`` and ``dropped_covariates``, and the region prefix
+        dropped from the entity columns.
     """
     out = diagnostic.copy()
     for column in ('entities', 'training_blocks'):
@@ -390,6 +390,9 @@ def _canonical_diagnostic(diagnostic: pd.DataFrame, names: Dict[str, str]) -> pd
         return ', '.join(f"{names.get(name, name)}={way}" for name, way in pairs)
 
     out['materialization'] = out['materialization'].map(_rename_ways)
+    out['dropped_covariates'] = out['dropped_covariates'].map(
+        lambda text: ', '.join(names.get(name, name) for name in text.split(', ')) if text else text
+    )
     return out
 
 

@@ -24,7 +24,10 @@ import pytest
 
 from tests.support.estimators import FailingEstimator, SpyEstimator
 from tsforecast.imputation import HighFrequencyImputer, ProvenanceType
-from tsforecast.imputation._components.covariate_materializer import CovariateMaterializer
+from tsforecast.imputation._components.covariate_materializer import (
+    UNINFORMATIVE_COVARIATE,
+    CovariateMaterializer,
+)
 from tsforecast.imputation._components.imputation_plan import (
     INTERPOLATE_FALLBACK,
     ImputationPlan,
@@ -328,7 +331,7 @@ class TestStageParams:
         """Each field holds the very object of the imputer parameter of the same name."""
         imputer = _fitted(
             _imputer(
-                covariate_strategy='model', impute_intermediate_frequencies='covariates_only',
+                covariate_strategy='model', impute_intermediate_frequencies=True,
                 aggregation_constraint=None, impute_unobserved_entities=True,
             ),
             reference_timeseries,
@@ -386,8 +389,11 @@ class TestPrepareVariable:
             np.array([28, 30, 31, 31, 31, 33, 34, 34, 36, 37, 38, 39]) / 3,
         )
         assert y.loc['IT'].tolist() == [10.0] * 12 + [11.0] * 12 + [12.5] * 12
-        # Covariables : celles de la grille de prédiction, voies décidées sur elle
-        assert prepared.feature_cols == ('m1', 'q1')
+        # Covariables : celles de la grille de prédiction, voies décidées sur
+        # elle ; q1, trimestrielle, est observée à la fréquence des ancres de DE
+        # et seulement interpolée au mois : écartée
+        assert prepared.feature_cols == ('m1',)
+        assert prepared.dropped == {'q1': UNINFORMATIVE_COVARIATE}
         assert prepared.ways == dict(prepared.training.ways)
         assert prepared.X_train.index.equals(prepared.y_train.index)
         # Grille de prédiction restreinte aux entités des groupes
@@ -395,7 +401,7 @@ class TestPrepareVariable:
 
     def test_stage_q_divides_by_4_1_and_a_third(self, mixed_freq_panel_multifrequency):
         runner, X_work = _fit_runner(
-            _imputer(impute_intermediate_frequencies='covariates_only'),
+            _imputer(impute_intermediate_frequencies=True),
             mixed_freq_panel_multifrequency,
         )
         prepared = self._prepare(runner, X_work, 'v', [FR], runner.layout.progression[0])
@@ -468,9 +474,10 @@ class TestFitStage:
             _imputer(covariate_strategy='model'), mixed_freq_panel_multifrequency
         )
         (outcome,) = _fit_all_stages(runner, X_work)
-        # v, annuelle chez FR, précède q1, trimestrielle
-        assert outcome.order == ['v', 'q1']
-        assert [step.var_name for step in outcome.steps] == ['v', 'v', 'q1']
+        # q1, trimestrielle, précède v, annuelle chez FR : la fréquence la
+        # plus basse des groupes d'une colonne décide de son rang
+        assert outcome.order == ['q1', 'v']
+        assert [step.var_name for step in outcome.steps] == ['q1', 'v', 'v']
         assert outcome.cv_scores == {}
 
     def test_cv_order_reports_its_scores(self, mixed_freq_panel_multifrequency):
@@ -683,7 +690,7 @@ class TestFitStage:
             pytest.param(
                 'panel_reference_full',
                 {'covariate_strategy': 'model', 'fit_predict_order': 'cv', 'cv': 3,
-                 'impute_intermediate_frequencies': 'covariates_only',
+                 'impute_intermediate_frequencies': True,
                  'aggregation_constraint': None},
                 marks=pytest.mark.slow,
             ),

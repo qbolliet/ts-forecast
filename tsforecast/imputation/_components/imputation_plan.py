@@ -31,20 +31,19 @@ MaterializationWay = Literal[
     'identity',       # rang 1 : f_c == f, la covariable est lue telle quelle
     'aggregate',      # rang 1 : f_c plus fine que f, agrégation exacte sur période complète
     'stage_model',    # rang 2 : covariable imputée à l'étape courante, lue dans le miroir
-    'carried_model',  # rang 3 : covariable imputée à une étape antérieure puis REPORTÉE sur f
-    'interpolate',    # rang 4 : covariate_fallback='interpolate', interpolation des observations
-    'raw_anchors',    # rang 4 : covariate_fallback='tolerate_nan' (ou stratégie 'tolerate_nan')
+    'interpolate',    # rang 3 : covariate_fallback='interpolate', interpolation des observations
+    'raw_anchors',    # rang 3 : covariate_fallback='tolerate_nan' (ou stratégie 'tolerate_nan')
 ]
 
 # Ensemble de contrôle des voies admissibles
 _MATERIALIZATION_WAYS: FrozenSet[str] = frozenset(
-    ('identity', 'aggregate', 'stage_model', 'carried_model', 'interpolate', 'raw_anchors')
+    ('identity', 'aggregate', 'stage_model', 'interpolate', 'raw_anchors')
 )
 
 # Colonnes textuelles du jeu de diagnostic, rendues en dtype chaîne
 _DIAGNOSTIC_STRING_COLUMNS: Tuple[str, ...] = (
     'stage', 'source_frequency', 'entities', 'covariate_taint', 'target_taint',
-    'interpolation_method', 'materialization', 'training_blocks',
+    'interpolation_method', 'materialization', 'training_blocks', 'dropped_covariates',
 )
 
 # Colonnes numériques et booléennes du jeu de diagnostic, typées même sans étape ;
@@ -208,6 +207,14 @@ class ImputationStep:
             non-NaN predictions after rescaling, hence after the anchor rows
             were re-expressed. A pure fit-time diagnostic: the replay at
             ``transform`` writes onto another index and never refreshes it.
+        dropped_covariates: Mapping column -> reason of the covariates left
+            out of :attr:`feature_cols` although available: a covariate the
+            prediction grid only receives interpolated (or as raw anchors) and
+            that the variable's own anchors observe at their frequency. Such a
+            covariate is exact on every training row and, at prediction, brings
+            nothing below the anchors' resolution — only the period level, which
+            the aggregation constraint already imposes. A pure diagnostic field,
+            stored as a read-only mapping.
 
     Examples:
         >>> from sklearn.linear_model import LinearRegression
@@ -259,6 +266,8 @@ class ImputationStep:
     n_training_rows: int = 0
     # Nombre de lignes imputées
     n_written: int = 0
+    # Covariables disponibles mais écartées, avec leur motif
+    dropped_covariates: Mapping[str, str] = field(default_factory=dict)
 
     # Contrôles d'invariants et gel des conteneurs mutables
     def __post_init__(self) -> None:
@@ -311,10 +320,13 @@ class ImputationStep:
         )
         object.__setattr__(self, 'materialization', frozen_materialization)
 
-        # Gel de la composition du jeu mutualisé, au même titre que
-        # materialization : un champ de diagnostic reste immuable
+        # Gel de la composition du jeu mutualisé et des covariables écartées,
+        # au même titre que materialization : un champ de diagnostic reste immuable
         object.__setattr__(
             self, 'training_blocks', MappingProxyType(dict(self.training_blocks))
+        )
+        object.__setattr__(
+            self, 'dropped_covariates', MappingProxyType(dict(self.dropped_covariates))
         )
 
         # Cohérence du repli : la sentinelle impose is_fallback
@@ -408,6 +420,7 @@ class ImputationStep:
             and self.unanchored == other.unanchored
             and self.n_training_rows == other.n_training_rows
             and self.n_written == other.n_written
+            and dict(self.dropped_covariates) == dict(other.dropped_covariates)
         )
 
     # Hachage sur un sous-ensemble sûrement hachable et stable
@@ -437,8 +450,8 @@ class ImputationStep:
         deep-copied. :meth:`__setstate__` freezes the mappings again.
 
         Returns:
-            The instance dictionary, ``materialization`` and
-            ``training_blocks`` turned into ``dict``.
+            The instance dictionary, ``materialization``,
+            ``training_blocks`` and ``dropped_covariates`` turned into ``dict``.
         """
         state = dict(self.__dict__)
         for name in _FROZEN_MAPPINGS:
@@ -460,7 +473,7 @@ class ImputationStep:
 
 
 # Champs figés en vue en lecture seule par "ImputationStep.__post_init__"
-_FROZEN_MAPPINGS = ('materialization', 'training_blocks')
+_FROZEN_MAPPINGS = ('materialization', 'training_blocks', 'dropped_covariates')
 
 
 # Conteneur immuable du plan complet
@@ -549,10 +562,11 @@ class ImputationPlan:
             or :attr:`ProvenanceType.INTERPOLATED` for a fallback step),
             ``is_fallback``, ``interpolation_method``,
             ``interpolation_anchor``, ``materialization`` (rendered as a
-            comma-separated ``col=way`` string) and ``training_blocks``
+            comma-separated ``col=way`` string), ``training_blocks``
             (rendered as a comma-separated ``entity=frequency`` string,
             sorted by entity key so that the frame does not depend on the
-            order of the input rows). The text columns have the ``str``
+            order of the input rows) and ``dropped_covariates`` (the names of
+            the covariates left out, comma-separated). The text columns have the ``str``
             dtype (a missing ``source_frequency`` is NaN); the counts are
             ``int64``, the flags ``bool`` and ``interpolation_anchor``
             ``float64`` (NaN when no anchor applies), an empty plan included;
@@ -566,7 +580,7 @@ class ImputationPlan:
 
         Examples:
             >>> ImputationPlan().to_diagnostic_frame().columns.tolist()
-            ['stage', 'variable', 'source_frequency', 'entities', 'n_entities', 'scale_factor', 'fit_scale_factor', 'unanchored', 'n_features', 'n_training_rows', 'n_written', 'covariate_taint', 'target_taint', 'emitted_provenance', 'is_fallback', 'interpolation_method', 'interpolation_anchor', 'materialization', 'training_blocks']
+            ['stage', 'variable', 'source_frequency', 'entities', 'n_entities', 'scale_factor', 'fit_scale_factor', 'unanchored', 'n_features', 'n_training_rows', 'n_written', 'covariate_taint', 'target_taint', 'emitted_provenance', 'is_fallback', 'interpolation_method', 'interpolation_anchor', 'materialization', 'training_blocks', 'dropped_covariates']
         """
         # Colonnes retournées dans le jeu de données de diagnostic
         columns = [
@@ -576,6 +590,7 @@ class ImputationPlan:
             'covariate_taint', 'target_taint',
             'emitted_provenance', 'is_fallback', 'interpolation_method',
             'interpolation_anchor', 'materialization', 'training_blocks',
+            'dropped_covariates',
         ]
         # Initialisation de la liste des lignes (1 ligne correspond à une étape du plan)
         rows = []
@@ -630,6 +645,7 @@ class ImputationPlan:
                 'interpolation_anchor': step.interpolation_anchor,
                 'materialization': materialization_repr,
                 'training_blocks': training_blocks_repr,
+                'dropped_covariates': ", ".join(step.dropped_covariates),
             })
         frame = pd.DataFrame(rows, columns=columns)
         # Provenance émise au dtype catégoriel des matrices de provenance,

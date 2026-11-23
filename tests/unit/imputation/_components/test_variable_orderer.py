@@ -1,6 +1,7 @@
 """Tests for tsforecast.imputation._components.variable_orderer.
 
-'frequency' and 'cv' orders, deterministic alphabetical tie-break
+'frequency' order (highest source frequency first, unanchored variables last) and
+'cv' order, deterministic alphabetical tie-break
 (independent of insertion order / input columns), polymorphic sklearn
 ``cv`` parameter (replacing ``cv_n_splits``), ``cv`` resolved at ``fit``
 only.
@@ -95,13 +96,13 @@ class _FailsOnFirstFold(ConstantEstimator):
 
 
 class TestFrequencyOrder:
-    """'frequency' order: lowest frequency first."""
+    """'frequency' order: highest source frequency first."""
 
     def test_frequency_order_on_reference_ts(self, reference_timeseries):
-        """The order is a1, a2, q1 (Y before Q, alphabetical tie-break)."""
+        """The order is q1, a1, a2 (Q before Y, alphabetical tie-break)."""
         del reference_timeseries  # les fréquences suffisent, données non lues
         orderer = VariableOrderer(fit_predict_order='frequency').fit()
-        assert orderer.order(_reference_variables()) == ['a1', 'a2', 'q1']
+        assert orderer.order(_reference_variables()) == ['q1', 'a1', 'a2']
 
     def test_entity_count_breaks_frequency_ties_ascending(self):
         """At equal frequency, the group with the FEWEST entities comes first.
@@ -149,7 +150,7 @@ class TestAlphabeticalTiebreak:
         forward = _reference_variables()
         reversed_dict = dict(reversed(list(_reference_variables().items())))
 
-        assert orderer.order(forward) == orderer.order(reversed_dict) == ['a1', 'a2', 'q1']
+        assert orderer.order(forward) == orderer.order(reversed_dict) == ['q1', 'a1', 'a2']
 
     def test_alphabetical_tiebreak_ignores_column_order_cv(self, reference_timeseries):
         """Permuter les colonnes de X et les clés de "variables" ne change pas l'ordre sous 'cv'."""
@@ -421,12 +422,12 @@ class TestFrequencyOrderEdgeCases:
     @pytest.mark.parametrize(
         'frequencies, expected',
         [
-            pytest.param(['M', 'D', 'Q', 'Y'], ['v3', 'v2', 'v0', 'v1'], id='Y-Q-M-D'),
-            pytest.param(['D', 'M'], ['v1', 'v0'], id='M-before-D'),
+            pytest.param(['M', 'D', 'Q', 'Y'], ['v1', 'v0', 'v2', 'v3'], id='D-M-Q-Y'),
+            pytest.param(['M', 'D'], ['v1', 'v0'], id='D-before-M'),
         ],
     )
-    def test_lowest_frequency_comes_first(self, frequencies, expected):
-        """The lowest frequency is processed first, whatever the insertion order."""
+    def test_highest_frequency_comes_first(self, frequencies, expected):
+        """The highest source frequency is processed first, whatever the insertion order."""
         # Une clé "v<i>" par fréquence de la liste, dans l'ordre d'insertion donné
         variables = {
             f'v{i}': VariableSpec(name=f'v{i}', frequency=freq)
@@ -445,7 +446,7 @@ class TestFrequencyOrderEdgeCases:
             ('v', 'Q'): VariableSpec(name='v', frequency='Q', entities=(('DE',),)),
         }
         orderer = VariableOrderer(fit_predict_order='frequency').fit()
-        assert orderer.order(variables) == [('v', 'Y'), ('v', 'Q'), ('v', 'M')]
+        assert orderer.order(variables) == [('v', 'M'), ('v', 'Q'), ('v', 'Y')]
 
     def test_entity_count_then_name_break_remaining_ties(self):
         """Same frequency: fewer entities first, then alphabetical name."""
@@ -468,6 +469,16 @@ class TestFrequencyOrderEdgeCases:
         orderer = VariableOrderer(fit_predict_order='frequency').fit()
         # Tie-break nom entre les deux groupes sans entité, puis le groupe à 1 entité
         assert orderer.order(variables) == ['with_empty', 'with_none', 'with_one']
+
+    def test_unanchored_variable_comes_last_whatever_its_frequency(self):
+        """A variable without anchor follows every anchored one, even a coarser one."""
+        variables = {
+            'free': VariableSpec(name='free', frequency='M', anchored=False),
+            'a1': VariableSpec(name='a1', frequency='Y'),
+            'q1': VariableSpec(name='q1', frequency='Q'),
+        }
+        orderer = VariableOrderer(fit_predict_order='frequency').fit()
+        assert orderer.order(variables) == ['q1', 'a1', 'free']
 
     def test_tiebreak_uses_spec_name_not_key(self):
         """The alphabetical tie-break reads ``VariableSpec.name``, never the dict key."""
@@ -847,7 +858,7 @@ class TestFallbackGroup:
         }
 
     def test_fallback_keys_follow_frequency_order(self):
-        """Without covariate everywhere: all fallback, lowest frequency first, scores_ empty."""
+        """Without covariate everywhere: all fallback, highest frequency first, scores_ empty."""
         sets = {
             key: (pd.DataFrame(index=x.index), y) for key, (x, y) in self._sets().items()
         }
@@ -856,13 +867,21 @@ class TestFallbackGroup:
             self._specs(), estimator=ConstantEstimator(0.0), training_sets=sets,
         )
         assert (ordered, orderer.fallback_keys_, orderer.scores_) == (
-            ['a1', 'q1', 'm1'], ['a1', 'q1', 'm1'], {},
+            ['m1', 'q1', 'a1'], ['m1', 'q1', 'a1'], {},
         )
+
+    def test_unanchored_variable_closes_the_fallback_group(self):
+        """In the fallback group too, an unanchored variable comes after the anchored ones."""
+        specs = self._specs()
+        specs['m1'] = VariableSpec(name='m1', frequency='M', anchored=False)
+        orderer = _mae_orderer(cv=2, min_cv_train_size=2)
+        ordered = orderer.order(specs, estimator=ConstantEstimator(0.0), training_sets={})
+        assert ordered == ['q1', 'a1', 'm1']
 
     def test_scored_group_precedes_fallback_group(self):
         """A scored low-score variable still precedes a fallback one, whatever the frequency."""
         sets = self._sets()
-        # a1 (annuelle, donc première sous 'frequency') perd sa covariable : repli
+        # a1 perd sa covariable : repli, après les variables scorées
         sets['a1'] = (pd.DataFrame(index=sets['a1'][1].index), sets['a1'][1])
         orderer = _mae_orderer(cv=2, min_cv_train_size=2)
         ordered = orderer.order(
@@ -901,7 +920,7 @@ class TestFallbackGroup:
         ordered = orderer.order(
             self._specs(), estimator=ConstantEstimator(0.0), training_sets={},
         )
-        assert (ordered, orderer.fallback_keys_) == (['a1', 'q1', 'm1'], ['a1', 'q1', 'm1'])
+        assert (ordered, orderer.fallback_keys_) == (['m1', 'q1', 'a1'], ['m1', 'q1', 'a1'])
 
     def test_empty_training_frames_fall_back(self):
         """Zero-row scoring sets fall back (0 < min_cv_train_size), no CV attempted."""
@@ -913,7 +932,7 @@ class TestFallbackGroup:
             ordered = orderer.order(
                 self._specs(), estimator=ConstantEstimator(0.0), training_sets=sets,
             )
-        assert (ordered, cvs.called) == (['a1', 'q1', 'm1'], False)
+        assert (ordered, cvs.called) == (['m1', 'q1', 'a1'], False)
 
     def test_empty_working_frame_falls_back(self):
         """An empty X (columns, no rows) sends every variable to the fallback group."""

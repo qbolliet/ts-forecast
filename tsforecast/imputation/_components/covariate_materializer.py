@@ -72,10 +72,16 @@ COVARIATE_FALLBACKS: Tuple[str, ...] = get_args(CovariateFallback)
 COVARIATE_ELIGIBILITIES: Tuple[str, ...] = get_args(CovariateEligibility)
 
 # Voies réservées aux modèles
-_MODEL_WAYS: FrozenSet[str] = frozenset(('stage_model', 'carried_model'))
+_MODEL_WAYS: FrozenSet[str] = frozenset(('stage_model',))
 
-# Voies servant une colonne plus basse que la grille, au rang 4
+# Voies servant une colonne plus basse que la grille, au rang 3
 _COARSER_WAYS: FrozenSet[str] = frozenset(('interpolate', 'raw_anchors'))
+
+# Motif d'écartement d'une covariable que la grille de prédiction ne reçoit
+# qu'interpolée et que les ancres de la variable observent à leur fréquence
+UNINFORMATIVE_COVARIATE = (
+    'observed at the frequency of the target anchors, interpolated only at prediction'
+)
 
 # Degré de dégradation d'une voie, servant à réduire des verdicts par entité en
 # une voie unique par colonne.
@@ -85,20 +91,17 @@ _WAY_RANK: Dict[str, int] = {
     'interpolate': 2,
     'raw_anchors': 2,
     'stage_model': 3,
-    'carried_model': 3,
 }
 
 # Départage des voies de même rang : la réduction d'une colonne ne dépend
 # jamais de l'ordre des entités de la grille. Les ancres brutes portent moins
-# de cellules que l'interpolation, le report d'une étape antérieure est moins
-# direct que la lecture de l'étape courante
+# de cellules que l'interpolation
 _WAY_TIE_BREAK: Dict[str, int] = {
     'identity': 0,
     'aggregate': 0,
     'interpolate': 0,
     'raw_anchors': 1,
     'stage_model': 0,
-    'carried_model': 1,
 }
 
 # Origine des cellules produites par chaque voie
@@ -108,7 +111,6 @@ _WAY_ORIGIN: Dict[str, CellOrigin] = {
     'raw_anchors': 'observed',
     'interpolate': 'interpolated',
     'stage_model': 'model',
-    'carried_model': 'model',
 }
 
 # Convertisseur partagé par défaut, pour ne pas en instancier un par appel
@@ -320,10 +322,15 @@ class CovariateMaterializer:
 
     Every write goes through ``new.combine_first(existing)``: cells
     the new production does not cover are never destroyed, unlike a plain
-    assignment. Presence in :attr:`imputed_store` is not a model-imputation
-    signal — observed and interpolated cells sit there too —, and ranks 2 and
-    3 of the precedence do not need one: they fire on the mere presence of
-    cells produced at a stage, whatever their origin, which
+    assignment. These three registries thus hold, at each date, the latest
+    production — the view read by the output, by the training rows of a
+    target and by rank 2 of the precedence. A covariate is read at the
+    current stage only: on a training row coarser than the stage, it is the
+    exact aggregation of its current-stage production, never the value an
+    earlier stage produced for that row. Presence in :attr:`imputed_store` is
+    not a model-imputation signal — observed and interpolated cells sit there
+    too —, and rank 2 does not need one: it fires on the mere presence of
+    cells produced at the stage, whatever their origin, which
     :attr:`origin_store` then reports as is (a stage served by the fallback is
     read back ``'interpolated'``). What the stores hold is what was
     produced — a covariate merely prepared as a feature is materialized under
@@ -368,17 +375,19 @@ class CovariateMaterializer:
             - ``'model'``: covariates are imputed by the same fit/predict
               mechanism as the target variables, in the order given by
               ``fit_predict_order`` — the only mode where that order has an
-              effect. The four-rank precedence then applies, stopping at the
+              effect. The three-rank precedence then applies, stopping at the
               first applicable rank: rank 1 identity or exact aggregation;
               rank 2 the covariate's own imputation at the current stage,
-              read from the mirror (``'stage_model'``); rank 3 its imputation
-              at an earlier stage ``f'``, carried onto the current grid by its
-              own interpolation way and rescaled to the ``f'`` totals
-              (``'carried_model'``); rank 4 ``covariate_fallback``.
-        covariate_fallback: Secondary approach used at rank 4 of the
-            precedence, when the covariate has been materialized by none of
-            the higher ranks. Applied at fit and at predict — never full at
-            fit and empty at predict.
+              read from the mirror (``'stage_model'``), exactly aggregated on
+              a coarser grid; rank 3 ``covariate_fallback``. A covariate not
+              yet imputed at the current stage is served by rank 3 from its
+              original anchors: what an earlier stage imputed is never carried
+              onto the current grid.
+        covariate_fallback: Form of a covariate not yet imputed at the current
+            stage (rank 3 of the precedence): its interpolation from its
+            original anchors (``'interpolate'``, default) or the raw anchors
+            alone (``'tolerate_nan'``). Applied at fit and at predict — never
+            full at fit and empty at predict.
         covariate_eligibility: Handling of a feature with no observation at
             all for a whole entity. ``'any_entity'`` keeps the column
             as soon as one entity observes it, the empty entities' rows
@@ -393,7 +402,8 @@ class CovariateMaterializer:
             middle, ``1.0`` end, None attributing the value to the anchor date.
             Scalar or per-feature dict, same rules.
         aggregation_constraint: Constraint the interpolated covariates are
-            rescaled to. ``'sum'`` (default) preserves the period totals, and
+            rescaled to. ``'sum'`` (default) preserves the period totals pro
+            rata, ``'denton'`` by the smoothest additive correction, and
             None applies no constraint — additivity is the contract of the
             whole class, not a per-column choice, and a
             non-additive column goes through ``additive_transformer`` instead.
@@ -695,7 +705,7 @@ class CovariateMaterializer:
     # Propriété d'accès à la voie de l'approche secondaire
     @property
     def _fallback_way(self) -> MaterializationWay:
-        """Way rank 4 of the precedence resolves to.
+        """Way rank 3 of the precedence resolves to.
 
         Returns:
             ``'interpolate'`` when ``covariate_fallback`` is ``'interpolate'``,
@@ -703,10 +713,10 @@ class CovariateMaterializer:
         """
         return 'interpolate' if self.covariate_fallback == 'interpolate' else 'raw_anchors'
 
-    # Voie de rang 4 de la stratégie courante
+    # Voie de rang 3 de la stratégie courante
     @property
-    def _rank4_way(self) -> MaterializationWay:
-        """Way rank 4 resolves to under the current strategy.
+    def _rank3_way(self) -> MaterializationWay:
+        """Way rank 3 resolves to under the current strategy.
 
         Returns:
             ``'raw_anchors'`` under ``'tolerate_nan'``, ``'interpolate'``
@@ -799,6 +809,9 @@ class CovariateMaterializer:
     def _mirror_blocks(self, column: str) -> Dict[EntityKey, pd.DataFrame]:
         """Assemble the three stores of one column, split by entity.
 
+        The view holds the latest production at each date: the one the output,
+        the training rows of a target and rank 2 of the precedence read.
+
         Args:
             column: Column whose mirror is read.
 
@@ -809,17 +822,43 @@ class CovariateMaterializer:
             entity ``()``.
         """
         # Colonne jamais produite : aucun bloc
+        frame = self._mirror_frame(column)
+        if frame is None:
+            return {}
+        # Découpage par entité, index de date seul dans chaque bloc
+        return self._split_by_entity(frame)
+
+    # Méthode auxiliaire d'assemblage des trois registres d'une colonne
+    def _mirror_frame(self, column: str) -> Optional[pd.DataFrame]:
+        """Assemble the three stores of one column on the mirror index.
+
+        Args:
+            column: Column whose mirror is read.
+
+        Returns:
+            Frame with columns ``value``, ``freq`` and ``origin``, or None
+            when the column has produced nothing yet.
+        """
         values = self.imputed_store.get(column)
         if values is None or values.empty:
-            return {}
-
-        # Assemblage des trois registres sur l'index du miroir
-        frame = pd.DataFrame({
+            return None
+        return pd.DataFrame({
             'value': values,
             'freq': self.imputed_freq_store.get(column, pd.Series(dtype='str')),
             'origin': self.origin_store.get(column, pd.Series(dtype=CELL_ORIGIN_DTYPE)),
         })
-        # Découpage par entité, index de date seul dans chaque bloc
+
+    # Méthode auxiliaire de découpage d'une trame de registres par entité
+    @staticmethod
+    def _split_by_entity(frame: pd.DataFrame) -> Dict[EntityKey, pd.DataFrame]:
+        """Split a frame of store cells into date-indexed entity blocks.
+
+        Args:
+            frame: Frame indexed like the stores.
+
+        Returns:
+            Mapping normalized entity key -> block indexed by date only.
+        """
         return {
             normalize_entity_key(entity): block
             for entity, _mask, block in iter_entity_blocks(frame)
@@ -844,35 +883,44 @@ class CovariateMaterializer:
         selected = [_same_frequency(entry, freq) for entry in block['freq']]
         return block[np.asarray(selected, dtype=bool)]
 
-    # Méthode auxiliaire de recherche de la fréquence de report
+    # Méthode auxiliaire de recherche de la production la plus fine
     @staticmethod
-    def _carry_frequency(block: pd.DataFrame, f_stage: Optional[str]) -> Optional[str]:
-        """Find the stage a rank-3 carry must start from.
+    def _finest_production(block: pd.DataFrame, freq: Optional[str]) -> Optional[str]:
+        """Find the finest production frequency a grid of frequency ``freq`` can read.
 
         The production frequency is read in ``imputed_freq_store``, never
-        re-detected: the carry must start from the grid the values were
-        actually produced on.
+        re-detected. A production at ``freq`` is read as is, a finer one is
+        exactly aggregated onto the grid: the finest one is the production of
+        the current stage, the latest the cascade made.
 
         Args:
             block: Entity block returned by :meth:`_mirror_blocks`.
-            f_stage: Frequency of the current stage.
+            freq: Frequency of the grid.
 
         Returns:
-            The highest production frequency strictly lower than ``f_stage``
-            present in the block — the closest earlier stage — or None when
-            the block holds none.
+            The finest production frequency of the block equal to or finer
+            than ``freq``, or None when the block holds none.
+
+        Examples:
+            >>> dates = pd.date_range('2024-01-01', periods=3, freq='MS')
+            >>> block = pd.DataFrame({'value': [1.0, 2.0, 3.0], 'freq': ['M', 'M', 'Q'],
+            ...                       'origin': ['model'] * 3}, index=dates)
+            >>> CovariateMaterializer._finest_production(block, 'Q')
+            'M'
+            >>> CovariateMaterializer._finest_production(block, 'D') is None
+            True
         """
-        # Fréquence d'étape inconnue : aucun report définissable
-        if f_stage is None or block.empty:
+        # Fréquence de grille inconnue : aucune production lisible
+        if freq is None or block.empty:
             return None
 
-        # Fréquence la plus haute parmi celles strictement plus basses que f_stage
+        # Fréquence la plus fine parmi celles égales à la grille ou plus fines
         best: Optional[str] = None
-        for freq in block['freq'].dropna().unique():
-            if not is_higher_frequency(f_stage, freq):
+        for entry in block['freq'].dropna().unique():
+            if not (_same_frequency(entry, freq) or is_higher_frequency(entry, freq)):
                 continue
-            if best is None or is_higher_frequency(freq, best):
-                best = freq
+            if best is None or is_higher_frequency(entry, best):
+                best = entry
         return best
 
     # -------------------------------------------------------------------------
@@ -1022,7 +1070,7 @@ class CovariateMaterializer:
     ) -> MaterializationWay:
         """Classify one covariate against one stage grid.
 
-        The four ranks of the precedence, applied in order, stopping at the
+        The three ranks of the precedence, applied in order, stopping at the
         first applicable one:
 
         - RANK 1, ``f_c >= f``: ``f_c == f`` -> ``'identity'``, ``f_c`` finer
@@ -1036,16 +1084,18 @@ class CovariateMaterializer:
           interpolated covariates only. An incomplete period yields NaN: that
           is a legitimate source of NaN, identical at fit and at predict, and
           it is never masked;
-        - RANK 2, ``c`` already produced at the current stage ``f``
-          -> ``'stage_model'``, its values read from the mirror. The trigger is
-          the mere presence of cells produced at ``f``, whatever their origin:
-          a covariate served by the fallback earlier in the same stage is
-          materialized, and is read back from the mirror like any other;
-        - RANK 3, ``c`` imputed at an earlier stage ``f'``
-          -> ``'carried_model'``, those values carried onto the ``f`` grid;
-        - RANK 4, none of the above -> ``covariate_fallback``.
+        - RANK 2, ``c`` already produced at ``f`` or at a finer frequency
+          -> ``'stage_model'``, its values read from the mirror, exactly
+          aggregated onto ``f`` when produced finer. The trigger is the mere
+          presence of produced cells, whatever their origin: a covariate
+          served by the fallback earlier in the same stage is materialized,
+          and is read back from the mirror like any other;
+        - RANK 3, none of the above -> ``covariate_fallback``, from the
+          covariate's original anchors. What an earlier stage imputed is never
+          carried onto a finer grid: a model trained on that production would
+          predict on its interpolation.
 
-        Ranks 2 and 3 read the stores, and are therefore reachable under
+        Rank 2 reads the stores, and is therefore reachable under
         ``covariate_strategy='model'`` only.
 
         Args:
@@ -1090,8 +1140,8 @@ class CovariateMaterializer:
 
         # Fréquence plus basse que la grille : gouverné par la stratégie.
         # Sortie avant toute lecture de registre sous 'tolerate_nan' et
-        # 'interpolate' : les rangs 2 et 3 y sont structurellement
-        # inatteignables, ce qui rend l'ordre d'imputation sans effet sur les
+        # 'interpolate' : le rang 2 y est structurellement
+        # inatteignable, ce qui rend l'ordre d'imputation sans effet sur les
         # valeurs produites hors 'model'
         if self.covariate_strategy == 'tolerate_nan':
             return 'raw_anchors'
@@ -1101,18 +1151,15 @@ class CovariateMaterializer:
         # Stratégie 'model' : lecture des registres de l'entité
         block = self._mirror_blocks(column).get(normalize_entity_key(entity))
 
-        # Rang 2 : la covariable a déjà été produite à cette étape. Le critère
-        # est la présence de cellules au pas f, quelle que soit leur origine —
-        # « le repli matérialise » : une covariable servie par repli plus tôt
-        # dans l'étape est ensuite relue dans le miroir
-        if block is not None and not self._stage_cells(block, f_stage).empty:
+        # Rang 2 : la covariable a déjà été produite au pas f ou plus finement.
+        # Le critère est la présence de cellules produites, quelle que soit
+        # leur origine : une covariable servie par
+        # repli plus tôt dans l'étape est ensuite relue dans le miroir
+        if block is not None and self._finest_production(block, f_stage) is not None:
             return 'stage_model'
 
-        # Rang 3 : report d'une imputation d'une étape antérieure
-        if block is not None and self._carry_frequency(block, f_stage) is not None:
-            return 'carried_model'
-
-        # Rang 4 : approche secondaire, au fit comme au predict
+        # Rang 3 : approche secondaire depuis les ancres d'origine, au fit
+        # comme au predict
         return self._fallback_way
 
     # Méthode auxiliaire de repli d'une voie inapplicable à une entité
@@ -1130,11 +1177,12 @@ class CovariateMaterializer:
         on the entity, and may have imputed it for some entities only. Rank 1
         always comes first: an entity observing the column at least as finely
         as the grid reads it by identity or exact aggregation, whatever the
-        way of the column — ``'raw_anchors'`` included. A model
-        way is resolved by the entity's own precedence: rank 2 when its
-        mirror holds cells at ``f``, else rank 3, else ``covariate_fallback``
-        — whichever of ``'stage_model'`` / ``'carried_model'`` the column
-        retained. The invariant is therefore measured per entity.
+        way of the column — ``'raw_anchors'`` included. The model way is
+        resolved by the entity's own precedence: rank 2 when its mirror holds
+        cells produced at ``f`` or finer — on a training layer coarser than
+        the stage, the exact aggregation of the stage production —, else
+        ``covariate_fallback``. The invariant is therefore measured per
+        entity.
 
         Args:
             way: Way retained for the column.
@@ -1156,20 +1204,11 @@ class CovariateMaterializer:
             if f_col is not None and f_stage is not None and is_higher_frequency(f_col, f_stage):
                 return 'aggregate'
 
-            # Disponibilité effective du miroir pour cette entité
-            block = mirror_block
-            has_stage = block is not None and not self._stage_cells(block, f_stage).empty
-            carry = None if block is None else self._carry_frequency(block, f_stage)
-
-            # Précédence propre à l'entité, quelle que soit la voie de modèle
-            # retenue pour la colonne : rang 2, puis rang 3, puis rang 4
-            # ramené aux fréquences de l'entité. Les deux voies de modèle
-            # partagent un rang ; laisser la voie de colonne choisir entre
-            # elles ferait dépendre la valeur servie de l'ordre des entités
-            if has_stage:
+            # Précédence propre à l'entité : rang 2 lorsque son miroir porte
+            # une production lisible sur cette grille, sinon rang 3 ramené aux
+            # fréquences de l'entité
+            if mirror_block is not None and self._finest_production(mirror_block, f_stage) is not None:
                 return 'stage_model'
-            if carry is not None:
-                return 'carried_model'
             return self._applicable_way(self._fallback_way, f_col, f_stage)
 
         # Fréquences inconnues : aucune conversion n'est définissable, la
@@ -1188,12 +1227,12 @@ class CovariateMaterializer:
         if is_higher_frequency(f_col, f_stage):
             return 'aggregate'
 
-        # Colonne plus basse que la grille : la voie de rang 4 imposée
+        # Colonne plus basse que la grille : la voie de rang 3 imposée
         # s'applique telle quelle, une voie de rang 1 imposée retombant sur
         # l'approche secondaire
         if way in _COARSER_WAYS:
             return way
-        return self._rank4_way
+        return self._rank3_way
 
     # -------------------------------------------------------------------------
     # Interpolation (voie et repli)
@@ -1236,22 +1275,20 @@ class CovariateMaterializer:
 
         The interpolation way of ``column`` — its method, its anchor, the
         spreading of each value over the grid steps of its period, then the
-        rescaling to the totals of ``f_source`` — applied to whatever series
-        is handed over: the column's raw observations for the
-        ``'interpolate'`` way, its mirror cells produced at the earlier stage
-        ``f'`` for the ``'carried_model'`` way. The rescaling therefore bears
-        on the totals of the origin stage, never on those of the current one.
+        rescaling to the totals of ``f_source`` — applied to the series
+        handed over, the column's raw observations.
 
         Every returned cell spans one period of the grid, whether the
         rescaling applies or not: a quarterly total interpolated onto months
-        is divided by the three months of its quarter. The rescaling is
-        proportional, so the spreading leaves the cells of a rescaled period
-        unchanged; it is what keeps the scale of the cells that the rescaling
-        does not reach (``aggregation_constraint=None``, truncated or zero
-        periods).
+        is divided by the three months of its quarter. Under ``'sum'`` the
+        rescaling is proportional, so the spreading leaves the cells of a
+        rescaled period unchanged; under ``'denton'`` it sets the level the
+        smooth correction starts from. Either way it is what keeps the scale
+        of the cells that the rescaling does not reach
+        (``aggregation_constraint=None``, truncated or zero periods).
 
         Args:
-            column: Column being carried, driving ``resolve_method`` and
+            column: Column being interpolated, driving ``resolve_method`` and
                 ``resolve_anchor``.
             observations: Values to carry, date-indexed, NaN already dropped.
             dates: Target grid dates.
@@ -1606,7 +1643,7 @@ class CovariateMaterializer:
         # Voies du modèle : les valeurs viennent du miroir, jamais de la source
         if way in _MODEL_WAYS:
             values, origins = self._produce_model_block(
-                column, way, dates, f_stage, mirror_block
+                column, dates, f_stage, mirror_block
             )
         else:
             # Suppression des valeurs manquantes
@@ -1615,7 +1652,7 @@ class CovariateMaterializer:
             # Identité et ancres brutes : les observations portées sur la grille.
             # Mécaniquement identiques, sémantiquement distinctes — 'identity'
             # est un rang 1 (la colonne est à la fréquence de la grille),
-            # 'raw_anchors' est le rang 4 de 'tolerate_nan' (les ancres, et NaN
+            # 'raw_anchors' est le rang 3 de 'tolerate_nan' (les ancres, et NaN
             # partout ailleurs)
             if way in ('identity', 'raw_anchors'):
                 values = observations.reindex(dates)
@@ -1645,62 +1682,83 @@ class CovariateMaterializer:
         origins = origins.where(values.notna())
         return values, origins
 
-    # Méthode auxiliaire de production d'un bloc par une voie de modèle
+    # Méthode auxiliaire de production d'un bloc par la voie du modèle
     def _produce_model_block(
         self,
         column: str,
-        way: MaterializationWay,
         dates: pd.DatetimeIndex,
         f_stage: Optional[str],
         mirror_block: Optional[pd.DataFrame],
     ) -> Tuple[pd.Series, pd.Series]:
-        """Produce one entity's values from the mirror, ranks 2 and 3.
+        """Produce one entity's values from the mirror, rank 2.
+
+        The finest production the grid can read (:meth:`_finest_production`)
+        is served as is on a grid of its own frequency, and exactly aggregated
+        — sum over complete periods — on a coarser one: a training row coarser
+        than the stage reads the aggregation of the very imputation the
+        prediction grid reads. Where that production covers no complete
+        period, the cells produced at the grid's own frequency fill in.
 
         Args:
             column: Column being produced.
-            way: ``'stage_model'`` (rank 2) or ``'carried_model'`` (rank 3).
             dates: Target grid dates of this entity.
-            f_stage: Stage frequency for this entity.
+            f_stage: Frequency of the grid for this entity.
             mirror_block: This entity's mirror block, as returned by
                 :meth:`_mirror_blocks`.
 
         Returns:
             Tuple ``(values, origins)``, both indexed by ``dates``. The origins
             are read in ``origin_store``: an imputation produced by fallback
-            reports ``'interpolated'``, and carrying a model value onto a finer
-            grid keeps it ``'model'`` — the way never decides the origin.
+            reports ``'interpolated'`` — the way never decides the origin.
+
+        Examples:
+            >>> months = pd.date_range('2024-01-01', periods=6, freq='MS')
+            >>> block = pd.DataFrame({'value': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 'freq': ['M'] * 6,
+            ...                       'origin': pd.Categorical(['model'] * 6, dtype=CELL_ORIGIN_DTYPE)},
+            ...                      index=months)
+            >>> quarters = pd.DatetimeIndex(['2024-01-01', '2024-04-01'])
+            >>> values, origins = CovariateMaterializer()._produce_model_block('a1', quarters, 'Q', block)
+            >>> values.tolist(), origins.astype(str).tolist()
+            ([6.0, 15.0], ['model', 'model'])
         """
         # Bloc absent : l'entité n'a rien dans le miroir, ses lignes restent NaN
         empty_values = pd.Series(np.nan, index=dates, name=column)
         empty_origins = pd.Series(np.nan, index=dates, dtype=CELL_ORIGIN_DTYPE)
         if mirror_block is None or mirror_block.empty:
             return empty_values, empty_origins
+        finest = self._finest_production(mirror_block, f_stage)
+        if finest is None:
+            return empty_values, empty_origins
 
-        # Rang 2 : les valeurs imputées à l'étape courante, telles quelles
-        if way == 'stage_model':
-            cells = self._stage_cells(mirror_block, f_stage)
-            if cells.empty:
-                return empty_values, empty_origins
+        # Production à la fréquence de la grille : lue telle quelle
+        cells = self._stage_cells(mirror_block, finest)
+        if _same_frequency(finest, f_stage):
             return (
                 cells['value'].reindex(dates).rename(column),
                 cells['origin'].reindex(dates).astype(CELL_ORIGIN_DTYPE),
             )
 
-        # Rang 3 : fréquence de production lue dans le registre, jamais redétectée
-        f_prime = self._carry_frequency(mirror_block, f_stage)
-        if f_prime is None:
-            return empty_values, empty_origins
-
-        # Report des cellules de l'étape d'origine sur la grille courante, par
-        # la voie d'interpolation de la colonne et avec recalage aux totaux de f'
-        cells = self._stage_cells(mirror_block, f_prime)
-        values = self._interpolate_series(
-            column, cells['value'].dropna(), dates, f_prime, f_stage
+        # Production plus fine : agrégation exacte sur périodes complètes, la
+        # même que celle du rang 1 ; l'origine est celle des cellules agrégées
+        stage_offset = target_offset_for_index(dates, f_stage)
+        values = self._conv.aggregate_to_lower_frequency(
+            cells['value'].dropna(), stage_offset, method='sum',
+            full_periods_only=True, source_freq=finest,
+        ).reindex(dates).rename(column)
+        origins = pd.Series(
+            max_cell_origin(cells['origin']), index=dates, dtype=CELL_ORIGIN_DTYPE
         )
-        # Origine propagée sans dégradation ni amélioration : l'interpolation
-        # d'une valeur de modèle reste de modèle, un repli reste 'interpolated'
-        carried_origin = max_cell_origin(cells['origin'])
-        return values, pd.Series(carried_origin, index=dates, dtype=CELL_ORIGIN_DTYPE)
+
+        # Complément par les cellules produites à la fréquence de la grille, là
+        # où la production plus fine ne couvre aucune période complète
+        own = self._stage_cells(mirror_block, f_stage)
+        if not own.empty:
+            missing = values.isna()
+            values = values.where(~missing, own['value'].reindex(dates))
+            origins = origins.where(
+                ~missing, own['origin'].reindex(dates).astype(CELL_ORIGIN_DTYPE)
+            )
+        return values, origins
 
     # Méthode auxiliaire d'enregistrement d'une colonne dans les registres
     def _record(
@@ -1787,13 +1845,12 @@ class CovariateMaterializer:
                 overwrite in the mirror the imputation its own model just
                 wrote, make the result depend on the processing order, and —
                 on a mutualized grid carrying cells produced at the frequency
-                of the blocks rather than at that of any stage — let
-                ``_carry_frequency`` believe a rank-3 carry is available where
-                nothing was ever imputed. A step's own production goes through
+                of the blocks rather than at that of any stage — let rank 2
+                believe a production is available where nothing was ever
+                imputed. A step's own production goes through
                 :meth:`record_production` or :meth:`interpolate_column`; True
                 is left for a caller deliberately recording a materialization.
-                Reading the stores is unaffected: ranks 2 and 3 work either
-                way.
+                Reading the stores is unaffected: rank 2 works either way.
 
         Returns:
             Tuple ``(features, ways, column_origins)``:
@@ -1858,8 +1915,8 @@ class CovariateMaterializer:
             # Production non enregistrée sous record=False : une grille
             # d'entraînement mutualisée porte des cellules produites à la
             # fréquence des blocs, et non à celle d'une étape ; les inscrire
-            # ferait croire à "_carry_frequency" qu'un report d'étape (rang 3)
-            # est disponible là où rien n'a jamais été imputé
+            # ferait croire au rang 2 qu'une production est disponible là où
+            # rien n'a jamais été imputé
             if record:
                 self._record(column, values, origins, freqs)
 
@@ -1894,11 +1951,11 @@ class CovariateMaterializer:
         never the features handed to an estimator.
 
         The cap is applied per entity, after the precedence: an entity whose
-        own way lands on the interpolation — rank 4 of the column, or a model
+        own way lands on the interpolation — rank 3 of the column, or a model
         way degraded to ``covariate_fallback`` because its mirror is empty — is
         left at its raw anchors, while an entity observing the column at least
         as finely as the grid keeps its identity or exact aggregation, and an
-        entity served by the mirror (ranks 2 and 3, under
+        entity served by the mirror (rank 2, under
         ``covariate_strategy='model'`` only) keeps it. The mirror **overlays**
         the raw anchors rather than replacing them: wherever the model produced
         nothing — outside the imputation window above all — the observation
@@ -2073,7 +2130,7 @@ class CovariateMaterializer:
         stage_freq: StageFrequency,
         detected_frequencies: DetectedFrequencies,
     ) -> Dict[str, MaterializationWay]:
-        """Apply the four-rank precedence to each column, and nothing else.
+        """Apply the three-rank precedence to each column, and nothing else.
 
         No value is produced, no store is written. :meth:`materialize` calls it when
         ``materialization`` is None, and replays the imposed ways otherwise.
@@ -2250,6 +2307,60 @@ class CovariateMaterializer:
             retained.append(column)
 
         return tuple(retained)
+
+    # Méthode de recensement des covariables sans information sous la résolution des ancres
+    def uninformative_covariates(
+        self,
+        ways: Mapping[str, MaterializationWay],
+        blocks: Mapping[EntityKey, str],
+        detected_frequencies: DetectedFrequencies,
+    ) -> Dict[str, str]:
+        """Name the covariates a model would learn on exactly and predict on smoothed.
+
+        A covariate the prediction grid receives by rank 3 only —
+        interpolated, or as raw anchors — while the variable's own anchors
+        observe it at their frequency is exact on every training row of that
+        frequency, and at prediction brings nothing below the anchors'
+        resolution: only the period level, which the aggregation constraint
+        already imposes on the variable. A model leaning on it learns a
+        relationship the prediction grid cannot feed. Such a covariate is left
+        out, in every strategy.
+
+        A covariate coarser than the anchors (interpolated on both grids), or
+        finer than them (it still carries its own sub-period values at
+        prediction), keeps its place.
+
+        Args:
+            ways: Way decided for each covariate on the prediction grid.
+            blocks: Mapping entity -> frequency of the variable's own anchors,
+                ``f_block(e)`` of the training set.
+            detected_frequencies: Detected frequency of each column, scalar or
+                per entity.
+
+        Returns:
+            Mapping column -> reason (:data:`UNINFORMATIVE_COVARIATE`), in the
+            order of ``ways``; empty when every covariate keeps its place.
+
+        Examples:
+            >>> mat = CovariateMaterializer()
+            >>> ways = {'m1': 'identity', 'q1': 'interpolate', 'a2': 'interpolate'}
+            >>> sorted(mat.uninformative_covariates(ways, {(): 'Y'}, {'m1': 'M', 'q1': 'Q', 'a2': 'Y'}))
+            ['a2']
+        """
+        # Initialisation du dictionnaire des variables écartées
+        dropped: Dict[str, str] = {}
+        # Parcours des colonnes
+        for column, way in ways.items():
+            # Seules les covariables servies par le rang 3 à la prédiction
+            if way not in _COARSER_WAYS:
+                continue
+            # Une entité au moins observe la covariable à la fréquence de ses ancres
+            if any(
+                _same_frequency(self._column_frequency(detected_frequencies, column, entity), f_block)
+                for entity, f_block in blocks.items()
+            ):
+                dropped[column] = UNINFORMATIVE_COVARIATE
+        return dropped
 
     # Représentation lisible du composant
     def __repr__(self) -> str:

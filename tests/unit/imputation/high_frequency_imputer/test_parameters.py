@@ -273,7 +273,7 @@ _ADMITTED = (
     + [('interpolation_method', {'a1': 'cubic', '__default__': 'linear'})]
     + [('interpolation_anchor', value) for value in (None, 0.0, 0.5, 1.0)]
     + [('interpolation_anchor', {'a1': 0.0, 'q1': None, '__default__': 1.0})]
-    + [('impute_intermediate_frequencies', value) for value in (False, 'covariates_only', True)]
+    + [('impute_intermediate_frequencies', value) for value in (False, True)]
     + [('impute_unobserved_entities', value) for value in (False, True)]
     + [('fit_predict_order', value) for value in ('frequency', 'cv')]
     + [('cv', value) for value in (None, 2, 5, np.int64(3), KFold(n_splits=3), _SPLITS)]
@@ -285,7 +285,7 @@ _ADMITTED = (
     + [('training_coverage_threshold', value) for value in (None, 0.0, 1.0)]
     + [('scale_features', value) for value in (False, 'constant', 'calendar')]
     + [('scale_features', {'a1': 'calendar', 'q1': False, '__default__': 'constant'})]
-    + [('aggregation_constraint', value) for value in ('sum', None)]
+    + [('aggregation_constraint', value) for value in ('sum', 'denton', None)]
     + [('aggregation_constraint', {'a1': None, '__default__': 'sum'})]
     + [(name, value)
        for name in ('keep_lower_frequencies', 'restore_original_values', 'verbose')
@@ -618,8 +618,7 @@ class TestInertCombinations:
 
     @pytest.mark.parametrize(
         'fragment',
-        ["'covariates_only'", 'covariate_fallback', 'fit_predict_order',
-         'training_coverage_threshold'],
+        ['covariate_fallback', 'fit_predict_order', 'training_coverage_threshold'],
     )
     def test_inert_combinations_are_documented(self, fragment):
         """The class docstring names each inert combination."""

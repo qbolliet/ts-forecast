@@ -1,7 +1,9 @@
 """Covariate materialization ways of ``HighFrequencyImputer``.
 
 Covers the way recorded per plan step, its per-entity degradation on
-the pooled grid, the true values kept on the training grid, and the
+the pooled grid, the covariates left out because the prediction grid only
+receives them interpolated while the variable's anchors observe them, the
+covariates already imputed at the stage read imputed on both grids, and the
 replay of the ways at ``transform``.
 """
 
@@ -11,6 +13,7 @@ import pytest
 
 # Objets testés
 from tsforecast.imputation.high_frequency_imputer import HighFrequencyImputer
+from tsforecast.imputation._components.covariate_materializer import UNINFORMATIVE_COVARIATE
 
 # Outils de test partagés
 from tests.unit.imputation.high_frequency_imputer.helpers import (
@@ -23,16 +26,27 @@ from tests.unit.imputation.high_frequency_imputer.helpers import (
 )
 
 
+# Étape de plan imputant une colonne donnée
+def step_of(imputer: HighFrequencyImputer, column: str):
+    """Return the first plan step imputing ``column``."""
+    return next(step for step in imputer.imputation_plan_ if step.var_name == column)
+
+
 class TestMaterializationWays:
     """The materialization way is recorded and follows the precedence."""
 
     def test_materialization_way_recorded_per_step(self, reference_timeseries):
-        """Une entrée par feature_col, et la voie attendue par la précédence."""
+        """Une entrée par feature_col, et la voie attendue par la précédence.
+
+        Les deux annuelles ne se lisent pas l'une l'autre : chacune est
+        observée à la fréquence des ancres de l'autre et seulement interpolée
+        au mois.
+        """
         imputer = fit_with_spy(reference_timeseries)
         expected = {
             'q1': {'m1': 'identity', 'a1': 'interpolate', 'a2': 'interpolate'},
-            'a1': {'m1': 'identity', 'q1': 'interpolate', 'a2': 'interpolate'},
-            'a2': {'m1': 'identity', 'q1': 'interpolate', 'a1': 'interpolate'},
+            'a1': {'m1': 'identity', 'q1': 'interpolate'},
+            'a2': {'m1': 'identity', 'q1': 'interpolate'},
         }
         for step in imputer.imputation_plan_:
             assert set(step.materialization) == set(step.feature_cols)
@@ -52,23 +66,21 @@ class TestPerEntityMaterialization:
     def test_one_covariate_takes_three_ways_on_the_pooled_grid(
         self, mixed_freq_panel_multifrequency
     ):
-        """Une covariable trimestrielle est agrégée, lue, puis interpolée selon le bloc.
+        """Une covariable imputée à l'étape est agrégée, lue, puis lue imputée selon le bloc.
 
         C'est le cas que la mutualisation crée : la grille d'entraînement de
         ``v`` réunit un bloc annuel (FR), un bloc trimestriel (DE) et un bloc
-        mensuel (IT). ``q1``, trimestrielle, y couvre les trois positions
-        possibles face à la grille — plus fine, égale, plus basse — et doit
-        recevoir la transformation propre à chacune, sans que la voie de
-        l'étape, décidée une seule fois sur la grille de prédiction, soit
-        remise en cause.
+        mensuel (IT). ``q1``, trimestrielle et déjà imputée au mois sous
+        ``'model'``, y couvre les trois positions possibles face à la grille —
+        plus fine, égale, plus basse — et reçoit la transformation propre à
+        chacune, sans que la voie de l'étape, décidée une seule fois sur la
+        grille de prédiction, soit remise en cause.
         """
-        imputer = fit_with_spy(mixed_freq_panel_multifrequency)
-        step = next(
-            step for step in imputer.imputation_plan_ if step.var_name == 'v'
-        )
+        imputer = fit_with_spy(mixed_freq_panel_multifrequency, covariate_strategy='model')
+        step = step_of(imputer, 'v')
 
         # Voie de l'étape : décidée sur la grille de prédiction, mensuelle
-        assert step.materialization['q1'] == 'interpolate'
+        assert step.materialization['q1'] == 'stage_model'
         assert step.materialization['m1'] == 'identity'
         # Un bloc par entité, chacun à la fréquence propre de v
         assert dict(step.training_blocks) == {FR: 'Y', DE: 'Q', IT: 'M'}
@@ -91,19 +103,12 @@ class TestPerEntityMaterialization:
             [value / 3 for value in range(10, 130, 10)]
         )
 
-        # Bloc mensuel d'IT : q1 y est plus basse, donc INTERPOLÉE, puis recalée
+        # Bloc mensuel d'IT : q1 y est plus basse, donc lue IMPUTÉE, recalée
         # sous 'sum' : les trois mois de chaque trimestre somment à son
-        # observation (covariable matérialisée comprise)
+        # observation
         italy = entity_block(X_train['q1'], 'IT')
         by_quarter = italy.groupby(italy.index.to_period('Q')).sum()
         assert by_quarter.tolist() == pytest.approx(list(range(10, 130, 10)))
-        # La forme intra-trimestrielle est celle de l'interpolation linéaire.
-        # Valeur d'or du T2 2021 : entre les ancres 10 (mars) et 20 (juin), la
-        # droite passe par 40/3, 50/3, 60/3, soit les proportions 4:5:6,
-        # recalées sur le total 20
-        assert italy.loc['2021-04':'2021-06'].tolist() == pytest.approx(
-            [20 * 4 / 15, 20 * 5 / 15, 20 * 6 / 15]
-        )
 
     def test_the_three_ways_land_on_the_same_scale(
         self, mixed_freq_panel_multifrequency
@@ -115,11 +120,8 @@ class TestPerEntityMaterialization:
         la cellule couvre, l'agrégat annuel de ``q1`` chez FR entrerait dans le
         modèle douze fois plus grand que sa valeur mensuelle chez IT.
         """
-        imputer = fit_with_spy(mixed_freq_panel_multifrequency)
-        step = next(
-            step for step in imputer.imputation_plan_ if step.var_name == 'v'
-        )
-        X_train = step.model.fit_X_
+        imputer = fit_with_spy(mixed_freq_panel_multifrequency, covariate_strategy='model')
+        X_train = step_of(imputer, 'v').model.fit_X_
 
         means = {
             entity: float(entity_block(X_train['q1'], entity).mean())
@@ -132,108 +134,90 @@ class TestPerEntityMaterialization:
             assert mean == pytest.approx(reference, rel=0.35), entity
 
         # Et la prédiction lit la même échelle que l'entraînement
-        for prediction_frame in step.model.predict_X_:
+        for prediction_frame in step_of(imputer, 'v').model.predict_X_:
             assert float(prediction_frame['q1'].mean()) == pytest.approx(
                 reference, rel=0.35
             )
 
 
-class TestTrueValuesOnTheTrainingGrid:
-    """Une covariable à sa propre fréquence garde ses VRAIES valeurs au fit.
+class TestUninformativeCovariates:
+    """A covariate the prediction grid only receives interpolated is left out if the anchors observe it.
 
-    Le cas : la grille de prédiction est trimestrielle et la covariable
-    annuelle — elle doit donc y être matérialisée —, tandis que la grille
-    d'entraînement, elle, est annuelle, parce que la variable imputée l'est
-    aussi. La covariable y est disponible à sa propre maille : le rang 1 de la
-    précédence l'emporte, et ce sont ses observations qui entrent dans
-    ``X_train``, jamais une version reconstruite.
+    Observée à la fréquence des ancres de la variable, elle est exacte sur
+    chaque ligne d'entraînement ; interpolée sur la grille de prédiction, elle
+    n'y apporte que le niveau de la période, que le recalage impose déjà.
+    """
+
+    @pytest.mark.parametrize('strategy', ['interpolate', 'model'])
+    def test_annual_covariate_of_an_annual_variable_is_left_out(self, reference_timeseries, strategy):
+        """a2, annual, is not a covariate of a1, annual, and the plan says why."""
+        imputer = fit_with_spy(reference_timeseries, covariate_strategy=strategy)
+        step = step_of(imputer, 'a1')
+
+        assert 'a2' not in step.feature_cols
+        assert dict(step.dropped_covariates) == {'a2': UNINFORMATIVE_COVARIATE}
+        frame = imputer.imputation_plan_.to_diagnostic_frame()
+        assert frame.set_index('variable').loc['a1', 'dropped_covariates'] == 'a2'
+
+    def test_finer_covariate_keeps_its_place(self, reference_timeseries):
+        """q1, quarterly, is finer than the annual anchors of a1: still a covariate, interpolated."""
+        step = step_of(fit_with_spy(reference_timeseries), 'a1')
+        assert step.materialization['q1'] == 'interpolate'
+
+    def test_coarser_covariates_keep_their_place(self, reference_timeseries):
+        """a1 and a2, annual, are interpolated on both grids of q1: still covariates."""
+        step = step_of(fit_with_spy(reference_timeseries), 'q1')
+        assert dict(step.dropped_covariates) == {}
+        assert (step.materialization['a1'], step.materialization['a2']) == ('interpolate', 'interpolate')
+
+
+class TestImputedCovariateOnBothGrids:
+    """A covariate already imputed at the stage is read imputed, never interpolated.
+
+    Le cas : la grille de prédiction est trimestrielle, la grille
+    d'entraînement de la variable annuelle ``a2`` l'est aussi, et ``a1`` a déjà
+    été imputée à l'étape. La prédiction lit l'imputation trimestrielle de
+    ``a1`` ; l'entraînement lit ses ancres annuelles, qui sont sous ``'sum'``
+    l'agrégat exact de cette imputation.
     """
 
     @staticmethod
-    def _annual_step(imputer: HighFrequencyImputer):
-        """Return the plan step imputing 'a1', whose training block is annual."""
-        return next(
-            step for step in imputer.imputation_plan_ if step.var_name == 'a1'
+    def _second_step(reference_timeseries):
+        """Fit under 'model' at a quarterly target and return the step of a2."""
+        imputer = fit_with_spy(
+            reference_timeseries, target_frequency='Q', covariate_strategy='model'
         )
+        return step_of(imputer, 'a2')
 
-    def test_annual_covariate_enters_the_fit_with_its_observations(
-        self, reference_timeseries
-    ):
-        """Sur la grille annuelle, 'a2' vaut ses ancres, pas une interpolation."""
-        imputer = fit_with_spy(reference_timeseries, target_frequency='Q')
-        step = self._annual_step(imputer)
-
-        # La voie de l'étape est bien celle de la grille de PRÉDICTION
-        assert step.materialization['a2'] == 'interpolate'
-        # Mais la grille d'entraînement est annuelle, comme 'a2'
-        assert dict(step.training_blocks) == {(): 'Y'}
-
-        # Les valeurs vues au fit sont les VRAIES, à l'échelle de l'étape :
-        # 60 / 66 / 72 divisées par les 4 trimestres d'une année
-        observed = reference_timeseries['a2'].dropna()
-        assert observed.tolist() == [60.0, 66.0, 72.0]
-        assert step.model.fit_X_['a2'].tolist() == [15.0, 16.5, 18.0]
-
-    def test_the_two_grids_stay_consistent_under_the_sum_constraint(
-        self, reference_timeseries
-    ):
-        """La valeur d'entraînement est l'agrégat exact des valeurs de prédiction.
-
-        C'est ce qui rend l'asymétrie inoffensive : le modèle apprend sur
-        l'observation annuelle et prédit sur son interpolation trimestrielle,
-        mais sous ``aggregation_constraint='sum'`` la seconde somme exactement
-        à la première. Les deux côtés portent le même niveau ; seule la forme
-        intra-annuelle diffère, et la grille annuelle ne pouvait de toute
-        façon pas l'exprimer.
-        """
-        imputer = fit_with_spy(reference_timeseries, target_frequency='Q')
-        step = self._annual_step(imputer)
-        predicted = step.model.predict_X_[0]['a2']
-
-        yearly = predicted.groupby(predicted.index.year).sum()
-        assert yearly.tolist() == pytest.approx([60.0, 66.0, 72.0])
-        # Même niveau des deux côtés, une fois l'échelle appliquée
-        assert step.model.fit_X_['a2'].mean() == pytest.approx(predicted.mean())
-
-    def test_the_step_is_nonetheless_marked_as_having_read_an_interpolation(
-        self, reference_timeseries
-    ):
-        """The taint is the MAX over the two grids: the prediction rules.
-
-        Keeping the true values at fit does not whiten the stage: the taint
-        is computed on ``X_train ∪ X_pred``, and the prediction grid
-        brings interpolated values to it. The emitted provenance stays
-        ``MODEL_ON_INTERPOLATED``.
-        """
-        imputer = fit_with_spy(reference_timeseries, target_frequency='Q')
-        step = self._annual_step(imputer)
-
-        assert step.covariate_taint == 'interpolated'
-        assert step.target_taint == 'none'
-        assert str(step.emitted_provenance) == 'model_on_interpolated'
+    def test_the_imputed_covariate_is_never_left_out(self, reference_timeseries):
+        """a1, observed at the annual frequency of a2's anchors, stays: it is imputed at the stage."""
+        step = self._second_step(reference_timeseries)
+        assert step.materialization['a1'] == 'stage_model'
+        assert 'a1' not in step.dropped_covariates
 
     def test_the_mirror_never_overrides_an_observation(self, reference_timeseries):
         """Sous 'model', le rang 1 passe AVANT la lecture du miroir.
 
-        Même quand 'a2' a déjà été imputée à l'étape courante — donc lisible au
-        rang 2 —, une entité qui l'observe à la fréquence de sa grille
+        Une entité qui observe 'a1' à la fréquence de sa grille
         d'entraînement y lit son observation. Le miroir ne remplace jamais une
         vraie valeur.
         """
-        imputer = fit_with_spy(
-            reference_timeseries, target_frequency='Q', covariate_strategy='model'
-        )
-        # 'a1' est imputée en premier ; à l'étape de 'a2', 'a1' est au miroir
-        second = next(
-            step for step in imputer.imputation_plan_ if step.var_name == 'a2'
-        )
-        assert second.materialization['a1'] == 'stage_model'
-
-        # Et pourtant la grille d'entraînement de 'a2', annuelle, lit les
-        # observations de 'a1' : 120 / 132 / 150 divisées par 4
-        assert second.model.fit_X_['a1'].tolist() == [30.0, 33.0, 37.5]
+        step = self._second_step(reference_timeseries)
+        # Grille d'entraînement annuelle : les observations de 'a1',
+        # 120 / 132 / 150 divisées par 4
+        assert step.model.fit_X_['a1'].tolist() == [30.0, 33.0, 37.5]
         observed = reference_timeseries['a1'].dropna()
         assert observed.tolist() == [120.0, 132.0, 150.0]
+
+    def test_the_training_value_is_the_aggregate_of_the_prediction_values(self, reference_timeseries):
+        """Under ``'sum'``, the annual training value of a1 is the sum of its quarterly imputation."""
+        step = self._second_step(reference_timeseries)
+        predicted = step.model.predict_X_[0]['a1']
+
+        yearly = predicted.groupby(predicted.index.year).sum()
+        assert yearly.tolist() == pytest.approx([120.0, 132.0, 150.0])
+        # Même niveau des deux côtés, une fois l'échelle appliquée
+        assert step.model.fit_X_['a1'].mean() == pytest.approx(predicted.mean())
 
 
 class TestMaterializationReplay:

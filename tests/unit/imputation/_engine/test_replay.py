@@ -289,8 +289,9 @@ class TestWarnRowsOutsideWindow:
         calculator = ImputationWindowCalculator().fit(data)
         assert self._messages(calculator, data, is_panel=False) == [
             "2 row(s) of the data being transformed fall outside the imputation "
-            "window recomputed on them. These rows keep their input values: "
-            "nothing is ever blanked."
+            "window recomputed on them. These rows keep their input values, save "
+            "the period totals of the lower-frequency columns the imputer produces, "
+            "which are left empty."
         ]
 
     def test_panel_names_the_entities_and_skips_those_without_window(self):
@@ -308,7 +309,8 @@ class TestWarnRowsOutsideWindow:
         assert self._messages(calculator, data, is_panel=True) == [
             "1 row(s) of the data being transformed fall outside the imputation "
             "window recomputed on them, for entities (('FR',),). These rows keep "
-            "their input values: nothing is ever blanked."
+            "their input values, save the period totals of the lower-frequency "
+            "columns the imputer produces, which are left empty."
         ]
 
     def test_unusable_calculator_is_silent(self, reference_timeseries):

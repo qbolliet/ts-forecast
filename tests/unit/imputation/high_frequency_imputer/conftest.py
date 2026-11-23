@@ -36,7 +36,16 @@ def panel_f_with_a_mute_entity(panel_f_without_it_v) -> pd.DataFrame:
     covariates. This is the only failure path: the row is empty, and
     interpolation cannot serve as a fallback — there is nothing to
     interpolate.
+
+    The ``v`` of ``DE`` is brought to its annual totals, so that the anchors
+    of ``v`` are all annual: ``q1``, finer than them, stays a covariate of
+    ``v`` — a quarterly covariate observed at the frequency of quarterly
+    anchors would be left out of the set.
     """
     frame = panel_f_without_it_v.copy()
     frame.loc[('IT',), 'q1'] = np.nan
+    germany = frame.loc[('DE',), 'v']
+    annual = germany.groupby(germany.index.year).transform('sum')
+    year_end = germany.index.month == 12
+    frame.loc[('DE',), 'v'] = np.where(year_end, annual, np.nan)
     return frame

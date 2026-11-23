@@ -1,6 +1,6 @@
 """Fixtures of the ``frequency`` integration tests: cached fits of the scenario matrix."""
 # Modules de base
-from typing import Callable, Dict, Tuple, Union
+from typing import Callable, Dict, Tuple
 
 import pytest
 
@@ -8,7 +8,7 @@ from tests.integration.imputation.realistic_runs import DATASET_FIXTURES, build_
 
 
 @pytest.fixture(scope='session')
-def realistic_run(request) -> Callable[[str, str, Union[bool, str]], dict]:
+def realistic_run(request) -> Callable[[str, str, bool], dict]:
     """Fit each cell of the matrix of ``realistic_runs.py`` once per session.
 
     Returns:
@@ -18,8 +18,8 @@ def realistic_run(request) -> Callable[[str, str, Union[bool, str]], dict]:
     """
     cache: Dict[Tuple[str, str, str], dict] = {}
 
-    def _get(dataset: str, strategy: str, modality: Union[bool, str]) -> dict:
-        # Clé de cache : la modalité est encodée en str ('False' ≠ 'covariates_only')
+    def _get(dataset: str, strategy: str, modality: bool) -> dict:
+        # Clé de cache : la modalité est encodée en str
         key = (dataset, strategy, str(modality))
         if key not in cache:
             data = request.getfixturevalue(DATASET_FIXTURES[dataset]).copy()
@@ -30,7 +30,7 @@ def realistic_run(request) -> Callable[[str, str, Union[bool, str]], dict]:
 
 
 @pytest.fixture
-def record(realistic_run, dataset: str, strategy: str, modality: Union[bool, str]) -> dict:
+def record(realistic_run, dataset: str, strategy: str, modality: bool) -> dict:
     """Record of the matrix cell the test is parametrized on.
 
     Moves the (cached) fit into the fixture setup: the cost of a cell is paid

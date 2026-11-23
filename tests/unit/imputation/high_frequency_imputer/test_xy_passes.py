@@ -70,18 +70,26 @@ class TestTargetAsCovariate:
         assert (features['q1'], features['a1']) == (('m1', 'a1'), ('m1', 'q1'))
 
     def test_target_is_still_imputed_from_x(self, xy):
-        """The target keeps its own step, fed by every column of ``X``."""
+        """The target keeps its own step, fed by the columns of ``X`` it can read.
+
+        a1, annual like the anchors of the target and only interpolated at
+        prediction, is left out.
+        """
         imputer = _fitted(*xy)
 
-        assert _features_by_variable(imputer)[TARGET] == ('m1', 'q1', 'a1')
+        assert _features_by_variable(imputer)[TARGET] == ('m1', 'q1')
 
     def test_true_lets_the_target_in(self, xy):
-        """``target_as_covariate=True``: a2 becomes a covariate of q1 and a1."""
+        """``target_as_covariate=True``: a2 becomes a covariate of q1.
+
+        a1, annual like a2, never reads it: a2 would be exact on its annual
+        training rows and only interpolated at prediction.
+        """
         imputer = _fitted(*xy, target_as_covariate=True)
 
         features = _features_by_variable(imputer)
 
-        assert TARGET in features['q1'] and TARGET in features['a1']
+        assert TARGET in features['q1'] and TARGET not in features['a1']
 
     def test_inert_without_target(self, reference_timeseries):
         """Without ``y``, a2 is a column like any other: both values give one plan."""
@@ -265,7 +273,7 @@ class TestPredictionPass:
         X, y = xy
         imputer = _fitted(X, y, target_as_covariate=True)
 
-        with pytest.raises(ValueError, match=r"cannot impute \['a1', 'q1'\]"):
+        with pytest.raises(ValueError, match=r"cannot impute \['q1'\]"):
             imputer.transform(X)
 
     def test_refused_pass_leaves_the_previous_one_invertible(self, xy):

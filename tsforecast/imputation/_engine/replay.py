@@ -180,7 +180,9 @@ def warn_rows_outside_window(
 
     The window is a constraint on data availability, not a learned
     parameter: it is recomputed on the transformed data. Rows falling
-    outside it are simply not predicted — nothing is ever blanked — and a
+    outside it are not predicted and keep their input values — save the
+    period totals of the lower-frequency columns the stage produces, which
+    have no place on a finer row and are emptied — and a
     single aggregated message names how many they are and which entities
     they belong to. An entity — or a time series — with no row at all in
     the window is left out of that count: the calculator has already named
@@ -210,7 +212,7 @@ def warn_rows_outside_window(
         ...     warnings.simplefilter('always')
         ...     warn_rows_outside_window(calculator, data, is_panel=False)
         >>> print(caught[0].message)
-        2 row(s) of the data being transformed fall outside the imputation window recomputed on them. These rows keep their input values: nothing is ever blanked.
+        2 row(s) of the data being transformed fall outside the imputation window recomputed on them. These rows keep their input values, save the period totals of the lower-frequency columns the imputer produces, which are left empty.
     """
     # Masque de prédiction, "kind" nommé explicitement
     try:
@@ -240,7 +242,8 @@ def warn_rows_outside_window(
         f"{len(outside)} row(s) of the data being transformed fall outside "
         f"the imputation window recomputed on them"
         + (f", for entities {entities}" if entities else "")
-        + ". These rows keep their input values: nothing is ever blanked.",
+        + ". These rows keep their input values, save the period totals of the "
+        "lower-frequency columns the imputer produces, which are left empty.",
         UserWarning,
     )
 
@@ -638,7 +641,8 @@ def replay_plan(
 
         # Grille de la frame : l'index du masque, jamais ses seules lignes
         # vraies — les lignes hors fenêtre restent dans la sortie avec
-        # leurs valeurs d'entrée. Une ligne d'entrée hors de la grille (une
+        # leurs valeurs d'entrée, hormis les totaux de période des colonnes
+        # produites, sans place sur une ligne plus fine. Une ligne d'entrée hors de la grille (une
         # cible plus grossière que l'index) n'y figure pas : elle n'y
         # porterait rien, sa valeur étant agrégée sur la ligne de sa
         # période, et l'inversion rend l'index d'entrée. L'ordre est

@@ -1,12 +1,13 @@
-"""Tests of the four-rank materialization precedence.
+"""Tests of the three-rank materialization precedence.
 
 When a covariate must
 be materialized on the grid of stage ``f``, the precedence applies in order
 and stops at the FIRST applicable rank — rank 1 identity / exact aggregation,
-rank 2 the covariate's own production at ``f`` read from the mirror, rank 3
-its production at an earlier stage ``f'`` carried onto ``f``, rank 4
-``covariate_fallback``. Ranks 2 and 3 read the stores, hence exist under
-``covariate_strategy='model'`` only.
+rank 2 the covariate's own production at ``f`` (or at a finer frequency,
+exactly aggregated onto ``f``) read from the mirror, rank 3
+``covariate_fallback`` from the original anchors. Rank 2 reads the stores,
+hence exists under ``covariate_strategy='model'`` only; a production of an
+earlier, coarser stage is never carried onto a finer grid.
 
 Each rank is first pinned on its own, then opposed to a lower rank that is
 ALSO applicable, so that only the precedence decides — including rank 1
@@ -14,7 +15,7 @@ against the mirror, entity by entity (an imputation never
 overwrites a measurement).
 
 Covered symbols: ``CovariateMaterializer.classify``, ``materialize`` (model
-ways), ``record_production`` (mirror priming).
+way), ``record_production`` (mirror priming).
 """
 # Calcul numérique
 import numpy as np
@@ -32,7 +33,6 @@ from tsforecast.imputation._components.covariate_materializer import CovariateMa
 from tests.unit.imputation._components.covariate_materializer.helpers import (
     PANEL_FREQUENCIES,
     PANEL_F_FREQUENCIES,
-    SpyApplier,
     TS_FREQUENCIES,
     annual_grid,
     entity_grid,
@@ -43,8 +43,20 @@ from tests.unit.imputation._components.covariate_materializer.helpers import (
 )
 
 
+def fallback_values(source_data, grid, column='a1', stage_freq='M', frequencies=TS_FREQUENCIES):
+    """Values the fallback serves with empty stores, the reference of rank 3."""
+    features, _ways, _origins = CovariateMaterializer(covariate_strategy='model').materialize(
+        columns=[column],
+        grid_index=grid,
+        stage_freq=stage_freq,
+        detected_frequencies=frequencies,
+        source_data=source_data,
+    )
+    return features[column]
+
+
 class TestPrecedenceRanks:
-    """The four ranks, each on its own."""
+    """The three ranks, each on its own."""
 
     def test_rank_two_reads_stage_mirror(self, reference_timeseries):
         """Rank 2: the values come from the stage mirror, not from the source."""
@@ -97,17 +109,74 @@ class TestPrecedenceRanks:
         """Rank 2 fires on the mere presence of cells produced at ``f``.
 
         "Fallback materializes": a stage served by the fallback is read back like
-        any other. The code and the docstring of ``classify`` say so; the class
-        docstring, which requires ``origin == 'model'``, does not.
+        any other.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(7.0, index=monthly_grid()), 'M', origin)
         assert materializer.classify('a1', 'M', TS_FREQUENCIES) == 'stage_model'
 
-    def test_rank_three_carries_from_previous_stage(self, reference_timeseries):
-        """Rank 3: the quarterly imputation of a1 is CARRIED onto the M grid.
+    def test_rank_two_aggregates_a_finer_production_onto_a_coarser_grid(self, reference_timeseries):
+        """A monthly production read on a quarterly grid is summed over each complete quarter.
 
-        a1 is never left NaN two months out of three at the monthly stage.
+        Valeurs d'or : le mois k (base 0) vaut k ; le trimestre q somme
+        3 · (3q) + 0 + 1 + 2 = 9q + 3.
+        """
+        months = monthly_grid()
+        materializer = CovariateMaterializer(covariate_strategy='model')
+        prime(materializer, 'a1', pd.Series(np.arange(len(months), dtype=float), index=months), 'M', 'model')
+
+        features, ways, origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=quarterly_grid(),
+            stage_freq='Q',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+
+        assert (ways, origins) == ({'a1': 'stage_model'}, {'a1': 'model'})
+        np.testing.assert_allclose(features['a1'].to_numpy(), 9.0 * np.arange(12) + 3.0)
+
+    def test_incomplete_period_of_the_finer_production_stays_empty(self, reference_timeseries):
+        """A quarter the monthly production covers partially is never summed."""
+        months = monthly_grid()
+        materializer = CovariateMaterializer(covariate_strategy='model')
+        # Production à partir de février 2021 : le premier trimestre est incomplet
+        prime(materializer, 'a1', pd.Series(1.0, index=months[1:]), 'M', 'model')
+
+        features, _ways, _origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=quarterly_grid(),
+            stage_freq='Q',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+        assert np.isnan(features['a1'].iloc[0])
+        assert set(features['a1'].iloc[1:]) == {3.0}
+
+    def test_own_frequency_cells_fill_what_the_finer_production_misses(self, reference_timeseries):
+        """Q cells of 2021, M cells from 2022: the quarterly grid reads each where it exists."""
+        months = monthly_grid()
+        quarters = quarterly_grid()
+        materializer = CovariateMaterializer(covariate_strategy='model')
+        prime(materializer, 'a1', pd.Series(99.0, index=quarters[quarters.year == 2021]), 'Q', 'model')
+        prime(materializer, 'a1', pd.Series(1.0, index=months[months.year >= 2022]), 'M', 'model')
+
+        features, _ways, _origins = materializer.materialize(
+            columns=['a1'],
+            grid_index=quarters,
+            stage_freq='Q',
+            detected_frequencies=TS_FREQUENCIES,
+            source_data=reference_timeseries,
+        )
+        assert set(features['a1'].loc['2021']) == {99.0}
+        assert set(features['a1'].loc['2022':]) == {3.0}
+
+    def test_earlier_stage_production_is_never_carried(self, reference_timeseries):
+        """A quarterly imputation of a1 never reaches the M grid: rank 3 from the anchors.
+
+        A model trained on a quarterly production would predict on its
+        interpolation; the monthly grid is served what it would be served with
+        empty stores.
         """
         quarterly = pd.Series(20.0 + np.arange(12), index=quarterly_grid())
         materializer = CovariateMaterializer(covariate_strategy='model')
@@ -119,48 +188,15 @@ class TestPrecedenceRanks:
             stage_freq='M',
             detected_frequencies=TS_FREQUENCIES,
             source_data=reference_timeseries,
-            record=True,
         )
 
-        assert ways == {'a1': 'carried_model'}
-        # Aucune cellule NaN : deux mois sur trois ne restent pas vides
-        assert features['a1'].notna().all()
-        # L'interpolation d'une valeur de modèle RESTE de modèle
-        assert origins == {'a1': 'model'}
-        assert set(materializer.origin_store['a1'].unique()) == {'model'}
-        # Les cellules reportées sont écrites à la fréquence de l'étape courante
-        assert set(materializer.imputed_freq_store['a1'].unique()) == {'M'}
-
-    def test_rank_three_rescales_to_origin_stage_totals(self, reference_timeseries):
-        """Rank 3: the rescaling bears on the totals of ``f'``, not those of ``f``."""
-        quarterly_dates = quarterly_grid()
-        applier = SpyApplier()
-        materializer = CovariateMaterializer(
-            covariate_strategy='model', aggregation_constraint_applier=applier
-        )
-        quarterly = pd.Series(20.0 + np.arange(12), index=quarterly_dates)
-        prime(materializer, 'a1', quarterly, 'Q', 'model')
-
-        _features, ways, _origins = materializer.materialize(
-            columns=['a1'],
-            grid_index=monthly_grid(),
-            stage_freq='M',
-            detected_frequencies=TS_FREQUENCIES,
-            source_data=reference_timeseries,
+        assert (ways, origins) == ({'a1': 'interpolate'}, {'a1': 'interpolated'})
+        pd.testing.assert_series_equal(
+            features['a1'], fallback_values(reference_timeseries, monthly_grid())
         )
 
-        assert ways == {'a1': 'carried_model'}
-        assert len(applier.calls) == 1
-        call = applier.calls[0]
-        # Les totaux de l'étape d'origine, jamais ceux de l'étape courante ;
-        # la colonne, pour une contrainte par colonne ; la fréquence de la
-        # grille CIBLE, pour la garde de complétude calendaire
-        assert (call['period_freq'], call['column'], call['grid_freq']) == ('Q', 'a1', 'M')
-        # Ni les ancres annuelles de la source, ni la grille mensuelle
-        pd.testing.assert_series_equal(call['observations'], quarterly, check_names=False)
-
-    def test_rank_four_fallback_interpolate(self, reference_timeseries):
-        """Rank 4, empty stores: ``covariate_fallback='interpolate'``."""
+    def test_rank_three_fallback_interpolate(self, reference_timeseries):
+        """Rank 3, empty stores: ``covariate_fallback='interpolate'``."""
         materializer = CovariateMaterializer(
             covariate_strategy='model', covariate_fallback='interpolate'
         )
@@ -177,8 +213,8 @@ class TestPrecedenceRanks:
         assert origins == {'a1': 'interpolated'}
         assert features['a1'].notna().all()
 
-    def test_rank_four_fallback_tolerate_nan(self, reference_timeseries):
-        """Rank 4, empty stores: ``covariate_fallback='tolerate_nan'``."""
+    def test_rank_three_fallback_tolerate_nan(self, reference_timeseries):
+        """Rank 3, empty stores: ``covariate_fallback='tolerate_nan'``."""
         materializer = CovariateMaterializer(
             covariate_strategy='model', covariate_fallback='tolerate_nan'
         )
@@ -245,7 +281,7 @@ class TestPrecedenceRanks:
         # Une seule voie pour la colonne, la plus dégradée des verdicts
         assert ways == {'a1': 'stage_model'}
         assert origins == {'a1': 'model'}
-        # FR lit le miroir ; DE et IT dégradent au rang 4 (repli interpolé,
+        # FR lit le miroir ; DE et IT dégradent au rang 3 (repli interpolé,
         # un douzième de l'ancre annuelle par mois)
         np.testing.assert_allclose(
             features.loc['FR', 'a1'].to_numpy(), 7.0 + np.arange(len(dates))
@@ -260,11 +296,11 @@ class TestPrecedenceRanks:
         [('tolerate_nan', 'raw_anchors'), ('interpolate', 'interpolate')],
         ids=['tolerate_nan', 'interpolate'],
     )
-    def test_ranks_two_and_three_unreachable_outside_model(self, strategy, expected):
+    def test_rank_two_unreachable_outside_model(self, strategy, expected):
         """Outside ``'model'``, no strategy ever reads the stores."""
         grid = monthly_grid()
         materializer = CovariateMaterializer(covariate_strategy=strategy)
-        # Registres amorcés aux deux rangs : rien ne doit les lire
+        # Registres amorcés : rien ne doit les lire
         prime(materializer, 'a1', pd.Series(20.0 + np.arange(12), index=quarterly_grid()), 'Q', 'model')
         prime(materializer, 'a2', pd.Series(7.0 + np.arange(len(grid)), index=grid), 'M', 'model')
 
@@ -315,7 +351,7 @@ class TestTwoCandidateRanks:
         )
         np.testing.assert_allclose(features['m1'].to_numpy(), 303.0 + 9.0 * np.arange(12))
 
-    def test_rank_one_beats_a_carry(self, reference_timeseries):
+    def test_rank_one_beats_an_earlier_stage_production(self, reference_timeseries):
         """q1 imputed at an earlier (annual) stage is still read at its observations."""
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'q1', pd.Series(999.0, index=annual_grid()), 'Y', 'model')
@@ -343,43 +379,31 @@ class TestTwoCandidateRanks:
         )
         assert (ways, set(features['a1'])) == ({'a1': 'stage_model'}, {7.0})
 
-    def test_rank_three_beats_the_fallback(self, reference_timeseries):
-        """A carry of the constant quarterly imputation 5.0 is constant (5 / 3 a month)."""
-        materializer = CovariateMaterializer(covariate_strategy='model')
-        prime(materializer, 'a1', pd.Series(5.0, index=quarterly_grid()), 'Q', 'model')
+    def test_coarser_grid_reads_the_latest_production_aggregated(self, reference_timeseries):
+        """Q production then M production: a Q grid reads the M one, summed over each quarter.
 
-        features, ways, _origins = materializer.materialize(
-            columns=['a1'],
-            grid_index=monthly_grid(),
-            stage_freq='M',
-            detected_frequencies=TS_FREQUENCIES,
-            source_data=reference_timeseries,
-        )
-        assert (ways, set(features['a1'].round(12))) == ({'a1': 'carried_model'}, {round(5 / 3, 12)})
-
-    def test_carry_starts_from_the_closest_earlier_stage(self, reference_timeseries):
-        """Mirror cells at Q and at Y: the carry onto M starts from Q.
-
-        Cellules Q en 2021 (5.0) puis cellules Y en 2022-2023 (1.0) : l'étape
-        antérieure la plus proche de M est Q, aucune valeur annuelle ne doit
-        transparaître.
+        Cas d'une ligne d'entraînement plus grossière que l'étape : la
+        covariable déjà imputée au mensuel y est lue agrégée, jamais à la
+        valeur que l'étape trimestrielle avait produite.
         """
         quarters = quarterly_grid()
+        months = monthly_grid()
         materializer = CovariateMaterializer(covariate_strategy='model')
-        prime(materializer, 'a1', pd.Series(5.0, index=quarters[quarters.year == 2021]), 'Q', 'model')
-        prime(materializer, 'a1', pd.Series(1.0, index=annual_grid()[1:]), 'Y', 'model')
+        prime(materializer, 'a1', pd.Series(10.0 + np.arange(len(quarters)), index=quarters), 'Q', 'model')
+        prime(materializer, 'a1', pd.Series(-1.0, index=months), 'M', 'model')
 
-        features, _ways, _origins = materializer.materialize(
+        features, ways, origins = materializer.materialize(
             columns=['a1'],
-            grid_index=monthly_grid(),
-            stage_freq='M',
+            grid_index=quarters,
+            stage_freq='Q',
             detected_frequencies=TS_FREQUENCIES,
             source_data=reference_timeseries,
         )
-        assert set(features['a1'].dropna().round(12)) == {round(5 / 3, 12)}
+        assert (ways, origins) == ({'a1': 'stage_model'}, {'a1': 'model'})
+        assert set(features['a1']) == {-3.0}
 
     def test_mirror_cell_without_production_frequency_grants_no_model_rank(self):
-        """A mirror cell of unknown production frequency is neither rank 2 nor rank 3."""
+        """A mirror cell of unknown production frequency grants no rank 2."""
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(7.0, index=monthly_grid()), None, 'model')
         assert materializer.classify('a1', 'M', TS_FREQUENCIES) == 'interpolate'
@@ -451,41 +475,33 @@ class TestRankOnePerEntity:
 
 
 class TestModelWaysPerEntity:
-    """Per entity, a model way is brought back to what the entity's mirror holds."""
+    """Per entity, the model way is brought back to what the entity's mirror holds."""
 
-    @pytest.mark.parametrize(
-        'entity, expected',
-        [
-            # FR ne porte que des cellules de l'étape M : rang 2, ses valeurs
-            ('FR', [1.0] * 36),
-            # DE ne porte que des cellules Q : rang 3, report de la constante,
-            # répartie sur les trois mois de chaque trimestre
-            ('DE', [5.0 / 3] * 36),
-        ],
-        ids=['FR-stage-cells', 'DE-carry'],
-    )
-    def test_each_entity_is_served_by_the_rank_its_mirror_holds(
-        self, mixed_freq_panel_heterogeneous, entity, expected
-    ):
-        """DE listed first makes the column way ``'carried_model'``; FR still reads its stage.
+    def test_each_entity_is_served_by_the_rank_its_mirror_holds(self, mixed_freq_panel_heterogeneous):
+        """FR holds stage cells and reads them; DE holds quarterly cells only and takes rank 3.
 
-        The served values depend only on the mirror of each entity; the column
-        way, however, depends on the entity order and is therefore not asserted
-        here.
+        The quarterly production of DE belongs to an earlier stage: it is never
+        carried onto the monthly grid, DE is served its fallback as with empty
+        stores.
         """
+        data = mixed_freq_panel_heterogeneous
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(1.0, index=entity_grid(['FR'], monthly_grid())), 'M', 'model')
         prime(materializer, 'a1', pd.Series(5.0, index=entity_grid(['DE'], quarterly_grid())), 'Q', 'model')
 
-        features, _ways, _origins = materializer.materialize(
+        grid = entity_grid(['DE', 'FR'], monthly_grid())
+        features, ways, _origins = materializer.materialize(
             columns=['a1'],
-            grid_index=entity_grid(['DE', 'FR'], monthly_grid()),
+            grid_index=grid,
             stage_freq='M',
             detected_frequencies=TS_FREQUENCIES,
-            source_data=mixed_freq_panel_heterogeneous,
+            source_data=data,
             record=False,
         )
-        np.testing.assert_allclose(features.loc[entity, 'a1'].to_numpy(), expected)
+        assert ways == {'a1': 'stage_model'}
+        np.testing.assert_allclose(features.loc['FR', 'a1'].to_numpy(), [1.0] * 36)
+        reference = fallback_values(data, grid)
+        np.testing.assert_allclose(features.loc['DE', 'a1'].to_numpy(), reference.loc['DE'].to_numpy())
 
     def test_entity_without_frequency_under_a_model_way_stays_empty(self, mixed_freq_panel_heterogeneous):
         """IT never observes a1: under the column's model way, its rows stay NaN.

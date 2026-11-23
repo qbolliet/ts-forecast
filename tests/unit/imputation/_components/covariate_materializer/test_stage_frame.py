@@ -199,11 +199,11 @@ class TestStageFrameMirror:
         )
         assert int(frame.loc['DE', 'a1'].notna().sum()) == 3
 
-    def test_carried_mirror_is_not_capped(self, reference_timeseries):
-        """Rank 3 reads the mirror: the cap leaves it, only an interpolation way is capped.
+    def test_earlier_stage_production_is_capped_like_the_fallback(self, reference_timeseries):
+        """A quarterly production never reaches the monthly view: the fallback, capped to the anchors.
 
-        Imputation trimestrielle constante (5.0), reportée sur la grille
-        mensuelle : la vue d'étape en porte le tiers sur les 36 mois.
+        Imputation trimestrielle constante (5.0) : jamais reportée sur la
+        grille mensuelle, la vue d'étape y porte les trois ancres annuelles.
         """
         materializer = CovariateMaterializer(covariate_strategy='model')
         prime(materializer, 'a1', pd.Series(5.0, index=quarterly_grid()), 'Q', 'model')
@@ -215,7 +215,7 @@ class TestStageFrameMirror:
             source_data=reference_timeseries,
             columns=['a1'],
         )
-        assert set(frame['a1'].round(12)) == {round(5 / 3, 12)}
+        assert frame['a1'].dropna().tolist() == [120.0, 132.0, 150.0]
 
 
 class TestStageFramePanel:

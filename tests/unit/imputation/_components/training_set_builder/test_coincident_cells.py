@@ -127,7 +127,7 @@ class TestCoincidentCells:
     @pytest.mark.parametrize('column', ['a1', 'a2'])
     def test_coincidence_must_survive_the_origin_filter(self, reference_timeseries, column):
         """Mirror cells filtered out: no coincidence left, no level."""
-        # 'covariates_only' : le miroir porte bien la coïncidence, mais le
+        # Filtre de False : le miroir porte bien la coïncidence, mais le
         # filtre d'origine l'écarte AVANT le constat
         builder = seed_quarterly_mirror(make_builder(), column)
 

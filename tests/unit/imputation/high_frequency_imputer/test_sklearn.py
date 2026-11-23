@@ -67,15 +67,11 @@ from tests.unit.imputation.high_frequency_imputer.helpers import (
 class TestParameterContract:
     """sklearn conformance of the parameter space."""
 
-    def test_impute_intermediate_frequencies_covariates_only_is_not_true(self):
-        """'covariates_only' est accepté et n'est jamais confondu avec True."""
-        imputer = make_imputer(impute_intermediate_frequencies='covariates_only')
-        # La valeur est stockée telle que reçue
-        assert imputer.impute_intermediate_frequencies == 'covariates_only'
-        # Elle est truthy, mais n'est PAS True : c'est tout le piège du paramètre
-        assert bool(imputer.impute_intermediate_frequencies) is True
-        assert imputer.impute_intermediate_frequencies is not True
-        assert imputer.impute_intermediate_frequencies is not False
+    @pytest.mark.parametrize('value', ['covariates_only', 1, 'True'])
+    def test_impute_intermediate_frequencies_accepts_booleans_only(self, value):
+        """A truthy non-boolean is refused, never read as True."""
+        with pytest.raises(ValueError, match='impute_intermediate_frequencies must be one of'):
+            make_imputer(impute_intermediate_frequencies=value)
 
     @pytest.mark.parametrize(
         'removed',

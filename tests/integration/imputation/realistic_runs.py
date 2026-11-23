@@ -5,11 +5,11 @@ Shared by ``test_hfi_on_realistic_dataset.py`` and ``test_tracking.py``
 ``conftest.py``), so that each cell of the matrix is fitted once per session:
 dataset {``'ts'``, ``'panel'``} x ``covariate_strategy`` {``'interpolate'``,
 ``'model'``, ``'tolerate_nan'``} x ``impute_intermediate_frequencies``
-{``False``, ``'covariates_only'``, ``True``}.
+{``False``, ``True``}.
 """
 # Modules de base
 import warnings
-from typing import Callable, Dict, List, Tuple, Union
+from typing import Callable, Dict, List, Tuple
 
 import pandas as pd
 import pytest
@@ -28,7 +28,7 @@ STRATEGY_ESTIMATORS: Dict[str, Callable[[], object]] = {
 }
 
 # Modalités de impute_intermediate_frequencies, jamais testées par vérité booléenne
-MODALITIES: List[Union[bool, str]] = [False, 'covariates_only', True]
+MODALITIES: List[bool] = [False, True]
 
 # Jeux réalistes : nom de la fixture de session (tests/support/fixtures.py) qui les construit
 DATASET_FIXTURES: Dict[str, str] = {
@@ -37,7 +37,7 @@ DATASET_FIXTURES: Dict[str, str] = {
 }
 
 
-def matrix_case(dataset: str, strategy: str, modality: Union[bool, str]):
+def matrix_case(dataset: str, strategy: str, modality: bool):
     """Build one ``pytest.param`` of the matrix, ``slow`` for the panel.
 
     Args:
@@ -47,7 +47,7 @@ def matrix_case(dataset: str, strategy: str, modality: Union[bool, str]):
 
     Returns:
         ``pytest.param(dataset, strategy, modality)`` with a readable id such as
-        ``ts-model-covariates_only``; the panel cells (2.5-6 s per fit) are
+        ``ts-model-True``; the panel cells (2.5-6 s per fit) are
         marked ``slow``.
     """
     marks = [pytest.mark.slow] if dataset == 'panel' else []
@@ -56,7 +56,7 @@ def matrix_case(dataset: str, strategy: str, modality: Union[bool, str]):
     )
 
 
-# Produit complet : 2 jeux x 3 stratégies x 3 modalités = 18 ajustements
+# Produit complet : 2 jeux x 3 stratégies x 2 modalités = 12 ajustements
 CASES = [
     matrix_case(dataset, strategy, modality)
     for dataset in DATASET_FIXTURES
@@ -80,7 +80,7 @@ def caught_messages(call: Callable[[], object]) -> Tuple[object, List[str]]:
     return result, [str(item.message) for item in caught]
 
 
-def build_record(data: pd.DataFrame, strategy: str, modality: Union[bool, str]) -> dict:
+def build_record(data: pd.DataFrame, strategy: str, modality: bool) -> dict:
     """Fit, transform and invert one cell of the matrix.
 
     The imputer keeps its defaults (``target_frequency='M'``, stacked output

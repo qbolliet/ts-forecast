@@ -294,8 +294,8 @@ class TestFitPhases:
 
     @pytest.mark.slow
     def test_intermediate_frequencies_modalities_all_fit(self, reference_timeseries):
-        """The three modalities of axis 2 all fit, none raises."""
-        for modality in (False, 'covariates_only', True):
+        """The two modalities of axis 2 both fit, none raises."""
+        for modality in (False, True):
             imputer = make_imputer(impute_intermediate_frequencies=modality)
             fit_quietly(imputer, reference_timeseries)
             assert imputer.frequency_progression_[-1] == 'M'
@@ -939,7 +939,8 @@ class TestWindowWithoutTraining:
         anchors, where ``late`` — no complete year — aggregates nowhere;
         yet the prediction grid (February-December 2023) carries it.
         A covariate non-empty on only one of the two grids would
-        give a coefficient without support: it is discarded.
+        give a coefficient without support: it is discarded. a2, annual like
+        a1's anchors and only interpolated at prediction, is left out too.
         """
         data = reference_timeseries.copy()
         data['late'] = data['m1'].where(data.index >= '2023-02-01')
@@ -947,7 +948,8 @@ class TestWindowWithoutTraining:
         imputer = fit_quietly(make_imputer(training_scope='unrestricted'), data)
 
         step = next(s for s in imputer.imputation_plan_ if s.var_name == 'a1')
-        assert step.feature_cols == ('m1', 'q1', 'a2')
+        assert step.feature_cols == ('m1', 'q1')
+        assert set(step.dropped_covariates) == {'a2'}
 
 
 # =============================================================================

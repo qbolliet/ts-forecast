@@ -60,12 +60,11 @@ from .run_context import _RunContext
 # Groupes imputables d'une colonne : (colonne, fréquence source) -> entités
 ColumnGroups = Dict[Tuple[str, Optional[str]], Tuple[EntityKey, ...]]
 
-# Origines de cellule admissibles dans "y_train", par modalité de l'axe 2.
-# Table plutôt qu'une suite de tests : la modalité n'est
-# jamais évaluée comme un booléen ('covariates_only' est truthy)
-ELIGIBLE_ORIGINS: Dict[Any, Tuple[CellOrigin, ...]] = {
+# Origines de cellule admissibles dans "y_train", par modalité de l'axe 2 :
+# sous True, la variable s'entraîne aussi sur ses imputations des étapes
+# intermédiaires
+ELIGIBLE_ORIGINS: Dict[bool, Tuple[CellOrigin, ...]] = {
     False: ('observed',),
-    'covariates_only': ('observed',),
     True: ('observed', 'interpolated', 'model'),
 }
 
@@ -353,9 +352,12 @@ class _VariableFit:
         pred_grid: Prediction grid of the stage, restricted to the entities of
             the variable's groups.
         feature_cols: Covariates retained by :func:`select_feature_columns`,
-            i.e. those available at prediction time.
+            i.e. those available at prediction time, less the uninformative
+            ones.
         ways: Materialization way of each covariate, decided on the prediction
             grid and imposed on both grids.
+        dropped: Mapping column -> reason of the covariates left out by
+            :meth:`CovariateMaterializer.uninformative_covariates`.
         X_train: Scaled features, rows carrying no observed covariate and rows
             of missing target already dropped.
         y_train: Scaled target, sharing ``X_train``'s index.
@@ -368,6 +370,7 @@ class _VariableFit:
     ways: Dict[str, MaterializationWay]
     X_train: pd.DataFrame
     y_train: pd.Series
+    dropped: Dict[str, str] = field(default_factory=dict)
 
 
 # Résultat de l'ajustement d'une étape de fréquence
@@ -676,15 +679,17 @@ class StageRunner:
         if self.params.covariate_strategy != 'model' or len(columns) <= 1:
             return columns, None, {}
 
-        # Une spécification par colonnes : la fréquence retenue est la plus
-        # basse de ses groupes, celle qui décide de son rang
+        # Une spécification par colonne : la fréquence retenue est la plus
+        # basse de ses groupes ancrés — la partie la moins ancrée de la
+        # colonne décide de son rang
         specs: Dict[str, VariableSpec] = {}
         # Parcours des colonnes
         for column in columns:
             groups = by_column[column]
             # Les groupes sans ancre n'ont pas de fréquence source à comparer :
-            # ils sont écartés du rang, et une colonne qui n'aurait qu'eux se
-            # range à la fréquence cible de ses entités
+            # ils sont écartés du rang, et une colonne qui n'aurait qu'eux,
+            # non ancrée, passe après toutes les autres (départage à la
+            # fréquence cible de ses entités)
             anchored = [
                 source_freq
                 for _column, source_freq in groups
@@ -701,6 +706,7 @@ class StageRunner:
                 name=column,
                 frequency=lowest,
                 entities=entities if self.layout.is_panel else None,
+                anchored=bool(anchored),
             )
 
         # Ajustement paresseux de l'ordonnanceur, sous l'ordre 'frequency'
@@ -868,6 +874,13 @@ class StageRunner:
             detected_frequencies=freqs_by_column,
         )
 
+        # Covariates sans information sous la résolution des ancres : exactes
+        # sur les lignes d'entraînement, seulement interpolées à la prédiction
+        dropped = materializer.uninformative_covariates(ways, blocks, freqs_by_column)
+        if dropped:
+            feature_cols = tuple(name for name in feature_cols if name not in dropped)
+            ways = {name: way for name, way in ways.items() if name not in dropped}
+
         # Jeu mutualisé complet, matérialisé par les voies imposées
         training = builder.build(
             column=column,
@@ -922,6 +935,7 @@ class StageRunner:
             ways=dict(ways),
             X_train=X_train,
             y_train=y_train,
+            dropped=dropped,
         )
 
     # Méthode auxiliaire de la vue d'entraînement, lue couche par couche
@@ -1115,6 +1129,7 @@ class StageRunner:
                 multi_frequency=multi_frequency,
                 n_training_rows=len(y_train),
                 unanchored=group_key[1] is None,
+                dropped_covariates=prepared.dropped,
             )
             # Exécution, puis gel : un échec de prédiction dégrade l'étape en
             # repli, de sorte que le plan dise ce qui a réellement été fait.
@@ -1219,6 +1234,7 @@ class StageRunner:
         multi_frequency: bool,
         n_training_rows: int,
         unanchored: bool = False,
+        dropped_covariates: Optional[Dict[str, str]] = None,
     ) -> ImputationStep:
         """Freeze one plan step of a (stage, variable, source frequency) group.
 
@@ -1246,6 +1262,8 @@ class StageRunner:
                 fitted on, shared by every group of the variable.
             unanchored: Whether the entities of the group never observe the
                 column, so the step predicts without any anchor.
+            dropped_covariates: Covariates left out with their reason, None
+                when none was.
 
         Returns:
             The frozen :class:`ImputationStep`.
@@ -1285,6 +1303,7 @@ class StageRunner:
             training_blocks=training_blocks,
             unanchored=unanchored,
             n_training_rows=n_training_rows,
+            dropped_covariates=dropped_covariates or {},
         )
 
     # -------------------------------------------------------------------------
