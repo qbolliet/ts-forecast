@@ -2,96 +2,122 @@
 
 ## Le problème
 
-La validation croisée classique (`KFold`) mélange les observations au hasard. Sur
-une série temporelle, cela revient à entraîner un modèle sur le futur pour
-prédire le passé : les scores obtenus sont optimistes et ne disent rien de la
-performance réelle en production.
+La validation croisée classique (`KFold`) répartit les observations au hasard entre entraînement et
+test. Sur une série temporelle, le modèle apprend alors sur le futur pour prédire le passé : ses
+scores sont optimistes et ne disent rien de sa performance en production.
 
-`tsforecast.crossvals` fournit des *splitters* qui respectent l'ordre temporel :
-dans le cas `out-of-sample`, l'entraînement précède strictement le test, et un
-intervalle (`gap`) peut être imposé entre les deux pour reproduire un délai du à l'horizon de prévision ou au délai de publication de la variable que l'on cherche à prédire.
+`tsforecast.crossvals` fournit des *splitters* qui découpent les données **en respectant leur structure temporelle**.
+Hors échantillon, chaque pli reproduit une prévision faite en temps réel : le modèle n'apprend que
+sur des lignes antérieures au test, et un écart (`gap`) retire les lignes dont la cible n'était pas
+encore connue à la date de la prévision.
 
 ## Deux familles
 
-| Famille | Le test est… | Usage |
-|---------|--------------|-------|
-| **Out-of-sample** (`OutOfSampleSplit`, `TSOutOfSampleSplit`, `PanelOutOfSampleSplit`) | exclu de l'entraînement | estimer la performance de prévision réelle |
-| **In-sample** (`InSampleSplit`, `TSInSampleSplit`, `PanelInSampleSplit`) | inclus dans l'entraînement | évaluer un ajustement historique (backcast, *nowcasting* révisé) |
+| Famille | Plis | Le test est… | Usage |
+|---------|------|--------------|-------|
+| **Hors échantillon** (`TSOutOfSampleSplit`, `PanelOutOfSampleSplit`, `PanelOutOfSampleSplitPerEntity`) | `n_splits`, ou un par élément de `test_indices` | exclu de l'entraînement, qui le précède | estimer l'erreur de prévision |
+| **Dans l'échantillon** (`TSInSampleSplit`, `PanelInSampleSplit`, `PanelInSampleSplitPerEntity`) | un seul | inclus dans l'entraînement, qui s'arrête à la dernière ligne de test | mesurer un ajustement historique (rétropolation, estimation révisée d'une période passée) |
 
-Chaque famille se décline pour :
+![Hors échantillon et dans l'échantillon](../assets/crossval_families.png)
 
-- une **série temporelle** unique — un index trié (le plus souvent un
-  `DatetimeIndex` ou un `PeriodIndex`), ou un tableau pris dans l'ordre de ses
-  lignes ; les splitters `TS*` refusent un `MultiIndex` ;
-- un **panel** — `MultiIndex (entité..., date)`, avec deux variantes :
-    - `Panel*Split` : un découpage global, les mêmes dates de test pour toutes
-      les entités, chaque pli contenant toutes les entités. Un modèle qui
-      mutualise les entités n'apprend ainsi jamais sur la période de test. Une
-      entité qui ne porte pas les dates de test d'un pli (entité qui finit plus
-      tôt) n'y est pas testée, mais apprend sur ses dates antérieures (avec
-      `gap` et la fenêtre) ; un avertissement la signale ;
-    - `Panel*SplitPerEntity` : un découpage propre à chaque entité, sur ses
-      propres dates (plis par défaut : ses dernières dates), un pli par entité
-      et par découpage. Une entité trop courte pour les plis par défaut, ou qui
-      ne porte pas une date demandée, ne reçoit pas de pli (avertissement).
+Un score dans l'échantillon est toujours plus favorable qu'un score hors échantillon sur la même
+période : il ne sert pas à estimer une erreur de prévision.
 
-Le découpage se fait par position, sur les données triées par date (par
-entité puis date pour un panel) : un index de dates, de périodes ou de nombres
-non trié est trié avec un avertissement ; un index de libellés (chaînes) doit
-déjà être trié, son ordre alphabétique n'étant pas chronologique
-(`'01/31/2024'` précède `'12/31/2023'`) : le convertir avec `pd.to_datetime` ;
-une date répétée (un couple entité-date répété pour un panel) est refusée.
-Pour un panel, l'entité est formée de tous les niveaux de l'index sauf le
-dernier, qui porte la date.
+## Séries temporelles et panels
 
-## Paramètres clés
+Chaque famille se décline en trois classes :
 
-- `n_splits` : nombre de plis hors échantillon (défaut 5) ; en échantillon, il
-  ne fixe que la taille de test par défaut, le découpage ayant toujours un seul
-  pli ;
-- `test_size` : taille de chaque ensemble de test ;
-- `gap` (hors échantillon seulement) : nombre de périodes ignorées entre
-  entraînement et test — c'est le levier anti-fuite. Un modèle qui prédit à
-  horizon *h* doit être évalué avec `gap = h`. Une configuration qui laisserait
-  un pli sans données d'entraînement est refusée ;
-- `max_train_size` : plafond de la fenêtre d'entraînement (fenêtre glissante
-  plutôt qu'extensible) ;
-- `test_indices` : débuts de test explicites, au lieu des dernières portions :
-  positions entières (jamais des booléens), dates (chaînes, `Timestamp`,
-  `datetime`, `date`, `numpy.datetime64`, `Period`, `DatetimeIndex`) ou, pour
-  un panel, couples `(entité, date)`. Une date vaut pour toutes les entités ;
-  une position ou un couple ouvre un pli limité à son entité.
+- **`TS*Split`** : une **série temporelle** unique, indexée par des dates, des périodes ou des
+  nombres, ou un tableau pris dans l'ordre de ses lignes. Un `MultiIndex` est refusé ;
+- **`Panel*Split`** : un **panel**, indexé par un `MultiIndex` dont le dernier niveau porte la date
+  et les autres l'entité. Les **mêmes dates de test** valent pour toutes les entités et un pli
+  contient toutes les entités : un modèle apprend sur toutes les entités jusqu'à une date données et prédit pour toutes les entités ;
+- **`Panel*SplitPerEntity`** : un panel dont chaque entité est découpée **sur ses propres dates**,
+  avec un pli par entité et par découpage : un modèle est entrainée et évalué indépendamment sur chaque entité.
 
-![Effet du paramètre gap](../assets/crossval_gap.png)
+Sur un panel, `gap`, `test_size` et `max_train_size` se comptent en dates de chaque entité. La
+différence entre les deux variantes n'apparaît que sur un panel **déséquilibré** :
+
+![Panel : dates communes ou propres à chaque entité](../assets/crossval_panel.png)
+
+Avec des dates communes, une entité qui ne porte pas la première date de test d'un pli n'y est pas
+testée (un avertissement le signale) mais reste dans l'entraînement, sur ses dates antérieures au
+test moins le `gap`. Une entité testée doit garder au moins une date d'entraînement, sinon le
+découpage est refusé. La variante `PerEntity` écarte, avec un avertissement, une entité trop
+courte pour un pli.
+
+## Les règles du découpage
+
+Le découpage se fait **par position**, sur les données triées par date (par entité puis par date
+pour un panel) ; `split` renvoie les positions des lignes de `X` tel qu'il est passé.
+
+- **Plis par défaut** (sans `test_indices`) : hors échantillon, `n_splits` blocs de test adjacents,
+  le dernier se terminant à la dernière date, comme le `TimeSeriesSplit` de scikit-learn ; dans
+  l'échantillon, un seul bloc, les `test_size` dernières lignes. Sur un panel, ce sont les
+  dernières dates du panel (`Panel*Split`) ou de chaque entité (`PerEntity`).
+- **`test_size`** : nombre de lignes (de dates par entité) de chaque test. Par défaut,
+  `n_samples // (n_splits + 1)` pour une série, 1 sur un panel ou lorsque `test_indices` est précisé.
+- **`gap`** (hors échantillon) : nombre de lignes retirées entre l'entraînement et le test. Pour un
+  horizon `h` et une cible publiée `d` périodes après sa période, l'écart minimal sans fuite est
+  `gap = h + d − 1` ; le [tutoriel](../tutorials/pseudo_real_time_forecast.md#3-choisir-le-gap)
+  le justifie.
+- **`max_train_size`** : plafond de l'entraînement, qui devient une **fenêtre glissante** au lieu
+  d'une fenêtre extensible depuis la première date. Dans l'échantillon, la fenêtre couvre au moins
+  toute la période de test.
+- **`test_indices`** : débuts de test explicites, chacun ouvrant un pli hors échantillon de
+  `test_size` lignes, coupé à la fin des données ou de l'entité. Un élément est une position
+  entière, une date (chaîne, `Timestamp`, `datetime`, `date`, `numpy.datetime64`, `Period`) ou, pour
+  un panel, un couple `(entité, date)`. Une date vaut pour toutes les entités qui la portent ; une
+  position ou un couple ouvre un pli limité à son entité. Dans l'échantillon, plusieurs éléments
+  désignent exactement leurs lignes et `test_size` n'est pas utilisé.
+
+Un index de dates, de périodes ou de nombres non trié est trié avec un avertissement. Un index de
+libellés (chaînes) doit déjà être trié, son ordre alphabétique n'étant pas chronologique
+(`'02/2024'` précède `'12/2023'`). Il est préférable de le convertir avec `pd.to_datetime`. Une date répétée (un couple
+entité-date répété pour un panel) est refusée, comme une configuration qui laisserait un pli sans
+entraînement.
 
 ## Compatibilité scikit-learn
 
-Les splitters implémentent `split(X, y=None, groups=None)` et `get_n_splits()`.
-Comme pour sklearn, `get_n_splits` se calcule sur les paramètres seuls : le
-nombre de `test_indices` s'il y en a, `n_splits` sinon, 1 en échantillon. Les
-variantes `Panel*SplitPerEntity` font exception : leur nombre de plis dépend des
-entités et de leurs dates, `get_n_splits(X)` exige donc les données (comme
-`LeaveOneGroupOut` exige `groups`) et compte exactement les plis produits ;
-`GridSearchCV` les lui transmet. Ils s'utilisent donc directement partout où
-sklearn attend un `cv` :
+Les splitters implémentent `split(X, y=None, groups=None)` et `get_n_splits()`, et s'utilisent
+partout où sklearn attend un `cv` :
 
 ```python
-from sklearn.model_selection import cross_validate, GridSearchCV
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import GridSearchCV, cross_validate
 from tsforecast.crossvals import TSOutOfSampleSplit
 
+dates = pd.date_range("2020-01-01", periods=60, freq="MS")
+X = pd.DataFrame({"x": np.arange(60.0)}, index=dates)
+y = 2 * X["x"] + 1
+
 cv = TSOutOfSampleSplit(n_splits=5, test_size=6, gap=1)
-cross_validate(estimator, X, y, cv=cv, scoring="neg_root_mean_squared_error")
-GridSearchCV(estimator, param_grid, cv=cv)
+cross_validate(Ridge(), X, y, cv=cv, scoring="neg_root_mean_squared_error")
+GridSearchCV(Ridge(), {"alpha": [0.1, 1.0, 10.0]}, cv=cv).fit(X, y)
 ```
 
-Pour un panel, passer `groups` (les identifiants d'entité) ou laisser le splitter
-les extraire du `MultiIndex`.
+- **Nombre de plis** : comme pour sklearn, `get_n_splits()` se calcule sur les paramètres seuls
+  (le nombre de `test_indices` s'il y en a, `n_splits` sinon, 1 dans l'échantillon). Les variantes
+  `PerEntity` font exception : leur nombre de plis dépend des entités et de leurs dates,
+  `get_n_splits(X)` exige les données et compte exactement les plis produits ; `GridSearchCV` les
+  lui transmet.
+- **Entités** : les splitters de panel lisent les entités dans l'index ; `groups`, facultatif,
+  doit les répéter ligne à ligne. Les splitters `TS*` ignorent `groups`, avec un avertissement.
+- **Cible** : un `y` pandas doit avoir l'index de `X`.
 
 ## Pour aller plus loin
 
 - Tutoriel : [Ensembles train/test rigoureux](../tutorials/pseudo_real_time_forecast.md)
-- API : [OutOfSampleSplit](../api/crossvals/OutOfSampleSplit.md),
-  [TSOutOfSampleSplit](../api/crossvals/TSOutOfSampleSplit.md),
-  [PanelOutOfSampleSplit](../api/crossvals/PanelOutOfSampleSplit.md)
-- Résumé des plis pour le tracking :
-  [`split_summary`](../guides/mlflow_tracking.md)
+- Notebook : `notebooks/0 - QB - Crossvals.ipynb`, qui trace les plis de chaque classe
+- API : [TSOutOfSampleSplit](../api/crossvals/TSOutOfSampleSplit.md),
+  [TSInSampleSplit](../api/crossvals/TSInSampleSplit.md),
+  [PanelOutOfSampleSplit](../api/crossvals/PanelOutOfSampleSplit.md),
+  [PanelInSampleSplit](../api/crossvals/PanelInSampleSplit.md),
+  [PanelOutOfSampleSplitPerEntity](../api/crossvals/PanelOutOfSampleSplitPerEntity.md),
+  [PanelInSampleSplitPerEntity](../api/crossvals/PanelInSampleSplitPerEntity.md),
+  et les classes de base [OutOfSampleSplit](../api/crossvals/OutOfSampleSplit.md),
+  [InSampleSplit](../api/crossvals/InSampleSplit.md)
+- Délais des covariables : [concept des délais de publication](publication_delays.md)
+- Résumé des plis pour le tracking : [`split_summary`](../guides/mlflow_tracking.md)

@@ -1,357 +1,327 @@
-# Tutoriel : Définition rigoureuse des ensembles d'entraînement et de test pour la prévision
+# Tutoriel : ensembles d'entraînement et de test en pseudo temps réel
 
-## Introduction
+Ce tutoriel évalue un modèle de prévision comme s'il avait tourné en production : à chaque pli, le
+modèle n'apprend que sur ce qui était connu à la date de la prévision. Il construit le jeu
+de données, déduit le `gap` de l'horizon et du délai de publication de la cible, puis découpe une
+série temporelle et un panel avec les splitters de `tsforecast.crossvals`.
 
-Lors de la construction de modèles de prévision pour des séries temporelles ou des données de panel, la définition correcte des ensembles d'entraînement et de test est **cruciale** pour éviter le *data leakage* et obtenir des évaluations réalistes de la performance. Ce tutoriel explique comment utiliser le paramètre `gap` dans les classes de validation croisée `tsforecast.crossvals` à ces fins.
+Le [concept](../concepts/cross_validation.md) présente les deux familles de découpage (hors
+échantillon, dans l'échantillon) et les variantes de panel.
 
-## 1. Concepts fondamentaux
+## Table des matières
 
-### 1.1 L'alignement des données dans la prévision
+- [1. Données](#1-donnees)
+- [2. Le jeu supervisé : une ligne par origine de prévision](#2-le-jeu-supervise-une-ligne-par-origine-de-prevision)
+- [3. Choisir le `gap`](#3-choisir-le-gap)
+- [4. Découper une série : `TSOutOfSampleSplit`](#4-decouper-une-serie-tsoutofsamplesplit)
+- [5. Évaluer un modèle](#5-evaluer-un-modele)
+- [6. Dans l'échantillon : `TSInSampleSplit`](#6-dans-lechantillon-tsinsamplesplit)
+- [7. Panel : `PanelOutOfSampleSplit` et `PanelOutOfSampleSplitPerEntity`](#7-panel-paneloutofsamplesplit-et-paneloutofsamplesplitperentity)
+- [8. Erreurs fréquentes](#8-erreurs-frequentes)
 
-Pour prédire une variable $y$ à un horizon $h$, il faut aligner correctement les observations et les covariables :
+## 1. Données
 
-- **Au moment de la prédiction** : On utilise les covariables $X_t$ pour prédire $y_{t+h}$
-- **Pour l'entraînement** : On aligne $X_{t-h}$ avec $y_t$ 
-
-![Alignement des données pour la prévision](../assets/forecast_alignment.png)
-
-**Point clé** : Pour entraîner un modèle jusqu'au temps $t$, on ne peut utiliser que les données allant antérieures à la paire $(X_{t-h}, y_t)$ car $y$ doit être observé pour l'entraînement.
-
-### 1.2 Impact du délai de publication
-
-En pratique, les données cibles $y$ peuvent avoir un **délai de publication**[^1]. Par exemple :
-- Les données économiques sont souvent publiées avec 1-3 mois de retard
-- Les rapports financiers sont disponibles plusieurs semaines après la fin du trimestre
-
-![Impact du délai de publication](../assets/release_delay.png)
-
-Avec un délai de publication $d$, au temps $t$ nous n'avons accès qu'à $y_{t-d}$. Donc :
-- La dernière observation utilisable pour l'entraînement est $y_{t-d}$
-- Qui s'aligne avec $X_{t-d-h}$
-
-**Règle importante** : L'écart nécessaire entre les données d'entraînement et de test est la somme du le délai de publication de la variable cible : $\text{gap} = d$
-
-[^1]: Les covariables $X$ peuvent également avoir des délais de publication mais ces-derniers sont facilement traitables, sans occasionner de *data leakage* en utilisant des valeurs plus anciennes.
-
-## 2. Utilisation pratique avec `tsforecast.crossvals`
-
-### 2.1 Configuration de base pour séries temporelles
+Une production mensuelle (`production`) suit, avec trois mois de retard, un indicateur de climat
+des affaires (`climat`), sur dix ans :
 
 ```python
-import pandas as pd
 import numpy as np
+import pandas as pd
+
+rng = np.random.default_rng(0)
+dates = pd.date_range("2015-01-01", "2024-12-01", freq="MS", name="date")
+t = np.arange(len(dates) + 3)
+climate = np.sin(2 * np.pi * t / 30) + rng.normal(0, 0.2, len(t))
+data = pd.DataFrame({
+    "climat": climate[3:],
+    "production": 100 + 0.1 * t[3:] + 3 * climate[:-3] + rng.normal(0, 0.5, len(dates)),
+}, index=dates)
+```
+
+## 2. Le jeu de données d'apprentissage
+
+Deux grandeurs fixent ce qu'un modèle peut connaître dans un contexte d'apprentissage supervisé :
+
+- l'**horizon** `h` : à l'**origine** `t`, date à laquelle la prévision est faite, on prévoit la
+  valeur de la période `t + h` (`h = 0` : estimation de la période en cours) ;
+- le **délai de publication** `d` de la cible : la valeur de la période `s` n'est connue qu'à partir
+  de l'origine `s + d`. Un indice mensuel publié le 15 du mois suivant a `d = 1` pour des
+  prévisions faites le 20 de chaque mois, `d = 2` pour des prévisions faites le 10.
+
+Le jeu de données d'entraînement associe à chaque origine `t` les covariables connues en `t` et la cible
+`y(t + h)`. Ici, `h = 2` et `d = 1` :
+
+```python
+h, d = 2, 1
+supervised = pd.DataFrame({
+    "climat": data["climat"],
+    "climat_lag1": data["climat"].shift(1),
+    "production_publiee": data["production"].shift(d),   # dernière valeur publiée en t
+    "cible": data["production"].shift(-h),               # valeur à prévoir, y(t + h)
+}).dropna()
+X, y = supervised.drop(columns="cible"), supervised["cible"]
+len(X), X.index[0], X.index[-1]
+# (117, Timestamp('2015-02-01 00:00:00'), Timestamp('2024-10-01 00:00:00'))
+```
+
+- **`shift` décale des lignes**, non des dates : la série doit être régulière (un mois par ligne,
+  sans trou).
+- **Les covariables sont celles connues à l'origine** : la production entre dans `X` décalée de
+  `d` mois. Les délais des covariables se traitent en amont avec
+  [`PublicationDelayTransformer`](publication_delays.md#6-evaluer-un-modele-avec-delais).
+
+## 3. Choisir le `gap`
+
+À l'origine `T` (première ligne de test d'un pli), une ligne `s` ne peut servir à l'entraînement
+que si sa cible `y(s + h)` est publiée, soit `s + h ≤ T − d`. Le splitter laisse `gap` lignes entre
+la dernière ligne d'entraînement et `T` ; l'écart minimal sans fuite est donc :
+
+$$\text{gap} = h + d - 1$$
+
+![Choisir le gap](../assets/crossval_gap_rule.png)
+
+La fonction `leaks` vérifie la règle pli par pli :
+
+```python
 from tsforecast.crossvals import TSOutOfSampleSplit
 
-# Création de données exemple
-dates = pd.date_range('2020-01-01', periods=365, freq='D')
-X = pd.DataFrame({
-    'feature_1': np.random.randn(365),
-    'feature_2': np.random.randn(365)
-}, index=dates)
-y = pd.Series(np.random.randn(365), index=dates, name='target')
+def leaks(splitter, X, h, d):
+    """Pour chaque pli : le modèle apprend-il une cible encore inconnue à la première origine de test ?"""
+    origins = X.index.to_period("M")
+    return [origins[train].max() + h > origins[test].min() - d for train, test in splitter.split(X)]
 
-# Scénario 1 : Prévision à horizon h=5 jours sans délai
-h = 5
-splitter = TSOutOfSampleSplit(
-    n_splits=3,
-    test_size=20,  # 20 jours de test
-    gap=h          # gap = horizon
-)
-
-# Validation croisée
-for i, (train_idx, test_idx) in enumerate(splitter.split(X)):
-    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-    y_train = y.iloc[train_idx + h]  # Alignement pour l'entraînement
-    y_test = y.iloc[test_idx + h]    # Alignement pour le test
-    
-    print(f"\nSplit {i+1}:")
-    print(f"  Train: {X_train.index[0].date()} → {X_train.index[-1].date()}")
-    print(f"  Test:  {X_test.index[0].date()} → {X_test.index[-1].date()}")
-    print(f"  Gap de {h} jours respecté")
+for gap in range(4):
+    print(gap, leaks(TSOutOfSampleSplit(n_splits=4, test_size=6, gap=gap), X, h, d))
+# 0 [True, True, True, True]
+# 1 [True, True, True, True]
+# 2 [False, False, False, False]
+# 3 [False, False, False, False]
 ```
 
-### 2.2 Gestion du délai de publication
+En deçà de `h + d − 1`, chaque pli apprend des cibles encore inconnues à la date de la prévision et
+ses scores sont optimistes ; au-delà, le découpage retire des lignes d'entraînement sans nécessité.
+
+## 4. Découper une série : `TSOutOfSampleSplit`
+
+Sans `test_indices`, le splitter produit `n_splits` tests adjacents de `test_size` lignes, le
+dernier se terminant à la dernière ligne ; l'entraînement va de la première ligne au test, moins
+`gap` lignes :
 
 ```python
-# Scénario 2 : Prévision avec délai de publication
-h = 5        # Horizon de prévision
-delay = 7    # Délai de publication de 7 jours
-
-splitter = TSOutOfSampleSplit(
-    n_splits=3,
-    test_size=20,
-    gap=h+delay  # Utilisation du delay
-)
-
-# Application
-for i, (train_idx, test_idx) in enumerate(splitter.split(X)):
-    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-    y_train = y.iloc[train_idx + h]  # Alignement pour l'entraînement : X_{t-delay-h} ↔ y_{t-delay}
-    y_test = y.iloc[test_idx + h]    # Alignement pour le test : X_t → y_{t+h}
-    
-    
-    print(f"\nSplit {i+1} avec delay={delay}, h={h}:")
-    print(f"  Dernière observation y disponible pour train: {y_train.index[-1].date()}")
-    print(f"  Première prédiction à faire: {y_test.index[0].date()}")
-    print(f"  Gap effectif: {(y_test.index[0] - y_train.index[-1]).days} jours")
+cv = TSOutOfSampleSplit(n_splits=4, test_size=6, gap=h + d - 1)
+for train, test in cv.split(X):
+    print(f"entraînement {X.index[train[0]]:%Y-%m} → {X.index[train[-1]]:%Y-%m}"
+          f" | test {X.index[test[0]]:%Y-%m} → {X.index[test[-1]]:%Y-%m}")
+# entraînement 2015-02 → 2022-08 | test 2022-11 → 2023-04
+# entraînement 2015-02 → 2023-02 | test 2023-05 → 2023-10
+# entraînement 2015-02 → 2023-08 | test 2023-11 → 2024-04
+# entraînement 2015-02 → 2024-02 | test 2024-05 → 2024-10
 ```
 
-### 2.3 Validation croisée avec fenêtre glissante
-
-Pour les longues séries temporelles, utiliser une fenêtre d'entraînement limitée peut améliorer la performance :
+`max_train_size` remplace la fenêtre extensible par une fenêtre glissante, pour un modèle qui
+oublie le passé lointain :
 
 ```python
-# Scénario 3 : Fenêtre glissante (rolling window)
-splitter = TSOutOfSampleSplit(
-    n_splits=5,
-    test_size=30,
-    gap=5,
-    max_train_size=180  # Fenêtre de 6 mois
-)
-
-results = []
-for train_idx, test_idx in splitter.split(X):
-    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-    
-    # Entraînement du modèle (exemple avec régression linéaire)
-    from sklearn.linear_model import LinearRegression
-    model = LinearRegression()
-    
-    # Alignement simple pour h=5
-    y_train_aligned = y.iloc[train_idx + 5]
-    model.fit(X_train, y_train_aligned)
-    
-    # Prédiction
-    y_pred = model.predict(X_test)
-    
-    results.append({
-        'train_start': X_train.index[0],
-        'train_end': X_train.index[-1],
-        'test_start': X_test.index[0],
-        'test_end': X_test.index[-1],
-        'train_size': len(X_train),
-        'predictions': y_pred
-    })
-
-# Affichage du résumé
-import pandas as pd
-results_df = pd.DataFrame(results)
-print("\nRésumé de la validation croisée avec fenêtre glissante:")
-print(results_df[['train_start', 'train_end', 'test_start', 'train_size']])
+cv_rolling = TSOutOfSampleSplit(n_splits=4, test_size=6, gap=h + d - 1, max_train_size=36)
+[len(train) for train, _ in cv_rolling.split(X)]
+# [36, 36, 36, 36]
 ```
 
-![Validation croisée avec gap](../assets/crossval_gap.png)
+`test_indices` place les tests sur des épisodes choisis : chaque élément ouvre un pli de
+`test_size` lignes, et `get_n_splits()` vaut leur nombre.
 
-## 3. Application aux données de panel
+```python
+cv_dates = TSOutOfSampleSplit(test_indices=["2020-01-01", "2022-07-01"], test_size=12, gap=h + d - 1)
+for train, test in cv_dates.split(X):
+    print(f"entraînement → {X.index[train[-1]]:%Y-%m} | test {X.index[test[0]]:%Y-%m} → {X.index[test[-1]]:%Y-%m}")
+# entraînement → 2019-10 | test 2020-01 → 2020-12
+# entraînement → 2022-04 | test 2022-07 → 2023-06
+```
 
-Pour les données de panel (multi-entités), les mêmes principes s'appliquent à chaque entité :
+<!-- doc-args: tsforecast.crossvals.TSOutOfSampleSplit -->
+| Argument | Type | Description |
+|----------|------|-------------|
+| `n_splits` | `int` | Nombre de plis sans `test_indices` (au moins 2, défaut 5). |
+| `test_indices` | positions, dates ou `None` | Débuts de test explicites, chacun ouvrant un pli : positions entières, ou dates (chaînes, `Timestamp`, `datetime`, `date`, `numpy.datetime64`, `Period`) recherchées dans l'index. Une chaîne partielle (`'2024-05'`) doit désigner une seule ligne. Une valeur seule vaut un début. |
+| `max_train_size` | `int` ou `None` | Nombre maximal de lignes d'entraînement (fenêtre glissante) ; `None` (défaut) : fenêtre extensible depuis la première ligne. |
+| `test_size` | `int` ou `None` | Nombre de lignes de chaque test. Par défaut, `n_samples // (n_splits + 1)`, ou 1 avec `test_indices` ; un test est coupé à la fin des données. |
+| `gap` | `int` | Nombre de lignes retirées entre l'entraînement et le test (défaut 0) : `h + d − 1` (section 3). |
+<!-- /doc-args -->
+
+Référence complète : [API `TSOutOfSampleSplit`](../api/crossvals/TSOutOfSampleSplit.md).
+
+Un pli qui n'aurait aucune ligne d'entraînement lève une `ValueError`. `split` renvoie les
+positions des lignes de `X` tel qu'il est passé : un index non trié est trié en interne, avec un
+avertissement, et `X.iloc[train]` reste correct.
+
+## 5. Évaluer un modèle
+
+Le splitter se passe en `cv` aux fonctions de scikit-learn :
+
+```python
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import cross_validate
+
+scores = cross_validate(Ridge(), X, y, cv=cv, scoring="neg_mean_absolute_error")
+(-scores["test_score"]).round(3)
+# array([1.724, 0.918, 1.15 , 2.665])
+```
+
+Un pli de `test_size` lignes simule un modèle réentraîné toutes les `test_size` périodes : les
+origines suivantes du test sont prévues sans les données publiées depuis la première. Pour simuler
+un réentraînement mensuel sur les deux dernières années, un pli d'une ligne par mois :
+
+```python
+monthly = TSOutOfSampleSplit(n_splits=24, test_size=1, gap=h + d - 1)
+scores = cross_validate(Ridge(), X, y, cv=monthly, scoring="neg_mean_absolute_error")
+print(f"MAE moyenne : {-scores['test_score'].mean():.3f}")
+# MAE moyenne : 1.605
+```
+
+## 6. Dans l'échantillon : `TSInSampleSplit`
+
+`TSInSampleSplit` produit un seul pli dont l'entraînement **contient** la période de test et
+s'arrête à sa dernière ligne. Il mesure la qualité d'un ajustement historique (rétropolation,
+estimation révisée d'une période passée), jamais une erreur de prévision. Sur les mêmes douze
+dernières origines, une forêt aléatoire évaluée hors échantillon puis dans l'échantillon :
+
+```python
+from sklearn.ensemble import RandomForestRegressor
+from tsforecast.crossvals import TSInSampleSplit
+
+first_test = X.index[-12]
+for name, splitter in {
+    "hors échantillon": TSOutOfSampleSplit(test_indices=first_test, test_size=12, gap=h + d - 1),
+    "dans l'échantillon": TSInSampleSplit(test_indices=first_test, test_size=12),
+}.items():
+    scores = cross_validate(RandomForestRegressor(random_state=0), X, y, cv=splitter,
+                            scoring="neg_mean_absolute_error")
+    print(f"{name:>18} : MAE = {-scores['test_score'][0]:.3f}")
+#   hors échantillon : MAE = 2.058
+# dans l'échantillon : MAE = 0.541
+```
+
+L'écart mesure ce que le modèle a mémorisé de la période de test.
+
+<!-- doc-args: tsforecast.crossvals.TSInSampleSplit -->
+| Argument | Type | Description |
+|----------|------|-------------|
+| `n_splits` | `int` | Fixe seulement la taille de test par défaut, `n_samples // (n_splits + 1)` (au moins 2, défaut 5) ; le découpage a toujours un seul pli. |
+| `test_indices` | positions, dates ou `None` | Lignes de test : un élément ouvre `test_size` lignes à partir de lui ; plusieurs éléments désignent exactement leurs lignes, `test_size` n'étant alors pas utilisé. `None` (défaut) : les dernières lignes. |
+| `max_train_size` | `int` ou `None` | Nombre maximal de lignes d'entraînement, porté au besoin à l'étendue du test pour que toute ligne de test soit apprise ; `None` (défaut) : tout l'historique. |
+| `test_size` | `int` ou `None` | Nombre de lignes de la période de test (voir `n_splits` et `test_indices` pour les valeurs par défaut). |
+<!-- /doc-args -->
+
+Référence complète : [API `TSInSampleSplit`](../api/crossvals/TSInSampleSplit.md).
+
+## 7. Panel : `PanelOutOfSampleSplit` et `PanelOutOfSampleSplitPerEntity`
+
+Le panel porte la même relation pour trois pays aux couvertures différentes : `DE` s'arrête en
+septembre 2024, `IT` commence en 2017. Le jeu supervisé se construit **entité par entité** : un
+`shift` sur tout le panel ferait passer la cible d'une entité dans la ligne d'une autre.
+
+```python
+spans = {"FR": ("2015-01-01", "2024-12-01"), "DE": ("2015-01-01", "2024-09-01"),
+         "IT": ("2017-01-01", "2024-12-01")}
+frames = {}
+for seed, (entity, (start, end)) in enumerate(spans.items()):
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range(start, end, freq="MS", name="date")
+    t = np.arange(len(idx) + 3)
+    climate = np.sin(2 * np.pi * t / 30) + rng.normal(0, 0.2, len(t))
+    frames[entity] = pd.DataFrame({
+        "climat": climate[3:],
+        "production": 100 + 0.1 * t[3:] + 3 * climate[:-3] + rng.normal(0, 0.5, len(idx)),
+    }, index=idx)
+panel = pd.concat(frames, names=["entity"])        # MultiIndex (entity, date)
+
+by_entity = panel.groupby(level="entity")
+panel_supervised = pd.DataFrame({
+    "climat": panel["climat"],
+    "climat_lag1": by_entity["climat"].shift(1),
+    "production_publiee": by_entity["production"].shift(d),
+    "cible": by_entity["production"].shift(-h),
+}).dropna()
+X_panel, y_panel = panel_supervised.drop(columns="cible"), panel_supervised["cible"]
+```
+
+### 7.1 Dates de test communes : `PanelOutOfSampleSplit`
+
+Les mêmes dates de test valent pour toutes les entités, et chaque pli les contient toutes : un
+modèle qui mutualise les entités n'apprend jamais sur la période de test d'une autre. Les entités
+sont lues dans l'index (`groups` est facultatif) :
 
 ```python
 from tsforecast.crossvals import PanelOutOfSampleSplit
 
-# Création de données panel
-entities = ['AAPL', 'GOOGL', 'MSFT', 'AMZN']
-dates = pd.date_range('2020-01-01', periods=252, freq='D')  # 1 an de trading
-index = pd.MultiIndex.from_product([entities, dates], names=['entity', 'date'])
-
-# Features et target
-panel_X = pd.DataFrame({
-    'return_lag1': np.random.randn(len(index)),
-    'volume': np.random.exponential(1e6, len(index)),
-    'volatility': np.random.exponential(0.02, len(index))
-}, index=index)
-
-panel_y = pd.Series(np.random.randn(len(index)), index=index, name='return')
-
-# Configuration pour prévision à 5 jours avec délai de 1 jour
-h = 5
-delay = 1
-
-splitter = PanelOutOfSampleSplit(
-    test_indices=['2020-06-01', '2020-09-01', '2020-12-01'],
-    test_size=20,
-    gap=h+delay
-)
-
-# Validation pour chaque split
-for split_num, (train_idx, test_idx) in enumerate(splitter.split(panel_X)):
-    print(f"\n=== Split {split_num + 1} ===")
-    
-    # Analyse par entité
-    for entity in entities:
-        # Extraction des données de l'entité
-        entity_train_mask = panel_X.iloc[train_idx].index.get_level_values(0) == entity
-        entity_test_mask = panel_X.iloc[test_idx].index.get_level_values(0) == entity
-        
-        if entity_train_mask.any() and entity_test_mask.any():
-            entity_train_dates = panel_X.iloc[train_idx][entity_train_mask].index.get_level_values(1)
-            entity_test_dates = panel_X.iloc[test_idx][entity_test_mask].index.get_level_values(1)
-            
-            print(f"\n  {entity}:")
-            print(f"    Train: {entity_train_dates[0].date()} → {entity_train_dates[-1].date()}")
-            print(f"    Test:  {entity_test_dates[0].date()} → {entity_test_dates[-1].date()}")
-            print(f"    Gap: {(entity_test_dates[0] - entity_train_dates[-1]).days} jours")
+cv_panel = PanelOutOfSampleSplit(n_splits=4, test_size=3, gap=h + d - 1)
+scores = cross_validate(Ridge(), X_panel, y_panel, cv=cv_panel, scoring="neg_mean_absolute_error")
+# UserWarning: Cannot find test period '2024-08-01 00:00:00' for entity 'DE'; the entity is not tested in this fold
+(-scores["test_score"]).round(3)
+# array([1.41 , 1.498, 1.866, 2.424])
 ```
 
-## 4. Procédure algorithmique complète
+Les tests couvrent les douze dernières origines du panel, de novembre 2023 à octobre 2024. La
+dernière origine de `DE` est juillet 2024 : au dernier pli (août à octobre), `DE` n'est pas testée,
+mais reste dans l'entraînement, sur ses origines antérieures au test moins le `gap`.
 
-Voici la procédure complète pour configurer correctement la validation croisée :
+<!-- doc-args: tsforecast.crossvals.PanelOutOfSampleSplit -->
+| Argument | Type | Description |
+|----------|------|-------------|
+| `n_splits` | `int` | Nombre de plis sans `test_indices` (au moins 2, défaut 5) : les derniers blocs de `test_size` dates du panel. |
+| `test_indices` | dates, couples, positions ou `None` | Débuts de test explicites. Une date ouvre un pli pour chaque entité qui la porte ; un couple `(entité, date)` ou une position entière ouvre un pli limité à son entité. |
+| `max_train_size` | `int` ou `None` | Nombre maximal de dates d'entraînement par entité ; `None` (défaut) : fenêtre extensible. |
+| `test_size` | `int` ou `None` | Nombre de dates de test par entité et par pli (défaut 1), coupé à la fin de chaque entité. |
+| `gap` | `int` | Nombre de dates retirées, dans chaque entité, entre l'entraînement et le test (défaut 0). |
+<!-- /doc-args -->
 
-![Procédure algorithmique](../assets/algorithm_procedure.png)
+Référence complète : [API `PanelOutOfSampleSplit`](../api/crossvals/PanelOutOfSampleSplit.md).
 
-## 5. Erreurs courantes à éviter
+### 7.2 Dates propres à chaque entité : `PanelOutOfSampleSplitPerEntity`
 
-### ❌ Erreur 1 : Ignorer le délai de publication
-```python
-# INCORRECT : Ne considère que l'horizon
-splitter = TSOutOfSampleSplit(gap=h)  # Oublie le delay!
-```
-
-### ✅ Correction :
-```python
-# CORRECT : Prend en compte horizon ET délai
-splitter = TSOutOfSampleSplit(gap=h+ delay)
-```
-
-### ❌ Erreur 2 : Mauvais alignement des données
-```python
-# INCORRECT : Utilise les mêmes indices pour X et y
-y_train = y.iloc[train_idx]  # Pas d'alignement!
-```
-
-### ✅ Correction :
-```python
-# CORRECT : Aligne correctement X et y
-y_train = y.iloc[train_idx + h]  # Alignement correct
-```
-
-### ❌ Erreur 3 : Utiliser des données futures
-```python
-# INCORRECT : Inclut des observations futures dans les features
-X_with_future = create_features_with_future_info(data)
-```
-
-### ✅ Correction :
-```python
-# CORRECT : Utilise seulement l'information passée
-X_valid = create_features_using_past_only(data)
-```
-
-## 6. Exemple complet : Prévision de ventes avec saisonnalité
+Chaque entité est découpée sur ses propres dernières dates, avec un pli par entité et par
+découpage : `DE` est testée sur ses douze dernières origines. Les arguments sont ceux de
+`PanelOutOfSampleSplit` ; le nombre de plis dépend des données, et `get_n_splits` exige `X`.
 
 ```python
-# Génération de données de ventes avec tendance et saisonnalité
-np.random.seed(42)
-dates = pd.date_range('2018-01-01', periods=365*3, freq='D')
+from tsforecast.crossvals import PanelOutOfSampleSplitPerEntity
 
-# Composantes du signal
-trend = np.linspace(100, 150, len(dates))
-seasonal = 10 * np.sin(2 * np.pi * np.arange(len(dates)) / 365.25)
-noise = np.random.normal(0, 5, len(dates))
-sales = trend + seasonal + noise
+cv_entity = PanelOutOfSampleSplitPerEntity(n_splits=4, test_size=3, gap=h + d - 1)
+cv_entity.get_n_splits(X_panel)
+# 12
 
-# DataFrame avec features
-data = pd.DataFrame({
-    'sales': sales,
-    'day_of_week': dates.dayofweek,
-    'month': dates.month,
-    'day_of_year': dates.dayofyear,
-    'trend': np.arange(len(dates))
-}, index=dates)
-
-# Ajout de features retardées
-for lag in [1, 7, 14, 30]:
-    data[f'sales_lag_{lag}'] = data['sales'].shift(lag)
-
-# Suppression des NaN dus aux lags
-data = data.dropna()
-
-# Configuration pour prévision à 7 jours avec délai de 2 jours
-h = 7
-delay = 2
-gap = h + delay  # gap =9
-
-# Séparation features/target
-feature_cols = [col for col in data.columns if col != 'sales']
-X = data[feature_cols]
-y = data['sales']
-
-# Validation croisée avec dates spécifiques
-test_dates = pd.date_range('2020-01-01', '2020-12-01', freq='MS')
-splitter = TSOutOfSampleSplit(
-    test_indices=test_dates,
-    test_size=30,  # 30 jours de test
-    gap=gap,
-    max_train_size=365  # Fenêtre d'un an
-)
-
-# Évaluation
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-
-results = []
-for i, (train_idx, test_idx) in enumerate(splitter.split(X)):
-    # Alignement des données
-    X_train = X.iloc[train_idx]
-    X_test = X.iloc[test_idx]
-    
-    # Alignement correct de y
-    y_train_idx = [idx + h for idx in train_idx if idx + h < len(y)]
-    y_test_idx = [idx + h for idx in test_idx if idx + h < len(y)]
-    
-    y_train = y.iloc[y_train_idx]
-    y_test = y.iloc[y_test_idx]
-    
-    # Ajustement des tailles si nécessaire
-    min_len_train = min(len(X_train), len(y_train))
-    X_train = X_train.iloc[:min_len_train]
-    y_train = y_train.iloc[:min_len_train]
-    
-    min_len_test = min(len(X_test), len(y_test))
-    X_test = X_test.iloc[:min_len_test]
-    y_test = y_test.iloc[:min_len_test]
-    
-    # Modèle
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
-    
-    # Prédictions
-    y_pred = model.predict(X_test)
-    
-    # Métriques
-    mae = mean_absolute_error(y_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-    
-    results.append({
-        'split': i + 1,
-        'test_start': X_test.index[0],
-        'test_end': X_test.index[-1],
-        'mae': mae,
-        'rmse': rmse,
-        'train_size': len(X_train)
-    })
-    
-    print(f"\nSplit {i+1}:")
-    print(f"  Test: {X_test.index[0].date()} → {X_test.index[-1].date()}")
-    print(f"  MAE: {mae:.2f}, RMSE: {rmse:.2f}")
-
-# Résumé des performances
-results_df = pd.DataFrame(results)
-print("\n=== Résumé des performances ===")
-print(f"MAE moyen: {results_df['mae'].mean():.2f} ± {results_df['mae'].std():.2f}")
-print(f"RMSE moyen: {results_df['rmse'].mean():.2f} ± {results_df['rmse'].std():.2f}")
+scores = cross_validate(Ridge(), X_panel, y_panel, cv=cv_entity, scoring="neg_mean_absolute_error")
+entities = [X_panel.index[test[0]][0] for _, test in cv_entity.split(X_panel)]
+pd.Series(-scores["test_score"], index=entities).groupby(level=0, sort=False).mean().round(3)
+# FR    1.919
+# DE    1.111
+# IT    2.263
+# dtype: float64
 ```
 
-## Conclusion
+Les plis viennent découpage par découpage, puis entité par entité : chaque score porte sur une
+seule entité. `GridSearchCV` accepte ce splitter tel quel, en lui transmettant les données.
 
-La définition rigoureuse des ensembles d'entraînement et de test est essentielle pour :
+Les variantes dans l'échantillon, `PanelInSampleSplit` et `PanelInSampleSplitPerEntity`, suivent
+les règles de `TSInSampleSplit` entité par entité.
 
-1. **Éviter le data leakage** : En respectant l'ordre temporel et les contraintes d'information
-2. **Obtenir des évaluations réalistes** : En simulant les conditions réelles de prédiction
-3. **Gérer les contraintes pratiques** : Délais de publication, horizons multiples, etc.
+## 8. Erreurs fréquentes
 
-Le paramètre `gap` dans `tsforecast.crossvals` permet de gérer ces contraintes de manière systématique :
-- `gap = h` pour une prévision simple à horizon h
-- `gap = delay + h` quand il y a un délai de publication
+| Erreur | Effet | Correction |
+|--------|-------|------------|
+| `gap=0`, ou `gap=h` en oubliant le délai de la cible | le modèle apprend des cibles non encore publiées : scores optimistes | `gap = h + d − 1` |
+| Cible non décalée (`y(t)` sur la ligne `t` alors que l'on prévoit `y(t + h)`) | l'évaluation porte sur un autre horizon | `shift(-h)` de la cible |
+| Covariable prise à sa valeur finale (`production` non décalée) | le modèle lit une valeur inconnue à l'origine | décaler de son délai, ou `PublicationDelayTransformer` |
+| `shift` sur tout un panel | la cible d'une entité passe dans la ligne d'une autre | `groupby(level="entity").shift(...)` |
+| Score dans l'échantillon présenté comme une erreur de prévision | erreur fortement sous-estimée | découpage hors échantillon |
 
-Cette approche garantit que les modèles sont évalués dans des conditions qui reflètent leur utilisation en production.
+## Voir aussi
+
+- [Concept : cross-validation temporelle](../concepts/cross_validation.md)
+- Notebook `notebooks/0 - QB - Crossvals.ipynb`, qui trace les plis de chaque classe
+- API : [TSOutOfSampleSplit](../api/crossvals/TSOutOfSampleSplit.md),
+  [TSInSampleSplit](../api/crossvals/TSInSampleSplit.md),
+  [PanelOutOfSampleSplit](../api/crossvals/PanelOutOfSampleSplit.md),
+  [PanelOutOfSampleSplitPerEntity](../api/crossvals/PanelOutOfSampleSplitPerEntity.md)
+- [Tutoriel : délais de publication](publication_delays.md), pour les délais des covariables
+- [Guide de tracking (MLflow)](../guides/mlflow_tracking.md) : `split_summary`
