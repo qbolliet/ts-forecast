@@ -278,6 +278,110 @@ class TestDoctest:
 
 
 # ---------------------------------------------------------------------------
+# doc-args
+# ---------------------------------------------------------------------------
+
+DOC_MODULE = '''"""Callables documented by the Markdown pages of the tests."""
+
+
+def detect(data, reference=None, *args, mode="new", **kwargs):
+    """Function with variadic parameters."""
+
+
+class Shifter:
+    """Class whose constructor parameters are documented."""
+
+    def __init__(self, periods, frequency="D"):
+        self.periods = periods
+        self.frequency = frequency
+'''
+
+ARG_TABLE = "| Argument | Description |\n|----------|-------------|\n"
+
+
+class TestDocArgs:
+    @pytest.fixture
+    def package(self, tmp_path, request):
+        """Write an importable module under ``tmp_path`` and return its dotted name."""
+        # Nom unique par test : le cache des modules importés ne doit pas les mêler
+        name = f"docargs_{request.node.name.replace('[', '_').replace(']', '').replace('-', '_')}"
+        write(tmp_path, f"{name}/__init__.py", GOOD_HEADER)
+        write(tmp_path, f"{name}/api.py", DOC_MODULE)
+        return f"{name}.api"
+
+    def check(self, tmp_path: Path, page: str) -> list[cc.Violation]:
+        return cc.check_doc_args_file(write(tmp_path, "docs/page.md", page), tmp_path)
+
+    def block(self, target: str, *rows: str) -> str:
+        body = "".join(f"| `{row}` | texte |\n" for row in rows)
+        return f"<!-- doc-args: {target} -->\n{ARG_TABLE}{body}<!-- /doc-args -->\n"
+
+    def test_complete_function_table_passes(self, tmp_path, package):
+        page = "# Page\n\n" + self.block(f"{package}.detect", "data", "reference", "mode")
+        assert self.check(tmp_path, page) == []
+
+    def test_class_uses_constructor_without_self(self, tmp_path, package):
+        page = self.block(f"{package}.Shifter", "periods", "frequency")
+        assert self.check(tmp_path, page) == []
+
+    def test_missing_argument_is_reported_on_marker_line(self, tmp_path, package):
+        page = "# Page\n\n" + self.block(f"{package}.detect", "data", "mode")
+        violations = self.check(tmp_path, page)
+        assert [(v.line, v.rule, v.blocking) for v in violations] == [(3, "doc-args", True)]
+        assert "reference" in violations[0].message
+
+    def test_unknown_argument_is_reported_on_its_row(self, tmp_path, package):
+        page = self.block(f"{package}.Shifter", "periods", "frequency", "freq")
+        violations = self.check(tmp_path, page)
+        assert [v.line for v in violations] == [6]
+        assert "'freq'" in violations[0].message
+
+    def test_duplicated_argument_is_reported(self, tmp_path, package):
+        page = self.block(f"{package}.Shifter", "periods", "frequency", "periods")
+        assert [v.message for v in self.check(tmp_path, page)] == ["argument en double : 'periods'"]
+
+    def test_tables_of_a_block_are_merged_and_outside_tables_ignored(self, tmp_path, package):
+        page = (
+            f"{ARG_TABLE}| `unrelated` | hors bloc |\n\n"
+            f"<!-- doc-args: {package}.detect -->\n"
+            f"**Essentiels**\n\n{ARG_TABLE}| `data` | texte |\n\n"
+            f"**Autres**\n\n{ARG_TABLE}| `reference`, `mode` | deux noms |\n"
+            "<!-- /doc-args -->\n"
+        )
+        assert self.check(tmp_path, page) == []
+
+    def test_unresolvable_target(self, tmp_path, package):
+        violations = self.check(tmp_path, self.block(f"{package}.missing", "data"))
+        assert len(violations) == 1 and "objet illisible" in violations[0].message
+
+    def test_unknown_module(self, tmp_path):
+        violations = self.check(tmp_path, self.block("module_that_does_not_exist.f", "data"))
+        assert len(violations) == 1 and violations[0].line == 1
+
+    def test_empty_block(self, tmp_path, package):
+        page = f"<!-- doc-args: {package}.detect -->\n<!-- /doc-args -->\n"
+        assert "aucun argument" in self.check(tmp_path, page)[0].message
+
+    @pytest.mark.parametrize(
+        "page, line",
+        [
+            ("texte\n<!-- doc-args: a.b -->\n", 2),
+            ("texte\n<!-- /doc-args -->\n", 2),
+        ],
+    )
+    def test_unbalanced_markers(self, tmp_path, page, line):
+        violations = self.check(tmp_path, page)
+        assert [v.line for v in violations] == [line]
+
+    def test_main_scans_docs_by_default(self, tmp_path, package, capsys):
+        write(tmp_path, "docs/page.md", self.block(f"{package}.Shifter", "periods"))
+        write(tmp_path, "notes/page.md", self.block(f"{package}.Shifter", "periods"))
+        assert cc.main(["--root", str(tmp_path), "--rule", "doc-args", "--format", "detail"]) == 1
+        out = capsys.readouterr().out
+        assert "docs/page.md:1: [doc-args]" in out and "notes/page.md" not in out
+
+
+# ---------------------------------------------------------------------------
 # collecte, résumé, point d'entrée
 # ---------------------------------------------------------------------------
 

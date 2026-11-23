@@ -39,7 +39,7 @@ différence entre les deux résultats.
 `calculate_applicable_delay()` convertit un délai d'une fréquence / d'un point de référence à un autre (ex.
 « 45 jours depuis la fin du trimestre » → « 76 jours depuis le début de son dernier
 mois »), selon une règle unique : une période est publiée avec sa dernière
-sous-période, chaque sous-période à le même retard après sa fin. Le délai depuis la
+sous-période, chaque sous-période a le même retard après sa fin. Le délai depuis la
 fin est donc le même à toute fréquence ; le délai depuis le début lui ajoute la
 durée de la période cible. Le transformeur relit la fréquence du tableau
 (`delay_frequency`) avec la même règle.
@@ -48,7 +48,7 @@ durée de la période cible. Le transformeur relit la fréquence du tableau
 
 ### 3. Appliquer / inverser — `PublicationDelayTransformer`
 
-Le transformeur sklearn (réversible) `PublicationDelayTransformer` ré-exprime le jeu de données comme il était connu à cette date à partir des délais et et de la `prediction_date`. Il existe deux stratégies :
+Le transformeur sklearn (réversible) `PublicationDelayTransformer` ré-exprime le jeu de données comme il était connu à cette date à partir des délais et de la `prediction_date`. Il existe deux stratégies :
 
 | Stratégie | Effet | Quand |
 |-----------|-------|-------|
@@ -85,8 +85,6 @@ telle quelle (avec un avertissement).
   [`PanelwiseTransformer`](panelwise_transforms.md) pour l'application de délais différents à chaque entité. Dans ce cas il est préférable d'utiliser `calculate_applicable_delay(..., aggregate_by_panel=True)`,
   puis `create_delay_transformer_factory` (ou `prepare_entity_kwargs_from_delays`)
   avec un `PanelwiseTransformer`.
-
-Les briques bas niveau `ShiftTransformer` et `MaskTransformer` restent accessibles.
 
 ### Briques bas niveau
 

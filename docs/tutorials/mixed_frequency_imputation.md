@@ -133,9 +133,8 @@ imputer.imputation_cv_scores_      # {'M': {'a1': <score>, 'a2': <score>}}
 `a2` reçoit `a1` déjà imputée comme covariable. `imputation_cv_scores_` expose les scores qui ont
 décidé de l'ordre, utiles pour le [tracking](../guides/mlflow_tracking.md).
 
-Sous l'ordre par défaut `fit_predict_order="frequency"`, la variable de **fréquence source la plus
-élevée** passe en premier à chaque étape (un PIB trimestriel avant une balance annuelle) : la mieux
-ancrée est imputée d'abord, puis sert de covariable imputée aux moins ancrées.
+L'ordre par défaut, `fit_predict_order="frequency"`, est décrit dans le
+[concept](../concepts/mixed_frequency_imputation.md#axe-1-covariate_strategy-comment-mettre-a-disposition-du-modele-dimputation-une-covariable-peu-observee).
 
 ## 6. Panel
 
@@ -223,54 +222,13 @@ seule ligne évaluée, dispose d'une fenêtre complète.
 
 ## 8. Récapitulatif de la classe
 
-### 8.1 Signature
-
-```python
-from tsforecast.imputation import HighFrequencyImputer
-
-imputer = HighFrequencyImputer(
-    target_frequency="M",                    # obligatoire, sans défaut
-    estimator=None,
-    additive_transformer=None,
-    # Axe 1 : matérialisation des covariables
-    covariate_strategy="interpolate",
-    covariate_fallback="interpolate",
-    covariate_eligibility="any_entity",
-    interpolation_method="linear",
-    interpolation_anchor=None,
-    # Axe 2 : fréquences intermédiaires
-    impute_intermediate_frequencies=False,
-    impute_unobserved_entities=False,
-    # Rôle de y
-    target_as_covariate=False,
-    # Ordre d'imputation
-    fit_predict_order="frequency",
-    cv=None,
-    cv_scoring="neg_mean_absolute_percentage_error",
-    min_cv_train_size=10,
-    # Fenêtres
-    imputation_scope="strict",
-    coverage_threshold=0.5,
-    training_scope=None,
-    training_coverage_threshold=None,
-    # Échelle et contraintes
-    scale_features="constant",
-    aggregation_constraint="sum",
-    # Sortie et divers
-    keep_lower_frequencies=True,
-    on_frequency_mismatch="error",
-    restore_original_values=False,
-    time_col=None,
-    panel_cols=None,
-    verbose=False,
-)
-```
+### 8.1 Arguments
 
 Les paramètres acceptant un dictionnaire (`estimator`, `interpolation_method`,
 `interpolation_anchor`, `scale_features`, `aggregation_constraint`) sont indexés par **nom de
 colonne**, avec une clé `'__default__'` facultative pour les colonnes non nommées.
 
-### 8.2 Arguments
+<!-- doc-args: tsforecast.imputation.HighFrequencyImputer -->
 
 **Essentiels**
 
@@ -338,8 +296,11 @@ colonne**, avec une clé `'__default__'` facultative pour les colonnes non nomm�
 | `time_col` | `str`, `None` | `None` | Colonne des dates d'un frame plat. |
 | `panel_cols` | liste de `str`, `None` | `None` | Colonnes des entités d'un frame plat. |
 | `verbose` | `bool` | `False` | Messages de progression préfixés `[HighFrequencyImputer]`. |
+<!-- /doc-args -->
 
-### 8.3 Méthodes
+Référence complète : [API `HighFrequencyImputer`](../api/imputation/HighFrequencyImputer.md).
+
+### 8.2 Méthodes
 
 | Méthode | Description |
 |---------|-------------|
@@ -348,7 +309,7 @@ colonne**, avec une clé `'__default__'` facultative pour les colonnes non nomm�
 | `transform(X, y=None)` | Rejoue le plan figé sans rien réajuster. Avec `X` seul : passe de prédiction, sur les lignes d'entrée, `y` rendu inchangé. |
 | `inverse_transform(X)` | Défait la dernière passe : index de l'entrée, cellules `ORIGINAL` (toutes les observations sous `restore_original_values=True`). |
 
-### 8.4 Attributs après `fit`
+### 8.3 Attributs après `fit`
 
 | Attribut | Description |
 |----------|-------------|

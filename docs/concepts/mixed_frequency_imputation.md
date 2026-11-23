@@ -30,7 +30,7 @@ justifie le recalage. Une variable non additive (niveau, taux) passe par un `add
 | `aggregate` | plus fine que la cible | agrégée exactement sur la grille |
 
 **Un modèle par variable et par étape.** Le modèle d'une variable s'entraîne sur les dates où elle est observée (**lignes
-d'ancre**). Ses covariables sont les autres colonnes du jeu de données, disponible à la fréquence de la variable que l'on cherche à prédire (cf axe 1 ci-dessous). Cible et covariables sont ramenées à l'échelle d'une période de la grille (`scale_features`) : sur une grille mensuelle, un total trimestriel est divisé par trois. Le modèle
+d'ancre**). Ses covariables sont les autres colonnes du jeu de données, lues selon la règle de l'axe 1 ci-dessous. Cible et covariables sont ramenées à l'échelle d'une période de la grille (`scale_features`) : sur une grille mensuelle, un total trimestriel est divisé par trois. Le modèle
 prédit ensuite chaque sous-période, et `aggregation_constraint` recale le résultat à la bonne échelle. `estimator`
 accepte un estimateur unique ou un dictionnaire par colonne ; `None` remplace tous les modèles par
 une interpolation.
@@ -63,11 +63,11 @@ au prix d'une cascade computationnellement plus coûteuse et qui dépend de l'or
    interpolée ni écartée). Sur la grille d'entraînement, elle est :
     - observée, si la ligne est à la même fréquence  ;
     - agrégée si la ligne est à une plus basse fréquence ; sous
-      `'sum'` et `'denton'`, l'agrégation des valeurs imputées à une fréquence plus fine correspond exactement aux valeurs imputées à cette fréquence plus faible, elles peuvent donc lues directement plutôt que recalculées.
+      `'sum'` et `'denton'`, l'agrégation des valeurs imputées à une fréquence plus fine correspond exactement aux valeurs imputées à cette fréquence plus faible, elles peuvent donc être lues directement plutôt que recalculées.
 2. **La covariable est interpolée ou brute sur la grille de prédiction** (stratégies `'interpolate'`
    et `'tolerate_nan'`, ou covariable pas encore imputée, servie par `covariate_fallback`). Elle est :
     - **écartée** si elle est observée à la fréquence des ancres de la variable (sur un panel, par
-      au moins une entité). En effet, les valeurs de la variable sont exactes sur la grille d'entraînement mais approchée sur la grille de prédiction ce qui pourrait engendrer une importante erreur d'imputation ;
+      au moins une entité). En effet, les valeurs de la variable sont exactes sur la grille d'entraînement mais approchées sur la grille de prédiction ce qui pourrait engendrer une importante erreur d'imputation ;
     - **conservée** sinon, toujours depuis ses ancres d'origine, jamais depuis l'imputation d'une
       étape antérieure. A une fréquence plus faible que celle de l'étape, la covariable est interpolée sur les deux grilles. A une fréquence plus élevée que l'étape d'entrainement et plus faible que celle de prédiction, elle est agrégée exactement à
       l'entraînement et interpolée à la prédiction (le PIB pour la balance annuelle) : sa qualité
@@ -128,7 +128,7 @@ Deux subtilités :
     faute d'imputation mensuelle de la balance, il ne pourrait la lire qu'interpolée. Avec un
     estimateur linéaire peu pénalisé, le modèle du PIB inverserait la relation, s'ajusterait presque
     sans résidu, puis prédirait au mois une interpolation de ses propres totaux trimestriels :
-    l'erreur pourrait alors fortement augmenter. Pour d'autre classes de modèles, l'ajout de cette variable ne présente pas vraiment d'intérêt car elle synthétise une information disponible dans les autres covariables. La balance commerciale n'est donc lue, à l'étape mensuelle, que depuis
+    l'erreur pourrait alors fortement augmenter. Pour d'autres classes de modèles, l'ajout de cette variable ne présente pas vraiment d'intérêt car elle synthétise une information disponible dans les autres covariables. La balance commerciale n'est donc lue, à l'étape mensuelle, que depuis
     ses ancres annuelles tant qu'elle n'y est pas imputée, et imputée dès qu'elle l'est.
 
 ## Provenance
@@ -265,7 +265,7 @@ sur n'importe quelles données, et `fit_transform(X)` égale `fit(X).transform(X
 
 ### Cible observée moins souvent que la grille
 
-Quand `y` est trimestriel et la grille mensuelle, le modèle impute une **valeur mensuelle** qui n'est pas à la même échelle que les valeurs dans `y`(qui valent le **total trimestriel** sur la ligne d'ancre, NaN ailleurs). [`RollingAggregator`](../api/xy/RollingAggregator.md) (`window='Q'`)
+Quand `y` est trimestriel et la grille mensuelle, le modèle impute une **valeur mensuelle** qui n'est pas à la même échelle que les valeurs dans `y` (qui valent le **total trimestriel** sur la ligne d'ancre, NaN ailleurs). [`RollingAggregator`](../api/xy/RollingAggregator.md) (`window='Q'`)
 résout l'écart : placé après l'imputeur, il fait de chaque mois un **trimestre glissant**, et, sur
 une ligne d'ancre, la somme glissante redonne exactement le total observé. Il suit la même
 convention que l'imputeur : `y` n'est agrégé qu'à la passe d'entraînement. Le sens de la fenêtre
@@ -303,52 +303,11 @@ pipeline = XYPipeline([
 ])
 ```
 
-## Architecture du code
-
-`HighFrequencyImputer` est un orchestrateur : la classe valide les paramètres, publie les attributs
-ajustés et enchaîne les phases ; chaque phase vit dans un module de
-`tsforecast/imputation/_engine/`. Le `fit` et le `transform` partagent la **même préparation** et la
-**même exécution d'étape**.
-
-![fit construit le plan, transform le rejoue](../assets/hfi_fit_transform.png)
-
-Le contexte d'exécution (`_RunContext`) n'est jamais stocké sur l'imputeur : chaque passe reçoit son
-matérialiseur, ses registres, son calculateur de fenêtre, son traceur de provenance et ses
-avertissements en attente. Un `transform` ne lit ni n'altère aucun état d'exécution du `fit`.
-
-| Module (`_engine/`) | Rôle |
-|---------------------|------|
-| `params` | validateurs purs des paramètres du constructeur |
-| `frequency_layout` | `FrequencyLayout` figé et `plan_frequencies` : fréquence de chaque couple (entité, colonne), catégories de variables, progression des étapes |
-| `preparation` | `prepare_work_frame` : phases communes au `fit` et au `transform` |
-| `run_context` | `FittedComponents` (configurés au `fit`, relus par toute passe) et `_RunContext` (état d'une passe) |
-| `grids` | grilles de prédiction et masques de fenêtre d'une étape |
-| `row_scaling` | `RowScaler` : diviseurs par ligne des jeux d'entraînement mutualisés |
-| `stage_runner` | `StageRunner` : ajustement d'une étape (`fit_stage`) et exécution d'une étape du plan (`execute_step`) |
-| `replay` | rejeu du plan, contrôles du `transform`, entités nées au `transform` |
-| `output` | assemblage de la sortie et gestes de l'inversion |
-| `warnings` | `WarningAccumulator` : un avertissement par famille et par passe |
-
-Les composants réutilisables vivent dans `_components/` :
-
-| Composant | Rôle |
-|-----------|------|
-| `CovariateMaterializer` | produit `X_train` / `X_pred` ; la prédiction ne dispose jamais de moins d'information que l'entraînement |
-| `StageScaler` | met les deux côtés du modèle à la même échelle de fréquence |
-| `AggregationConstraint` | recale les sous-périodes sur le total observé |
-| `VariableOrderer` | ordonne les variables (`'frequency'` ou `'cv'`), expose `scores_` |
-| `TrainingSetBuilder` | jeu d'entraînement mutualisé entre entités d'un panel |
-| `ImputationWindowCalculator` | fenêtres de prédiction et d'entraînement |
-| `TargetFrequencyValidator` | cohérence fréquence cible ↔ fréquences détectées |
-
-`_engine/` et `_components/` sont des détails d'implémentation : l'API publique est celle de la
-classe et des types réexportés par `tsforecast.imputation`. `FrequencyAligner` et `IndexRegularizer`
-(`tsforecast.utils.frequency`) sont des outils autonomes que l'imputeur n'utilise pas.
-
 ## Pour aller plus loin
 
 - Tutoriel : [Imputation multi-fréquences](../tutorials/mixed_frequency_imputation.md)
 - Notebook : `notebooks/2 - QB - Mixed frequencies.ipynb`, qui illustre chaque paramètre
+- Organisation du code : [architecture interne](../api/imputation/architecture.md)
 - API : [HighFrequencyImputer](../api/imputation/HighFrequencyImputer.md),
   [provenance](../api/imputation/provenance.md),
   [aggregation_constraint](../api/imputation/aggregation_constraint.md),

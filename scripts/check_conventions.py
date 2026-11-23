@@ -1,14 +1,17 @@
 """Command-line checker for the writing conventions of the repository.
 
 It verifies that comments and docstrings are self-contained, that every file starts
-with an English header, that test files stay short and that doctests run. Each rule is
-a function returning ``Violation`` objects; ``main`` is the entry point.
+with an English header, that test files stay short, that doctests run and that the
+marked argument tables of the documentation match the signatures. Each rule is a
+function returning ``Violation`` objects; ``main`` is the entry point.
 """
 from __future__ import annotations
 
 import argparse
 import ast
 import difflib
+import importlib
+import inspect
 import io
 import os
 import re
@@ -22,12 +25,13 @@ from typing import Iterator, Optional, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-RULES: tuple[str, ...] = ("refs", "history", "header", "length", "doctest")
+RULES: tuple[str, ...] = ("refs", "history", "header", "length", "doctest", "doc-args")
 VERIFY_RULE = "verify"
 
 # Périmètre par défaut des fichiers Python
 DEFAULT_PYTHON_DIRS: tuple[str, ...] = ("tsforecast", "tests", "scripts")
 CONFIG_SUFFIXES: frozenset[str] = frozenset({".yml", ".yaml", ".toml"})
+DEFAULT_DOCS_DIR = "docs"
 
 # Dossiers ignorés : à n'importe quelle profondeur, ou seulement à la racine du dépôt
 EXCLUDED_ANYWHERE: frozenset[str] = frozenset(
@@ -81,14 +85,20 @@ DIRECTIVE_PATTERN = re.compile(
 )
 ANO_PATTERN = re.compile(r"ANO-[\w-]+")
 
+# Tableaux d'arguments de la documentation, délimités par des marqueurs HTML
+DOC_ARGS_START = re.compile(r"<!--\s*doc-args:\s*([\w.]+)\s*-->")
+DOC_ARGS_END = re.compile(r"<!--\s*/doc-args\s*-->")
+TABLE_NAME_PATTERN = re.compile(r"`([A-Za-z_]\w*)`")
+TABLE_SEPARATOR_PATTERN = re.compile(r"^\|[\s:|-]+$")
+
 
 @dataclass(frozen=True)
 class Violation:
     """One finding of a rule.
 
     Attributes:
-        rule: Rule name (``refs``, ``history``, ``header``, ``length``, ``doctest``
-            or ``verify``).
+        rule: Rule name (``refs``, ``history``, ``header``, ``length``, ``doctest``,
+            ``doc-args`` or ``verify``).
         path: File path, relative to the repository root, with forward slashes.
         line: 1-based line number (0 when not applicable).
         message: Human-readable description.
@@ -501,6 +511,183 @@ def check_length_file(path: Path, root: Path) -> list[Violation]:
 
 
 # ---------------------------------------------------------------------------
+# Règle doc-args
+# ---------------------------------------------------------------------------
+
+
+def resolve_object(dotted: str, root: Path) -> object:
+    """Import the object named by a dotted path, such as ``package.module.Class``.
+
+    The longest importable module prefix is imported, then the remaining parts are
+    read as attributes. ``root`` is put on ``sys.path`` for the duration of the import.
+
+    Args:
+        dotted: Dotted path of a module attribute.
+        root: Directory from which the top-level package is importable.
+
+    Returns:
+        The named object.
+
+    Raises:
+        ImportError: If no prefix of the path is an importable module, if a module
+            fails to import because of one of its own imports, or if an attribute is
+            missing.
+    """
+    parts = dotted.split(".")
+    added = str(root) not in sys.path
+    if added:
+        sys.path.insert(0, str(root))
+    try:
+        for split in range(len(parts), 0, -1):
+            module_name = ".".join(parts[:split])
+            try:
+                obj: object = importlib.import_module(module_name)
+            except ModuleNotFoundError as error:
+                # Seul un préfixe absent du chemin lui-même autorise un préfixe plus court
+                missing = error.name or ""
+                if module_name == missing or module_name.startswith(missing + "."):
+                    continue
+                raise
+            for attribute in parts[split:]:
+                if not hasattr(obj, attribute):
+                    raise ImportError(f"'{module_name}' n'a pas d'attribut '{attribute}'")
+                obj = getattr(obj, attribute)
+            return obj
+    finally:
+        if added:
+            sys.path.remove(str(root))
+    raise ImportError(f"aucun module importable dans '{dotted}'")
+
+
+def signature_parameters(obj: object) -> list[str]:
+    """List the named parameters of a callable, in signature order.
+
+    For a class, the parameters are those of its constructor, without ``self``.
+    Variadic parameters (``*args``, ``**kwargs``) are left out.
+
+    Args:
+        obj: Function or class.
+
+    Returns:
+        Parameter names.
+
+    Raises:
+        TypeError: If ``obj`` is not callable.
+        ValueError: If no signature can be read.
+    """
+    variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    return [
+        name
+        for name, parameter in inspect.signature(obj).parameters.items()  # type: ignore[arg-type]
+        if parameter.kind not in variadic
+    ]
+
+
+def documented_parameters(rows: Sequence[tuple[int, str]]) -> list[tuple[str, int]]:
+    """Read the argument names of the Markdown tables among the given lines.
+
+    Each name is a backquoted identifier of the first cell of a table row; header
+    rows (no backquote) and separator rows yield nothing, other lines are ignored.
+
+    Args:
+        rows: ``(line number, line)`` pairs.
+
+    Returns:
+        ``(name, line number)`` pairs, in reading order.
+    """
+    names: list[tuple[str, int]] = []
+    for number, line in rows:
+        stripped = line.strip()
+        if not stripped.startswith("|") or TABLE_SEPARATOR_PATTERN.match(stripped):
+            continue
+        first_cell = stripped.split("|")[1]
+        names.extend((name, number) for name in TABLE_NAME_PATTERN.findall(first_cell))
+    return names
+
+
+def compare_doc_args(
+    target: str, start_line: int, rows: Sequence[tuple[int, str]], relative: str, root: Path
+) -> list[Violation]:
+    """Compare the arguments documented in one marked block with a signature.
+
+    Args:
+        target: Dotted path named by the opening marker.
+        start_line: Line of the opening marker.
+        rows: ``(line number, line)`` pairs between the two markers.
+        relative: Displayed path of the Markdown file.
+        root: Repository root, from which ``target`` is imported.
+
+    Returns:
+        One violation per unresolvable target, empty block, duplicated or unknown
+        argument, and one listing the undocumented arguments.
+    """
+    try:
+        expected = signature_parameters(resolve_object(target, root))
+    except Exception as error:  # noqa: BLE001 - toute erreur d'import est rapportée
+        return [Violation("doc-args", relative, start_line, f"objet illisible '{target}' : {error}")]
+    documented = documented_parameters(rows)
+    if not documented:
+        return [Violation("doc-args", relative, start_line, f"aucun argument documenté pour '{target}'")]
+    violations = []
+    seen: set[str] = set()
+    for name, number in documented:
+        if name in seen:
+            violations.append(Violation("doc-args", relative, number, f"argument en double : '{name}'"))
+        elif name not in expected:
+            violations.append(
+                Violation("doc-args", relative, number, f"'{name}' n'est pas un argument de '{target}'")
+            )
+        seen.add(name)
+    missing = [name for name in expected if name not in seen]
+    if missing:
+        violations.append(
+            Violation(
+                "doc-args",
+                relative,
+                start_line,
+                f"arguments de '{target}' absents du tableau : {', '.join(missing)}",
+            )
+        )
+    return violations
+
+
+def check_doc_args_file(path: Path, root: Path) -> list[Violation]:
+    """Check the marked argument tables of one Markdown file against the signatures.
+
+    A block opens with ``<!-- doc-args: package.module.Name -->`` and closes with
+    ``<!-- /doc-args -->``; every table row inside it documents one argument.
+
+    Args:
+        path: Markdown file to check.
+        root: Repository root, for the imports and the displayed path.
+
+    Returns:
+        Violations found, including unbalanced markers.
+    """
+    relative = relative_path(path, root)
+    lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    violations: list[Violation] = []
+    block: Optional[tuple[str, int, list[tuple[int, str]]]] = None
+    for number, line in enumerate(lines, start=1):
+        start = DOC_ARGS_START.search(line)
+        if start:
+            if block is not None:
+                violations.append(Violation("doc-args", relative, block[1], "bloc doc-args non fermé"))
+            block = (start.group(1), number, [])
+        elif DOC_ARGS_END.search(line):
+            if block is None:
+                violations.append(Violation("doc-args", relative, number, "fin de bloc doc-args sans début"))
+            else:
+                violations.extend(compare_doc_args(block[0], block[1], block[2], relative, root))
+                block = None
+        elif block is not None:
+            block[2].append((number, line))
+    if block is not None:
+        violations.append(Violation("doc-args", relative, block[1], "bloc doc-args non fermé"))
+    return violations
+
+
+# ---------------------------------------------------------------------------
 # Règle doctest
 # ---------------------------------------------------------------------------
 
@@ -693,6 +880,10 @@ def run_rules(
                 violations.extend(check_python_header(path, root))
             for path in collect_files(root, config_targets, CONFIG_SUFFIXES):
                 violations.extend(check_config_header(path, root))
+        elif rule == "doc-args":
+            doc_targets = list(paths) or [root / DEFAULT_DOCS_DIR]
+            for path in collect_files(root, doc_targets, frozenset({".md"})):
+                violations.extend(check_doc_args_file(path, root))
         elif rule == "doctest":
             targets = [relative_path(path, root) for path in paths] or ["tsforecast"]
             violations.extend(run_doctests(root, targets))

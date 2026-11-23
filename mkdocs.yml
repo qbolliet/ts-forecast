@@ -127,6 +127,7 @@ nav:
     - Rapports (détection, ajustement): api/delays/report.md
   - imputation:
     - HighFrequencyImputer: api/imputation/HighFrequencyImputer.md
+    - Architecture interne: api/imputation/architecture.md
     - Internals - composants:
       - provenance: api/imputation/provenance.md
       - imputation_plan: api/imputation/imputation_plan.md

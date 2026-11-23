@@ -186,6 +186,14 @@ générée par mkdocstrings.
 
 Build local : `uv run mkdocs serve` (ou `uv run mkdocs build --strict`).
 
+Les tutoriels présentent le paramétrage par des tableaux d'arguments (en français, groupés par rôle),
+sans bloc de signature, suivis d'un lien vers la page API. Chaque tableau d'arguments est encadré par
+`<!-- doc-args: tsforecast.module.Nom -->` et `<!-- /doc-args -->` : la règle `doc-args` de
+`scripts/check_conventions.py` vérifie que ses noms (cellule de la première colonne, entre accents
+graves) sont exactement les paramètres de la signature (constructeur pour une classe, sans `*args` /
+`**kwargs`). Les exemples de code des tutoriels s'exécutent et leurs sorties en commentaire sont
+celles de l'exécution.
+
 ## Objectifs Fonctionnels
 
 ### ✅ Implémenté
@@ -327,7 +335,7 @@ en-tête (règle 3).
 (`pytest --doctest-modules tsforecast`). Pas de `+SKIP`.
 
 **Vérification mécanique** : `python scripts/check_conventions.py --rule all` (règles `refs`,
-`header`, `length`, `doctest` bloquantes ; `history` à relire).
+`header`, `length`, `doctest`, `doc-args` bloquantes ; `history` à relire).
 
 #### Docstrings (ENGLISH)
 - Convention **Google Style** obligatoire
