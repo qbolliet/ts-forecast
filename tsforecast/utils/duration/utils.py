@@ -190,10 +190,13 @@ def get_duration_nanoseconds(duration: Union[DurationType, UserDurationType]) ->
     Meant for exact integer arithmetic: the float seconds of
     :func:`convert_duration` are not exact to the microsecond beyond a few days.
     Sub-daily units are exact; calendar units use the conventional lengths of
-    :func:`convert_duration` ('W' = 7 days, 'M' = 30 days, 'Q' = 90 days, ...).
+    :func:`convert_duration` ('W' = 7 days, 'M' = 30 days, 'Q' = 91 days, ...).
+    A leading multiplier scales the unit, as in :func:`convert_duration`
+    (``'2D'`` lasts two days).
 
     Args:
-        duration: Duration in any supported format (code or literal name).
+        duration: Duration in any supported format (code, possibly multiplied,
+            or literal name).
 
     Returns:
         Number of nanoseconds in the unit.
@@ -204,16 +207,16 @@ def get_duration_nanoseconds(duration: Union[DurationType, UserDurationType]) ->
     Examples:
         >>> get_duration_nanoseconds('microsecond'), get_duration_nanoseconds('D')
         (1000, 86400000000000)
-        >>> get_duration_nanoseconds('hour')
-        3600000000000
+        >>> get_duration_nanoseconds('hour'), get_duration_nanoseconds('2h')
+        (3600000000000, 7200000000000)
     """
-    # Conversion de l'unité de durée en code
-    code = to_code(duration)
+    # Conversion de l'unité de durée en code et extraction du multiplicateur
+    code, multiplier = _normalizer.normalize_with_multiplier(duration)
     # Unités infra-journalières : durées entières exactes
     if code in SUBDAILY_NS:
-        return SUBDAILY_NS[code]
+        return multiplier * SUBDAILY_NS[code]
     # Unités calendaires : facteurs conventionnels, entiers en secondes
-    return int(CONVERSION_FACTORS_TO_SECONDS[code]) * 10**9
+    return multiplier * int(CONVERSION_FACTORS_TO_SECONDS[code]) * 10**9
 
 
 # Extraction de l'ordre des durées

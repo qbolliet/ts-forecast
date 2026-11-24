@@ -194,8 +194,9 @@ class DurationNormalizer(TemporalNormalizer):
         """Check if dur1 is a longer duration than dur2.
 
         A multiplier lengthens the duration: ``'2D'`` is longer than ``'D'``
-        and shorter than ``'W'``. Without any multiplier the comparison
-        follows the order of the codes.
+        and shorter than ``'W'``. Nested calendar units are compared exactly
+        in sub-periods (``'3M'`` and ``'Q'`` have the same length). Without any
+        multiplier the comparison follows the order of the codes.
 
         Args:
             dur1: First duration
@@ -212,6 +213,8 @@ class DurationNormalizer(TemporalNormalizer):
             False
             >>> normalizer.is_longer_duration('2D', 'D')
             True
+            >>> normalizer.is_longer_duration('3M', 'Q'), normalizer.is_longer_duration('Q', '3M')
+            (False, False)
         """
         # Conversion en code et extraction des multiplicateurs
         code1, multiplier1 = self.normalize_with_multiplier(dur1)
@@ -225,9 +228,9 @@ class DurationNormalizer(TemporalNormalizer):
         if code1 == code2:
             return multiplier1 > multiplier2
 
-        # Codes différents : comparaison des durées nominales
-        return (multiplier1 * CONVERSION_FACTORS_TO_SECONDS[code1]
-                > multiplier2 * CONVERSION_FACTORS_TO_SECONDS[code2])
+        # Codes différents : comparaison exacte des paires emboîtées, nominale sinon
+        return self._compare_multiplied_lengths(
+            code1, multiplier1, code2, multiplier2, CONVERSION_FACTORS_TO_SECONDS) > 0
 
     # Méthode de vérification que deux expressions de durées sont compatibles
     def are_compatible_durations(self, dur1: DurationType, dur2: DurationType) -> bool:

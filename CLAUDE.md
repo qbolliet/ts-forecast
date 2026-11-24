@@ -190,8 +190,8 @@ Les tutoriels présentent le paramétrage par des tableaux d'arguments (en fran�
 sans bloc de signature, suivis d'un lien vers la page API. Chaque tableau d'arguments est encadré par
 `<!-- doc-args: tsforecast.module.Nom -->` et `<!-- /doc-args -->` : la règle `doc-args` de
 `scripts/check_conventions.py` vérifie que ses noms (cellule de la première colonne, entre accents
-graves) sont exactement les paramètres de la signature (constructeur pour une classe, sans `*args` /
-`**kwargs`). Les exemples de code des tutoriels s'exécutent et leurs sorties en commentaire sont
+graves) sont exactement les paramètres de la signature (constructeur pour une classe, méthode sans
+`self` pour une cible `tsforecast.module.Classe.methode`, sans `*args` / `**kwargs`). Les exemples de code des tutoriels s'exécutent et leurs sorties en commentaire sont
 celles de l'exécution.
 
 ## Objectifs Fonctionnels

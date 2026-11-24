@@ -167,6 +167,13 @@ class TestFrequencyNormalizerMultiplier:
             pytest.param("QS", "2MS", False, id="quarter-vs-two-months"),
             pytest.param("2D", "W", True, id="two-days-vs-week"),
             pytest.param("15min", "h", True, id="fifteen-minutes-vs-hour"),
+            # Paires calendaires emboîtées : longueurs exactes, égales pour 3 mois et un trimestre
+            pytest.param("3MS", "QS", False, id="three-months-vs-quarter"),
+            pytest.param("QS", "3MS", False, id="quarter-vs-three-months"),
+            pytest.param("12MS", "YS", False, id="twelve-months-vs-year"),
+            pytest.param("YS", "4QS", False, id="year-vs-four-quarters"),
+            pytest.param("6SMS", "QS", False, id="six-semi-months-vs-quarter"),
+            pytest.param("11MS", "YS", True, id="eleven-months-vs-year"),
             # Sans multiplicateur : ordre des codes inchangé
             pytest.param("daily", "monthly", True, id="no-multiplier"),
             pytest.param("B", "D", False, id="business-day-vs-day"),

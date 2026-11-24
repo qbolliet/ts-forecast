@@ -97,6 +97,12 @@ class TestDelayUnit:
         transformer = _fit(_monthly(('GDP',)), delays={'GDP': weeks}, delay_unit='W', reference_point='start')
         assert transformer.shift_params['GDP']['n_periods'] == expected
 
+    def test_multiplied_unit_lasts_its_multiple(self):
+        """23 delays of 2 days are 46 days (-2), not 23 days (-1)."""
+        doubled = _fit(_monthly(('GDP',)), delays={'GDP': 23.0}, delay_unit='2D', reference_point='start')
+        days = _fit(_monthly(('GDP',)), delays={'GDP': 46.0}, delay_unit='D', reference_point='start')
+        assert doubled.shift_params == days.shift_params == {'GDP': {'n_periods': -2, 'frequency': 'MS'}}
+
     def test_unit_per_variable(self):
         """A per-variable unit applies to each variable: 30 days -> -1, 7 weeks -> -2."""
         transformer = _fit(_monthly(), delays={'GDP': 30.0, 'CPI': 7.0}, delay_unit={'GDP': 'D', 'CPI': 'W'},

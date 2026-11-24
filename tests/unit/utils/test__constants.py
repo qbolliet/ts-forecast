@@ -75,3 +75,10 @@ class TestDurationTables:
     def test_calendar_subperiods_are_ordered_coarse_to_fine(self):
         for coarse, fine in CALENDAR_SUBPERIODS:
             assert CONVERSION_FACTORS_TO_SECONDS[coarse] > CONVERSION_FACTORS_TO_SECONDS[fine]
+
+    def test_seconds_table_counts_the_days_of_the_calendar_table(self):
+        """A calendar unit lasts, in seconds, the number of days the calendar table gives it."""
+        days = {coarse: count for (coarse, fine), count in CALENDAR_SUBPERIODS.items() if fine == 'D'}
+        assert days == {'Y': 365, 'Q': 91, 'M': 30, 'W': 7}
+        for coarse, count in days.items():
+            assert CONVERSION_FACTORS_TO_SECONDS[coarse] == count * CONVERSION_FACTORS_TO_SECONDS['D']

@@ -15,8 +15,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Literal
 # Modules du package
 from ..utils.frequency import normalize_frequency
 from ..utils.time.utils import get_period_boundaries
-from ..utils.duration import to_code as duration_to_code, get_duration_nanoseconds
+from ..utils.duration import DurationNormalizer, get_duration_nanoseconds
 from ..panel.utils import factorize_row_keys
+
+# Normaliseur des unités de délai
+_duration_normalizer = DurationNormalizer()
 
 # Fonction de calcul du délai applicable
 def calculate_applicable_delay(
@@ -531,6 +534,27 @@ def _map_distinct(values: pd.Series, function: Callable[[Any], Any]) -> pd.Serie
     return values.map(results)
 
 
+# Fonction auxiliaire de normalisation d'une unité de délai, multiplicateur compris
+def _unit_code(unit: str) -> str:
+    """Normalize a delay unit into its duration code, keeping its multiplier.
+
+    Args:
+        unit: Duration name or code, possibly multiplied ('day', 'D', '2D', ...)
+
+    Returns:
+        The duration code, prefixed by the multiplier when it is not 1
+
+    Raises:
+        ValueError: If the unit is not a supported duration
+
+    Examples:
+        >>> _unit_code('day'), _unit_code('2D')
+        ('D', '2D')
+    """
+    code, multiplier = _duration_normalizer.normalize_with_multiplier(unit)
+    return code if multiplier == 1 else f"{multiplier}{code}"
+
+
 # Fonction auxiliaire de conversion d'une valeur en nanosecondes entières
 def _to_nanoseconds(value: float, nanoseconds_per_unit: int) -> int:
     """Convert a delay value to whole nanoseconds, exactly.
@@ -723,22 +747,21 @@ def _convert_delay_unit(delays: pd.DataFrame, target_unit: str) -> pd.DataFrame:
     Raises:
         ValueError: If a unit is not a supported duration
     """
-    # Normalisation de l'unité cible avec la fonction utilitaire to_code
-    # qui gère déjà tous les formats possibles
-    target_unit_code = duration_to_code(target_unit)
-    target_nanoseconds = get_duration_nanoseconds(target_unit_code)
+    # Normalisation de l'unité cible (tous les formats, multiplicateur compris)
+    target_unit_code = _unit_code(target_unit)
+    target_nanoseconds = get_duration_nanoseconds(target_unit)
 
     # Fonction de conversion en nanosecondes entières
     def convert_value(value, unit):
-        # Extraction du code de l'unité courante
-        current_unit_code = duration_to_code(unit)
+        # Extraction du code de l'unité courante, multiplicateur compris
+        current_unit_code = _unit_code(unit)
 
         # Pas de conversion nécessaire si les unités sont identiques
         if current_unit_code == target_unit_code:
             return value
 
         # Conversion exacte, arrondie au supérieur
-        nanoseconds = _to_nanoseconds(value, get_duration_nanoseconds(current_unit_code))
+        nanoseconds = _to_nanoseconds(value, get_duration_nanoseconds(unit))
         return -(-nanoseconds // target_nanoseconds)
 
     # Délais connus, seuls convertis : un délai inconnu reste tel quel
@@ -801,7 +824,7 @@ def _aggregate_delays(
         group_levels = [last_level]
 
     # Les délais agrégés ensemble doivent être exprimés dans la même unité
-    unit_codes = delays['unit'].map(duration_to_code)
+    unit_codes = delays['unit'].map(_unit_code)
     mixed = unit_codes.groupby(level=group_levels).nunique()
     mixed_groups = mixed[mixed > 1].index.tolist()
     if mixed_groups:

@@ -158,6 +158,30 @@ class TestTargetUnit:
 
         assert _delay(delays, 'end', 'M') == [15]
 
+    def test_multiplied_input_unit_is_converted_with_its_length(self):
+        """7 delays of 2 days are 14 days, i.e. 2 weeks."""
+        delays = _frame([_monthly('2023-12', 7, unit='2D')])
+
+        assert _delay(delays, 'end', 'M', unit='D') == [14]
+        assert _delay(delays, 'end', 'M', unit='W') == [2]
+
+    def test_multiplied_target_unit_keeps_its_multiplier(self):
+        """14 d are 7 units of 2 days, labelled ``'2D'``; the start-reference conversion stays in that unit."""
+        result = calculate_applicable_delay(_frame([_monthly('2023-12', 14)]), 'end', 'M', unit='2D')
+
+        assert (result['delay'].tolist(), result['unit'].tolist()) == ([7], ['2D'])
+        # Depuis le début de décembre : 45 jours, soit 22,5 unités de 2 jours, arrondies à 23
+        assert _delay(_frame([_monthly('2023-12', 7, unit='2D')]), 'start', 'M') == [23]
+
+    def test_multiplied_unit_is_not_the_unit_it_multiplies(self):
+        """Rows of one indicator in ``'2D'`` and in ``'D'`` are in different units: refused without ``unit``."""
+        delays = _frame([_monthly('2023-12', 7, unit='2D'), _monthly('2023-12', 14, unit='D')],
+                        [('France', 'GDP'), ('Germany', 'GDP')], names=('country', 'indicator'))
+
+        with pytest.raises(ValueError, match=r"delays of \['GDP'\] are expressed in different units"):
+            calculate_applicable_delay(delays, 'end', 'M')
+        assert calculate_applicable_delay(delays, 'end', 'M', unit='D')['delay'].tolist() == [14]
+
     @pytest.mark.parametrize(
         ('delay', 'target', 'expected'),
         [(8_183_426_019_070, 'end', 8_183_426_019_070),

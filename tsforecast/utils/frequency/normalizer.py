@@ -351,10 +351,12 @@ class FrequencyNormalizer(TemporalNormalizer):
         A multiplier lengthens the period: ``'MS'`` is a higher frequency than
         ``'2MS'``, and ``'2MS'`` a higher one than ``'QS'``. Without any
         multiplier the comparison follows the granularity order of the codes.
-        With multipliers, nominal durations are compared, a business day
+        With multipliers, nested calendar bases are compared exactly in
+        sub-periods (``'3MS'`` and ``'QS'``, ``'12MS'`` and ``'YS'`` have the
+        same length); other bases by nominal durations, a business day
         counting for 7/5 of a calendar day: ``'2D'`` is a higher frequency than
         ``'2B'``, like ``'D'`` than ``'B'``. Two different codes of equal
-        nominal duration (``'24h'`` and ``'D'``) are neither higher nor lower.
+        length (``'24h'`` and ``'D'``) are neither higher nor lower.
 
         Args:
             freq1: First frequency
@@ -375,6 +377,8 @@ class FrequencyNormalizer(TemporalNormalizer):
             True
             >>> normalizer.is_higher_frequency('2D', '2B')
             True
+            >>> normalizer.is_higher_frequency('3MS', 'QS'), normalizer.is_higher_frequency('QS', '3MS')
+            (False, False)
         """
         # Normalisation des fréquences et extraction de leurs multiplicateurs
         code1, multiplier1 = self.normalize_with_multiplier(freq1)
@@ -388,8 +392,9 @@ class FrequencyNormalizer(TemporalNormalizer):
         if code1 == code2:
             return multiplier1 < multiplier2
 
-        # Codes différents : comparaison des durées nominales des périodes
-        return multiplier1 * _NOMINAL_SECONDS[code1] < multiplier2 * _NOMINAL_SECONDS[code2]
+        # Codes différents : comparaison exacte des paires emboîtées ('3MS' et 'QS' de même
+        # longueur), des durées nominales des périodes sinon
+        return self._compare_multiplied_lengths(code1, multiplier1, code2, multiplier2, _NOMINAL_SECONDS) < 0
 
     # Méthode de vérification que deux expressions de fréquences sont compatibles
     def are_compatible_frequencies(self, freq1: FrequencyType, freq2: FrequencyType) -> bool:

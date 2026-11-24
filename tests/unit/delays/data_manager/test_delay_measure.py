@@ -85,9 +85,9 @@ class TestReferencePointAndUnit:
 
         assert result['unit'].iloc[0] == 'day'
 
-    @pytest.mark.parametrize('delay_unit', ['hour', 'invalid', 'Day', 'ms'])
+    @pytest.mark.parametrize('delay_unit', ['hour', 'invalid', 'Day', 'ms', '2D', '10s'])
     def test_invalid_delay_unit_raises(self, monthly_series, delay_unit):
-        """Units other than day / second / microsecond are rejected."""
+        """Units other than day / second / microsecond, multiplied units included, are rejected."""
         with pytest.raises(ValueError, match="Unit must be one of"):
             compare_and_detect_delays(monthly_series, None, '2023-06-15', delay_unit=delay_unit)
 

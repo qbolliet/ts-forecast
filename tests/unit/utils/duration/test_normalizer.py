@@ -154,6 +154,12 @@ class TestNormalize:
             pytest.param("8D", "W", True, id="eight-days-vs-week"),
             pytest.param("120min", "h", True, id="two-hours-in-minutes-vs-hour"),
             pytest.param("month", "day", True, id="no-multiplier"),
+            # Paires calendaires emboîtées : longueurs exactes, égales pour 3 mois et un trimestre
+            pytest.param("3M", "Q", False, id="three-months-vs-quarter"),
+            pytest.param("Q", "3M", False, id="quarter-vs-three-months"),
+            pytest.param("12M", "Y", False, id="twelve-months-vs-year"),
+            pytest.param("Y", "4Q", False, id="year-vs-four-quarters"),
+            pytest.param("13M", "Y", True, id="thirteen-months-vs-year"),
         ],
     )
     def test_is_longer_duration_with_multiplier(self, normalizer, dur1, dur2, expected):

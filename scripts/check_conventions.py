@@ -562,11 +562,12 @@ def resolve_object(dotted: str, root: Path) -> object:
 def signature_parameters(obj: object) -> list[str]:
     """List the named parameters of a callable, in signature order.
 
-    For a class, the parameters are those of its constructor, without ``self``.
-    Variadic parameters (``*args``, ``**kwargs``) are left out.
+    For a class, the parameters are those of its constructor, without ``self``; for a
+    method read on its class (``package.module.Class.method``), those of the method,
+    without ``self``. Variadic parameters (``*args``, ``**kwargs``) are left out.
 
     Args:
-        obj: Function or class.
+        obj: Function, method or class.
 
     Returns:
         Parameter names.
@@ -576,11 +577,12 @@ def signature_parameters(obj: object) -> list[str]:
         ValueError: If no signature can be read.
     """
     variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-    return [
-        name
-        for name, parameter in inspect.signature(obj).parameters.items()  # type: ignore[arg-type]
-        if parameter.kind not in variadic
-    ]
+    parameters = list(inspect.signature(obj).parameters.items())  # type: ignore[arg-type]
+    # Méthode lue sur sa classe : le premier paramètre désigne l'instance
+    qualified_name = getattr(obj, "__qualname__", "")
+    if inspect.isfunction(obj) and "." in qualified_name and parameters and parameters[0][0] == "self":
+        parameters = parameters[1:]
+    return [name for name, parameter in parameters if parameter.kind not in variadic]
 
 
 def documented_parameters(rows: Sequence[tuple[int, str]]) -> list[tuple[str, int]]:

@@ -294,6 +294,9 @@ class Shifter:
     def __init__(self, periods, frequency="D"):
         self.periods = periods
         self.frequency = frequency
+
+    def shift(self, data, fill_value=None):
+        """Method whose parameters are documented."""
 '''
 
 ARG_TABLE = "| Argument | Description |\n|----------|-------------|\n"
@@ -323,6 +326,14 @@ class TestDocArgs:
     def test_class_uses_constructor_without_self(self, tmp_path, package):
         page = self.block(f"{package}.Shifter", "periods", "frequency")
         assert self.check(tmp_path, page) == []
+
+    def test_method_read_on_its_class_has_no_self(self, tmp_path, package):
+        page = self.block(f"{package}.Shifter.shift", "data", "fill_value")
+        assert self.check(tmp_path, page) == []
+
+    def test_method_self_is_not_an_argument(self, tmp_path, package):
+        page = self.block(f"{package}.Shifter.shift", "self", "data", "fill_value")
+        assert [v.line for v in self.check(tmp_path, page)] == [4]
 
     def test_missing_argument_is_reported_on_marker_line(self, tmp_path, package):
         page = "# Page\n\n" + self.block(f"{package}.detect", "data", "mode")

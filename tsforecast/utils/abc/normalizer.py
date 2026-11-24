@@ -10,6 +10,7 @@ from typing import Dict, Tuple
 
 # Import de la fonction de parsing des chaînes de fréquence / durée
 from ..parse.utils import parse_frequency
+from .._constants import CALENDAR_SUBPERIODS, EXACT_CALENDAR_SUBPERIOD_PAIRS
 
 # Classe abstraite de normalisation 
 class TemporalNormalizer(ABC):
@@ -127,6 +128,45 @@ class TemporalNormalizer(ABC):
             # cette dernière étant rejetée par normalize
             multiplier = 1
         return self.normalize(value), multiplier
+
+    # Méthode auxiliaire de comparaison des longueurs de deux unités multipliées de codes différents
+    @staticmethod
+    def _compare_multiplied_lengths(
+        code1: str, multiplier1: int, code2: str, multiplier2: int, seconds: Dict[str, float]
+    ) -> int:
+        """Compare the lengths of two multiplied units of different codes.
+
+        Nested calendar pairs (3 months in a quarter, 7 days in a week, ...) are
+        compared exactly, in sub-periods: ``'3M'`` and ``'Q'`` have the same
+        length. Other pairs are compared by their nominal lengths in seconds.
+
+        Args:
+            code1: Normalized code of the first unit.
+            multiplier1: Multiplier of the first unit.
+            code2: Normalized code of the second unit, different from ``code1``.
+            multiplier2: Multiplier of the second unit.
+            seconds: Nominal length of each code, in seconds.
+
+        Returns:
+            -1 if the first unit is shorter, 1 if it is longer, 0 if both have
+            the same length.
+
+        Examples:
+            >>> from tsforecast.utils._constants import CONVERSION_FACTORS_TO_SECONDS as seconds
+            >>> TemporalNormalizer._compare_multiplied_lengths('M', 3, 'Q', 1, seconds)
+            0
+            >>> TemporalNormalizer._compare_multiplied_lengths('D', 2, 'W', 1, seconds)
+            -1
+        """
+        # Paire calendaire emboîtée : comparaison exacte en sous-périodes du code le plus fin
+        if (code2, code1) in EXACT_CALENDAR_SUBPERIOD_PAIRS:
+            length1, length2 = multiplier1, multiplier2 * CALENDAR_SUBPERIODS[(code2, code1)]
+        elif (code1, code2) in EXACT_CALENDAR_SUBPERIOD_PAIRS:
+            length1, length2 = multiplier1 * CALENDAR_SUBPERIODS[(code1, code2)], multiplier2
+        # Autres paires : durées nominales
+        else:
+            length1, length2 = multiplier1 * seconds[code1], multiplier2 * seconds[code2]
+        return (length1 > length2) - (length1 < length2)
 
     # Méthode auxiliaire de construction du mapping inverse entre les codes temporels et leur expression littéraire
     @staticmethod

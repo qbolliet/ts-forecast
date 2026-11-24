@@ -19,7 +19,7 @@ from ..utils.validation import validate_temporal_data
 from ..utils.time import resolve_date, get_labelled_period, as_exact_unit
 # Module de conversion des durées (le calcul des délais se fait en nanosecondes entières :
 # un produit flottant par 1e6 fausserait le dernier chiffre au-delà de ~800 jours)
-from ..utils.duration import to_code as duration_to_code, to_literal as duration_to_literal, get_duration_nanoseconds
+from ..utils.duration import DurationNormalizer, to_literal as duration_to_literal, get_duration_nanoseconds
 # Module de manipulation des structures de panel
 from ..panel.utils import is_panel_data, get_entity_levels, get_unique_panel_entities
 # Module de rapport de détection
@@ -240,11 +240,12 @@ def _resolve_delay_unit(unit: str) -> Tuple[str, int]:
     if not isinstance(unit, str):
         raise error
     try:
-        code = duration_to_code(unit)
+        code, multiplier = DurationNormalizer().normalize_with_multiplier(unit)
     except ValueError:
         raise error from None
-    # Les durées supportées au-delà de ces trois unités (heure, semaine, ...) ne sont pas des unités de délai
-    if code not in _DELAY_UNIT_CODES:
+    # Les durées supportées au-delà de ces trois unités (heure, semaine, ...), et les unités
+    # multipliées ('2D'), ne sont pas des unités de délai
+    if code not in _DELAY_UNIT_CODES or multiplier != 1:
         raise error
     return duration_to_literal(code), get_duration_nanoseconds(code)
 

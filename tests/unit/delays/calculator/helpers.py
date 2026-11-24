@@ -5,6 +5,7 @@ several test files of the package.
 """
 
 # Modules de base
+import re
 import warnings
 
 import pandas as pd
@@ -46,7 +47,9 @@ def _row(observation, start, end, delay, *, reference_point='end', unit='day', f
         ``reference date + delay`` (``NaT`` for a ``NaN`` delay).
     """
     reference = TS(end if reference_point == 'end' else start)
-    download = reference + pd.Timedelta(delay, unit=_PANDAS_UNITS.get(unit, unit))
+    # Unité éventuellement multipliée ('2D' : délai compté en unités de deux jours)
+    multiplier, base = re.fullmatch(r'(\d*)(.+)', unit).groups()
+    download = reference + pd.Timedelta(delay * int(multiplier or 1), unit=_PANDAS_UNITS.get(base, base))
     return {
         'observation_date': TS(observation), 'download_date': download, 'frequency': frequency,
         'period_start': TS(start), 'period_end': TS(end), 'reference_point': reference_point,

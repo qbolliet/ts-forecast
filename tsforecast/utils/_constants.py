@@ -51,7 +51,9 @@ INTRADAY_UNITS: Tuple[Tuple[str, int], ...] = tuple(
 )
 
 # Facteurs de conversion vers les secondes. Les unités infra-journalières sont
-# dérivées de SUBDAILY_NS ; les unités calendaires sont des approximations
+# dérivées de SUBDAILY_NS ; les unités calendaires sont des approximations, dont
+# le nombre de jours est celui de la table CALENDAR_SUBPERIODS ci-dessous (une
+# conversion vers les jours et une conversion vers les heures y concordent)
 CONVERSION_FACTORS_TO_SECONDS: Dict[str, float] = {
     **{unit: nanoseconds / 1e9 for unit, nanoseconds in SUBDAILY_NS.items()},
     'D': 86400,  # 24 * 3600
@@ -59,7 +61,7 @@ CONVERSION_FACTORS_TO_SECONDS: Dict[str, float] = {
     'W': 604800,  # 7 * 24 * 3600
     'SM': 1296000,  # 15 * 24 * 3600 (approximation)
     'M': 2592000,  # 30 * 24 * 3600 (approximation)
-    'Q': 7776000,  # 90 * 24 * 3600 (approximation)
+    'Q': 7862400,  # 91 * 24 * 3600 (approximation, 13 semaines)
     'Y': 31536000,  # 365 * 24 * 3600 (approximation)
 }
 

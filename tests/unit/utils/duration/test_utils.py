@@ -7,7 +7,8 @@ Covers the module-level convenience functions that delegate to a shared
 ``convert_duration`` and ``get_duration_order``. Equivalence with the class
 methods is the central property under test: these functions add no logic of
 their own beyond instantiation and delegation. ``get_duration_nanoseconds`` is
-also checked against pandas durations stored at every resolution (``s`` to ``ns``).
+checked on gold values, multiplied units, agreement with ``convert_duration``
+and pandas durations stored at every resolution (``s`` to ``ns``).
 """
 from __future__ import annotations
 
@@ -196,7 +197,7 @@ class TestGetDurationNanoseconds:
         ("ns", 1), ("us", 1_000), ("ms", 1_000_000), ("s", 10**9),
         ("min", 60 * 10**9), ("h", 3_600 * 10**9), ("D", 86_400 * 10**9),
         ("W", 7 * 86_400 * 10**9), ("M", 30 * 86_400 * 10**9),
-        ("Q", 90 * 86_400 * 10**9), ("Y", 365 * 86_400 * 10**9),
+        ("Q", 91 * 86_400 * 10**9), ("Y", 365 * 86_400 * 10**9),
     ])
     def test_gold_values(self, unit, expected):
         assert get_duration_nanoseconds(unit) == expected
@@ -212,6 +213,24 @@ class TestGetDurationNanoseconds:
         for code in _CODES:
             assert get_duration_nanoseconds(code) == pytest.approx(
                 convert_duration(1, code, "ns"), rel=1e-9)
+
+    @pytest.mark.parametrize("unit, expected", [
+        ("2D", 2 * 86_400 * 10**9), ("3h", 3 * 3_600 * 10**9), ("15min", 15 * 60 * 10**9),
+        ("500ms", 500 * 10**6), ("2W", 14 * 86_400 * 10**9), ("2Q", 182 * 86_400 * 10**9),
+    ])
+    def test_multiplier_scales_the_unit(self, unit, expected):
+        assert get_duration_nanoseconds(unit) == expected
+
+    @pytest.mark.parametrize("unit", ["2D", "3h", "2W", "3M", "2Q", "Y"])
+    def test_multiplied_unit_is_consistent_with_the_float_conversion(self, unit):
+        assert get_duration_nanoseconds(unit) == pytest.approx(convert_duration(1, unit, "ns"), rel=1e-9)
+
+    @pytest.mark.parametrize("unit", ["W", "M", "Q", "Y"])
+    def test_calendar_unit_lasts_its_days_in_hours(self, unit):
+        """Days and hours of a calendar unit agree: a quarter is 91 days, hence 2 184 hours."""
+        days = convert_duration(1, unit, "D")
+        assert convert_duration(1, unit, "h") == days * 24
+        assert get_duration_nanoseconds(unit) == days * get_duration_nanoseconds("D")
 
     @pytest.mark.parametrize("unit", ["days", "decade", "", "d"])
     def test_unknown_unit_raises(self, unit):
