@@ -285,7 +285,7 @@ n'est pas une étape XY et, sous `'shift'`, ajoute des dates à `X` : il s'appli
 la validation croisée, ramené aux lignes de `y`. Le décalage ne dépend pas de la cible et
 n'introduit pas de fuite. `prediction_date` le fixe pour toute la série : c'est la date à laquelle
 les prévisions évaluées sont censées être produites ; laissée à `'today'`, elle rend le résultat
-dépendant du jour d'exécution (voir [Pipeline XY](xy_pipeline.md#la-solution)).
+dépendant du jour d'exécution (voir [Délais de publication dans un pipeline](sklearn_extensions.md#delais-de-publication-dans-un-pipeline)).
 
 ```python
 X_delayed = (

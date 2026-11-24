@@ -496,7 +496,7 @@ Au 15 mars, les ventes sont connues jusqu'au 11 mars (quatre jours de recul) et 
 Passé directement à un `PublicationDelayTransformer`, un panel reçoit **les mêmes délais** pour
 toutes les entités (un avertissement le rappelle). Pour des délais propres à chaque entité, on les
 calcule par entité (`aggregate_by_panel=True`) puis on confie un transformeur à chaque entité par
-[`PanelwiseTransformer`](../concepts/panelwise_transforms.md).
+[`PanelwiseTransformer`](../concepts/sklearn_extensions.md#transformations-par-entite-panelwisetransformer).
 
 Dans le panel ci-dessous, l'Allemagne publie son indice de prix 30 jours plus tard que la France :
 
@@ -579,7 +579,7 @@ scores = cross_validate(
 - **`.reindex(new_data.index)`** ramène `X` aux lignes de `y` : sous `'shift'`, l'index s'allonge
   et les premières périodes, pas encore publiées, restent vides (`SimpleImputer` les comble).
   `PublicationDelayTransformer` n'est pas une étape XY ; le
-  [concept du pipeline XY](../concepts/xy_pipeline.md) détaille ce point.
+  [concept des extensions de scikit-learn](../concepts/sklearn_extensions.md#delais-de-publication-dans-un-pipeline) détaille ce point.
 - **Délai de la cible.** Les délais traités ici sont ceux des covariables. Celui de la cible se
   traite par l'écart entre entraînement et test (`gap`) du splitter : voir le tutoriel
   [Ensembles train/test rigoureux](pseudo_real_time_forecast.md).

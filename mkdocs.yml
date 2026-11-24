@@ -95,16 +95,13 @@ nav:
   - Cross-validation temporelle: concepts/cross_validation.md
   - Délais de publication: concepts/publication_delays.md
   - Imputation multi-fréquences: concepts/mixed_frequency_imputation.md
-  - Pipeline XY: concepts/xy_pipeline.md
-  - Transformations par entité: concepts/panelwise_transforms.md
-  - Classes de base des transformateurs: concepts/base_transformers.md
+  - Extensions de scikit-learn: concepts/sklearn_extensions.md
   - Utilitaires temporels: concepts/temporal_utils.md
 - Tutoriels:
   - Ensembles train/test rigoureux: tutorials/pseudo_real_time_forecast.md
   - Délais de publication: tutorials/publication_delays.md
   - Imputation multi-fréquences: tutorials/mixed_frequency_imputation.md
-  - Pipeline XY: tutorials/xy_pipeline.md
-  - Transformations par entité: tutorials/panelwise_transforms.md
+  - Extensions de scikit-learn: tutorials/sklearn_extensions.md
   - Utilitaires temporels: tutorials/temporal_utils.md
 - Guides:
   - Tracking d'expériences (MLflow): guides/mlflow_tracking.md

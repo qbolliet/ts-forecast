@@ -333,7 +333,7 @@ Référence complète : [API `HighFrequencyImputer`](../api/imputation/HighFrequ
 ## Voir aussi
 
 - [Concept : imputation multi-fréquences](../concepts/mixed_frequency_imputation.md)
-- [Concept : pipeline XY](../concepts/xy_pipeline.md)
+- [Concept : extensions de scikit-learn](../concepts/sklearn_extensions.md)
 - [API : HighFrequencyImputer](../api/imputation/HighFrequencyImputer.md),
   [RollingAggregator](../api/xy/RollingAggregator.md)
 - [Guide MLflow](../guides/mlflow_tracking.md)

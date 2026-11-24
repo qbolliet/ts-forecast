@@ -82,7 +82,7 @@ telle quelle (avec un avertissement).
 - **Panel** : un panel peut être passé directement, mais les **mêmes délais**
   s'appliquent alors à toutes les entités (un avertissement le rappelle) ; le
   transformeur s'enveloppe dans un
-  [`PanelwiseTransformer`](panelwise_transforms.md) pour l'application de délais différents à chaque entité. Dans ce cas il est préférable d'utiliser `calculate_applicable_delay(..., aggregate_by_panel=True)`,
+  [`PanelwiseTransformer`](sklearn_extensions.md#transformations-par-entite-panelwisetransformer) pour l'application de délais différents à chaque entité. Dans ce cas il est préférable d'utiliser `calculate_applicable_delay(..., aggregate_by_panel=True)`,
   puis `create_delay_transformer_factory` (ou `prepare_entity_kwargs_from_delays`)
   avec un `PanelwiseTransformer`.
 
