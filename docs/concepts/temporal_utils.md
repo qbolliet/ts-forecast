@@ -238,7 +238,7 @@ modifier ; elles lisent les entités dans un `MultiIndex` ou dans `panel_cols`.
 ## Pour aller plus loin
 
 - Tutoriel : [Utilitaires temporels](../tutorials/temporal_utils.md)
-- Notebook : `notebooks/0 - QB - Utils.ipynb`
+- Notebook : `notebooks/0 - Utils.ipynb`
 - API : [frequency](../api/utils/frequency.md), [aligner](../api/utils/aligner.md),
   [regularizer](../api/utils/regularizer.md), [duration](../api/utils/duration.md),
   [position](../api/utils/position.md), [time](../api/utils/time.md),

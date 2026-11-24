@@ -110,7 +110,7 @@ GridSearchCV(Ridge(), {"alpha": [0.1, 1.0, 10.0]}, cv=cv).fit(X, y)
 ## Pour aller plus loin
 
 - Tutoriel : [Ensembles train/test rigoureux](../tutorials/pseudo_real_time_forecast.md)
-- Notebook : `notebooks/0 - QB - Crossvals.ipynb`, qui trace les plis de chaque classe
+- Notebook : `notebooks/3 - Crossvals.ipynb`, qui trace les plis de chaque classe
 - API : [TSOutOfSampleSplit](../api/crossvals/TSOutOfSampleSplit.md),
   [TSInSampleSplit](../api/crossvals/TSInSampleSplit.md),
   [PanelOutOfSampleSplit](../api/crossvals/PanelOutOfSampleSplit.md),

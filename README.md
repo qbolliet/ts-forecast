@@ -62,12 +62,8 @@ tests/
 ├── unit/         # miroir exact de tsforecast/ : un composant, petites données à valeurs d'or
 ├── integration/  # plusieurs composants publics enchaînés, ou jeux de données réalistes
 ├── support/      # jeux de données, fixtures, perturbations et doublures partagés
-├── ANOMALIES.md  # registre des anomalies détectées par la campagne de tests
 └── run_tests.py  # lanceur
 ```
-
-Les anomalies de comportement du code constatées par les tests sont consignées dans
-[`tests/ANOMALIES.md`](tests/ANOMALIES.md).
 
 ### Intégration continue
 

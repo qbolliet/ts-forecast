@@ -38,7 +38,7 @@ EXCLUDED_ANYWHERE: frozenset[str] = frozenset(
     {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", "node_modules"}
 )
 EXCLUDED_AT_ROOT: frozenset[str] = frozenset({"site", "htmlcov", ".venv", "venv"})
-EXCLUDED_PREFIXES: tuple[str, ...] = ("tests/support/golden",)
+EXCLUDED_PREFIXES: tuple[str, ...] = ()
 
 MAX_TEST_LINES = 1200
 MAX_PACKAGE_LINES = 1500
@@ -142,7 +142,7 @@ def is_excluded(relative: str) -> bool:
         relative: POSIX path relative to the repository root.
 
     Returns:
-        True for cache folders, virtual environments, generated sites and golden files.
+        True for cache folders, virtual environments, and generated sites.
     """
     parts = relative.split("/")
     if parts and parts[0] in EXCLUDED_AT_ROOT:

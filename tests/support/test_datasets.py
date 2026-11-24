@@ -218,7 +218,7 @@ class TestRealisticMixedFrequencyDatasets:
     :func:`build_mixed_frequency_timeseries` and
     :func:`build_mixed_frequency_panel`, generalized to reproduce
     ``create_timeseries_dataset`` / ``create_panel_dataset`` of the
-    notebook ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb``
+    notebook of heterogeneous panels
     (cells 5 and 7). Each test below checks a feature announced by this
     notebook (cells 0, 6, 8, 10, 11), exercised through the fixtures.
     """

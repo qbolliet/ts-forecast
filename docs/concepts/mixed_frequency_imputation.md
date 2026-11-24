@@ -306,7 +306,7 @@ pipeline = XYPipeline([
 ## Pour aller plus loin
 
 - Tutoriel : [Imputation multi-fréquences](../tutorials/mixed_frequency_imputation.md)
-- Notebook : `notebooks/2 - QB - Mixed frequencies.ipynb`, qui illustre chaque paramètre
+- Notebook : `notebooks/4 - Mixed frequencies.ipynb`, qui illustre chaque paramètre
 - Organisation du code : [architecture interne](../api/imputation/architecture.md)
 - API : [HighFrequencyImputer](../api/imputation/HighFrequencyImputer.md),
   [provenance](../api/imputation/provenance.md),

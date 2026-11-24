@@ -402,7 +402,6 @@ class TestCollection:
         for relative in [
             "tsforecast/a.py",
             "tsforecast/__pycache__/b.py",
-            "tests/support/golden/c.py",
             "tests/support/d.py",
             ".venv/e.py",
             "site/f.yml",

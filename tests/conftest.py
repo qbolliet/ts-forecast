@@ -20,54 +20,12 @@ pytest_plugins = ["tests.support.fixtures"]
 collect_ignore: list[str] = []
 
 
-# =============================================================================
-# Échecs hérités — TRANSITOIRE (voir tests/legacy_failures.txt)
-# =============================================================================
-def _load_legacy_failures() -> dict[str, str]:
-    """Read ``tests/legacy_failures.txt`` and map each node id to its reason.
-
-    File format: lines grouped by block, each block preceded by a
-    ``# prompt <id>`` or ``# hors campagne`` comment; empty lines and
-    header comments (before the first group) are ignored.
-
-    Returns:
-        Dictionary ``{node_id: xfail_reason}``.
-    """
-    path = Path(__file__).parent / "legacy_failures.txt"
-    if not path.exists():
-        return {}
-
-    failures: dict[str, str] = {}
-    current_prompt = "?"
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("# prompt "):
-            current_prompt = line.removeprefix("# prompt ").strip()
-            continue
-        if line.startswith("# hors campagne"):
-            current_prompt = "hors campagne"
-            continue
-        if line.startswith("#"):
-            continue
-        failures[line] = f"legacy: à trier au prompt {current_prompt}"
-
-    return failures
-
-
-_LEGACY_FAILURES = _load_legacy_failures()
-
-
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Mark each test ``unit`` / ``integration`` and apply the inherited xfails.
+    """Mark each test ``unit`` or ``integration``.
 
     The marker is derived from the test path relative to ``tests/``:
     ``tests/integration/...`` gets ``integration``, everything else
-    (``tests/unit/...`` and ``tests/support/...``) gets ``unit``. Node
-    ids listed in ``tests/legacy_failures.txt`` additionally get a
-    transient ``xfail(strict=False)``, removed as the inherited failures
-    are triaged (parts D, U, F of the campaign plan).
+    (``tests/unit/...`` and ``tests/support/...``) gets ``unit``.
 
     Args:
         config: Pytest configuration of the session.
@@ -83,6 +41,3 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         else:
             item.add_marker(pytest.mark.unit)
 
-        reason = _LEGACY_FAILURES.get(item.nodeid)
-        if reason is not None:
-            item.add_marker(pytest.mark.xfail(reason=reason, strict=False))

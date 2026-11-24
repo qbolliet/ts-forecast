@@ -307,15 +307,11 @@ décision (`D47`), spécification (« voir la spec »), invariant (`I11`), anoma
 `[CODE]`), prompt, ticket. On **énonce la règle** au lieu de la citer.
   - ❌ `# Invariant I11 : jamais de dégradation fit → predict`
   - ✅ `# La prédiction ne dispose jamais de moins d'information que l'entraînement`
-  - Seule exception : le `reason=` d'un `pytest.mark.xfail` peut commencer par un identifiant
-    `ANO-…` (lien machine vers `tests/ANOMALIES.md`), à condition d'être suivi d'une phrase
-    complète qui se comprend seule. `tests/ANOMALIES.md` et les documents de conception
-    archivés sont, eux, le lieu de ces références.
 
 **2. Pas d'historique ni de justification de décision.** Décrire ce que le code **est**, pas ce
 qu'il était ni pourquoi il a changé : proscrire « auparavant », « désormais », « corrigé »,
 « remplace l'ancien… », « contrairement à la version précédente », « pour corriger le bug ».
-L'historique relève de `git log`, des messages de commit et de `tests/ANOMALIES.md`. Une
+L'historique relève de `git log` et des messages de commit. Une
 contrainte technique durable (« les mois de 28 jours imposent un calcul en entiers exacts »)
 reste bienvenue, sans son récit.
 
@@ -401,18 +397,13 @@ def validate_temporal_data(
 - **Structure** :
   ```
   tests/
-  ├── conftest.py        # pytest_plugins, marquage auto unit/integration, xfail transitoire
-  ├── legacy_failures.txt  # TRANSITOIRE : échecs hérités en cours de tri
-  ├── ANOMALIES.md       # registre des anomalies [CODE]/[DOC]/[SPEC]
+  ├── conftest.py        # pytest_plugins, marquage auto unit/integration
   ├── run_tests.py        # --mode all | unit | integration | fast | coverage, --path
   ├── support/            # jeux de données, fixtures et doublures partagés
   │   ├── datasets.py      # constructeurs purs (notebook 2, PANEL-X, ...)
   │   ├── fixtures.py      # fixtures pytest, enregistrées via pytest_plugins
   │   ├── perturbations.py # désordre, noms spéciaux, positions, résolution des dates, ...
-  │   ├── estimators.py    # SpyEstimator, FailingEstimator, ...
-  │   └── golden/          # golden master de HighFrequencyImputer : generate.py (à la main),
-  │                        #   manifest.json, cases/*.pkl.gz ; comparé par
-  │                        #   tests/integration/imputation/test_golden_master.py (slow)
+  │   └── estimators.py    # SpyEstimator, FailingEstimator, ...
   ├── unit/               # miroir EXACT de tsforecast/ (+ scripts/ : tests de scripts/)
   │   ├── base/  crossvals/  panel/  tracking/  xy/
   │   ├── delays/           # test_calculator.py, test_data_manager.py, ...

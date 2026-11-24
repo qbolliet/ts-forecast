@@ -318,7 +318,7 @@ les règles de `TSInSampleSplit` entité par entité.
 ## Voir aussi
 
 - [Concept : cross-validation temporelle](../concepts/cross_validation.md)
-- Notebook `notebooks/0 - QB - Crossvals.ipynb`, qui trace les plis de chaque classe
+- Notebook `notebooks/3 - Crossvals.ipynb`, qui trace les plis de chaque classe
 - API : [TSOutOfSampleSplit](../api/crossvals/TSOutOfSampleSplit.md),
   [TSInSampleSplit](../api/crossvals/TSInSampleSplit.md),
   [PanelOutOfSampleSplit](../api/crossvals/PanelOutOfSampleSplit.md),

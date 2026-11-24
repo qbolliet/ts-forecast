@@ -16,8 +16,26 @@ from sklearn.linear_model import LinearRegression
 # Objet testé
 from tsforecast.imputation import HighFrequencyImputer
 
-# Lecture des attributs publics partagée avec le golden master
-from tests.support.golden.scenarios import public_attribute_names
+
+
+def public_attribute_names(imputer):
+    """List the public fitted attributes present on an imputer.
+
+    Returns:
+        Sorted names ending with ``_`` and not starting with ``_`` that can be
+        read on the instance (properties included).
+    """
+    names = []
+    for name in dir(imputer):
+        if not name.endswith('_') or name.startswith('_'):
+            continue
+        try:
+            getattr(imputer, name)
+        except AttributeError:
+            continue
+        names.append(name)
+    return sorted(names)
+
 
 # Signature figée : (nom, nature, défaut) dans l'ordre de déclaration
 _POSITIONAL_OR_KEYWORD = inspect.Parameter.POSITIONAL_OR_KEYWORD

@@ -623,7 +623,7 @@ class TestLayoutObject:
 class TestImputerPublishesTheLayout:
     """``HighFrequencyImputer`` publishes its fitted attributes from one layout."""
 
-    # Interne : attribut privé ; le contenu public est figé par le golden master
+    # Interne : attribut privé ; le contenu public est testé par ailleurs
     @pytest.mark.internal
     @pytest.mark.parametrize('modality', [False, True])
     def test_fitted_attributes_are_the_layout_fields(self, panel_reference_full, modality):

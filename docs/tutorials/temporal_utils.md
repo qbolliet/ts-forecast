@@ -368,7 +368,7 @@ Les étiquettes temporelles acceptées sont des dates, des chaînes que `pd.to_d
 ## Voir aussi
 
 - [Concept : utilitaires temporels](../concepts/temporal_utils.md)
-- Notebook : `notebooks/0 - QB - Utils.ipynb`
+- Notebook : `notebooks/0 - Utils.ipynb`
 - API : [frequency](../api/utils/frequency.md), [aligner](../api/utils/aligner.md),
   [regularizer](../api/utils/regularizer.md), [duration](../api/utils/duration.md),
   [position](../api/utils/position.md), [time](../api/utils/time.md),

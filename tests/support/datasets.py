@@ -1,7 +1,7 @@
 """Pure builders of the reference datasets of the tests.
 
 Gathers the builders (code replicas, without reading the notebook, of
-notebook 2 ``notebooks/2 - QB - Mixed frequencies.ipynb`` and of the
+notebook 2 (mixed frequencies) and of the
 unified ``PANEL-X`` dataset), made public to be
 imported directly by tests and notebooks
 (``from tests.support.datasets import build_panel_reference``).
@@ -25,10 +25,10 @@ def build_mixed_frequency_timeseries(
     """Build the mixed-frequency time series dataset of notebook 2.
 
     Code replica (without reading the notebook) of ``df_timeseries`` in
-    ``notebooks/2 - QB - Mixed frequencies.ipynb``, used as empirical
+    the mixed-frequencies notebook, used as empirical
     reference. Generalized to also
     cover the more realistic dataset of ``create_timeseries_dataset`` in
-    ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb``: an
+    a heterogeneous-panel notebook: an
     ``annual_start_date`` earlier than ``start_date`` (default parameters
     of that notebook) makes the global index irregular - a few isolated
     annual anchors before the start of the monthly grid. This parameter
@@ -177,10 +177,9 @@ def build_mixed_frequency_panel(
     """Build the mixed-frequency panel dataset of notebook 2.
 
     Code replica of ``df_panel`` in
-    ``notebooks/2 - QB - Mixed frequencies.ipynb``. Generalized to also
+    the mixed-frequencies notebook. Generalized to also
     cover the more realistic and heterogeneous dataset of
-    ``create_panel_dataset`` in ``notebooks/3 - QB - Panel a frequences
-    mixtes heterogene.ipynb``: passing
+    ``create_panel_dataset`` in a heterogeneous-panel notebook: passing
     ``countries=HETEROGENEOUS_PANEL_COUNTRIES`` (defined below in this
     module) reproduces that dataset's structure - coverage specific to each
     entity, ``depenses_publiques_pib`` with a heterogeneous publication
@@ -358,7 +357,7 @@ def build_mixed_frequency_panel(
 
 
 # Réplique fidèle du dictionnaire ``countries`` de ``create_panel_dataset``
-# (cellule 7, ``notebooks/3 - QB - Panel a frequences mixtes heterogene.ipynb``) :
+# (notebook de panel hétérogène) :
 # couverture propre à chaque entité, dépenses publiques à fréquence de
 # publication hétérogène (annuelle FR/IT, trimestrielle DE), climat_affaires
 # jamais observée pour l'Italie, historique de balance commerciale antérieur

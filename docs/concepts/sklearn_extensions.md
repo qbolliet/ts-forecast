@@ -254,7 +254,7 @@ en donne un exemple complet.
 ## Pour aller plus loin
 
 - Tutoriel : [Extensions de scikit-learn](../tutorials/sklearn_extensions.md)
-- Notebook : `notebooks/0 - QB - Sklearn extensions.ipynb`
+- Notebook : `notebooks/1 - Sklearn extensions.ipynb`
 - Concept lié : [Imputation multi-fréquences](mixed_frequency_imputation.md#dans-un-pipeline-entraine-avec-y),
   qui place `HighFrequencyImputer` et `RollingAggregator` dans un même `XYPipeline`
 - API : [transformateurs de base](../api/base/transformers.md),
