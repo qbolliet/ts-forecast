@@ -48,7 +48,7 @@ existing_data.loc["2023-10-01", "gdp"] = 509.0    # PIB du T4 2023 avant révisi
 `compare_and_detect_delays` repère les observations apparues entre les deux extractions et mesure,
 pour chacune, le temps écoulé entre sa période et la date de téléchargement du nouveau millésime.
 
-![Détection avec deux jeux de données](../assets/detect_delays_two_datasets.png)
+![Détection avec deux jeux de données](../assets/images/detect_delays_two_datasets.png)
 
 ```python
 from tsforecast.delays import compare_and_detect_delays
@@ -92,7 +92,7 @@ Sans `existing_data`, la fonction retient la dernière observation non nulle de 
 une seule extraction suffit pour initialiser un suivi des délais, à condition qu'elle soit faite peu
 après la dernière publication de chaque variable.
 
-![Détection avec un seul jeu de données](../assets/detect_delays_single_dataset.png)
+![Détection avec un seul jeu de données](../assets/images/detect_delays_single_dataset.png)
 
 ```python
 compare_and_detect_delays(new_data, download_date="2024-05-16", reference_point="end")[["delay"]]
@@ -106,7 +106,7 @@ compare_and_detect_delays(new_data, download_date="2024-05-16", reference_point=
 
 `reference_point` choisit le point de la période depuis lequel le délai se compte.
 
-![Impact du point de référence](../assets/reference_point_impact.png)
+![Impact du point de référence](../assets/images/reference_point_impact.png)
 
 | `reference_point` | Formule |
 |-------------------|---------|
@@ -222,7 +222,7 @@ trimestre forment le trimestre).
   dernier jour de l'observation : le **dernier mois** pour une observation trimestrielle ramenée au
   mois, le trimestre pour une observation mensuelle ramenée au trimestre.
 
-![Conversion de fréquence](../assets/frequency_conversion_delay.png)
+![Conversion de fréquence](../assets/images/frequency_conversion_delay.png)
 
 ```python
 calculate_applicable_delay(delays, reference_point="start", frequency="M")[["delay", "frequency"]]
@@ -242,7 +242,7 @@ La conversion d'un point de référence à l'autre se fait en trois temps : reco
 de publication à partir du délai d'origine, choix de la période cible contenant le dernier jour de
 l'observation, puis calcul du délai depuis le point de référence cible.
 
-![Conversion du point de référence](../assets/reference_point_conversion.png)
+![Conversion du point de référence](../assets/images/reference_point_conversion.png)
 
 La date qui étiquette l'observation (début ou fin de période) n'intervient pas, et le délai d'une
 variable ne dépend pas de la position de ses observations dans la période cible : l'agrégation de
@@ -414,7 +414,7 @@ publiée). La durée réelle des mois (28 à 31 jours) et les années bissextile
 le délai, lui, est une durée (un délai en mois compte 30 jours par mois, comme partout dans le
 package).
 
-![Calcul des périodes à décaler](../assets/compute_shift_periods.png)
+![Calcul des périodes à décaler](../assets/images/compute_shift_periods.png)
 
 Avec un délai de 45 jours depuis la fin (`'end'`) et une prédiction au 15 février 2024 :
 
@@ -442,7 +442,7 @@ de l'index de `prediction_date` dans sa période cible (position `p`, comptée d
   qui précèdent jusqu'à `p` incluse (pas encore publiées) sont masquées. Les positions se comptent
   depuis le début de la période : au 15 mars, chaque mois est vu comme à son 15.
 
-![Calcul des observations à masquer](../assets/compute_mask_periods.png)
+![Calcul des observations à masquer](../assets/images/compute_mask_periods.png)
 
 **Faisabilité.** Le masque doit laisser au moins une observation dans chaque période cible :
 

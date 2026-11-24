@@ -10,7 +10,7 @@ ajustés et enchaîne les phases ; chaque phase vit dans un module de
 **même exécution d'étape** : le `fit` construit chaque étape puis l'exécute, le `transform` rejoue le
 plan figé (`ImputationPlan`).
 
-![fit construit le plan, transform le rejoue](../../assets/hfi_fit_transform.png)
+![fit construit le plan, transform le rejoue](../../assets/images/hfi_fit_transform.png)
 
 Le contexte d'exécution (`_RunContext`) n'est jamais stocké sur l'imputeur : chaque passe reçoit son
 matérialiseur, ses registres, son calculateur de fenêtre, son traceur de provenance et ses

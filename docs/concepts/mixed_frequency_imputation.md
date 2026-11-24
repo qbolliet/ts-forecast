@@ -12,7 +12,7 @@ une valeur mensuelle aux variables observées une fois par trimestre ou par an, 
 répartition peut être recalée pour que les sous-périodes redonnent exactement ce total. Chaque cellule
 produite garde la trace de sa **provenance**.
 
-![Principe de la désagrégation](../assets/hfi_principle.png)
+![Principe de la désagrégation](../assets/images/hfi_principle.png)
 
 ## Le principe
 
@@ -46,7 +46,7 @@ l'estimateur pour imputer la cible, l'axe 2 les **lignes** de sa cible.
 
 ### Axe 1 — `covariate_strategy` : comment mettre à disposition du modèle d'imputation une covariable peu observée ?
 
-![Axe 1 : covariate_strategy](../assets/hfi_covariate_strategy.png)
+![Axe 1 : covariate_strategy](../assets/images/hfi_covariate_strategy.png)
 
 | Valeur | Ce que reçoit le modèle | Prérequis |
 |--------|-------------------------|-----------|
@@ -98,7 +98,7 @@ interpolation (covariables, replis, `estimator=None`).
 
 ### Axe 2 — `impute_intermediate_frequencies` : passer par des fréquences intermédiaires ?
 
-![Axe 2 : impute_intermediate_frequencies](../assets/hfi_intermediate_frequencies.png)
+![Axe 2 : impute_intermediate_frequencies](../assets/images/hfi_intermediate_frequencies.png)
 
 | Valeur | Étapes (annuel → mensuel) | `y_train` |
 |--------|---------------------------|-----------|
@@ -272,7 +272,7 @@ convention que l'imputeur : `y` n'est agrégé qu'à la passe d'entraînement. L
 suit la position de la grille (`alignment='auto'`) : passée `[t-2, t]` sur une grille de fin de
 période (`ME`), future `[t, t+2]` sur une grille de début (`MS`).
 
-![Les deux passes dans un XYPipeline](../assets/hfi_pipeline_passes.png)
+![Les deux passes dans un XYPipeline](../assets/images/hfi_pipeline_passes.png)
 
 [`DropNaNTarget`](../api/xy/DropNaNTarget.md), juste avant l'estimateur, retire les lignes sans
 cible au `fit` et au `score`. Un scorer textuel (`scoring='neg_mean_absolute_error'`) comparerait les

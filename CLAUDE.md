@@ -183,6 +183,8 @@ générée par mkdocstrings.
 - Tutoriels : `docs/tutorials/`
 - Intégration MLflow / tracking : `docs/guides/mlflow_tracking.md`
 - Référence API : `docs/api/`
+- Schémas : PNG exportés dans `docs/assets/images/`, sources draw.io dans `docs/assets/drawio/`
+  (même nom de base, exclues du site par `exclude_docs`) ; un schéma modifié se réexporte en PNG
 
 Build local : `uv run mkdocs serve` (ou `uv run mkdocs build --strict`).
 

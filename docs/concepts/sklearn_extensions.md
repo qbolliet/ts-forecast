@@ -25,7 +25,7 @@ ignorent les dates et les entités, et un `Pipeline` ne transforme que `X`, la c
 | Retirer les lignes sans cible avant l'estimateur | `DropNaNTarget` | `tsforecast.xy` |
 | Agréger sur une période calendaire glissante | `RollingAggregator` | `tsforecast.xy` |
 
-![Les extensions de scikit-learn](../assets/sklearn_extensions_overview.png)
+![Les extensions de scikit-learn](../assets/images/sklearn_extensions_overview.png)
 
 Toutes ces classes suivent le contrat de sklearn (`fit`, `transform`, `get_params`, `set_params`,
 `clone`) : elles s'utilisent dans `GridSearchCV`, `cross_validate` et avec les splitters de
@@ -84,7 +84,7 @@ laquelle s'appuient les autres classes.
 **indépendamment sur chaque entité** : chaque entité reçoit son propre clone, ajusté sur ses seules
 lignes, et `transformers_` les range par clé d'entité (un tuple, `('FR',)`).
 
-![Un transformateur ajusté par entité](../assets/panelwise_principle.png)
+![Un transformateur ajusté par entité](../assets/images/panelwise_principle.png)
 
 Trois modes fixent le transformateur de chaque entité :
 
@@ -131,7 +131,7 @@ et lit sa sortie comme la paire `(X, y)` ; une étape XY qui rend autre chose l�
 Toute autre étape est traitée exactement comme par `Pipeline` : `fit_transform(X, y)` à
 l'entraînement, `transform(X)` sans la cible, et sa sortie devient le `X` de l'étape suivante.
 
-![Le parcours de X et y dans un XYPipeline](../assets/xy_pipeline_flow.png)
+![Le parcours de X et y dans un XYPipeline](../assets/images/xy_pipeline_flow.png)
 
 Les méthodes de prédiction (`predict`, `predict_proba`, `predict_log_proba`, `decision_function`,
 `score_samples`) ne prennent pas de `y`, comme celles de `Pipeline` : une prédiction ne dépend jamais
@@ -215,7 +215,7 @@ période (`MS`) une fenêtre **future** `[t, t+2]`. Dans les deux cas, la ligne 
 porte le total exact de ce trimestre. Une grille sans position (jours, semaines) demande
 `alignment='past'` ou `'future'`.
 
-![Le sens de la fenêtre](../assets/rolling_window_alignment.png)
+![Le sens de la fenêtre](../assets/images/rolling_window_alignment.png)
 
 **Taille de la fenêtre.** `window` est une fréquence (`'Q'`, `'Y'`, `'3M'`...) comptée en pas de la
 grille de chaque entité, détectée au `fit`. La grille doit être de même base que la fenêtre ou s'y

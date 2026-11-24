@@ -11,7 +11,7 @@ Le [concept](../concepts/cross_validation.md) présente les deux familles de dé
 ## Table des matières
 
 - [1. Données](#1-donnees)
-- [2. Le jeu supervisé : une ligne par origine de prévision](#2-le-jeu-supervise-une-ligne-par-origine-de-prevision)
+- [2. Le jeu de données d'apprentissage](#2-le-jeu-de-donnees-dapprentissage)
 - [3. Choisir le `gap`](#3-choisir-le-gap)
 - [4. Découper une série : `TSOutOfSampleSplit`](#4-decouper-une-serie-tsoutofsamplesplit)
 - [5. Évaluer un modèle](#5-evaluer-un-modele)
@@ -78,7 +78,7 @@ la dernière ligne d'entraînement et `T` ; l'écart minimal sans fuite est donc
 
 $$\text{gap} = h + d - 1$$
 
-![Choisir le gap](../assets/crossval_gap_rule.png)
+![Choisir le gap](../assets/images/crossval_gap_rule.png)
 
 La fonction `leaks` vérifie la règle pli par pli :
 

@@ -32,7 +32,7 @@ Une fréquence s'écrit comme un alias pandas, `[N]BASE[S|E][-ANCRE]`. `parse_fr
 en un `ParsedFrequency(freq, position, suffix, multiplier)` et `build_frequency_string` l'assemble ;
 ce sont les deux seules fonctions qui manipulent le texte d'une fréquence.
 
-![Anatomie d'une chaîne de fréquence](../assets/frequency_string_anatomy.png)
+![Anatomie d'une chaîne de fréquence](../assets/images/frequency_string_anatomy.png)
 
 - **Bases** : `ns`, `us`, `ms`, `s`, `min`, `h`, `D`, `B`, `W`, `SM`, `M`, `Q`, `Y`. Les noms
   littéraux forment une liste fermée : `'nanosecond'`, `'microsecond'`, `'millisecond'`, `'second'`,
@@ -99,7 +99,7 @@ observation hors de la grille détectée est écartée, avec un avertissement.
 `get_period_boundaries(date, frequency)` renvoie le début et la fin de la période de `frequency` qui
 contient `date` ; `get_period_start` et `get_period_end` en renvoient une borne.
 
-![Période contenant une date](../assets/period_boundaries.png)
+![Période contenant une date](../assets/images/period_boundaries.png)
 
 - **Intervalle semi-ouvert** : la période est `[début, fin)`, la fin étant le premier instant de la
   période suivante. C'est une date exacte, là où `Period.end_time` de pandas vaut
@@ -141,7 +141,7 @@ opposée. Les positions s'écrivent `'S'` / `'E'` ou `'start'` / `'end'`.
 `FrequencyConverter().convert_frequency(data, target_freq, method=...)` change la fréquence d'une
 série, d'un `DataFrame` ou d'un panel, entité par entité.
 
-![Changer de fréquence](../assets/frequency_conversion.png)
+![Changer de fréquence](../assets/images/frequency_conversion.png)
 
 - **Direction** : la fréquence source de chaque colonne est détectée sur ses valeurs observées. Une
   cible moins fréquente agrège (`method` parmi `'mean'`, `'sum'`, `'first'`, `'last'`, `'min'`,

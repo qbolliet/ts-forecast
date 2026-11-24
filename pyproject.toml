@@ -35,6 +35,8 @@ docs = [
     "mkdocs>=1.6.1,<2",
     "mkdocs-material>=9.6.16,<10",
     "mkdocstrings-python>=1.16.12,<2",
+    # Mise en forme des signatures séparées (separate_signature) par mkdocstrings
+    "ruff>=0.17.6,<1",
 ]
 
 [tool.uv]

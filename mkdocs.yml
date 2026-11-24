@@ -1,12 +1,16 @@
 # MkDocs site configuration for ts-forecast: theme, navigation, and the mkdocstrings
 # plugin that generates the API reference pages.
-site_name: Time series forecast
+site_name: ts-forecast
 site_url: https://qbolliet.github.io/ts-forecast/
 repo_url: https://github.com/qbolliet/ts-forecast
 site_dir: site
 docs_dir: docs
+# Sources draw.io des schémas : versionnées à côté des PNG exportés, jamais publiées
+exclude_docs: |
+  assets/drawio/
 theme:
   name: material
+  language: fr
   pygments_style: 'lovelace'
   logo: assets/logo.svg
   favicon: assets/logo.svg
@@ -22,13 +26,13 @@ theme:
     - scheme: default
       toggle:
         icon: material/brightness-7 
-        name: Switch to dark mode
+        name: Passer en mode sombre
 
     # Palette toggle for dark mode
     - scheme: slate
       toggle:
         icon: material/brightness-4
-        name: Switch to light mode
+        name: Passer en mode clair
 
 # extra_css:
 #   - assets/stylesheets/extra.css

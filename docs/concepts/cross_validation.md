@@ -18,7 +18,7 @@ encore connue à la date de la prévision.
 | **Hors échantillon** (`TSOutOfSampleSplit`, `PanelOutOfSampleSplit`, `PanelOutOfSampleSplitPerEntity`) | `n_splits`, ou un par élément de `test_indices` | exclu de l'entraînement, qui le précède | estimer l'erreur de prévision |
 | **Dans l'échantillon** (`TSInSampleSplit`, `PanelInSampleSplit`, `PanelInSampleSplitPerEntity`) | un seul | inclus dans l'entraînement, qui s'arrête à la dernière ligne de test | mesurer un ajustement historique (rétropolation, estimation révisée d'une période passée) |
 
-![Hors échantillon et dans l'échantillon](../assets/crossval_families.png)
+![Hors échantillon et dans l'échantillon](../assets/images/crossval_families.png)
 
 Un score dans l'échantillon est toujours plus favorable qu'un score hors échantillon sur la même
 période : il ne sert pas à estimer une erreur de prévision.
@@ -38,7 +38,7 @@ Chaque famille se décline en trois classes :
 Sur un panel, `gap`, `test_size` et `max_train_size` se comptent en dates de chaque entité. La
 différence entre les deux variantes n'apparaît que sur un panel **déséquilibré** :
 
-![Panel : dates communes ou propres à chaque entité](../assets/crossval_panel.png)
+![Panel : dates communes ou propres à chaque entité](../assets/images/crossval_panel.png)
 
 Avec des dates communes, une entité qui ne porte pas la première date de test d'un pli n'y est pas
 testée (un avertissement le signale) mais reste dans l'entraînement, sur ses dates antérieures au

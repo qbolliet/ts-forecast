@@ -43,7 +43,7 @@ y = pd.Series(sales.ravel(), index=index, name="sales")
 y[[("FR", "2023-06-30"), ("DE", "2024-02-29")]] = np.nan
 ```
 
-## 2. Écrire un transformer temporel : `PanelTimeSeriesTransformer`
+## 2. Écrire un transformateur temporel : `PanelTimeSeriesTransformer`
 
 Une sous-classe de `PanelTimeSeriesTransformer` n'écrit que `_fit` et `_transform`. Les méthodes
 publiques `fit` et `transform` valident les données avant de les lui passer, et enregistrent les
@@ -413,7 +413,7 @@ trimestre (31 mars, ou 1er janvier) porte le total exact de ce trimestre. Une fe
 mois de chaque pays et, pour `sales`, les trois trimestres glissants qui contiennent une vente
 manquante.
 
-![Sens de la fenêtre](../assets/rolling_window_alignment.png)
+![Sens de la fenêtre](../assets/images/rolling_window_alignment.png)
 
 La convention des deux passes sert le cas où la cible d'évaluation est **publiée par trimestre** :
 le modèle apprend sur des ventes mensuelles agrégées en trimestres glissants (trois fois plus de

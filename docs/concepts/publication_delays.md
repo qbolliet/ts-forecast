@@ -20,7 +20,7 @@ pas encore.
 - **Date de prévision (`prediction_date`)** : la date à laquelle on se place pour
   décider ce qui est connu.
 
-![Impact du délai de publication](../assets/release_delay_impact.png)
+![Impact du délai de publication](../assets/images/release_delay_impact.png)
 
 ## Trois briques
 
@@ -44,7 +44,7 @@ fin est donc le même à toute fréquence ; le délai depuis le début lui ajout
 durée de la période cible. Le transformeur relit la fréquence du tableau
 (`delay_frequency`) avec la même règle.
 
-![Conversion du point de référence](../assets/reference_point_conversion.png)
+![Conversion du point de référence](../assets/images/reference_point_conversion.png)
 
 ### 3. Appliquer / inverser — `PublicationDelayTransformer`
 
@@ -55,7 +55,7 @@ Le transformeur sklearn (réversible) `PublicationDelayTransformer` ré-exprime 
 | `mask` | met à `NaN`, dans chaque période cible (`target_frequency`), les valeurs non encore publiées ou pas encore observées au même point de la période que `prediction_date` ; laisse les dates en place | conserver l'acquis, gérer les valeurs manquantes en aval |
 | `shift` | décale chaque série de son délai (la valeur de *t* apparaît à *t + délai*) | aligner toutes les séries sur ce qui est réellement disponible à chaque ligne |
 
-![Comparaison des deux stratégies](../assets/approach_comparison.png)
+![Comparaison des deux stratégies](../assets/images/approach_comparison.png)
 
 Les stratégies sont configurables par variable (`strategy={'gdp': 'shift',
 'cpi': 'mask'}`) ; une variable retardée absente du dictionnaire est laissée
