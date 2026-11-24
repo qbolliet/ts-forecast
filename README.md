@@ -1,4 +1,15 @@
 # ts-forecast
+
+[![tests](https://github.com/qbolliet/ts-forecast/actions/workflows/tests.yml/badge.svg)](https://github.com/qbolliet/ts-forecast/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg)](https://codecov.io/gh/qbolliet/ts-forecast)
+[![utils](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=utils&label=utils)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=utils)
+[![delays](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=delays&label=delays)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=delays)
+[![imputation](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=imputation&label=imputation)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=imputation)
+[![base](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=base&label=base)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=base)
+[![crossvals](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=crossvals&label=crossvals)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=crossvals)
+[![panel](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=panel&label=panel)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=panel)
+[![xy](https://codecov.io/gh/qbolliet/ts-forecast/branch/main/graph/badge.svg?component=xy&label=xy)](https://codecov.io/gh/qbolliet/ts-forecast/components?components%5B0%5D=xy)
+
 Tools for pseudo-real time forecasting on time series and panel data
 
 # Objectifs
@@ -12,18 +23,51 @@ Ce package poursuit les objectifs suivants :
 - Permettre l'utilisation de méthodes d'interprétabilité
 - L'agrégation sera traitée dans un package différent
 
+## Prérequis
+
+Python ≥ 3.13, `pandas>=3.0,<4` (Copy-on-Write, dtype chaîne `str` et résolution des dates
+inférée — `us` par défaut), `scikit-learn>=1.9,<2`, `numpy>=2.3.1,<3`, `joblib>=1.5.1,<2`
+(voir `pyproject.toml`). pandas 2 n'est plus pris en charge.
+
+Optionnel : l'extra `pyarrow` (`pip install "ts-forecast[pyarrow]"`, ou `uv sync --extra pyarrow`)
+installe pyarrow, que pandas utilise alors pour stocker le dtype chaîne `str` : même sémantique
+(manquant = `NaN`), stockage et opérations sur les chaînes plus rapides. Les sorties textuelles du
+paquet (fréquences, unités, origines…) sont en dtype `str` avec ou sans pyarrow ; la CI exécute les
+tests rapides sous les deux stockages.
 
 ## Test
 
-### Run all tests
+Les tests utilisent `pytest` ; la couverture (lignes et branches) est mesurée par `pytest-cov`
+et publiée par Codecov (badges ci-dessus : global, puis un badge par paquet). Seuil visé :
+90 % par module.
 
-python tests/run_tests.py --mode all
+### Commandes
 
-### Run fast tests only (excluding performance tests)
-python tests/run_tests.py --mode fast
+```bash
+python tests/run_tests.py --mode all          # tous les tests
+python tests/run_tests.py --mode unit         # tests unitaires (tests/unit/ et tests/support/)
+python tests/run_tests.py --mode integration  # tests d'intégration (tests/integration/)
+python tests/run_tests.py --mode fast         # tout sauf les tests marqués slow
+python tests/run_tests.py --mode coverage     # suite complète + rapports + contrôle du seuil de 90 %
+python tests/run_tests.py --path tests/unit/crossvals/base/   # cible libre (fichier, dossier, node id)
+```
 
-### Run with coverage report
-python tests/run_tests.py --mode coverage
+Le mode `coverage` produit `coverage.xml`, `coverage.json` et `htmlcov/`, puis échoue en listant
+les modules de `tsforecast/{utils,delays,imputation,base,crossvals,panel,xy}` sous 90 %.
 
-### Run specific test module
-python tests/run_tests.py --module test_base_classes
+### Arborescence
+
+```
+tests/
+├── unit/         # miroir exact de tsforecast/ : un composant, petites données à valeurs d'or
+├── integration/  # plusieurs composants publics enchaînés, ou jeux de données réalistes
+├── support/      # jeux de données, fixtures, perturbations et doublures partagés
+└── run_tests.py  # lanceur
+```
+
+### Intégration continue
+
+`.github/workflows/tests.yml` vérifie que les tests (hors `slow`) passent sur chaque pull
+request vers `main`. Sur chaque push sur `main`, il mesure la couverture, l'envoie à Codecov
+(secret `CODECOV_TOKEN`) et lance les tests `slow` dans un job séparé. La configuration Codecov
+est dans `codecov.yml`.

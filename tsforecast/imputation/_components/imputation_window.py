@@ -1,0 +1,1863 @@
+"""Imputation window calculation for mixed frequency imputation.
+
+This module provides the ImputationWindowCalculator class to compute the
+temporal window where all series have real (non-NaN) values using a
+multi-frequency coverage matrix approach, and to extend this window based
+on coverage threshold and imputation scope parameters.
+"""
+# Importation des modules
+# Modules de base
+import warnings
+from typing import Dict, List, Literal, Optional, Union, Tuple, cast
+
+# Manipulation de données
+import numpy as np
+import pandas as pd
+
+# Modules du package
+from ...utils.frequency.utils import (
+    detect_dataset_frequency,
+    detect_index_frequency,
+    target_offset_for_index,
+    is_higher_frequency,
+    normalize_frequency,
+)
+from ...panel.utils import (
+    check_entity_labels,
+    get_entity_codes,
+    get_entity_mask,
+    get_unique_panel_entities,
+    is_panel_data,
+    normalize_entity_key,
+)
+from ...utils.parse.utils import build_frequency_string
+from ...utils.time.utils import get_period_start, get_period_end
+from ...utils.frequency.converter import FrequencyConverter
+
+# Type pour le scope d'imputation (fenêtre de prédiction)
+ImputationScope = Literal['strict', 'extended_backward', 'extended_forward', 'extended_both']
+
+# Type pour le scope d'entraînement : les quatre valeurs d'ImputationScope, plus
+# 'unrestricted' qui supprime toute restriction de fenêtre à l'entraînement
+TrainingScope = Literal['strict', 'extended_backward', 'extended_forward',
+                        'extended_both', 'unrestricted']
+
+
+# Classe de calcul de la fenêtre d'imputation à partir des couvertures multi-fréquences
+class ImputationWindowCalculator:
+    """Calculate the imputation window and extended training windows for imputation.
+
+    The strict imputation window is the temporal interval where ALL series
+    in the dataset have data (directly or via sub-period coverage). A
+    quarterly observation, for example, is considered to cover all
+    high-frequency sub-periods (e.g., months) within that quarter.
+
+    The class builds a boolean coverage matrix at the highest detected
+    frequency, then derives coverage (fraction of columns covered) at
+    each date. The strict window is where coverage equals 1.0. An extended
+    window grows backward or forward from it as long as coverage meets the
+    specified threshold.
+
+    Columns with no observation at all — for a panel, per entity — are
+    excluded from that fraction. Such a column carries no information about
+    the temporal extent of its entity, while keeping it in the denominator
+    would cap coverage at ``(n-1)/n`` on every date, hence below 1.0, hence
+    an empty strict window and an entity where nothing can ever be imputed.
+    The exclusion is reported through ``structurally_absent_columns_`` and a
+    ``UserWarning``.
+
+    Columns that are observed but whose frequency cannot be detected (too
+    few observations, or irregular spacing) are excluded as well, from the
+    grid and from the denominator: without a frequency, the period an
+    observation covers is unknown, and guessing one would let a single
+    stray value veto or stretch the window. They are reported through
+    ``undetected_frequency_columns_`` and a ``UserWarning`` of their own.
+
+    The grid is anchored (start or end of period) like the columns at the
+    grid frequency; failing those, like the entity's own index, then like
+    its other observed columns, so the masks always reindex onto the data.
+
+    Three masks are derived from the same coverage computation, so that the
+    range a model is fitted on can be set independently of the range it
+    imputes:
+
+    - ``imputation_strict_window_mask_`` — coverage == 1.0, no extension.
+    - ``imputation_window_mask_`` — the prediction window, extended per
+      ``imputation_scope`` with ``coverage_threshold``.
+    - ``training_window_mask_`` — the training window, extended per
+      ``training_scope`` with ``training_coverage_threshold``; the value
+      'unrestricted' lifts the restriction entirely.
+
+    Both training parameters default to None, meaning "follow the prediction
+    window": the three masks then reduce to the historical single window.
+    Callers pick one through the ``kind`` argument of
+    :meth:`get_imputation_window_mask` and :meth:`get_mask_at_frequency`,
+    whose default 'imputation' preserves the historical behaviour.
+
+    For panel data (MultiIndex with entity levels + time level), windows
+    are computed independently per entity.
+
+    The internal high-frequency grid (used for ``imputation_window_mask_``,
+    ``coverage_by_date_``, etc.) can extend past the last date actually
+    present in the fitted data: it spans to the end of the last period
+    covered by a low-frequency observation, which may fall after the last
+    high-frequency row (e.g. a quarterly observation covers 3 months of
+    grid even if only the first month exists as a row). Consumers must
+    therefore never intersect this mask directly (e.g. via a bare ``&``)
+    with a mask computed on their own data index; always go through
+    :meth:`get_imputation_window_mask` (optionally passing ``data``), which
+    reindexes/aligns the mask onto the caller's index.
+
+    For panel data, every dict-valued attribute
+    (``imputation_window_start_``, ``imputation_window_end_``,
+    ``imputation_strict_window_start_``, ``imputation_strict_window_end_``,
+    ``column_coverage_`` and ``index_freq_``) is keyed by the entity
+    **tuple**, even when the panel has a single entity level:
+    ``('France',)``, never ``'France'``. These are exactly the keys returned
+    by :func:`tsforecast.panel.utils.get_unique_panel_entities`, so a consumer
+    can index them directly and a ``KeyError`` genuinely signals a bug rather
+    than a key-format mismatch.
+
+    The three window masks (``imputation_strict_window_mask_``,
+    ``imputation_window_mask_``, ``training_window_mask_``) and
+    ``coverage_by_date_`` are NOT dicts: for panel data they are a single
+    ``pd.Series`` on a MultiIndex ``(entity..., date)``, in the
+    level order of the input frame, so a caller can align them without
+    rebuilding a per-entity structure. An entity whose window could not be
+    determined (index frequency not identified, or empty coverage grid)
+    still contributes its rows, all ``False``; ``entities_without_window_``
+    lists those entities and a single ``UserWarning`` names them.
+    :meth:`get_mask_at_frequency` leaves them out of its result instead, so
+    a consumer can tell "no window" (absent) from "outside the window"
+    (``False``).
+
+    Methods taking an entity from the caller
+    (:meth:`get_columns_with_coverage`, :meth:`get_mask_at_frequency`)
+    normalize it via ``normalize_entity_key``, so scalars remain accepted at
+    the public boundary only.
+
+    Attributes:
+        imputation_window_start_: Start of the imputation window, following
+            ``imputation_scope`` — identical to
+            ``imputation_strict_window_start_`` when ``imputation_scope='strict'``
+            (the default), extended otherwise. Always matches the active
+            range of ``imputation_window_mask_``. Scalar for time series,
+            Dict[tuple, Optional[Timestamp]] for panel.
+        imputation_window_end_: End of the imputation window, following
+            ``imputation_scope``. Same type as imputation_window_start_.
+        imputation_strict_window_start_: Start of the STRICT imputation
+            window (coverage == 1.0), independent of ``imputation_scope``.
+            Scalar for time series, Dict[tuple, Optional[Timestamp]] for panel.
+        imputation_strict_window_end_: End of the strict imputation window,
+            independent of ``imputation_scope``. Same type as
+            imputation_strict_window_start_.
+        training_window_start_: Start of the training window, following
+            ``training_scope`` — identical to
+            ``imputation_strict_window_start_`` when ``imputation_scope='strict'``
+            (the default), extended otherwise. Always matches the active
+            range of ``training_window_mask_``. Scalar for time series,
+            Dict[tuple, Optional[Timestamp]] for panel.
+        training_window_end_: End of the training window, following
+            ``training_scope``. Same type as training_window_start_.
+        imputation_strict_window_mask_: Boolean mask on the high-frequency
+            grid identifying observations in the STRICT window
+            (coverage == 1.0), before any extension. ``pd.Series`` on a
+            DatetimeIndex for time series; ``pd.Series`` on a MultiIndex
+            ``(entity..., date)`` for panel, covering every row
+            of the fitted frame — entities without a window contribute
+            ``False`` rows.
+        imputation_window_mask_: Boolean mask on the high-frequency grid
+            identifying observations in the imputation (prediction) window,
+            i.e. the strict window extended per ``imputation_scope``. Same
+            type as imputation_strict_window_mask_.
+        training_window_mask_: Boolean mask on the high-frequency grid
+            identifying observations in the TRAINING window, i.e. the strict
+            window extended per ``training_scope`` — all True when that scope
+            is 'unrestricted'. Same type as imputation_strict_window_mask_.
+        coverage_by_date_: Ratio of columns covered per high-freq date.
+            ``pd.Series`` on a DatetimeIndex for time series; ``pd.Series``
+            on a MultiIndex ``(entity..., date)`` for panel, restricted to
+            entities that have a coverage grid.
+        structurally_absent_columns_: Columns with no observation at all,
+            excluded from the coverage denominator so that they cannot cap
+            coverage below 1.0 and veto the whole window of their entity.
+            Tuple of column names for a time series. Dict entity tuple ->
+            tuple of column names for a panel — the notion is a per-entity
+            one, a column possibly observed elsewhere in the panel but never
+            for that entity. The attribute is only meaningful for an entity
+            that has a coverage grid: an entity listed in
+            ``entities_without_window_`` (index frequency not identified, or
+            no observation at all in any column) always carries an empty
+            tuple, its columns never having been weighed against one another.
+            Their entry in ``column_coverage_`` stays ``(None, None)``: the
+            exclusion bears on the denominator, not on the reported coverage.
+        undetected_frequency_columns_: Columns that are observed but whose
+            frequency cannot be detected (fewer observations than detection
+            requires, or irregular spacing), excluded from the grid and from
+            the coverage denominator. Same type and same per-entity rule as
+            ``structurally_absent_columns_``; their ``column_coverage_``
+            entry is ``(None, None)`` too.
+        entities_without_window_: Tuple of entity key tuples whose imputation
+            window could not be determined (index frequency not identified,
+            or empty coverage grid). Their rows appear in the three masks as
+            ``False`` and they are absent from :meth:`get_mask_at_frequency`.
+            Empty tuple for time series data.
+        index_freq_: Detected highest frequency. str for time series,
+            Dict[tuple, Optional[str]] for panel.
+        column_coverage_: Dict mapping column names to (start, end)
+            coverage timestamps, for time series data. For panel data,
+            Dict[tuple, Optional[Dict[str, Tuple]]] mapping each entity
+            key to its own per-column coverage dict (one entry per
+            entity, not just the last one fitted).
+
+    Examples:
+        >>> import pandas as pd
+        >>> import numpy as np
+        >>> dates = pd.date_range('2023-01-31', periods=12, freq='ME')
+        >>> data = pd.DataFrame({
+        ...     'var1': [np.nan, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, np.nan],
+        ...     'var2': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
+        ... }, index=dates)
+        >>> calc = ImputationWindowCalculator(
+        ...     imputation_scope='extended_both',
+        ...     training_scope='unrestricted',
+        ... )
+        >>> calc.fit(data) is calc
+        True
+        >>> print(calc.imputation_window_start_, calc.imputation_window_end_)
+        2023-01-31 00:00:00 2023-12-31 00:00:00
+        >>> strict = calc.get_imputation_window_mask(data, kind='strict')
+        >>> training = calc.get_imputation_window_mask(data, kind='training')
+        >>> int(strict.sum()), int(training.sum())
+        (10, 12)
+    """
+
+    # Initialisation
+    def __init__(
+        self,
+        coverage_threshold: float = 0.5,
+        imputation_scope: ImputationScope = 'strict',
+        training_scope: Optional[TrainingScope] = None,
+        training_coverage_threshold: Optional[float] = None,
+        min_columns: int = 1,
+    ):
+        """Initialize the ImputationWindowCalculator.
+
+        Args:
+            coverage_threshold: Minimum fraction of columns that must have
+                coverage for a date to be included in the extended PREDICTION
+                window. Value between 0 and 1. Default 0.5.
+            imputation_scope: How to determine the imputation (prediction)
+                window:
+                - 'strict': Only dates where all columns have coverage.
+                - 'extended_backward': Extend before the strict window
+                  where coverage >= threshold.
+                - 'extended_forward': Extend after the strict window
+                  where coverage >= threshold.
+                - 'extended_both': Extend in both directions.
+            training_scope: How to determine the training window. Accepts the
+                four ``imputation_scope`` values plus 'unrestricted', which
+                lifts the window restriction altogether (mask everywhere True)
+                so a model can be fitted on a wider range than it imputes.
+                None (the default) follows ``imputation_scope``, which keeps a
+                single shared window.
+            training_coverage_threshold: Coverage threshold of the training
+                window extensions. None (the default) follows
+                ``coverage_threshold``.
+            min_columns: Minimum number of data columns required.
+                Must be at least 1. Default 1.
+
+        Raises:
+            ValueError: If coverage_threshold or training_coverage_threshold
+                is not in [0, 1], if imputation_scope or training_scope is
+                invalid, or if min_columns < 1.
+        """
+        # Validation des paramètres
+        if not 0 <= coverage_threshold <= 1:
+            raise ValueError(
+                f"coverage_threshold must be between 0 and 1, got {coverage_threshold}"
+            )
+        if imputation_scope not in ('strict', 'extended_backward', 'extended_forward', 'extended_both'):
+            raise ValueError(
+                f"imputation_scope must be one of 'strict', 'extended_backward', "
+                f"'extended_forward', 'extended_both', got '{imputation_scope}'"
+            )
+        if training_scope is not None and training_scope not in (
+            'strict', 'extended_backward', 'extended_forward', 'extended_both', 'unrestricted'
+        ):
+            raise ValueError(
+                f"training_scope must be None or one of 'strict', 'extended_backward', "
+                f"'extended_forward', 'extended_both', 'unrestricted', got '{training_scope}'"
+            )
+        if training_coverage_threshold is not None and not 0 <= training_coverage_threshold <= 1:
+            raise ValueError(
+                f"training_coverage_threshold must be between 0 and 1, "
+                f"got {training_coverage_threshold}"
+            )
+        if min_columns < 1:
+            raise ValueError(f"min_columns must be at least 1, got {min_columns}")
+
+        # Stockage des paramètres, tels que reçus : les défauts None ne sont pas
+        # résolus ici, la convention sklearn imposant que get_params()/clone()
+        # retrouvent la valeur fournie par l'appelant (cf. _effective_* plus bas)
+        self.coverage_threshold = coverage_threshold
+        self.imputation_scope = imputation_scope
+        self.training_scope = training_scope
+        self.training_coverage_threshold = training_coverage_threshold
+        self.min_columns = min_columns
+
+        # Attributs de fenêtre d'imputation — scalaires pour TS, dict par entité pour panel
+        # Bornes suivant imputation_scope (== bornes strictes en scope 'strict')
+        self.imputation_window_start_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
+        self.imputation_window_end_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
+        # Bornes de la fenêtre stricte, indépendantes de imputation_scope
+        self.imputation_strict_window_start_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
+        self.imputation_strict_window_end_: Optional[Union[pd.Timestamp, Dict[tuple, Optional[pd.Timestamp]]]] = None
+        # Masques de fenêtre : pd.Series sur DatetimeIndex pour une série
+        # temporelle ; pd.Series unique sur MultiIndex (entity..., date) pour un panel
+        # Masque de la fenêtre stricte, avant toute extension
+        self.imputation_strict_window_mask_: Optional[pd.Series] = None
+        # Masque de la fenêtre d'imputation (prédiction), étendu selon imputation_scope
+        self.imputation_window_mask_: Optional[pd.Series] = None
+        # Masque de la fenêtre d'entraînement, étendu selon training_scope
+        self.training_window_mask_: Optional[pd.Series] = None
+        # Entités de panel sans fenêtre déterminable (fréquence d'index non
+        # identifiée ou grille de couverture vide) : leurs lignes figurent à
+        # False dans les trois masques, cet attribut les recense explicitement
+        self.entities_without_window_: Tuple[tuple, ...] = ()
+        # Colonnes sans aucune observation, écartées du dénominateur de
+        # couverture : tuple de noms pour une série temporelle, dict par entité
+        # pour un panel (une entité sans colonne absente porte un tuple vide)
+        self.structurally_absent_columns_: Union[
+            Tuple[str, ...], Dict[tuple, Tuple[str, ...]]
+        ] = ()
+        # Colonnes observées mais de fréquence indétectable, écartées de la
+        # grille et du dénominateur : même structure que la précédente
+        self.undetected_frequency_columns_: Union[
+            Tuple[str, ...], Dict[tuple, Tuple[str, ...]]
+        ] = ()
+
+        # Attributs auxiliaires
+        self.coverage_by_date_: Optional[pd.Series] = None
+        self.index_freq_: Optional[Union[str, Dict[tuple, Optional[str]]]] = None
+        # Dict[str, Tuple] pour TS ; Dict[tuple, Optional[Dict[str, Tuple]]] par entité pour panel
+        self.column_coverage_: Optional[Union[
+            Dict[str, Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]],
+            Dict[tuple, Optional[Dict[str, Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]]]],
+        ]] = None
+
+        # Attributs internes
+        self._detected_frequencies: Optional[Dict] = None
+        self._is_panel: bool = False
+        self._is_fitted: bool = False
+        self._converter = FrequencyConverter()
+        # Noms des niveaux de l'index du frame ajusté, capturés au fit pour
+        # renommer le MultiIndex des masques de panel
+        self._index_names: Optional[List[str]] = None
+
+    # Résolution du défaut "suit la fenêtre de prédiction" pour le scope d'entraînement
+    @property
+    def _effective_training_scope(self) -> str:
+        """Training scope actually applied, falling back to imputation_scope.
+
+        Returns:
+            ``training_scope`` when set, otherwise ``imputation_scope``.
+        """
+        return self.training_scope if self.training_scope is not None else self.imputation_scope
+
+    # Résolution du défaut "suit la fenêtre de prédiction" pour le seuil d'entraînement
+    @property
+    def _effective_training_coverage_threshold(self) -> float:
+        """Training coverage threshold actually applied, falling back to coverage_threshold.
+
+        Returns:
+            ``training_coverage_threshold`` when set, otherwise
+            ``coverage_threshold``.
+        """
+        return (
+            self.training_coverage_threshold
+            if self.training_coverage_threshold is not None
+            else self.coverage_threshold
+        )
+
+    # Méthode d'entraînement du calculateur
+    def fit(self, data: pd.DataFrame) -> 'ImputationWindowCalculator':
+        """Calculate the imputation and training windows from data.
+
+        Detects column frequencies, builds a coverage matrix at the
+        highest detected frequency, then derives the strict window (all
+        columns covered) and extends it in two independent directions.
+        three boolean masks are stored alongside the window bounds:
+        ``imputation_strict_window_mask_`` (no extension),
+        ``imputation_window_mask_`` (extended per ``imputation_scope``) and
+        ``training_window_mask_`` (extended per ``training_scope``).
+
+        Args:
+            data: DataFrame with DatetimeIndex (time series) or MultiIndex
+                where the last level is time and earlier levels identify
+                panel entities.
+
+        Returns:
+            self: The fitted calculator.
+
+        Raises:
+            ValueError: If data is invalid, has too few columns, or no column
+                frequency can be detected. A frame without any strict window
+                — time series or panel alike — does not raise: its masks are
+                all False (all True for an ``'unrestricted'`` training scope)
+                and a single warning says so.
+
+        Examples:
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> dates = pd.date_range('2023-01-31', periods=12, freq='ME')
+            >>> data = pd.DataFrame({
+            ...     'var1': [np.nan] + list(range(1, 11)) + [np.nan],
+            ...     'var2': range(12),
+            ... }, index=dates)
+            >>> calc = ImputationWindowCalculator().fit(data)
+            >>> print(calc.imputation_window_start_, calc.imputation_window_end_)
+            2023-02-28 00:00:00 2023-11-30 00:00:00
+        """
+        # Validation des données d'entrée
+        if not isinstance(data, pd.DataFrame):
+            raise ValueError(f"data must be a pandas DataFrame, got {type(data).__name__}")
+        if data.empty:
+            raise ValueError("data cannot be empty")
+        if not isinstance(data.index, (pd.DatetimeIndex, pd.MultiIndex)):
+            raise ValueError("data must have a DatetimeIndex or MultiIndex with datetime level")
+
+        # Détection du type de données (panel ou séries temporelles)
+        self._is_panel = is_panel_data(data=data)
+        # Capture des noms de niveaux d'index pour le renommage du MultiIndex
+        # des masques de panel
+        self._index_names = list(data.index.names)
+
+        # Vérification du nombre minimal de colonnes
+        if len(data.columns) < self.min_columns:
+            raise ValueError(
+                f"Data has {len(data.columns)} columns, but min_columns={self.min_columns}"
+            )
+
+        # Détection des fréquences par colonne (et par entité pour panel)
+        self._detected_frequencies = detect_dataset_frequency(data)
+        # Détection de la fréquence de l'index : entité par entité sur un
+        # panel, une entité indéterminable (une seule ligne) valant None — elle
+        # rejoint alors les entités sans fenêtre, sans coûter la leur aux autres
+        if self._is_panel:
+            self.index_freq_ = self._detect_entity_index_frequencies(data.index)
+        else:
+            self.index_freq_ = detect_index_frequency(data.index)
+
+        # Calcul des fenêtres selon le type de données
+        if self._is_panel:
+            self._fit_panel(data)
+        else:
+            self._fit_ts(data)
+
+        self._is_fitted = True
+        return self
+
+    # Méthode auxiliaire de détection de la fréquence d'index, entité par entité
+    @staticmethod
+    def _detect_entity_index_frequencies(
+        index: pd.MultiIndex,
+    ) -> Dict[tuple, Optional[str]]:
+        """Detect the index frequency of each entity, None where it cannot be.
+
+        :func:`detect_index_frequency` raises as soon as one entity holds fewer
+        than two dates, which would cost every entity its window. Each entity
+        is detected on its own instead, and one whose frequency cannot be read
+        maps to None: :meth:`_fit_panel` then lists it among
+        ``entities_without_window_``.
+
+        Args:
+            index: Panel ``MultiIndex``, the date as last level.
+
+        Returns:
+            Mapping from entity key tuple to detected frequency, or None, in
+            order of first appearance of the entities.
+
+        Raises:
+            ValueError: If an entity label is missing (NaN, None): such rows
+                belong to no entity.
+
+        Examples:
+            >>> idx = pd.MultiIndex.from_tuples(
+            ...     [('A', pd.Timestamp('2021-01-31')), ('A', pd.Timestamp('2021-02-28')),
+            ...      ('B', pd.Timestamp('2021-01-31'))], names=['entity', 'date'])
+            >>> ImputationWindowCalculator._detect_entity_index_frequencies(idx)
+            {('A',): 'M', ('B',): None}
+        """
+        # Refus des étiquettes d'entité manquantes : leurs lignes n'ont pas d'entité
+        check_entity_labels(index)
+
+        # Code entier de l'entité de chaque ligne, sans tuple par ligne
+        codes, entities = get_entity_codes(index)
+        # Lignes regroupées par entité en un seul tri stable : les lignes d'une
+        # entité forment une tranche contiguë, dans leur ordre d'origine
+        order = np.argsort(codes, kind='stable')
+        bounds = np.searchsorted(codes[order], np.arange(len(entities) + 1))
+        dates = index.get_level_values(-1)
+
+        # Détection entité par entité, l'échec d'une seule n'arrêtant rien
+        frequencies: Dict[tuple, Optional[str]] = {}
+        for position, entity in enumerate(entities):
+            try:
+                frequency = detect_index_frequency(dates[order[bounds[position]:bounds[position + 1]]])
+            except ValueError:
+                frequency = None
+            frequencies[entity] = frequency
+        return frequencies
+
+    # Méthode auxiliaire d'estimation de la fenêtre sur des données de séries temporelles
+    def _fit_ts(self, data: pd.DataFrame) -> None:
+        """Compute windows and masks for time series data (DatetimeIndex).
+
+        Delegates to _compute_window and stores all resulting attributes:
+        imputation window bounds, the three window masks (strict, imputation
+        and training), the coverage series and the column coverage mapping.
+
+        Args:
+            data: DataFrame with a simple DatetimeIndex.
+        """
+        # Fréquence la plus élevée parmi toutes les colonnes
+        valid_freqs = [f for f in self._detected_frequencies.values() if f is not None]
+        if not valid_freqs:
+            raise ValueError("Cannot detect any column frequency in the data")
+
+        # Calcul de la fenêtre pour l'unique entité TS
+        result = self._compute_window(data, self._detected_frequencies, self.index_freq_)
+
+        # Valorisation des bornes de fenêtre (scope-dépendantes et strictes)
+        self.imputation_window_start_ = result['imputation_start']
+        self.imputation_window_end_ = result['imputation_end']
+        self.training_window_start_ = result['training_start']
+        self.training_window_end_ = result['training_end']
+        self.imputation_strict_window_start_ = result['imputation_strict_start']
+        self.imputation_strict_window_end_ = result['imputation_strict_end']
+
+        # Valorisation des trois masques
+        self.imputation_strict_window_mask_ = result['imputation_strict_window_mask']
+        self.imputation_window_mask_ = result['imputation_window_mask']
+        self.training_window_mask_ = result['training_window_mask']
+
+        # Valorisation des attributs auxiliaires
+        self.coverage_by_date_ = result['coverage']
+        self.column_coverage_ = result['column_coverage']
+        # Notion sans objet hors panel (réinitialisation en cas de ré-estimation)
+        self.entities_without_window_ = ()
+
+        # Colonnes écartées du dénominateur : jamais silencieux
+        self.structurally_absent_columns_ = result['absent_columns']
+        self.undetected_frequency_columns_ = result['undetected_columns']
+        self._warn_excluded_columns(
+            {(): result['absent_columns']}, {(): result['undetected_columns']}
+        )
+
+        # Aucune période couverte par toutes les colonnes : fenêtre vide
+        if result['no_strict_window']:
+            self._warn_no_strict_window(())
+
+    # Méthode auxiliaire d'estimation de la fenêtre sur des données de panel
+    def _fit_panel(self, data: pd.DataFrame) -> None:
+        """Compute per-entity windows and masks for panel data (MultiIndex).
+
+        Iterates over each panel entity, extracts its sub-DataFrame, and
+        calls _compute_window. Window bounds (strict and scope-dependent) and
+        ``column_coverage_`` are aggregated into dicts keyed by entity tuple.
+        The three boolean masks and ``coverage_by_date_`` are instead
+        assembled into a single ``pd.Series`` on a MultiIndex
+        ``(entity..., date)``: an entity whose window cannot be
+        determined (index frequency not identified, or empty coverage grid)
+        contributes its frame rows as ``False`` and is recorded in
+        ``entities_without_window_``.
+
+        Args:
+            data: Panel DataFrame with MultiIndex whose last level is time.
+        """
+        # Extraction des entités des données
+        entities = get_unique_panel_entities(data)
+
+        # Initialisation des dictionnaires de bornes (scalaires par entité)
+        self.imputation_window_start_ = {}
+        self.imputation_window_end_ = {}
+        self.training_window_start_ = {}
+        self.training_window_end_ = {}
+        self.imputation_strict_window_start_ = {}
+        self.imputation_strict_window_end_ = {}
+        self.column_coverage_ = {}
+
+        # Contributions par entité, fusionnées ensuite en une unique Series à
+        # MultiIndex (entity..., date)
+        strict_mask_parts: List[pd.Series] = []
+        imputation_mask_parts: List[pd.Series] = []
+        training_mask_parts: List[pd.Series] = []
+        coverage_parts: List[pd.Series] = []
+        entities_without_window: List[tuple] = []
+        entities_without_strict_window: List[tuple] = []
+        absent_by_entity: Dict[tuple, Tuple[str, ...]] = {}
+        undetected_by_entity: Dict[tuple, Tuple[str, ...]] = {}
+
+        # Parcours des entités
+        for entity in entities:
+            # Extraction du sous-DataFrame de l'entité avec index temporel simple
+            entity_row_mask = self._get_entity_row_mask(data, entity)
+            entity_df = data[entity_row_mask].copy()
+            entity_df.index = entity_df.index.get_level_values(-1)
+            # Dates réelles de l'entité dans le frame ajusté : servent à couvrir
+            # ses lignes à False quand aucune fenêtre n'est déterminable
+            entity_frame_dates = entity_df.index
+
+            # Fréquences des colonnes pour cette entité
+            col_freqs = {
+                col: self._detected_frequencies.get(entity + (col,))
+                for col in data.columns
+            }
+
+            # Clé d'entité TOUJOURS le tuple rendu par get_unique_panel_entities,
+            # y compris à un seul niveau : ('France',) et jamais 'France'.
+            entity_key = entity
+
+            # Cas où la fréquence de l'index n'a pas pu être identifiée : aucune
+            # fenêtre exploitable, mais l'entité a toutes ses lignes à False
+            if self.index_freq_[entity_key] is None:
+                # Ajout au registre des entités sans fenêtre
+                self._store_entity_without_window(entity_key)
+                entities_without_window.append(entity_key)
+                absent_by_entity[entity_key] = ()
+                undetected_by_entity[entity_key] = ()
+                # Série de booléens False
+                self._append_false_mask_parts(
+                    entity_key, entity_frame_dates,
+                    strict_mask_parts, imputation_mask_parts, training_mask_parts,
+                )
+                continue
+
+            # Calcul de la fenêtre d'imputation
+            result = self._compute_window(entity_df, col_freqs, self.index_freq_[entity_key])
+
+            # Complétion des dictionnaires de bornes (scope-dépendantes et strictes)
+            self.imputation_window_start_[entity_key] = result['imputation_start']
+            self.imputation_window_end_[entity_key] = result['imputation_end']
+            self.training_window_start_[entity_key] = result['training_start']
+            self.training_window_end_[entity_key] = result['training_end']
+            self.imputation_strict_window_start_[entity_key] = result['imputation_strict_start']
+            self.imputation_strict_window_end_[entity_key] = result['imputation_strict_end']
+            self.column_coverage_[entity_key] = result['column_coverage']
+            absent_by_entity[entity_key] = result['absent_columns']
+            undetected_by_entity[entity_key] = result['undetected_columns']
+            if result['no_strict_window']:
+                entities_without_strict_window.append(entity_key)
+
+            # Cas où la grille de couverture est vide : même traitement que la
+            # fréquence non identifiée, l'entité n'a pas de masque exploitable
+            if result['imputation_window_mask'] is None:
+                entities_without_window.append(entity_key)
+                self._append_false_mask_parts(
+                    entity_key, entity_frame_dates,
+                    strict_mask_parts, imputation_mask_parts, training_mask_parts,
+                )
+                continue
+
+            # Contribution des trois masques et de la couverture, préfixés par
+            # la clé d'entité pour former le MultiIndex final
+            strict_mask_parts.append(self._entity_series_with_multiindex(
+                result['imputation_strict_window_mask'], entity_key))
+            imputation_mask_parts.append(self._entity_series_with_multiindex(
+                result['imputation_window_mask'], entity_key))
+            training_mask_parts.append(self._entity_series_with_multiindex(
+                result['training_window_mask'], entity_key))
+            coverage_parts.append(self._entity_series_with_multiindex(
+                result['coverage'], entity_key))
+
+        # Fusion des contributions en une Series unique à MultiIndex
+        self.imputation_strict_window_mask_ = self._assemble_panel_series(strict_mask_parts)
+        self.imputation_window_mask_ = self._assemble_panel_series(imputation_mask_parts)
+        self.training_window_mask_ = self._assemble_panel_series(training_mask_parts)
+        self.coverage_by_date_ = self._assemble_panel_series(coverage_parts)
+        self.entities_without_window_ = tuple(entities_without_window)
+
+        # Colonnes écartées du dénominateur, par entité : jamais silencieux
+        self.structurally_absent_columns_ = absent_by_entity
+        self.undetected_frequency_columns_ = undetected_by_entity
+        self._warn_excluded_columns(absent_by_entity, undetected_by_entity)
+
+        # Entités sans fenêtre : leurs lignes sont à False dans les trois
+        # masques, ce qui retire silencieusement toute l'entité
+        if entities_without_window:
+            warnings.warn(
+                f"{len(entities_without_window)} entity(ies) without a determinable "
+                f"window (index frequency not identified, or no observation at all): "
+                f"{list(entities_without_window)}. Their rows are False in the three "
+                "masks; they are listed in entities_without_window_.",
+                UserWarning
+            )
+
+        # Entités sans période couverte par toutes leurs colonnes : un seul
+        # avertissement les nommant toutes, jamais un par entité. Aucune entité
+        # n'en a-t-elle une, le panel suit la règle de la série temporelle :
+        # les trois masques existent — tout faux, ou tout vrai à
+        # l'entraînement sous training_scope='unrestricted' — et rien n'est
+        # imputable. Jamais une erreur : elle renvoyait l'imputeur vers des
+        # masques tout-vrais, qui imputaient tout le panel là où la même série
+        # temporelle n'impute rien
+        if entities_without_strict_window:
+            self._warn_no_strict_window(tuple(entities_without_strict_window))
+
+    # Méthode auxiliaire d'avertissement sur l'absence de fenêtre stricte
+    @staticmethod
+    def _warn_no_strict_window(entities: Tuple[tuple, ...]) -> None:
+        """Warn once that no period is covered by every column.
+
+        The strict window is then empty, hence the imputation window too —
+        no extension can create a window where no strict one exists —, and
+        only ``training_scope='unrestricted'`` still trains.
+
+        Args:
+            entities: Entities concerned on a panel, ``()`` for a time series.
+        """
+        # Sujet du message : le jeu entier, ou les entités nommées
+        subject = (
+            "in the DataFrame" if not entities
+            else f"for {len(entities)} entity(ies) {list(entities)}"
+        )
+        warnings.warn(
+            f"There is no period {subject} where all the variables are available: "
+            f"the imputation window is empty, so no value can be imputed, and only "
+            f"training_scope='unrestricted' allows training in this case.",
+            UserWarning
+        )
+
+    # Méthode auxiliaire d'avertissement sur les colonnes écartées du dénominateur
+    @classmethod
+    def _warn_excluded_columns(
+        cls,
+        absent_by_entity: Dict[tuple, Tuple[str, ...]],
+        undetected_by_entity: Dict[tuple, Tuple[str, ...]],
+    ) -> None:
+        """Warn about the columns dropped from the coverage denominator.
+
+        A column with no observation at all says nothing about the temporal
+        extent of its entity, so it is excluded rather than allowed to cap
+        coverage below 1.0 forever. A column observed without a detectable
+        frequency covers an unknown period, so it is excluded too. Both
+        exclusions widen the window, hence the imputations, so neither is
+        silent: one warning per kind of exclusion, aggregated over entities.
+
+        Args:
+            absent_by_entity: Structurally absent columns, keyed by entity
+                tuple; ``()`` is the degenerate key of a time series.
+            undetected_by_entity: Observed columns without a detectable
+                frequency, same keys.
+        """
+        cls._warn_excluded(
+            absent_by_entity,
+            "Columns without any observation are excluded from the coverage "
+            "denominator, which widens the imputation window",
+            "structurally_absent_columns_",
+        )
+        cls._warn_excluded(
+            undetected_by_entity,
+            "Columns whose frequency cannot be detected (too few observations or "
+            "irregular spacing) are excluded from the coverage grid and denominator",
+            "undetected_frequency_columns_",
+        )
+
+    # Méthode auxiliaire d'émission d'un avertissement agrégé d'exclusion
+    @staticmethod
+    def _warn_excluded(
+        columns_by_entity: Dict[tuple, Tuple[str, ...]],
+        reason: str,
+        attribute: str,
+    ) -> None:
+        """Emit one aggregated warning naming the excluded columns of every entity.
+
+        Args:
+            columns_by_entity: Excluded columns, keyed by entity tuple; ``()``
+                is the degenerate key of a time series.
+            reason: Leading sentence of the warning.
+            attribute: Fitted attribute listing those columns.
+        """
+        # Rendu par entité, restreint à celles qui ont effectivement perdu une colonne
+        reported = {
+            entity: columns for entity, columns in columns_by_entity.items() if columns
+        }
+        if not reported:
+            return
+
+        # Message : la clé dégénérée d'une série temporelle n'est pas nommée
+        details = "; ".join(
+            (f"{sorted(columns)}" if not entity else f"{entity}: {sorted(columns)}")
+            for entity, columns in reported.items()
+        )
+        warnings.warn(
+            f"{reason} ({details}). They are listed in {attribute}.",
+            UserWarning
+        )
+
+    # Méthode auxiliaire d'enregistrement des bornes None d'une entité sans fenêtre
+    def _store_entity_without_window(self, entity_key: tuple) -> None:
+        """Record None window bounds and coverage for an entity with no window.
+
+        ``column_coverage_`` must stay keyed by every entity, otherwise
+        :meth:`get_columns_with_coverage` raises a ``KeyError`` on those.
+
+        Args:
+            entity_key: Entity key tuple whose index frequency could not be
+                identified or whose coverage grid is empty.
+        """
+        # Bornes indéterminées (dicts par entité, inchangé)
+        self.imputation_window_start_[entity_key] = None
+        self.imputation_window_end_[entity_key] = None
+        self.training_window_start_[entity_key] = None
+        self.training_window_end_[entity_key] = None
+        self.imputation_strict_window_start_[entity_key] = None
+        self.imputation_strict_window_end_[entity_key] = None
+        self.column_coverage_[entity_key] = None
+
+    # Méthode auxiliaire d'ajout d'une contribution tout-False pour une entité
+    def _append_false_mask_parts(
+        self,
+        entity_key: tuple,
+        entity_frame_dates: pd.DatetimeIndex,
+        *mask_parts_lists: List[pd.Series],
+    ) -> None:
+        """Append an all-False contribution covering the entity's frame rows.
+
+        An entity without a determinable window must still contribute its
+        rows (value ``False``, not an absence of rows) so callers can align
+        the mask without rebuilding it.
+
+        Args:
+            entity_key: Entity key tuple, prepended as MultiIndex levels.
+            entity_frame_dates: Dates of the entity's rows in the fitted frame.
+            *mask_parts_lists: Accumulator lists to append the contribution to.
+        """
+        # Contribution tout-faux sur les dates réelles du frame ajusté
+        false_series = pd.Series(False, index=entity_frame_dates)
+        for parts in mask_parts_lists:
+            parts.append(self._entity_series_with_multiindex(false_series, entity_key))
+
+    # Méthode auxiliaire de préfixage de l'index d'une Series par la clé d'entité
+    def _entity_series_with_multiindex(
+        self,
+        series: pd.Series,
+        entity_key: tuple,
+    ) -> pd.Series:
+        """Prefix a per-entity Series index with the entity key levels.
+
+        Args:
+            series: Series indexed by a simple DatetimeIndex (one entity's
+                high-frequency grid, or one entity's frame dates).
+            entity_key: Entity key tuple prepended as leading index levels.
+
+        Returns:
+            Series carrying the same values on a MultiIndex ``(entity..., date)``.
+        """
+        # Construction du MultiIndex (niveaux d'entité..., date)
+        tuples = [(*entity_key, date) for date in series.index]
+        multi_index = pd.MultiIndex.from_tuples(tuples)
+        return pd.Series(series.to_numpy(), index=multi_index)
+
+    # Méthode auxiliaire de fusion des contributions par entité en une Series unique
+    def _assemble_panel_series(self, parts: List[pd.Series]) -> pd.Series:
+        """Concatenate per-entity Series into one MultiIndex Series.
+
+        Args:
+            parts: Per-entity Series already carrying a ``(entity..., date)``
+                MultiIndex.
+
+        Returns:
+            Single Series spanning every contributed entity, its MultiIndex
+            levels named after the fitted frame's index. An empty (dtype-bool)
+            Series when no entity contributed.
+        """
+        # Concaténation ; repli sur une Series vide si aucune contribution
+        combined = pd.concat(parts) if parts else pd.Series(dtype=bool)
+        if isinstance(combined.index, pd.MultiIndex) and self._index_names is not None:
+            combined.index = combined.index.set_names(self._index_names)
+        return combined
+
+    # Méthode auxiliaire permettant d'extraire des observations relatives à une entité du panel
+    # Délégation à la fonction utilitaire partagée de tsforecast.panel.utils
+    def _get_entity_row_mask(self, data: pd.DataFrame, entity: tuple) -> np.ndarray:
+        """Build a boolean row mask selecting the given entity from panel data.
+
+        Thin wrapper over :func:`tsforecast.panel.utils.get_entity_mask`.
+
+        Args:
+            data: Panel DataFrame with MultiIndex.
+            entity: Normalized entity key tuple.
+
+        Returns:
+            Boolean numpy array of length len(data).
+        """
+        return get_entity_mask(data, entity)
+
+    # Méthode de calcul de la fenêtre d'imputation et d'entraînement pour une entité
+    def _compute_window(
+        self,
+        df: pd.DataFrame,
+        col_freqs: Dict[str, Optional[str]],
+        index_freq: str,
+    ) -> Dict:
+        """Compute imputation and training windows for one entity.
+
+        Builds the high-frequency grid and coverage matrix, derives the
+        coverage series, then constructs the strict window mask
+        (coverage == 1.0). Strict window bounds are derived from this mask,
+        independently of imputation_scope. TWO further masks are then derived
+        from it by _build_scope_mask, which never mutates it: the imputation
+        (prediction) mask, extended per imputation_scope / coverage_threshold,
+        and the training mask, extended per training_scope /
+        training_coverage_threshold. Scope-dependent bounds are derived from
+        the imputation mask only.
+
+        Args:
+            df: DataFrame with simple DatetimeIndex for the entity.
+            col_freqs: Dict mapping column names to detected frequencies.
+            index_freq: Highest (most granular) frequency for this entity,
+                used as the reference grid frequency.
+
+        Returns:
+            Dict with keys:
+                - 'imputation_start': Start of the scope-dependent window
+                  (== 'imputation_strict_start' when imputation_scope is
+                  'strict').
+                - 'imputation_end': End of the scope-dependent window.
+                - 'training_start': Start of the scope-dependent window
+                   (== 'imputation_strict_start' when training_scope is
+                    'strict').
+                - 'training_end': End of the scope-dependent window.
+                - 'imputation_strict_start': Start of the strict window,
+                  independent of imputation_scope.
+                - 'imputation_strict_end': End of the strict window,
+                  independent of imputation_scope.
+                - 'imputation_strict_window_mask': Boolean pd.Series on the
+                  grid where coverage == 1.0, BEFORE any extension.
+                - 'imputation_window_mask': Same, extended per
+                  imputation_scope / coverage_threshold.
+                - 'training_window_mask': Same, extended per training_scope
+                  / training_coverage_threshold (all True when the effective
+                  training scope is 'unrestricted').
+                - 'coverage': coverage pd.Series on the high-freq grid.
+                - 'column_coverage': Dict of per-column (start, end)
+                  tuples.
+                - 'absent_columns': Tuple of the columns without any
+                  observation, excluded from the coverage denominator.
+                - 'undetected_columns': Tuple of the observed columns without
+                  a detectable frequency, excluded from the grid and from the
+                  coverage denominator.
+                - 'no_strict_window': True when no date of the grid is
+                  covered by every column. Reported, never warned here: the
+                  caller emits one warning for the whole fit, naming the
+                  entities of a panel.
+            Every value is None — the two tuples empty, the flag False — when
+            the grid is empty (no observation in a column of detected
+            frequency).
+        """
+        # Initialisation du dictionnaire résultat par défaut
+        _none_result = {
+            'no_strict_window': False,
+            'imputation_start': None,
+            'imputation_end': None,
+            'training_start': None,
+            'training_end': None,
+            'imputation_strict_start': None,
+            'imputation_strict_end': None,
+            'imputation_strict_window_mask': None,
+            'imputation_window_mask': None,
+            'training_window_mask': None,
+            'coverage': None,
+            'column_coverage': None,
+            'absent_columns': (),
+            'undetected_columns': (),
+        }
+
+        # Colonnes observées mais de fréquence indétectable (trop peu
+        # d'observations, espacement irrégulier) : sans fréquence, la période
+        # couverte par une observation est inconnue. Les garder obligerait à en
+        # deviner une — une valeur isolée pourrait alors opposer un veto à la
+        # fenêtre ou étirer la grille. Elles sont écartées de la grille comme
+        # du dénominateur, à l'image des couples non détectés de l'imputeur
+        undetected_columns = tuple(
+            col for col in df.columns
+            if col_freqs.get(col) is None and bool(df[col].notna().any())
+        )
+
+        # Construction de la grille haute fréquence de référence
+        grid = self._build_index_freq_grid(df, col_freqs, index_freq)
+
+        # Cas où la grille est vide
+        if grid is None or len(grid) == 0:
+            return _none_result
+
+        # Construction de la matrice de couverture booléenne
+        coverage_matrix = self._build_coverage_matrix(df, col_freqs, grid, index_freq)
+
+        # Colonnes structurellement absentes : aucune observation sur toute la
+        # grille. Elles ne disent rien de l'étendue temporelle de l'entité, et
+        # les garder au dénominateur reviendrait à leur laisser opposer un veto
+        # permanent à toute la fenêtre — une colonne absente plafonnerait la
+        # couverture à (n-1)/n, donc sous 1.0, donc fenêtre stricte vide. Les
+        # colonnes de fréquence indétectable, colonnes vides de la matrice, sont
+        # recensées à part
+        absent_columns = tuple(
+            col for col in coverage_matrix.columns
+            if col not in undetected_columns and not bool(coverage_matrix[col].any())
+        )
+        present_columns = [
+            col for col in coverage_matrix.columns
+            if col not in absent_columns and col not in undetected_columns
+        ]
+
+        # Calcul de la couverture (proportion de colonnes couvertes par date),
+        # sur les seules colonnes présentes. Une grille non vide garantit au
+        # moins une colonne présente : elle n'est bâtie que sur les observations
+        # des colonnes de fréquence détectée
+        coverage = coverage_matrix[present_columns].mean(axis=1)
+
+        # Extraction de la couverture par colonne (premier/dernier True dans la grille)
+        column_coverage = {}
+        for col in coverage_matrix.columns:
+            col_bool = np.asarray(coverage_matrix[col], dtype=bool)
+            covered_grid_dates = grid[col_bool]
+            if len(covered_grid_dates) > 0:
+                column_coverage[col] = (covered_grid_dates[0], covered_grid_dates[-1])
+            else:
+                column_coverage[col] = (None, None)
+
+        # Construction du masque de la fenêtre STRICTE sur la grille haute fréquence :
+        # les trois masques en dérivent, il n'est donc jamais réaffecté ni muté
+        # Utilisation d'un seuil légèrement inférieur à 1.0 pour les erreurs d'arrondi
+        imputation_strict_window_mask = pd.Series(
+            np.asarray(coverage >= (1.0 - 1e-10), dtype=bool),
+            index=grid,
+        )
+
+        # Dérivation des bornes de la fenêtre stricte depuis le masque
+        strict_dates = imputation_strict_window_mask.index[imputation_strict_window_mask]
+
+        # Cas où pour aucune période l'ensemble des variables sont disponibles simultanément
+        if len(strict_dates) == 0:
+            # Signalé à l'appelant, qui émet un avertissement unique pour tout
+            # l'ajustement. Les extensions sont tout de même appliquées : partant
+            # d'un masque strict vide, leur garde "len(masked_dates) == 0" les
+            # rend inopérantes et le résultat reste tout-faux, sauf pour
+            # 'unrestricted' qui devient tout-vrai
+            return {
+                **_none_result,
+                'no_strict_window': True,
+                'coverage': coverage,
+                'column_coverage': column_coverage,
+                'absent_columns': absent_columns,
+                'undetected_columns': undetected_columns,
+                'imputation_strict_window_mask': imputation_strict_window_mask,
+                'imputation_window_mask': self._build_scope_mask(
+                    coverage,
+                    imputation_strict_window_mask,
+                    self.imputation_scope,
+                    self.coverage_threshold,
+                ),
+                'training_window_mask': self._build_scope_mask(
+                    coverage,
+                    imputation_strict_window_mask,
+                    self._effective_training_scope,
+                    self._effective_training_coverage_threshold,
+                ),
+            }
+
+        # Extraction des bornes strictes depuis le masque, indépendamment du scope
+        imputation_strict_start = strict_dates.min()
+        imputation_strict_end = strict_dates.max()
+
+        # Vérification de la contiguïté de la fenêtre stricte
+        if len(strict_dates) > 1:
+            grid_positions = np.searchsorted(grid, strict_dates)
+            gaps = np.diff(grid_positions)
+            if np.any(gaps > 1):
+                warnings.warn(
+                    "The strict imputation window is not contiguous: there are gaps where "
+                    "not all columns have data. Reporting [first, last] bounds.",
+                    UserWarning
+                )
+
+        # Dérivation des deux masques étendus, chacun avec son scope et son seuil
+        imputation_window_mask = self._build_scope_mask(
+            coverage,
+            imputation_strict_window_mask,
+            self.imputation_scope,
+            self.coverage_threshold,
+        )
+        training_window_mask = self._build_scope_mask(
+            coverage,
+            imputation_strict_window_mask,
+            self._effective_training_scope,
+            self._effective_training_coverage_threshold,
+        )
+
+        # Cas où la fenêtre d'imputation ne contient qu'une seule observation.
+        # Avertissement rattaché au seul masque d'imputation
+        imputation_dates = imputation_window_mask.index[imputation_window_mask]
+        if len(imputation_dates) <= 1:
+            warnings.warn(
+                "Imputation window contains only one observation. Consider relaxing "
+                "constraints or using a different imputation_scope.",
+                UserWarning
+            )
+
+        # Cas où la fenêtre d'entraînement ne contient qu'une seule observation.
+        # Avertissement rattaché au seul masque d'entraînement
+        training_dates = training_window_mask.index[training_window_mask]
+        if len(training_dates) <= 1:
+            warnings.warn(
+                "Training window contains only one observation. Consider relaxing "
+                "constraints or using a different training_scope.",
+                UserWarning
+            )
+
+        # Bornes scope-dépendantes, dérivées du masque final (identiques aux bornes
+        # strictes en scope 'strict', puisqu'aucune extension n'a alors eu lieu)
+        # Imputation
+        imputation_start = imputation_dates.min()
+        imputation_end = imputation_dates.max()
+        # Entraînement
+        training_start = training_dates.min()
+        training_end = training_dates.max()
+
+        return {
+            'no_strict_window': False,
+            'imputation_start': imputation_start,
+            'imputation_end': imputation_end,
+            'training_start': training_start,
+            'training_end': training_end,
+            'imputation_strict_start': imputation_strict_start,
+            'imputation_strict_end': imputation_strict_end,
+            'imputation_strict_window_mask': imputation_strict_window_mask,
+            'imputation_window_mask': imputation_window_mask,
+            'training_window_mask': training_window_mask,
+            'coverage': coverage,
+            'column_coverage': column_coverage,
+            'absent_columns': absent_columns,
+            'undetected_columns': undetected_columns,
+        }
+
+    # Construction de la grille à l'indice de la fréquence pour le calcul de la couverture
+    def _build_index_freq_grid(
+        self,
+        df: pd.DataFrame,
+        col_freqs: Dict[str, Optional[str]],
+        index_freq: str,
+    ) -> Optional[pd.DatetimeIndex]:
+        """Build the reference high-frequency date grid for coverage computation.
+
+        The grid spans from the earliest period start to the latest period
+        end across all non-NaN observations of the columns whose frequency is
+        detected — an observation of unknown frequency covers an unknown
+        period and is left out. Period boundaries are computed using
+        get_period_start/get_period_end, so a quarterly observation expands
+        the grid to cover all three constituent months. The grid is anchored
+        per :meth:`_detect_grid_position`.
+
+        Args:
+            df: Entity sub-DataFrame with simple DatetimeIndex.
+            col_freqs: Dict mapping column names to frequencies.
+            index_freq: Highest (most granular) frequency code.
+
+        Returns:
+            pd.DatetimeIndex grid, or None if no data.
+        """
+        # Calcul des bornes de la grille en étendant chaque observation sur la période qu'elle couvre
+        # Initialisation des listes de début et de fin de période
+        expanded_starts = []
+        expanded_ends = []
+
+        # Parcours des colonnes du jeu de données
+        for col in df.columns:
+            # Extraction de la fréquence de la colonne ; une colonne de fréquence
+            # indétectable couvre une période inconnue et n'étend pas la grille
+            col_freq = col_freqs.get(col)
+            if col_freq is None:
+                continue
+            # Extraction des observations valides (i.e. non nulles) ; une
+            # fréquence détectée garantit au moins deux observations
+            valid = df[col].dropna()
+            # Parcours des dates de l'index
+            for d in valid.index:
+                # Extraction des débuts et fins de période
+                expanded_starts.append(pd.Timestamp(get_period_start(d, col_freq)))
+                expanded_ends.append(pd.Timestamp(get_period_end(d, col_freq)))
+
+        # Cas où la liste est vide
+        if not expanded_starts:
+            return None
+
+        # Initialisation des dates de début et de fin de grille
+        # Début de la grille
+        grid_start = min(expanded_starts)
+        # Fin de la grille — get_period_end est exclusif (borne supérieure exclue)
+        grid_end_exclusive = max(expanded_ends)
+
+        # Détection de la position (S/E) de la grille
+        hf_pos = self._detect_grid_position(df, col_freqs, index_freq)
+
+        # Construction de l'offset pandas complet (fréquence + position)
+        try:
+            grid_offset = build_frequency_string(
+                index_freq, hf_pos  # type: ignore[arg-type]
+            )
+        except Exception:
+            grid_offset = index_freq
+
+        # Génération de la grille
+        try:
+            grid = pd.date_range(start=grid_start, end=grid_end_exclusive, freq=grid_offset)
+        except Exception:
+            # Fallback sans position si l'offset est invalide
+            try:
+                grid = pd.date_range(start=grid_start, end=grid_end_exclusive, freq=index_freq)
+            except Exception:
+                return None
+
+        # Application de l'exclusivité de la borne supérieure : "date_range" la
+        # traite comme incluse. Sur une grille ancrée en fin de période la date
+        # produite précède la borne et rien n'est retiré ; sur une grille ancrée
+        # en début de période la borne est elle-même une date de la grille, et
+        # la conserver ajouterait une période entière après la dernière
+        # observation
+        return grid[grid < grid_end_exclusive]
+
+    # Méthode auxiliaire de détection de la position (début / fin) de la grille
+    @staticmethod
+    def _detect_grid_position(
+        df: pd.DataFrame,
+        col_freqs: Dict[str, Optional[str]],
+        index_freq: str,
+    ) -> str:
+        """Detect the period position (start or end) the grid must be anchored on.
+
+        The masks are reindexed onto the caller's rows, so the grid must carry
+        the same anchoring as the data. Candidates are read in decreasing
+        order of reliability: the observed dates of the columns at the grid
+        frequency, then the entity's own index, then the observed dates of
+        the other columns of detected frequency. The first candidate whose
+        position is detected wins.
+
+        Args:
+            df: Entity sub-DataFrame with simple DatetimeIndex.
+            col_freqs: Dict mapping column names to frequencies.
+            index_freq: Grid frequency code.
+
+        Returns:
+            'S' or 'E'; 'E' when no candidate reveals a position.
+        """
+        # Colonnes de fréquence détectée, celles à la fréquence de la grille en tête
+        detected = [col for col in df.columns if col_freqs.get(col) is not None]
+        hf_cols = [col for col in detected if col_freqs[col] == index_freq]
+        other_cols = [col for col in detected if col_freqs[col] != index_freq]
+
+        # Candidats : dates observées des colonnes haute fréquence, index de
+        # l'entité, puis dates observées des autres colonnes. Sans colonne à la
+        # fréquence de la grille (index mensuel ne portant que des séries
+        # trimestrielles ou annuelles), seul l'index révèle l'ancrage des lignes
+        candidates = (
+            [df[col].dropna().index for col in hf_cols]
+            + [df.index]
+            + [df[col].dropna().index for col in other_cols]
+        )
+        for dates in candidates:
+            try:
+                position = detect_index_frequency(
+                    cast(pd.DatetimeIndex, pd.DatetimeIndex(dates).sort_values()),
+                    return_format='components',
+                ).position
+            except (ValueError, TypeError):
+                continue
+            if position is not None:
+                return position
+
+        # Convention par défaut : fin de période
+        return 'E'
+
+    # Méthode auxiliaire de construction de la matrice de couverture
+    def _build_coverage_matrix(
+        self,
+        df: pd.DataFrame,
+        col_freqs: Dict[str, Optional[str]],
+        grid: pd.DatetimeIndex,
+        index_freq: str,
+    ) -> pd.DataFrame:
+        """Build the boolean coverage matrix at the high-frequency grid.
+
+        Each cell (date, column) is True if the column has a non-NaN
+        observation whose period contains that grid date. A column of
+        undetected frequency stays all False: its period is unknown.
+
+        Args:
+            df: Entity sub-DataFrame with simple DatetimeIndex.
+            col_freqs: Dict mapping column names to frequencies.
+            grid: Reference high-frequency DatetimeIndex.
+            index_freq: Highest (most granular) frequency code.
+
+        Returns:
+            Boolean DataFrame with grid as index and columns as columns.
+        """
+        # Initialisation de la matrice de couverture
+        coverage = pd.DataFrame(False, index=grid, columns=df.columns)
+
+        # Parcours des colonnes
+        for col in df.columns:
+            # Extraction de la fréquence de la colonne ; fréquence indétectable :
+            # période couverte inconnue, colonne laissée à False
+            col_freq = col_freqs[col]
+            if col_freq is None:
+                continue
+            # Extraction des observations non nulles ; une fréquence détectée
+            # garantit au moins deux observations
+            valid = df[col].dropna()
+            # Initialisation du masque de la colonne
+            col_mask = np.zeros(len(grid), dtype=bool)
+            # Parcours des dates associées aux observations non nulles
+            for d in valid.index:
+                # Détermination des bornes de la période
+                p_start = pd.Timestamp(get_period_start(d, col_freq))
+                p_end = pd.Timestamp(get_period_end(d, col_freq))
+                # Convention [p_start, p_end) : p_end est exclusif
+                col_mask |= np.asarray((grid >= p_start) & (grid < p_end), dtype=bool)
+            # Ajout du masque associé à la colonne
+            coverage[col] = col_mask
+
+        return coverage
+
+    # Méthode auxiliaire de dérivation d'un masque de scope depuis le masque strict
+    def _build_scope_mask(
+        self,
+        coverage: pd.Series,
+        strict_mask: pd.Series,
+        scope: str,
+        threshold: float,
+    ) -> pd.Series:
+        """Derive one scope mask from the strict mask, without mutating it.
+
+        Args:
+            coverage: Coverage series on the high-freq grid.
+            strict_mask: Boolean pd.Series of the strict window
+                (coverage == 1.0), shared by every derived mask.
+            scope: One of 'strict', 'extended_backward', 'extended_forward',
+                'extended_both' or 'unrestricted'.
+            threshold: Coverage threshold governing the extensions of this
+                mask, so that prediction and training windows may differ.
+
+        Returns:
+            New boolean pd.Series on the grid. All True for 'unrestricted';
+            an unchanged copy of strict_mask for 'strict'.
+        """
+        # Aucune restriction : toute la grille est retenue
+        if scope == 'unrestricted':
+            return pd.Series(True, index=coverage.index)
+
+        # Copie systématique : jamais l'original, les trois masques en dérivent
+        mask = strict_mask.copy()
+        if scope in ('extended_backward', 'extended_both'):
+            mask = self._extend_backward(coverage, mask, threshold)
+        if scope in ('extended_forward', 'extended_both'):
+            mask = self._extend_forward(coverage, mask, threshold)
+        return mask
+
+    # Méthode auxiliaire d'extension du masque d'entraînement avant le début de la fenêtre stricte
+    def _extend_backward(
+        self,
+        coverage: pd.Series,
+        mask: pd.Series,
+        threshold: float,
+    ) -> pd.Series:
+        """Extend a boolean window mask backward while coverage meets the threshold.
+
+        Extension is contiguous: walking backward from the window start,
+        it stops at the first date whose coverage falls below the
+        threshold — a date beyond a below-threshold gap is never
+        activated, even if its own coverage would otherwise qualify.
+
+        Args:
+            coverage: coverage series on the high-freq grid.
+            mask: Boolean pd.Series on the high-freq grid representing the
+                current window (strict or partially extended).
+            threshold: Minimum coverage a date must reach to be activated.
+                Passed in rather than read off the instance, so that the
+                training window can use its own threshold.
+
+        Returns:
+            New boolean pd.Series with additional True values prepended
+            where coverage contiguously meets the threshold. Returns an
+            unchanged copy if no extension is possible.
+        """
+        # Identification de la borne de début actuelle du masque
+        masked_dates = mask.index[mask]
+        if len(masked_dates) == 0:
+            return mask.copy()
+        window_start = masked_dates.min()
+
+        # Extraction des observations antérieures, de la plus récente à la plus ancienne
+        before = coverage[coverage.index < window_start].sort_index(ascending=False)
+        # Si la borne actuelle correspond au début de la grille, le masque est inchangé
+        if before.empty:
+            return mask.copy()
+
+        # Extension contiguë : n_valid = position du premier point sous le seuil
+        # (ou la longueur totale si aucun point ne le viole)
+        below = (before < threshold).to_numpy()
+        n_valid = int(np.argmax(below)) if below.any() else len(before)
+
+        # Activation des dates contiguës satisfaisant le seuil (no-op si n_valid == 0)
+        new_mask = mask.copy()
+        new_mask[before.index[:n_valid]] = True
+        return new_mask
+
+    # Méthode auxiliaire d'extension du masque d'entraînement après la fin de la fenêtre stricte
+    def _extend_forward(
+        self,
+        coverage: pd.Series,
+        mask: pd.Series,
+        threshold: float,
+    ) -> pd.Series:
+        """Extend a boolean window mask forward while coverage meets the threshold.
+
+        Extension is contiguous: walking forward from the window end, it
+        stops at the first date whose coverage falls below the threshold —
+        a date beyond a below-threshold gap is never activated, even if
+        its own coverage would otherwise qualify.
+
+        Args:
+            coverage: coverage series on the high-freq grid.
+            mask: Boolean pd.Series on the high-freq grid representing the
+                current window (strict or partially extended).
+            threshold: Minimum coverage a date must reach to be activated.
+                Passed in rather than read off the instance, so that the
+                training window can use its own threshold.
+
+        Returns:
+            New boolean pd.Series with additional True values appended
+            where coverage contiguously meets the threshold. Returns an
+            unchanged copy if no extension is possible.
+        """
+        # Identification de la borne de fin actuelle du masque
+        masked_dates = mask.index[mask]
+        if len(masked_dates) == 0:
+            return mask.copy()
+        window_end = masked_dates.max()
+
+        # Extraction des observations postérieures, de la plus ancienne à la plus récente
+        after = coverage[coverage.index > window_end].sort_index(ascending=True)
+        # Si la borne actuelle correspond à la fin de la grille, le masque est inchangé
+        if after.empty:
+            return mask.copy()
+
+        # Extension contiguë : n_valid = position du premier point sous le seuil
+        # (ou la longueur totale si aucun point ne le viole)
+        below = (after < threshold).to_numpy()
+        n_valid = int(np.argmax(below)) if below.any() else len(after)
+
+        # Activation des dates contiguës satisfaisant le seuil (no-op si n_valid == 0)
+        new_mask = mask.copy()
+        new_mask[after.index[:n_valid]] = True
+        return new_mask
+
+    # Méthode auxiliaire de sélection du masque désigné par "kind"
+    def _select_mask(
+        self,
+        kind: str,
+    ) -> Optional[pd.Series]:
+        """Return the fitted mask attribute designated by ``kind``.
+
+        Args:
+            kind: 'imputation' for the prediction window, 'strict' for the
+                unextended window, 'training' for the training window.
+
+        Returns:
+            The corresponding fitted mask attribute, untouched — a
+            ``pd.Series`` on a DatetimeIndex (time series) or on a MultiIndex
+            ``(entity..., date)`` (panel).
+
+        Raises:
+            ValueError: If kind is not one of the three accepted values.
+        """
+        # Validation explicite : un kind fautif doit échouer, pas retomber
+        # silencieusement sur la fenêtre d'imputation
+        if kind not in ('imputation', 'strict', 'training'):
+            raise ValueError(
+                f"kind must be one of 'imputation', 'strict', 'training', got '{kind}'"
+            )
+        return {
+            'imputation': self.imputation_window_mask_,
+            'strict': self.imputation_strict_window_mask_,
+            'training': self.training_window_mask_,
+        }[kind]
+
+    # Méthode d'extraction du masque booléen de la fenêtre d'imputation
+    def get_imputation_window_mask(
+        self,
+        data: Optional[Union[pd.DataFrame, pd.Series]] = None,
+        kind: Literal['imputation', 'strict', 'training'] = 'imputation',
+    ) -> pd.Series:
+        """Get one of the boolean window masks, optionally aligned to data.
+
+        Args:
+            data: If provided, the mask is re-indexed on ``data.index``
+                (rows absent from the fitted grid are False). For panel data
+                this aligns the MultiIndex ``(entity..., date)`` rows of
+                ``data`` directly.
+            kind: Which window to read:
+                - 'imputation' (default): the prediction window, extended
+                  per ``imputation_scope``. The default preserves the
+                  historical behaviour of this method.
+                - 'strict': the unextended window (coverage == 1.0).
+                - 'training': the training window, extended per
+                  ``training_scope``.
+
+        Returns:
+            Boolean Series aligned on ``data.index`` if ``data`` is given.
+            Otherwise the raw fitted mask: a ``pd.Series`` on a DatetimeIndex
+            for time series, or a ``pd.Series`` on a
+            MultiIndex ``(entity..., date)`` for panel.
+
+        Raises:
+            ValueError: If calculator not fitted, or if kind is invalid.
+        """
+        # Vérification de l'entraînement du calculateur
+        if not self._is_fitted:
+            raise ValueError("Calculator not fitted. Call fit() first.")
+
+        # Sélection de la source : déjà une Series (à MultiIndex pour un panel),
+        # l'alignement ci-dessous est donc le même pour les deux structures
+        source = self._select_mask(kind)
+
+        # Sans données : retour du masque brut sur la grille interne
+        if data is None:
+            return source
+
+        # Avec données : réindexation directe sur l'index de l'appelant. Les
+        # paires (entity..., date) absentes de la grille ajustée tombent à False
+        # La valeur de remplissage booléenne garde le dtype bool : pas de
+        # passage par object puis de fillna (déclassement déprécié par pandas)
+        return source.reindex(data.index, fill_value=False).astype(bool)
+
+
+    # Méthode de conversion du masque d'imputation vers une fréquence inférieure
+    def get_mask_at_frequency(
+        self,
+        frequency: Union[str, Dict[tuple, str]],
+        kind: Literal['imputation', 'strict', 'training'] = 'imputation',
+    ) -> pd.Series:
+        """Get the selected window mask resampled to a lower frequency.
+
+        A lower-frequency period is True if and only if all its high-frequency
+        sub-periods fall within the selected window. The conversion delegates
+        to :meth:`FrequencyConverter.aggregate_to_lower_frequency` with
+        ``method='all'``, anchoring the target offset on the same start/end
+        position as the source mask's grid (see
+        :func:`tsforecast.utils.frequency.utils.target_offset_for_index`) so the
+        result stays reindexable against the original data.
+
+        For panel data, the conversion is computed independently per entity,
+        as each entity may have a different source frequency; the per-entity
+        results are then assembled into a single ``pd.Series`` on a MultiIndex
+        ``(entity..., date)``. The internal per-entity loop is
+        kept rather than delegating to
+        :meth:`FrequencyConverter.convert_frequency` (which does route an
+        ``{entity: freq}`` mapping over a panel): that path aggregates per
+        entity through ``convert_frequency`` on a simple index, which exposes
+        neither the boolean ``method='all'`` aggregation (a target period is
+        True iff every sub-period is) nor the start/end offset anchoring via
+        ``target_offset_for_index`` that keeps the result reindexable — so
+        delegating would change the mask semantics.
+
+        Args:
+            frequency: Target (lower) frequency offset string (e.g., 'QE',
+                'YE') or dictionnary entity -> frequency string. Entity keys
+                may be given in scalar form for a single-level panel: they
+                are normalized to tuples before lookup.
+            kind: Which window to convert — 'imputation' (default), 'strict'
+                or 'training'. See :meth:`get_imputation_window_mask`.
+
+        Returns:
+            Boolean Series at the target frequency: on a DatetimeIndex for
+            time series, or on a MultiIndex
+            ``(entity..., date)`` for panel. Every entity listed in
+            ``entities_without_window_`` is absent from the panel result
+            ("no window", as opposed to ``False``, "outside the window"), so a
+            dict ``frequency`` need not name those entities.
+
+        Raises:
+            ValueError: If calculator not fitted, if kind is invalid, or if
+                the target frequency is not lower than the mask frequency.
+
+        Examples:
+            >>> import numpy as np
+            >>> import pandas as pd
+            >>> dates = pd.date_range('2023-01-31', periods=12, freq='ME')
+            >>> data = pd.DataFrame({
+            ...     'var1': [np.nan] + list(range(1, 11)) + [np.nan],
+            ...     'var2': range(12),
+            ... }, index=dates)
+            >>> calc = ImputationWindowCalculator().fit(data)
+            >>> calc.get_mask_at_frequency('QE').tolist()
+            [False, True, True, False]
+        """
+        # Vérification de l'entraînement du calculateur
+        if not self._is_fitted:
+            raise ValueError("Calculator not fitted. Call fit() first.")
+
+        # Sélection de la source, identique à get_imputation_window_mask
+        source = self._select_mask(kind)
+
+        # Cas des séries temporelles : conversion unique
+        if not self._is_panel:
+            return self._convert_mask_to_frequency(
+                mask=source,
+                source_freq=self.index_freq_,
+                target_freq=frequency,
+            )
+
+        # Normalisation des clés du dictionnaire fourni par l'appelant : c'est la
+        # seule frontière où une clé scalaire peut encore entrer
+        if isinstance(frequency, dict):
+            frequency = {
+                normalize_entity_key(entity): freq
+                for entity, freq in frequency.items()
+            }
+
+        # Cas des données de panel : conversion indépendante par entité (source
+        # et cible propres à chacune), puis réassemblage en une Series unique
+        converted_parts: List[pd.Series] = []
+        for entity in self.index_freq_:
+            # Entité sans fenêtre (fréquence d'index non identifiée ou aucune
+            # observation) : absente du résultat, quelle qu'en soit la cause.
+            # L'absence signifie "pas de fenêtre", distincte de "hors fenêtre"
+            # (False) ; les consommateurs la lisent comme "aucune restriction"
+            if entity in self.entities_without_window_:
+                continue
+            entity_mask = self._entity_grid_series(source, entity)
+            target = frequency[entity] if isinstance(frequency, dict) else frequency
+            converted = self._convert_mask_to_frequency(
+                mask=entity_mask,
+                source_freq=self.index_freq_[entity],
+                target_freq=target,
+            )
+            converted_parts.append(
+                self._entity_series_with_multiindex(converted, entity)
+            )
+        return self._assemble_panel_series(converted_parts)
+
+    # Méthode auxiliaire d'extraction de la tranche d'une entité depuis un masque à MultiIndex
+    def _entity_grid_series(
+        self,
+        source: Optional[pd.Series],
+        entity_key: tuple,
+    ) -> Optional[pd.Series]:
+        """Extract one entity's slice from a MultiIndex mask, on a simple index.
+
+        Args:
+            source: Unified MultiIndex mask Series, or None.
+            entity_key: Entity key tuple to extract.
+
+        Returns:
+            Boolean Series indexed by a simple DatetimeIndex for that entity,
+            or None if the entity is absent from the source.
+        """
+        # Absence de source exploitable
+        if source is None or not isinstance(source.index, pd.MultiIndex):
+            return None
+
+        # Sélection des lignes de l'entité (les clés d'entité sont des tuples)
+        rows = np.ones(len(source), dtype=bool)
+        for level, wanted in enumerate(entity_key):
+            rows &= (source.index.get_level_values(level) == wanted)
+        if not rows.any():
+            return None
+
+        # Retour sur un index temporel simple
+        entity_series = source[rows]
+        entity_series.index = entity_series.index.get_level_values(-1)
+        return entity_series
+
+    # Méthode auxiliaire de conversion d'un masque booléen vers une fréquence inférieure
+    def _convert_mask_to_frequency(
+        self,
+        mask: Optional[pd.Series],
+        source_freq: Optional[str],
+        target_freq: str,
+    ) -> Optional[pd.Series]:
+        """Resample a single boolean window mask to a lower frequency.
+
+        A target period is True if and only if all its sub-periods at the
+        source frequency are covered by the mask. The conversion delegates to
+        :meth:`FrequencyConverter.aggregate_to_lower_frequency` with
+        ``method='all'``, which already forces False on periods only
+        partially present in the mask's grid (e.g. a target period straddling
+        the edge of the fitted grid). The target offset is anchored on the
+        same start/end position as the source mask's index (via
+        :func:`tsforecast.utils.frequency.utils.target_offset_for_index`), so
+        the returned index stays reindexable against the original data.
+
+        Args:
+            mask: Boolean Series on the source-frequency grid, or None.
+            source_freq: Frequency of the mask index, or None.
+            target_freq: Target (lower) frequency offset string.
+
+        Returns:
+            Boolean Series at the target frequency, anchored like the source
+            mask's index, or None if either the mask or the source frequency
+            is missing.
+
+        A target frequency equal to the source one is the identity, and the
+        mask is returned unchanged. The mutualized training set of
+        ``TrainingSetBuilder`` reads the ``'training'`` mask at the frequency
+        of each BLOCK, and a block may sit exactly on the grid frequency:
+        asking for the grid's own frequency is a legitimate
+        request, not an error.
+
+        Args:
+            mask: Boolean Series on the source-frequency grid, or None.
+            source_freq: Frequency of the mask index, or None.
+            target_freq: Target (lower or equal) frequency offset string.
+
+        Returns:
+            Boolean Series at the target frequency, anchored like the source
+            mask's index, or None if either the mask or the source frequency
+            is missing.
+
+        Raises:
+            ValueError: If source_freq is strictly lower than target_freq.
+
+        Examples:
+            >>> import pandas as pd
+            >>> calc = ImputationWindowCalculator()
+            >>> grid = pd.date_range('2023-01-01', periods=12, freq='MS')
+            >>> mask = pd.Series(True, index=grid)
+            >>> calc._convert_mask_to_frequency(mask, 'M', 'Y').tolist()
+            [True]
+            >>> calc._convert_mask_to_frequency(mask, 'M', 'M') is mask
+            True
+        """
+        # Absence de masque ou de fréquence source exploitable
+        if mask is None or source_freq is None:
+            return None
+
+        # Fréquence cible identique à la source : conversion sans objet
+        if normalize_frequency(source_freq) == normalize_frequency(target_freq):
+            return mask
+
+        # Vérification que la fréquence source est plus élevée que la fréquence cible
+        if not is_higher_frequency(source_freq, target_freq):
+            raise ValueError(
+                f"Index mask frequency : {source_freq} should be higher than "
+                f"frequency : {target_freq}"
+            )
+
+        # Ancrage de l'offset cible sur la position (début/fin) de la grille
+        # source, pour que l'index résultat retombe sur des dates réindexables
+        # sur les données (et non sur des labels de fin de période inutilisables
+        # face à une grille source ancrée en début de période)
+        target_offset = target_offset_for_index(mask.index, target_freq)
+
+        # Une période cible est dans la fenêtre ssi TOUTES ses sous-périodes le
+        # sont : délégué entièrement à 'all', qui encode déjà à la fois la
+        # comparaison booléenne et le garde-fou de couverture intégrale.
+        # La fréquence source est transmise plutôt que redevinée : elle est
+        # déjà un paramètre de cette méthode, et fait autorité sur l'index
+        return self._converter.aggregate_to_lower_frequency(
+            mask, target_offset, method='all', source_freq=source_freq
+        ).astype(bool)
+
+    # Méthode d'extraction de la couverture associée à chaque série
+    def get_columns_with_coverage(
+        self,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        entity: Optional[tuple] = None,
+    ) -> Union[List[str], Dict[tuple, List[str]]]:
+        """Get list of columns that have coverage in a given time range.
+
+        For time series data, returns the list of covered columns directly.
+        For panel data, ``column_coverage_`` holds one per-column coverage
+        dict per entity: pass ``entity`` to query a single entity, or omit
+        it to get a dict mapping every entity key to its own covered-column
+        list.
+
+        Args:
+            start: Start of the query range.
+            end: End of the query range.
+            entity: Panel entity key, as a tuple — a scalar is accepted and
+                normalized, since it is a caller-supplied value. Ignored for
+                time series data. Required to get a List[str] result for
+                panel data; if omitted for panel data, a dict over all
+                entities is returned instead.
+
+        Returns:
+            List of column names with coverage overlapping [start, end]
+            (time series, or panel with ``entity`` given). Dict mapping
+            each entity key (always a tuple) to such a list (panel,
+            ``entity`` omitted).
+
+        Raises:
+            ValueError: If calculator not fitted.
+            KeyError: If ``entity`` is not one of the fitted panel entities.
+        """
+        # Vérification que le calculateur est estimé
+        if not self._is_fitted:
+            raise ValueError("Calculator not fitted. Call fit() first.")
+
+        # Cas où la couverture des colonnes n'est pas disponible
+        if self.column_coverage_ is None:
+            return {} if (self._is_panel and entity is None) else []
+
+        # Cas des données de panel : couverture par entité
+        if self._is_panel:
+            if entity is not None:
+                # Normalisation de la clé fournie par l'appelant : les clés
+                # internes sont des tuples, y compris à un seul niveau
+                col_coverage = self.column_coverage_[normalize_entity_key(entity)]
+                return self._columns_with_coverage(col_coverage, start, end)
+            return {
+                entity_key: self._columns_with_coverage(col_coverage, start, end)
+                for entity_key, col_coverage in self.column_coverage_.items()
+            }
+
+        # Cas des séries temporelles
+        return self._columns_with_coverage(self.column_coverage_, start, end)
+
+    # Méthode auxiliaire d'extraction des colonnes couvertes depuis un dict de couverture
+    def _columns_with_coverage(
+        self,
+        column_coverage: Optional[Dict[str, Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]]],
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> List[str]:
+        """Filter a single per-column coverage dict for overlap with [start, end].
+
+        Args:
+            column_coverage: Dict mapping column names to (start, end)
+                coverage timestamps, or None.
+            start: Start of the query range.
+            end: End of the query range.
+
+        Returns:
+            List of column names with coverage overlapping [start, end].
+        """
+        # Cas où la couverture des colonnes n'est pas disponible
+        if column_coverage is None:
+            return []
+
+        # Initialisation de la liste résultat
+        columns_with_coverage = []
+        # Parcours des colonnes
+        for col, (col_start, col_end) in column_coverage.items():
+            # Exclusion des colonnes sans couverture définie
+            if col_start is None or col_end is None:
+                continue
+            # Chevauchement si col_start <= end ET col_end >= start
+            if col_start <= end and col_end >= start:
+                columns_with_coverage.append(col)
+
+        return columns_with_coverage

@@ -1,0 +1,539 @@
+"""Variable ordering for the ``model`` covariate strategy of ``HighFrequencyImputer``."""
+# Importation des modules
+# Modules de base
+import numbers
+import warnings
+from dataclasses import dataclass
+from typing import (
+    Any, Callable, Iterable, List, Literal, Mapping, Optional, Tuple, Union, get_args,
+)
+
+# Manipulation de données
+import numpy as np
+import pandas as pd
+
+# Sklearn
+from sklearn.base import BaseEstimator, clone
+from sklearn.metrics import check_scoring
+from sklearn.model_selection import BaseCrossValidator, KFold, check_cv, cross_val_score
+from sklearn.utils.validation import check_is_fitted
+
+# Utilitaires du package
+from ...utils.frequency.utils import get_frequency_order
+from .._engine.params import (
+    validate_cv,
+    validate_cv_scoring,
+    validate_literal,
+    validate_min_cv_train_size,
+)
+
+# Identifiant retourné par order() : le nom de variable pour une série
+# temporelle, ou la clé de groupe (nom, fréquence) de HighFrequencyImputer pour un panel dont
+# les entités divergent de fréquence
+VariableKey = Any
+
+# Modes d'ordonnancement admis ; source unique pour ce composant et pour l'imputeur
+FitPredictOrder = Literal['frequency', 'cv']
+FIT_PREDICT_ORDERS: Tuple[str, ...] = get_args(FitPredictOrder)
+
+
+# Description d'une variable à ordonner
+@dataclass(frozen=True)
+class VariableSpec:
+    """Ordering-relevant metadata of one variable, keyed by its ``VariableKey``.
+
+    A ``VariableOrderer`` never re-groups entities by itself: each
+    :class:`VariableSpec` already represents one imputable group as built by
+    the caller (one variable name, one detected frequency, and the entities
+    sharing that frequency for a panel group) — grouping heterogeneous
+    entities into several same-frequency groups is the caller's
+    responsibility (``HighFrequencyImputer``'s ``GroupKey``, see ``imputation_plan.py``).
+
+    Attributes:
+        name: Column name of the variable in the data passed to
+            :meth:`VariableOrderer.order` — the string compared for the
+            alphabetical tie-break. Equal to the group's
+            ``VariableKey`` for a time series.
+        frequency: Detected source frequency of the variable (e.g. ``'M'``,
+            ``'Q'``, ``'A'``), used by the ``'frequency'`` order and as the
+            fallback score of the ``'cv'`` order.
+        entities: Entity tuples backing this group, ``None`` for a time
+            series. An empty tuple is treated identically to ``None``.
+        anchored: Whether the variable holds at least one observation to
+            anchor its imputation on. An unanchored variable — imputed from
+            the other entities alone — ranks after every anchored one under
+            the ``'frequency'`` order and in the fallback group of the
+            ``'cv'`` order, whatever its ``frequency``: it is the least
+            reliable covariate the others could read.
+    """
+
+    name: str
+    frequency: str
+    entities: Optional[Tuple[Any, ...]] = None
+    anchored: bool = True
+
+
+# Composant d'ordonnancement des variables
+class VariableOrderer(BaseEstimator):
+    """Order variables for the cascading imputation of ``HighFrequencyImputer``.
+
+    Two orders are available, selected by ``fit_predict_order``:
+
+    - ``'frequency'``: anchored variables first, then highest source
+      frequency first, then ascending entity count, then alphabetical
+      variable name — deterministic tie-break. The
+      order holds within one stage of the cascade, whose stages themselves go
+      from the coarsest frequency to the finest: at a given stage, the
+      variable observed most often — the one with the most anchors, hence
+      the best estimated model — is imputed first, and its imputations then
+      serve as covariates to the variables observed less often, the most
+      uncertain ones.
+    - ``'cv'``: variables best predicted by cross-validation first (sklearn's
+      "greater is better" convention), scores tied (``NaN`` included) broken
+      alphabetically. A variable that cannot be scored falls back to the
+      ``'frequency'`` group instead: too few scorable observations
+      (``min_cv_train_size``), no covariate at all, or no scoring set given
+      for it.
+
+    What is scored is the caller's business, and a caller that fits the
+    variables afterwards should hand over the sets it will fit
+    (``training_sets``) rather than a raw frame: an order established on
+    covariates the fit will drop, or on rows the fit will never see, ranks
+    variables on a problem that does not exist.
+
+    **Restricted scope**: this ordering only matters — and is only
+    meant to be invoked by the caller — under ``covariate_strategy='model'``.
+    Under ``tolerate_nan``: no values are imputed, so there is nothing to
+    order. Under ``interpolate``: imputation is based solely on the
+    observations specific to each variable. In both cases, the
+    training set and the prediction set for a given variable do not depend
+    on any prior imputation of another variable: the order of
+    processing—that of the input columns—therefore has no effect on the
+    values produced.
+
+    Attributes:
+        cv_: Cross-validator resolved from ``cv`` at :meth:`fit`
+            (``sklearn.model_selection.check_cv`` contract). ``None`` and an
+            ``int`` build a ``KFold(shuffle=True, random_state=42)`` instead
+            of ``check_cv``'s unshuffled default; a splitter or an iterable
+            of splits is resolved through ``check_cv`` unchanged.
+        scores_: Cross-validated score of each key actually scored by the
+            **last** :meth:`order` call, ``{VariableKey: float}``. Empty
+            under the ``'frequency'`` order and whenever ``order`` returns
+            early (one variable or fewer). Meant for tracking — it is the
+            per-variable predictability that drove the ranking.
+        fallback_keys_: Keys relegated to the fallback group by the last
+            :meth:`order` call (no covariate, too few observations, or no
+            scoring set), ordered as returned. Empty under ``'frequency'``.
+
+    Examples:
+        >>> import pandas as pd
+        >>> orderer = VariableOrderer(fit_predict_order='frequency').fit()
+        >>> variables = {
+        ...     'a1': VariableSpec(name='a1', frequency='Y'),
+        ...     'a2': VariableSpec(name='a2', frequency='Y'),
+        ...     'q1': VariableSpec(name='q1', frequency='Q'),
+        ... }
+        >>> orderer.order(variables)
+        ['q1', 'a1', 'a2']
+    """
+    # Initialisation
+    def __init__(
+        self,
+        fit_predict_order: FitPredictOrder = 'frequency',
+        cv: Union[int, BaseCrossValidator, Iterable, None] = None,
+        cv_scoring: Union[str, Callable] = 'neg_mean_absolute_percentage_error',
+        min_cv_train_size: int = 10,
+    ):
+        """Initialize the VariableOrderer.
+
+        Args:
+            fit_predict_order: Order used to sort variables:
+                - ``'frequency'`` (default): highest source frequency first,
+                  then ascending entity count, then alphabetical name.
+                - ``'cv'``: highest cross-validated score first (any value
+                  accepted by ``sklearn.metrics.check_scoring`` — a registry
+                  string, a ``make_scorer`` scorer, or a callable — higher is
+                  better). A variable with too few scorable observations
+                  falls back to the ``'frequency'`` ordering group.
+                Ignored — silently, see class docstring — outside
+                ``covariate_strategy='model'``.
+            cv: Cross-validation splitting strategy, following sklearn's
+                ``cross_val_score`` contract:
+                - ``None`` (default): ``KFold(n_splits=5, shuffle=True,
+                  random_state=42)``.
+                - ``int``: ``KFold(n_splits=cv, shuffle=True,
+                  random_state=42)``.
+                - a cross-validation splitter (exposing ``split`` and
+                  ``get_n_splits``), or an iterable of ``(train, test)``
+                  splits: used as-is (via ``check_cv``).
+                ``shuffle=True, random_state=42`` is deliberate here — the
+                goal is to produce an ORDER of variables, not an honest
+                time-series evaluation of a model, and the rows being scored
+                are aggregated onto a shared grid rather than left as a
+                temporally ordered series. A caller who does not want this
+                passes its own splitter (e.g. a ``tsforecast.crossvals``
+                one).
+            cv_scoring: Scoring used by ``fit_predict_order='cv'``, any value
+                accepted by ``sklearn.metrics.check_scoring``.
+            min_cv_train_size: Minimum number of scorable observations a
+                variable must have for ``fit_predict_order='cv'`` to score it
+                by cross-validation; below this it falls back to the
+                ``'frequency'`` ordering group. Must be >= 1.
+
+        Raises:
+            ValueError: If ``fit_predict_order`` is not ``'frequency'`` or
+                ``'cv'``; if ``cv`` is an ``int`` < 2; if ``min_cv_train_size``
+                < 1.
+            TypeError: If ``min_cv_train_size`` is not an ``int``; if ``cv`` is a bool, or neither ``None``, an ``int``,
+                an object exposing ``split`` and ``get_n_splits``, nor an
+                iterable; if ``cv_scoring`` is neither a string nor a
+                callable.
+        """
+        # Validation à l'init : aucune transformation, seulement un
+        # contrôle de forme — la résolution effective de "cv" (check_cv)
+        # n'a lieu qu'au fit
+        validate_literal('fit_predict_order', fit_predict_order, FIT_PREDICT_ORDERS)
+        validate_cv(cv)
+        validate_cv_scoring(cv_scoring)
+        validate_min_cv_train_size(min_cv_train_size)
+
+        # Instanciation des attributs
+        self.fit_predict_order = fit_predict_order
+        self.cv = cv
+        self.cv_scoring = cv_scoring
+        self.min_cv_train_size = min_cv_train_size
+
+    # Résolution de "cv" et avertissement croisé
+    def fit(self, X: Optional[pd.DataFrame] = None, y: Optional[pd.Series] = None) -> 'VariableOrderer':
+        """Resolve ``cv`` into ``cv_`` and check it against ``min_cv_train_size``.
+
+        Args:
+            X: Unused; kept for sklearn signature parity. The variables and
+                data actually scored under ``fit_predict_order='cv'`` are
+                passed to :meth:`order`, not here — resolving ``cv`` does not
+                depend on them.
+            y: Unused, same reason as ``X``.
+
+        Returns:
+            self.
+        """
+        del X, y
+
+        # "None" et un entier imposent shuffle=True/random_state=42 (voir
+        # docstring de "cv") : check_cv seul construirait un KFold NON
+        # mélangé, donc ces deux cas sont résolus avant de lui être délégués
+        if self.cv is None:
+            self.cv_ = KFold(n_splits=5, shuffle=True, random_state=42)
+        elif isinstance(self.cv, numbers.Integral):
+            self.cv_ = KFold(n_splits=self.cv, shuffle=True, random_state=42)
+        else:
+            # Splitter déjà construit, ou itérable de splits : utilisé tel
+            # quel (check_cv l'enveloppe si besoin d'un get_n_splits)
+            self.cv_ = check_cv(self.cv, y=None, classifier=False)
+
+        # Avertissement croisé, unique, indépendant de "fit_predict_order"
+        n_splits = self.cv_.get_n_splits()
+        if self.min_cv_train_size < n_splits:
+            warnings.warn(
+                f"min_cv_train_size ({self.min_cv_train_size}) < the "
+                f"effective number of CV splits ({n_splits}): cross-validation "
+                f"will systematically fall back to the 'frequency' ordering "
+                f"for every variable.",
+                UserWarning,
+            )
+
+        return self
+
+    # Résolution de l'estimateur d'une variable
+    @staticmethod
+    def _resolve_estimator(
+        estimator: Union[BaseEstimator, Mapping[str, BaseEstimator], None],
+        var_name: str,
+    ) -> Optional[BaseEstimator]:
+        """Resolve the estimator to score ``var_name`` with.
+
+        Args:
+            estimator: A single estimator (applied to every variable), a
+                dict mapping variable name -> estimator (with an optional
+                ``'__default__'`` fallback entry), or ``None``.
+            var_name: Name of the variable being scored.
+
+        Returns:
+            A clone of the resolved estimator, or ``None`` if none applies.
+        """
+        # Estimateur par défaut
+        if estimator is None:
+            return None
+        # Extraction de l'estimateur associé à la colonne
+        if isinstance(estimator, Mapping):
+            est = estimator.get(var_name, estimator.get('__default__'))
+            return clone(est) if est is not None else None
+        # Estimateur unique pour l'ensemble des colonnes
+        return clone(estimator)
+
+    # Point d'entrée principal : calcul de l'ordre des variables
+    def order(
+        self,
+        variables: Mapping[VariableKey, VariableSpec],
+        X: Optional[pd.DataFrame] = None,
+        estimator: Union[BaseEstimator, Mapping[str, BaseEstimator], None] = None,
+        scoring_mask: Optional[pd.Series] = None,
+        log: Optional[Callable[[str], None]] = None,
+        training_sets: Optional[Mapping[VariableKey, Tuple[pd.DataFrame, pd.Series]]] = None,
+    ) -> List[VariableKey]:
+        """Order ``variables`` according to ``fit_predict_order``.
+
+        Args:
+            variables: Mapping of ``VariableKey`` -> :class:`VariableSpec` to
+                order. The keys are returned as-is, ordered; ties are broken
+                by ``VariableSpec.name``.
+            X: Working data to score variables on. Its columns other than a
+                variable's own ``name`` are used as its features. Required
+                (and used) only when ``fit_predict_order='cv'``, and only when
+                ``training_sets`` is not given — the autonomous mode of the
+                component, where it derives the scoring sets itself.
+            estimator: Estimator(s) used to score variables under
+                ``fit_predict_order='cv'`` — a single estimator, a dict
+                mapping variable name -> estimator (optional
+                ``'__default__'`` entry), or ``None``. Ignored under
+                ``'frequency'``.
+            scoring_mask: Boolean mask (aligned on ``X``'s index) restricting
+                the rows used to build the CV scoring set — typically the
+                strict imputation window (``kind='strict'``): the ordering
+                must compare variables on data of homogeneous quality, or a
+                variable's score would depend on the extent of its own
+                extension rather than on how well it is predicted. Defaults
+                to keeping every row. Ignored under ``'frequency'``, and
+                ignored whenever ``training_sets`` is given — those rows are
+                already restricted by the caller.
+            log: Callback invoked with a message string when every CV fold
+                fails for a variable, so the fallback to the worst possible
+                score is never silent. No message is emitted if ``None``
+                (default). Ignored under ``'frequency'``.
+            training_sets: Scoring sets built by the caller, one
+                ``(X_sub, y_sub)`` pair per key. **The scored set is the one
+                the caller will fit**: its covariates, its rows and its scale
+                are those of the actual estimation, so the order compares
+                variables on the very problems they will be fitted on, and
+                not on a raw view of the data whose covariates may never
+                reach the model. When given it takes precedence over ``X``
+                and ``scoring_mask``, which are then unused; a key it does
+                not cover carries no scorable set and joins the
+                ``'frequency'`` fallback group. Ignored under
+                ``'frequency'``.
+
+        Returns:
+            List of the keys of ``variables``, ordered.
+
+        Raises:
+            NotFittedError: If :meth:`fit` has not been called.
+            ValueError: If ``fit_predict_order='cv'`` and both ``X`` and
+                ``training_sets`` are ``None``.
+        """
+        # Vérification que l'estimateur est entraîné
+        check_is_fitted(self, attributes=['cv_'])
+
+        # Réinitialisation des diagnostics de l'appel : les scores de
+        # validation croisée qui ont décidé du rang, et les clés reléguées au
+        # groupe de repli. Renseignés uniquement sous l'ordre 'cv'.
+        self.scores_: Dict[VariableKey, float] = {}
+        self.fallback_keys_: List[VariableKey] = []
+
+        # Extraction des variables à ordonner
+        var_keys = list(variables)
+        if len(var_keys) <= 1:
+            return var_keys
+
+        # Ordination par fréquence
+        if self.fit_predict_order == 'frequency':
+            return self._order_by_frequency(variables)
+
+        # Vérification que des données sont spécifiées pour l'ordination par
+        # validation croisée : les jeux pré-construits en dispensent
+        if X is None and training_sets is None:
+            raise ValueError(
+                "X is required when fit_predict_order='cv' and no training_sets "
+                "is given"
+            )
+        # Ordination par validation croisée
+        return self._order_by_cv(
+            variables, X, estimator, scoring_mask, log, training_sets
+        )
+
+    # Ordre par fréquence (décroissante), nombre d'entités croissant, puis tie-break alphabétique
+    def _order_by_frequency(
+        self,
+        variables: Mapping[VariableKey, VariableSpec],
+    ) -> List[VariableKey]:
+        """Order variables: anchored first, by descending frequency, ascending entity count, name.
+
+        Args:
+            variables: Mapping of ``VariableKey`` -> :class:`VariableSpec`.
+
+        Returns:
+            List of keys of ``variables``, ordered.
+        """
+        # Fonction de tri
+        def sort_key(var_key: VariableKey) -> Tuple[bool, float, int, str]:
+            # Spécification de la clé (contient son nom, sa fréquence et ses entités)
+            spec = variables[var_key]
+            # Calcul du nombre d'entités
+            n_entities = len(spec.entities) if spec.entities else 0
+            # Variables ancrées d'abord, puis fréquence la plus élevée d'abord :
+            # ordre croissant de "get_frequency_order" (plus petit = fréquence
+            # plus élevée)
+            return (not spec.anchored, get_frequency_order(spec.frequency), n_entities, spec.name)
+
+        return sorted(variables, key=sort_key)
+
+    # Ordre par validation croisée
+    def _order_by_cv(
+        self,
+        variables: Mapping[VariableKey, VariableSpec],
+        X: Optional[pd.DataFrame],
+        estimator: Union[BaseEstimator, Mapping[str, BaseEstimator], None],
+        scoring_mask: Optional[pd.Series],
+        log: Optional[Callable[[str], None]],
+        training_sets: Optional[Mapping[VariableKey, Tuple[pd.DataFrame, pd.Series]]] = None,
+    ) -> List[VariableKey]:
+        """Order variables by descending cross-validated score.
+
+        Two sources of scoring sets, never mixed: the ``training_sets`` the
+        caller built — the authoritative one, taken as-is — or, in their
+        absence, sets derived from ``X`` and ``scoring_mask``.
+
+        Args:
+            variables: Mapping of ``VariableKey`` -> :class:`VariableSpec`.
+            X: Working data; every column but a variable's own name is used
+                as its features. Unused, and allowed to be None, when
+                ``training_sets`` is given.
+            estimator: Estimator(s) resolved per variable, see :meth:`order`.
+            scoring_mask: Row mask restricting the scoring set, see
+                :meth:`order`.
+            log: Fold-failure logging callback, see :meth:`order`.
+            training_sets: Scoring sets built by the caller, see
+                :meth:`order`.
+
+        Returns:
+            List of keys of ``variables``, CV-scored variables first
+            (highest score first), then the fallback group (anchored variables
+            first, then highest frequency first, as under ``'frequency'``) —
+            the two groups are sorted separately and never merged :
+            their scores live on unrelated scales (a "scoring" value versus a
+            frequency-order integer), so sorting them together would send
+            fallback variables to an arbitrary rank depending on that scale.
+            A variable joins the fallback group when it has no scorable set
+            at all, no covariate, or fewer than ``min_cv_train_size``
+            observations.
+        """
+        # Lorsqu'aucun masque n'est spécifié, l'ensemble des observations sont
+        # considérées. Sans "X", il n'y a pas de masque à défaut : les lignes
+        # des jeux pré-construits sont déjà celles de l'ajustement
+        if scoring_mask is None and X is not None:
+            scoring_mask = pd.Series(True, index=X.index)
+
+        # Initialisation des deux groupes, non comparables entre eux (voir la docstring)
+        cv_scored: List[Tuple[VariableKey, float]] = []
+        fallback_scored: List[Tuple[VariableKey, float]] = []
+
+        # Parcours des clés
+        for var_key in variables:
+            # Extraction de la spec (qui contient le nom, la fréquence et les entités)
+            spec = variables[var_key]
+            # Extraction du nom de la variable
+            var_name = spec.name
+
+            # Jeu pré-construit par l'appelant : il prime, et il est pris tel
+            # quel — ses covariables, ses lignes et son échelle sont déjà
+            # celles de l'ajustement
+            if training_sets is not None:
+                pair = training_sets.get(var_key)
+                # Clé non couverte : aucun jeu scorable, donc le groupe de repli
+                if pair is None:
+                    fallback_scored.append(
+                        (var_key, get_frequency_order(spec.frequency))
+                    )
+                    continue
+                X_sub, y_sub = pair
+            else:
+                # Toutes les colonnes de X sauf la variable elle-même
+                feature_cols = [c for c in X.columns if c != var_name]
+                # Restriction aux lignes réellement exploitables : la cible doit
+                # être observée sur les lignes du masque de scoring
+                scoring_rows = scoring_mask & X[var_name].notna()
+                X_sub = X.loc[scoring_rows, feature_cols]
+                y_sub = X.loc[scoring_rows, var_name]
+
+            # Repli si la série est univariée : sans covariable, elle sera
+            # imputée par interpolation quel que soit son rang, et aucun score
+            # ne la décrit — un -inf la coincerait arbitrairement en fin du
+            # groupe scoré
+            if X_sub.shape[1] == 0:
+                fallback_scored.append((var_key, get_frequency_order(spec.frequency)))
+                continue
+
+            # Fallback si moins de "min_cv_train_size" observations exploitables
+            if len(X_sub) < self.min_cv_train_size:
+                fallback_scored.append((var_key, get_frequency_order(spec.frequency)))
+                continue
+
+            # Extraction de l'estimateur ; -inf si non spécifié
+            est = self._resolve_estimator(estimator, var_name)
+            if est is None:
+                cv_scored.append((var_key, -np.inf))
+                continue
+
+            # Résolution du "scoring" : lève un ValueError explicite si la
+            # valeur n'est pas reconnue par sklearn
+            scorer = check_scoring(est, scoring=self.cv_scoring)
+
+            # "cross_val_score" absorbe l'échec d'un pli isolé via
+            # "error_score=np.nan"
+            try:
+                scores = cross_val_score(
+                    est, X_sub, y_sub,
+                    cv=self.cv_,
+                    scoring=scorer,
+                    error_score=np.nan,
+                )
+            except ValueError as error:
+                # sklearn ne renvoie des NaN que si au moins un pli réussit :
+                # quand tous échouent, il lève "All the N fits failed". Ce cas
+                # (et lui seul) est ramené à des scores NaN pour obtenir le
+                # repli -inf journalisé ; toute autre ValueError (splitter
+                # incompatible avec les données, ...) est une erreur de
+                # configuration et reste propagée
+                if 'fits failed' not in str(error):
+                    raise
+                scores = np.array([np.nan])
+            # Score -inf si tous les plis ont échoué, journalisé explicitement :
+            # sans ce journal l'échec systématique resterait silencieux
+            if np.all(np.isnan(scores)):
+                if log is not None:
+                    log(
+                        f"[VariableOrderer] CV scoring failed on every fold "
+                        f"for '{var_name}': falling back to the lowest "
+                        f"possible score."
+                    )
+                score = -np.inf
+            else:
+                score = float(np.nanmean(scores))
+            cv_scored.append((var_key, score))
+
+        # Tri décroissant (convention sklearn "greater is better") au sein
+        # de chaque groupe, tie-break alphabétique explicite sur le nom de
+        # variable
+        cv_scored.sort(key=lambda item: (-item[1], variables[item[0]].name))
+        # Groupe de repli : rangé comme sous l'ordre 'frequency', variables
+        # ancrées d'abord puis fréquence la plus élevée d'abord
+        fallback_scored.sort(
+            key=lambda item: (not variables[item[0]].anchored, item[1], variables[item[0]].name)
+        )
+
+        # Diagnostics de l'appel : le score CV par clé effectivement scorée, et
+        # les clés du groupe de repli (non comparables, cf. docstring)
+        self.scores_ = {key: score for key, score in cv_scored}
+        self.fallback_keys_ = [key for key, _ in fallback_scored]
+
+        return [v for v, _ in cv_scored] + [v for v, _ in fallback_scored]

@@ -1,0 +1,28 @@
+"""
+Publication delays module for tsforecast.
+
+This module provides tools for managing and applying publication delays
+to time series and panel data using sklearn-compatible transformers.
+"""
+# Importation des modules
+# Importation du module d'inférence des délais de publication à partir de deux jeux de données
+from .data_manager import compare_and_detect_delays
+# Importation du module de calcul du délai de publication à partir des dates de publication de différentes observations
+from .calculator import calculate_applicable_delay
+# Importation du module d'application des délais de publication à des données
+from .transformers import ShiftTransformer, MaskTransformer, PublicationDelayTransformer, create_delay_transformer_factory, prepare_entity_kwargs_from_delays
+# Importation des rapports structurés (détection et ajustement)
+from .report import DelayDetectionReport, DelayFitReport, ColumnDelayRecord
+
+__all__ = [
+    'DelayDetectionReport',
+    'DelayFitReport',
+    'ColumnDelayRecord',
+    'compare_and_detect_delays',
+    'calculate_applicable_delay',
+    'ShiftTransformer',
+    'MaskTransformer',
+    'PublicationDelayTransformer',
+    'create_delay_transformer_factory',
+    'prepare_entity_kwargs_from_delays'
+]

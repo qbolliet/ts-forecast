@@ -1,1 +1,1 @@
-"""Tests package for tsforecast."""
+"""Test package for tsforecast: unit and integration suites."""
