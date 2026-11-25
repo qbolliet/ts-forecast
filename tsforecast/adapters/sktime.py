@@ -1,193 +1,365 @@
-"""Adapter for sktime forecasters to sklearn API."""
+"""Sklearn adapter for sktime forecasters: ``SktimeAdapter``.
+
+The wrapped forecaster predicts the rows of ``X``: the forecasting horizon is
+made of the dates of these rows, as absolute dates, never of a user parameter.
+Time series and panels (entity levels, then a date level) are passed to sktime
+in its native formats, and the predictions are returned as an array in the row
+order of ``X``.
+"""
 # Importation des modules
 # Modules de base
-import pandas as pd
+from typing import Any, List, Tuple, Union
+
+# Modules de manipulation de données
 import numpy as np
-from typing import Any
-# Sklearn
-from sklearn.base import BaseEstimator, RegressorMixin
+import pandas as pd
+from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.utils.validation import check_is_fitted
 
+# tsforecast
+from tsforecast.adapters._base import (
+    TemporalLayout,
+    _preview,
+    check_adapter_input,
+    import_optional,
+    restore_row_order,
+    steps_between,
+)
+from tsforecast.utils.frequency import to_pandas_freq
 
-# Wrapper permettant l'intégration des forecasters du package "sktime" dans un syntaxe "sklearn-like"
-# /!\ La méthode "score" (nécessaire pour GridSearchCV) et l'héritage de RegressorMixin font que l'on wrappe des régresseurs et non des classifieurs par défaut
-class SktimeAdapter(BaseEstimator, RegressorMixin):
-    """
-    Adapter to use sktime forecasters with sklearn API.
-    
-    This adapter converts standard sklearn DataFrames to sktime's expected format
-    and handles the forecasting horizon (fh) parameter.
-    
+# Extra installant sktime
+_EXTRA = "adapters-sktime"
+# Nom de la colonne de cible transmise à sktime quand la cible n'a pas de nom
+_DEFAULT_TARGET_NAME = "target"
+
+
+# Fonction auxiliaire de lecture d'un tag sktime
+def _tag(forecaster: Any, name: str, default: Any) -> Any:
+    """Read a tag of a sktime forecaster, with a default when the tag is unknown."""
+    return forecaster.get_tag(name, tag_value_default=default, raise_error=False)
+
+
+# Fonction auxiliaire : bornes temporelles et nombre de lignes de chaque entité
+def _entity_bounds(layout: TemporalLayout) -> Tuple[pd.DatetimeIndex, pd.DatetimeIndex, np.ndarray]:
+    """Return the first date, the last date and the row count of each entity, in code order."""
+    first = pd.Series(layout.dates).groupby(layout.codes, sort=True).min()
+    return (
+        pd.DatetimeIndex(first),
+        layout.last_dates(),
+        np.bincount(layout.codes, minlength=layout.n_entities),
+    )
+
+
+# Fonction auxiliaire : index d'origine des entités, un libellé par code
+def _entity_labels(index: pd.Index, layout: TemporalLayout) -> pd.Index:
+    """Return the entity part of ``index`` for each entity code (dtypes of the input kept)."""
+    _, first_rows = np.unique(layout.codes, return_index=True)
+    return index[first_rows].droplevel(-1)
+
+
+# Fonction auxiliaire : index complet de la grille de chaque entité
+def _complete_index(index: pd.Index, layout: TemporalLayout) -> pd.Index:
+    """Index covering every grid date between the first and the last date of each entity."""
+    first, last, _ = _entity_bounds(layout)
+    grid = pd.date_range(first.min(), last.max(), freq=to_pandas_freq(layout.freq))
+    start, stop = grid.get_indexer(first), grid.get_indexer(last)
+    # Positions de grille de chaque entité, entité par entité
+    positions = np.concatenate([np.arange(a, b + 1) for a, b in zip(start, stop)])
+    dates = pd.DatetimeIndex(grid[positions], name=layout.time_name).as_unit(layout.unit)
+    if not layout.is_panel:
+        return dates
+    codes = np.repeat(np.arange(layout.n_entities), stop - start + 1)
+    labels = _entity_labels(index, layout).take(codes)
+    arrays = [labels.get_level_values(level) for level in range(labels.nlevels)] + [dates]
+    return pd.MultiIndex.from_arrays(arrays, names=index.names)
+
+
+# Fonction auxiliaire : fréquence posée sur un index de dates contigu
+def _with_freq(obj: Union[pd.Series, pd.DataFrame], freq: str) -> Union[pd.Series, pd.DataFrame]:
+    """Set ``freq`` on the ``DatetimeIndex`` of ``obj`` when its dates are contiguous on the grid."""
+    dates = obj.index
+    if isinstance(dates, pd.MultiIndex) or len(dates) < 2:
+        return obj
+    if steps_between(dates[:1], dates[-1:], freq)[0] + 1 != len(dates):
+        return obj
+    return obj.set_axis(pd.DatetimeIndex(dates, freq=to_pandas_freq(freq)), axis=0)
+
+
+# Wrapper des forecasters sktime dans un régresseur sklearn
+class SktimeAdapter(RegressorMixin, BaseEstimator):
+    """Sklearn regressor predicting the rows of ``X`` with a sktime forecaster.
+
+    Rows are indexed by forecast origin: a ``DatetimeIndex`` for a time series,
+    or a ``MultiIndex`` whose last level holds the dates and whose other levels
+    identify the entity for a panel. ``fit`` gives the forecaster the training
+    target (and ``X`` as exogenous data when the forecaster uses it);
+    ``predict`` forecasts the dates of the rows of ``X``, entity by entity, as
+    an absolute horizon: a row ``k`` grid steps after the last training date of
+    its entity is a ``k``-step-ahead forecast. Nothing is shifted.
+
+    The forecaster passed to the constructor is never modified: ``fit`` fits a
+    clone stored in ``forecaster_``. Its parameters are tunable through
+    ``forecaster__<param>``.
+
+    On a panel, sktime fits a forecaster without native panel support once per
+    entity (``NaiveForecaster``, ``YfromX``, ``SARIMAX``...): the model is local
+    and an entity unknown at fit cannot be predicted. For a regression of ``y``
+    on ``X`` pooled over the entities, use the scikit-learn regressor directly.
+
+    Constraints, each raising an explicit ``ValueError``:
+
+    - the dates must lie on a regular grid (holes are allowed);
+    - forecasters needing the horizon at fit (``requires-fh-in-fit``, direct
+      reductions) are refused;
+    - training rows with holes (rows dropped by ``DropNaNTarget``) require a
+      forecaster that handles missing values; a forecaster ignoring ``X`` sees
+      the holes as missing target values on the complete grid;
+    - a forecaster that needs ``X`` on every date between the training data
+      and the forecast (``capability:non_contiguous_X`` false, e.g.
+      ``SARIMAX``) cannot skip a gap absent from ``X``: no value is invented.
+
+    On a panel, sktime infers the frequency of each entity from its training
+    dates: a forecaster that needs it (``NaiveForecaster``) requires at least
+    three training dates per entity.
+
     Args:
-        forecaster: A sktime forecaster instance
-        fh: Forecasting horizon (default: 0 for same-period prediction)
-    
-    Examples:
-        >>> from sktime.forecasting.arima import ARIMA
-        >>> from sklearn.model_selection import cross_val_score
-        >>> 
-        >>> # Création de l'adapter
-        >>> estimator = SktimeForecasterAdapter(ARIMA(), fh=0)
-        >>> 
-        >>> # Utilisation avec l'API sklearn
-        >>> estimator.fit(X_train, y_train)
-        >>> y_pred = estimator.predict(X_test)
-        >>> 
-        >>> # Utilisation avec cross_val_score
-        >>> scores = cross_val_score(estimator, X, y, cv=cv)
-    """
-    # Initialisation
-    def __init__(self, forecaster: Any, fh: int =0):
-        # Initialisation des attributs
-        self.forecaster = forecaster
-        self.fh = fh
+        forecaster: Unfitted sktime forecaster.
 
-    # Méthode auxiliaire de conversion des données au format attendu par les sktime forecasters
-    def _convert_to_sktime_format(self, X, y=None):
-        """
-        Convert sklearn-style DataFrame to sktime format.
-        
-        Args:
-            X: Features DataFrame with MultiIndex (entity, date) or DatetimeIndex
-            y: Target Series (optional)
-        
-        Returns:
-            X_sktime: DataFrame with pd.Series columns for sktime
-            y_sktime: Series in sktime format (if y provided)
-        """
-        # Conversion de X : création d'une pd.Series par colonne
-        if isinstance(X, pd.DataFrame):
-            X_sktime = pd.DataFrame({
-                col: pd.Series(X[col].values, index=X.index)
-                for col in X.columns
-            })
-        else:
-            X_sktime = X
-        
-        # Conversion de y si présent
-        if y is not None:
-            if isinstance(y, pd.Series):
-                # Création d'un DataFrame s'il s'agit de données de panel
-                y_sktime = y.to_frame() if isinstance(y.index, pd.MultiIndex) else y
-            else:
-                # Conversion d'un array numpy en Series
-                y_sktime = pd.Series(y, index=X.index if hasattr(X, 'index') else None)
-                # Conversion en DataFrame s'il s'agit de données de panel
-                y_sktime = y_sktime.to_frame() if isinstance(y_sktime.index, pd.MultiIndex) else y_sktime 
-        else:
-            y_sktime = None
-            
-        return X_sktime, y_sktime
+    Attributes:
+        forecaster_: Fitted clone of ``forecaster``.
+        target_names_: Names of the target columns given to sktime
+            (``'target'`` for an unnamed ``Series``).
+        layout_: Temporal layout of the training rows (entities, dates, grid
+            frequency).
+        n_features_in_: Number of columns of ``X`` seen at fit.
+        feature_names_in_: Column names of ``X`` seen at fit.
+
+    Examples:
+        >>> import pandas as pd
+        >>> from sktime.forecasting.naive import NaiveForecaster
+        >>> from tsforecast.adapters import SktimeAdapter
+        >>> dates = pd.date_range('2024-01-01', periods=6, freq='MS', name='date')
+        >>> X = pd.DataFrame({'x': [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]}, index=dates)
+        >>> y = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], index=dates)
+        >>> model = SktimeAdapter(NaiveForecaster(strategy='drift')).fit(X.iloc[:3], y.iloc[:3])
+        >>> # Rows 3 and 2 months after the last training date, a one-month gap left out
+        >>> model.predict(X.iloc[[5, 4]]).round(6)
+        array([6., 5.])
+    """
+
+    # Initialisation
+    def __init__(self, forecaster: Any):
+        self.forecaster = forecaster
 
     # Méthode d'entraînement
-    def fit(self, X, y):
-        """
-        Fit the sktime forecaster.
-        
-        Args:
-            X: Features DataFrame
-            y: Target values
-        
-        Returns:
-            self
-        """
-        # Conversion au format sktime
-        X_sktime, y_sktime = self._convert_to_sktime_format(X, y)
-        
-        # Entraînement du forecaster avec fh
-        self.forecaster.fit(y=y_sktime, X=X_sktime, fh=self.fh)
+    def fit(self, X: pd.DataFrame, y: Any) -> "SktimeAdapter":
+        """Fit a clone of the forecaster on the training rows.
 
-        # Stockage des attributs fitted pour la compatibilité sklearn
-        self.is_fitted_ = True
-        self.n_features_in_ = X.shape[1] if hasattr(X, 'shape') else 0
-        if hasattr(X, 'columns'):
-            self.feature_names_in_ = np.array(X.columns)
-        
+        Args:
+            X: Features indexed by a ``DatetimeIndex`` or an
+                ``(entity..., date)`` ``MultiIndex``, rows in any order.
+            y: Target aligned with ``X``: ``Series`` (one target) or
+                ``DataFrame`` (several targets).
+
+        Returns:
+            The fitted adapter.
+
+        Raises:
+            ImportError: If sktime is not installed.
+            TypeError: If ``X`` is not a ``DataFrame``, if its dates are not
+                ``datetime64``, or if ``forecaster`` is not a sktime forecaster.
+            ValueError: If the dates are not on a regular grid, if the
+                forecaster needs the horizon at fit, or if the training rows
+                have holes that the forecaster cannot handle.
+        """
+        # Importation de sktime
+        base = import_optional("sktime.forecasting.base", _EXTRA)
+        # Vérification des entrées X et y
+        X, y, layout = check_adapter_input(self, X, y, reset=True)
+        # Vérification de la fréquence
+        if layout.freq is None:
+            raise ValueError(
+                "The training dates are not on a regular grid: sktime needs a frequency "
+                "to forecast the dates of the rows of X"
+            )
+        # Vérification que le forecaster
+        if not isinstance(self.forecaster, base.BaseForecaster):
+            raise TypeError(
+                f"forecaster must be a sktime forecaster, got {type(self.forecaster).__name__}"
+            )
+        forecaster = clone(self.forecaster)
+        # Vérification de l'horizon
+        if _tag(forecaster, "requires-fh-in-fit", False):
+            raise ValueError(
+                f"{type(forecaster).__name__} needs the forecasting horizon at fit; "
+                "the horizon of SktimeAdapter is only known at predict (dates of the rows of X)"
+            )
+        # Forecaster qui ignore X : X jamais transmis
+        uses_X = bool(_tag(forecaster, "capability:exogenous", True))
+
+        # Cible au format sktime : DataFrame, colonnes mémorisées pour la sortie
+        target_ndim = y.ndim
+        if isinstance(y, pd.Series):
+            y = y.to_frame(_DEFAULT_TARGET_NAME if y.name is None else y.name)
+
+        # Lignes triées par entité puis par date, X et y de la même façon
+        y_fit = y.sort_index()
+        X_fit = X.sort_index() if uses_X else None
+
+        # Trous dans la grille d'une entité : dates manquantes
+        first, last, n_rows = _entity_bounds(layout)
+        holes = steps_between(first, last, layout.freq) + 1 > n_rows
+        if holes.any():
+            if not _tag(forecaster, "capability:missing_values", False):
+                entities = [layout.entities[code] for code in np.flatnonzero(holes)]
+                rows = f"of the entities {_preview(entities)} " if layout.is_panel else ""
+                raise ValueError(
+                    f"The training rows {rows}do not cover every date of the "
+                    f"'{layout.freq}' grid, and {type(forecaster).__name__} does not handle missing "
+                    "values: train on contiguous rows"
+                )
+            # Forecaster sans X : cible manquante déclarée sur la grille complète
+            if not uses_X:
+                y_fit = y_fit.reindex(_complete_index(y.index, layout)).sort_index()
+
+        if not layout.is_panel:
+            y_fit = _with_freq(y_fit, layout.freq)
+            X_fit = None if X_fit is None else _with_freq(X_fit, layout.freq)
+        forecaster.fit(y=y_fit, X=X_fit)
+
+        # Attributs ajustés, posés une fois l'ajustement réussi
+        self.forecaster_ = forecaster
+        self.layout_ = layout
+        self.target_names_ = list(y.columns)
+        self._target_ndim = target_ndim
         return self
+
+    # Contrôle des dates de X exigées par un forecaster à X contigu
+    def _check_contiguous_X(self, layout: TemporalLayout, codes: np.ndarray) -> None:
+        """Refuse rows of ``X`` that leave grid dates without ``X`` after the training data."""
+        # Extraction de la fréquence
+        freq = self.layout_.freq
+        # Extraction de la dernière date d'entrainement
+        last_train = self.layout_.last_dates()[codes]
+        # Extraction des dates postérieures à la dernière date d'entrainement
+        after = np.asarray(layout.dates > last_train)
+        # Par entité de test : nombre de dates postérieures à l'entraînement et dernière date
+        n_after = np.bincount(layout.codes[after], minlength=layout.n_entities)
+        last_test = pd.Series(layout.dates).groupby(layout.codes, sort=True).max()
+        _, first_rows = np.unique(layout.codes, return_index=True)
+        # Fin de la période d'entrainement
+        train_end = last_train[first_rows]
+        # Calcul du nombre de pas entre la fin du train et la fin du test
+        needed = np.maximum(steps_between(train_end, pd.DatetimeIndex(last_test), freq), 0)
+        incomplete = np.flatnonzero(n_after < needed)
+        # Complétion de l'index si nécessaire
+        if incomplete.size:
+            code = incomplete[0]
+            # Crétion de l'index
+            expected = pd.date_range(train_end[code], last_test.iloc[code], freq=to_pandas_freq(freq))[1:]
+            missing = expected.difference(layout.dates[layout.codes == code])
+            entity = layout.entities[code]
+            where = f" for entity {entity!r}" if layout.is_panel else ""
+            raise ValueError(
+                f"{type(self.forecaster_).__name__} needs X on every date between the end of "
+                f"training and the forecast date, but X has no row{where} on "
+                f"{_preview(missing.strftime('%Y-%m-%d %H:%M:%S'))}; no value is invented for "
+                "them: use a forecaster that accepts non-contiguous X (YfromX, ...) or no gap"
+            )
+
+    # Prévision entité par entité par les forecasters vectorisés de sktime
+    def _predict_per_entity(
+        self, X: pd.DataFrame, layout: TemporalLayout, codes: np.ndarray, columns: List[Any]
+    ) -> np.ndarray:
+        """Forecast each entity of ``X`` with its own dates and features."""
+        # Importation de l'horizon de prévision de sktime
+        ForecastingHorizon = import_optional("sktime.forecasting.base", _EXTRA).ForecastingHorizon
+        # Extraction des prédicteurs
+        table = self.forecaster_.forecasters_
+        # Inialisation du jeu de données résultat
+        result = np.empty((len(X), len(columns)))
+        for code in np.unique(layout.codes):
+            rows = np.flatnonzero(layout.codes == code)
+            rows = rows[np.argsort(layout.dates[rows])]
+            dates = pd.DatetimeIndex(layout.dates[rows], name=layout.time_name)
+            X_entity = _with_freq(X.iloc[rows].set_axis(dates, axis=0), self.layout_.freq)
+            # Création de l'horizon de prédiction
+            fh = ForecastingHorizon(dates, is_relative=False, freq=self.layout_.freq)
+            # Ligne de la table des forecasters : clé simple ou tuple selon les niveaux d'entité
+            entity = self.layout_.entities[codes[rows[0]]]
+            cells = table.loc[entity[0] if len(entity) == 1 else entity]
+            # Concaténation des prédictions
+            forecasts = pd.concat([cell.predict(fh=fh, X=X_entity) for cell in cells], axis=1)
+            result[rows] = restore_row_order(forecasts[columns].to_numpy(), forecasts.index, dates)
+        return result
 
     # Méthode de prédiction
-    def predict(self, X):
-        """
-        Make predictions using the sktime forecaster.
-        
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """Forecast the dates of the rows of ``X``.
+
         Args:
-            X: Features DataFrame
-        
+            X: Features of the rows to predict, with the columns seen at fit;
+                rows in any order, entities known at fit.
+
         Returns:
-            Predictions array
+            Predictions in the row order of ``X``: shape ``(n_samples,)`` for a
+            ``Series`` target, ``(n_samples, n_targets)`` for a ``DataFrame``.
+
+        Raises:
+            ImportError: If sktime is not installed.
+            NotFittedError: If the adapter is not fitted.
+            ValueError: If an entity is unknown at fit, if the columns differ
+                from those seen at fit, or if the forecaster needs ``X`` on
+                dates absent from ``X``.
         """
-        # Vérification que le modèle est entraîné
+        # Vérification que l'estimateur est entraîné
         check_is_fitted(self)
-        
-        # Conversion au format sktime
-        X_sktime, _ = self._convert_to_sktime_format(X)
-        
-        # Prédiction
-        y_pred = self.forecaster.predict(X=X_sktime, fh=self.fh)
-        
-        return y_pred
+        # Importation de l'horizon de prédiction
+        ForecastingHorizon = import_optional("sktime.forecasting.base", _EXTRA).ForecastingHorizon
+        # Vérification de l'entrée X
+        X, _, layout = check_adapter_input(self, X, reset=False, freq=self.layout_.freq)
+        # Nombre de variables à prévoir
+        n_targets = len(self.target_names_)
+        # Vérification que le jeu de données de prédictions n'est pas vide
+        if len(X) == 0:
+            return np.empty((0,) if self._target_ndim == 1 else (0, n_targets))
 
-    # Méthode d'extraction des paramètres 
-    def get_params(self, deep=True):
-        """
-        Get parameters for GridSearchCV compatibility.
-        
-        Forecaster parameters are prefixed with 'forecaster__' to enable
-        nested parameter tuning in GridSearchCV.
-        
-        Args:
-            deep: If True, return parameters of sub-objects
-        
-        Returns:
-            Parameter dictionary with 'forecaster', 'fh', and forecaster sub-parameters
-        """
-        # Initialisation du dictionnaire des paramètres
-        params = {
-            'forecaster': self.forecaster,
-            'fh': self.fh
-        }
+        # Entités inconnues : aucun modèle ajusté pour elles
+        codes = self.layout_.match_entities(layout)
+        if (codes < 0).any():
+            unknown = [layout.entities[code] for code in np.unique(layout.codes[codes < 0])]
+            raise ValueError(f"Entities unknown at fit: {_preview(unknown)}")
 
-        # Extraction des paramètres du forecaster
-        if deep and hasattr(self.forecaster, 'get_params'):
-            # Ajout des paramètres du forecaster avec le préfixe 'forecaster__'
-            forecaster_params = self.forecaster.get_params(deep=True)
-            params.update({f'forecaster__{k}': v for k, v in forecaster_params.items()})
-        
-        return params
+        # Utilisation de variables exogènes par l'estimateur
+        uses_X = bool(_tag(self.forecaster_, "capability:exogenous", True))
+        # Vérification de la contiguité des observations de X
+        if uses_X and not _tag(self.forecaster_, "capability:non_contiguous_X", True):
+            self._check_contiguous_X(layout, codes)
 
-    # Méthode d'initialisation des paramètres
-    def set_params(self, **params):
-        """
-        Set parameters for GridSearchCV compatibility.
-        
-        Forecaster parameters should be prefixed with 'forecaster__' for
-        nested parameter setting in GridSearchCV.
-        
-        Args:
-            **params: Parameters to set (forecaster params must have 'forecaster__' prefix)
-        
-        Returns:
-            self
-        """
-        # Séparation des paramètres de l'adapter et du forecaster
-        adapter_params = {}
-        forecaster_params = {}
+        columns = self.target_names_
+        dates = layout.dates.unique().sort_values()
 
-        # Parcours des paramètres
-        for key, value in params.items():
-            if key.startswith('forecaster__'):
-                # Paramètre du forecaster
-                forecaster_params[key.replace('forecaster__', '')] = value
-            else:
-                # Paramètre de l'adapter
-                adapter_params[key] = value
-        
-        # Application des paramètres de l'adapter
-        for key, value in adapter_params.items():
-            setattr(self, key, value)
-        
-        # Application des paramètres du forecaster
-        if forecaster_params and hasattr(self.forecaster, 'set_params'):
-            self.forecaster.set_params(**forecaster_params)
-        
-        return self
+        # Lignes de test couvrant toutes les entités ajustées à toutes les dates : un appel sktime
+        rectangular = len(X) == self.layout_.n_entities * len(dates)
+        if not uses_X or rectangular:
+            # Construction du jeu de données de variables exogènes attendues par sktime
+            X_sk = None
+            if uses_X:
+                X_sk = X.sort_index()
+                X_sk = X_sk if layout.is_panel else _with_freq(X_sk, self.layout_.freq)
+            # Construction de l'horizon de prédiction
+            fh = ForecastingHorizon(dates, is_relative=False, freq=self.layout_.freq)
+            # Le predict de sktime mémorise l'horizon dans le forecaster, sans effet sur ses prévisions
+            forecasts = self.forecaster_.predict(fh=fh, X=X_sk)
+            values = restore_row_order(forecasts[columns].to_numpy(), forecasts.index, X.index)
+        # Forecaster vectorisé par sktime : un forecaster ajusté par entité, chacune à ses dates
+        elif hasattr(self.forecaster_, "forecasters_"):
+            values = self._predict_per_entity(X, layout, codes, columns)
+        else:
+            raise ValueError(
+                f"{type(self.forecaster_).__name__} forecasts every entity on the same dates and "
+                f"needs X on each of them; X lacks {self.layout_.n_entities * len(dates) - len(X)} "
+                "(entity, date) row(s)"
+            )
+        values = np.asarray(values, dtype=float)
+        return values.reshape(len(X)) if self._target_ndim == 1 else values.reshape(len(X), n_targets)

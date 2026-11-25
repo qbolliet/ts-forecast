@@ -161,6 +161,12 @@ def _assert_predictions(actual: Any, expected: np.ndarray, case: AdapterCase, me
     np.testing.assert_allclose(np.asarray(actual), expected, rtol=case.rtol, atol=case.atol, err_msg=message)
 
 
+def _param_fingerprint(estimator: BaseEstimator) -> str:
+    """Hash of the deep parameters, each nested object reduced to its class."""
+    params = estimator.get_params(deep=True)
+    return joblib.hash({key: type(value) if hasattr(value, 'get_params') else value for key, value in params.items()})
+
+
 def _assert_output_shape(predictions: Any, X: pd.DataFrame, y: Any) -> None:
     """Assert the sklearn output contract: a finite ndarray with one row per row of ``X``."""
     assert isinstance(predictions, np.ndarray), (
@@ -209,11 +215,14 @@ def check_wrapped_object_untouched(case: AdapterCase) -> None:
     cloned.fit(X, y)
     assert joblib.hash(cloned_wrapped) == cloned_fingerprint, 'fit modified the wrapped object of a clone'
 
-    # Aller-retour des paramètres
+    # Aller-retour des paramètres, comparés par leurs valeurs : un objet imbriqué est décrit
+    # par sa classe, ses propres paramètres figurant dans get_params(deep=True) ; son état
+    # privé (caches remplis par set_params, comme la configuration des objets sktime) n'est
+    # pas un paramètre
     fresh = case.make_estimator()
-    before = joblib.hash(fresh.get_params(deep=False))
+    before = _param_fingerprint(fresh)
     fresh.set_params(**fresh.get_params(deep=True))
-    assert joblib.hash(fresh.get_params(deep=False)) == before, 'set_params(**get_params()) changed the parameters'
+    assert _param_fingerprint(fresh) == before, 'set_params(**get_params()) changed the parameters'
 
 
 def check_fit_predict(case: AdapterCase, kind: str) -> None:

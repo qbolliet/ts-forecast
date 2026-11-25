@@ -260,6 +260,15 @@ Le socle est une boîte à outils, pas une classe mère obligatoire. Une classe 
   prévoit à travers le `gap` à partir de l'historique d'entraînement.
 - Contrôler que sktime ne réclame pas `X` sur les dates du `gap` (lignes absentes de `X_test`) ; si
   c'est le cas, le documenter et lever une erreur claire plutôt que d'inventer des valeurs.
+- **Réalisé en session 3 (AD-11)** : tags sktime lus sur le forecaster —
+  `capability:exogenous = False` → `X` jamais transmis ; `capability:non_contiguous_X = False`
+  (`SARIMAX`) → `ValueError` si `X` n'a pas toutes les dates entre la fin d'entraînement et la date
+  prévue ; `requires-fh-in-fit` → `ValueError` au `fit` ; trous dans l'entraînement : `y` réindexé
+  avec `NaN` pour un forecaster sans `X`, lignes telles quelles sinon, `ValueError` si
+  `capability:missing_values = False`. Prévision : un appel sktime quand `X` est ignoré ou couvre
+  toutes les entités ajustées à toutes les dates de test ; sinon un appel par entité via la table
+  publique `forecasters_` des forecasters vectorisés ; sinon (forecaster à support panel natif) `ValueError`.
+  Sur un panel, sktime ajuste un forecaster local par entité (`YfromX` = une régression par entité).
 
 ### 5.2 `DartsAdapter`
 
@@ -520,4 +529,5 @@ tsforecast/adapters/foundation/
 | AD-08 | 2026-11-25 | 2 | API de `_base` du § 4 : `check_adapter_input` (via `validate_data`) remplace `set_fitted_feature_info` ; `iter_entity_blocks` de `tsforecast.panel.utils` remplace `split_by_entity` / `iter_entities` ; dates `Period` refusées (`TypeError`, conversion par `to_timestamp()`) ; `steps_between` par grille `date_range` + `get_indexer` | Réutiliser l'existant ; une grille gère multiplicateurs et ancrages, que `xy/rolling._period_ordinals` (privé) ne gère pas |
 | AD-09 | 2026-11-25 | 2 | Batterie de contrat en fonctions `check_*` (style `check_estimator`) + mixins unit / workflow, dans `tests/support/adapter_contract.py`, auto-validée sur deux adapters de référence et des mutants ; `test_init.py` (sous-processus, ~2 s, marqué `slow`) lancé explicitement par le job CI `tests-adapters` | Partagée par les tests unit et integration de chaque adapter ; une batterie qui ne détecte rien ne vaut rien |
 | AD-10 | 2026-11-25 | 2 | `conftest.py` racine : doctests d'un adapter ignorés si son paquet manque ; exclusions **transitoires** des doctests de `hierarchicalforecast.py` (ne se parse pas, session 6) et de `sktime.py` (exemple faux, session 3) ; `hierarchicalforecast.py` dans `EXCLUDED_PREFIXES` de `scripts/check_conventions.py` et non exporté par `tsforecast.adapters` (session 6 : retirer ces trois exclusions) | `check_conventions --rule all` vert sans toucher aux modules réécrits plus tard |
+| AD-11 | 2026-11-25 | 3 | `SktimeAdapter` : paramètre `fh` supprimé (horizon absolu tiré des dates de `X`) ; ajustement par la vectorisation de sktime (`pd-multiindex` / hiérarchique) ; prévision hybride (un appel sktime si `X` est ignoré ou complet sur toutes les entités et dates, sinon un appel par entité par `forecasters_`, sinon `ValueError` pour un forecaster à panel natif) ; capacités lues sur les tags sktime (`capability:exogenous`, `capability:non_contiguous_X`, `capability:missing_values`, `requires-fh-in-fit`) ; exclusion transitoire des doctests de `sktime.py` (AD-10) levée ; contrôle d'aller-retour `set_params(**get_params())` de la batterie comparant les valeurs des paramètres (objets imbriqués réduits à leur classe) | sktime n'a qu'un horizon commun à toutes les entités : un forecaster qui lit `X` échoue sur un test incomplet (panel déséquilibré) ; le `set_params` de sktime remplit un cache privé qui change l'empreinte `joblib` sans changer les paramètres |
 |  |  |  |  |  |

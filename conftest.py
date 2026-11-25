@@ -18,11 +18,9 @@ _ADAPTER_PACKAGES: dict[str, str] = {
     "tsforecast/adapters/sktime.py": "sktime",
 }
 
-# Modules exclus — TRANSITOIRE, retiré quand le module est réécrit : le premier ne se
-# parse pas, le second porte un exemple qui ne s'exécute pas
+# Modules exclus — TRANSITOIRE, retiré quand le module est réécrit : il ne se parse pas
 _TRANSIENTLY_EXCLUDED: list[str] = [
     "tsforecast/adapters/hierarchicalforecast.py",
-    "tsforecast/adapters/sktime.py",
 ]
 
 collect_ignore: list[str] = sorted(
