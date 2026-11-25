@@ -1,0 +1,872 @@
+"""Publication delay calculation utilities.
+
+This module provides functions to calculate applicable publication delays
+by converting frequencies and aggregating delays across time series.
+"""
+# Importation des modules
+# Modules de base
+from fractions import Fraction
+from functools import partial
+
+import numpy as np
+import pandas as pd
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Literal
+
+# Modules du package
+from ..utils.frequency import normalize_frequency
+from ..utils.time.utils import get_period_boundaries
+from ..utils.duration import DurationNormalizer, get_duration_nanoseconds
+from ..panel.utils import factorize_row_keys
+
+# Normaliseur des unités de délai
+_duration_normalizer = DurationNormalizer()
+
+# Fonction de calcul du délai applicable
+def calculate_applicable_delay(
+    publication_delays: pd.DataFrame,
+    reference_point: Literal['start', 'end'],
+    frequency: Union[str, Dict[Union[str, tuple], str]],
+    unit: Optional[Literal['us', 's', 'D', 'microsecond', 'second', 'day']] = None,
+    indicators: Optional[List[str]] = None,
+    aggregate_by_panel: bool = False,
+    aggregation_method: Union[str, callable] = 'median'
+) -> pd.DataFrame:
+    """Calculate applicable publication delay for specified indicators.
+
+    This function recalculates publication delays by converting to a target
+    frequency and reference point, then aggregates delays according to the
+    specified method.
+
+    **Frequency conversion.** A period is published with its last sub-period,
+    every sub-period being published at the same lag after its end (the months of
+    a quarter sum up to the quarter):
+
+    - the delay from the end (``reference_point='end'``) is the lag between the end
+      of the observation period and its publication, at any target frequency: a
+      monthly index published 19 days after each month end has a quarterly delay
+      of 19 days from the quarter end;
+    - the delay from the start adds the length of the target period containing the
+      end of the observation: the quarter for a monthly observation, the **last**
+      month for a quarterly one (Q1 GDP published 45 days after March 31 is
+      published 75 days after March 1st), whatever the date labelling it.
+
+    The delays of a column are thus independent of the position of its
+    observations in the target periods, and ``PublicationDelayTransformer`` reads
+    them back at the frequency given in the ``frequency`` column of the result.
+
+    **Unknown delays.** A row whose delay is ``NaN`` or whose frequency is
+    undetermined (``None``), as returned by ``compare_and_detect_delays`` for a
+    couple whose frequency cannot be detected, is kept with a ``NaN`` converted
+    delay: it is not counted in ``n_observations``, and a group made only of such
+    rows gets a ``NaN`` delay and ``n_observations=0``.
+
+    Args:
+        publication_delays: DataFrame returned by compare_and_detect_delays()
+            containing columns: observation_date, download_date, frequency,
+            period_start, period_end, reference_point, delay, unit. The last
+            level of its index is the indicator (the level names are free, or
+            absent); any other level identifies a panel entity. The ``unit``
+            values must be duration names or codes (``'day'``/``'D'``,
+            ``'second'``/``'s'``, ``'microsecond'``/``'us'``, ...): plural forms
+            such as ``'days'`` are rejected. The rows aggregated together must share
+            the same unit.
+        reference_point: Reference point for delay calculation ('start' or 'end'): the
+            delay is counted from the start of the target period, or from its end,
+            which is exclusive (the period of March ends on April 1st).
+        frequency: Target frequency for delay calculation. Either a single
+            frequency applied to all indicators ('monthly', 'M', 'quarterly',
+            'QE-DEC', ...), or a dict whose keys are indicators (``{'GDP': 'monthly'}``)
+            and/or full index keys of a panel, ``(entity, ..., indicator)`` tuples
+            (``{('FR', 'GDP'): 'monthly'}``). The tuple key of a row takes
+            precedence over its indicator key; every row of the (filtered) data must
+            be covered. A complete pandas code is honoured: its anchor sets the
+            target periods (``'QE-NOV'``: quarters from September to November,
+            ``'W-WED'``: weeks from Thursday to Wednesday), its position does not
+            change them (``'MS'``, ``'ME'`` and ``'M'`` are the same months). A
+            multiplied frequency (``'2MS'``) has periods only on the data grid: it
+            can only be the frequency of the observation itself, its periods then
+            starting at ``period_start``. Without ``aggregate_by_panel``, the entities
+            of an indicator must share the same target periods.
+        unit: Unit for output delays. If None, keeps the unit of the input data
+            (its label is then unchanged, e.g. ``'day'``). Otherwise any duration
+            supported by ``convert_duration`` ('us'/'microsecond', 's'/'second',
+            'D'/'day', 'h'/'hour', 'W'/'week', ...): delays are converted with
+            ceiling rounding and the ``unit`` column then holds the duration
+            *code* (``'D'``, ``'h'``, ...).
+        indicators: List of indicators to calculate delays for. If None, uses all
+            indicators found in the data.
+        aggregate_by_panel: If True, calculate separate delays for each (panel_entity, indicator)
+            combination. If False, aggregate across all panel entities for each indicator.
+        aggregation_method: Method to aggregate delays. Can be:
+            - String: any method supported by pandas.agg ('mean', 'median', 'max', 'min', etc.)
+            - Callable: custom aggregation function (reported by its ``__name__``)
+
+    Returns:
+        DataFrame with calculated applicable delays, indexed by indicator
+        (or by panel_entity and indicator if aggregate_by_panel=True).
+        Contains columns:
+        - delay: The calculated delay value
+        - unit: Unit of the delay
+        - frequency: The target frequency used, as given (literal name or code)
+        - reference_point: The target reference point used
+        - n_observations: Number of observations (known delays) used in aggregation
+        - aggregation_method: The aggregation method used
+        The text columns (unit, frequency, reference_point, aggregation_method) have the
+        ``str`` dtype.
+
+    Raises:
+        ValueError: If a required column is missing, if ``publication_delays`` has no
+            row, if reference_point is not 'start' or 'end', if none of the requested
+            indicators is found, if a frequency or a unit is not supported, if
+            ``frequency`` is a dict that does not cover every row (the uncovered keys
+            are named), if a multiplied target frequency is not the frequency of
+            the observation, if the entities of an indicator have different target
+            frequencies without ``aggregate_by_panel``, if aggregated rows have
+            different units, or if ``aggregation_method`` is an unknown method name
+        TypeError: If frequency is neither a string nor a dict, or if
+            aggregation_method is neither a string nor a callable
+
+    Examples:
+        >>> # Quarterly GDP of two countries and monthly CPI, all observed in March 2024
+        >>> index = pd.MultiIndex.from_tuples(
+        ...     [('FR', 'GDP'), ('DE', 'GDP'), ('FR', 'CPI')], names=['country', 'indicator'])
+        >>> delays_df = pd.DataFrame({
+        ...     'observation_date': pd.to_datetime(['2024-03-15'] * 3),
+        ...     'download_date': pd.to_datetime(['2024-05-15', '2024-05-25', '2024-04-10']),
+        ...     'frequency': ['Q', 'Q', 'M'],
+        ...     'period_start': pd.to_datetime(['2024-01-01', '2024-01-01', '2024-03-01']),
+        ...     'period_end': pd.to_datetime(['2024-03-31', '2024-03-31', '2024-03-31']),
+        ...     'reference_point': ['end', 'end', 'end'],
+        ...     'delay': [45, 55, 10],
+        ...     'unit': ['day', 'day', 'day'],
+        ... }, index=index)
+
+        >>> # Monthly delay from the start of the month, median over the countries:
+        >>> # GDP observed in March, downloaded May 15 (FR) and May 25 (DE), gives
+        >>> # 75 and 85 days after March 1st, hence a median of 80
+        >>> applicable = calculate_applicable_delay(
+        ...     publication_delays=delays_df,
+        ...     reference_point='start',
+        ...     frequency='monthly',
+        ...     aggregation_method='median'
+        ... )
+        >>> applicable['delay'].to_dict()
+        {'CPI': 40.0, 'GDP': 80.0}
+
+        >>> # Panel-level aggregation, delays counted from the end of the quarter
+        >>> # (April 1st, exclusive)
+        >>> applicable = calculate_applicable_delay(
+        ...     publication_delays=delays_df,
+        ...     reference_point='end',
+        ...     frequency='quarterly',
+        ...     aggregate_by_panel=True,
+        ...     aggregation_method='mean'
+        ... )
+        >>> applicable['delay'].to_dict()
+        {('DE', 'GDP'): 54.0, ('FR', 'CPI'): 9.0, ('FR', 'GDP'): 44.0}
+
+        >>> # One target frequency per indicator, delays expressed in hours
+        >>> applicable = calculate_applicable_delay(
+        ...     publication_delays=delays_df,
+        ...     reference_point='start',
+        ...     frequency={'GDP': 'monthly', 'CPI': 'quarterly'},
+        ...     unit='hour'
+        ... )
+        >>> applicable['delay'].to_dict(), applicable['unit'].unique().tolist()
+        ({'CPI': 2400.0, 'GDP': 1920.0}, ['h'])
+
+        >>> # One target frequency per (entity, indicator) couple: German GDP in
+        >>> # quarterly (Jan 1st to May 25th: 145 days), French GDP and CPI in monthly
+        >>> applicable = calculate_applicable_delay(
+        ...     publication_delays=delays_df,
+        ...     reference_point='start',
+        ...     frequency={('DE', 'GDP'): 'quarterly', 'GDP': 'monthly', 'CPI': 'monthly'},
+        ...     aggregate_by_panel=True
+        ... )
+        >>> applicable['delay'].to_dict()
+        {('DE', 'GDP'): 145.0, ('FR', 'CPI'): 40.0, ('FR', 'GDP'): 75.0}
+    """
+    # Validation des colonnes requises dans le DataFrame
+    _validate_columns(publication_delays)
+
+    # Validation des arguments
+    if reference_point not in ['start', 'end']:
+        raise ValueError("reference_point must be 'start' or 'end'")
+    if len(publication_delays) == 0:
+        raise ValueError("Cannot calculate applicable delays on empty data: publication_delays has no row")
+    _validate_aggregation_method(aggregation_method)
+
+    # Copie indépendante des données
+    delays = publication_delays.copy()
+
+    # Position du niveau de l'indicateur (dernier niveau de l'index) : les niveaux
+    # sont repérés par leur position, leurs noms étant libres, voire absents
+    indicator_level = delays.index.nlevels - 1
+
+    # Filtrage sur les indicateurs si spécifié
+    if indicators is not None:
+        delays = delays[delays.index.get_level_values(indicator_level).isin(indicators)]
+        if len(delays) == 0:
+            raise ValueError(f"No data found for specified indicators: {indicators}")
+
+    # Fréquence cible de chaque ligne
+    if isinstance(frequency, str):
+        # Fréquence unique pour tous les indicateurs
+        target_frequencies = [frequency] * len(delays)
+    elif isinstance(frequency, dict):
+        target_frequencies = _resolve_target_frequencies(delays.index, frequency)
+    else:
+        raise TypeError(f"'frequency' should be a string or a dict, got a {type(frequency).__name__}")
+
+    # Conversion des délais au point de référence et à la fréquence cibles
+    delays = _convert_to_target_frequency_and_reference(
+        delays=delays,
+        target_frequencies=target_frequencies,
+        target_reference_point=reference_point
+    )
+
+    # Fréquence cible unique par indicateur quand les entités sont agrégées
+    if not aggregate_by_panel:
+        _validate_single_frequency_per_indicator(delays, indicator_level)
+
+    # Conversion de l'unité si nécessaire
+    if unit is not None:
+        delays = _convert_delay_unit(delays, unit)
+
+    # Agrégation des délais
+    result = _aggregate_delays(
+        delays=delays,
+        aggregate_by_panel=aggregate_by_panel,
+        aggregation_method=aggregation_method,
+        target_reference_point=reference_point
+    )
+
+    return result
+
+# Fonction auxiliaire de validation des colonnes
+def _validate_columns(df: pd.DataFrame) -> None:
+    """Validate that all required columns are present in the DataFrame.
+
+    Args:
+        df: DataFrame to validate
+
+    Raises:
+        ValueError: If any required column is missing
+
+    Examples:
+        >>> _validate_columns(pd.DataFrame({'delay': [45]}))  # doctest: +ELLIPSIS
+        Traceback (most recent call last):
+        ...
+        ValueError: Missing required columns in publication_delays DataFrame: ['observation_date', ...
+    """
+    # Colonnes requises pour le calcul des délais
+    required_columns = [
+        'observation_date',
+        'download_date',
+        'frequency',
+        'period_start',
+        'period_end',
+        'reference_point',
+        'delay',
+        'unit'
+    ]
+
+    # Vérification de la présence de toutes les colonnes
+    missing_columns = [col for col in required_columns if col not in df.columns]
+
+    if missing_columns:
+        raise ValueError(
+            f"Missing required columns in publication_delays DataFrame: {missing_columns}. "
+            f"Required columns are: {required_columns}"
+        )
+
+
+# Fonction auxiliaire de validation de la méthode d'agrégation
+def _validate_aggregation_method(aggregation_method: Union[str, callable]) -> None:
+    """Validate the aggregation method before any computation.
+
+    A method name is tried on a minimal grouped series, so that an unknown name is
+    reported as an invalid argument rather than as an obscure pandas error.
+
+    Args:
+        aggregation_method: Method name supported by ``pandas.agg``, or callable
+
+    Raises:
+        ValueError: If a name is not a pandas aggregation method
+        TypeError: If the method is neither a string nor a callable
+
+    Examples:
+        >>> _validate_aggregation_method('median')
+        >>> _validate_aggregation_method('nope')  # doctest: +ELLIPSIS
+        Traceback (most recent call last):
+        ...
+        ValueError: Unsupported aggregation_method 'nope': ...
+    """
+    if isinstance(aggregation_method, str):
+        # Essai de la méthode sur un groupe minimal
+        try:
+            pd.Series([0.0, 1.0]).groupby([0, 0]).agg(aggregation_method)
+        except Exception as error:
+            raise ValueError(
+                f"Unsupported aggregation_method {aggregation_method!r}: it is not a pandas "
+                f"aggregation method ({type(error).__name__}: {error})"
+            ) from error
+    elif not callable(aggregation_method):
+        raise TypeError(
+            f"'aggregation_method' should be a string or a callable, got a {type(aggregation_method).__name__}"
+        )
+
+
+# Fonction auxiliaire de résolution de la fréquence cible de chaque ligne
+def _resolve_target_frequencies(index: pd.Index, frequency: Dict[Union[str, tuple], str]) -> List[str]:
+    """Resolve the target frequency of each row from a dictionary.
+
+    The key of a row is its full index entry (a tuple for a ``MultiIndex``: entity
+    levels, then indicator) and takes precedence; the indicator alone is the fallback.
+
+    Args:
+        index: Index of the delays (last level = indicator)
+        frequency: ``{indicator: frequency}`` and/or ``{(entity, ..., indicator): frequency}``
+
+    Returns:
+        One target frequency per row, in the order of ``index``
+
+    Raises:
+        ValueError: If some rows are covered by neither of their keys (the keys are named)
+
+    Examples:
+        >>> index = pd.MultiIndex.from_tuples([('FR', 'GDP'), ('DE', 'GDP')])
+        >>> _resolve_target_frequencies(index, {('DE', 'GDP'): 'Q', 'GDP': 'M'})
+        ['M', 'Q']
+    """
+    # Clés distinctes de l'index, codées sans construire de tuple par ligne
+    level_codes = index.codes if isinstance(index, pd.MultiIndex) else [index]
+    codes, first_rows = factorize_row_keys(*level_codes)
+
+    # Liste des fréquences de chaque clé distincte
+    targets = []
+    # Liste des clés sans fréquences associées
+    uncovered = []
+    # Parcours des seules clés distinctes, dans l'ordre de première apparition
+    for key in index[first_rows]:
+        # Extraction de l'indicateur en dernière position de l'index
+        indicator = key[-1] if isinstance(key, tuple) else key
+        # Recherche de la fréquence associée à l'indicateur
+        if key in frequency:
+            targets.append(frequency[key])
+        elif indicator in frequency:
+            targets.append(frequency[indicator])
+        # Cas où la fréquence n'est pas trouvée
+        else:
+            targets.append(None)
+            uncovered.append(key)
+
+    # Cas avec des entités non couvertes
+    if uncovered:
+        raise ValueError(
+            f"'frequency' does not give a target frequency for: {uncovered}. "
+            f"Give one per indicator, or per (entity, ..., indicator) index key"
+        )
+
+    # Diffusion de la fréquence de chaque clé distincte sur ses lignes
+    return [targets[code] for code in codes]
+
+
+# Date de référence des clés de période : une période d'une grille calendaire régulière la fixe tout entière
+_PERIOD_KEY_DATE = pd.Timestamp('2001-01-17 12:00')
+
+
+# Fonction auxiliaire de clé des périodes d'une fréquence cible
+def _period_key(frequency: str) -> Any:
+    """Return a key equal for two frequencies cutting the calendar into the same periods.
+
+    A single-period frequency is identified by its period around the reference date
+    ``_PERIOD_KEY_DATE``, which sets its whole grid ('M', 'MS' and 'monthly' share it, as 'QE-NOV' and
+    'QS-DEC'); a multiplied one, whose periods follow the data grid, by its string.
+
+    Args:
+        frequency: Complete frequency string
+
+    Returns:
+        A hashable key
+
+    Examples:
+        >>> _period_key('QE-NOV') == _period_key('QS-DEC'), _period_key('M') == _period_key('MS')
+        (True, True)
+        >>> _period_key('Q') == _period_key('QE-NOV')
+        False
+    """
+    if normalize_frequency(frequency, return_format='components').multiplier != 1:
+        return frequency
+    return get_period_boundaries(_PERIOD_KEY_DATE, frequency)
+
+
+# Fonction auxiliaire de validation de l'unicité de la fréquence cible par indicateur
+def _validate_single_frequency_per_indicator(delays: pd.DataFrame, indicator_level: int) -> None:
+    """Validate that each indicator has a single target frequency.
+
+    Delays counted against different target frequencies cannot be aggregated across
+    entities. Two spellings of the same periods (``'M'``, ``'MS'`` and ``'monthly'``;
+    ``'QE-NOV'`` and ``'QS-DEC'``) are the same target frequency.
+
+    Args:
+        delays: Converted delays, holding ``target_frequency_normalized``
+        indicator_level: Position of the indicator level in the index
+
+    Raises:
+        ValueError: If the entities of an indicator have different target frequencies
+    """
+    # Périodes cibles de chaque ligne, comparées par leur clé
+    keys = _map_distinct(delays['target_frequency_normalized'], _period_key)
+    frequencies = keys.groupby(level=indicator_level).nunique()
+    # Vérification de l'unicité
+    ambiguous = frequencies[frequencies > 1].index.tolist()
+    if ambiguous:
+        raise ValueError(
+            f"The target frequency differs between the entities of the indicators {ambiguous}: "
+            f"use aggregate_by_panel=True to aggregate per (entity, indicator)"
+        )
+
+
+# Fonction auxiliaire de conversion à la fréquence cible et au point de référence cible des délais de publication
+def _convert_to_target_frequency_and_reference(
+    delays: pd.DataFrame,
+    target_frequencies: List[str],
+    target_reference_point: str
+) -> pd.DataFrame:
+    """Convert delays to target frequency and reference point.
+
+    The columns ``target_frequency``, ``target_frequency_normalized`` and
+    ``current_frequency_normalized`` are added to ``delays`` in place. The
+    conversion is computed by ``_calculate_converted_delay`` once per distinct
+    combination of the columns it reads, then spread over the rows sharing it:
+    the entities and indicators of a same observation date share their period
+    and their delay, so the combinations are far fewer than the rows.
+
+    Args:
+        delays: Publication delays DataFrame
+        target_frequencies: Target frequency of each row, in the order of ``delays``
+        target_reference_point: Target reference point ('start' or 'end')
+
+    Returns:
+        DataFrame with the input columns, the three frequency columns above and
+        ``converted_delay`` (``int64``, ``float64`` as soon as a delay is unknown),
+        ``target_period_start``, ``target_period_end`` (``NaT`` for an unknown delay)
+        and ``target_reference_point``
+
+    Raises:
+        ValueError: If a frequency is not supported, or if the unit of a row with a
+            known delay is not a supported duration
+    """
+    # Ajout d'une colonne pour la fréquence cible
+    delays['target_frequency'] = target_frequencies
+
+    # Normalisation des fréquences en code complet (une fréquence source indéterminée reste telle
+    # quelle) : l'ancrage et le multiplicateur fixent la fin de l'observation et les périodes cibles
+    delays['target_frequency_normalized'] = _map_distinct(delays['target_frequency'], partial(normalize_frequency, return_format='full'))
+    delays['current_frequency_normalized'] = _map_distinct(delays['frequency'], partial(normalize_frequency, return_format='full'))
+    delays['target_reference_point'] = target_reference_point
+
+    # Lignes au délai et à la fréquence source connus : seules converties, les
+    # autres gardent un délai inconnu
+    known = (delays['delay'].notna() & delays['current_frequency_normalized'].notna()).to_numpy()
+    known_rows = np.flatnonzero(known)
+    known_delays = delays.iloc[known_rows]
+
+    # Combinaisons distinctes des colonnes lues par la conversion
+    codes, first_rows = factorize_row_keys(*(known_delays[column] for column in _CONVERSION_COLUMNS))
+    distinct = known_delays[list(_CONVERSION_COLUMNS)].iloc[first_rows]
+
+    # Conversion exacte de chaque combinaison distincte, dans l'ordre de première
+    # apparition (une erreur désigne donc la première ligne fautive)
+    converted = [
+        _calculate_converted_delay(*combination, target_reference_point)
+        for combination in distinct.itertuples(index=False, name=None)
+    ]
+
+    # Diffusion du délai converti : entiers, flottants dès qu'un délai est inconnu
+    distinct_delays = np.asarray([delay for delay, _start, _end in converted])
+    if known.all():
+        delays['converted_delay'] = distinct_delays[codes] if len(codes) else np.zeros(0, dtype=np.int64)
+    else:
+        converted_delay = np.full(len(delays), np.nan)
+        converted_delay[known_rows] = distinct_delays[codes].astype(float) if len(codes) else []
+        delays['converted_delay'] = converted_delay
+
+    # Diffusion des bornes de la période cible, NaT pour un délai inconnu (dernière position)
+    positions = np.full(len(delays), len(converted))
+    positions[known_rows] = codes
+    for position, column in ((1, 'target_period_start'), (2, 'target_period_end')):
+        bounds = pd.DatetimeIndex([bound[position] for bound in converted] + [pd.NaT])
+        delays[column] = bounds.take(positions)
+
+    return delays
+
+
+# Colonnes lues par la conversion d'un délai, dans l'ordre des arguments de
+# "_calculate_converted_delay"
+_CONVERSION_COLUMNS: Tuple[str, ...] = (
+    'observation_date', 'period_start', 'period_end', 'reference_point', 'delay', 'unit',
+    'target_frequency_normalized', 'current_frequency_normalized',
+)
+
+
+# Fonction auxiliaire d'application d'une fonction aux seules valeurs distinctes
+def _map_distinct(values: pd.Series, function: Callable[[Any], Any]) -> pd.Series:
+    """Apply a scalar function once per distinct value, missing values kept missing.
+
+    The values are visited in order of first appearance: an error raised by
+    ``function`` designates the first faulty row.
+
+    Args:
+        values: Series to transform
+        function: Scalar function applied to each distinct non-missing value
+
+    Returns:
+        Series of the results, indexed like ``values`` (NaN where ``values`` is missing)
+
+    Examples:
+        >>> _map_distinct(pd.Series(['monthly', None, 'monthly']), normalize_frequency).tolist()
+        ['M', nan, 'M']
+    """
+    # Résultat de chaque valeur distincte non manquante
+    results = {value: function(value) for value in pd.unique(values.dropna())}
+    return values.map(results)
+
+
+# Fonction auxiliaire de normalisation d'une unité de délai, multiplicateur compris
+def _unit_code(unit: str) -> str:
+    """Normalize a delay unit into its duration code, keeping its multiplier.
+
+    Args:
+        unit: Duration name or code, possibly multiplied ('day', 'D', '2D', ...)
+
+    Returns:
+        The duration code, prefixed by the multiplier when it is not 1
+
+    Raises:
+        ValueError: If the unit is not a supported duration
+
+    Examples:
+        >>> _unit_code('day'), _unit_code('2D')
+        ('D', '2D')
+    """
+    code, multiplier = _duration_normalizer.normalize_with_multiplier(unit)
+    return code if multiplier == 1 else f"{multiplier}{code}"
+
+
+# Fonction auxiliaire de conversion d'une valeur en nanosecondes entières
+def _to_nanoseconds(value: float, nanoseconds_per_unit: int) -> int:
+    """Convert a delay value to whole nanoseconds, exactly.
+
+    Args:
+        value: Delay, in a unit of ``nanoseconds_per_unit`` nanoseconds (integer or float)
+        nanoseconds_per_unit: Length of the unit, in nanoseconds
+
+    Returns:
+        The delay in nanoseconds (a fraction of a nanosecond is rounded)
+
+    Examples:
+        >>> _to_nanoseconds(129_600_000_123_457, 1_000)
+        129600000123457000
+        >>> _to_nanoseconds(1.5, 10**9)
+        1500000000
+    """
+    # Cas d'un entier
+    if isinstance(value, (int, np.integer)):
+        return int(value) * nanoseconds_per_unit
+    # Fraction d'un flottant : valeur binaire exacte, sans erreur d'arrondi du produit
+    return round(Fraction(float(value)) * nanoseconds_per_unit)
+
+
+# Fonction auxiliaire de conversion des délais de publication à la bonne fréquence et à la bonne référence
+def _calculate_converted_delay(
+    observation_date: pd.Timestamp,
+    period_start: pd.Timestamp,
+    period_end: pd.Timestamp,
+    reference_point: str,
+    delay: float,
+    unit: str,
+    target_frequency: str,
+    current_frequency: str,
+    target_reference_point: str,
+) -> Tuple[Union[int, float], pd.Timestamp, pd.Timestamp]:
+    """Calculate delay with converted frequency and reference point for a single observation.
+
+    This function performs a three-step conversion process:
+
+    1. **Reconstruction of download date**: Converts the relative delay
+       (e.g., "45 days after period end") into an absolute download date
+       by adding the delay to the original reference date.
+
+    2. **Determination of target period**: the period of the target frequency
+       containing the last instant of the observation period (computed from
+       ``period_start`` at ``current_frequency``, the end being **exclusive**: the
+       period of March ends on April 1st). For a higher target frequency
+       (quarterly → monthly), it is the **last sub-period** of the observation
+       (March for Q1), whatever the date labelling the observation; for an equal
+       or lower one (monthly → quarterly), the period containing it.
+
+    3. **Calculation of converted delay**: a period of the target frequency is
+       published with its last sub-period, every sub-period being published at the
+       same lag after its end. The delay from the end (``'end'``) is thus the lag
+       between the end of the observation period and the download date, at any
+       target frequency; the delay from the start (``'start'``) adds the length of
+       the target period. The result is converted back to the original time unit
+       with ceiling rounding, computed with integer nanoseconds, hence exact.
+
+    A delay or a source frequency unknown (``NaN`` / ``None``) gives a ``NaN``
+    converted delay and ``NaT`` target period bounds.
+
+    Args:
+        observation_date: Date the observation refers to
+        period_start: Start of the original period
+        period_end: End of the original period
+        reference_point: Original reference ('start' or 'end')
+        delay: Numeric delay value
+        unit: Duration name or code of the delay ('day'/'D', 'second'/'s',
+            'microsecond'/'us', ...; plural forms such as 'days' are rejected)
+        target_frequency: Target frequency, as a complete pandas string ('M',
+            'QE-NOV') or any form accepted by
+            :func:`~tsforecast.utils.frequency.normalize_frequency`; its anchor sets
+            the target periods. A multiplied target must be ``current_frequency``:
+            its periods then start at ``period_start``
+        current_frequency: Frequency of the observation, as a complete pandas string
+            ('QE-DEC', 'W-WED', '2MS') or any form accepted by
+            :func:`~tsforecast.utils.frequency.normalize_frequency`; its anchor sets the
+            period of ``period_start``, and a multiplied period starts at ``period_start``
+        target_reference_point: Target reference point ('start' or 'end')
+
+    Returns:
+        Tuple ``(converted_delay, target_period_start, target_period_end)``: the
+        delay in the original unit, rounded up, and the bounds of the target
+        period, the end being exclusive
+
+    Raises:
+        ValueError: If the unit of a known delay is not a supported duration, or
+            if a multiplied target frequency is not ``current_frequency``
+
+    Examples:
+        >>> # Q1 2024 data (Jan 1 - Mar 31), published 45 days after quarter end
+        >>> # Observation occurred in March, convert to monthly with 'start' reference
+        >>> converted_delay, start, end = _calculate_converted_delay(
+        ...     pd.Timestamp('2024-03-15'), pd.Timestamp('2024-01-01'), pd.Timestamp('2024-03-31'),
+        ...     'end', 45, 'day', 'M', 'Q', 'start',
+        ... )
+        >>> # Download date: Mar 31 + 45 days = May 15
+        >>> # Target period: March 2024, last month of the quarter
+        >>> start, end
+        (Timestamp('2024-03-01 00:00:00'), Timestamp('2024-04-01 00:00:00'))
+        >>> # Converted delay: May 15 - Apr 1 (end of Q1) + 31 days (March) = 75 days
+        >>> converted_delay
+        75
+        >>> # A monthly observation (January, downloaded Feb 20) seen at the quarterly frequency:
+        >>> # 19 days after its end, i.e. 19 days after the end of a quarter whose last month it would be
+        >>> _calculate_converted_delay(
+        ...     pd.Timestamp('2024-01-01'), pd.Timestamp('2024-01-01'), pd.Timestamp('2024-02-01'),
+        ...     'end', 19, 'day', 'Q', 'M', 'end',
+        ... )[0]
+        19
+    """
+    # Délai ou fréquence source inconnus : délai inconnu, sans période cible
+    if pd.isna(delay) or pd.isna(current_frequency):
+        return np.nan, pd.NaT, pd.NaT
+
+    # Reconstruction de la date de téléchargement originale
+    # download_date = reference_date + delay
+    if reference_point == 'start':
+        original_reference_date = period_start
+    else:
+        original_reference_date = period_end
+
+    # Durée de l'unité du délai en nanosecondes entières (calcul exact, sans secondes flottantes)
+    nanoseconds_per_unit = get_duration_nanoseconds(unit)
+    delay_timedelta = pd.Timedelta(_to_nanoseconds(delay, nanoseconds_per_unit), unit='ns')
+
+    # Calcul de la date de téléchargement
+    download_date = original_reference_date + delay_timedelta
+
+    # Fin exacte (exclusive) de la période de l'observation, à sa propre fréquence (une période
+    # multipliée débute à period_start : grille des données, et non grille alignée sur l'epoch)
+    multiplied = normalize_frequency(current_frequency, return_format='components').multiplier != 1
+    _, observation_end = get_period_boundaries(
+        date=period_start, frequency=current_frequency, origin=period_start if multiplied else None
+    )
+
+    # Période cible : celle de la fréquence cible qui contient le dernier instant de l'observation
+    # (sa période englobante pour une fréquence cible plus faible, sa dernière sous-période pour une
+    # fréquence cible plus élevée). Une période cible multipliée n'existe que sur la grille des données :
+    # elle est celle de l'observation elle-même
+    target_multiplied = normalize_frequency(target_frequency, return_format='components').multiplier != 1
+    if target_multiplied and target_frequency != current_frequency:
+        raise ValueError(
+            f"The multiplied target frequency '{target_frequency}' has periods only on the data grid: it can "
+            f"only be the frequency of the observation ('{current_frequency}'). Give a single-period target "
+            f"frequency instead"
+        )
+    target_period_start, target_period_end = get_period_boundaries(
+        date=observation_end - pd.Timedelta(1, unit='ns'),
+        frequency=target_frequency,
+        origin=period_start if target_multiplied else None
+    )
+
+    # Nouvelle date de référence : une période cible est publiée avec sa dernière sous-période, chaque
+    # sous-période au même retard après sa fin. Le délai depuis la fin est celui de l'observation ; le
+    # délai depuis le début lui ajoute la durée de la période cible
+    if target_reference_point == 'start':
+        new_reference_date = observation_end - (target_period_end - target_period_start)
+    else:
+        new_reference_date = observation_end
+
+    # Calcul du nouveau délai, en nanosecondes entières
+    new_delay_nanoseconds = (download_date - new_reference_date) // pd.Timedelta(1, unit='ns')
+
+    # Conversion dans l'unité d'origine, arrondie au supérieur (division entière par excès)
+    converted_delay = -(-new_delay_nanoseconds // nanoseconds_per_unit)
+
+    return converted_delay, target_period_start, target_period_end
+
+# Fonction auxiliaire de conversion de l'unité du délai
+def _convert_delay_unit(delays: pd.DataFrame, target_unit: str) -> pd.DataFrame:
+    """Convert delay values to target unit.
+
+    The conversion is made with integer nanoseconds, hence exact before the ceiling
+    rounding.
+
+    Args:
+        delays: DataFrame with delays, holding ``converted_delay`` and ``unit``
+        target_unit: Target duration, name or code: 'us'/'microsecond',
+            's'/'second', 'D'/'day', 'h'/'hour', 'W'/'week', ... (any duration
+            supported by ``convert_duration``)
+
+    Returns:
+        DataFrame with ``converted_delay`` converted (ceiling rounding; rows
+        already in the target unit, and unknown delays, are left as they are) and
+        ``unit`` set to the duration *code* of the target unit (``'D'``, not ``'day'``)
+
+    Raises:
+        ValueError: If a unit is not a supported duration
+    """
+    # Normalisation de l'unité cible (tous les formats, multiplicateur compris)
+    target_unit_code = _unit_code(target_unit)
+    target_nanoseconds = get_duration_nanoseconds(target_unit)
+
+    # Fonction de conversion en nanosecondes entières
+    def convert_value(value, unit):
+        # Extraction du code de l'unité courante, multiplicateur compris
+        current_unit_code = _unit_code(unit)
+
+        # Pas de conversion nécessaire si les unités sont identiques
+        if current_unit_code == target_unit_code:
+            return value
+
+        # Conversion exacte, arrondie au supérieur
+        nanoseconds = _to_nanoseconds(value, get_duration_nanoseconds(unit))
+        return -(-nanoseconds // target_nanoseconds)
+
+    # Délais connus, seuls convertis : un délai inconnu reste tel quel
+    values = delays['converted_delay']
+    known = values.notna().to_numpy()
+    known_rows = np.flatnonzero(known)
+
+    # Conversion une fois par couple (délai, unité) distinct, dans l'ordre de
+    # première apparition (une erreur désigne donc la première ligne fautive)
+    known_values = values.iloc[known_rows]
+    known_units = delays['unit'].iloc[known_rows]
+    codes, first_rows = factorize_row_keys(known_values, known_units)
+    distinct = np.asarray([
+        convert_value(value, unit)
+        for value, unit in zip(known_values.iloc[first_rows], known_units.iloc[first_rows])
+    ])
+
+    # Diffusion : entiers, flottants dès qu'un délai est inconnu
+    if known.all():
+        delays['converted_delay'] = distinct[codes] if len(codes) else values
+    else:
+        converted_delay = np.full(len(delays), np.nan)
+        converted_delay[known_rows] = distinct[codes].astype(float) if len(codes) else []
+        delays['converted_delay'] = converted_delay
+    delays['unit'] = target_unit_code
+
+    return delays
+
+# Fonction auxiliaire d'aggrégation des délais
+def _aggregate_delays(
+    delays: pd.DataFrame,
+    aggregate_by_panel: bool,
+    aggregation_method: Union[str, callable],
+    target_reference_point: str
+) -> pd.DataFrame:
+    """Aggregate delays by indicator or by (panel, indicator).
+
+    Args:
+        delays: DataFrame with converted delays
+        aggregate_by_panel: Whether to aggregate by panel
+        aggregation_method: Aggregation method
+        target_reference_point: Target reference point
+
+    Returns:
+        DataFrame indexed by the grouping levels (indicator, or panel entities and
+        indicator) with the columns ``delay``, ``unit`` (first of the group),
+        ``frequency`` (target frequency as given, first of the group),
+        ``reference_point``, ``n_observations`` (known delays) and ``aggregation_method``
+
+    Raises:
+        ValueError: If the rows of a group have different units
+    """
+    # Détermination des niveaux de groupement (par position)
+    last_level = delays.index.nlevels - 1
+    if aggregate_by_panel:
+        # Groupement par tous les niveaux de l'index (panel + indicateur)
+        group_levels = list(range(delays.index.nlevels))
+    else:
+        # Groupement uniquement par indicateur
+        group_levels = [last_level]
+
+    # Les délais agrégés ensemble doivent être exprimés dans la même unité
+    unit_codes = delays['unit'].map(_unit_code)
+    mixed = unit_codes.groupby(level=group_levels).nunique()
+    mixed_groups = mixed[mixed > 1].index.tolist()
+    if mixed_groups:
+        raise ValueError(
+            f"The delays of {mixed_groups} are expressed in different units and cannot be aggregated "
+            f"as they are: give a common 'unit'"
+        )
+
+    # Agrégation des délais
+    agg_result = delays.groupby(level=group_levels).agg({
+        'converted_delay': aggregation_method,
+        'unit': 'first',  # L'unité doit être la même pour tous
+        'target_frequency': 'first'  # La fréquence cible doit être la même pour chaque groupe (sera renommée en 'frequency')
+    })
+
+    # Comptage du nombre d'observations dont le délai est connu
+    n_obs = delays['converted_delay'].notna().groupby(level=group_levels).sum().astype('int64')
+    agg_result['n_observations'] = n_obs
+
+    # Un groupe sans aucun délai connu a un délai inconnu (une somme vide vaudrait 0)
+    agg_result.loc[agg_result['n_observations'] == 0, 'converted_delay'] = np.nan
+
+    # Renommage de la colonne du délai
+    agg_result = agg_result.rename(columns={'converted_delay': 'delay', 'target_frequency': 'frequency'})
+
+    # Ajout des métadonnées
+    agg_result['reference_point'] = target_reference_point
+    agg_result['aggregation_method'] = (
+        aggregation_method if isinstance(aggregation_method, str)
+        else getattr(aggregation_method, '__name__', type(aggregation_method).__name__)
+    )
+
+    # Réorganisation des colonnes
+    column_order = [
+        'delay',
+        'unit',
+        'frequency',
+        'reference_point',
+        'n_observations',
+        'aggregation_method'
+    ]
+    # Colonnes textuelles en dtype chaîne, quel que soit le dtype de l'entrée
+    return agg_result[column_order].astype(
+        {'unit': 'str', 'frequency': 'str', 'reference_point': 'str', 'aggregation_method': 'str'}
+    )

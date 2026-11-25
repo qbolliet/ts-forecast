@@ -1,0 +1,259 @@
+"""Duration normalization utilities for time series processing.
+
+This module provides the DurationNormalizer class to handle different duration
+representations including codes and literal names.
+"""
+# Importation des modules
+from typing import Union
+
+# Import de la classe parente
+from ..abc.normalizer import TemporalNormalizer
+from .._constants import CONVERSION_FACTORS_TO_SECONDS
+# Importation des types
+from .types import DurationType, UserDurationType
+# Importation de la fonction de parsing des fréquences pandas / durées
+from ..parse import parse_frequency
+
+
+# Classe de normalisation des durées
+class DurationNormalizer(TemporalNormalizer):
+    """Centralized duration normalization and conversion utility.
+
+    This class handles conversions between different duration representations:
+    - Duration codes (D, W, M, Q, Y, etc.)
+    - User-friendly literal names
+
+    Examples:
+        >>> normalizer = DurationNormalizer()
+        >>> normalizer.normalize('hour')
+        'h'
+        >>> normalizer.to_literal('D')
+        'day'
+        >>> normalizer.normalize('month')
+        'M'
+    """
+
+    # Initialisation
+    def __init__(self):
+        """Initialize duration mappings."""
+        # Mapping des codes de durées vers des noms littéraux
+        self._code_to_literal = {
+            'ns': 'nanosecond',
+            'us': 'microsecond',
+            'ms': 'millisecond',
+            's': 'second',
+            'min': 'minute',
+            'h': 'hour',
+            'D': 'day',
+            'B': 'business_day',
+            'W': 'week',
+            'SM': 'semi_month',
+            'M': 'month',
+            'Q': 'quarter',
+            'Y': 'year'
+        }
+
+        # Mapping inverse pour les conversions (utilisation de la méthode héritée)
+        self._literal_to_code = self._build_reverse_mapping(self._code_to_literal)
+
+        # Ordre des durées pour les comparaisons (du plus court au plus long)
+        self._duration_order = {
+            'ns': 1,
+            'us': 2,
+            'ms': 3,
+            's': 4,
+            'min': 5,
+            'h': 6,
+            'D': 7,
+            'B': 7.5,
+            'W': 8,
+            'SM': 8.5,
+            'M': 9,
+            'Q': 10,
+            'Y': 11
+        }
+
+    # Méthode de normalisation de la durée
+    def normalize(self, value: Union[DurationType, UserDurationType]) -> DurationType:
+        """Normalize any duration representation to duration code.
+
+        A leading multiplier ('2D') is accepted and dropped from the returned
+        code; use :meth:`normalize_with_multiplier` to keep it.
+
+        Args:
+            value: Duration string (code or literal name)
+
+        Returns:
+            Duration code string
+
+        Raises:
+            ValueError: If value format is not supported
+
+        Examples:
+            >>> normalizer = DurationNormalizer()
+            >>> normalizer.normalize('hour')
+            'h'
+            >>> normalizer.normalize('D')
+            'D'
+        """
+        # Vérification que la durée est du type spécifié
+        if not isinstance(value, str):
+            raise ValueError(f"Duration must be a string, got {type(value)}")
+
+        # Retourne un code inchangé
+        if value in self._code_to_literal:
+            return value
+
+        # Conversion du nom littéral en code
+        if value in self._literal_to_code:
+            return self._literal_to_code[value]
+
+        # Tentative d'extraction de la fréquence de base via parse_frequency
+        try:
+            base = parse_frequency(value).freq
+            # Récursion seulement si la base est différente de la valeur d'entrée (évite boucle infinie)
+            if base != value:
+                return self.normalize(base)
+        except ValueError:
+            pass
+
+        # Renvoie une erreur si le code est inconnu
+        raise ValueError(
+            f"Unsupported duration: {value}. "
+            f"Supported durations: {list(self._literal_to_code.keys())} "
+            f"or duration codes: {list(self._code_to_literal.keys())}"
+        )
+
+    # Méthode de conversion en expression littéraire
+    def to_literal(self, duration: DurationType) -> UserDurationType:
+        """Convert duration to literal name.
+
+        Implementation of TemporalNormalizer.to_literal() for durations.
+
+        Args:
+            duration: Duration in any supported format
+
+        Returns:
+            Literal duration name
+
+        Examples:
+            >>> normalizer = DurationNormalizer()
+            >>> normalizer.to_literal('h')
+            'hour'
+            >>> normalizer.to_literal('Q')
+            'quarter'
+        """
+        # Normalisation de la durée
+        duration_code = self.normalize(duration)
+        # Conversion dans son nom littéral
+        return self._code_to_literal.get(duration_code, duration_code)
+
+    # Méthode de validation du support de la durée
+    def validate(self, value: Union[DurationType, UserDurationType]) -> bool:
+        """Validate if a duration is supported.
+
+        Args:
+            value: Duration to validate
+
+        Returns:
+            True if duration is valid and supported
+
+        Examples:
+            >>> normalizer = DurationNormalizer()
+            >>> normalizer.validate('day')
+            True
+            >>> normalizer.validate('invalid_dur')
+            False
+        """
+        try:
+            # Tentative de normalisation de la durée
+            self.normalize(value)
+            return True
+        except ValueError:
+            return False
+
+    # Conversion d'une durée dans son expression code
+    def to_code(self, duration: Union[DurationType, UserDurationType]) -> DurationType:
+        """Convert duration to duration code.
+
+        Args:
+            duration: Duration in any supported format
+
+        Returns:
+            Duration code
+
+        Examples:
+            >>> normalizer = DurationNormalizer()
+            >>> normalizer.to_code('hour')
+            'h'
+        """
+        return self.normalize(duration)
+
+    # Méthode déterminant si une durée est plus longue qu'une autre
+    def is_longer_duration(self, dur1: DurationType, dur2: DurationType) -> bool:
+        """Check if dur1 is a longer duration than dur2.
+
+        A multiplier lengthens the duration: ``'2D'`` is longer than ``'D'``
+        and shorter than ``'W'``. Nested calendar units are compared exactly
+        in sub-periods (``'3M'`` and ``'Q'`` have the same length). Without any
+        multiplier the comparison follows the order of the codes.
+
+        Args:
+            dur1: First duration
+            dur2: Second duration
+
+        Returns:
+            True if dur1 is longer duration than dur2
+
+        Examples:
+            >>> normalizer = DurationNormalizer()
+            >>> normalizer.is_longer_duration('month', 'day')
+            True
+            >>> normalizer.is_longer_duration('week', 'quarter')
+            False
+            >>> normalizer.is_longer_duration('2D', 'D')
+            True
+            >>> normalizer.is_longer_duration('3M', 'Q'), normalizer.is_longer_duration('Q', '3M')
+            (False, False)
+        """
+        # Conversion en code et extraction des multiplicateurs
+        code1, multiplier1 = self.normalize_with_multiplier(dur1)
+        code2, multiplier2 = self.normalize_with_multiplier(dur2)
+
+        # Sans multiplicateur : ordre des codes
+        if multiplier1 == multiplier2 == 1:
+            return self._duration_order.get(code1, 0) > self._duration_order.get(code2, 0)
+
+        # Même code : le plus grand multiplicateur donne la durée la plus longue
+        if code1 == code2:
+            return multiplier1 > multiplier2
+
+        # Codes différents : comparaison exacte des paires emboîtées, nominale sinon
+        return self._compare_multiplied_lengths(
+            code1, multiplier1, code2, multiplier2, CONVERSION_FACTORS_TO_SECONDS) > 0
+
+    # Méthode de vérification que deux expressions de durées sont compatibles
+    def are_compatible_durations(self, dur1: DurationType, dur2: DurationType) -> bool:
+        """Check if two durations are compatible for conversion.
+
+        Args:
+            dur1: First duration
+            dur2: Second duration
+
+        Returns:
+            True if durations can be converted between each other
+
+        Examples:
+            >>> normalizer = DurationNormalizer()
+            >>> normalizer.are_compatible_durations('day', 'month')
+            True
+            >>> normalizer.are_compatible_durations('business_day', 'month')
+            True
+        """
+        try:
+            # Tentative de normalisation de chaque durée
+            self.normalize(dur1)
+            self.normalize(dur2)
+            return True
+        except ValueError:
+            return False

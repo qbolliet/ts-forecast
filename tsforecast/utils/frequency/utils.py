@@ -1,0 +1,776 @@
+"""Module-level helpers for frequency strings: canonicalization and normalization,
+conversion to literal, code, pandas alias and DateOffset forms, comparison and ordering,
+and frequency detection for series, datasets and indexes (``detect_frequency``,
+``detect_dataset_frequency``, ``detect_index_frequency``)."""
+# Importation des modules
+# Modules de base
+from typing import Union, Literal, Tuple, Optional, Dict, List, TYPE_CHECKING
+import pandas as pd
+
+# Importation des modules du package
+from .normalizer import FrequencyNormalizer
+from .types import FrequencyType, UserFrequencyType
+from .._constants import MONTH_ABBREVIATIONS
+from ..parse.utils import ParsedFrequency, parse_frequency, build_frequency_string
+from ...panel.utils import normalize_entity_key
+
+# Import réservé au typage statique : .detector importe des noms définis dans
+# ce module (normalize_frequency, get_frequency_order), un import global ici
+# créerait un cycle
+if TYPE_CHECKING:
+    from .detector import FrequencyDetector
+
+# Instance globale pour faciliter l'utilisation
+_normalizer = FrequencyNormalizer()
+
+# Fonction de mise sous forme canonique d'une fréquence
+def canonicalize_frequency(frequency: Optional[str]) -> Optional[str]:
+    """Rewrite a frequency string to the canonical spelling of its equivalence class.
+
+    Some pandas frequencies generate exactly the same dates under several
+    spellings, and ``pd.infer_freq`` returns any of them. This function maps
+    every spelling of a class to a single, readable representative. Anything
+    that is not affected is returned unchanged, so it is safe to apply to any
+    inferred frequency.
+
+    Rules:
+        - Quarterly anchors come in classes of three equivalent months:
+          ``QS-JAN``, ``QS-APR``, ``QS-JUL`` and ``QS-OCT`` generate the same
+          dates (``pd.infer_freq`` reports ``'QS-OCT'`` for a plain ``'QS'``
+          index). The canonical anchor is the first month of the calendar
+          year for a start position (``JAN`` / ``FEB`` / ``MAR``) and the
+          month preceding it for an end position (``DEC`` / ``JAN`` /
+          ``FEB``): the pandas defaults (``QS-JAN`` / ``QE-DEC``) are
+          preserved, and a start anchor and its end counterpart describe the
+          same periods (``QS-FEB`` / ``QE-JAN``).
+
+    Args:
+        frequency: Frequency string (multiplier, position and anchor allowed),
+            or None.
+
+    Returns:
+        The canonical frequency string; ``frequency`` itself when no rule
+        applies (unparsable, unanchored, other frequencies, None).
+
+    Examples:
+        >>> canonicalize_frequency('QS-OCT')
+        'QS-JAN'
+        >>> canonicalize_frequency('2QE-MAR')
+        '2QE-DEC'
+        >>> canonicalize_frequency('QE-NOV')
+        'QE-FEB'
+        >>> canonicalize_frequency('MS')
+        'MS'
+    """
+    if frequency is None:
+        return None
+    try:
+        parsed = parse_frequency(frequency)
+    except ValueError:
+        return frequency
+
+    # Ancres trimestrielles : trois mois consécutifs modulo 3 décrivent les mêmes dates
+    if parsed.freq == 'Q' and parsed.suffix in MONTH_ABBREVIATIONS:
+        month = MONTH_ABBREVIATIONS.index(parsed.suffix)
+        if parsed.position == 'S':
+            # Premier début de trimestre de l'année civile : JAN, FEB ou MAR
+            canonical = MONTH_ABBREVIATIONS[month % 3]
+        else:
+            # Fin (ou ancre sans position, lue comme fin par pandas) : mois qui précède
+            # le début canonique du même cycle -> DEC, JAN ou FEB
+            canonical = MONTH_ABBREVIATIONS[(month + 1) % 3 - 1]
+        return build_frequency_string(*parsed._replace(suffix=canonical))
+
+    return frequency
+
+
+# Fonctions de commodité pour accès direct
+# Fonction de normalisation de la fréquence
+def normalize_frequency(
+    frequency: Union[str, FrequencyType, UserFrequencyType],
+    return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
+) -> Union[str, ParsedFrequency]:
+    """Normalize frequency with configurable output format.
+
+    This function provides flexible frequency normalization with multiple
+    output formats to support different use cases while maintaining
+    backward compatibility.
+
+    Args:
+        frequency: Frequency to normalize (pandas code, literal name, or complex string)
+        return_format: Output format level (default: 'base' for backward compatibility):
+            - 'base': Base frequency only → 'Q'
+            - 'with_position': Base + position if present → 'QE'
+            - 'full': Complete pandas code → 'QE-DEC' (a leading
+              multiplier is kept: '2MS' → '2MS'; a literal name gives its
+              base code: 'quarterly' → 'Q')
+            - 'components': ParsedFrequency (base, position, anchor,
+              multiplier) → ('Q', 'E', 'DEC', 1)
+            A leading multiplier is accepted by every format: 'base' and
+            'with_position' leave it out ('2MS' → 'M' / 'MS'); 'full' and
+            'components' keep it.
+
+    Returns:
+        Normalized frequency in requested format:
+        - 'base', 'with_position', 'full': str
+        - 'components': ParsedFrequency, a named tuple
+            ``(freq, position, suffix, multiplier)``
+
+    Raises:
+        ValueError: If frequency is invalid (not a string, unsupported, or with an
+            anchor that does not exist in pandas) or return_format is unsupported
+
+    Examples:
+        >>> # Default: backward compatible base extraction
+        >>> normalize_frequency('QE-DEC')
+        'Q'
+        >>> normalize_frequency('monthly')
+        'M'
+
+        >>> # With position: useful for resampling
+        >>> normalize_frequency('QE-DEC', return_format='with_position')
+        'QE'
+        >>> normalize_frequency('MS', return_format='with_position')
+        'MS'
+
+        >>> # Full: complete pandas code
+        >>> normalize_frequency('QE-DEC', return_format='full')
+        'QE-DEC'
+        >>> normalize_frequency('quarterly', return_format='full')
+        'Q'
+
+        >>> # Components: complete parsing
+        >>> normalize_frequency('QE-DEC', return_format='components')
+        ParsedFrequency(freq='Q', position='E', suffix='DEC', multiplier=1)
+        >>> normalize_frequency('2MS', return_format='components')
+        ParsedFrequency(freq='M', position='S', suffix=None, multiplier=2)
+        >>> normalize_frequency('D', return_format='components')
+        ParsedFrequency(freq='D', position=None, suffix=None, multiplier=1)
+    """
+    # Vérification du format demandé, avant toute analyse de la fréquence
+    if return_format not in ('base', 'with_position', 'full', 'components'):
+        raise ValueError(
+            f"Invalid return_format: {return_format}. "
+            f"Must be one of: 'base', 'with_position', 'full', 'components'"
+        )
+
+    # Format de base -> normalisation
+    if return_format == 'base':
+        # Comportement actuel (backward compatible)
+        return _normalizer.normalize(frequency)
+
+    # Validation de la chaîne complète (type, base, ancre) : erreur uniforme quel que
+    # soit le format, y compris pour une entrée qui n'est pas une chaîne
+    _normalizer.normalize(frequency)
+
+    # Format complet
+    if return_format == 'full':
+        # Code pandas complet : un nom littéral passe à son code de base, une chaîne déjà
+        # complète garde position, ancre et multiplicateur en tête ('2MS', détecté par
+        # pandas sur un index bimestriel)
+        parsed = normalize_frequency(frequency, return_format='components')
+        return build_frequency_string(parsed.freq, parsed.position, parsed.suffix, parsed.multiplier)
+
+    # Parsing pour les composants
+    try:
+        parsed = parse_frequency(frequency)
+    except ValueError:
+        # Nom littéral que parse_frequency ne lit pas ('business_daily') : ni position,
+        # ni ancre, ni multiplicateur
+        base = _normalizer.normalize(frequency)
+        return ParsedFrequency(base, None, None) if return_format == 'components' else base
+
+    # Composants
+    if return_format == 'components':
+        # Décomposition complète via parse_frequency
+        return parsed._replace(freq=_normalizer.normalize(parsed.freq))
+
+    # 'with_position' : base + position si présente
+    normalized_base = _normalizer.normalize(parsed.freq)
+    return f"{normalized_base}{parsed.position}" if parsed.position else normalized_base
+
+# Fonction de conversion en expression littéraire
+def to_literal(frequency: Union[FrequencyType, UserFrequencyType]) -> str:
+    """Convert frequency to user-friendly literal name.
+
+    Args:
+        frequency: Frequency in pandas code or literal format to convert.
+
+    Returns:
+        User-friendly literal frequency name.
+
+    Examples:
+        >>> to_literal('M')
+        'monthly'
+        >>> to_literal('Q')
+        'quarterly'
+    """
+    return _normalizer.to_literal(frequency)
+
+# Fonction de conversion en code
+def to_code(frequency: Union[FrequencyType, UserFrequencyType]) -> str:
+    """Convert frequency to frequency code.
+
+    Args:
+        frequency: Frequency in any supported format (code or literal name).
+
+    Returns:
+        Frequency code string.
+
+    Examples:
+        >>> to_code('monthly')
+        'M'
+        >>> to_code('D')
+        'D'
+    """
+    return _normalizer.to_code(frequency)
+
+# Fonction de conversion en code de fréquence pandas
+def to_pandas_freq(frequency: Union[FrequencyType, UserFrequencyType]) -> str:
+    """Convert frequency to a pandas frequency alias.
+
+    A frequency with start and end variants but no position gets its end variant
+    (``'M'`` → ``'ME'``), the bare aliases being deprecated in pandas 2.2 and removed
+    in pandas 3. To get the base code (``'M'``), use :func:`normalize_frequency` or
+    :func:`to_code`.
+
+    Args:
+        frequency: Frequency in any supported format (pandas code or literal name).
+
+    Returns:
+        Pandas frequency alias string.
+
+    Raises:
+        ValueError: If frequency is not a string, is not supported, or has an anchor
+            that does not exist in pandas.
+
+    Examples:
+        >>> to_pandas_freq('monthly')
+        'ME'
+        >>> to_pandas_freq('MS')
+        'MS'
+        >>> to_pandas_freq('D')
+        'D'
+    """
+    return _normalizer.to_pandas_freq(frequency)
+
+# Fonction de conversion en dateoffset
+def to_dateoffset(frequency: Union[FrequencyType, UserFrequencyType]) -> pd.DateOffset:
+    """Convert frequency to pandas DateOffset object.
+
+    Args:
+        frequency: Frequency string to convert to DateOffset.
+
+    Returns:
+        Pandas DateOffset object corresponding to the frequency.
+
+    Examples:
+        >>> offset = to_dateoffset('monthly')
+        >>> isinstance(offset, pd.DateOffset)
+        True
+    """
+    return _normalizer.to_dateoffset(frequency)
+
+# Fonction de détection d'une fréquence plus élevée
+def is_higher_frequency(freq1: Union[FrequencyType, UserFrequencyType],
+                       freq2: Union[FrequencyType, UserFrequencyType]) -> bool:
+    """Check if freq1 is higher frequency than freq2.
+
+    Higher frequency means more granular time periods (e.g., daily vs monthly).
+
+    Args:
+        freq1: First frequency to compare.
+        freq2: Second frequency to compare.
+
+    Returns:
+        True if freq1 has higher frequency (more granular) than freq2.
+
+    Examples:
+        >>> is_higher_frequency('daily', 'monthly')
+        True
+        >>> is_higher_frequency('quarterly', 'weekly')
+        False
+    """
+    return _normalizer.is_higher_frequency(freq1, freq2)
+
+# Fonction de validation de la fréquence
+def validate_frequency(frequency: Union[FrequencyType, UserFrequencyType]) -> bool:
+    """Validate if frequency is supported by the normalizer.
+
+    Args:
+        frequency: Frequency string to validate.
+
+    Returns:
+        True if frequency is valid and supported, False otherwise.
+
+    Examples:
+        >>> validate_frequency('daily')
+        True
+        >>> validate_frequency('M')
+        True
+        >>> validate_frequency('invalid_freq')
+        False
+    """
+    return _normalizer.validate(frequency)
+
+# Fonction de détection de l'ordre des fréquences
+def get_frequency_order(frequency: Union[FrequencyType, UserFrequencyType]) -> float:
+    """Get the numerical order of a frequency for comparison purposes.
+
+    The order represents the granularity level where lower numbers indicate
+    higher frequency (more granular) and higher numbers indicate lower
+    frequency (less granular).
+
+    Args:
+        frequency: Frequency to get order for. Can be pandas code or literal name.
+
+    Returns:
+        Frequency order, an ``int`` for most codes and a ``float`` for ``'B'`` (7.5)
+        and ``'SM'`` (8.5). Higher number means lower frequency/granularity. A
+        leading multiplier is ignored (``'2MS'`` has the order of ``'M'``).
+
+    Raises:
+        ValueError: If frequency is not supported.
+
+    Examples:
+        >>> get_frequency_order('daily')
+        7
+        >>> get_frequency_order('monthly')
+        9
+        >>> get_frequency_order('quarterly') > get_frequency_order('monthly')
+        True
+    """
+    base_freq = normalize_frequency(frequency)
+    return _normalizer._frequency_order[base_freq]
+
+# Fonction de détection de la fréquence d'une série
+def detect_frequency(data: Union[pd.Series, pd.DataFrame],
+                    time_col: Optional[str] = None,
+                    panel_cols: Optional[List[str]] = None,
+                    return_format: Literal['base', 'with_position', 'full', 'components'] = 'base',
+                    check_consistency: bool = False,
+                    consistency_mode: str = 'modal',
+                    strict: bool = True) -> Optional[Union[FrequencyType, UserFrequencyType, Dict]]:
+    """Detect the frequency of time series data using FrequencyDetector.
+
+    This function handles both Series and DataFrame inputs. For Series with MultiIndex,
+    it returns a dictionary mapping panel IDs to frequencies. For DataFrames, it can
+    detect frequencies for all columns and optionally return a consistent frequency.
+
+    Args:
+        data: Time series data (Series or DataFrame) with datetime index or MultiIndex
+        time_col: Name of the time column (if None, uses index). Only for DataFrame.
+        panel_cols: List of columns identifying panel dimensions. Only for DataFrame.
+        return_format: Output format for the detected frequency:
+            - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
+            - 'with_position': Frequency with position (e.g. 'MS', 'QE')
+            - 'full': Full pandas frequency string (e.g. 'QE-DEC')
+            - 'components': ParsedFrequency (base, position, suffix, multiplier)
+        check_consistency: If True, check frequency consistency across panel groups or columns
+        consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
+            - 'modal': Returns the most common frequency (default)
+            - 'highest': Returns the highest frequency (most granular)
+        strict: If True, all frequencies must be identical (used with check_consistency).
+            Undetectable entities or columns (None) are ignored by the consistency
+            check: they neither break a strict check nor count in the modal one.
+
+    Returns:
+        For Series without MultiIndex: Detected frequency as string, or None if detection fails
+        For Series with MultiIndex: Dictionary mapping panel_id tuples to frequencies
+            (None for an undetectable entity), or single frequency if check_consistency=True
+        For DataFrame without check_consistency: Dictionary mapping columns (or flattened
+            ``(entity..., column)`` tuples) to frequencies, None when undetectable
+        For DataFrame with check_consistency: Single consistent frequency or None
+
+    Examples:
+        >>> import pandas as pd
+        >>> # Simple series detection
+        >>> dates = pd.date_range('2023-01-01', periods=5, freq='D')
+        >>> series = pd.Series([1, 2, 3, 4, 5], index=dates)
+        >>> detect_frequency(series)
+        'D'
+
+        >>> # Series with MultiIndex (panel data)
+        >>> idx = pd.MultiIndex.from_arrays([
+        ...     ['A', 'A', 'A', 'B', 'B', 'B'],
+        ...     pd.date_range('2023-01-01', periods=3, freq='D').tolist() * 2
+        ... ], names=['panel_id', 'date'])
+        >>> series = pd.Series([1, 2, 3, 4, 5, 6], index=idx)
+        >>> detect_frequency(series)
+        {('A',): 'D', ('B',): 'D'}
+
+        >>> # Series with MultiIndex and consistency check
+        >>> detect_frequency(series, check_consistency=True)
+        'D'
+
+        >>> # DataFrame detection with consistency check (modal)
+        >>> df = pd.DataFrame({'a': series, 'b': series})
+        >>> detect_frequency(df, check_consistency=True, consistency_mode='modal')
+        'D'
+    """
+    # Cas 1: Entrée Series
+    if isinstance(data, pd.Series):
+        if time_col is not None or panel_cols:
+            raise ValueError("time_col and panel_cols parameters are only valid for DataFrame inputs")
+
+        # Importation du locale du détector (pour éviter les imports circulaires)
+        from .detector import FrequencyDetector
+        # Instanciation de la classe
+        _detector = FrequencyDetector()
+
+        # Détection de la fréquence (peut retourner un dict pour MultiIndex)
+        freq_result = _detector.detect_frequency(data, return_format)
+
+        # Si check_consistency demandé et résultat est un dict (MultiIndex détecté)
+        if check_consistency and isinstance(freq_result, dict):
+            # Application de la logique de validation de consistance
+            if consistency_mode == 'modal':
+                # Mode modal: fréquence la plus commune
+                _, frequency = _detector.validate_frequency_consistency(frequency_map=freq_result, strict=strict)
+                return frequency
+            elif consistency_mode == 'highest':
+                # Mode highest: fréquence la plus haute (plus granulaire)
+                return _get_highest_frequency(freq_result)
+            else:
+                raise ValueError(f"Invalid consistency_mode: {consistency_mode}. Must be 'modal' or 'highest'")
+
+        # Sinon, retour direct du résultat
+        return freq_result
+
+    # Cas 2: Entrée DataFrame
+    elif isinstance(data, pd.DataFrame):
+        return detect_dataset_frequency(
+            df=data,
+            time_col=time_col,
+            panel_cols=panel_cols,
+            return_format=return_format,
+            check_consistency=check_consistency,
+            consistency_mode=consistency_mode,
+            strict=strict
+        )
+
+    else:
+        raise ValueError("Input must be a pandas Series or DataFrame")
+
+# Fonction de détection de la fréquence d'un jeu de données
+def detect_dataset_frequency(df: pd.DataFrame,
+                           time_col: Optional[str] = None,
+                           panel_cols: Optional[List[str]] = None,
+                           return_format: Literal['base', 'with_position', 'full', 'components'] = 'base',
+                           check_consistency: bool = False,
+                           consistency_mode: str = 'modal',
+                           strict: bool = True) -> Union[Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]], FrequencyType, UserFrequencyType]:
+    """Detect frequencies for all series in a dataset using FrequencyDetector.
+
+    Args:
+        df: DataFrame containing time series data
+        time_col: Name of the time column (if None, uses index)
+        panel_cols: List of columns identifying panel dimensions
+        return_format: Output format for the detected frequency:
+            - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
+            - 'with_position': Frequency with position (e.g. 'MS', 'QE')
+            - 'full': Full pandas frequency string (e.g. 'QE-DEC')
+            - 'components': ParsedFrequency (base, position, suffix, multiplier)
+        check_consistency: If True, check the frequency consistency across columns
+        consistency_mode: Mode for determining consistent frequency ('modal' or 'highest')
+            - 'modal': Returns the most common frequency (default)
+            - 'highest': Returns the highest frequency (most granular)
+        strict: If True, all detected frequencies must be identical. Undetectable
+            columns or pairs (None) are ignored by the consistency check.
+
+    Returns:
+        Without ``check_consistency``: dictionary mapping column names (time
+        series) or FLATTENED ``(entity..., column)`` tuples (panel, e.g.
+        ``('FR', 'gdp')``) to frequencies, None for an undetectable column or
+        pair. With ``check_consistency``: the consistent frequency, or None.
+
+    Examples:
+        >>> import pandas as pd
+        >>> dates = pd.date_range('2023-01-31', periods=6, freq='ME')
+        >>> df = pd.DataFrame({'gdp': range(6), 'cpi': range(6)}, index=dates)
+        >>> detect_dataset_frequency(df)
+        {'gdp': 'M', 'cpi': 'M'}
+        >>> detect_dataset_frequency(df, check_consistency=True)
+        'M'
+    """
+    # Importation du locale du détector (pour éviter les imports circulaires)
+    from .detector import FrequencyDetector
+    # Instanciation de la classe
+    _detector = FrequencyDetector()
+    
+    # Détection des fréquences
+    frequency_map = _detector.detect_dataset_frequency(df, time_col, panel_cols, return_format)
+    # Vérification de la consistence des fréquences si demandé
+    if check_consistency :
+        if consistency_mode == 'modal':
+            # Mode modal: fréquence la plus commune
+            _, frequency = _detector.validate_frequency_consistency(frequency_map=frequency_map, strict=strict)
+        elif consistency_mode == 'highest':
+            # Mode highest: fréquence la plus haute (plus granulaire)
+            frequency = _get_highest_frequency(frequency_map)
+        else:
+            raise ValueError(f"Invalid consistency_mode: {consistency_mode}. Must be 'modal' or 'highest'")
+        return frequency
+    else :
+        return frequency_map
+
+# Fonction de détection de la fréquence d'un index
+def detect_index_frequency(
+    index: Union[pd.DatetimeIndex, pd.MultiIndex],
+    return_format: Literal['base', 'with_position', 'full', 'components'] = 'base'
+) -> Union[FrequencyType, Dict[Tuple, FrequencyType]]:
+    """Detect and parse DatetimeIndex or MultiIndex frequency.
+
+    For a DatetimeIndex, analyzes the frequency and returns it in the
+    requested format. With 'components' format, returns a ``ParsedFrequency``
+    ``(freq, position, suffix, multiplier)``. When pandas' own inference
+    (``inferred_freq``) fails (gaps, two dates, irregular spacing), falls
+    back to ``FrequencyDetector``, which reads the **modal spacing** between
+    consecutive dates (see
+    :meth:`FrequencyDetector.detect_time_series_frequency`). On an irregular
+    index the result is therefore the frequency of the dominant grid (e.g.
+    ``'MS'`` for a monthly grid preceded by a few isolated annual dates), or
+    None when no spacing dominates; it is not a regularity check.
+
+    For a MultiIndex with dates as the last level, detects frequency
+    for each unique entity (combination of non-date levels) and returns
+    a dictionary mapping entity keys to their frequencies.
+
+    Args:
+        index: DatetimeIndex or MultiIndex to analyze (for a MultiIndex, the
+            dates are the last level). Strings parsable as dates and
+            ``Period`` labels (first instant of each period) are accepted;
+            numeric labels are not dates and are rejected.
+        return_format: Output format for the detected frequency:
+            - 'base': Base frequency code (e.g. 'M', 'Q', 'D')
+            - 'with_position': Frequency with position (e.g. 'MS', 'QE')
+            - 'full': Full pandas frequency string (e.g. 'QE-DEC')
+            - 'components': ParsedFrequency (base, position, suffix, multiplier)
+
+    Returns:
+        For DatetimeIndex: Frequency in the requested format, or None if no
+            frequency can be read from the dates
+        For MultiIndex: Dict mapping entity keys to frequencies. Entity keys
+            are ALWAYS tuples, even for a single entity level (``('FR',)``,
+            never ``'FR'``), so that they match the keys produced by
+            ``get_unique_panel_entities`` and ``detect_dataset_frequency``.
+
+    Raises:
+        ValueError: If the index (or one entity of a MultiIndex) has fewer
+            than 2 dates, if the labels cannot be converted to datetime, or
+            if ``return_format`` is unknown. An unsorted index (decreasing
+            included) is detected as the sorted one.
+
+    Examples:
+        >>> import pandas as pd
+        >>> # DatetimeIndex - Daily frequency
+        >>> dates = pd.date_range('2024-01-01', periods=10, freq='D')
+        >>> detect_index_frequency(dates)
+        'D'
+        >>>
+        >>> # With components format
+        >>> dates = pd.date_range('2024-01-01', periods=5, freq='MS')
+        >>> detect_index_frequency(dates, return_format='components')
+        ParsedFrequency(freq='M', position='S', suffix=None, multiplier=1)
+        >>>
+        >>> # MultiIndex panel data
+        >>> idx = pd.MultiIndex.from_product([
+        ...     ['entity_1', 'entity_2'],
+        ...     pd.date_range('2024-01-01', periods=5, freq='MS')
+        ... ], names=['entity', 'date'])
+        >>> detect_index_frequency(idx)
+        {('entity_1',): 'M', ('entity_2',): 'M'}
+    """
+    # Vérification du type d'index : MultiIndex ou DatetimeIndex
+    if isinstance(index, pd.MultiIndex):
+        # Traitement du MultiIndex avec date au dernier niveau
+        result = {}
+        date_level_idx = index.nlevels - 1
+
+        # Extraction des entités uniques (n-1 premiers niveaux)
+        entity_index = index.droplevel(date_level_idx)
+
+        # Parcours des entités
+        for entity_key in entity_index.unique():
+            # Création du masque pour cette entité
+            mask = entity_index == entity_key
+            # Extraction du DatetimeIndex pour cette entité
+            dates = index.get_level_values(date_level_idx)[mask]
+            # Appel récursif pour déterminer la fréquence
+            freq = detect_index_frequency(dates, return_format=return_format)
+            # Clé d'entité TOUJOURS normalisée en tuple : "entity_index.unique()"
+            # rend des scalaires quand le panel n'a qu'un seul niveau d'entité
+            result[normalize_entity_key(entity_key)] = freq
+
+        return result
+    else:
+        # Conversion d'un index non temporel (chaînes, périodes) ; mêmes règles que
+        # la validation temporelle : étiquettes numériques refusées
+        if not isinstance(index, pd.DatetimeIndex):
+            from ..validation.utils import _convert_to_datetime
+            converted = _convert_to_datetime(index)
+            if converted is None:
+                raise ValueError(
+                    "Index cannot be converted to datetime (numeric labels are not dates)"
+                )
+            index = converted
+
+        # Tri d'un index désordonné ou décroissant
+        if not index.is_monotonic_increasing:
+            index = index.sort_values()
+
+        # Traitement du DatetimeIndex
+        # Inférence de la fréquence de l'index
+        freq = index.inferred_freq
+
+        if freq is None:
+            # Repli lorsque l'inférence directe échoue (ex. fréquence trimestrielle
+            # ou motif régulier non reconnu par pandas.inferred_freq) : construction
+            # d'une série dédiée pour bénéficier des heuristiques étendues de
+            # FrequencyDetector (extension au-delà de infer_freq, cf. _extend_infer_freq)
+            from .detector import FrequencyDetector
+            series = pd.Series(range(len(index)), index=index)
+            fallback_result = FrequencyDetector().detect_time_series_frequency(series, return_format)
+            return fallback_result
+
+        # Normalisation au format demandé, sous forme canonique ('QS-OCT' -> 'QS-JAN')
+        return normalize_frequency(frequency=canonicalize_frequency(freq), return_format=return_format)
+
+
+# Fonction de construction d'un offset cible ancré comme un index source
+def target_offset_for_index(
+    index: pd.DatetimeIndex,
+    target_frequency: str,
+) -> str:
+    """Build a pandas offset for target_frequency anchored like the index.
+
+    Detects whether the source index is anchored at period start or end and
+    combines that position with the target frequency, so that aggregated
+    labels land on dates that exist in the source index (e.g. a
+    month-start-anchored index converted to a quarterly frequency yields
+    'QS', not 'QE'). Shared by every consumer that resamples data to a
+    lower frequency while needing the result to stay reindexable against
+    the original, position-anchored data.
+
+    Args:
+        index: Source DatetimeIndex whose position (start/end) is detected.
+        target_frequency: Target frequency, with or without an explicit
+            position (e.g. 'Q' or 'QE'). When a source position IS detected,
+            any existing target position is stripped and overridden by it,
+            so a caller passing an end-anchored frequency against a
+            start-anchored index still gets rebased correctly instead of
+            keeping the mismatched position as-is. Its multiplier and its
+            periods are kept: an anchor is moved to the other side of the
+            same periods ('QE-NOV', quarters ending in November, becomes the
+            start of those quarters, 'QS-DEC', written canonically 'QS-MAR').
+
+    Returns:
+        Pandas offset alias anchored like ``index`` (e.g. 'QS') when a
+        position can be detected on ``index``; the pandas default anchor is
+        left implicit ('QS', not 'QS-JAN'). Falls back to
+        ``target_frequency`` unchanged when the source position cannot be
+        detected at all (e.g. a position-less source frequency like daily,
+        or an index too short to detect a frequency): there is then nothing
+        to anchor on, so the caller's own choice — positioned or not — is
+        preserved rather than defaulting to an arbitrary position.
+
+    Examples:
+        >>> ms_index = pd.date_range('2024-01-01', periods=12, freq='MS')
+        >>> target_offset_for_index(ms_index, 'Q')
+        'QS'
+        >>> target_offset_for_index(ms_index, 'QE')
+        'QS'
+        >>> target_offset_for_index(ms_index, '2Q')
+        '2QS'
+        >>> target_offset_for_index(ms_index, 'YE-JUN')
+        'YS-JUL'
+        >>> daily_index = pd.date_range('2024-01-01', periods=59, freq='D')
+        >>> target_offset_for_index(daily_index, 'ME')
+        'ME'
+    """
+    # Détection de la position (début/fin) de l'index source
+    try:
+        position = detect_index_frequency(index, return_format='components').position
+    except Exception:
+        position = None
+
+    # Position source indétectable (fréquence sans position, ex. journalière,
+    # ou index trop court) : rien à ancrer, la fréquence cible fournie par
+    # l'appelant est conservée telle quelle, positionnée ou non
+    if position is None:
+        return target_frequency
+
+    # Décomposition de la cible : sa position est écrasée par celle de la source,
+    # son multiplicateur et ses périodes (ancre) sont conservés
+    try:
+        target = normalize_frequency(target_frequency, return_format='components')
+    except ValueError:
+        return target_frequency
+
+    # Ancre mensuelle d'un trimestre ou d'une année : mêmes périodes vues de
+    # l'autre bord (fin en novembre <-> début en décembre). Une ancre sans
+    # position est lue comme une fin, comme le fait pandas ('Q-NOV' = 'QE-NOV')
+    suffix = target.suffix
+    if target.freq in ('Q', 'Y') and suffix in MONTH_ABBREVIATIONS:
+        month = MONTH_ABBREVIATIONS.index(suffix)
+        if (target.position or 'E') == 'E' and position == 'S':
+            suffix = MONTH_ABBREVIATIONS[(month + 1) % 12]
+        elif target.position == 'S' and position == 'E':
+            suffix = MONTH_ABBREVIATIONS[(month - 1) % 12]
+
+    # Assemblage, forme canonique, puis ancre par défaut de pandas laissée implicite
+    anchored = parse_frequency(canonicalize_frequency(
+        build_frequency_string(target.freq, position, suffix, target.multiplier)
+    ))
+    if (anchored.position, anchored.suffix) in (('S', 'JAN'), ('E', 'DEC')):
+        anchored = anchored._replace(suffix=None)
+    return build_frequency_string(*anchored)
+
+
+# Fonction auxiliaire d'extraction de la fréquence la plus haute d'un dictionnaire de fréquences
+def _get_highest_frequency(frequency_map: Dict[Union[str, tuple], Union[FrequencyType, UserFrequencyType]]) -> Optional[Union[FrequencyType, UserFrequencyType]]:
+    """Get the highest (most granular) frequency from a frequency map.
+
+    Args:
+        frequency_map: Dictionary mapping columns to frequencies
+
+    Returns:
+        Highest frequency or None if map is empty
+
+    Examples:
+        >>> freq_map = {'col1': 'D', 'col2': 'M', 'col3': 'D'}
+        >>> _get_highest_frequency(freq_map)
+        'D'
+    """
+    # Vérification que le dictionnaire n'est pas vide
+    if not frequency_map:
+        return None
+
+    # Extraction des fréquences uniques
+    unique_frequencies = set(frequency_map.values())
+
+    # Si une seule fréquence, la retourner
+    if len(unique_frequencies) == 1:
+        return list(unique_frequencies)[0]
+
+    # Normalisation des fréquences avec ancrages (ex: 'W-SUN' -> 'W', 'Q-DEC' -> 'Q')
+    # Calcul de l'ordre de chaque fréquence et sélection de la plus haute (ordre le plus bas)
+    freq_orders = {}
+    for freq in unique_frequencies:
+        try:
+            freq_orders[freq] = get_frequency_order(freq)
+        except ValueError:
+            # Si la normalisation échoue, essayer avec la fréquence complète
+            try:
+                freq_orders[freq] = get_frequency_order(freq)
+            except ValueError:
+                # Si toujours échec, ignorer cette fréquence
+                continue
+
+    if not freq_orders:
+        return None
+
+    # Retour de la fréquence avec l'ordre le plus bas (plus granulaire)
+    highest_freq = min(freq_orders.keys(), key=lambda x: freq_orders[x])
+
+    return highest_freq

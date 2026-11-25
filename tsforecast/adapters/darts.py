@@ -208,8 +208,9 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
             
             y_processed = y_multivariate
         else:
-            # Série temporelle simple : pas de transformation
-            y_processed = y
+            # Série temporelle simple : DataFrame à une colonne, TimeSeries.from_dataframe
+            # refusant une Series
+            y_processed = y.to_frame() if isinstance(y, pd.Series) else y
 
         # Conversion pandas → TimeSeries Darts (univarié ou multivarié)
         self.series_ = TimeSeries.from_dataframe(

@@ -1,0 +1,1631 @@
+"""Aggregation constraint of one imputation stage, as an sklearn transformer.
+
+``HighFrequencyImputer`` predicts the sub-periods of a low-frequency variable
+on a finer grid. Left free, those predictions have no reason to agree with the
+observation they are supposed to describe: a year observed at 120 may end up
+with twelve months summing to 112.5. The aggregation constraint closes that
+gap — the sub-periods of a period are rescaled so that their aggregate equals
+the observed total, which turns a free-floating prediction into a genuine
+disaggregation of the observation. Two constraints do it: ``'sum'`` multiplies
+each period by its own ratio (pro rata), ``'denton'`` adds the smoothest
+correction over the whole series (additive Denton benchmarking).
+
+This module honours the ``AggregationConstraintApplier``
+protocol of :mod:`~tsforecast.imputation._components.covariate_materializer`, whose
+injection point is the single place where the constraint enters the
+materialization path.
+
+Two returns matter to the caller, and they are different objects:
+
+1. :meth:`AggregationConstraint.rescale` returns the rescaled values and the
+   mask of the cells the constraint actually moved;
+2. :meth:`AggregationConstraint.anchor_cells_mask` returns the anchor rows
+   re-expressed at the stage frequency, i.e. the rows where an observation was
+   overwritten by a sub-period value.
+
+Provenance invariance: applying the constraint never changes the provenance of
+a cell. A rescaled cell keeps the ``MODEL_*`` or ``INTERPOLATED`` mark it
+carried before the rescaling, exactly as rescaling by ``StageScaler`` leaves
+provenance untouched. There is no ``DISAGGREGATED`` provenance in ``HighFrequencyImputer``: it
+would state nothing the cell's own provenance does not already state, and would
+hide whether the value came from a model or from an interpolation. Both masks
+above are therefore diagnostic — they say which cells moved and which rows held
+an observation — and neither drives a marking.
+
+Degenerate periods (zero aggregate, flipped profile) are reported by one
+aggregated warning per case and per operation. A caller chaining many
+rescalings — ``HighFrequencyImputer``, one per (stage, column) plus one per
+interpolated covariate — wraps them in
+:meth:`AggregationConstraint.deferred_warnings` to get one warning per case
+for the whole chain.
+"""
+# Importation des modules
+# Modules de base
+from contextlib import contextmanager
+from typing import Any, Dict, Iterable, Iterator, List, Literal, Mapping, Optional, Tuple, Union
+import warnings
+
+# Calcul numérique
+import numpy as np
+
+# Manipulation de données
+import pandas as pd
+
+# Calcul creux : système de l'étalonnage de Denton
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
+
+# Sklearn
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.utils.validation import check_is_fitted
+
+# Normalisation des fréquences : seule la base est acceptée par "to_period"
+from ...utils.frequency.utils import normalize_frequency
+# Clés d'entité du panel et codage entier des clés de lignes
+from ...panel.utils import factorize_row_keys, get_entity_codes, normalize_entity_key
+
+
+# Clé d'entité normalisée : "()" en série temporelle
+EntityKey = Tuple[Any, ...]
+# Fréquence de grille : unique, ou une par entité
+GridFrequency = Union[str, Mapping[EntityKey, str]]
+
+
+# Contrainte reconnue, et réglage effectif d'une colonne ("None" ne recale rien)
+ConstraintKind = Literal['sum', 'denton']
+ConstraintSetting = Optional[ConstraintKind]
+# Forme complète du paramètre public
+AggregationConstraintSetting = Union[ConstraintSetting, Dict[str, ConstraintSetting]]
+
+# Clé de repli du dictionnaire par colonne
+DEFAULT_CONSTRAINT_KEY = '__default__'
+# Contrainte retenue pour une colonne non couverte et sans clé de repli
+DEFAULT_CONSTRAINT: ConstraintSetting = 'sum'
+
+# Réglages admissibles, base des validations d'__init__
+_CONSTRAINT_SETTINGS: Tuple[Any, ...] = ('sum', 'denton', None)
+
+
+# Fonction auxiliaire des composantes de la clé de bloc de chaque ligne
+def _block_key_components(index: pd.Index, period_freq: str) -> Tuple[List[pd.Index], pd.PeriodIndex]:
+    """Return the entity labels and the low-frequency period of each row of a grid.
+
+    The rescaling block of a row is the pair (entity, period): two entities
+    never share a block. The reference frequency is always the detected
+    frequency of the variable being imputed, never the frequency of the
+    cascade stage: a yearly variable imputed at the quarter then at the month
+    is rescaled on its yearly total at both stages.
+
+    Args:
+        index: Grid index — a ``DatetimeIndex`` for a time series, a
+            ``MultiIndex`` ``(entity..., date)`` for a panel.
+        period_freq: Frequency of the periods the observed totals refer to
+            (any representation: ``'Q'``, ``'QS'``, ``'quarterly'``...).
+
+    Returns:
+        Tuple ``(entity_levels, periods)``: one ``Index`` of labels per entity
+        level (none for a time series) and the ``PeriodIndex`` of the period
+        holding each row. A row dated ``NaT`` has a ``NaT`` period: it belongs
+        to no block.
+
+    Examples:
+        >>> idx = pd.date_range('2021-01-31', periods=2, freq='ME')
+        >>> levels, periods = _block_key_components(idx, 'Y')
+        >>> levels, [str(period) for period in periods]
+        ([], ['2021', '2021'])
+        >>> _block_key_components(pd.DatetimeIndex(['2021-01-31', 'NaT']), 'Y')[1].isna().tolist()
+        [False, True]
+    """
+    # Normalisation en base de fréquence
+    base = normalize_frequency(period_freq, return_format='base')
+
+    # Cas des séries temporelles : la période suffit à identifier le bloc
+    if not isinstance(index, pd.MultiIndex):
+        return [], pd.DatetimeIndex(index).to_period(base)
+
+    # Cas des données de panel : l'entité fait partie de la clé de bloc
+    entity_levels = [index.get_level_values(level) for level in range(index.nlevels - 1)]
+    return entity_levels, index.get_level_values(-1).to_period(base)
+
+
+# Fonction auxiliaire de regroupement des positions par code
+def _positions_by_code(codes: np.ndarray, selected: np.ndarray) -> Dict[int, np.ndarray]:
+    """Group the selected positions by code, each group in increasing position order.
+
+    Args:
+        codes: Integer code of each position.
+        selected: Boolean mask of the positions to group.
+
+    Returns:
+        Mapping code -> sorted positions holding it.
+
+    Examples:
+        >>> groups = _positions_by_code(np.array([1, 0, 1, 0]), np.array([True, True, True, False]))
+        >>> {code: positions.tolist() for code, positions in groups.items()}
+        {0: [1], 1: [0, 2]}
+    """
+    # Tri stable par code : chaque groupe garde l'ordre des positions
+    positions = np.flatnonzero(selected)
+    order = positions[np.argsort(codes[positions], kind='stable')]
+    sorted_codes = codes[order]
+    # Découpage aux changements de code
+    boundaries = np.flatnonzero(np.diff(sorted_codes)) + 1
+    starts = np.concatenate(([0], boundaries)) if len(order) else np.zeros(0, dtype=np.intp)
+    return {
+        int(sorted_codes[start]): group
+        for start, group in zip(starts, np.split(order, boundaries))
+    }
+
+
+# Fonction auxiliaire de rejet des dates dupliquées
+def _check_unique_dates(index: pd.Index, what: str) -> None:
+    """Reject an index holding the same date (or entity-date pair) twice.
+
+    A duplicated anchor would be summed twice into its period total, and a
+    duplicated sub-period would count twice in the predicted aggregate: the
+    constraint would then impose an inflated total, silently. An error is
+    preferred, as in ``FrequencyAligner``.
+
+    Args:
+        index: Index to check — a ``DatetimeIndex`` or a ``MultiIndex``
+            ``(entity..., date)``.
+        what: Name of the checked object, quoted in the message.
+
+    Raises:
+        ValueError: If ``index`` holds duplicated labels, listing the first
+            five of them.
+
+    Examples:
+        >>> _check_unique_dates(pd.DatetimeIndex(['2021-12-31']), 'observations')
+        >>> _check_unique_dates(
+        ...     pd.DatetimeIndex(['2021-12-31', '2021-12-31']), 'observations'
+        ... )
+        Traceback (most recent call last):
+            ...
+        ValueError: Duplicate dates in observations: [Timestamp('2021-12-31 00:00:00')]
+    """
+    # Étiquettes répétées, chacune citée une fois
+    duplicated = index[index.duplicated()].unique()
+    if len(duplicated):
+        raise ValueError(f"Duplicate dates in {what}: {list(duplicated[:5])}")
+
+
+# Fonction auxiliaire de résolution de la fréquence de grille
+def _resolve_grid_freq(
+    grid_freq: Optional[GridFrequency],
+    index: pd.Index,
+) -> Optional[Union[str, Dict[EntityKey, str]]]:
+    """Normalize the grid frequency and check that it covers every entity.
+
+    The truncation guard only exists through ``grid_freq``: an unreadable
+    frequency, or an entity the per-entity mapping forgets, would switch it
+    off for the whole call or for that entity, and a truncated period would
+    then receive its whole total. Both are caller errors, raised once per
+    call rather than discovered period by period.
+
+    Args:
+        grid_freq: Frequency of the grid, scalar or ``{entity: frequency}``.
+            Entity keys are normalized, so ``'FR'`` and ``('FR',)`` are the
+            same entity. None disables the guard.
+        index: Index of the values — its entities must all be covered by a
+            mapping.
+
+    Returns:
+        None, the normalized base frequency, or a mapping from normalized
+        entity key to normalized base frequency.
+
+    Raises:
+        ValueError: If a frequency is not readable, or if the mapping does not
+            cover an entity of ``index``.
+
+    Examples:
+        >>> _resolve_grid_freq('ME', pd.DatetimeIndex(['2021-01-31']))
+        'M'
+        >>> idx = pd.MultiIndex.from_tuples(
+        ...     [('FR', pd.Timestamp('2021-01-31'))], names=['country', 'date']
+        ... )
+        >>> _resolve_grid_freq({'FR': 'MS'}, idx)
+        {('FR',): 'M'}
+    """
+    # Garde désactivée à la demande de l'appelant
+    if grid_freq is None:
+        return None
+
+    # Normalisation d'une fréquence, avec un message nommant le paramètre
+    def _normalize(freq: Any) -> str:
+        try:
+            return normalize_frequency(freq, return_format='base')
+        except (ValueError, TypeError) as error:
+            raise ValueError(
+                f"grid_freq must be a readable frequency, got {freq!r}: {error}"
+            ) from error
+
+    # Forme scalaire : une seule fréquence pour toute la grille
+    if not isinstance(grid_freq, Mapping):
+        return _normalize(grid_freq)
+
+    # Forme par entité : clés normalisées en tuples
+    resolved = {
+        normalize_entity_key(entity): _normalize(freq)
+        for entity, freq in grid_freq.items()
+    }
+
+    # Entités de la grille : "()" pour une série temporelle
+    if isinstance(index, pd.MultiIndex):
+        entities = set(get_entity_codes(index)[1])
+    else:
+        entities = {()} if len(index) else set()
+
+    # Couverture exhaustive exigée : une entité oubliée perdrait sa garde
+    missing = sorted(entities - set(resolved), key=str)
+    if missing:
+        raise ValueError(
+            f"grid_freq does not cover entities {missing}, got keys "
+            f"{sorted(resolved, key=str)}"
+        )
+    return resolved
+
+
+# Fonction du terme correctif de Denton d'une série
+def _denton_correction(
+    preliminary: np.ndarray,
+    blocks: List[Tuple[np.ndarray, float]],
+) -> np.ndarray:
+    """Return the smoothest additive correction that makes each block meet its total.
+
+    Additive first-difference Denton benchmarking, in Cholette's form: the
+    correction ``d`` minimizes ``sum((d[t] - d[t - 1]) ** 2)`` subject to
+    ``sum(preliminary[block] + d[block]) == total`` for every block. Being
+    smooth over the whole series, it never steps at the boundary of two
+    periods, and it keeps the moves of the preliminary series: the values
+    differ from them by a slowly varying gap. Before the first constrained
+    period and after the last one, the correction stays flat at the gap of
+    the nearest period. The system is the KKT system of that quadratic
+    programme, solved sparse.
+
+    Args:
+        preliminary: Preliminary values, in date order, without NaN.
+        blocks: One ``(positions, total)`` pair per constrained period,
+            positions into ``preliminary``; the blocks are disjoint and at
+            least one is given.
+
+    Returns:
+        The correction, one value per position of ``preliminary``.
+
+    Examples:
+        >>> correction = _denton_correction(
+        ...     np.array([1.0, 1.0, 1.0, 1.0]),
+        ...     [(np.array([0, 1]), 4.0), (np.array([2, 3]), 8.0)],
+        ... )
+        >>> [round(float(value), 6) for value in correction]
+        [0.666667, 1.333333, 2.666667, 3.333333]
+    """
+    # Dimensions : positions et contraintes
+    n_values, n_blocks = len(preliminary), len(blocks)
+
+    # Pénalité des différences premières de la correction
+    if n_values > 1:
+        differences = sparse.diags(
+            [-np.ones(n_values - 1), np.ones(n_values - 1)], [0, 1],
+            shape=(n_values - 1, n_values),
+        )
+        penalty = (differences.T @ differences).tocsc()
+    else:
+        penalty = sparse.csc_matrix((1, 1))
+
+    # Matrice d'agrégation : une ligne par période contrainte
+    rows = np.concatenate([np.full(len(positions), row) for row, (positions, _) in enumerate(blocks)])
+    columns = np.concatenate([positions for positions, _ in blocks])
+    aggregation = sparse.csc_matrix(
+        (np.ones(len(columns)), (rows, columns)), shape=(n_blocks, n_values)
+    )
+    # Écarts à combler : total observé moins agrégat préliminaire
+    gaps = np.array([total - float(np.sum(preliminary[positions])) for positions, total in blocks])
+
+    # Système KKT : inversible dès qu'une contrainte existe, une correction
+    # constante non nulle ne pouvant annuler toutes les sommes
+    system = sparse.bmat([[penalty, aggregation.T], [aggregation, None]], format='csc')
+    solution = spsolve(system, np.concatenate([np.zeros(n_values), gaps]))
+    return np.asarray(solution, dtype=float)[:n_values]
+
+
+# Fonction de l'étalonnage lissé d'une colonne, entité par entité
+def _benchmark_additive(
+    values: pd.Series,
+    periods: List[Tuple[Any, np.ndarray, float]],
+) -> Tuple[pd.Series, pd.Series]:
+    """Benchmark each entity of a column onto its observed totals, Denton-style.
+
+    The correction of :func:`_denton_correction` is computed per entity,
+    on its non-NaN values in date order: two entities never share a
+    correction. An entity without constrained period is left untouched.
+
+    Args:
+        values: Sub-period values produced on the stage grid.
+        periods: Constrained periods, as :meth:`AggregationConstraint._constrained_periods`
+            lists them.
+
+    Returns:
+        Tuple ``(benchmarked, moved_mask)``.
+
+    Examples:
+        >>> grid = pd.date_range('2021-01-31', periods=4, freq='ME')
+        >>> values = pd.Series(1.0, index=grid)
+        >>> periods = [(None, np.array([0, 1]), 4.0), (None, np.array([2, 3]), 8.0)]
+        >>> benchmarked, moved = _benchmark_additive(values, periods)
+        >>> [round(float(value), 6) for value in benchmarked], bool(moved.all())
+        ([1.666667, 2.333333, 3.666667, 4.333333], True)
+    """
+    # Valeurs en tableaux et résultat initial
+    value_array = values.to_numpy(dtype=float, na_value=np.nan)
+    new_values = value_array.copy()
+    moved = np.zeros(len(values), dtype=bool)
+
+    # Entité et date de chaque ligne ; une ligne vide ou sans date n'entre
+    # dans aucune série
+    entity_codes, _entities = get_entity_codes(values.index)
+    dates = pd.DatetimeIndex(values.index.get_level_values(-1))
+    valid = ~np.isnan(value_array) & ~np.asarray(dates.isna())
+    date_values = dates.as_unit('ns').asi8
+
+    # Périodes regroupées par entité, lue sur leur première sous-période
+    by_entity: Dict[int, List[Tuple[np.ndarray, float]]] = {}
+    for _key, positions, total in periods:
+        by_entity.setdefault(int(entity_codes[positions[0]]), []).append((positions, total))
+
+    # Correction lissée, entité par entité
+    local = np.full(len(values), -1, dtype=np.intp)
+    for entity_code, blocks in by_entity.items():
+        # Série de l'entité, dans l'ordre des dates
+        rows = np.flatnonzero(valid & (entity_codes == entity_code))
+        rows = rows[np.argsort(date_values[rows], kind='stable')]
+        local[rows] = np.arange(len(rows))
+        correction = _denton_correction(
+            value_array[rows],
+            [(local[positions], total) for positions, total in blocks],
+        )
+        new_values[rows] = value_array[rows] + correction
+        moved[rows] = correction != 0
+
+    # Écriture unique des cellules étalonnées
+    benchmarked = values.copy()
+    if moved.any():
+        benchmarked.iloc[np.flatnonzero(moved)] = new_values[moved]
+    return benchmarked, pd.Series(moved, index=values.index)
+
+
+# Fonction de validation du paramètre public
+def validate_aggregation_constraint(
+    aggregation_constraint: AggregationConstraintSetting,
+) -> None:
+    """Check that ``aggregation_constraint`` is an admissible setting.
+
+    Exposed at module level because two components carry the parameter —
+    :class:`AggregationConstraint` and ``CovariateMaterializer`` — and a
+    setting accepted by one must be accepted by the other. A single
+    implementation is the only way to keep the two contracts from drifting.
+
+    Args:
+        aggregation_constraint: Value handed to ``__init__``: ``'sum'``,
+            ``'denton'``, None, or a dict mapping a column name to one of these values with an
+            optional ``'__default__'`` key. Additivity is the contract of the
+            whole class : a non-additive column must go through
+            ``additive_transformer`` instead of a relaxed constraint here.
+
+    Raises:
+        ValueError: If the value, or one of the values of the dict form, is
+            not admissible; or if the dict is empty.
+
+    Examples:
+        >>> validate_aggregation_constraint('sum')
+        >>> validate_aggregation_constraint({'a1': None, '__default__': 'sum'})
+        >>> validate_aggregation_constraint('mean')
+        Traceback (most recent call last):
+            ...
+        ValueError: aggregation_constraint must be one of ('sum', 'denton', None), or a dict mapping a column name to one of these values with an optional '__default__' key, got 'mean'. A non-additive column must go through additive_transformer instead.
+    """
+    # Forme dictionnaire : chaque valeur doit être admissible
+    if isinstance(aggregation_constraint, dict):
+        if not aggregation_constraint:
+            raise ValueError("aggregation_constraint dict cannot be empty")
+        # Enumération des valeurs non-valides
+        invalid = {
+            key: value
+            for key, value in aggregation_constraint.items()
+            if value not in _CONSTRAINT_SETTINGS
+        }
+        if invalid:
+            raise ValueError(
+                f"aggregation_constraint values must be one of "
+                f"{_CONSTRAINT_SETTINGS}, in a dict mapping a column name to "
+                f"one of these values with an optional "
+                f"{DEFAULT_CONSTRAINT_KEY!r} key, got {invalid}. A "
+                f"non-additive column must go through additive_transformer "
+                f"instead."
+            )
+        return
+
+    # Forme scalaire
+    if aggregation_constraint not in _CONSTRAINT_SETTINGS:
+        raise ValueError(
+            f"aggregation_constraint must be one of {_CONSTRAINT_SETTINGS}, or "
+            f"a dict mapping a column name to one of these values with an "
+            f"optional {DEFAULT_CONSTRAINT_KEY!r} key, got "
+            f"{aggregation_constraint!r}. A non-additive column must go "
+            f"through additive_transformer instead."
+        )
+
+
+# Fonction de résolution du réglage effectif d'une colonne
+def resolve_aggregation_constraint(
+    aggregation_constraint: AggregationConstraintSetting,
+    column: Optional[str] = None,
+) -> ConstraintSetting:
+    """Return the constraint effectively applied to one column.
+
+    Module-level for the same reason as
+    :func:`validate_aggregation_constraint`: the resolution rules of the dict
+    form belong to the parameter, not to one of the components carrying it.
+
+    Args:
+        aggregation_constraint: Setting to resolve, scalar or dict.
+        column: Column name, or None for the global setting.
+
+    Returns:
+        ``'sum'``, ``'denton'`` or None: the column's own entry, else the
+        ``'__default__'`` entry, else ``'sum'``.
+
+    Examples:
+        >>> resolve_aggregation_constraint({'a1': None, '__default__': 'sum'}, 'a1')
+        >>> resolve_aggregation_constraint({'a1': None}, 'q1')
+        'sum'
+    """
+    # Forme scalaire : la même contrainte pour toutes les colonnes
+    if not isinstance(aggregation_constraint, dict):
+        return aggregation_constraint
+
+    # Entrée propre à la colonne
+    if column is not None and column in aggregation_constraint:
+        return aggregation_constraint[column]
+    # Repli explicite
+    if DEFAULT_CONSTRAINT_KEY in aggregation_constraint:
+        return aggregation_constraint[DEFAULT_CONSTRAINT_KEY]
+    # Défaut du document
+    return DEFAULT_CONSTRAINT
+
+
+# Fonction de contrôle des clés du dictionnaire contre les colonnes réelles
+def validate_constraint_columns(
+    aggregation_constraint: AggregationConstraintSetting,
+    columns: Iterable[str],
+) -> None:
+    """Check the dict keys against the columns actually present.
+
+    Args:
+        aggregation_constraint: Setting to check, scalar or dict.
+        columns: Column names present in the data.
+
+    Raises:
+        ValueError: If the dict form names columns absent from ``columns``,
+            listing the offending keys.
+
+    Examples:
+        >>> validate_constraint_columns({'a1': 'sum'}, ['a1', 'q1'])
+        >>> validate_constraint_columns({'zz': 'sum'}, ['a1'])
+        Traceback (most recent call last):
+            ...
+        ValueError: aggregation_constraint names unknown columns : ['zz']
+    """
+    # Seule la forme dictionnaire porte des clés à vérifier
+    if not isinstance(aggregation_constraint, dict):
+        return
+
+    # La clé de repli n'est pas un nom de colonne
+    known = set(columns)
+    unknown = sorted(
+        key for key in aggregation_constraint
+        if key != DEFAULT_CONSTRAINT_KEY and key not in known
+    )
+    if unknown:
+        raise ValueError(
+            f"aggregation_constraint names unknown columns : {unknown}"
+        )
+
+
+# Classe de contrainte d'agrégation
+class AggregationConstraint(BaseEstimator, TransformerMixin):
+    """Rescale predicted sub-periods so each period matches its observed total.
+
+    The column then carries a genuine disaggregation of the observation
+    instead of a free-floating prediction. The aggregate is always the sum:
+    additivity is the contract of the whole class — a non-additive column
+    goes through ``additive_transformer`` upstream, never through a relaxed
+    constraint here. Two constraints:
+
+    - ``'sum'`` (pro rata): the sub-periods of one period are multiplied by
+      ``observed total / predicted aggregate``. Each period has its own
+      ratio, so the series steps at the boundary of two periods whose ratios
+      differ — markedly so after an interpolation, whose profile is smooth.
+    - ``'denton'`` (additive first-difference Denton benchmarking, in
+      Cholette's form): a correction is added to the predictions, the
+      smoothest one — least sum of squared first differences — that makes
+      every constrained period meet its total. It is computed per entity over
+      the whole series, never steps at a period boundary, and keeps the
+      moves of the predictions. Being additive, it divides by nothing: a
+      variable crossing zero has neither a zero nor a flipped period. Cells
+      outside every constrained period — a period truncated by the grid,
+      only partly predicted, or not observed — receive the correction of the
+      nearest constrained period, flat, so the series stays continuous; they
+      are not imposed any total. Each value then depends on the totals of the
+      neighbouring periods too, not on the total of its own period only.
+
+    Five guards, the same periods being constrained under both:
+
+    - a period only partly predicted (at least one NaN sub-period, typically a
+      period straddling the edge of the grid) is left untouched, raw
+      predictions kept;
+    - a period the bounds of the frame truncate (sub-periods absent from the
+      grid, not NaN) is left untouched — active only when ``rescale`` is told
+      the grid frequency (``grid_freq``). Its observed total is then lost in
+      the values, so a single aggregated ``UserWarning`` names the columns
+      and the number of periods concerned;
+    - a period holding no observation at all (delayed series end) is left
+      untouched;
+    - under ``'sum'``, a period whose predicted aggregate is zero while its
+      observed total is not is left untouched, the ratio being undefined. Zero is numerical: an
+      aggregate within the rounding bound of the summation
+      (``n · ε · Σ|x|``), such as ``0.1 + 0.2 - 0.3``, counts as zero;
+    - under ``'sum'``, a period whose predicted aggregate has the opposite
+      sign of its observed total is rescaled — the constraint takes precedence — but every
+      sub-period then flips sign, and a single aggregated ``UserWarning`` is
+      emitted for the whole operation, naming the columns and the number of
+      periods concerned. Never one warning per period, and — inside
+      :meth:`deferred_warnings` — never one per call either.
+
+    Anchor disaggregation, not parameterizable:
+
+        A variable imputed at stage ``f`` is predicted over the whole of every
+        period it covers, anchors included. The row that held the period total
+        receives, like the others, a sub-period value. A column must never mix,
+        at one imputation frequency, a period total and sub-period values: that
+        heterogeneity makes the column unusable as a covariate, falsifies any
+        downstream aggregation, and makes the scale of a row depend on its
+        position within the period.
+
+    Two consequences follow, and they are the price of the rule:
+
+    - under ``'sum'`` and ``'denton'``, no information is lost: the
+      sub-periods sum back exactly to the observed total;
+    - under ``None``, the observed total is overwritten by a free prediction.
+      It stays recoverable in two ways, both of them supported: through
+      ``inverse_transform`` of the imputer, and through the ``ORIGINAL`` mask
+      of the source frequency level in the multi-frequency output
+      (``keep_lower_frequencies=True``).
+
+    In both cases the anchor row carries the provenance of the value now
+    written there — the ``MODEL_*`` of the step, or ``INTERPOLATED`` — never
+    ``ORIGINAL``, the observation no longer being what the cell holds, and
+    never a mark of its own. :meth:`anchor_cells_mask` locates the overwritten
+    observations, it does not qualify them, and it depends neither on
+    ``aggregation_constraint`` nor on whether the rescaling succeeded.
+
+    Provenance invariance:
+
+        Applying the constraint never changes a provenance. A rescaled cell
+        keeps the ``MODEL_*`` or ``INTERPOLATED`` mark it carried before the
+        rescaling, exactly as it does under ``StageScaler``: the constraint
+        moves a value, it does not produce it. There is no ``DISAGGREGATED``
+        provenance in ``HighFrequencyImputer`` — it would state nothing the cell's own
+        provenance does not already state, and would hide whether the value
+        came from a model or from an interpolation.
+
+    The component therefore never marks provenance, and neither of the two
+    masks it returns is a provenance mask: they are diagnostic, and say which
+    cells the constraint moved and which rows held an observation.
+
+    Both a time series and a panel are served, and several columns at once: a
+    ``DatetimeIndex`` or a ``MultiIndex`` ``(entity..., date)`` is accepted
+    everywhere, masks come back as ``pd.Series`` on the same index, and two entities never share a rescaling block.
+
+    Attributes:
+        anchor_mask_: Anchor rows of the fit grid, per column — a boolean
+            ``DataFrame``. Computed at :meth:`fit` because it depends neither
+            on the values nor on the constraint.
+        rescaled_mask_: Cells the last :meth:`transform` actually moved, per
+            column — a boolean ``DataFrame``.
+        n_features_in_: Number of columns seen at :meth:`fit`.
+        feature_names_in_: Column names seen at :meth:`fit`.
+
+    Args:
+        aggregation_constraint: Constraint applied to the predicted
+            sub-periods. ``'sum'`` (the default) rescales each period pro rata
+            so its sum equals the observed total, ``'denton'`` adds the
+            smoothest correction meeting every total, and ``None`` applies no
+            constraint at all. A
+            dict ``{column: setting}`` sets the constraint per column, with an
+            optional ``'__default__'`` key covering the rest. A non-additive
+            column must go through ``additive_transformer`` instead — see
+            :func:`validate_aggregation_constraint`.
+        period_frequencies: Detected frequency of the periods the observed
+            totals refer to, for :meth:`fit` / :meth:`transform`: a single
+            frequency, or a ``{column: frequency}`` mapping.
+        observations: Observed low-frequency values of the columns, at their
+            own frequency (anchor rows non-null, the rest NaN), for
+            :meth:`fit` / :meth:`transform`. Read from the untouched input
+            frame, never from a stage frame.
+        context: Label used in the aggregated warning messages, e.g.
+            ``"'a1' at stage M"``.
+
+    Raises:
+        ValueError: If ``aggregation_constraint`` is not an admissible setting,
+            or is an empty dict, or is a dict holding an inadmissible value.
+
+    Examples:
+        A year observed at 120 whose three predicted sub-periods sum to 100
+        comes back scaled by 1.2, and sums to 120 exactly:
+
+        >>> grid = pd.date_range('2021-01-31', periods=3, freq='ME')
+        >>> values = pd.Series([20.0, 30.0, 50.0], index=grid)
+        >>> observations = pd.Series([np.nan, np.nan, 120.0], index=grid)
+        >>> constraint = AggregationConstraint('sum')
+        >>> rescaled, mask = constraint.rescale(values, observations, 'Y')
+        >>> rescaled.tolist()
+        [24.0, 36.0, 60.0]
+        >>> mask.tolist()
+        [True, True, True]
+
+        The anchor rows are located whatever the constraint, and carry no
+        provenance of their own:
+
+        >>> constraint.anchor_cells_mask(observations, grid).tolist()
+        [False, False, True]
+        >>> AggregationConstraint(None).anchor_cells_mask(observations, grid).tolist()
+        [False, False, True]
+
+        Two years observed at 12 and 24, predicted flat at 1 a month: pro
+        rata steps from 1 to 2 at the turn of the year, Denton rises
+        smoothly, both summing to the totals:
+
+        >>> grid = pd.date_range('2021-01-31', periods=24, freq='ME')
+        >>> observations = pd.Series(np.nan, index=grid)
+        >>> observations.iloc[[11, 23]] = [12.0, 24.0]
+        >>> flat = pd.Series(1.0, index=grid)
+        >>> pro_rata, _ = AggregationConstraint('sum').rescale(flat, observations, 'Y')
+        >>> smooth, _ = AggregationConstraint('denton').rescale(flat, observations, 'Y')
+        >>> float(pro_rata.iloc[12] - pro_rata.iloc[11]), round(float(smooth.iloc[12] - smooth.iloc[11]), 3)
+        (1.0, 0.125)
+        >>> round(float(smooth.iloc[:12].sum()), 9), round(float(smooth.iloc[12:].sum()), 9)
+        (12.0, 24.0)
+    """
+
+    # Initialisation : validation sans transformation
+    def __init__(
+        self,
+        aggregation_constraint: AggregationConstraintSetting = DEFAULT_CONSTRAINT,
+        period_frequencies: Optional[Union[str, Mapping[str, str]]] = None,
+        observations: Optional[Union[pd.Series, pd.DataFrame]] = None,
+        context: str = '',
+    ) -> None:
+        """Validate the configuration and store it untouched.
+
+        Args:
+            aggregation_constraint: Constraint applied (see class docstring).
+            period_frequencies: Frequency of the periods of each column.
+            observations: Observed low-frequency values of each column.
+            context: Label used in the aggregated warning messages.
+
+        Raises:
+            ValueError: If ``aggregation_constraint`` is not admissible.
+        """
+        # Validation du réglage, clés du dict NON vérifiées ici : aucune colonne
+        # n'est connue à l'initialisation (voir "validate_columns")
+        self._validate_aggregation_constraint(aggregation_constraint)
+
+        # Stockage des paramètres
+        self.aggregation_constraint = aggregation_constraint
+        self.period_frequencies = period_frequencies
+        self.observations = observations
+        self.context = context
+
+    # -------------------------------------------------------------------------
+    # Validation
+    # -------------------------------------------------------------------------
+    # Méthode auxiliaire de validation du paramètre de contrainte
+    @staticmethod
+    def _validate_aggregation_constraint(
+        aggregation_constraint: AggregationConstraintSetting,
+    ) -> None:
+        """Check that ``aggregation_constraint`` is an admissible setting.
+
+        Args:
+            aggregation_constraint: Value handed to ``__init__``.
+
+        Raises:
+            ValueError: If the value, or one of the values of the dict form, is
+                not ``'sum'``, ``'denton'`` or None; or if the dict is empty. A non-additive column goes
+                through ``additive_transformer`` instead.
+
+        Examples:
+            >>> AggregationConstraint._validate_aggregation_constraint('sum')
+            >>> AggregationConstraint._validate_aggregation_constraint('mean')
+            Traceback (most recent call last):
+                ...
+            ValueError: aggregation_constraint must be one of ('sum', 'denton', None), or a dict mapping a column name to one of these values with an optional '__default__' key, got 'mean'. A non-additive column must go through additive_transformer instead.
+        """
+        # Délégation à la fonction de module : "CovariateMaterializer" porte le
+        # même paramètre et doit accepter exactement les mêmes formes
+        validate_aggregation_constraint(aggregation_constraint)
+
+    # Méthode de validation des clés du dictionnaire contre les colonnes réelles
+    def validate_columns(self, columns: Iterable[str]) -> None:
+        """Check the dict keys against the columns actually present.
+
+        Called once by the imputer at ``fit``, with the full set of columns:
+        the rescaling methods only ever see one stage's subset, against which a
+        legitimate key of another variable would look unknown.
+
+        Args:
+            columns: Column names present in the data.
+
+        Raises:
+            ValueError: If the dict form names columns absent from ``columns``,
+                listing the offending keys.
+
+        Examples:
+            >>> constraint = AggregationConstraint({'a1': 'sum'})
+            >>> constraint.validate_columns(['a1', 'q1'])
+            >>> AggregationConstraint({'zz': 'sum'}).validate_columns(['a1'])
+            Traceback (most recent call last):
+                ...
+            ValueError: aggregation_constraint names unknown columns : ['zz']
+        """
+        validate_constraint_columns(self.aggregation_constraint, columns)
+
+    # -------------------------------------------------------------------------
+    # Résolution de la contrainte et des métadonnées
+    # -------------------------------------------------------------------------
+    # Méthode de résolution de la contrainte effective d'une colonne
+    def resolve_constraint(self, column: Optional[str] = None) -> ConstraintSetting:
+        """Return the constraint effectively applied to one column.
+
+        Args:
+            column: Column name, or None for the global setting.
+
+        Returns:
+            ``'sum'``, ``'denton'`` or None: the column's own entry, else the
+            ``'__default__'`` entry, else ``'sum'``.
+
+        Examples:
+            >>> constraint = AggregationConstraint(
+            ...     {'a1': None, '__default__': 'sum'}
+            ... )
+            >>> constraint.resolve_constraint('a1') is None
+            True
+            >>> constraint.resolve_constraint('q1')
+            'sum'
+        """
+        return resolve_aggregation_constraint(self.aggregation_constraint, column)
+
+    # Méthode auxiliaire de résolution de la fréquence de période d'une colonne
+    def _period_freq_for(self, column: Optional[str]) -> str:
+        """Resolve the period frequency configured for one column.
+
+        Args:
+            column: Column name, or None for the global setting.
+
+        Returns:
+            The frequency of the periods the column's totals refer to.
+
+        Raises:
+            ValueError: If ``period_frequencies`` is not configured, or does
+                not cover the column.
+        """
+        # Dictionnaire des fréquences de chaque colonne
+        binding = self.period_frequencies
+
+        # Métadonnée indispensable
+        if binding is None:
+            raise ValueError(
+                "AggregationConstraint requires period_frequencies to be set "
+                "before fit"
+            )
+
+        # Forme scalaire : une seule fréquence pour toutes les colonnes
+        if not isinstance(binding, Mapping):
+            return binding
+
+        # Dans le cas où la fréquence n'est pas la même pour l'ensemble des colonnes, on s'assure qu'elle est présente dans le dictionnaire 
+        if column is None or column not in binding:
+            raise ValueError(
+                f"period_frequencies does not cover column {column!r}, got "
+                f"keys {sorted(binding)}"
+            )
+        return binding[column]
+
+    # Méthode auxiliaire d'extraction des observations d'une colonne
+    def _observations_for(self, column: Optional[str]) -> pd.Series:
+        """Extract the observed low-frequency values of one column.
+
+        Args:
+            column: Column name, or None when ``observations`` is a Series.
+
+        Returns:
+            The column's observations, anchors non-null and the rest NaN.
+
+        Raises:
+            ValueError: If ``observations`` is not configured, or does not
+                cover the column.
+        """
+        # Series/Dataframe des observations pour chaque colonne
+        observations = self.observations
+
+        # Métadonnée indispensable
+        if observations is None:
+            raise ValueError(
+                "AggregationConstraint requires observations to be set before fit"
+            )
+
+        # DataFrame : une colonne d'observations par variable imputée
+        if isinstance(observations, pd.DataFrame):
+            # Vérification que la colonne demandée est bien dans le jeu de données
+            if column is None or column not in observations.columns:
+                raise ValueError(
+                    f"observations does not hold column {column!r}, got columns "
+                    f"{list(observations.columns)}"
+                )
+            return observations[column]
+
+        return observations
+
+    # -------------------------------------------------------------------------
+    # Recalage
+    # -------------------------------------------------------------------------
+    # Méthode auxiliaire du décompte attendu de sous-périodes d'une période
+    @staticmethod
+    def _expected_subperiods(
+        period_key: Any,
+        grid_freq: Optional[GridFrequency],
+    ) -> Optional[int]:
+        """Count the grid sub-periods one whole period should hold.
+
+        The count is calendar, read off the period itself: twelve months in a
+        year, three in a quarter, 28 to 31 days in a month. It is what tells a
+        period the data covers entirely from a period the bounds of the frame
+        truncate.
+
+        Args:
+            period_key: Key of the period — a ``Period`` for a time series,
+                an ``(entity, Period)`` pair for a panel.
+            grid_freq: Frequency of the grid the values sit on, as
+                :func:`_resolve_grid_freq` returns it — scalar, or a mapping
+                covering every entity. None disables the count, hence the
+                guard.
+
+        Returns:
+            The expected number of sub-periods, or None when no grid frequency
+            is given.
+
+        Examples:
+            >>> AggregationConstraint._expected_subperiods(
+            ...     pd.Period('2021', 'Y-DEC'), 'M'
+            ... )
+            12
+            >>> AggregationConstraint._expected_subperiods(pd.Period('2021'), None) is None
+            True
+        """
+        # Garde désactivée : aucun décompte n'est demandé
+        if grid_freq is None:
+            return None
+
+        # Décomposition de la clé : le panel y accole son entité
+        if isinstance(period_key, tuple):
+            entity, period = period_key
+        else:
+            entity, period = (), period_key
+
+        # Fréquence de grille de cette entité, couverture garantie en amont
+        if isinstance(grid_freq, Mapping):
+            freq = grid_freq[normalize_entity_key(entity)]
+        else:
+            freq = grid_freq
+
+        # Décompte calendaire des sous-périodes contenues dans la période
+        return len(pd.period_range(
+            period.start_time,
+            period.end_time,
+            freq=normalize_frequency(freq, return_format='base'),
+        ))
+
+    # Méthode auxiliaire du recensement des périodes contraignables d'une colonne
+    def _constrained_periods(
+        self,
+        values: pd.Series,
+        observations: pd.Series,
+        period_freq: str,
+        grid_freq: Optional[GridFrequency] = None,
+    ) -> Tuple[List[Tuple[Any, np.ndarray, float]], List[Any]]:
+        """List the periods whose observed total can be imposed on the values.
+
+        Shared by both constraints, which therefore impose totals on exactly
+        the same periods. Three guards of the class docstring are applied
+        here: a period holding no observation is absent from the list, a
+        period the grid truncates is reported apart, and a period holding a
+        NaN sub-period is skipped without report.
+
+        Args:
+            values: Sub-period values produced on the stage grid.
+            observations: Observed low-frequency totals of the column.
+            period_freq: Frequency of the periods the totals refer to.
+            grid_freq: Frequency of the grid ``values`` sit on, scalar or per
+                entity. None disables the truncation guard.
+
+        Returns:
+            Tuple ``(periods, truncated_periods)``: one ``(period_key,
+            positions, total)`` triple per period to constrain — the
+            positions of its sub-periods in ``values``, in increasing order —
+            listed in the order of first appearance of the anchors; and the
+            observed periods the grid holds only in part.
+
+        Raises:
+            ValueError: If ``values`` or the anchors of ``observations`` hold
+                duplicated dates, or if ``grid_freq`` is unreadable or does
+                not cover every entity of ``values``.
+        """
+        # Rejet des doublons : un total ou une sous-période compté deux fois
+        _check_unique_dates(values.index, 'values')
+        _check_unique_dates(observations.dropna().index, 'observations')
+        # Fréquence de grille validée une fois pour tout l'appel
+        grid_freq = _resolve_grid_freq(grid_freq, values.index)
+
+        # Ancres seules : les lignes vides ne portent aucune contrainte
+        observed = observations.dropna()
+
+        # Périodes retenues et périodes tronquées
+        periods: List[Tuple[Any, np.ndarray, float]] = []
+        truncated_periods: List[Any] = []
+
+        # Clés de bloc (entité, période) des lignes prédites puis des ancres,
+        # codées ensemble pour partager les mêmes codes. Des structures
+        # différentes (série temporelle d'un côté, panel de l'autre) n'ont
+        # aucun bloc commun
+        value_levels, value_periods = _block_key_components(values.index, period_freq)
+        observed_levels, observed_periods = _block_key_components(observed.index, period_freq)
+        if observed.empty or len(value_levels) != len(observed_levels):
+            return periods, truncated_periods
+        levels = [value.append(other) for value, other in zip(value_levels, observed_levels)]
+        all_periods = value_periods.append(observed_periods)
+        codes, first_rows = factorize_row_keys(*levels, all_periods)
+        # Une ligne datée NaT n'appartient à aucun bloc
+        usable = ~np.asarray(all_periods.isna())
+        n_values = len(values)
+        value_codes, observed_codes = codes[:n_values], codes[n_values:]
+
+        # Positions de chaque bloc, côté lignes prédites et côté ancres
+        value_positions = _positions_by_code(value_codes, usable[:n_values])
+        observed_positions = _positions_by_code(observed_codes, usable[n_values:])
+
+        # Clé de chaque bloc, construite à la demande : la période seule pour
+        # une série temporelle, le couple (entité, période) pour un panel
+        entity_labels = [level.take(first_rows).tolist() for level in levels]
+        block_periods = all_periods.take(first_rows)
+
+        def block_key(code: int) -> Any:
+            if not entity_labels:
+                return block_periods[code]
+            entity = normalize_entity_key(tuple(labels[code] for labels in entity_labels))
+            return entity, block_periods[code]
+
+        # Valeurs en tableaux : aucune opération pandas par période
+        observed_values = observed.to_numpy(dtype=float)
+        missing = values.isna().to_numpy()
+        # Décomptes calendaires déjà calculés, par fréquence de grille et période
+        expected_counts: Dict[Tuple[Any, Any], Optional[int]] = {}
+
+        # Parcours des périodes observées, dans l'ordre de première apparition
+        # des ancres, ce qui réalise la garde des périodes sans aucune
+        # observation : elles n'y figurent pas
+        for code in pd.unique(observed_codes[usable[n_values:]]):
+            # Total observé de la période : toujours la somme
+            period_value = float(np.sum(observed_values[observed_positions[code]]))
+            # Extraction des positions associées à la période
+            positions = value_positions.get(code)
+            if positions is None:
+                continue
+            # Périodes calendairement incomplètes : les sous-périodes que
+            # les bornes du jeu retranchent ne sont pas des NaN, la garde
+            # suivante ne peut donc pas les voir. Imposer le total d'une année
+            # entière aux dix mois présents fausserait la répartition ;
+            # le total observé est alors perdu, ce que dit l'avertissement
+            period_key = block_key(code)
+            entity = period_key[0] if entity_labels else ()
+            entity_freq = grid_freq[entity] if isinstance(grid_freq, Mapping) else grid_freq
+            count_key = (entity_freq, block_periods[code])
+            if count_key not in expected_counts:
+                expected_counts[count_key] = self._expected_subperiods(period_key, grid_freq)
+            expected = expected_counts[count_key]
+            if expected is not None and len(positions) < expected:
+                truncated_periods.append(period_key)
+                continue
+
+            # Périodes partiellement prédites : aucune contrainte imposable
+            if missing[positions].any():
+                continue
+            periods.append((period_key, positions, period_value))
+
+        return periods, truncated_periods
+
+    # Méthode auxiliaire de recalage d'une colonne, sans avertissement
+    def _rescale_one(
+        self,
+        values: pd.Series,
+        observations: pd.Series,
+        period_freq: str,
+        grid_freq: Optional[GridFrequency] = None,
+        kind: ConstraintKind = 'sum',
+    ) -> Tuple[pd.Series, pd.Series, List[Any], List[Any], List[Any]]:
+        """Rescale one column and report its degenerate periods.
+
+        Split out of :meth:`rescale` so that the warnings can be aggregated
+        over several columns: this method never warns, it only reports. Called
+        only when the constraint is active on the column — the caller has
+        already handled the ``None`` case.
+
+        Args:
+            values: Sub-period values produced on the stage grid.
+            observations: Observed low-frequency totals of the column.
+            period_freq: Frequency of the periods the totals refer to.
+            grid_freq: Frequency of the grid ``values`` sit on, scalar or per
+                entity. When given, a period the grid holds only partially —
+                because the bounds of the frame truncate it — is never
+                imposed its total. None disables that guard.
+            kind: ``'sum'`` for the pro rata rescaling, ``'denton'`` for the
+                smooth additive benchmarking (see the class docstring).
+
+        Returns:
+            Tuple ``(rescaled, rescaled_mask, zero_periods, flipped_periods,
+            truncated_periods)``: the rescaled values, the boolean mask of the
+            cells actually moved, the periods whose predicted aggregate was
+            zero against a non-zero total, the periods whose profile was
+            flipped, and the observed periods the grid holds only in part.
+            The additive benchmarking has no zero nor flipped period.
+
+        Raises:
+            ValueError: If ``values`` or the anchors of ``observations`` hold
+                duplicated dates, or if ``grid_freq`` is unreadable or does
+                not cover every entity of ``values``.
+        """
+        # Périodes dont le total observé peut être imposé
+        periods, truncated_periods = self._constrained_periods(
+            values, observations, period_freq, grid_freq
+        )
+        # Étalonnage lissé : aucune division, donc aucun cas dégénéré
+        if kind == 'denton':
+            rescaled, rescaled_mask = _benchmark_additive(values, periods)
+            return rescaled, rescaled_mask, [], [], truncated_periods
+
+        # Recensement des cas dégénérés pour un avertissement agrégé
+        zero_periods: List[Any] = []
+        flipped_periods: List[Any] = []
+
+        # Valeurs en tableaux : aucune opération pandas par période
+        value_array = values.to_numpy(dtype=float, na_value=np.nan)
+        new_values = value_array.copy()
+        moved = np.zeros(len(values), dtype=bool)
+
+        # Recalage au prorata : les prédictions de chaque période sont
+        # multipliées par le rapport du total observé à leur agrégat
+        for period_key, positions, period_value in periods:
+            # Agrégation des valeurs prédites sur la période : toujours la somme
+            block_values = value_array[positions]
+            aggregate = float(np.sum(block_values))
+
+            # Agrégat nul : le ratio est indéfini, prédictions brutes conservées.
+            # Le zéro est NUMÉRIQUE : une somme inférieure à la borne d'erreur
+            # d'arrondi de la sommation (n · ε · Σ|x|) ne se distingue pas de
+            # zéro — 0.1 + 0.2 - 0.3 vaut 5.55e-17, et un ratio de 2e17
+            # rendrait des sous-périodes absurdes dont la somme n'égale plus le
+            # total. La borne est relative : de petites prédictions de même
+            # signe gardent leur recalage
+            rounding_bound = (
+                len(block_values) * np.finfo(float).eps * float(np.abs(block_values).sum())
+            )
+            if abs(aggregate) <= rounding_bound:
+                if period_value != 0:
+                    zero_periods.append(period_key)
+                continue
+
+            # Application du ratio de recalage
+            new_values[positions] = block_values * (period_value / aggregate)
+            moved[positions] = True
+
+            # Signe opposé : la contrainte est imposée mais le profil est inversé
+            if period_value != 0 and np.sign(aggregate) != np.sign(period_value):
+                flipped_periods.append(period_key)
+
+        # Écriture unique des cellules recalées
+        rescaled = values.copy()
+        if moved.any():
+            rescaled.iloc[np.flatnonzero(moved)] = new_values[moved]
+        rescaled_mask = pd.Series(moved, index=values.index)
+
+        return rescaled, rescaled_mask, zero_periods, flipped_periods, truncated_periods
+
+    # Méthode auxiliaire d'émission des avertissements agrégés
+    def _emit_warnings(
+        self,
+        zero_periods: Mapping[str, List[Any]],
+        flipped_periods: Mapping[str, List[Any]],
+        truncated_periods: Optional[Mapping[str, List[Any]]] = None,
+    ) -> None:
+        """Emit at most one warning per degenerate case, for the whole operation.
+
+        A period-by-period warning would drown the caller under one message per
+        year of the panel: the three messages below name the columns and the
+        number of periods concerned, and are emitted once.
+
+        Args:
+            zero_periods: Periods whose predicted aggregate was zero against a
+                non-zero observed total, per column.
+            flipped_periods: Periods whose profile was flipped, per column.
+            truncated_periods: Observed periods the grid holds only in part,
+                left un-rescaled, per column.
+        """
+        # Suffixe de contexte,
+        suffix = f" for {self.context}" if self.context else ""
+
+        # Recensement des colonnes réellement concernées
+        zero_columns = sorted(
+            str(column) for column, periods in zero_periods.items() if periods
+        )
+        flipped_columns = sorted(
+            str(column) for column, periods in flipped_periods.items() if periods
+        )
+
+        # Warning sur les sommes nulles
+        if zero_columns:
+            count = sum(len(periods) for periods in zero_periods.values())
+            example = next(periods[0] for periods in zero_periods.values() if periods)
+            warnings.warn(
+                f"Aggregation constraint skipped{suffix}: predictions aggregate "
+                f"to zero for {count} period(s) with a non-zero observed total, "
+                f"in column(s) {zero_columns} (e.g. {example}). Raw predictions "
+                f"kept, their period totals do not match the observations.",
+                UserWarning
+            )
+        # Warning sur les signes inversés
+        if flipped_columns:
+            count = sum(len(periods) for periods in flipped_periods.values())
+            example = next(periods[0] for periods in flipped_periods.values() if periods)
+            warnings.warn(
+                f"Aggregation constraint flipped the predicted profile{suffix} "
+                f"for {count} period(s), in column(s) {flipped_columns} (e.g. "
+                f"{example}): the predictions aggregate to the opposite sign of "
+                f"the observed total. Period totals are exact but every "
+                f"sub-period changed sign.",
+                UserWarning
+            )
+        # Warning sur les périodes tronquées
+        truncated_periods = truncated_periods or {}
+        truncated_columns = sorted(
+            str(column) for column, periods in truncated_periods.items() if periods
+        )
+        if truncated_columns:
+            count = sum(len(periods) for periods in truncated_periods.values())
+            example = next(
+                periods[0] for periods in truncated_periods.values() if periods
+            )
+            warnings.warn(
+                f"Aggregation constraint not enforced{suffix} for {count} "
+                f"observed period(s) the grid holds only in part — the bounds "
+                f"of the data or of the imputation window cut them —, in "
+                f"column(s) {truncated_columns} (e.g. {example}). A period "
+                f"total cannot be imposed on some of its sub-periods only: "
+                f"it is not imposed on them, and their values do not add up "
+                f"to the observation.",
+                UserWarning
+            )
+
+    # Méthode auxiliaire de signalement des périodes dégénérées
+    def _report(
+        self,
+        zero_periods: Mapping[str, List[Any]],
+        flipped_periods: Mapping[str, List[Any]],
+        truncated_periods: Optional[Mapping[str, List[Any]]] = None,
+    ) -> None:
+        """Warn about the degenerate periods of one operation, or set them aside.
+
+        Outside :meth:`deferred_warnings`, the warnings are emitted at once.
+        Inside, the periods join the census of the block, deduplicated per
+        column: the same period met by several calls — one covariate
+        interpolated for several variables, one variable rescaled at several
+        stages — counts once.
+
+        Args:
+            zero_periods: Periods whose predicted aggregate was zero against a
+                non-zero observed total, per column.
+            flipped_periods: Periods whose profile was flipped, per column.
+            truncated_periods: Observed periods the grid holds only in part,
+                per column.
+        """
+        # Initialisation des périodes tronquées
+        truncated_periods = truncated_periods or {}
+        # Hors bloc différé : émission immédiate, comportement d'origine
+        census = getattr(self, '_deferred_census', None)
+        if census is None:
+            self._emit_warnings(zero_periods, flipped_periods, truncated_periods)
+            return
+
+        # Bloc différé : recensement dédoublonné par colonne, ordre de première
+        # rencontre conservé pour l'exemple cité par le message
+        for store, reported in zip(
+            census, (zero_periods, flipped_periods, truncated_periods)
+        ):
+            for column, periods in reported.items():
+                if periods:
+                    store.setdefault(column, {}).update(dict.fromkeys(periods))
+
+    # Méthode de report des avertissements sur une opération composée
+    @contextmanager
+    def deferred_warnings(self) -> Iterator['AggregationConstraint']:
+        """Gather the warnings of every rescaling of the block into one per case.
+
+        :meth:`rescale` and :meth:`transform` each warn once per degenerate
+        case and per call. A caller chaining many calls — the stage loop of
+        ``HighFrequencyImputer``, which rescales every (stage, column) and
+        every interpolated covariate — would still receive one warning per
+        call. Inside this block they report instead of warning; on the way
+        out, one warning per degenerate case covers the whole block, naming
+        every column concerned and the number of distinct periods: a period
+        met at several stages, or by several calls, counts once.
+
+        Re-entrant: a nested block joins the census of the outer one. When the
+        block exits on an exception, nothing is emitted — the exception says
+        more than the warnings would.
+
+        Yields:
+            The constraint itself.
+
+        Examples:
+            >>> grid = pd.date_range('2021-01-31', periods=12, freq='ME')
+            >>> observations = pd.Series([np.nan] * 11 + [-120.0], index=grid)
+            >>> constraint = AggregationConstraint('sum')
+            >>> with warnings.catch_warnings(record=True) as caught:
+            ...     warnings.simplefilter('always')
+            ...     with constraint.deferred_warnings():
+            ...         for column in ('a1', 'a2'):
+            ...             _ = constraint.rescale(
+            ...                 pd.Series(1.0, index=grid), observations, 'Y', column=column
+            ...             )
+            >>> len(caught)
+            1
+            >>> "2 period(s), in column(s) ['a1', 'a2']" in str(caught[0].message)
+            True
+        """
+        # Bloc imbriqué : il rejoint le recensement du bloc englobant
+        if getattr(self, '_deferred_census', None) is not None:
+            yield self
+            return
+
+        # Recensement du bloc : périodes nulles, inversées, puis tronquées
+        self._deferred_census: Tuple[Dict[str, Dict[Any, None]], ...] = ({}, {}, {})
+        try:
+            yield self
+            zero_periods, flipped_periods, truncated_periods = self._deferred_census
+        finally:
+            # Aucun état ne survit au bloc : ni clone, ni sérialisation, ni
+            # appel ultérieur hors bloc ne le voient
+            del self._deferred_census
+
+        # Émission unique, une par cas dégénéré, pour tout le bloc
+        self._emit_warnings(
+            {column: list(periods) for column, periods in zero_periods.items()},
+            {column: list(periods) for column, periods in flipped_periods.items()},
+            {column: list(periods) for column, periods in truncated_periods.items()},
+        )
+
+    # Méthode de recalage d'une colonne
+    def rescale(
+        self,
+        values: pd.Series,
+        observations: pd.Series,
+        period_freq: str,
+        column: Optional[str] = None,
+        grid_freq: Optional[GridFrequency] = None,
+    ) -> Tuple[pd.Series, pd.Series]:
+        """Rescale sub-period values so each complete period matches its total.
+
+        Implementation of the ``AggregationConstraintApplier`` protocol of
+        :mod:`~tsforecast.imputation._components.covariate_materializer`. The extra
+        ``column`` argument is optional and only selects the constraint under
+        the dict form, so the protocol signature is honoured as is.
+
+        The five guards of the class docstring apply. A single aggregated
+        ``UserWarning`` is emitted per degenerate case, never one per period;
+        inside :meth:`deferred_warnings`, it is held back until the block
+        exits.
+
+        Args:
+            values: Values produced on the stage grid, indexed by date for a
+                time series or by ``(entity..., date)`` for a panel.
+            observations: Observed low-frequency totals of the column, indexed
+                by their own anchor rows.
+            period_freq: Frequency of the periods the totals refer to.
+            column: Name of the column, to resolve the constraint under the
+                dict form. None reads the global setting.
+            grid_freq: Frequency of the grid ``values`` sit on, scalar or per
+                entity. When given, a period the grid holds only partially is
+                left un-rescaled — the guard on calendar truncation. A mapping
+                must cover every entity of ``values`` (keys normalized, ``'FR'``
+                is ``('FR',)``). None disables the guard.
+
+        Returns:
+            Tuple ``(rescaled, rescaled_mask)``: the rescaled values, and the
+            boolean mask of the cells the constraint actually moved. That mask
+            is diagnostic and drives no marking: moved or not, every cell keeps
+            the ``MODEL_*`` or ``INTERPOLATED`` provenance it carried before
+            the rescaling. Under a ``None`` constraint the values come back
+            untouched and the mask is all-False.
+
+        Raises:
+            ValueError: If ``aggregation_constraint`` is not admissible (it is
+                validated again here: ``set_params`` bypasses ``__init__``); if
+                ``values`` or the anchors of ``observations`` hold duplicated
+                dates; if ``grid_freq`` is unreadable or does not cover every
+                entity of ``values``.
+
+        Examples:
+            >>> grid = pd.date_range('2021-01-31', periods=3, freq='ME')
+            >>> values = pd.Series([20.0, 30.0, 50.0], index=grid)
+            >>> observations = pd.Series([np.nan, np.nan, 120.0], index=grid)
+            >>> rescaled, mask = AggregationConstraint('sum').rescale(
+            ...     values, observations, 'Y'
+            ... )
+            >>> float(rescaled.sum())
+            120.0
+            >>> rescaled, mask = AggregationConstraint(None).rescale(
+            ...     values, observations, 'Y'
+            ... )
+            >>> rescaled.tolist(), bool(mask.any())
+            ([20.0, 30.0, 50.0], False)
+
+            The same three months, declared as a monthly grid: 2021 should
+            hold twelve of them, the year is truncated, nothing is rescaled.
+
+            >>> rescaled, mask = AggregationConstraint('sum').rescale(
+            ...     values, observations, 'Y', grid_freq='M'
+            ... )
+            >>> rescaled.tolist(), bool(mask.any())
+            ([20.0, 30.0, 50.0], False)
+        """
+        # Revalidation du réglage : "set_params" contourne "__init__"
+        self._validate_aggregation_constraint(self.aggregation_constraint)
+
+        # Contrainte de la colonne
+        kind = self.resolve_constraint(column)
+
+        # Contrainte désactivée : valeurs brutes conservées, aucune cellule
+        # recalée — la ligne d'ancre porte néanmoins une valeur de sous-période,
+        # ce que dit "anchor_cells_mask" et non ce masque-ci
+        if kind is None:
+            return values, pd.Series(False, index=values.index)
+
+        # Remise à l'échelle
+        rescaled, mask, zero_periods, flipped_periods, truncated_periods = (
+            self._rescale_one(values, observations, period_freq, grid_freq, kind=kind)
+        )
+
+        # Avertissements agrégés sur l'unique colonne traitée, différés dans un
+        # bloc "deferred_warnings"
+        label = column if column is not None else values.name
+        self._report(
+            {label: zero_periods}, {label: flipped_periods}, {label: truncated_periods}
+        )
+
+        return rescaled, mask
+
+    # -------------------------------------------------------------------------
+    # Ancres
+    # -------------------------------------------------------------------------
+    # Méthode du masque des lignes d'ancre ré-exprimées à la fréquence d'étape
+    def anchor_cells_mask(
+        self,
+        observations: Union[pd.Series, pd.DataFrame],
+        index: pd.Index,
+    ) -> Union[pd.Series, pd.DataFrame]:
+        """Locate the anchor rows re-expressed at the stage frequency.
+
+        An anchor row is a row where the low-frequency variable carries a real
+        observation in the untouched input frame. Re-expressed at the stage
+        frequency, that row no longer holds the observation but a sub-period
+        value: the mask says where an observed total was overwritten, which is
+        what ``inverse_transform`` and the diagnostics need to find those
+        totals again.
+
+        It is not a provenance mask. The cell carries the provenance of the
+        value now written there — the ``MODEL_*`` of the step, or
+        ``INTERPOLATED`` — and its being an anchor position changes nothing to
+        it. Being read off the data alone, the mask depends neither on
+        ``aggregation_constraint`` nor on whether the rescaling succeeded.
+
+        Args:
+            observations: Observed low-frequency values, one Series for a
+                single column or a DataFrame for several.
+            index: Index of the cells that received a value — a
+                ``DatetimeIndex`` or a ``MultiIndex`` ``(entity..., date)``.
+
+        Returns:
+            Boolean ``Series`` aligned on ``index`` for a Series input, boolean
+            ``DataFrame`` indexed like ``index`` for a DataFrame input.
+
+        Raises:
+            ValueError: If ``observations`` holds duplicated dates.
+
+        Examples:
+            >>> grid = pd.date_range('2021-01-31', periods=3, freq='ME')
+            >>> observations = pd.Series([np.nan, np.nan, 120.0], index=grid)
+            >>> AggregationConstraint('sum').anchor_cells_mask(
+            ...     observations, grid
+            ... ).tolist()
+            [False, False, True]
+        """
+        # Rejet des doublons, avec le même message que le recalage
+        _check_unique_dates(observations.index, 'observations')
+
+        # Même règle pour une Series et pour une trame : "reindex" ramène les
+        # observations sur la grille d'étape, "notna" y désigne les ancres
+        return observations.reindex(index).notna()
+
+    # -------------------------------------------------------------------------
+    # Protocole sklearn
+    # -------------------------------------------------------------------------
+    # Méthode d'ajustement : gel du masque des ancres de la grille
+    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> 'AggregationConstraint':
+        """Freeze the anchor mask of the stage grid.
+
+        Nothing is learnt from the values: the anchor mask is a pure function
+        of the observations and of the grid ``X`` runs on. The rescaling itself needs the values, so it
+        belongs to :meth:`transform`.
+
+        Args:
+            X: Values produced on the stage grid, one column per imputed
+                variable. Its columns select the variables and its index
+                carries the grid.
+            y: Ignored, present for the sklearn signature.
+
+        Returns:
+            The fitted constraint.
+
+        Raises:
+            ValueError: If ``aggregation_constraint`` is not admissible
+                (validated again: ``set_params`` bypasses ``__init__``), names
+                unknown columns, or if ``observations`` or
+                ``period_frequencies`` was not configured, or does not cover a
+                column of ``X``.
+
+        Examples:
+            >>> grid = pd.date_range('2021-01-31', periods=3, freq='ME')
+            >>> X = pd.DataFrame({'a1': [20.0, 30.0, 50.0]}, index=grid)
+            >>> observations = pd.DataFrame({'a1': [np.nan, np.nan, 120.0]}, index=grid)
+            >>> constraint = AggregationConstraint(
+            ...     'sum', period_frequencies='Y', observations=observations
+            ... ).fit(X)
+            >>> constraint.anchor_mask_['a1'].tolist()
+            [False, False, True]
+        """
+        # Purge de l'état du transform précédent : un masque d'une autre
+        # grille ne doit pas survivre au nouvel ajustement
+        if hasattr(self, 'rescaled_mask_'):
+            del self.rescaled_mask_
+
+        # Revalidation du réglage : "set_params" contourne "__init__"
+        self._validate_aggregation_constraint(self.aggregation_constraint)
+
+        # Extraction des colonnes
+        columns = list(X.columns)
+        # Contrôle des clés du dictionnaire contre les colonnes réelles
+        self.validate_columns(columns)
+
+        # Masque des ancres, colonne par colonne : la résolution passe par
+        # "_observations_for", qui porte les messages d'erreur de métadonnée
+        self.anchor_mask_ = pd.DataFrame(
+            {
+                column: self.anchor_cells_mask(self._observations_for(column), X.index)
+                for column in columns
+            },
+            index=X.index,
+        )
+
+        # Contrôle anticipé des fréquences : une métadonnée absente est une
+        # erreur de branchement, à signaler au fit et non au transform
+        for column in columns:
+            self._period_freq_for(column)
+
+        # Attributs de convention sklearn
+        self.n_features_in_ = len(columns)
+        self.feature_names_in_ = np.asarray(columns, dtype=object)
+
+        return self
+
+    # Méthode de transformation : recalage de toutes les colonnes
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Rescale every column of a stage frame, warning once for all of them.
+
+        Args:
+            X: Values produced on the stage grid, one column per imputed
+                variable.
+
+        Returns:
+            The rescaled frame. :attr:`rescaled_mask_` holds the boolean mask
+            of the cells actually moved, per column.
+
+        Raises:
+            NotFittedError: If the constraint was not fitted.
+            ValueError: If ``aggregation_constraint`` is no longer admissible
+                (changed by ``set_params`` since the fit), or if the columns of
+                ``X`` differ from those seen at :meth:`fit`.
+
+        Examples:
+            >>> grid = pd.date_range('2021-01-31', periods=3, freq='ME')
+            >>> X = pd.DataFrame({'a1': [20.0, 30.0, 50.0]}, index=grid)
+            >>> observations = pd.DataFrame({'a1': [np.nan, np.nan, 120.0]}, index=grid)
+            >>> constraint = AggregationConstraint(
+            ...     'sum', period_frequencies='Y', observations=observations
+            ... ).fit(X)
+            >>> constraint.transform(X)['a1'].tolist()
+            [24.0, 36.0, 60.0]
+            >>> constraint.rescaled_mask_['a1'].tolist()
+            [True, True, True]
+        """
+        # Vérification que le transformer est entraîné
+        check_is_fitted(self)
+        # Revalidation du réglage : "set_params" contourne "__init__"
+        self._validate_aggregation_constraint(self.aggregation_constraint)
+
+        # Colonnes identiques à celles du fit : le masque des ancres et les
+        # métadonnées ont été contrôlés pour celles-là seulement
+        fitted = list(self.feature_names_in_)
+        missing = [column for column in fitted if column not in X.columns]
+        unexpected = [column for column in X.columns if column not in fitted]
+        if missing or unexpected:
+            raise ValueError(
+                f"X has different columns than during fit: missing {missing}, "
+                f"unexpected {unexpected}"
+            )
+
+        # Initialisation du résultat et des recensements
+        rescaled = X.copy()
+        masks: Dict[str, pd.Series] = {}
+        zero_periods: Dict[str, List[Any]] = {}
+        flipped_periods: Dict[str, List[Any]] = {}
+
+        # Recalage colonne par colonne, sans avertir
+        for column in X.columns:
+            # Contrainte de cette colonne
+            kind = self.resolve_constraint(column)
+
+            # Contrainte désactivée sur cette colonne : valeurs brutes gardées
+            if kind is None:
+                masks[column] = pd.Series(False, index=X.index)
+                continue
+
+            # Recalage de la colonne, sans grille déclarée : aucune troncature
+            # ne peut y être constatée
+            column_values, mask, zeros, flipped, _truncated = self._rescale_one(
+                X[column],
+                self._observations_for(column),
+                self._period_freq_for(column),
+                kind=kind,
+            )
+            # Affectation positionnelle : un index dupliqué ne doit déclencher
+            # aucun réalignement
+            rescaled[column] = column_values.to_numpy()
+            masks[column] = mask
+            zero_periods[column] = zeros
+            flipped_periods[column] = flipped
+
+        # Avertissements agrégés : un seul message pour toute l'opération, ou
+        # pour tout le bloc "deferred_warnings" englobant
+        self._report(zero_periods, flipped_periods)
+
+        self.rescaled_mask_ = pd.DataFrame(masks, index=X.index)
+        return rescaled

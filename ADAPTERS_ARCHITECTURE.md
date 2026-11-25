@@ -54,8 +54,8 @@ postérieure à la dernière ligne d'entraînement.
   (racine), `pyproject.toml`, `uv.lock`, et `tsforecast/crossvals/base.py` (ajout de
   `get_n_splits`, **déjà présent sur `main`** : prendre la version de `main`).
 - `main` impose Python ≥ 3.13, `pandas>=3.0,<4`, `scikit-learn>=1.9,<2`, `numpy>=2.3`. La `.venv`
-  locale est déjà sur pandas 3.0.6 / scikit-learn 1.9.1 ; **aucun paquet tiers des adapters n'y est
-  installé**.
+  locale est déjà sur pandas 3.0.6 / scikit-learn 1.9.1. Depuis la session 1, les extras
+  `adapters-all` et le groupe `notebooks` y sont installés (versions au § 2.3).
 - `main` a renuméroté ses notebooks (`0 - Utils`, `1 - Sklearn extensions`, `2 - Delays`,
   `3 - Crossvals`, `4 - Mixed frequencies`). Le notebook des adapters garde son nom
   `4 - QB - Adapters.ipynb` tant que l'utilisateur n'a pas décidé d'un renommage (§ 9).
@@ -118,6 +118,20 @@ non réalignée sur `X`.
 | chronos-forecasting | PyPI | `Chronos2Pipeline.from_pretrained("amazon/chronos-2", device_map=...)` ; `predict_df(context_df, future_df=..., prediction_length, quantile_levels, id_column, timestamp_column, target)` ; covariables passées et futures en colonnes. Modèles : `amazon/chronos-2`, `autogluon/chronos-2-small`, `amazon/chronos-bolt-{tiny,mini,small,base}`, `amazon/chronos-t5-*`. `pandas>=2,<4`. |
 | timestral (Mistral AI) | **pas sur PyPI** (`pip install git+https://github.com/mistralai/timestral.git`) | `TimestralForecaster.from_pretrained("mistralai/Timestral-{5M,28M,123M,209M}", device=...)` ; `model.forecast(context, prediction_length)` → `.median`, `.quantile(q)` ; covariables passées et futures annoncées ; contexte ≤ 32 768 pas ; sortie ≤ 1 024 pas par passe. Licence « Modified MIT » avec clause d'usage. Pas d'API batch documentée sur la carte. |
 | t0 (The Forecasting Company) | PyPI `tfc-t0[torch]>=0.6.1` | `T0Forecaster.from_pretrained("theforecastingcompany/t0-gamma")` ; `predict(context, horizon, quantile_levels, mask=, group_ids=, future_covariates=)` sur tenseurs `(B, T)` / `(B, V, T)` ; `batch_series([...])` ; Apache-2.0 ; ~256 M paramètres. |
+
+**Versions retenues en session 1** (Python 3.13, pandas 3.0.6, scikit-learn 1.9.1, numpy 2.3.2 ;
+résolution `uv lock` sans changement des versions de `main`) :
+
+| Paquet | Version | Compatibilité |
+|---|---|---|
+| sktime | 1.3.0 | pandas 3 depuis 1.2.0, pandas 3.1 depuis 1.3.0 ; plafonne `pandas<3.2`, `numpy<2.6`, `scikit-learn<1.10`, `joblib<1.7` |
+| darts | 0.48.1 | pandas 3 supporté ; **bug connu avec pandas 3.1** (séries journalières → `TypeError`), correctif non publié ; xgboost / statsforecast hors du cœur de darts |
+| hierarchicalforecast | 1.5.3 | roues cp313 ; pas de dépendance à statsforecast |
+| utilsforecast | 0.2.17 | support de pandas 3 à partir de cette version (plancher déclaré dans l'extra) |
+| opera | commit `9f82033` (`develop`, 2024-11-06) | pur Python, aucune écriture en place sur les entrées ; `scipy` importé non déclaré (déclaré dans l'extra) ; dépôt sans fichier LICENSE (setup.py : MIT) ; plus maintenu depuis 2024 |
+| xgboost | 3.4.1 | groupe `notebooks` |
+| tslearn | 0.10.0 | groupe `notebooks` |
+| statsforecast 2.1.1, mlforecast 1.1.0 | — | exigent `pandas<3` : non installables, non déclarés (aucun usage) |
 
 Il n'existe **aucune API commune** à ces modèles de fondation : chaque famille a son propre paquet,
 son propre format d'entrée (DataFrame long, `ndarray`, tenseurs) et sa propre gestion des
@@ -454,10 +468,10 @@ tsforecast/adapters/foundation/
 
 | Id | Question | Proposition par défaut |
 |---|---|---|
-| Q1 | Rattrapage de `main` : `merge` ou `rebase` ? | `git merge --no-commit main` (pas de réécriture des 36 commits, revue avant commit) |
+| Q1 | Rattrapage de `main` : `merge` ou `rebase` ? | **Tranchée (AD-04)** : `git merge --no-commit --no-ff main` |
 | Q2 | Renommer le notebook selon la numérotation de `main` (`5 - Adapters.ipynb`) ? | Garder le nom actuel jusqu'à la fin, renommer en dernière session |
-| Q3 | Paquet tiers incompatible avec pandas 3 / Python 3.13 | Signaler, chercher la version compatible ; à défaut, marquer l'adapter « non supporté » (tests sautés) plutôt que contraindre le cœur |
-| Q4 | opera incompatible ou abandonné | Figer un SHA ; à défaut, réimplémenter BOA / MLpol en interne (algorithmes courts) — à confirmer |
+| Q3 | Paquet tiers incompatible avec pandas 3 / Python 3.13 | **Tranchée (AD-05, AD-06)** : tous compatibles ; aucun plafond ajouté au cœur ; bug pandas 3.1 de darts documenté |
+| Q4 | opera incompatible ou abandonné | **Tranchée pour la session 1 (AD-07)** : SHA figé, fonctionne sous pandas 3 ; réimplémentation interne éventuelle à décider en session 9 |
 | Q5 | `HierarchicalForecastAdapter` : `reconciler` (singulier) seul, ou aussi `reconcilers` (liste) ? | `reconciler` pour `predict` / `GridSearchCV`, `reconcile()` pour comparer plusieurs réconciliateurs |
 | Q6 | Étiquette des lignes d'agrégat (`""`, `"Total"`, `"__all__"`) | `"Total"` (paramètre `aggregate_label`) |
 | Q7 | Ancrage temporel des agrégats (début de période / période cible) | Début de période, ancrage sur les origines documenté |
@@ -473,4 +487,8 @@ tsforecast/adapters/foundation/
 | AD-01 | 2026-11-25 | préparation | Les adapters ne décalent jamais rien ; l'horizon est déduit des index | Principe central (§ 1) |
 | AD-02 | 2026-11-25 | préparation | `predict` renvoie un `ndarray` dans l'ordre des lignes de `X` | Compatibilité scorers / `cross_val_predict` (§ 3.3) |
 | AD-03 | 2026-11-25 | préparation | Modèles de fondation : un adapter + des backends enregistrés | Pas d'API commune dans l'écosystème (§ 5.5) |
+| AD-04 | 2026-11-25 | 1 | Rattrapage par `git merge --no-commit --no-ff main` ; `crossvals/base.py` et `uv.lock` pris de `main` (lock régénéré) | Pas de réécriture des commits de la branche ; `get_n_splits` déjà sur `main` |
+| AD-05 | 2026-11-25 | 1 | Extras `adapters-sktime` (sktime ≥ 1.3.0), `adapters-darts` (darts ≥ 0.48.1), `adapters-hierarchical` (hierarchicalforecast ≥ 1.5.3, utilsforecast ≥ 0.2.17), `adapters-opera`, `adapters-all` ; groupe `notebooks` (`adapters-all`, xgboost, tslearn) hors `default-groups` ; groupe `adapters` de la branche supprimé | Versions minimales supportant pandas 3 (3.1 pour sktime) ; statsforecast / mlforecast exigent `pandas<3` et ne servent pas |
+| AD-06 | 2026-11-25 | 1 | Pas de plafond `pandas<3.1` dans `adapters-darts` malgré le bug pandas 3.1 de darts 0.48.1 ; `uv.lock` reste sur pandas 3.0.6 | Ne pas contraindre le cœur ; à revoir en session 4 (relever le plancher de darts dès le correctif publié) |
+| AD-07 | 2026-11-25 | 1 | opera figé sur `9f8203363ba75206e9beb02002e3420037456200`, `scipy` déclaré dans l'extra | Dépôt non publié sur PyPI et inactif depuis 2024 ; BOA, MLpol, MLprod et FTRL passent sous pandas 3 ; réimplémentation laissée à la session 9 |
 |  |  |  |  |  |

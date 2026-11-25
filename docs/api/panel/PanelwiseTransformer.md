@@ -1,0 +1,1 @@
+::: tsforecast.panel.transformers.PanelwiseTransformer

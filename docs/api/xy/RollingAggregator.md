@@ -1,0 +1,1 @@
+::: tsforecast.xy.rolling.RollingAggregator

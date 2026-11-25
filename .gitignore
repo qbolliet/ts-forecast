@@ -45,6 +45,7 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
+coverage.json
 *.cover
 *.py,cover
 .hypothesis/
@@ -183,4 +184,4 @@ outputs/*
 
 # Claude
 .claude/
-CLAUDE.md
+# CLAUDE.md
