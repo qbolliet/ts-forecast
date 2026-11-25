@@ -7,6 +7,8 @@ imported directly by tests and notebooks
 (``from tests.support.datasets import build_panel_reference``).
 ``build_staggered_panel`` adds a hand-sized panel whose entities cover
 different date ranges, for the cross-validation tests.
+``build_adapter_series`` and ``build_adapter_panel`` give the origin-indexed
+``(X, y)`` datasets of the adapter contract tests.
 """
 # Modules de base
 import zlib
@@ -632,3 +634,77 @@ def build_staggered_panel() -> pd.DataFrame:
     index = pd.MultiIndex.from_tuples(rows, names=['entity', 'date'])
     # Valeur égale à la position de la ligne : plis lisibles directement
     return pd.DataFrame({'v': np.arange(len(rows), dtype=float)}, index=index)
+
+
+# Coefficients de la relation linéaire des jeux des adapters : y = 2·x1 − x2 + bruit
+_ADAPTER_COEFFICIENTS = np.array([2.0, -1.0])
+_ADAPTER_NOISE = 0.05
+# Panel des adapters déséquilibré : premier pas de chaque entité ; fin commune, pour que
+# chaque pli de validation croisée teste toutes les entités
+_ADAPTER_UNBALANCED_STARTS = {'A': 0, 'B': 6, 'C': 3}
+
+
+def _adapter_target(X: pd.DataFrame, rng: np.random.Generator) -> pd.Series:
+    """Linear target of the adapter datasets, on the index of ``X``."""
+    values = X.to_numpy() @ _ADAPTER_COEFFICIENTS + _ADAPTER_NOISE * rng.standard_normal(len(X))
+    return pd.Series(values, index=X.index, name='target')
+
+
+def build_adapter_series(n_dates: int = 36, seed: int = 0) -> tuple:
+    """Build the time series of the adapter contract tests.
+
+    Rows are indexed by forecast origin on a month-start grid from January
+    2020; ``y = 2 * x1 - x2`` plus a small noise, so that a row-wise
+    regressor fits it almost exactly.
+
+    Args:
+        n_dates: Number of monthly dates.
+        seed: Seed of the generator of the covariates and the noise.
+
+    Returns:
+        ``(X, y)``: ``DataFrame`` with columns ``x1``, ``x2`` and a
+        ``DatetimeIndex`` named ``date``, and ``Series`` ``target`` on the same
+        index.
+
+    Examples:
+        >>> X, y = build_adapter_series(n_dates=4)
+        >>> X.shape, X.index.freqstr, y.name
+        ((4, 2), 'MS', 'target')
+    """
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range('2020-01-01', periods=n_dates, freq='MS', name='date')
+    X = pd.DataFrame(rng.standard_normal((n_dates, 2)), index=dates, columns=['x1', 'x2'])
+    return X, _adapter_target(X, rng)
+
+
+def build_adapter_panel(balanced: bool = True, n_dates: int = 36, seed: int = 0) -> tuple:
+    """Build the panel of the adapter contract tests.
+
+    Entities ``A``, ``B`` and ``C`` on a month-start grid from January 2020,
+    sorted by entity then date, with the relation of
+    :func:`build_adapter_series`. Unbalanced, ``B`` starts six months and
+    ``C`` three months later than ``A``; all entities end on the same date.
+
+    Args:
+        balanced: Whether every entity covers the ``n_dates`` dates.
+        n_dates: Number of monthly dates of the full calendar.
+        seed: Seed of the generator of the covariates and the noise.
+
+    Returns:
+        ``(X, y)``: ``DataFrame`` with columns ``x1``, ``x2`` and a
+        ``MultiIndex`` (``entity``, ``date``), and ``Series`` ``target`` on the
+        same index.
+
+    Examples:
+        >>> X, y = build_adapter_panel(balanced=False, n_dates=12)
+        >>> X.groupby(level='entity').size().to_dict()
+        {'A': 12, 'B': 6, 'C': 9}
+    """
+    rng = np.random.default_rng(seed)
+    calendar = pd.date_range('2020-01-01', periods=n_dates, freq='MS')
+    starts = {entity: 0 for entity in _ADAPTER_UNBALANCED_STARTS} if balanced else _ADAPTER_UNBALANCED_STARTS
+    # Couples (entité, date) dans l'ordre entité puis date
+    rows = [(entity, date) for entity, first in starts.items() for date in calendar[first:]]
+    index = pd.MultiIndex.from_tuples(rows, names=['entity', 'date'])
+    X = pd.DataFrame(rng.standard_normal((len(rows), 2)), index=index, columns=['x1', 'x2'])
+    return X, _adapter_target(X, rng)

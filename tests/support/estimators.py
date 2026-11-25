@@ -5,7 +5,10 @@ Estimators: ``SpyEstimator``, ``FailingEstimator``, ``ConstantEstimator`` and
 sklearn step) and ``SpyXYTransformer`` (XY step), which log every call they
 receive (``SpyCall``); the XY transformers ``LogTransformXY``, ``ScaleXY``,
 ``DropRowsXY`` and ``MixinScaleXY`` (minimal ``XYTransformerMixin`` subclass);
-and ``FailingTransformer``, which raises at a chosen method.
+and ``FailingTransformer``, which raises at a chosen method. Reference adapters
+built on ``tsforecast.adapters._base``: ``RowRegressorAdapter`` (row-wise
+regressor) and ``LastValueAdapter`` (local per-entity model), on which the
+adapter contract battery is validated.
 """
 # Modules de base
 from dataclasses import dataclass
@@ -15,6 +18,12 @@ import numpy as np
 from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin, clone
 from sklearn.utils.validation import check_is_fitted
 
+from tsforecast.adapters._base import (
+    check_adapter_input,
+    import_optional,
+    restore_row_order,
+    steps_between,
+)
 from tsforecast.xy import XYTransformerMixin
 
 
@@ -445,3 +454,82 @@ class FailingTransformer(BaseEstimator, TransformerMixin):
         check_is_fitted(self)
         self._maybe_fail('inverse_transform')
         return X + self.mean_
+
+
+# Adapter de référence : régresseur ligne à ligne bâti sur le socle des adapters
+class RowRegressorAdapter(RegressorMixin, BaseEstimator):
+    """Reference adapter: a row-wise regressor wrapped like a third-party model.
+
+    The regressor is cloned into ``regressor_`` (the wrapped object is never
+    fitted) and sees the rows sorted by index, as a third-party package
+    reordering its input would; the predictions are realigned on the rows of
+    ``X``. The default regressor is imported lazily from
+    ``sklearn.linear_model`` through ``import_optional`` (extra
+    ``adapters-reference``), which makes the missing-package path testable.
+    """
+
+    def __init__(self, regressor: Any = None):
+        self.regressor = regressor
+
+    def fit(self, X, y):
+        """Fit a clone of the regressor on the rows sorted by index."""
+        linear_model = import_optional('sklearn.linear_model', 'adapters-reference')
+        X, y, layout = check_adapter_input(self, X, y, reset=True)
+        template = self.regressor if self.regressor is not None else linear_model.LinearRegression()
+        self.regressor_ = clone(template)
+        # Lignes triées par entité puis par date, comme un paquet tiers qui réordonne
+        order = np.lexsort((layout.dates.asi8, layout.codes))
+        self.regressor_.fit(X.to_numpy()[order], y.to_numpy()[order])
+        self.freq_ = layout.freq
+        return self
+
+    def predict(self, X):
+        """Predict the rows sorted by index, then restore the order of ``X``."""
+        check_is_fitted(self)
+        X, _, _ = check_adapter_input(self, X, reset=False, freq=self.freq_)
+        X_sorted = X.sort_index()
+        values = self.regressor_.predict(X_sorted.to_numpy())
+        return restore_row_order(values, X_sorted.index, X.index)
+
+
+# Adapter de référence : modèle local par entité, prévision à travers les pas de grille
+class LastValueAdapter(RegressorMixin, BaseEstimator):
+    """Reference adapter: a local model extrapolating the last value of each entity.
+
+    The prediction of a row is the last training target of its entity plus
+    ``drift`` per grid step between that entity's last training date and the
+    row's date (``steps_between``). An entity unknown at fit cannot be
+    predicted.
+
+    Args:
+        drift: Increment per grid step; must be a real number.
+    """
+
+    def __init__(self, drift: float = 0.0):
+        self.drift = drift
+
+    def fit(self, X, y):
+        """Record the last target and the last date of each entity."""
+        if isinstance(self.drift, bool) or not isinstance(self.drift, (int, float)):
+            raise ValueError(f'drift must be a real number, got {self.drift!r}')
+        X, y, layout = check_adapter_input(self, X, y, reset=True)
+        if layout.freq is None:
+            raise ValueError('The frequency of the training dates cannot be read')
+        # Dernière ligne de chaque entité : tri par code puis par date
+        order = np.lexsort((layout.dates.asi8, layout.codes))
+        sorted_codes = layout.codes[order]
+        last_rows = order[np.r_[np.flatnonzero(np.diff(sorted_codes)), len(order) - 1]]
+        self.layout_ = layout
+        self.last_values_ = y.to_numpy()[last_rows]
+        return self
+
+    def predict(self, X):
+        """Extrapolate each row from the last training value of its entity."""
+        check_is_fitted(self)
+        X, _, layout = check_adapter_input(self, X, reset=False, freq=self.layout_.freq)
+        codes = self.layout_.match_entities(layout)
+        if (codes < 0).any():
+            unknown = sorted({layout.entities[code] for code in np.unique(layout.codes[codes < 0])})
+            raise ValueError(f'Entities unknown at fit: {unknown}')
+        steps = steps_between(self.layout_.last_dates()[codes], layout.dates, self.layout_.freq)
+        return self.last_values_[codes] + self.drift * steps

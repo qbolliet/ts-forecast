@@ -12,6 +12,11 @@ import warnings
 # Sklearn
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
+# tsforecast
+from tsforecast.adapters._base import import_optional
+
+# Extra installant darts
+_EXTRA = "adapters-darts"
 
 
 # Wrapper permettant l'intégration des modèles du package "darts" dans un syntaxe "sklearn-like"
@@ -167,16 +172,8 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
                 adapter = DartsAdapter(model=LinearRegressionModel())
                 adapter.fit(X, y)
         """
-        # Lazy import of darts
-        try:
-            from darts import TimeSeries
-            from darts.models.forecasting.forecasting_model import GlobalForecastingModel
-        except ImportError as e:
-            raise ImportError(
-                "DartsAdapter requires the 'darts' package. "
-                "Install it with: pip install ts-forecast[adapters-darts] "
-                "or: pip install darts"
-            ) from e
+        # Import différé de darts
+        TimeSeries = import_optional("darts", _EXTRA).TimeSeries
 
         # Gestion du cas univarié : si y est None, X devient la série cible
         if y is None:
@@ -311,15 +308,8 @@ class DartsAdapter(BaseEstimator, RegressorMixin):
                 adapter.fit(X_train, y_train)
                 predictions = adapter.predict(X_test)
         """
-        # Lazy import of darts
-        try:
-            from darts import TimeSeries
-        except ImportError as e:
-            raise ImportError(
-                "DartsAdapter requires the 'darts' package. "
-                "Install it with: pip install ts-forecast[adapters-darts] "
-                "or: pip install darts"
-            ) from e
+        # Import différé de darts
+        TimeSeries = import_optional("darts", _EXTRA).TimeSeries
 
         # Stockage de l'index original pour reconstruction finale
         original_index = X.index

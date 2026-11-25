@@ -10,6 +10,11 @@ from typing import Any, Dict, Optional
 # Sklearn
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.metrics import r2_score
+# tsforecast
+from tsforecast.adapters._base import import_optional
+
+# Extra installant opera
+_EXTRA = "adapters-opera"
 
 # Wrapper permettant l'intégration des modèles du package "opera" dans un syntaxe "sklearn-like"
 # /!\ La méthode "score" (nécessaire pour GridSearchCV) et l'héritage de RegressorMixin font que l'on wrappe des régresseurs et non des classifieurs par défaut
@@ -219,15 +224,8 @@ class OperaAdapter(BaseEstimator, RegressorMixin):
                 adapter = OperaAdapter()
                 adapter.fit(expert_preds, y_val)
         """
-        # Lazy import of opera
-        try:
-            from opera import Mixture
-        except ImportError as e:
-            raise ImportError(
-                "OperaAdapter requires the 'opera' package. "
-                "Install it with: pip install ts-forecast[adapters-opera] "
-                "or: pip install opera"
-            ) from e
+        # Import différé d'opera
+        Mixture = import_optional("opera", _EXTRA).Mixture
 
         # Initialisation du modèle Mixture
         # Note: L'entraînement initial est effectué lors de l'initialisation
@@ -296,15 +294,8 @@ class OperaAdapter(BaseEstimator, RegressorMixin):
         if not self.is_fitted_:
             return self.fit(X, y)
 
-        # Lazy import
-        try:
-            from opera import Mixture
-        except ImportError as e:
-            raise ImportError(
-                "OperaAdapter requires the 'opera' package. "
-                "Install it with: pip install ts-forecast[adapters-opera] "
-                "or: pip install opera"
-            ) from e
+        # Import différé d'opera
+        import_optional("opera", _EXTRA)
 
         # Mise à jour incrémentale du modèle
         self.mixture_.update(new_experts=X, new_y=y)

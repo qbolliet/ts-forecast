@@ -95,6 +95,7 @@ markers = [
     "integration: test enchaînant plusieurs composants publics ou des jeux réalistes",
     "slow: test dont l'exécution dépasse 2 secondes",
     "internal: test d'un symbole privé, sans chemin public raisonnable",
+    "network: test qui télécharge des données ou des poids de modèles ; jamais exécuté en CI",
 ]
 
 [tool.coverage.run]

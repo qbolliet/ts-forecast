@@ -214,17 +214,32 @@ paquet tiers est installé (voir § 7).
 
 ## 4. Socle commun : `tsforecast/adapters/_base.py`
 
-Module privé partagé par tous les adapters (nom indicatif, à fixer en session 2) :
+Module privé partagé par tous les adapters (fixé en session 2, AD-08). Il réutilise
+`tsforecast.panel.utils` (`check_entity_labels`, `get_entity_codes`),
+`tsforecast.utils.frequency` (`detect_index_frequency`, `to_pandas_freq`) et
+`sklearn.utils.validation.validate_data` :
 
-- `import_optional(module, extra)` : import différé avec message d'installation.
-- `TemporalLayout` (dataclass figée) : analyse d'un index — panel ou non, niveaux d'entité, niveau
-  temporel, codes d'entité (`get_entity_codes`), fréquence détectée, unité de date.
-- `steps_between(last_dates, target_dates, freq)` : nombre de pas de grille entre la dernière date
-  d'entraînement de chaque entité et chaque date à prévoir (vectorisé, sans boucle Python par ligne).
-- `split_by_entity(df, layout)` / `iter_entities` : découpage par entité par codes entiers.
-- `restore_row_order(values, source_index, target_index)` : réaligne une sortie tierce sur l'ordre
-  des lignes de `X` et vérifie qu'aucune ligne ne manque.
-- `set_fitted_feature_info(est, X)` : `n_features_in_`, `feature_names_in_`.
+- `import_optional(module, extra)` : import différé ; seule l'absence du module demandé (ou d'un
+  paquet parent) devient une `ImportError` citant `pip install 'ts-forecast[<extra>]'`, toute autre
+  erreur (dépendance transitive, paquet cassé) remonte telle quelle.
+- `TemporalLayout` (dataclass figée) : `entity_names`, `time_name`, `entities` (clés tuple, ordre
+  de première apparition ; une série = l'entité `()`), `codes` (code entier par ligne, lecture
+  seule), `dates` (unité de l'entrée), `freq` (alias pandas complet ou `None`) ; propriétés
+  `is_panel`, `n_entities`, `unit`. `from_index(index, *, freq=None, detect_freq=True)` refuse les
+  dates non `datetime64` (dont `Period` : `to_timestamp()`), `NaT`, étiquettes d'entité manquantes,
+  couples (entité, date) dupliqués et entités sur des grilles différentes ; `last_dates()` ;
+  `match_entities(other)` (code de l'entité dans `self`, `-1` si inconnue). Au `predict`, passer la
+  fréquence du `fit` (`freq=...`) : un test à une ligne par entité reste analysable.
+- `steps_between(start, end, freq)` : pas de grille `end - start` élément par élément (grille
+  `date_range` ancrée sur la première date + `get_indexer` ; multiplicateurs, ancrages, jours
+  ouvrés ; date hors grille → `ValueError`).
+- `restore_row_order(values, source_index, target_index)` : réalignement par `get_indexer`
+  (dates comparées comme instants), ligne manquante ou source dupliquée → `ValueError`.
+- `check_adapter_input(estimator, X, y=None, *, reset, freq=None, detect_freq=True)` : `X`
+  `DataFrame`, `validate_data(..., skip_check_array=True)` (pose ou contrôle `n_features_in_` /
+  `feature_names_in_`), `y` aligné sur `X.index` (un tableau y est replacé), renvoie
+  `(X, y, layout)`.
+- Découpage par entité : `tsforecast.panel.utils.iter_entity_blocks` (pas de doublon dans `_base`).
 
 Le socle est une boîte à outils, pas une classe mère obligatoire. Une classe mère commune
 (`_BaseAdapter`) n'est introduite que si au moins trois adapters partagent la même logique
@@ -422,9 +437,20 @@ tsforecast/adapters/foundation/
   `tests/integration/adapters/`. En-têtes de module en anglais, `tests/support` réutilisé
   (`datasets.py`, `splits.py`, `perturbations.py`).
 - Chaque module de test commence par `pytest.importorskip("<paquet>")`. La collecte des doctests
-  d'un adapter est ignorée quand son paquet manque (`collect_ignore_glob` conditionnel dans un
-  `conftest.py`, à vérifier avec `scripts/check_conventions.py --rule doctest`).
-- **Batterie de contrat commune** (paramétrée sur tous les adapters, fichier partagé) :
+  d'un adapter est ignorée quand son paquet manque : `conftest.py` **racine** (seul chargé par
+  `pytest --doctest-modules tsforecast`), table module d'adapter → paquet, `find_spec` ; il porte
+  aussi les exclusions transitoires (AD-10).
+- **Batterie de contrat commune** : `tests/support/adapter_contract.py` (AD-09). `AdapterCase`
+  décrit un adapter (`make_estimator`, `wrapped_param`, `param_grid`, `package` / `extra`,
+  `supports_panel`, `local_model`, `row_regressor`, `invalid_params`, `make_data`,
+  `frame_method`, tolérances) ; une fonction `check_*` par règle ; deux mixins :
+  `AdapterContractTests` (règles 1–3, 7–10, à brancher sous `tests/unit/adapters/`) et
+  `AdapterWorkflowContractTests` (règles 4–6, sous `tests/integration/adapters/`). Branchement :
+  `pytest.importorskip("sktime")` puis
+  `class TestSktimeContract(AdapterContractTests): case = AdapterCase(...)`. Jeux :
+  `build_adapter_series` / `build_adapter_panel` de `tests/support/datasets.py`. La batterie est
+  validée par `tests/support/test_adapter_contract.py` (adapters de référence `RowRegressorAdapter`
+  et `LastValueAdapter` de `tests/support/estimators.py`, mutants détectés). Règles :
   1. `clone(est)` puis `fit` ne modifie pas l'objet tiers d'origine ; `get_params` stable ;
   2. sortie `ndarray` de longueur `len(X)`, dans l'ordre des lignes de `X` (test avec lignes
      mélangées) ;
@@ -491,4 +517,7 @@ tsforecast/adapters/foundation/
 | AD-05 | 2026-11-25 | 1 | Extras `adapters-sktime` (sktime ≥ 1.3.0), `adapters-darts` (darts ≥ 0.48.1), `adapters-hierarchical` (hierarchicalforecast ≥ 1.5.3, utilsforecast ≥ 0.2.17), `adapters-opera`, `adapters-all` ; groupe `notebooks` (`adapters-all`, xgboost, tslearn) hors `default-groups` ; groupe `adapters` de la branche supprimé | Versions minimales supportant pandas 3 (3.1 pour sktime) ; statsforecast / mlforecast exigent `pandas<3` et ne servent pas |
 | AD-06 | 2026-11-25 | 1 | Pas de plafond `pandas<3.1` dans `adapters-darts` malgré le bug pandas 3.1 de darts 0.48.1 ; `uv.lock` reste sur pandas 3.0.6 | Ne pas contraindre le cœur ; à revoir en session 4 (relever le plancher de darts dès le correctif publié) |
 | AD-07 | 2026-11-25 | 1 | opera figé sur `9f8203363ba75206e9beb02002e3420037456200`, `scipy` déclaré dans l'extra | Dépôt non publié sur PyPI et inactif depuis 2024 ; BOA, MLpol, MLprod et FTRL passent sous pandas 3 ; réimplémentation laissée à la session 9 |
+| AD-08 | 2026-11-25 | 2 | API de `_base` du § 4 : `check_adapter_input` (via `validate_data`) remplace `set_fitted_feature_info` ; `iter_entity_blocks` de `tsforecast.panel.utils` remplace `split_by_entity` / `iter_entities` ; dates `Period` refusées (`TypeError`, conversion par `to_timestamp()`) ; `steps_between` par grille `date_range` + `get_indexer` | Réutiliser l'existant ; une grille gère multiplicateurs et ancrages, que `xy/rolling._period_ordinals` (privé) ne gère pas |
+| AD-09 | 2026-11-25 | 2 | Batterie de contrat en fonctions `check_*` (style `check_estimator`) + mixins unit / workflow, dans `tests/support/adapter_contract.py`, auto-validée sur deux adapters de référence et des mutants ; `test_init.py` (sous-processus, ~2 s, marqué `slow`) lancé explicitement par le job CI `tests-adapters` | Partagée par les tests unit et integration de chaque adapter ; une batterie qui ne détecte rien ne vaut rien |
+| AD-10 | 2026-11-25 | 2 | `conftest.py` racine : doctests d'un adapter ignorés si son paquet manque ; exclusions **transitoires** des doctests de `hierarchicalforecast.py` (ne se parse pas, session 6) et de `sktime.py` (exemple faux, session 3) ; `hierarchicalforecast.py` dans `EXCLUDED_PREFIXES` de `scripts/check_conventions.py` et non exporté par `tsforecast.adapters` (session 6 : retirer ces trois exclusions) | `check_conventions --rule all` vert sans toucher aux modules réécrits plus tard |
 |  |  |  |  |  |
