@@ -88,6 +88,12 @@ postérieure à la dernière ligne d'entraînement.
   construites mais inutilisées.
 - Trou entre entraînement et test rempli par `0` et prévision récursive sur `n` pas ;
   `n_features_in_` faux quand `X is None`.
+- Confirmés et complétés en session 4 (scénarios exécutés) : `LinearRegressionModel()` sans lags
+  refusé par darts (exemples faux) ; `is_regressor` faux ; panel déséquilibré → `ValueError`
+  (NaN), entités entières → prévisions toutes NaN sans erreur ; trous d'entraînement refusés par
+  darts ; `predict` sur des lignes d'entraînement → `IndexError` ; sortie `Series` ; modèles locaux
+  (`NaiveDrift`, `ExponentialSmoothing`) → `TypeError` ; `set_params(**get_params())` change
+  l'empreinte (`_random_instance` tiré au hasard). La prédiction d'une série ne dépendait pas du gap.
 
 **`HierarchicalForecastAdapter`** — inachevé, ne s'importe pas : erreurs de syntaxe
 (`"id_col" = _ID_COL` dans un dict), noms indéfinis (`hierarchy`, `temporal_hierarchy`,
@@ -272,18 +278,33 @@ Le socle est une boîte à outils, pas une classe mère obligatoire. Une classe 
 
 ### 5.2 `DartsAdapter`
 
-- Paramètre : `model` (modèle darts non ajusté). `fit` construit `model_` avec les paramètres
-  forcés du paradigme régression (`lags=None`, `lags_past_covariates=None`,
-  `lags_future_covariates=[0]`, `output_chunk_length=1`) ; `self.model` est intact. L'avertissement
-  sur les paramètres écrasés n'est émis que si l'utilisateur les a fixés à une autre valeur.
-- Panel : **liste de `TimeSeries`, une par entité**, passée à un modèle global darts ;
-  `static_covariates` = identifiant d'entité si le modèle les exploite (option).
-- Avec `lags_future_covariates=[0]` et sans lags de cible, la prédiction d'une ligne ne dépend que
-  de `X` de cette ligne : le `predict` ne doit ni prévoir récursivement à travers le `gap` ni
-  remplir le trou par des valeurs arbitraires. Si darts l'impose techniquement, la session d'audit
-  documente la contrainte et choisit la solution la moins coûteuse et neutre sur le résultat
-  (à prouver par un test : prédiction identique quel que soit le `gap`).
-- `get_params` / `set_params` personnalisés (darts n'a pas de `set_params`), conformes au § 3.1.
+**Réalisé en session 4 (AD-12)** : aucun paramètre forcé, aucun avertissement ; le mode est déduit
+de la configuration du modèle (`mode_`) ; pas de covariable statique.
+
+- Paramètre : `model` (modèle darts non ajusté, jamais modifié) ; `fit` en construit des copies
+  par `untrained_model()`.
+- `'row'` : modèle global dont `extreme_lags == (None, 0, None, None, 0, 0, 0)` (pas de lag de
+  cible ni de covariable passée, `lags_future_covariates=[0]`, `output_chunk_length=1`,
+  `output_chunk_shift=0`). Ajusté sur une `TimeSeries` par **suite contiguë** de lignes de chaque
+  entité (`X` en covariables futures ; trous → segments, neutre). Au `predict`, chaque suite
+  contiguë de lignes de `X` est prévue depuis une série factice d'un pas, remplie de `NaN` et
+  finissant juste avant elle (darts impose une série pour situer la prévision, mais n'en lit pas les
+  valeurs sans lag de cible) ; un appel darts par longueur de suite. Prédiction indépendante du gap
+  (prouvée par la batterie et par un test ligne seule = lot), lignes in-sample et entités inconnues
+  prédites. Encodeurs `position` refusés (`ValueError`).
+- `'global'` : autre modèle global (lags de cible, ensembles ; torch par ce chemin générique, non
+  testé). Une `TimeSeries` par entité ; `X` en covariables passées / futures selon les lags du
+  modèle. `'local'` : `LocalForecastingModel`, une copie par entité (`entity_models_`), `X` en
+  covariables futures si le modèle les accepte. Les deux modes extrapolent : ligne `k` pas après la
+  dernière date d'entraînement de l'entité = `k`-ième pas prévu ; trous d'entraînement, entité
+  inconnue, ligne non postérieure à l'entraînement, covariables absentes sur le gap → `ValueError`
+  explicite (aucune valeur inventée).
+- Ordre canonique des séries (étiquettes d'entité puis dates) : un modèle sensible à l'ordre des
+  échantillons (forêt aléatoire) ne dépend pas de l'ordre des lignes.
+- Classifieurs darts et objets non darts → `TypeError`.
+- `get_params` / `set_params` personnalisés : `model__<clé de model_params>` et
+  `model__<clé>__<param>` d'un estimateur sklearn imbriqué ; `set_params` reconstruit le modèle
+  seulement si une valeur change (aller-retour stable).
 
 ### 5.3 `HierarchicalForecastAdapter`
 
@@ -473,6 +494,10 @@ tsforecast/adapters/foundation/
   9. erreurs explicites (entité inconnue d'un modèle local, paquet manquant, paramètre invalide) ;
   10. conventions de dates de `main` (`with_datetime_resolution` × `datetime_units`) quand
       l'adapter renvoie des dates.
+
+  Session 4 : `AdapterCase.handles_training_holes` (un adapter qui refuse les trous
+  d'entraînement doit lever `ValueError` dans le contrôle `XYPipeline`) ; le contrôle
+  `GridSearchCV` cherche sur les dates d'entraînement et prédit les dates de test postérieures.
 - Commande locale : `.venv/Scripts/python.exe -m pytest tests/unit/adapters -q -p no:cacheprovider`.
 
 ---
@@ -530,4 +555,5 @@ tsforecast/adapters/foundation/
 | AD-09 | 2026-11-25 | 2 | Batterie de contrat en fonctions `check_*` (style `check_estimator`) + mixins unit / workflow, dans `tests/support/adapter_contract.py`, auto-validée sur deux adapters de référence et des mutants ; `test_init.py` (sous-processus, ~2 s, marqué `slow`) lancé explicitement par le job CI `tests-adapters` | Partagée par les tests unit et integration de chaque adapter ; une batterie qui ne détecte rien ne vaut rien |
 | AD-10 | 2026-11-25 | 2 | `conftest.py` racine : doctests d'un adapter ignorés si son paquet manque ; exclusions **transitoires** des doctests de `hierarchicalforecast.py` (ne se parse pas, session 6) et de `sktime.py` (exemple faux, session 3) ; `hierarchicalforecast.py` dans `EXCLUDED_PREFIXES` de `scripts/check_conventions.py` et non exporté par `tsforecast.adapters` (session 6 : retirer ces trois exclusions) | `check_conventions --rule all` vert sans toucher aux modules réécrits plus tard |
 | AD-11 | 2026-11-25 | 3 | `SktimeAdapter` : paramètre `fh` supprimé (horizon absolu tiré des dates de `X`) ; ajustement par la vectorisation de sktime (`pd-multiindex` / hiérarchique) ; prévision hybride (un appel sktime si `X` est ignoré ou complet sur toutes les entités et dates, sinon un appel par entité par `forecasters_`, sinon `ValueError` pour un forecaster à panel natif) ; capacités lues sur les tags sktime (`capability:exogenous`, `capability:non_contiguous_X`, `capability:missing_values`, `requires-fh-in-fit`) ; exclusion transitoire des doctests de `sktime.py` (AD-10) levée ; contrôle d'aller-retour `set_params(**get_params())` de la batterie comparant les valeurs des paramètres (objets imbriqués réduits à leur classe) | sktime n'a qu'un horizon commun à toutes les entités : un forecaster qui lit `X` échoue sur un test incomplet (panel déséquilibré) ; le `set_params` de sktime remplit un cache privé qui change l'empreinte `joblib` sans changer les paramètres |
+| AD-12 | 2026-11-25 | 4 | `DartsAdapter` : plus de paramètres forcés (`lags=None`, `lags_future_covariates=[0]`...) ; mode déduit de `extreme_lags` : `'row'` (régression ligne à ligne, série factice `NaN` d'un pas par suite contiguë de lignes, segments contigus à l'entraînement), `'global'` et `'local'` (extrapolation de l'historique, `ValueError` si `X` manque sur le gap) ; pas d'option de covariables statiques ; batterie : `handles_training_holes`, `GridSearchCV` ajusté sur l'entraînement | Forcer la régression réduit darts à une régression sklearn sur `X` ; l'extrapolation ouvre les modèles locaux et autorégressifs de darts ; darts n'accepte que des covariables statiques numériques (l'utilisateur ajoute ses indicatrices dans `X`) ; un modèle qui extrapole ne prédit pas les lignes d'entraînement |
 |  |  |  |  |  |

@@ -91,6 +91,9 @@ class AdapterCase:
             features of that row (it must then not depend on the gap between
             training and test).
         invalid_params: Parameter sets with which ``fit`` raises ``ValueError``.
+        handles_training_holes: Whether ``fit`` accepts training rows that
+            leave grid dates of an entity uncovered (rows dropped by
+            ``DropNaNTarget``); otherwise it must raise ``ValueError``.
         make_data: Builds ``(X, y)`` for a kind of :data:`DATA_KINDS`.
         frame_method: Name of a method returning a pandas object with dates,
             whose units must be those of the input, or None.
@@ -107,6 +110,7 @@ class AdapterCase:
     local_model: bool = False
     row_regressor: bool = True
     invalid_params: Tuple[Mapping[str, Any], ...] = ()
+    handles_training_holes: bool = True
     make_data: Callable[[str], Tuple[pd.DataFrame, Any]] = field(default=default_data)
     frame_method: Optional[str] = None
     rtol: float = 1e-7
@@ -368,18 +372,25 @@ def check_cross_val_score(case: AdapterCase, kind: str) -> None:
 
 
 def check_grid_search(case: AdapterCase) -> None:
-    """``GridSearchCV`` explores the (nested) grid of the case and refits the best adapter."""
+    """``GridSearchCV`` explores the (nested) grid of the case and refits the best adapter.
+
+    The search runs on the training dates and the refitted adapter predicts the
+    later test dates, as in a forecasting workflow.
+    """
     X, y = case.make_data('series')
+    X_train, y_train, X_test, _ = split_by_date(X, y)
     search = GridSearchCV(
         case.make_estimator(), case.param_grid, cv=_splitter('series'), error_score='raise'
-    ).fit(X, y)
+    ).fit(X_train, y_train)
     assert set(search.best_params_) == set(case.param_grid), f'best_params_ = {search.best_params_}'
-    _, _, X_test, _ = split_by_date(X, y)
     _assert_output_shape(search.predict(X_test), X_test, y)
 
 
 def check_xy_pipeline(case: AdapterCase, kind: str) -> None:
-    """In an ``XYPipeline`` after ``DropNaNTarget``, the adapter fits on the rows with a target."""
+    """In an ``XYPipeline`` after ``DropNaNTarget``, the adapter fits on the rows with a target.
+
+    An adapter refusing training rows with holes must raise ``ValueError`` instead.
+    """
     X, y = case.make_data(kind)
     X_train, y_train, X_test, _ = split_by_date(X, y)
     # Cible manquante sur une ligne sur cinq de l'entraînement
@@ -388,6 +399,12 @@ def check_xy_pipeline(case: AdapterCase, kind: str) -> None:
     y_holes = y_train.mask(condition)
 
     pipeline = XYPipeline([('drop', DropNaNTarget()), ('model', case.make_estimator())])
+    if not case.handles_training_holes:
+        try:
+            pipeline.fit(X_train, y_holes)
+        except ValueError:
+            return
+        raise AssertionError('fit accepted training rows with holes without a ValueError')
     predictions = pipeline.fit(X_train, y_holes).predict(X_test)
     expected = case.make_estimator().fit(X_train[~missing], y_train[~missing]).predict(X_test)
     _assert_predictions(predictions, expected, case, 'XYPipeline does not reproduce a fit on the kept rows')
