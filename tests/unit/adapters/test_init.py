@@ -53,6 +53,7 @@ def test_exported_names():
         'HierarchicalForecastAdapter',
         'OperaAdapter',
         'SktimeAdapter',
+        'period_splits',
         'stack_nodes',
         'unstack_nodes',
     ]

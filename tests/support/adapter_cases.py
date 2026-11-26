@@ -6,8 +6,9 @@ row-wise regressor) and the ``DartsAdapter`` cases (row-wise linear and random
 forest models, ``NaiveSeasonal`` local model, lagged global linear model) and the
 ``HierarchicalForecastAdapter`` cases (``BottomUp``, ``MinTrace`` ``'ols'`` with the
 mean of two base models, ``MinTrace`` ``'mint_shrink'`` with one base model per
-level, on a node tree; ``MinTrace`` ``'ols'`` on a hierarchy of index levels) are
-shared by the unit and integration tests. A third-party package is imported only
+level, on a node tree; ``MinTrace`` ``'ols'`` on a hierarchy of index levels; the
+temporal and cross-temporal cases on years, quarters and months) are shared by the
+unit and integration tests. A third-party package is imported only
 when an estimator or a parameter grid is built.
 """
 from functools import partial
@@ -18,8 +19,11 @@ from tests.support.adapter_contract import AdapterCase, default_splitter
 from tests.support.datasets import (
     HIERARCHY_LEVELS,
     HIERARCHY_TREE,
+    TEMPORAL_HIERARCHY,
+    build_cross_temporal_hierarchy,
     build_hierarchy_levels,
     build_hierarchy_nodes,
+    build_temporal_hierarchy,
 )
 from tsforecast.adapters import DartsAdapter, HierarchicalForecastAdapter, SktimeAdapter
 
@@ -277,4 +281,44 @@ def hierarchical_levels_case() -> AdapterCase:
             {'hierarchy': [['region'], ['country']]},
             {'hierarchy': [['country'], ['country', 'city']]},
         ),
+    )
+
+
+# Paramètres invalides d'un adapter temporel
+_TEMPORAL_INVALID_PARAMS = (
+    {'temporal_hierarchy': {'year': 12, 'quarter': 3}},
+    {'temporal_hierarchy': {'year': 12, 'five_months': 5, 'month': 1}},
+    {'temporal_origin': 'not a date'},
+    {'temporal_level': 'region'},
+)
+
+
+def hierarchical_temporal_case() -> AdapterCase:
+    """Contract case of ``MinTrace(method='ols')`` on years, quarters and months, base model ``m1``.
+
+    Only the checks that do not cut test windows on arbitrary dates apply: a
+    temporal reconciliation needs complete years (see ``period_splits``).
+
+    Returns:
+        Temporal reconciliation of each series, one calendar year at a time.
+    """
+    return _hierarchy_case(
+        partial(
+            _hierarchy_adapter, 'ols', hierarchy=None, forecast_columns=['m1'], temporal_hierarchy=TEMPORAL_HIERARCHY
+        ),
+        build_temporal_hierarchy,
+        _TEMPORAL_INVALID_PARAMS + ({'reconciler': _reconciler('mint_shrink')},),
+    )
+
+
+def hierarchical_cross_temporal_case() -> AdapterCase:
+    """Contract case of ``MinTrace(method='ols')`` on the node tree crossed with years, quarters and months.
+
+    Returns:
+        Cross-temporal reconciliation of each copy, one calendar year at a time.
+    """
+    return _hierarchy_case(
+        partial(_hierarchy_adapter, 'ols', model_combination='mean', temporal_hierarchy=TEMPORAL_HIERARCHY),
+        build_cross_temporal_hierarchy,
+        _TEMPORAL_INVALID_PARAMS + ({'hierarchy': {'a': ['b'], 'b': ['a']}},),
     )

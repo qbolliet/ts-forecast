@@ -308,8 +308,8 @@ de la configuration du modèle (`mode_`) ; pas de covariable statique.
 
 ### 5.3 `HierarchicalForecastAdapter`
 
-**Réalisé en session 6 (AD-13, AD-14)** pour la cross-section ; temporel et cross-temporel en
-session 7 (`temporal_hierarchy` non `None` → `NotImplementedError`).
+**Réalisé en session 6 (AD-13, AD-14)** pour la cross-section, **en session 7 (AD-16, AD-17)** pour
+le temporel et le cross-temporel.
 
 **Rôle** : réconciliateur. `X` contient les **prévisions de base** (une colonne par modèle de base)
 et, éventuellement, des colonnes ignorées ; `y` les réalisations. `fit` construit la structure (`S`,
@@ -318,26 +318,35 @@ date par date les prévisions de base des lignes de `X` (prédiction indépendan
 
 **Code** : sous-paquet `tsforecast/adapters/hierarchicalforecast/` — `adapter.py` (classe),
 `_structure.py` (`parse_hierarchy`, `HierarchySpec`, `Structure`, `tree_structure` ; numpy et pandas
-seuls), `reshape.py` (`stack_nodes`, `unstack_nodes`), `__init__.py` (réexports, repris par
-`tsforecast.adapters`).
+seuls), `_temporal.py` (`parse_temporal_hierarchy`, `TemporalSpec`, `temporal_structure`,
+`cross_structure`, `TemporalCalendar`, `read_temporal_index`, `detect_fine_frequency` ; numpy et
+pandas seuls), `splits.py` (`period_splits`), `reshape.py` (`stack_nodes`, `unstack_nodes`),
+`__init__.py` (réexports, repris par `tsforecast.adapters`).
 
 **API**
 
 ```python
 HierarchicalForecastAdapter(hierarchy=None, reconciler=None, *, node_level=None,
                             aggregate_label="Total", model_combination=None,
-                            forecast_columns=None, temporal_hierarchy=None)
+                            forecast_columns=None, temporal_hierarchy=None,
+                            temporal_level=None, temporal_origin=None)
 fit(X, y) ; predict(X) -> ndarray (n,) ; score (R² de RegressorMixin)
 reconcile(X, reconcilers=None, *, level=None, intervals_method="normality", num_samples=-1, seed=0)
 diagnose(X, reconcilers=None, *, atol=1e-6) ; summing_matrix(copy=None)
 stack_nodes(data, node_level="node") ; unstack_nodes(data, node_level="node")
+period_splits(X, temporal_hierarchy, *, n_splits=2, test_periods=1, gap=0,
+              temporal_level=None, temporal_origin=None) -> [(train, test), ...]
 ```
 
 Attributs ajustés : `reconciler_` (copie ; `BottomUp()` si `reconciler=None`), `hierarchy_levels_`
 (noms des niveaux, du plus agrégé au plus fin : clés d'un `model_combination` dict, valeurs possibles
 de `middle_level`), `copies_` (`((),)` sans copie), `forecast_columns_`, `n_features_in_`,
-`feature_names_in_` ; privés : `_spec`, `_copies` (structure, lignes d'entraînement au format
-hierarchicalforecast, nœuds sans ligne, équilibre), `_combination`, `_intervals`.
+`feature_names_in_`, `temporal_freq_` (grille fine d'une hiérarchie temporelle, `None` sinon) ;
+privés : `_design` (mode, hiérarchies, calendrier, structure temporelle, noms des niveaux et des
+copies), `_copies` (structure réconciliée, structure cross-section, positions des couples
+cross-temporels, lignes d'entraînement au format hierarchicalforecast, nœuds sans ligne,
+équilibre), `_shared` (structures d'une copie inconnue : arbre et/ou temporel), `_combination`,
+`_intervals`.
 
 **Format** : long côté sklearn. Une ligne par (copie, nœud, date) ; la date est le dernier niveau
 d'index ; `y` est une `Series` 1-D sur **tous** les nœuds (feuilles et agrégats) ; lignes dans
@@ -422,27 +431,76 @@ numériques, `model_combination` invalide, `reconciler` non `HReconciler` (`Type
 strict (`TopDown`, `MiddleOut`) sur structure groupée ou feuilles hors du niveau le plus fin,
 `middle_level` inconnu, nœud sans ligne pour un réconciliateur insample. `predict` — nœud ou copie
 inconnus, date sans tous les nœuds de sa copie, prévision de base non finie, colonnes différentes du
-fit.
+fit. Modes temporels, en plus : `temporal_hierarchy` mal formée, `temporal_level` /
+`temporal_origin` sans hiérarchie temporelle ou invalides, `node_level` sans `hierarchy`, étiquette
+temporelle inconnue, agrégat mal daté, grille fine indétectable ou ne pavant pas les périodes,
+réconciliateur ou intervalles insample (fit, `reconcile`, `diagnose`) ; au predict, période
+incomplète.
 
-**Emboîtement des modes temporel et cross-temporel (session 7)**
+**Modes temporel et cross-temporel (session 7, AD-16, AD-17)**
 
-- Paramètres : `temporal_hierarchy={'year': 12, 'quarter': 3, 'month': 1}` (format
-  hierarchicalforecast), `temporal_level` (défaut : niveau juste avant la date ; `node_level` prend
-  alors le niveau précédent).
-- Datation (Q7) selon la position de la grille fine (`parse_frequency(freq).position`) : `'S'`
-  (`MS`, `QS`) → un agrégat porte la date de la première ligne fine de sa période ; `'E'` (`ME`,
-  `QE`) → celle de la dernière ; grilles sans position (`D`, `h`, `B`, `W-SUN`) : Q10. Un agrégat de
-  `n_k` pas couvre `n_k` dates consécutives de la grille fine ; imbrication vérifiée ; `predict`
-  refuse une période incomplète (le test couvre des périodes complètes du niveau le plus agrégé) ;
-  insample refusés. Lignes indexées par origine : l'agrégation porte sur les origines (documenté ;
-  l'ancrage sur la période cible se fait en amont, en indexant par date cible).
-- Moteur commun : réconcilier une matrice (nœuds × colonnes) avec une structure `S`. Cross-section :
-  colonnes = dates. Temporel : `S` d'**une** période du niveau le plus agrégé (fixée au `fit` depuis
-  `temporal_hierarchy`), colonnes = (série × période) → aucun `S` propre à l'horizon, rien de réécrit
-  au `predict`. Cross-temporel : pas de méthode native en 1.5.3 ; une passe avec `S_cs ⊗ S_te`
-  (feuilles replacées en bas), cohérente dans les deux dimensions par construction ; *tags* croisés
-  `cs//te` comme `get_cross_temporal_tags`. À confronter en session 7 à la composition en deux
-  passes du tutoriel (cohérente dans les deux dimensions seulement pour `BottomUp`).
+- **Modes** (déduits au fit) : cross-section (`temporal_hierarchy=None`), **temporel**
+  (`hierarchy=None`, `temporal_hierarchy={...}` : tout niveau non temporel et non date est un niveau
+  de copie, une série = une copie), **cross-temporel** (les deux).
+- **Index** : `(copie..., nœud..., niveau temporel, date)`. `temporal_level` (nom ou position ;
+  défaut : niveau juste avant la date) porte le nom du niveau temporel de chaque ligne (clés de
+  `temporal_hierarchy`) ; `hierarchy` / `node_level` sont lus sur les autres niveaux (`node_level`
+  par défaut : niveau précédant le niveau temporel). Étiquette inconnue → `ValueError`.
+- **`temporal_hierarchy`** (format hierarchicalforecast) : `{nom: nombre de pas fins}`, entiers
+  positifs distincts, un niveau à `1` (grille fine), chaque valeur divise la plus grande `m`
+  (niveaux non emboîtés entre eux admis : 12/4/3/1 → structure groupée). Niveaux triés du plus
+  agrégé au plus fin ; `hierarchy_levels_` = noms temporels (temporel) ou `'<cs>//<te>'`
+  (cross-temporel, convention `get_cross_temporal_tags`) : clés de `model_combination`.
+- **Grille fine et calendrier** : fréquence détectée au fit sur les seules lignes du niveau fin
+  (`temporal_freq_`, réutilisée au predict ; indétectable → `ValueError`). Période du niveau le plus
+  agrégé = fréquence fine × `m` (`'12MS'`, `'4QE-DEC'`, `'24h'`) alignée par
+  `get_period_boundaries` sur l'époque Unix (années civiles pour `MS`/`ME`×12 et `QS`/`QE`×4, jours
+  pour `h`×24) ou sur `temporal_origin` (exercices fiscaux, semaines du lundi, périodes d'origines).
+  Une période doit contenir exactement `m` dates de la grille fine (`B`×5, `2MS` déphasé →
+  `ValueError`). Nœud `j` d'un niveau de `n` pas = pas `[j·n, (j+1)·n)` de la période, nommé
+  `'<niveau>-<j+1>'`.
+- **Datation** (Q7, Q10) : grille étiquetée par le début (`S`, et `D`, `h`, `B`, `min`) → premier
+  pas fin du nœud ; par la fin (`E`, et `W-<jour>`) → dernier pas fin. Agrégat daté autrement →
+  `ValueError` (au fit comme au predict). Contrairement à `aggregate_temporal` (périodes comptées
+  depuis la première date de chaque série du jeu passé, agrégat daté par sa dernière date), les
+  périodes sont calendaires et communes à toutes les séries : pas d'`aggregation_type`.
+- **Moteur** : colonne de réconciliation = (copie, début de période du niveau le plus agrégé) au lieu
+  de la date ; `S_te` d'**une** période, fixée au fit. Pour tout réconciliateur non insample
+  (`BottomUp`, `MinTrace` `ols` / `wls_struct`, `TopDown` `forecast_proportions`), `P` ne dépend que
+  de `S` et la matrice d'un horizon de `p` périodes est `I_p ⊗ S_te` : réconcilier période par
+  période est identique, aucun `S` propre à l'horizon, rien recalculé ni modifié au predict. Appel à
+  `reconcile` en mode non temporel (`unique_id` = nœud, `ds` = début de période), comme la
+  cross-section.
+- **Périodes complètes** : au predict, chaque période de chaque copie contient tous les nœuds
+  (temporels, ou cs × temporels) → sinon `ValueError` (« incomplete period »). Au fit, aucune
+  exigence (aucune donnée insample lue ; `y` validé mais non lu).
+- **Insample refusés** : réconciliateur `insample` (`mint_shrink`, `wls_var`, `ERM`...) au fit et
+  dans `reconcile()` / `diagnose()` ; intervalles `bootstrap` / `permbu` / `conformal` → `ValueError`.
+  `normality` fonctionne (colonnes `-lo-` / `-hi-` de `X`).
+- **Splitters** : `PanelOutOfSampleSplit` compte `test_size` lignes **par entité** depuis une date ;
+  ici entité = (nœud, niveau temporel) : un niveau annuel a une ligne par an et un agrégat daté en
+  fin de période n'a pas la date de début → plis incomplets, refusés au predict. `period_splits`
+  découpe `n_splits` blocs adjacents de `test_periods` périodes complètes finissant à la dernière
+  période de `X` (même calendrier que l'adapter) ; entraînement = lignes dont le nœud se termine au
+  moins `gap + 1` pas fins avant le test (un agrégat qui chevauche le gap n'entre pas). Liste
+  `[(train, test), ...]` pour `cv=` de `cross_val_score` / `GridSearchCV`.
+- **Lignes indexées par origine** : l'agrégation porte sur les dates de l'index, donc sur les
+  origines ; la ligne « année » somme les cibles des origines de l'année. Pour des années **cibles**
+  civiles avec un horizon de `h` pas : `temporal_origin` = début d'année − `h` pas (prouvé par un
+  test : mêmes prévisions qu'avec l'index par date cible), ou indexation par date cible en amont.
+- **Cross-temporel** : pas de méthode native en 1.5.3 (`get_cross_temporal_tags` ne fait que croiser
+  les noms ; le tutoriel fait une passe temporelle **sur les prévisions de base**, cohérente dans la
+  seule dimension temporelle). Une passe unique sur `S_ct = S_cs ⊗ S_te` par copie (lignes
+  réordonnées : agrégats groupés par niveau croisé, bloc identité `(feuille cs, pas fin)` en bas) :
+  `ỹ = S_ct P ŷ` vérifie toutes les contraintes des deux dimensions. Pour `BottomUp`, `ols`,
+  `wls_struct`, `P_ct = P_cs ⊗ P_te` : deux passes enchaînées (dans un ordre ou l'autre) donnent le
+  même résultat (test numérique pour `ols`) ; pour `MinTrace(nonnegative=True)` (programme
+  quadratique) elles ne commutent pas et seule la passe unique est cohérente. `TopDown` /
+  `MiddleOut` refusés (un nœud `(feuille, trimestre)` a deux parents) ; accepté en temporel seul sur
+  des niveaux en chaîne (12/3/1). Copie inconnue : acceptée pour un arbre ou en temporel seul,
+  refusée pour une hiérarchie de niveaux d'index.
+- `summing_matrix(copy)` : `S_te` (index des nœuds temporels, nommé comme le niveau temporel) ou
+  `S_ct` (`MultiIndex` nœud cs + nœud temporel), d'une période.
 
 ### 5.4 `OperaAdapter`
 
@@ -586,6 +644,13 @@ tsforecast/adapters/foundation/
   hiérarchique a un niveau de nœuds). Jeux `build_hierarchy_nodes` / `build_hierarchy_levels`
   (`tests/support/datasets.py`, `y` cohérent, `m1` / `m2` bruités) ; cas
   `hierarchical_{bottomup,ols,mint_shrink,levels}_case` (`tests/support/adapter_cases.py`).
+  Session 7 : jeux `build_temporal_hierarchy` / `build_cross_temporal_hierarchy` (années,
+  trimestres, mois ; `y` cohérent dans les deux dimensions) ; cas
+  `hierarchical_{temporal,cross_temporal}_case`, soumis aux seules règles 1, 9 (paramètres
+  invalides, paquet manquant) : les autres découpent des fenêtres de test sur des dates arbitraires,
+  qu'un adapter temporel refuse (périodes incomplètes) ; elles sont couvertes par
+  `tests/unit/adapters/hierarchicalforecast/test_temporal.py` et
+  `tests/integration/adapters/test_hierarchicalforecast_temporal.py` (`period_splits`).
 - Commande locale : `.venv/Scripts/python.exe -m pytest tests/unit/adapters -q -p no:cacheprovider`.
 
 ---
@@ -625,7 +690,7 @@ tsforecast/adapters/foundation/
 | Q7 | Ancrage temporel des agrégats (début de période / période cible) | **Tranchée (AD-13)** : selon la position de la grille fine (`S` → début, `E` → fin) ; ancrage sur les origines documenté |
 | Q8 | Backends de fondation à livrer en premier | Chronos-2 + `callable`, puis Timestral et t0 |
 | Q9 | Sort des fichiers `ADAPTERS_*.md` avant fusion dans `main` | Les supprimer ; le contenu utile passe dans `docs/concepts/adapters.md` |
-| Q10 | Datation des agrégats temporels sur une grille sans position (`D`, `h`, `B`, `W-SUN`) | Session 7 : début de période, sauf `W-<jour>` (semaine étiquetée par son dernier jour) → fin ; ou paramètre explicite |
+| Q10 | Datation des agrégats temporels sur une grille sans position (`D`, `h`, `B`, `W-SUN`) | **Tranchée (AD-16)** : premier pas fin (`D`, `h`, `B`, `min`), sauf `W-<jour>` (semaine étiquetée par son dernier jour, convention de `get_labelled_period`) → dernier pas fin ; pas de paramètre |
 | Q11 | Utilitaire public d'agrégation des feuilles vers tous les nœuds (`y` sommé, exogènes agrégés comme `aggregate(exog_vars=...)`), pour construire les jeux des modèles de base de chaque niveau | Hors périmètre de la session 6 ; à décider avant la session 8 (notebook) |
 
 ---
@@ -649,4 +714,6 @@ tsforecast/adapters/foundation/
 | AD-13 | 2026-11-25 | 6 | Q5 : `reconciler` singulier (`None` → `BottomUp()`) pour `predict` et `GridSearchCV`, `reconcile(X, reconcilers=None)` pour comparer ; Q6 : `aggregate_label="Total"` ; Q7 : datation des agrégats temporels selon la position de la grille fine (`S` → première date de la période, `E` → dernière ; grille sans position : Q10) ; `level`, `intervals_method`, `num_samples`, `seed` arguments de `reconcile()`, diagnostics par `diagnose(X, reconcilers, atol)`, `is_balanced` interne | Le constructeur ne porte que ce qui change `predict` ; un seul réconciliateur par estimateur garde `GridSearchCV` naturel ; une grille `QE` étiquette ses périodes par leur fin, une grille `QS` par leur début |
 | AD-14 | 2026-11-25 | 6 | `HierarchicalForecastAdapter` en sous-paquet (`adapter.py`, `_structure.py`, `reshape.py`) ; format long ; `hierarchy` en liste de niveaux d'index (nœuds appris au fit, par copie) ou dict `{parent: [enfants]}` sur `node_level` (niveaux `depth_<d>`) ; niveaux non date restants = copies indépendantes réconciliées séparément (copie inconnue acceptée pour un arbre sans besoin insample) ; `S` construit par l'adapter (identifiants chaînes, feuilles en bas) ; `reconcile` public de hierarchicalforecast appelé par copie sur des copies profondes des réconciliateurs et de `level` ; `forecast_columns` (pas d'`exog_vars`) ; `model_combination` `None` / `"mean"` / `{niveau: colonne}`, nommée `combined` ; insample mémorisé au fit, prévisions de base hors échantillon produites pli par pli (`cross_validate(return_estimator=True, return_indices=True)` : `cross_val_predict` refuse les splitters temporels) ; `TopDown` / `MiddleOut` refusés sur structure groupée ou feuilles hors du niveau le plus fin ; `stack_nodes` / `unstack_nodes` exportés par `tsforecast.adapters` | `reconcile` mute réconciliateurs et `level` ; chaque date se réconcilie seule (`P` ne dépend que de `S` et de l'insample) ; des copies indépendantes ne partagent pas leurs covariances d'erreurs ; les réconciliateurs stricts de hierarchicalforecast lisent le niveau le plus fin des *tags* comme le bas ; les données larges de l'auteur (`value_a..value_e`) passent par `stack_nodes` |
 | AD-15 | 2026-11-25 | 6 | Exclusions d'AD-10 levées (`conftest.py` racine : `tsforecast/adapters/hierarchicalforecast/adapter.py` collecté si hierarchicalforecast est installé ; `EXCLUDED_PREFIXES = ()` ; adapter exporté) ; champ `AdapterCase.make_splitter` ajouté à la batterie de contrat | Le module se parse et ses doctests passent ; une série hiérarchique a toujours un `MultiIndex`, que `TSOutOfSampleSplit` refuse |
+| AD-16 | 2026-11-26 | 7 | Modes temporel (`hierarchy=None`) et cross-temporel de `HierarchicalForecastAdapter` : niveau temporel dans l'index (`temporal_level`, défaut juste avant la date) ; `temporal_hierarchy` en pas fins, chaque valeur divisant la plus grande ; grille fine détectée sur les lignes du niveau fin (`temporal_freq_`) ; périodes calendaires = fréquence fine × `m` alignée sur l'époque Unix ou sur `temporal_origin` (nouveau paramètre) ; Q10 : agrégat daté par son premier pas fin, son dernier sur une grille étiquetée par la fin (`E`, `W-<jour>`) ; `S_te` d'une période fixée au fit, colonnes = (copie, période) ; périodes complètes exigées au predict seulement ; réconciliateurs et intervalles insample refusés (`ValueError`) ; fonction publique `period_splits` (plis de périodes complètes, gap en pas fins, agrégats chevauchant le gap exclus) ; pas d'`aggregation_type` ; cas de contrat temporels limités aux règles indépendantes de la fenêtre de test | Un réconciliateur non insample a un `P` bloc-diagonal par période : aucun `S` propre à l'horizon ; l'ancrage calendaire rend les périodes indépendantes de la fenêtre d'entraînement (fenêtres glissantes) et communes aux séries d'un panel déséquilibré ; `temporal_origin` couvre exercices fiscaux, semaines et lignes indexées par origine ; les splitters de `tsforecast` comptent des lignes par entité, incompatibles avec des niveaux temporels de grilles différentes |
+| AD-17 | 2026-11-26 | 7 | Cross-temporel en une passe sur `S_ct = S_cs ⊗ S_te` par copie (niveaux `'<cs>//<te>'`, bloc identité replacé en bas) ; `TopDown` / `MiddleOut` refusés (structure non stricte) | Aucune méthode native en 1.5.3 ; cohérence dans les deux dimensions par construction ; égale aux deux passes enchaînées pour `BottomUp`, `ols`, `wls_struct` (`P_ct = P_cs ⊗ P_te`, testé), seule cohérente pour `nonnegative=True` ; la composition du tutoriel (passe temporelle sur les prévisions de base) n'est pas cohérente en cross-section |
 |  |  |  |  |  |

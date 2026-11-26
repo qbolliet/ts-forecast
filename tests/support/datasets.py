@@ -10,7 +10,9 @@ different date ranges, for the cross-validation tests.
 ``build_adapter_series`` and ``build_adapter_panel`` give the origin-indexed
 ``(X, y)`` datasets of the adapter contract tests; ``build_hierarchy_nodes`` and
 ``build_hierarchy_levels`` give hierarchical data in long layout (coherent
-realised values, two incoherent base forecasts).
+realised values, two incoherent base forecasts); ``build_temporal_hierarchy`` and
+``build_cross_temporal_hierarchy`` give their temporal and cross-temporal
+counterparts (one row per node, temporal level and period).
 """
 # Modules de base
 import zlib
@@ -846,3 +848,171 @@ def build_hierarchy_levels(kind: str = 'series', n_dates: int = 36, seed: int = 
         (['market', 'country', 'region', 'date'], 42)
     """
     return _build_hierarchical(_LEVEL_LEAVES, ['country', 'region'], kind, n_dates, seed, 'market')
+
+
+# Hiérarchie temporelle des jeux temporels : années, trimestres et mois
+TEMPORAL_HIERARCHY = {'year': 12, 'quarter': 3, 'month': 1}
+# Première année de chaque copie des panels temporels déséquilibrés (années après 2020)
+_TEMPORAL_UNBALANCED_STARTS = {'A': 0, 'B': 1, 'C': 2}
+# Débuts des grilles fines selon leur étiquetage : début (MS, QS) ou fin de période (ME, QE, W-...)
+_END_LABELLED_PREFIXES = ('ME', 'QE', 'W')
+
+
+def _build_temporal(
+    node_leaves: Optional[dict],
+    node_names: list,
+    kind: str,
+    n_years: int,
+    freq: str,
+    temporal_hierarchy: dict,
+    seed: int,
+    copy_name: str,
+) -> tuple:
+    """Build a coherent temporal (or cross-temporal) dataset and two incoherent base forecasts.
+
+    Args:
+        node_leaves: Leaves below each cross-sectional node (see
+            ``_build_hierarchical``), or None for a temporal hierarchy alone.
+        node_names: Names of the index levels carrying the node key.
+        kind: ``'series'``, ``'panel'`` (copies ``A``, ``B``, ``C``) or
+            ``'unbalanced_panel'`` (``B`` and ``C`` start one and two years
+            later).
+        n_years: Number of calendar years from January 2020.
+        freq: Fine grid, starting in January 2020 (``'MS'``, ``'ME'``,
+            ``'QS'``...).
+        temporal_hierarchy: ``{level: number of fine steps}``; the largest
+            count is one year of the fine grid.
+        seed: Seed of the generator.
+        copy_name: Name of the copy level of the panels.
+
+    Returns:
+        ``(X, y)``: base forecasts ``m1`` and ``m2`` and realised values
+        ``target``, indexed by ``(copy, node..., level, date)``; an aggregate
+        is dated by its first fine step on a start-labelled grid, by its last
+        one on an end-labelled grid.
+    """
+    if kind not in ('series', 'panel', 'unbalanced_panel'):
+        raise ValueError(f'Unknown data kind {kind!r}')
+    rng = np.random.default_rng(seed)
+    year = max(temporal_hierarchy.values())
+    calendar = pd.date_range('2020-01-01', periods=n_years * year, freq=freq)
+    end_labelled = freq.startswith(_END_LABELLED_PREFIXES)
+    node_leaves = {(): ((),)} if node_leaves is None else node_leaves
+    leaves = [node for node, below in node_leaves.items() if below == (node,)]
+    if kind == 'series':
+        copies = {None: 0}
+    elif kind == 'panel':
+        copies = dict.fromkeys(_TEMPORAL_UNBALANCED_STARTS, 0)
+    else:
+        copies = _TEMPORAL_UNBALANCED_STARTS
+
+    labels, dates, values = [], [], []
+    for copy, first_year in copies.items():
+        first = first_year * year
+        steps = np.arange(first, len(calendar))
+        # Feuilles : niveau, tendance, saisonnalité annuelle et bruit propres
+        leaf_values = {
+            leaf: rng.uniform(10, 30)
+            + rng.uniform(-0.1, 0.2) * steps
+            + rng.uniform(1, 4) * np.sin(2 * np.pi * steps / year)
+            + rng.normal(0, 0.5, len(steps))
+            for leaf in leaves
+        }
+        for node, below in node_leaves.items():
+            key = node if isinstance(node, tuple) else (node,)
+            fine = np.sum([leaf_values[leaf] for leaf in below], axis=0)
+            # Agrégation temporelle par blocs de pas fins consécutifs, datés par leur premier ou dernier pas
+            for level, size in temporal_hierarchy.items():
+                block_dates = calendar[first:][size - 1::size] if end_labelled else calendar[first:][::size]
+                labels.extend([([] if copy is None else [copy]) + list(key) + [level]] * len(block_dates))
+                dates.append(block_dates)
+                values.append(fine.reshape(-1, size).sum(axis=1))
+
+    names = ([] if kind == 'series' else [copy_name]) + list(node_names) + ['level']
+    levels = [pd.Index([row[level] for row in labels], dtype='str') for level in range(len(names))]
+    index = pd.MultiIndex.from_arrays(levels + [pd.DatetimeIndex(np.concatenate(dates))], names=names + ['date'])
+    y = pd.Series(np.concatenate(values), index=index, name='target')
+    X = pd.DataFrame(
+        {model: y.to_numpy() + rng.normal(0, noise, len(y)) for model, noise in _HIERARCHY_MODEL_NOISE.items()},
+        index=index,
+    )
+    return X, y
+
+
+def build_temporal_hierarchy(
+    kind: str = 'series',
+    n_years: int = 4,
+    freq: str = 'MS',
+    temporal_hierarchy: Optional[dict] = None,
+    seed: int = 0,
+) -> tuple:
+    """Build data of a temporal hierarchy alone, in long layout.
+
+    The default hierarchy is :data:`TEMPORAL_HIERARCHY` on month starts:
+    each year holds twelve monthly rows, four quarterly rows and one yearly
+    row; ``y`` sums exactly across the temporal levels and the base forecasts
+    ``m1`` and ``m2`` add independent noises (standard deviations 1 and 2).
+
+    Args:
+        kind: ``'series'`` (index ``(level, date)``), ``'panel'`` or
+            ``'unbalanced_panel'`` (index ``(entity, level, date)``, copies
+            ``A``, ``B``, ``C``; unbalanced, ``B`` and ``C`` start later).
+        n_years: Number of calendar years from January 2020.
+        freq: Fine grid (one year = the largest count of the hierarchy).
+        temporal_hierarchy: ``{level: number of fine steps}``; None for
+            :data:`TEMPORAL_HIERARCHY`.
+        seed: Seed of the generator.
+
+    Returns:
+        ``(X, y)``: ``DataFrame`` with columns ``m1``, ``m2`` and ``Series``
+        ``target`` on the same index.
+
+    Examples:
+        >>> X, y = build_temporal_hierarchy(n_years=1)
+        >>> list(X.index.names), X.groupby(level='level').size().to_dict()
+        (['level', 'date'], {'month': 12, 'quarter': 4, 'year': 1})
+        >>> bool(abs(y.loc['year'].sum() - y.loc['month'].sum()) < 1e-9)
+        True
+    """
+    hierarchy = TEMPORAL_HIERARCHY if temporal_hierarchy is None else temporal_hierarchy
+    return _build_temporal(None, [], kind, n_years, freq, hierarchy, seed, 'entity')
+
+
+def build_cross_temporal_hierarchy(
+    kind: str = 'series',
+    n_years: int = 3,
+    freq: str = 'MS',
+    levels: bool = False,
+    seed: int = 0,
+) -> tuple:
+    """Build data of a cross-sectional hierarchy crossed with :data:`TEMPORAL_HIERARCHY`.
+
+    The cross-sectional hierarchy is the node tree :data:`HIERARCHY_TREE`
+    (index level ``node``) or, with ``levels=True``, the country / region
+    hierarchy :data:`HIERARCHY_LEVELS`; every node holds every temporal level.
+    ``y`` is coherent in both dimensions.
+
+    Args:
+        kind: ``'series'``, ``'panel'`` or ``'unbalanced_panel'`` (copy
+            level ``entity`` before the node levels).
+        n_years: Number of calendar years from January 2020.
+        freq: Fine grid of twelve steps a year.
+        levels: Whether the hierarchy is carried by the index levels
+            ``country`` and ``region`` instead of a node tree.
+        seed: Seed of the generator.
+
+    Returns:
+        ``(X, y)``: ``DataFrame`` with columns ``m1``, ``m2`` and ``Series``
+        ``target``, indexed by ``(entity, node..., level, date)``.
+
+    Examples:
+        >>> X, y = build_cross_temporal_hierarchy(n_years=1)
+        >>> list(X.index.names), len(X)
+        (['node', 'level', 'date'], 85)
+    """
+    if levels:
+        return _build_temporal(
+            _LEVEL_LEAVES, ['country', 'region'], kind, n_years, freq, TEMPORAL_HIERARCHY, seed, 'entity'
+        )
+    node_leaves = {node: _TREE_LEAVES[node] for node in ['a', 'b', 'c', 'd', 'e']}
+    return _build_temporal(node_leaves, ['node'], kind, n_years, freq, TEMPORAL_HIERARCHY, seed, 'entity')

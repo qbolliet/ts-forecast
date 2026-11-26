@@ -281,12 +281,11 @@ class TestHierarchyParameter:
         with pytest.raises(ValueError, match='before the date level'):
             HierarchicalForecastAdapter({'a': ['b']}).fit(X, X['m'])
 
-    def test_temporal_hierarchy_not_implemented(self, tree_series):
+    @pytest.mark.parametrize('params', [{'temporal_level': 'node'}, {'temporal_origin': '2020-01-01'}])
+    def test_temporal_parameters_need_a_temporal_hierarchy(self, tree_series, params):
         X_train, y_train, _, _ = tree_series
-        adapter = HierarchicalForecastAdapter(
-            HIERARCHY_TREE, forecast_columns=['m1'], temporal_hierarchy={'quarter': 3, 'month': 1}
-        )
-        with pytest.raises(NotImplementedError, match='Temporal reconciliation'):
+        adapter = HierarchicalForecastAdapter(HIERARCHY_TREE, forecast_columns=['m1'], **params)
+        with pytest.raises(ValueError, match='only apply with a temporal_hierarchy'):
             adapter.fit(X_train, y_train)
 
     def test_target_must_be_a_single_series(self, tree_series):

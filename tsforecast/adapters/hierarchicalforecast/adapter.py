@@ -5,8 +5,10 @@ model) and ``y`` the realised values, in a long layout: one row per node and dat
 the node carried by index levels placed before the date. ``fit`` builds the summing
 matrix of each copy of the hierarchy and keeps the training rows that reconcilers
 learning from in-sample errors need; ``predict`` reconciles the base forecasts of
-the rows of ``X`` date by date and returns them in the row order of ``X``;
-``reconcile`` and ``diagnose`` expose every base model and reconciler.
+the rows of ``X`` date by date (cross-sectional hierarchy), or calendar period by
+calendar period (temporal hierarchy, alone or crossed with a cross-sectional one),
+and returns them in the row order of ``X``; ``reconcile`` and ``diagnose`` expose
+every base model and reconciler.
 """
 # Importation des modules
 # Modules de base
@@ -32,6 +34,16 @@ from tsforecast.adapters._base import (
     restore_row_order,
 )
 from tsforecast.adapters.hierarchicalforecast._structure import HierarchySpec, Structure, parse_hierarchy
+from tsforecast.adapters.hierarchicalforecast._temporal import (
+    CROSS_LEVEL_SEPARATOR,
+    TemporalCalendar,
+    TemporalSpec,
+    cross_structure,
+    detect_fine_frequency,
+    parse_temporal_hierarchy,
+    read_temporal_index,
+    temporal_structure,
+)
 
 # Extra installant hierarchicalforecast
 _EXTRA = "adapters-hierarchical"
@@ -53,6 +65,11 @@ _INTERVAL_COLUMN = re.compile(r"^(?P<model>.+)-(?P<side>lo|hi)-(?P<level>\d+(?:\
 _INTERVAL_SIDES = ("lo", "hi")
 # Méthodes d'intervalle qui lisent les erreurs insample
 _INSAMPLE_INTERVAL_METHODS = frozenset({"bootstrap", "permbu", "conformal"})
+# Modes de réconciliation : cross-section (colonnes = dates), temporel et cross-temporel (colonnes =
+# périodes du niveau temporel le plus agrégé)
+_CROSS_SECTION = "cross_section"
+_TEMPORAL = "temporal"
+_CROSS_TEMPORAL = "cross_temporal"
 
 
 # Fonction d'import différé de hierarchicalforecast
@@ -72,27 +89,115 @@ class _CopyFit:
     """Structure and training rows of one copy of the hierarchy.
 
     Attributes:
-        structure: Summing matrix, levels and nodes of the copy.
+        structure: Summing matrix, levels and nodes reconciled for the copy
+            (cross-sectional, temporal or cross-temporal).
+        cross_section: Cross-sectional structure of the copy, None in the
+            temporal mode.
+        positions: Cross-temporal mode: position in ``structure`` of the pair
+            (cross-sectional node ``i``, temporal node ``j``) at index
+            ``i * n_temporal + j``; None otherwise.
         insample: Training rows in the format of hierarchicalforecast
-            (``unique_id``, ``ds``, ``y`` and one column per base model).
+            (``unique_id``, ``ds``, ``y`` and one column per base model);
+            None when no reconciliation may read them.
         missing_nodes: Nodes without any training row with a target.
         balanced: Whether every node has a row at every training date.
     """
 
-    # Matrice de sommation, niveaux et nœuds de la copie
+    # Matrice de sommation, niveaux et nœuds réconciliés pour la copie
     structure: Structure
+    # Structure cross-section de la copie (None en mode temporel)
+    cross_section: Optional[Structure] = None
+    # Mode cross-temporel : position du couple (nœud cs i, nœud temporel j) à l'indice i * n_temporel + j
+    positions: Optional[np.ndarray] = None
     # Lignes d'entraînement au format de hierarchicalforecast
-    insample: pd.DataFrame
+    insample: Optional[pd.DataFrame] = None
     # Nœuds sans aucune ligne d'entraînement à cible renseignée
-    missing_nodes: Tuple[Hashable, ...]
+    missing_nodes: Tuple[Hashable, ...] = ()
     # Présence d'une ligne pour chaque nœud à chaque date d'entraînement
-    balanced: bool
+    balanced: bool = False
+
+
+# Classe de description du mode de réconciliation, fixée au fit
+@dataclass(frozen=True, eq=False)
+class _Design:
+    """Mode, hierarchies and calendar of a fitted adapter.
+
+    Attributes:
+        mode: ``'cross_section'``, ``'temporal'`` or ``'cross_temporal'``.
+        spec: Cross-sectional hierarchy read on the index levels other than
+            the temporal one; None in the temporal mode.
+        temporal: Temporal hierarchy; None in the cross-sectional mode.
+        temporal_level: ``temporal_level`` parameter (name or position).
+        temporal_name: Name of the temporal index level.
+        calendar: Calendar of the temporal hierarchy on the fine grid.
+        temporal_structure: Structure of one period of the most aggregated
+            temporal level.
+        level_names: Names of the levels of the reconciled structures.
+        copy_names: Names of the copy levels (substitute name for an
+            anonymous level).
+    """
+
+    # Mode de réconciliation
+    mode: str
+    # Hiérarchie cross-section (None en mode temporel)
+    spec: Optional[HierarchySpec]
+    # Hiérarchie temporelle (None en mode cross-section)
+    temporal: Optional[TemporalSpec] = None
+    # Paramètre temporal_level
+    temporal_level: Any = None
+    # Nom du niveau d'index temporel
+    temporal_name: Hashable = None
+    # Calendrier de la hiérarchie temporelle
+    calendar: Optional[TemporalCalendar] = None
+    # Structure d'une période du niveau temporel le plus agrégé
+    temporal_structure: Optional[Structure] = None
+    # Noms des niveaux des structures réconciliées
+    level_names: Tuple[str, ...] = ()
+    # Noms des niveaux de copie
+    copy_names: Tuple[Hashable, ...] = ()
+
+    # Données structurelles d'une copie depuis sa structure cross-section
+    def record(self, cross_section: Optional[Structure]) -> _CopyFit:
+        """Return the structures of a copy whose cross-sectional structure is ``cross_section``."""
+        # Mode cross-section : la structure cross-section est réconciliée telle quelle
+        if self.mode == _CROSS_SECTION:
+            return _CopyFit(structure=cross_section, cross_section=cross_section)
+        # Mode temporel : structure d'une période, commune à toutes les copies
+        if self.mode == _TEMPORAL:
+            return _CopyFit(structure=self.temporal_structure)
+        # Mode cross-temporel : produit de Kronecker des deux structures
+        cross = cross_structure(cross_section, self.temporal_structure)
+        return _CopyFit(structure=cross.structure, cross_section=cross_section, positions=cross.positions)
+
+
+# Classe de séparation des combinaisons de niveaux d'index
+@dataclass(frozen=True, eq=False)
+class _EntitySplit:
+    """Copy, node and temporal level of each distinct combination of index levels.
+
+    Attributes:
+        copy_keys: Distinct copy keys, in order of first appearance.
+        entity_copy: Position in ``copy_keys`` of the copy of each entity.
+        node_keys: Cross-sectional node key of each entity (None in the
+            temporal mode).
+        row_temporal: Temporal level code of each row; None in the
+            cross-sectional mode.
+    """
+
+    # Clés des copies distinctes, dans l'ordre de leurs codes
+    copy_keys: Tuple[tuple, ...]
+    # Code de la copie de chaque combinaison distincte de niveaux d'index
+    entity_copy: np.ndarray
+    # Clé de nœud cross-section de chaque combinaison distincte
+    node_keys: List[Hashable]
+    # Code du niveau temporel de chaque ligne (None en mode cross-section)
+    row_temporal: Optional[np.ndarray]
 
 
 # Classe de localisation des lignes dans les copies de la hiérarchie
 @dataclass(frozen=True, eq=False)
 class _RowNodes:
-    """Copy and node of each row of a dataset.
+    """Copy, node and reconciliation column of each row of a dataset.
 
     Attributes:
         copy_keys: Distinct copy keys, in order of first appearance.
@@ -100,6 +205,8 @@ class _RowNodes:
         row_copy: Position in ``copy_keys`` of the copy of each row.
         row_node: Position of the node of each row in the structure of its copy.
         row_level: Position of the level of the node of each row.
+        row_column: Column of each row: its date (cross-section) or the
+            start of its period of the most aggregated temporal level.
     """
 
     # Clés des copies distinctes, dans l'ordre de leurs codes
@@ -112,24 +219,110 @@ class _RowNodes:
     row_node: np.ndarray
     # Position du niveau du nœud de chaque ligne
     row_level: np.ndarray
+    # Colonne de réconciliation de chaque ligne : date ou début de période
+    row_column: pd.DatetimeIndex
 
 
-# Fonction de séparation des combinaisons de niveaux d'index en copies et nœuds
-def _split_entities(layout: TemporalLayout, spec: HierarchySpec) -> Tuple[List[tuple], np.ndarray, List[Hashable]]:
-    """Return the distinct copy keys, the copy of each entity and the node key of each entity."""
+# Fonction de séparation des combinaisons de niveaux d'index en copies, nœuds et niveaux temporels
+def _split_entities(layout: TemporalLayout, design: _Design) -> _EntitySplit:
+    """Split each distinct combination of index levels into its copy, its node and its temporal level."""
+    # Niveau temporel de chaque combinaison et de chaque ligne (modes temporels)
+    temporal = (
+        read_temporal_index(layout, design.temporal, design.temporal_level) if design.temporal is not None else None
+    )
     # Dictionnaire clé de copie -> code (ordre de première apparition)
     lookup: Dict[tuple, int] = {}
     # Code de copie et clé de nœud de chaque combinaison distincte de niveaux d'index
     entity_copy, node_keys = [], []
     # Une seule analyse par combinaison distincte, diffusée ensuite par les codes des lignes
     for entity in layout.entities:
-        # Séparation des étiquettes de copie et de nœud
-        copy_key, node_key = spec.split_key(entity)
+        # Retrait de l'étiquette du niveau temporel
+        if temporal is not None:
+            entity = entity[: temporal.position] + entity[temporal.position + 1:]
+        # Séparation des étiquettes de copie et de nœud (mode temporel : tous les niveaux forment la copie)
+        copy_key, node_key = (entity, None) if design.spec is None else design.spec.split_key(entity)
         # Attribution d'un nouveau code à une copie jamais rencontrée
         entity_copy.append(lookup.setdefault(copy_key, len(lookup)))
         node_keys.append(node_key)
-    # Clés de copie dans l'ordre de leurs codes
-    return list(lookup), np.array(entity_copy, dtype=np.intp), node_keys
+    return _EntitySplit(
+        copy_keys=tuple(lookup),
+        entity_copy=np.array(entity_copy, dtype=np.intp),
+        node_keys=node_keys,
+        row_temporal=None if temporal is None else temporal.row_levels,
+    )
+
+
+# Fonction de placement des lignes dans les structures de leurs copies
+def _place_rows(
+    layout: TemporalLayout, design: _Design, split: _EntitySplit, records: Sequence[_CopyFit]
+) -> _RowNodes:
+    """Locate the node and the reconciliation column of each row.
+
+    Raises:
+        ValueError: If a cross-sectional node is unknown to the structure of
+            its copy, or if a temporal row is off its calendar.
+    """
+    # Placement des lignes dans les périodes et les nœuds temporels (modes temporels)
+    placement = (
+        design.calendar.locate(split.row_temporal, layout.dates) if split.row_temporal is not None else None
+    )
+    # Position du nœud cross-section de chaque combinaison de niveaux d'index
+    entity_cs = np.zeros(len(split.node_keys), dtype=np.intp)
+    # Parcours des copies : localisation de leurs nœuds cross-section
+    for code, (copy_key, record) in enumerate(zip(split.copy_keys, records)):
+        # Mode temporel : aucun nœud cross-section
+        if record.cross_section is None:
+            continue
+        # Combinaisons de niveaux d'index appartenant à la copie et position de leurs nœuds
+        members = np.flatnonzero(split.entity_copy == code)
+        positions = record.cross_section.locate([split.node_keys[member] for member in members])
+        # Refus des nœuds absents de la structure
+        if (positions < 0).any():
+            unknown = list(dict.fromkeys(split.node_keys[member] for member in members[positions < 0]))
+            where = f" of the copy {copy_key!r}" if copy_key else ""
+            raise ValueError(f"Nodes{where} unknown at fit: {_preview(unknown)}")
+        entity_cs[members] = positions
+
+    # Copie de chaque ligne, par le code de sa combinaison d'étiquettes
+    row_copy = split.entity_copy[layout.codes]
+    # Nœud de chaque ligne selon le mode
+    if design.mode == _CROSS_SECTION:
+        # Cross-section : le nœud de la combinaison d'étiquettes
+        row_node = entity_cs[layout.codes]
+    elif design.mode == _TEMPORAL:
+        # Temporel : le nœud temporel de la ligne
+        row_node = placement.node
+    else:
+        # Cross-temporel : couple (nœud cs, nœud temporel) placé dans la structure croisée de la copie
+        row_node = np.empty(len(layout.codes), dtype=np.intp)
+        # Nombre de nœuds temporels
+        n_temporal = design.temporal_structure.n_nodes
+        # Parcours des copies : position des couples de leurs lignes
+        for code, record in enumerate(records):
+            rows = np.flatnonzero(row_copy == code)
+            row_node[rows] = record.positions[entity_cs[layout.codes[rows]] * n_temporal + placement.node[rows]]
+    # Niveau du nœud de chaque ligne
+    row_level = np.empty(len(row_node), dtype=np.intp)
+    # Parcours des copies : niveau des nœuds de leurs lignes dans leur structure
+    for code, record in enumerate(records):
+        rows = row_copy == code
+        row_level[rows] = record.structure.node_levels[row_node[rows]]
+    return _RowNodes(
+        copy_keys=split.copy_keys,
+        structures=tuple(record.structure for record in records),
+        row_copy=row_copy,
+        row_node=row_node,
+        row_level=row_level,
+        # Colonne : date en cross-section, début de période dans les modes temporels
+        row_column=layout.dates if placement is None else placement.period_start,
+    )
+
+
+# Fonction de nommage des niveaux de copie
+def _copy_names(names: Sequence[Hashable], positions: Sequence[int]) -> Tuple[Hashable, ...]:
+    """Names of the copy levels, ``'level_<position>'`` for an anonymous level."""
+    # Nom de substitution pour un niveau sans nom
+    return tuple(f"level_{position}" if name is None else name for name, position in zip(names, positions))
 
 
 # Fonction de résolution des colonnes de prévisions de base et d'intervalle
@@ -271,6 +464,28 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
     are finite; top-down and middle-out reconcilers need a strictly
     hierarchical structure whose leaves all lie on the finest level.
 
+    With ``temporal_hierarchy`` (``{'year': 12, 'quarter': 3, 'month': 1}``:
+    number of fine steps of a node of each level), the index level
+    ``temporal_level`` holds the temporal level of each row and the
+    reconciliation is temporal (``hierarchy=None``: every other non-date
+    level identifies a series reconciled on its own) or cross-temporal (with a
+    ``hierarchy``: the summing matrix is the Kronecker product of both, so that
+    the forecasts become coherent across the nodes and across the temporal
+    levels at once). The fine grid is the one of the rows of the finest level;
+    a period of the most aggregated level is that grid multiplied by its number
+    of steps, aligned on the Unix epoch (calendar years for monthly and
+    quarterly grids, days for hourly grids) or on ``temporal_origin``. An
+    aggregate row is dated by the first fine step it covers on a grid labelling
+    its periods by their start (``'MS'``, ``'QS'``, ``'D'``, ``'h'``), by the last
+    one on a grid labelling them by their end (``'ME'``, ``'QE'``, ``'W-SUN'``).
+    Each period of ``X`` is reconciled on its own and must be complete at
+    predict (every node of every temporal level): test sets cover complete
+    periods, as the folds of ``period_splits``. Reconcilers and intervals
+    reading in-sample errors are refused. Rows indexed by forecast origin
+    aggregate origins: with a horizon of ``h`` fine steps, periods of origins
+    starting ``h`` steps before the calendar periods of the targets
+    (``temporal_origin``) reconcile calendar periods of the targets.
+
     Args:
         hierarchy: List of lists of index level names, or ``{parent:
             [children]}`` mapping on the labels of ``node_level``.
@@ -288,8 +503,16 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
             column but the interval columns ``'<column>-lo-<level>'`` and
             ``'<column>-hi-<level>'``. Other columns (exogenous variables)
             play no part in the reconciliation.
-        temporal_hierarchy: Temporal hierarchy ``{name: number of steps}``;
-            temporal reconciliation is not implemented and requires None.
+        temporal_hierarchy: Temporal hierarchy ``{name: number of fine
+            steps}`` (one level of 1 step; every count divides the largest);
+            None for a cross-sectional reconciliation.
+        temporal_level: With a temporal hierarchy: name or position of the
+            non-date index level holding the temporal level of each row; None
+            for the level just before the date (``node_level`` then defaults
+            to the level before it).
+        temporal_origin: With a temporal hierarchy: a date at which a period
+            of the most aggregated level starts (fiscal years, weeks starting
+            on Monday, periods of origins); None for the Unix epoch.
 
     Attributes:
         reconciler_: Copy of the reconciler used by ``predict``.
@@ -298,6 +521,8 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         copies_: Keys of the copies of the hierarchy seen at fit (``((),)``
             without copy levels).
         forecast_columns_: Base forecast columns of ``X``.
+        temporal_freq_: Pandas alias of the fine grid of a temporal
+            hierarchy, None without one.
         n_features_in_: Number of columns of ``X`` seen at fit.
         feature_names_in_: Column names of ``X`` seen at fit.
 
@@ -314,6 +539,19 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         array([3. , 5.5, 1. , 2.5, 2. , 3. ])
         >>> adapter.reconcile(X).columns.tolist()
         ['model/BottomUp']
+
+        Temporal reconciliation of four quarters and their year (dated by its
+        first quarter):
+
+        >>> from hierarchicalforecast.methods import MinTrace
+        >>> quarters = pd.date_range('2024-01-01', periods=4, freq='QS', name='date')
+        >>> index = pd.MultiIndex.from_arrays(
+        ...     [['quarter'] * 4 + ['year'], quarters.append(quarters[:1])], names=['level', 'date'])
+        >>> X = pd.DataFrame({'model': [2.0, 3.0, 2.0, 3.0, 12.0]}, index=index)
+        >>> adapter = HierarchicalForecastAdapter(
+        ...     None, MinTrace(method='ols'), temporal_hierarchy={'year': 4, 'quarter': 1}).fit(X, X['model'])
+        >>> adapter.predict(X).round(2)
+        array([ 2.4,  3.4,  2.4,  3.4, 11.6])
     """
 
     # Initialisation
@@ -327,6 +565,8 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         model_combination: Any = None,
         forecast_columns: Any = None,
         temporal_hierarchy: Optional[Mapping] = None,
+        temporal_level: Any = None,
+        temporal_origin: Any = None,
     ):
         # Stockage des paramètres tels quels (convention sklearn : validation au fit)
         self.hierarchy = hierarchy
@@ -336,6 +576,8 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         self.model_combination = model_combination
         self.forecast_columns = forecast_columns
         self.temporal_hierarchy = temporal_hierarchy
+        self.temporal_level = temporal_level
+        self.temporal_origin = temporal_origin
 
     # ------------------------------------------------------------------
     # Méthodes auxiliaires
@@ -343,8 +585,10 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
 
     # Vérification d'un réconciliateur
     @staticmethod
-    def _check_reconciler(reconciler: Any, structures: Sequence[Structure], level_names: Sequence[str]) -> None:
-        """Refuse an object that is no reconciler, or a reconciler the structure does not allow."""
+    def _check_reconciler(
+        reconciler: Any, structures: Sequence[Structure], level_names: Sequence[str], temporal: bool = False
+    ) -> None:
+        """Refuse an object that is no reconciler, or a reconciler the structure or the mode does not allow."""
         # Import des méthodes de réconciliation et des utilitaires
         _, methods, utils = _import_hierarchicalforecast()
         # Vérification du type du réconciliateur
@@ -355,6 +599,12 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
             )
         # Nom de la classe, pour les messages d'erreur
         name = type(reconciler).__name__
+        # Modes temporels : aucune erreur insample par période n'est disponible
+        if temporal and reconciler.insample:
+            raise ValueError(
+                f"{name} learns from in-sample errors, which temporal reconciliation does not support: use "
+                "BottomUp, MinTrace with method 'ols' or 'wls_struct', or TopDown with 'forecast_proportions'"
+            )
         # Réconciliateurs qui descendent les niveaux : hiérarchie stricte, feuilles au niveau le plus fin
         if getattr(reconciler, "is_strictly_hierarchical", False):
             # Parcours des structures : une par copie
@@ -392,65 +642,40 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         structures = [record.structure for record in self._copies.values()]
         # Vérification de chaque réconciliateur
         for reconciler in reconcilers:
-            self._check_reconciler(reconciler, structures, self.hierarchy_levels_)
+            self._check_reconciler(
+                reconciler, structures, self.hierarchy_levels_, self._design.mode != _CROSS_SECTION
+            )
         return reconcilers
 
     # Localisation des lignes d'un jeu de données à prédire
     def _locate_rows(self, layout: TemporalLayout, needs_insample: bool) -> _RowNodes:
-        """Locate the copy and the node of each row of ``X``."""
-        # Copies et nœuds des combinaisons de niveaux d'index de X
-        copy_keys, entity_copy, node_keys = _split_entities(layout, self._spec)
-        # Structure de chaque copie de X (None pour une copie inexploitable)
-        structures = []
-        # Position du nœud, puis de son niveau, pour chaque combinaison de niveaux d'index
-        entity_node = np.empty(len(node_keys), dtype=np.intp)
-        entity_level = np.empty(len(node_keys), dtype=np.intp)
+        """Locate the copy, the node and the reconciliation column of each row of ``X``."""
+        # Copies, nœuds et niveaux temporels des combinaisons de niveaux d'index de X
+        split = _split_entities(layout, self._design)
+        # Données structurelles de chaque copie de X
+        records = []
         # Copies de X inexploitables
         unknown_copies = []
-        # Parcours des copies de X : choix de la structure, puis localisation des nœuds
-        for code, copy_key in enumerate(copy_keys):
-            # Données ajustées de la copie, None si elle est inconnue
+        # Parcours des copies de X : copie ajustée, ou structure commune à toute copie
+        for copy_key in split.copy_keys:
             record = self._copies.get(copy_key)
-            if record is not None:
-                # Cas d'une copie connue
-                structure = record.structure
-            elif self._spec.kind == "tree" and not needs_insample:
-                # Copie inconnue d'un arbre : structure connue sans données d'entraînement
-                structure = self._spec.tree
-            else:
+            if record is None and self._shared is not None and not needs_insample:
+                # Copie inconnue dont la structure est connue sans données d'entraînement
+                record = self._shared
+            if record is None:
                 # Cas d'une copie inexploitable : signalée à la fin du parcours
                 unknown_copies.append(copy_key)
-                structures.append(None)
-                continue
-            # Combinaisons de niveaux d'index appartenant à la copie
-            members = np.flatnonzero(entity_copy == code)
-            # Position de leurs nœuds dans la structure
-            positions = structure.locate([node_keys[member] for member in members])
-            # Refus des nœuds absents de la structure
-            if (positions < 0).any():
-                unknown = [node_keys[member] for member in members[positions < 0]]
-                where = f" of the copy {copy_key!r}" if copy_key else ""
-                raise ValueError(f"Nodes{where} unknown at fit: {_preview(unknown)}")
-            # Enregistrement du nœud et de son niveau
-            entity_node[members] = positions
-            entity_level[members] = structure.node_levels[positions]
-            structures.append(structure)
+            records.append(record)
         # Refus des copies inexploitables, avec la raison propre à la forme de la hiérarchie
         if unknown_copies:
             reason = (
                 "the reconciliation needs their training rows"
-                if self._spec.kind == "tree"
+                if self._shared is not None
                 else "their nodes are learnt from the training rows"
             )
             raise ValueError(f"Copies of the hierarchy unknown at fit ({reason}): {_preview(unknown_copies)}")
-        # Diffusion à chaque ligne par le code de sa combinaison d'étiquettes
-        return _RowNodes(
-            copy_keys=tuple(copy_keys),
-            structures=tuple(structures),
-            row_copy=entity_copy[layout.codes],
-            row_node=entity_node[layout.codes],
-            row_level=entity_level[layout.codes],
-        )
+        # Nœud et colonne de chaque ligne
+        return _place_rows(layout, self._design, split, records)
 
     # Prévisions de base des modèles d'un appel
     @staticmethod
@@ -574,7 +799,14 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         needs_insample = any(reconciler.insample for reconciler in reconcilers) or (
             level is not None and intervals_method in _INSAMPLE_INTERVAL_METHODS
         )
-        # Copie, nœud et niveau de chaque ligne
+        # Modes temporels : aucune erreur insample par période n'est disponible
+        temporal = self._design.mode != _CROSS_SECTION
+        if temporal and level is not None and intervals_method in _INSAMPLE_INTERVAL_METHODS:
+            raise ValueError(
+                f"intervals_method={intervals_method!r} reads in-sample errors, which temporal reconciliation does "
+                "not support: use intervals_method='normality'"
+            )
+        # Copie, nœud, niveau et colonne de chaque ligne
         rows = self._locate_rows(layout, needs_insample)
         # Prévisions de base à réconcilier
         models = self._models(X, self.forecast_columns_, self._combination, rows.row_level, which)
@@ -600,14 +832,14 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         output, columns, per_copy = None, [], []
         # Parcours des copies : une réconciliation indépendante par copie
         for code, (copy_key, structure) in enumerate(zip(rows.copy_keys, rows.structures)):
-            # Lignes de X de la copie, avec leurs nœuds et leurs dates
+            # Lignes de X de la copie, avec leurs nœuds et leurs colonnes (dates ou débuts de période)
             members = np.flatnonzero(rows.row_copy == code)
             nodes = rows.row_node[members]
-            dates = layout.dates[members]
-            # Vérification de la présence de tous les nœuds à chaque date
-            self._check_complete(structure, nodes, dates, copy_key)
-            # Construction des prévisions de base au format de hierarchicalforecast : identifiant, date,
-            # modèles, puis intervalles
+            dates = rows.row_column[members]
+            # Vérification de la présence de tous les nœuds dans chaque colonne
+            self._check_complete(structure, nodes, dates, copy_key, temporal)
+            # Construction des prévisions de base au format de hierarchicalforecast : identifiant, colonne
+            # (date ou début de période), modèles, puis intervalles
             frame = {_ID_COL: structure.ids[nodes], _TIME_COL: dates}
             frame.update({internal: values[members] for _, internal, values in models})
             frame.update({column: values[members] for column, values in intervals.items()})
@@ -657,7 +889,7 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
             if output is None:
                 columns = [column for column in result.columns if column not in Y_hat_df.columns]
                 output = np.full((len(X), len(columns)), np.nan)
-            # Sortie triée par nœud puis date : réalignement par clés sur les lignes de X
+            # Sortie triée par nœud puis colonne : réalignement par clés sur les lignes de X
             source = pd.MultiIndex.from_arrays([result[_ID_COL].to_numpy(), pd.DatetimeIndex(result[_TIME_COL])])
             target = pd.MultiIndex.from_arrays([Y_hat_df[_ID_COL].to_numpy(), pd.DatetimeIndex(dates)])
             # Écriture des valeurs aux positions des lignes de la copie
@@ -677,11 +909,13 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         # Nom inchangé pour un modèle interne inconnu
         return f"{names.get(internal, internal)}{separator}{rest}"
 
-    # Contrôle de la présence de tous les nœuds à chaque date
+    # Contrôle de la présence de tous les nœuds dans chaque colonne
     @staticmethod
-    def _check_complete(structure: Structure, nodes: np.ndarray, dates: pd.DatetimeIndex, copy_key: tuple) -> None:
-        """Refuse a date that lacks the base forecast of a node of the copy."""
-        # Code de la date de chaque ligne et calendrier des dates distinctes
+    def _check_complete(
+        structure: Structure, nodes: np.ndarray, dates: pd.DatetimeIndex, copy_key: tuple, temporal: bool = False
+    ) -> None:
+        """Refuse a date, or a period of the most aggregated temporal level, that lacks a node of the copy."""
+        # Code de la colonne de chaque ligne et calendrier des colonnes distinctes
         date_codes, calendar = pd.factorize(dates)
         # Nombre de lignes par date
         counts = np.bincount(date_codes, minlength=len(calendar))
@@ -694,6 +928,14 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
             present = nodes[date_codes == first]
             missing = [structure.node_keys[node] for node in np.setdiff1d(np.arange(structure.n_nodes), present)]
             where = f" of the copy {copy_key!r}" if copy_key else ""
+            # Cas temporel : période incomplète du niveau le plus agrégé
+            if temporal:
+                raise ValueError(
+                    f"X has no row for the nodes{where} {_preview(missing)} in the period starting {calendar[first]} "
+                    f"({incomplete.size} incomplete period(s)): each period of the most aggregated temporal level "
+                    "to reconcile needs the base forecast of every node of every temporal level; test sets must "
+                    "cover complete periods (see period_splits)"
+                )
             raise ValueError(
                 f"X has no row for the nodes{where} {_preview(missing)} on {calendar[first]} "
                 f"({incomplete.size} incomplete date(s)): each date to reconcile needs the base forecast of "
@@ -711,7 +953,8 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         Args:
             X: Base forecasts of the training rows (out-of-sample forecasts for
                 the reconcilers that learn from in-sample errors), indexed by
-                ``(copy..., node..., date)``; rows in any order.
+                ``(copy..., node..., date)`` (``(copy..., node..., temporal
+                level, date)`` with a temporal hierarchy); rows in any order.
             y: Realised values of the same rows (every node, aggregates
                 included).
 
@@ -720,7 +963,6 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
 
         Raises:
             ImportError: If hierarchicalforecast is not installed.
-            NotImplementedError: If ``temporal_hierarchy`` is set.
             TypeError: If ``X`` is not a ``DataFrame``, if its dates are not
                 ``datetime64``, or if ``reconciler`` is not a hierarchicalforecast
                 reconciler.
@@ -728,17 +970,24 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
                 matches no node of the hierarchy, if ``y`` is not a single
                 numeric target aligned with ``X``, if the base forecast columns
                 or ``model_combination`` are invalid, or if the reconciler does
-                not suit the hierarchy or lacks training rows of a node.
+                not suit the hierarchy or lacks training rows of a node; with a
+                temporal hierarchy, if it is malformed, if a row holds an
+                unknown temporal level or is misdated, if the fine grid cannot
+                be detected or does not tile the periods, or if the reconciler
+                learns from in-sample errors.
         """
         # Import différé des méthodes de réconciliation
         _, methods, _ = _import_hierarchicalforecast()
         # Vérification des paramètres indispensables
-        if self.temporal_hierarchy is not None:
-            raise NotImplementedError(
-                "Temporal reconciliation is not implemented: temporal_hierarchy must be None"
-            )
-        if self.hierarchy is None:
-            raise ValueError("hierarchy is required: a list of lists of index levels or a {parent: [children]} mapping")
+        if self.temporal_hierarchy is None:
+            # Paramètres temporels sans hiérarchie temporelle
+            if self.temporal_level is not None or self.temporal_origin is not None:
+                raise ValueError("temporal_level and temporal_origin only apply with a temporal_hierarchy")
+            if self.hierarchy is None:
+                raise ValueError(
+                    "hierarchy is required: a list of lists of index levels or a {parent: [children]} mapping "
+                    "(or set temporal_hierarchy for a temporal reconciliation)"
+                )
         # Vérification des entrées et analyse de l'index (aucune grille exigée)
         X, y, layout = check_adapter_input(self, X, y, reset=True, detect_freq=False)
         # Vérification d'une cible unique
@@ -747,67 +996,63 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         # Valeurs de la cible, alignées sur les lignes de X
         target = np.asarray(y, dtype=np.float64)
 
-        # Analyse de la hiérarchie à partir des noms des niveaux d'index
-        spec = parse_hierarchy(self.hierarchy, list(X.index.names), self.node_level, self.aggregate_label)
+        # Mode, hiérarchies et calendrier, depuis les niveaux d'index
+        design = self._build_design(layout)
         # Colonnes des prévisions de base et de leurs intervalles
         base, intervals = _resolve_columns(X, self.forecast_columns)
         # Mode de combinaison des modèles de base
-        combination = _resolve_combination(self.model_combination, spec.level_names, base)
+        combination = _resolve_combination(self.model_combination, design.level_names, base)
         # Copie du réconciliateur (BottomUp par défaut) : l'objet reçu n'est jamais modifié
         reconciler = methods.BottomUp() if self.reconciler is None else copy.deepcopy(self.reconciler)
 
-        # Structure de chaque copie, depuis les nœuds de ses lignes
-        copy_keys, entity_copy, node_keys = _split_entities(layout, spec)
-        # Structure de chaque copie, dans l'ordre de leurs codes
-        structures = []
-        # Position du nœud de chaque combinaison de niveaux d'index
-        entity_node = np.empty(len(node_keys), dtype=np.intp)
-        # Parcours des copies : construction de leur structure depuis leurs nœuds observés
-        for code in range(len(copy_keys)):
-            # Combinaisons de niveaux d'index de la copie et leurs clés de nœud
-            members = np.flatnonzero(entity_copy == code)
-            keys = [node_keys[member] for member in members]
-            structure = spec.build_structure(keys)
-            # Position de chaque nœud dans la structure
-            entity_node[members] = structure.locate(keys)
-            structures.append(structure)
-
-        # Vérification de la compatibilité du réconciliateur avec les structures
-        self._check_reconciler(reconciler, structures, spec.level_names)
-
-        # Lignes d'entraînement de chaque copie au format de hierarchicalforecast
-        row_copy, row_node = entity_copy[layout.codes], entity_node[layout.codes]
-        # Niveau du nœud de chaque ligne
-        row_level = np.empty(len(X), dtype=np.intp)
-        # Parcours des copies : niveau des nœuds de leurs lignes
-        for code, structure in enumerate(structures):
-            members = row_copy == code
-            row_level[members] = structure.node_levels[row_node[members]]
+        # Copies, nœuds et niveaux temporels des combinaisons de niveaux d'index
+        split = _split_entities(layout, design)
+        # Structures de chaque copie, dans l'ordre de leurs codes
+        records = []
+        # Parcours des copies : structure depuis leurs nœuds observés (structure temporelle commune sinon)
+        for code in range(len(split.copy_keys)):
+            # Clés de nœud cross-section distinctes des combinaisons de niveaux d'index de la copie
+            members = np.flatnonzero(split.entity_copy == code)
+            keys = list(dict.fromkeys(split.node_keys[member] for member in members))
+            records.append(design.record(None if design.spec is None else design.spec.build_structure(keys)))
+        # Vérification de la compatibilité du réconciliateur avec les structures et le mode
+        self._check_reconciler(
+            reconciler, [record.structure for record in records], design.level_names, design.mode != _CROSS_SECTION
+        )
+        # Nœud, niveau et colonne de chaque ligne
+        rows = _place_rows(layout, design, split, records)
         # Toutes les prévisions de base, combinaison comprise
-        models = self._models(X, base, combination, row_level, "all")
+        models = self._models(X, base, combination, rows.row_level, "all")
+
         # Dictionnaire clé de copie -> données ajustées de la copie
         copies = {}
-        # Parcours des copies : extraction de leurs lignes d'entraînement
-        for code, (copy_key, structure) in enumerate(zip(copy_keys, structures)):
+        # Parcours des copies : structures, plus lignes d'entraînement en cross-section
+        for code, (copy_key, record) in enumerate(zip(split.copy_keys, records)):
+            # Modes temporels : aucune donnée insample, seules les structures sont conservées
+            if design.mode != _CROSS_SECTION:
+                copies[copy_key] = record
+                continue
+            structure = record.structure
             # Lignes de la copie dont la cible est renseignée
-            members = np.flatnonzero((row_copy == code) & np.isfinite(target))
+            members = np.flatnonzero((rows.row_copy == code) & np.isfinite(target))
             # Ordre canonique (nœud, date) : l'ajustement ne dépend pas de l'ordre des lignes
-            members = members[np.lexsort((layout.dates[members].to_numpy(), row_node[members]))]
+            members = members[np.lexsort((layout.dates[members].to_numpy(), rows.row_node[members]))]
             # Lignes d'entraînement au format de hierarchicalforecast
             frame = {
-                _ID_COL: structure.ids[row_node[members]],
+                _ID_COL: structure.ids[rows.row_node[members]],
                 _TIME_COL: layout.dates[members],
                 _TARGET_COL: target[members],
             }
             frame.update({internal: values[members] for _, internal, values in models})
             # Indicatrice des nœuds disposant d'au moins une ligne
             covered = np.zeros(structure.n_nodes, dtype=bool)
-            covered[row_node[members]] = True
+            covered[rows.row_node[members]] = True
             # Nombre de dates d'entraînement de la copie
             n_dates = len(layout.dates[members].unique())
             # Enregistrement des données ajustées (grille équilibrée : chaque nœud présent à chaque date)
             copies[copy_key] = _CopyFit(
                 structure=structure,
+                cross_section=structure,
                 insample=pd.DataFrame(frame),
                 missing_nodes=tuple(structure.node_keys[node] for node in np.flatnonzero(~covered)),
                 balanced=len(members) == structure.n_nodes * n_dates,
@@ -824,15 +1069,79 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
                     )
 
         # Attributs ajustés, posés une fois les contrôles réussis
-        self._spec = spec
+        self._design = design
+        # Structures de toute copie inconnue au fit : arbre cross-section et/ou structure temporelle ;
+        # None quand les nœuds d'une copie s'apprennent de ses lignes
+        self._shared = (
+            design.record(None if design.spec is None else design.spec.tree)
+            if design.spec is None or design.spec.kind == "tree"
+            else None
+        )
         self._intervals = intervals
         self._combination = combination
         self._copies = copies
-        self.hierarchy_levels_ = spec.level_names
+        self.hierarchy_levels_ = design.level_names
         self.forecast_columns_ = base
-        self.copies_ = tuple(copy_keys)
+        self.copies_ = split.copy_keys
+        self.temporal_freq_ = None if design.calendar is None else design.calendar.freq
         self.reconciler_ = reconciler
         return self
+
+    # Construction du mode de réconciliation depuis les niveaux d'index
+    def _build_design(self, layout: TemporalLayout) -> _Design:
+        """Read the hierarchies against the index levels and choose the mode of reconciliation."""
+        # Noms des niveaux d'index précédant la date
+        names = list(layout.entity_names)
+        # Mode cross-section : hiérarchie lue sur tous les niveaux d'index
+        if self.temporal_hierarchy is None:
+            spec = parse_hierarchy(self.hierarchy, [*names, layout.time_name], self.node_level, self.aggregate_label)
+            return _Design(
+                mode=_CROSS_SECTION,
+                spec=spec,
+                level_names=spec.level_names,
+                copy_names=_copy_names(spec.copy_names, spec.copy_levels),
+            )
+        # Hiérarchie temporelle et niveau temporel de chaque ligne
+        temporal = parse_temporal_hierarchy(self.temporal_hierarchy)
+        temporal_index = read_temporal_index(layout, temporal, self.temporal_level)
+        # Grille fine détectée sur les lignes du niveau le plus fin, et calendrier des périodes
+        calendar = TemporalCalendar.build(
+            temporal, detect_fine_frequency(layout, temporal_index.row_levels, temporal), self.temporal_origin
+        )
+        # Noms des niveaux d'index autres que le niveau temporel
+        others = [name for position, name in enumerate(names) if position != temporal_index.position]
+        # Paramètres communs aux deux modes temporels
+        common = dict(
+            temporal=temporal,
+            temporal_level=self.temporal_level,
+            temporal_name=names[temporal_index.position],
+            calendar=calendar,
+            temporal_structure=temporal_structure(temporal),
+        )
+        # Mode temporel : chaque combinaison des autres niveaux est une copie
+        if self.hierarchy is None:
+            if self.node_level is not None:
+                raise ValueError("node_level only applies with a hierarchy")
+            return _Design(
+                mode=_TEMPORAL,
+                spec=None,
+                level_names=temporal.levels,
+                copy_names=_copy_names(tuple(others), tuple(range(len(others)))),
+                **common,
+            )
+        # Mode cross-temporel : hiérarchie lue sur les autres niveaux, niveaux croisés
+        spec = parse_hierarchy(self.hierarchy, [*others, layout.time_name], self.node_level, self.aggregate_label)
+        return _Design(
+            mode=_CROSS_TEMPORAL,
+            spec=spec,
+            level_names=tuple(
+                f"{cs_level}{CROSS_LEVEL_SEPARATOR}{te_level}"
+                for cs_level in spec.level_names
+                for te_level in temporal.levels
+            ),
+            copy_names=_copy_names(spec.copy_names, spec.copy_levels),
+            **common,
+        )
 
     # Méthode de prédiction
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -840,7 +1149,9 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
 
         Args:
             X: Base forecasts with the columns seen at fit; on each date of each
-                copy, one row per node of the hierarchy; rows in any order.
+                copy, one row per node of the hierarchy (with a temporal
+                hierarchy: in each period of its most aggregated level, one row
+                per node and per temporal node); rows in any order.
 
         Returns:
             Reconciled forecasts (mean), shape ``(n_samples,)``, in the row
@@ -850,8 +1161,9 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
             ImportError: If hierarchicalforecast is not installed.
             NotFittedError: If the adapter is not fitted.
             ValueError: If the columns differ from those seen at fit, if a node
-                or a copy is unknown, if a date lacks a node, or if a base
-                forecast is missing.
+                or a copy is unknown, if a date (or a period of a temporal
+                hierarchy) lacks a node, if a temporal row is misdated, or if a
+                base forecast is missing.
         """
         # Vérification que l'estimateur est entraîné
         check_is_fitted(self)
@@ -882,7 +1194,8 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
             intervals_method: Method of the intervals: ``'normality'`` (reads
                 the interval columns ``'<column>-lo-<level>'`` /
                 ``'<column>-hi-<level>'`` of ``X``), ``'bootstrap'``,
-                ``'permbu'`` or ``'conformal'`` (read the training rows).
+                ``'permbu'`` or ``'conformal'`` (read the training rows; refused
+                with a temporal hierarchy).
             num_samples: Number of coherent samples per row when positive
                 (with ``level``).
             seed: Seed of the random generator of the intervals and samples.
@@ -941,10 +1254,7 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         names = {f"{_MODEL_PREFIX}{i}": column for i, column in enumerate(self.forecast_columns_)}
         names[_COMBINED_INTERNAL] = COMBINED_NAME
         # Noms des colonnes des niveaux de copie (nom de substitution pour un niveau anonyme)
-        copy_names = [
-            f"level_{position}" if name is None else name
-            for position, name in zip(self._spec.copy_levels, self._spec.copy_names)
-        ]
+        copy_names = self._design.copy_names
         # Tableaux de diagnostics, un par copie
         pieces = []
         # Parcours des copies : renommage, typage et identification
@@ -977,7 +1287,11 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         Returns:
             Frame with one row per node (aggregates first) and one column per
             bottom node, labelled by the node labels (a ``MultiIndex`` of the
-            hierarchy levels for a list of levels).
+            hierarchy levels for a list of levels). With a temporal hierarchy,
+            the matrix covers one period of its most aggregated level: temporal
+            nodes are labelled ``'<level>-<rank in the period>'`` and, with a
+            cross-sectional hierarchy too, each row is a pair (cross-sectional
+            node, temporal node) of the Kronecker product of both matrices.
 
         Raises:
             NotFittedError: If the adapter is not fitted.
@@ -994,18 +1308,31 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         else:
             # Clé fournie, normalisée en tuple
             key = copy if isinstance(copy, tuple) else (copy,)
-        # Choix de la structure : copie ajustée, ou arbre commun pour une copie inconnue
-        record = self._copies.get(key)
-        if record is not None:
-            structure = record.structure
-        elif self._spec.kind == "tree":
-            structure = self._spec.tree
-        else:
+        # Choix des structures : copie ajustée, ou structures communes pour une copie inconnue
+        record = self._copies.get(key, self._shared)
+        if record is None:
             raise ValueError(f"Copy {copy!r} unknown at fit; copies: {_preview(self.copies_)}")
-        # Étiquettes des nœuds : index simple pour un arbre, MultiIndex pour des niveaux d'index
-        if self._spec.kind == "tree":
-            rows = pd.Index(list(structure.node_keys), name=self._spec.node_names[0])
+        structure = record.structure
+        # Mode et hiérarchie cross-section
+        design, spec = self._design, self._design.spec
+        # Étiquettes des nœuds selon le mode
+        if design.mode == _TEMPORAL:
+            # Temporel : nom du nœud temporel
+            rows = pd.Index(list(structure.node_keys), name=design.temporal_name)
         else:
-            rows = pd.MultiIndex.from_tuples(list(structure.node_keys), names=list(self._spec.node_names))
+            # Clé cross-section (et nœud temporel) de chaque nœud, en tuple d'étiquettes
+            keys = [key if design.mode == _CROSS_SECTION else key[0] for key in structure.node_keys]
+            labels = [key if spec.kind == "levels" else (key,) for key in keys]
+            names = list(spec.node_names)
+            # Cross-temporel : nœud temporel ajouté en dernier niveau
+            if design.mode == _CROSS_TEMPORAL:
+                labels = [(*label, key[1]) for label, key in zip(labels, structure.node_keys)]
+                names.append(design.temporal_name)
+            # Index simple pour un niveau unique, MultiIndex sinon
+            rows = (
+                pd.Index([label[0] for label in labels], name=names[0])
+                if len(names) == 1
+                else pd.MultiIndex.from_tuples(labels, names=names)
+            )
         # Colonnes étiquetées par les feuilles (dernières lignes)
         return pd.DataFrame(np.array(structure.summing), index=rows, columns=rows[-structure.n_bottom:])
