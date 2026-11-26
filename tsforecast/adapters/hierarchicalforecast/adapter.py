@@ -74,7 +74,16 @@ _CROSS_TEMPORAL = "cross_temporal"
 
 # Fonction d'import différé de hierarchicalforecast
 def _import_hierarchicalforecast() -> Tuple[ModuleType, ModuleType, ModuleType]:
-    """Import the core, methods and utils modules of hierarchicalforecast."""
+    """Import the core, methods and utils modules of hierarchicalforecast.
+
+    Returns:
+        The modules ``hierarchicalforecast.core``, ``hierarchicalforecast.methods``
+        and ``hierarchicalforecast.utils``.
+
+    Raises:
+        ImportError: If hierarchicalforecast is not installed (the message
+            names the extra to install).
+    """
     # Import différé : le paquet n'est exigé qu'à l'ajustement et à la prédiction
     return (
         import_optional("hierarchicalforecast.core", _EXTRA),
@@ -158,7 +167,17 @@ class _Design:
 
     # Données structurelles d'une copie depuis sa structure cross-section
     def record(self, cross_section: Optional[Structure]) -> _CopyFit:
-        """Return the structures of a copy whose cross-sectional structure is ``cross_section``."""
+        """Return the structures of a copy whose cross-sectional structure is ``cross_section``.
+
+        Args:
+            cross_section: Cross-sectional structure of the copy, None in the
+                temporal mode.
+
+        Returns:
+            The structures of the copy in the mode of the design: the
+            cross-sectional structure, the structure of one period, or their
+            cross-temporal product.
+        """
         # Mode cross-section : la structure cross-section est réconciliée telle quelle
         if self.mode == _CROSS_SECTION:
             return _CopyFit(structure=cross_section, cross_section=cross_section)
@@ -225,7 +244,17 @@ class _RowNodes:
 
 # Fonction de séparation des combinaisons de niveaux d'index en copies, nœuds et niveaux temporels
 def _split_entities(layout: TemporalLayout, design: _Design) -> _EntitySplit:
-    """Split each distinct combination of index levels into its copy, its node and its temporal level."""
+    """Split each distinct combination of index levels into its copy, its node and its temporal level.
+
+    Args:
+        layout: Temporal and entity structure of the rows.
+        design: Hierarchies read against the index levels.
+
+    Returns:
+        The copy keys, the copy code and the node key of each distinct
+        combination of index levels, and the temporal level of each row in
+        the temporal modes.
+    """
     # Niveau temporel de chaque combinaison et de chaque ligne (modes temporels)
     temporal = (
         read_temporal_index(layout, design.temporal, design.temporal_level) if design.temporal is not None else None
@@ -257,6 +286,16 @@ def _place_rows(
     layout: TemporalLayout, design: _Design, split: _EntitySplit, records: Sequence[_CopyFit]
 ) -> _RowNodes:
     """Locate the node and the reconciliation column of each row.
+
+    Args:
+        layout: Temporal and entity structure of the rows.
+        design: Hierarchies read against the index levels.
+        split: Copy and node of each distinct combination of index levels.
+        records: Structures of each copy, in the order of ``split.copy_keys``.
+
+    Returns:
+        The copy, the node, the level of the node and the reconciliation
+        column (date, or start of period in the temporal modes) of each row.
 
     Raises:
         ValueError: If a cross-sectional node is unknown to the structure of
@@ -320,14 +359,38 @@ def _place_rows(
 
 # Fonction de nommage des niveaux de copie
 def _copy_names(names: Sequence[Hashable], positions: Sequence[int]) -> Tuple[Hashable, ...]:
-    """Names of the copy levels, ``'level_<position>'`` for an anonymous level."""
+    """Names of the copy levels, ``'level_<position>'`` for an anonymous level.
+
+    Args:
+        names: Name of each copy level, None for an anonymous level.
+        positions: Position of each copy level in the index.
+
+    Returns:
+        The names of the copy levels, anonymous levels named after their position.
+    """
     # Nom de substitution pour un niveau sans nom
     return tuple(f"level_{position}" if name is None else name for name, position in zip(names, positions))
 
 
 # Fonction de résolution des colonnes de prévisions de base et d'intervalle
 def _resolve_columns(X: pd.DataFrame, forecast_columns: Any) -> Tuple[List[Hashable], Dict[tuple, Hashable]]:
-    """Return the base forecast columns and the interval columns ``(model, side, level) -> column``."""
+    """Return the base forecast columns and the interval columns ``(model, side, level) -> column``.
+
+    Args:
+        X: Base forecasts, one column per base model, with optional interval
+            columns ``'<model>-lo-<level>'`` and ``'<model>-hi-<level>'``.
+        forecast_columns: Base forecast columns chosen by the user, or None
+            for every column that is not an interval column.
+
+    Returns:
+        Pair ``(base, intervals)``: the base forecast columns, and the
+        dictionary ``(model, side, level)`` -> interval column restricted to
+        these base models.
+
+    Raises:
+        ValueError: If ``forecast_columns`` is not a list of distinct columns
+            of ``X``, or if no base forecast column is left or one is not numeric.
+    """
     # Colonnes de X
     columns = list(X.columns)
     # Dictionnaire colonne d'intervalle -> (modèle, borne, niveau de confiance)
@@ -369,7 +432,24 @@ def _resolve_columns(X: pd.DataFrame, forecast_columns: Any) -> Tuple[List[Hasha
 def _resolve_combination(
     model_combination: Any, level_names: Sequence[str], base: Sequence[Hashable]
 ) -> Optional[Any]:
-    """Return None, ``'mean'`` or the base column position of each level of the hierarchy."""
+    """Return None, ``'mean'`` or the base column position of each level of the hierarchy.
+
+    Args:
+        model_combination: The ``model_combination`` parameter: None,
+            ``'mean'`` or a mapping level -> base forecast column.
+        level_names: Names of the levels of the hierarchy.
+        base: Base forecast columns.
+
+    Returns:
+        None without combination, ``'mean'`` for the mean of the base
+        forecasts, or the ``np.intp`` array of the position in ``base`` of the
+        column chosen for each level, in the order of ``level_names``.
+
+    Raises:
+        ValueError: If several base columns are given without combination, if
+            a base column is named like the combined forecast, or if the
+            combination is not a valid name or mapping of the levels.
+    """
     # Cas sans combinaison : une seule prévision de base admise
     if model_combination is None:
         if len(base) != 1:
@@ -588,7 +668,20 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
     def _check_reconciler(
         reconciler: Any, structures: Sequence[Structure], level_names: Sequence[str], temporal: bool = False
     ) -> None:
-        """Refuse an object that is no reconciler, or a reconciler the structure or the mode does not allow."""
+        """Refuse an object that is no reconciler, or a reconciler the structure or the mode does not allow.
+
+        Args:
+            reconciler: Object to check.
+            structures: Structures of the copies to reconcile.
+            level_names: Names of the levels of the hierarchy.
+            temporal: Whether the reconciliation is temporal or cross-temporal.
+
+        Raises:
+            TypeError: If ``reconciler`` is not a hierarchicalforecast reconciler.
+            ValueError: If the reconciler learns from in-sample errors in a
+                temporal mode, needs a strictly hierarchical structure that a
+                copy lacks, or names a middle level absent from the hierarchy.
+        """
         # Import des méthodes de réconciliation et des utilitaires
         _, methods, utils = _import_hierarchicalforecast()
         # Vérification du type du réconciliateur
@@ -629,7 +722,20 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
 
     # Liste des réconciliateurs d'un appel
     def _resolve_reconcilers(self, reconcilers: Any) -> List[Any]:
-        """Return the reconcilers of a call, checked against the fitted structures."""
+        """Return the reconcilers of a call, checked against the fitted structures.
+
+        Args:
+            reconcilers: A reconciler, a list of reconcilers, or None for the
+                fitted ``reconciler_``.
+
+        Returns:
+            The list of reconcilers to run.
+
+        Raises:
+            TypeError: If an object is not a hierarchicalforecast reconciler.
+            ValueError: If the list is empty or a reconciler does not suit the
+                fitted structures or mode.
+        """
         # Par défaut : le réconciliateur ajusté
         if reconcilers is None:
             return [self.reconciler_]
@@ -649,7 +755,21 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
 
     # Localisation des lignes d'un jeu de données à prédire
     def _locate_rows(self, layout: TemporalLayout, needs_insample: bool) -> _RowNodes:
-        """Locate the copy, the node and the reconciliation column of each row of ``X``."""
+        """Locate the copy, the node and the reconciliation column of each row of ``X``.
+
+        Args:
+            layout: Temporal and entity structure of the rows of ``X``.
+            needs_insample: Whether the reconciliation reads the training rows
+                of each copy.
+
+        Returns:
+            The copy, the node, the level of the node and the reconciliation
+            column of each row.
+
+        Raises:
+            ValueError: If a copy is unknown at fit while its nodes or its
+                training rows are needed, or if a row is off its structure.
+        """
         # Copies, nœuds et niveaux temporels des combinaisons de niveaux d'index de X
         split = _split_entities(layout, self._design)
         # Données structurelles de chaque copie de X
@@ -687,6 +807,18 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         ``which='target'``: the forecast that ``predict`` reconciles (the
         combined forecast, or the single base column); ``'all'``: every base
         column, then the combined forecast.
+
+        Args:
+            X: Base forecasts of the rows.
+            columns: Base forecast columns.
+            combination: Resolved combination: None, ``'mean'`` or the column
+                position of each level.
+            row_level: Position of the level of the node of each row.
+            which: ``'target'`` or ``'all'``.
+
+        Returns:
+            Triples ``(name, internal name, values)``, one per model, the
+            values aligned with the rows of ``X``.
         """
         # Matrice des prévisions de base (lignes × modèles)
         base = X[list(columns)].to_numpy(dtype=np.float64)
@@ -710,7 +842,15 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
 
     # Colonnes d'intervalle des modèles pour les intervalles par loi normale
     def _paired_levels(self, column: Hashable) -> List[str]:
-        """Levels for which ``X`` holds both interval columns of a base column."""
+        """Levels for which ``X`` holds both interval columns of a base column.
+
+        Args:
+            column: Base forecast column.
+
+        Returns:
+            The confidence levels (as written in the column names) with both a
+            ``'-lo-'`` and a ``'-hi-'`` column for ``column``.
+        """
         # Niveaux de confiance disposant des deux bornes
         return [
             level
@@ -722,7 +862,23 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
     def _interval_values(
         self, X: pd.DataFrame, models: Sequence[tuple], row_level: np.ndarray
     ) -> Dict[str, np.ndarray]:
-        """Interval columns of the base models, named after their internal names."""
+        """Interval columns of the base models, named after their internal names.
+
+        Args:
+            X: Base forecasts and interval columns of the rows.
+            models: Triples ``(name, internal name, values)`` of the reconciled models.
+            row_level: Position of the level of the node of each row.
+
+        Returns:
+            Dictionary ``'<internal>-<side>-<level>'`` -> interval bound of
+            each row; a combination by level takes the bounds of the column
+            chosen for the level of each row.
+
+        Raises:
+            ValueError: If a base model lacks its interval columns, if the
+                combined forecast is a mean of models, or if the columns chosen
+                by the combination share no confidence level.
+        """
         # Dictionnaire nom interne de la colonne d'intervalle -> valeurs
         values = {}
         # Parcours des modèles réconciliés
@@ -787,7 +943,33 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
         diagnostics: bool = False,
         atol: float = 1e-6,
     ) -> Tuple[pd.DataFrame, np.ndarray, List[str], List[Tuple[tuple, pd.DataFrame]]]:
-        """Reconcile the rows of ``X``; return ``X``, the values, their names and the diagnostics per copy."""
+        """Reconcile the rows of ``X``, copy by copy.
+
+        Args:
+            X: Base forecasts of the rows to reconcile.
+            reconcilers: Reconcilers to run.
+            which: ``'target'`` for the forecast that ``predict`` reconciles,
+                ``'all'`` for every base model and the combined forecast.
+            level: Confidence levels of the prediction intervals, or None.
+            intervals_method: Method of the prediction intervals
+                (``'normality'``, ``'bootstrap'``, ``'permbu'``, ``'conformal'``).
+            num_samples: Number of samples drawn by sampling methods.
+            seed: Seed of the sampling methods.
+            diagnostics: Whether to compute the coherence diagnostics of each copy.
+            atol: Absolute tolerance of the coherence diagnostics.
+
+        Returns:
+            Quadruple ``(X, values, names, diagnostics)``: the validated ``X``,
+            the reconciled values (one row per row of ``X``, one column per
+            output), the public name of each output column, and the pairs
+            ``(copy key, diagnostics frame)``.
+
+        Raises:
+            ValueError: If the intervals need in-sample errors in a temporal
+                mode, if a base forecast is missing or infinite, if a node has no
+                training row while the reconciliation needs them, or if the
+                bootstrap has too few training dates.
+        """
         # Import différé du moteur de réconciliation
         core, _, _ = _import_hierarchicalforecast()
         # Vérification de X et analyse de son index (aucune grille exigée)
@@ -903,7 +1085,15 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
     # Nom public d'une colonne de hierarchicalforecast
     @staticmethod
     def _public_name(column: str, names: Mapping[str, Hashable]) -> str:
-        """Replace the internal model name that prefixes a column with the name of the base model."""
+        """Replace the internal model name that prefixes a column with the name of the base model.
+
+        Args:
+            column: Output column of hierarchicalforecast (``'<internal>/<Reconciler>...'``).
+            names: Dictionary internal model name -> base model name.
+
+        Returns:
+            The column name with its prefix replaced by the base model name.
+        """
         # Découpage du nom '<modèle interne>/<réconciliateur...>'
         internal, separator, rest = column.partition("/")
         # Nom inchangé pour un modèle interne inconnu
@@ -914,7 +1104,18 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
     def _check_complete(
         structure: Structure, nodes: np.ndarray, dates: pd.DatetimeIndex, copy_key: tuple, temporal: bool = False
     ) -> None:
-        """Refuse a date, or a period of the most aggregated temporal level, that lacks a node of the copy."""
+        """Refuse a date, or a period of the most aggregated temporal level, that lacks a node of the copy.
+
+        Args:
+            structure: Structure of the copy.
+            nodes: Node position of each row of the copy.
+            dates: Reconciliation column of each row (date, or start of period).
+            copy_key: Key of the copy, for the error message.
+            temporal: Whether the columns are periods of a temporal hierarchy.
+
+        Raises:
+            ValueError: If a date or a period has no row for some node of the copy.
+        """
         # Code de la colonne de chaque ligne et calendrier des colonnes distinctes
         date_codes, calendar = pd.factorize(dates)
         # Nombre de lignes par date
@@ -1089,7 +1290,19 @@ class HierarchicalForecastAdapter(RegressorMixin, BaseEstimator):
 
     # Construction du mode de réconciliation depuis les niveaux d'index
     def _build_design(self, layout: TemporalLayout) -> _Design:
-        """Read the hierarchies against the index levels and choose the mode of reconciliation."""
+        """Read the hierarchies against the index levels and choose the mode of reconciliation.
+
+        Args:
+            layout: Temporal and entity structure of the training rows.
+
+        Returns:
+            The design: cross-sectional mode without ``temporal_hierarchy``,
+            temporal mode without ``hierarchy``, cross-temporal mode with both.
+
+        Raises:
+            ValueError: If a hierarchy does not match the index levels, or if
+                ``node_level`` is given without ``hierarchy``.
+        """
         # Noms des niveaux d'index précédant la date
         names = list(layout.entity_names)
         # Mode cross-section : hiérarchie lue sur tous les niveaux d'index

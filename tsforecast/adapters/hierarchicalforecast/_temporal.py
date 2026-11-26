@@ -68,12 +68,22 @@ class TemporalSpec:
 
     # Nombre de nœuds de chaque niveau dans une période
     def counts(self) -> np.ndarray:
-        """Number of nodes of each level in one period (``np.intp`` array)."""
+        """Number of nodes of each level in one period.
+
+        Returns:
+            ``np.intp`` array of the node count of each level, from the most
+            aggregated level to the finest.
+        """
         return np.array([self.period_steps // step for step in self.steps], dtype=np.intp)
 
     # Position du premier nœud de chaque niveau dans la structure temporelle
     def offsets(self) -> np.ndarray:
-        """Position of the first node of each level in the temporal structure (``np.intp`` array)."""
+        """Position of the first node of each level in the temporal structure.
+
+        Returns:
+            ``np.intp`` array of the position of the first node of each level,
+            from the most aggregated level to the finest.
+        """
         # Cumul des effectifs des niveaux précédents
         return np.concatenate([[0], np.cumsum(self.counts())[:-1]]).astype(np.intp)
 
@@ -361,7 +371,20 @@ class TemporalCalendar:
 
     # Grilles fines des périodes contenant des dates
     def _place(self, dates: pd.DatetimeIndex) -> Tuple[List[pd.Timestamp], np.ndarray, Dict[pd.Timestamp, pd.DatetimeIndex]]:
-        """Return the period start and the fine position of each date, and the grid of each period."""
+        """Return the period start and the fine position of each date, and the grid of each period.
+
+        Args:
+            dates: Dates of the rows of the finest temporal level.
+
+        Returns:
+            Triple ``(starts, positions, grids)``: start of the period of each
+            date, position of each date in the fine grid of its period, and the
+            dictionary period start -> fine grid of the period.
+
+        Raises:
+            ValueError: If the fine grid does not tile a period with the
+                expected number of steps, or if a date is off the fine grid.
+        """
         # Dictionnaire début de période -> dates de la grille fine de la période
         grids: Dict[pd.Timestamp, pd.DatetimeIndex] = {}
         # Début de période et position fine de chaque date

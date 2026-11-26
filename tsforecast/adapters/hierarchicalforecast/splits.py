@@ -29,7 +29,19 @@ from tsforecast.adapters.hierarchicalforecast._temporal import (
 
 # Fonction auxiliaire de contrôle d'un entier
 def _check_integer(value: Any, name: str, minimum: int) -> int:
-    """Return ``value`` as an ``int`` if it is an integer at least ``minimum``."""
+    """Return ``value`` as an ``int`` if it is an integer at least ``minimum``.
+
+    Args:
+        value: Value of the parameter.
+        name: Name of the parameter, for the error message.
+        minimum: Smallest accepted value.
+
+    Returns:
+        ``value`` converted to ``int``.
+
+    Raises:
+        ValueError: If ``value`` is a boolean, not an integer, or below ``minimum``.
+    """
     # Refus des booléens, des non-entiers et des valeurs trop petites
     if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
         raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")

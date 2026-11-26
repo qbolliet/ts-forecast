@@ -77,7 +77,15 @@ def import_optional(module: str, extra: str) -> ModuleType:
 
 # Fonction auxiliaire de description courte d'étiquettes
 def _preview(labels: Any) -> str:
-    """Render the first labels of a sequence for an error message."""
+    """Render the first labels of a sequence for an error message.
+
+    Args:
+        labels: Labels to render, in any iterable.
+
+    Returns:
+        The ``repr`` of the first labels, comma-separated, followed by
+        ``", ..."`` when some labels are left out.
+    """
     labels = list(labels)
     shown = ", ".join(repr(label) for label in labels[:_MAX_LABELS_IN_MESSAGE])
     return shown + (", ..." if len(labels) > _MAX_LABELS_IN_MESSAGE else "")
@@ -86,6 +94,15 @@ def _preview(labels: Any) -> str:
 # Fonction auxiliaire de détection d'une fréquence commune aux entités
 def _detect_common_frequency(dates: pd.DatetimeIndex, codes: np.ndarray, n_entities: int) -> Optional[str]:
     """Detect the grid frequency shared by the entities, ignoring single-date entities.
+
+    Args:
+        dates: Date of each row.
+        codes: Entity code of each row, aligned with ``dates``.
+        n_entities: Number of distinct entity codes.
+
+    Returns:
+        The full pandas alias of the common frequency, or None when no entity
+        has a detectable frequency.
 
     Raises:
         ValueError: If two entities are on different grids.

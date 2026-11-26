@@ -46,7 +46,16 @@ _MODE_ATTRIBUTES = ("model_", "entity_models_", "series_", "covariates_")
 
 # Fonction auxiliaire de comparaison de deux valeurs de paramètre
 def _same_value(left: Any, right: Any) -> bool:
-    """Whether two parameter values are the same object or compare equal."""
+    """Whether two parameter values are the same object or compare equal.
+
+    Args:
+        left: First parameter value.
+        right: Second parameter value.
+
+    Returns:
+        True when the values are the same object or compare equal; False when
+        they differ or their comparison is ambiguous (arrays).
+    """
     if left is right:
         return True
     try:
@@ -59,6 +68,14 @@ def _same_value(left: Any, right: Any) -> bool:
 # Fonction auxiliaire de détermination du mode de prévision d'un modèle darts
 def _forecasting_mode(model: Any) -> str:
     """Return ``'row'``, ``'global'`` or ``'local'`` for a darts model, refusing other objects.
+
+    Args:
+        model: Object passed as the ``model`` parameter of the adapter.
+
+    Returns:
+        ``'row'`` for a global model predicting each row from its own
+        features, ``'global'`` for another global model, ``'local'`` for a
+        local forecasting model.
 
     Raises:
         TypeError: If ``model`` is not a darts forecasting model, or is a classifier.
@@ -99,6 +116,10 @@ def _forecasting_mode(model: Any) -> str:
 # Fonction auxiliaire de découpage des lignes en suites contiguës par entité
 def _contiguous_runs(layout: TemporalLayout, freq: str) -> List[np.ndarray]:
     """Split the rows into runs of consecutive grid dates of one entity.
+
+    Args:
+        layout: Temporal and entity structure of the rows.
+        freq: Pandas alias of the grid frequency.
 
     Returns:
         Row positions of each run, sorted by date; runs ordered by entity
@@ -393,21 +414,42 @@ class DartsAdapter(RegressorMixin, BaseEstimator):
 
     # Nom du modèle ajusté, pour les messages d'erreur
     def _model_name(self) -> str:
-        """Class name of the fitted darts model."""
+        """Class name of the fitted darts model.
+
+        Returns:
+            Class name of ``model_``, or of the first entity model in local mode.
+        """
         fitted = self.model_ if hasattr(self, "model_") else self.entity_models_[0]
         return type(fitted).__name__
 
     # Construction d'une série darts
     @staticmethod
     def _series(dates: pd.DatetimeIndex, values: np.ndarray, freq: str) -> Any:
-        """Build a darts ``TimeSeries`` from dates on the grid and a 2-D array."""
+        """Build a darts ``TimeSeries`` from dates on the grid and a 2-D array.
+
+        Args:
+            dates: Consecutive dates of the grid.
+            values: Values of shape ``(len(dates), n_components)``.
+            freq: Pandas alias of the grid frequency.
+
+        Returns:
+            The darts ``TimeSeries`` of ``values`` at ``dates``.
+        """
         TimeSeries = import_optional("darts", _EXTRA).TimeSeries
         return TimeSeries.from_times_and_values(pd.DatetimeIndex(dates), values, freq=freq)
 
     # Rôles des covariables lus dans les décalages d'un modèle global
     @staticmethod
     def _covariate_roles(model: Any) -> Tuple[bool, bool]:
-        """Whether the lags of a global model read past and future covariates."""
+        """Whether the lags of a global model read past and future covariates.
+
+        Args:
+            model: Darts global forecasting model.
+
+        Returns:
+            Pair ``(uses_past, uses_future)`` of booleans read from
+            ``model.extreme_lags``.
+        """
         lags = tuple(model.extreme_lags)
         return lags[2] is not None, lags[4] is not None
 
@@ -415,7 +457,14 @@ class DartsAdapter(RegressorMixin, BaseEstimator):
     def _fit_row(
         self, layout: TemporalLayout, runs: List[np.ndarray], targets: np.ndarray, features: np.ndarray
     ) -> None:
-        """Fit the row-wise model on one series per run of consecutive rows."""
+        """Fit the row-wise model on one series per run of consecutive rows.
+
+        Args:
+            layout: Temporal and entity structure of the training rows.
+            runs: Row positions of each run of consecutive grid dates.
+            targets: Target values, of shape ``(n_rows, n_targets)``.
+            features: Feature values, of shape ``(n_rows, n_features)``.
+        """
         # Extraction de la fréquence
         freq = layout.freq
         # Trous dans les lignes : une série par suite contiguë, aucun échantillon à cheval
@@ -437,7 +486,16 @@ class DartsAdapter(RegressorMixin, BaseEstimator):
         features: np.ndarray,
         X: pd.DataFrame,
     ) -> None:
-        """Fit the global model on one series per entity, ``X`` in the roles of its lags."""
+        """Fit the global model on one series per entity, ``X`` in the roles of its lags.
+
+        Args:
+            layout: Temporal and entity structure of the training rows.
+            runs: Row positions of the run of each entity (one run per entity).
+            targets: Target values, of shape ``(n_rows, n_targets)``.
+            features: Feature values, of shape ``(n_rows, n_features)``.
+            X: Training features, kept as covariates for the predictions when
+                the model reads them.
+        """
         # Extraction de la fréquence
         freq = layout.freq
         # Construction de la série pour chaque run
@@ -476,7 +534,20 @@ class DartsAdapter(RegressorMixin, BaseEstimator):
         features: np.ndarray,
         X: pd.DataFrame,
     ) -> None:
-        """Fit one copy of the local model per entity, ``X`` as future covariates when supported."""
+        """Fit one copy of the local model per entity, ``X`` as future covariates when supported.
+
+        Args:
+            layout: Temporal and entity structure of the training rows.
+            runs: Row positions of the run of each entity (one run per entity).
+            targets: Target values, of shape ``(n_rows, n_targets)``.
+            features: Feature values, of shape ``(n_rows, n_features)``.
+            X: Training features, kept as covariates for the predictions when
+                the model reads future covariates.
+
+        Raises:
+            ValueError: If the target has several columns and the model is
+                univariate.
+        """
         # Extraction de la fréquence
         freq = layout.freq
         # Vérification que la cible est univariée ou supportée par le modèle
@@ -507,6 +578,14 @@ class DartsAdapter(RegressorMixin, BaseEstimator):
         With no target lag, the model never reads the values of the
         placeholder series (they are missing values): only its end date,
         which sets where the forecast starts, and the covariates matter.
+
+        Args:
+            layout: Temporal and entity structure of the rows to predict.
+            features: Feature values, of shape ``(n_rows, n_features)``.
+            n_targets: Number of target columns.
+
+        Returns:
+            Predictions of shape ``(n_rows, n_targets)``, in the order of the rows.
         """
         # Extraction de la fréquence
         freq = self.layout_.freq
@@ -539,7 +618,22 @@ class DartsAdapter(RegressorMixin, BaseEstimator):
     def _entity_covariates(
         self, code: int, train_features: np.ndarray, dates: pd.DatetimeIndex, features: np.ndarray
     ) -> Any:
-        """Join the training and predicted features of an entity; refuse missing grid dates."""
+        """Join the training and predicted features of an entity; refuse missing grid dates.
+
+        Args:
+            code: Entity code in the training layout.
+            train_features: Training feature values of every training row.
+            dates: Dates of the rows of the entity to predict.
+            features: Feature values of the rows to predict, aligned with ``dates``.
+
+        Returns:
+            Darts ``TimeSeries`` of the features of the entity, from its first
+            training date to its last date to predict.
+
+        Raises:
+            ValueError: If a grid date between the end of training and a date
+                to predict has no row in ``X``.
+        """
         # Extraction de la fréquence
         freq = self.layout_.freq
         # Observations d'entrainement
@@ -569,7 +663,22 @@ class DartsAdapter(RegressorMixin, BaseEstimator):
     def _predict_extrapolated(
         self, layout: TemporalLayout, codes: np.ndarray, features: np.ndarray, n_targets: int
     ) -> np.ndarray:
-        """Forecast each entity from its last training date and extract the rows of ``X``."""
+        """Forecast each entity from its last training date and extract the rows of ``X``.
+
+        Args:
+            layout: Temporal and entity structure of the rows to predict.
+            codes: Training entity code of each row to predict.
+            features: Feature values, of shape ``(n_rows, n_features)``.
+            n_targets: Number of target columns.
+
+        Returns:
+            Predictions of shape ``(n_rows, n_targets)``, in the order of the rows.
+
+        Raises:
+            ValueError: If a row is at or before the last training date of its
+                entity, or if covariates are missing between the end of
+                training and a date to predict.
+        """
         # Extraction de la fréquence
         freq = self.layout_.freq
         # Nombre de pas de chaque ligne après la dernière date d'entraînement de son entité

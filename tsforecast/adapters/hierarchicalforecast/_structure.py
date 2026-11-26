@@ -29,7 +29,15 @@ LEVEL_NAME_SEPARATOR = "/"
 
 # Fonction auxiliaire de tri déterministe de clés
 def _sorted(keys: Iterable[Hashable]) -> List[Hashable]:
-    """Sort keys when they are comparable, keep their order otherwise."""
+    """Sort keys when they are comparable, keep their order otherwise.
+
+    Args:
+        keys: Keys to sort, in any iterable.
+
+    Returns:
+        The sorted keys, or the keys in their input order when they cannot be
+        compared with each other (mixed types).
+    """
     # Matérialisation des clés : un générateur ne se parcourt qu'une fois
     keys = list(keys)
     # Tri des clés : ordre déterministe, indépendant de celui des lignes
@@ -42,7 +50,15 @@ def _sorted(keys: Iterable[Hashable]) -> List[Hashable]:
 
 # Fonction auxiliaire de contrôle d'une étiquette
 def _is_missing(label: Any) -> bool:
-    """Whether a scalar label is missing (None, NaN, NaT)."""
+    """Whether a scalar label is missing (None, NaN, NaT).
+
+    Args:
+        label: Index label.
+
+    Returns:
+        True for a missing scalar label; False otherwise, non-scalar labels
+        (tuples, lists) included.
+    """
     # Réduction du test de valeur manquante à un booléen
     try:
         return bool(pd.isna(label))
@@ -172,6 +188,9 @@ class Structure:
         Reconcilers that walk down the levels (top-down, middle-out) read the
         finest level as the bottom of the hierarchy: a tree whose leaves lie
         at different depths does not satisfy this condition.
+
+        Returns:
+            True when the nodes of the finest level are exactly the bottom nodes.
         """
         # Positions des nœuds du niveau le plus fin
         finest = np.flatnonzero(self.node_levels == len(self.levels) - 1)
@@ -188,7 +207,18 @@ def _make_structure(
     levels: Sequence[str],
     node_levels: Sequence[int],
 ) -> Structure:
-    """Build a ``Structure`` with read-only arrays."""
+    """Build a ``Structure`` with read-only arrays.
+
+    Args:
+        node_keys: Key of each node, aggregates first, bottom nodes last.
+        summing: Summing matrix, one row per node and one column per bottom node.
+        levels: Names of the levels of the hierarchy, from top to bottom.
+        node_levels: Position in ``levels`` of the level of each node.
+
+    Returns:
+        The frozen structure, with read-only copies of ``summing`` and
+        ``node_levels``.
+    """
     # Copie de la matrice en lecture seule : une structure ajustée n'est jamais modifiée
     summing = np.array(summing, dtype=np.float64)
     summing.setflags(write=False)
@@ -297,6 +327,14 @@ def tree_structure(tree: Mapping) -> Structure:
 
     # Fonction récursive de collecte des feuilles d'un nœud
     def collect(node: Hashable) -> List[int]:
+        """Return the summing-matrix columns of the leaves below a node.
+
+        Args:
+            node: Node of the tree.
+
+        Returns:
+            Columns of the leaves below ``node`` (the node itself for a leaf).
+        """
         # Calcul au premier passage seulement
         if node not in below:
             if node in leaf_position:
@@ -415,7 +453,15 @@ class HierarchySpec:
 
     # Niveau de la hiérarchie d'une clé de nœud
     def entry_of(self, node_key: tuple) -> int:
-        """Return the position in ``entries`` of the level of a node key, ``-1`` if none."""
+        """Return the position in ``entries`` of the level of a node key, ``-1`` if none.
+
+        Args:
+            node_key: Labels of a node on the node levels of the index.
+
+        Returns:
+            Position of the level whose levels are exactly the labels of
+            ``node_key`` that differ from the aggregate label, or ``-1``.
+        """
         # Positions des niveaux renseignés (différents de l'étiquette d'agrégat)
         present = tuple(
             position for position, label in enumerate(node_key) if not _same_label(label, self.aggregate_label)
@@ -429,7 +475,20 @@ class HierarchySpec:
 
     # Structure d'une hiérarchie donnée par des niveaux d'index
     def _levels_structure(self, node_keys: Sequence[tuple]) -> Structure:
-        """Structure implied by the bottom nodes of a hierarchy given by index levels."""
+        """Structure implied by the bottom nodes of a hierarchy given by index levels.
+
+        Args:
+            node_keys: Distinct node keys observed in the rows.
+
+        Returns:
+            The structure whose bottom nodes are the observed keys of the
+            finest level and whose aggregates are their projections on each
+            coarser level.
+
+        Raises:
+            ValueError: If a key matches no level, if no key is on the finest
+                level, or if an observed aggregate has no bottom node below it.
+        """
         # Position du niveau le plus fin
         finest = len(self.entries) - 1
         # Niveau de la hiérarchie de chaque clé observée
@@ -492,7 +551,16 @@ class HierarchySpec:
 
 # Fonction auxiliaire de comparaison d'étiquettes
 def _same_label(label: Any, reference: Any) -> bool:
-    """Whether a label equals the aggregate label."""
+    """Whether a label equals the aggregate label.
+
+    Args:
+        label: Index label.
+        reference: Aggregate label.
+
+    Returns:
+        True when the labels compare equal; False when they differ or cannot
+        be compared (composite label).
+    """
     # Réduction de la comparaison à un booléen
     try:
         return bool(label == reference)
@@ -503,7 +571,21 @@ def _same_label(label: Any, reference: Any) -> bool:
 
 # Fonction auxiliaire de résolution d'un niveau d'index
 def _level_position(level: Any, names: Sequence[Hashable], n_levels: int) -> int:
-    """Position of a non-date index level given by name or by position."""
+    """Position of a non-date index level given by name or by position.
+
+    Args:
+        level: Name of the level, or its position (negative positions count
+            from the last non-date level).
+        names: Names of the non-date index levels.
+        n_levels: Number of non-date index levels.
+
+    Returns:
+        Non-negative position of the level among the non-date levels.
+
+    Raises:
+        ValueError: If ``level`` is neither a valid position nor the name of a
+            non-date level.
+    """
     # Cas d'une position : entier qui n'est pas le nom d'un niveau
     if isinstance(level, (int, np.integer)) and not isinstance(level, bool) and level not in names:
         # Position négative comptée depuis le dernier niveau précédant la date

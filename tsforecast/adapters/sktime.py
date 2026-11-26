@@ -35,13 +35,30 @@ _DEFAULT_TARGET_NAME = "target"
 
 # Fonction auxiliaire de lecture d'un tag sktime
 def _tag(forecaster: Any, name: str, default: Any) -> Any:
-    """Read a tag of a sktime forecaster, with a default when the tag is unknown."""
+    """Read a tag of a sktime forecaster, with a default when the tag is unknown.
+
+    Args:
+        forecaster: Sktime forecaster.
+        name: Name of the tag (``'capability:exogenous'``, ...).
+        default: Value returned when the forecaster does not define the tag.
+
+    Returns:
+        The value of the tag, or ``default``.
+    """
     return forecaster.get_tag(name, tag_value_default=default, raise_error=False)
 
 
 # Fonction auxiliaire : bornes temporelles et nombre de lignes de chaque entité
 def _entity_bounds(layout: TemporalLayout) -> Tuple[pd.DatetimeIndex, pd.DatetimeIndex, np.ndarray]:
-    """Return the first date, the last date and the row count of each entity, in code order."""
+    """Return the first date, the last date and the row count of each entity, in code order.
+
+    Args:
+        layout: Temporal and entity structure of the rows.
+
+    Returns:
+        Triple ``(first, last, counts)``: first and last date of each entity
+        and its number of rows, indexed by entity code.
+    """
     first = pd.Series(layout.dates).groupby(layout.codes, sort=True).min()
     return (
         pd.DatetimeIndex(first),
@@ -52,14 +69,31 @@ def _entity_bounds(layout: TemporalLayout) -> Tuple[pd.DatetimeIndex, pd.Datetim
 
 # Fonction auxiliaire : index d'origine des entités, un libellé par code
 def _entity_labels(index: pd.Index, layout: TemporalLayout) -> pd.Index:
-    """Return the entity part of ``index`` for each entity code (dtypes of the input kept)."""
+    """Return the entity part of ``index`` for each entity code (dtypes of the input kept).
+
+    Args:
+        index: Panel ``MultiIndex`` of the rows described by ``layout``.
+        layout: Temporal and entity structure of ``index``.
+
+    Returns:
+        Index of the entity levels, one entry per entity code, in code order.
+    """
     _, first_rows = np.unique(layout.codes, return_index=True)
     return index[first_rows].droplevel(-1)
 
 
 # Fonction auxiliaire : index complet de la grille de chaque entité
 def _complete_index(index: pd.Index, layout: TemporalLayout) -> pd.Index:
-    """Index covering every grid date between the first and the last date of each entity."""
+    """Index covering every grid date between the first and the last date of each entity.
+
+    Args:
+        index: Index of the rows described by ``layout``.
+        layout: Temporal and entity structure of ``index``; its frequency is known.
+
+    Returns:
+        A ``DatetimeIndex`` for a time series, or a panel ``MultiIndex`` with
+        the names of ``index``, dates in the unit of the input.
+    """
     first, last, _ = _entity_bounds(layout)
     grid = pd.date_range(first.min(), last.max(), freq=to_pandas_freq(layout.freq))
     start, stop = grid.get_indexer(first), grid.get_indexer(last)
@@ -76,7 +110,16 @@ def _complete_index(index: pd.Index, layout: TemporalLayout) -> pd.Index:
 
 # Fonction auxiliaire : fréquence posée sur un index de dates contigu
 def _with_freq(obj: Union[pd.Series, pd.DataFrame], freq: str) -> Union[pd.Series, pd.DataFrame]:
-    """Set ``freq`` on the ``DatetimeIndex`` of ``obj`` when its dates are contiguous on the grid."""
+    """Set ``freq`` on the ``DatetimeIndex`` of ``obj`` when its dates are contiguous on the grid.
+
+    Args:
+        obj: Series or frame indexed by dates.
+        freq: Pandas alias of the grid frequency.
+
+    Returns:
+        ``obj`` with ``freq`` set on its index, or ``obj`` unchanged when its
+        index is a ``MultiIndex``, has fewer than two dates or skips grid dates.
+    """
     dates = obj.index
     if isinstance(dates, pd.MultiIndex) or len(dates) < 2:
         return obj
@@ -236,7 +279,16 @@ class SktimeAdapter(RegressorMixin, BaseEstimator):
 
     # Contrôle des dates de X exigées par un forecaster à X contigu
     def _check_contiguous_X(self, layout: TemporalLayout, codes: np.ndarray) -> None:
-        """Refuse rows of ``X`` that leave grid dates without ``X`` after the training data."""
+        """Refuse rows of ``X`` that leave grid dates without ``X`` after the training data.
+
+        Args:
+            layout: Temporal and entity structure of the rows to predict.
+            codes: Training entity code of each row to predict.
+
+        Raises:
+            ValueError: If an entity has no row of ``X`` on a grid date between
+                the end of its training data and its last date to predict.
+        """
         # Extraction de la fréquence
         freq = self.layout_.freq
         # Extraction de la dernière date d'entrainement
@@ -271,7 +323,18 @@ class SktimeAdapter(RegressorMixin, BaseEstimator):
     def _predict_per_entity(
         self, X: pd.DataFrame, layout: TemporalLayout, codes: np.ndarray, columns: List[Any]
     ) -> np.ndarray:
-        """Forecast each entity of ``X`` with its own dates and features."""
+        """Forecast each entity of ``X`` with its own dates and features.
+
+        Args:
+            X: Features of the rows to predict.
+            layout: Temporal and entity structure of ``X``.
+            codes: Training entity code of each row of ``X``.
+            columns: Target columns to extract from the sktime forecasts.
+
+        Returns:
+            Predictions of shape ``(len(X), len(columns))``, in the order of
+            the rows of ``X``.
+        """
         # Importation de l'horizon de prévision de sktime
         ForecastingHorizon = import_optional("sktime.forecasting.base", _EXTRA).ForecastingHorizon
         # Extraction des prédicteurs
