@@ -16,9 +16,11 @@
 
 ## 1. Objectif et principe central
 
-Envelopper des modèles de paquets tiers (sktime, darts, hierarchicalforecast, opera, modèles de
-fondation pour séries temporelles publiés sur Hugging Face) dans des estimateurs **compatibles
-sklearn**, utilisables tels quels avec :
+Envelopper des modèles de paquets tiers (sktime, darts, hierarchicalforecast, modèles de
+fondation pour séries temporelles publiés sur Hugging Face ; AutoGluon dès qu'il supportera
+pandas 3, § 5.6) dans des estimateurs **compatibles sklearn**, et fournir une agrégation d'experts
+en ligne **native** (BOA, MLpol, § 5.4) qui combine leurs prévisions ; le tout utilisable tel quel
+avec :
 
 - `sklearn.model_selection.cross_val_score`, `cross_validate`, `cross_val_predict`, `GridSearchCV` ;
 - les splitters de `tsforecast.crossvals` (`TSOutOfSampleSplit`, `PanelOutOfSampleSplit`, ...) ;
@@ -106,7 +108,8 @@ non réalignée sur `X`. **Réécrit en session 6** (sous-paquet, mode cross-sec
 - `mixture_` et `is_fitted_` posés dans `__init__` (violation sklearn : `clone`,
   `check_is_fitted`) ; noms d'algorithmes faux dans la docstring (opera ne connaît que `BOA`,
   `MLpol`, `MLprod`, `FTRL`) ; `Mixture` exige des experts en `pandas.DataFrame` (un `ndarray` lève
-  `TypeError`) ; aucun support panel.
+  `TypeError`) ; aucun support panel. **Abandonné le 2026-11-26 (AD-18)** : remplacé par une
+  agrégation native, sans dépendance à opera (§ 5.4).
 
 **Notebook `4 - QB - Adapters.ipynb`**
 - Section 2 : `X = X.shift(-horizon)` sur **tout le panel** (décalage inter-entités) et dans le
@@ -120,10 +123,12 @@ non réalignée sur `X`. **Réécrit en session 6** (sous-paquet, mode cross-sec
 | Paquet | Distribution | Remarques |
 |---|---|---|
 | hierarchicalforecast | PyPI | `aggregate(df, spec)` (spec : liste de listes de colonnes), `aggregate_temporal(df, spec)` (spec : `{nom: nb de pas}`), `get_cross_temporal_tags`, `HierarchicalReconciliation(reconcilers).reconcile(Y_hat_df, S_df, tags, Y_df=None, temporal=False, ...)`. Colonnes de sortie `<modèle>/<Réconciliateur>[_method-<m>]`. La réconciliation temporelle ne supporte pas les méthodes *insample* (`mint_shrink`, ...). Le tutoriel cross-temporel fait deux appels séparés (cross-section, puis temporel sur toutes les séries cross-section) et n'évalue qu'avec des *tags* cross-temporels. **Vérifié en session 6 (1.5.3)** : `reconcile` mute les réconciliateurs (`fitted`, `P`, `W`, `y_hat`, `sampler`) et trie `level` en place ; `unique_id` et colonnes de `S_df` doivent être des chaînes ; sortie triée par ordre de `S` puis `ds` ; un modèle dont le nom contient `-lo`, `-hi` ou `-median` est écarté en silence ; `Y_df` à trous accepté (`is_balanced=False`, NaN gérés par `mint_shrink`), `Y_hat_df` rectangulaire exigé ; intervalles `normality` lus sur des colonnes `<modèle>-lo-<niveau>` / `-hi-` de `Y_hat_df`, `bootstrap` par blocs d'autant de dates insample consécutives que de dates à réconcilier ; `TopDown` / `MiddleOut` faux si les feuilles ne sont pas toutes au niveau le plus fin des *tags* ; **aucune réconciliation cross-temporelle native** (seulement `temporal=True`). |
-| opera (`Dralliag/opera-python`) | **pas sur PyPI** (`pip install git+...`) ; version `0.0.1` | `Mixture(y, experts: DataFrame, awake=None, model="BOA"|"MLpol"|"MLprod"|"FTRL", coefficients="uniform"|ndarray, loss_type="mse"|"mae"|"mape"|"msle"|"mspe"|callable, loss_gradient=True, parameters=None)`. Le constructeur consomme les données (appelle `update`). `update(new_experts, new_y)` séquentiel ligne à ligne ; `predict(new_experts)` sans mise à jour (poids courants `w`). Dépendances non figées, **scipy importé mais non déclaré**. Compatibilité pandas 3 inconnue. |
+| opera (`Dralliag/opera-python`) — **abandonné (AD-18)**, référence des tests de l'agrégation native seulement | **pas sur PyPI** (`pip install git+...`) ; version `0.0.1` | `Mixture(y, experts: DataFrame, awake=None, model="BOA"|"MLpol"|"MLprod"|"FTRL", coefficients="uniform"|ndarray, loss_type="mse"|"mae"|"mape"|"msle"|"mspe"|callable, loss_gradient=True, parameters=None)`. Le constructeur consomme les données (appelle `update`). `update(new_experts, new_y)` séquentiel ligne à ligne ; `predict(new_experts)` sans mise à jour (poids courants `w`). Dépendances non figées, **scipy importé mais non déclaré**. Compatibilité pandas 3 inconnue. |
 | chronos-forecasting | PyPI | `Chronos2Pipeline.from_pretrained("amazon/chronos-2", device_map=...)` ; `predict_df(context_df, future_df=..., prediction_length, quantile_levels, id_column, timestamp_column, target)` ; covariables passées et futures en colonnes. Modèles : `amazon/chronos-2`, `autogluon/chronos-2-small`, `amazon/chronos-bolt-{tiny,mini,small,base}`, `amazon/chronos-t5-*`. `pandas>=2,<4`. |
 | timestral (Mistral AI) | **pas sur PyPI** (`pip install git+https://github.com/mistralai/timestral.git`) | `TimestralForecaster.from_pretrained("mistralai/Timestral-{5M,28M,123M,209M}", device=...)` ; `model.forecast(context, prediction_length)` → `.median`, `.quantile(q)` ; covariables passées et futures annoncées ; contexte ≤ 32 768 pas ; sortie ≤ 1 024 pas par passe. Licence « Modified MIT » avec clause d'usage. Pas d'API batch documentée sur la carte. |
 | t0 (The Forecasting Company) | PyPI `tfc-t0[torch]>=0.6.1` | `T0Forecaster.from_pretrained("theforecastingcompany/t0-gamma")` ; `predict(context, horizon, quantile_levels, mask=, group_ids=, future_covariates=)` sur tenseurs `(B, T)` / `(B, V, T)` ; `batch_series([...])` ; Apache-2.0 ; ~256 M paramètres. |
+| autogluon (`autogluon.timeseries`, `autogluon.tabular`) — **vérifié le 2026-11-26** | PyPI, 1.6.3 (2026-09-18) | `autogluon.common` déclare `pandas>=2.0,<2.4`, `numpy<2.6`, `scikit-learn<1.10`, Python `<3.14` ; même plafond pandas sur `master` ; support de pandas 3 suivi par le ticket #5730 (jalon « 2.0 Release », ouvert). **Non installable avec `pandas>=3`** : adapter reporté (§ 5.6). `TimeSeriesPredictor(prediction_length, target, known_covariates_names, eval_metric, quantile_levels, path, ...)` fixe l'horizon **au constructeur** ; `fit(TimeSeriesDataFrame, presets, time_limit, ...)` ; `predict(data, known_covariates=...)` ; données longues (`item_id`, `timestamp`) ; modèles écrits sur disque (`path`). |
+| mapie — **vérifié le 2026-11-26** | PyPI, 1.6.0 (2026-10-19) | `numpy>=1.24.1`, `scikit-learn>=1.4`, `scipy>=1.10`, pandas optionnel. `TimeSeriesRegressor` : `method` ∈ {`"enbpi"`, `"aci"`} seulement (γ d'ACI fixé à la main) ; **pas d'AgACI** (vérifié dans le code installé). Garde les DataFrames (`_safe_indexing`) et convertit les prédictions en `ndarray`. AgACI (Zaffran et al., 2022) agrège les bornes de plusieurs ACI de γ différents par agrégation d'experts en ligne (BOA, perte pinball) : réalisable plus tard sur l'agrégation native (Q12). |
 
 **Versions retenues en session 1** (Python 3.13, pandas 3.0.6, scikit-learn 1.9.1, numpy 2.3.2 ;
 résolution `uv lock` sans changement des versions de `main`) :
@@ -134,7 +139,7 @@ résolution `uv lock` sans changement des versions de `main`) :
 | darts | 0.48.1 | pandas 3 supporté ; **bug connu avec pandas 3.1** (séries journalières → `TypeError`), correctif non publié ; xgboost / statsforecast hors du cœur de darts |
 | hierarchicalforecast | 1.5.3 | roues cp313 ; pas de dépendance à statsforecast |
 | utilsforecast | 0.2.17 | support de pandas 3 à partir de cette version (plancher déclaré dans l'extra) |
-| opera | commit `9f82033` (`develop`, 2024-11-06) | pur Python, aucune écriture en place sur les entrées ; `scipy` importé non déclaré (déclaré dans l'extra) ; dépôt sans fichier LICENSE (setup.py : MIT) ; plus maintenu depuis 2024 |
+| opera (**abandonné, AD-18**) | commit `9f82033` (`develop`, 2024-11-06) | pur Python, aucune écriture en place sur les entrées ; `scipy` importé non déclaré (déclaré dans l'extra) ; dépôt sans fichier LICENSE (setup.py : MIT) ; plus maintenu depuis 2024 |
 | xgboost | 3.4.1 | groupe `notebooks` |
 | tslearn | 0.10.0 | groupe `notebooks` |
 | statsforecast 2.1.1, mlforecast 1.1.0 | — | exigent `pandas<3` : non installables, non déclarés (aucun usage) |
@@ -160,7 +165,7 @@ covariables. `transformers.AutoModel` n'en couvre aucune de façon uniforme.
   `get_params` / `set_params` (sktime, estimateurs sklearn, réconciliateurs à vérifier). Une
   surcharge n'existe que si l'objet tiers ne les expose pas (darts), et elle doit respecter
   `clone(est).get_params() == est.get_params()` (au sens de `clone`) et le préfixe `<param>__`.
-- Les composites de plusieurs estimateurs (experts opera) héritent de
+- Les composites de plusieurs estimateurs (experts de l'agrégation en ligne) héritent de
   `sklearn.utils.metaestimators._BaseComposition` comme `StackingRegressor`
   (paramètres imbriqués `experts__<nom>__<param>`).
 - Attributs ajustés : `n_features_in_`, `feature_names_in_` (quand `X` a des colonnes), plus les
@@ -502,31 +507,57 @@ incomplète.
 - `summing_matrix(copy)` : `S_te` (index des nœuds temporels, nommé comme le niveau temporel) ou
   `S_ct` (`MultiIndex` nœud cs + nœud temporel), d'une période.
 
-### 5.4 `OperaAdapter`
+### 5.4 Agrégation d'experts en ligne native (BOA, MLpol)
 
-**Rôle** : agrégation en ligne d'experts. Deux modes :
+**Décision du 2026-11-26 (AD-18)** : plus d'`OperaAdapter` ni de dépendance à opera (non publié sur
+PyPI, inactif depuis 2024). Les algorithmes sont implémentés dans `tsforecast` (numpy seul). AgACI
+de MAPIE n'en tient pas lieu : il agrège des bornes d'intervalles d'ACI, pas des prévisions de
+modèles hétérogènes, et MAPIE 1.6.0 ne l'implémente pas (§ 2.3).
 
+**Emplacement et nom (proposition, à confirmer en plan mode)** : ce n'est pas un adapter (aucun
+paquet tiers) : nouveau sous-paquet `tsforecast/ensemble/`, module `online.py` (estimateur) et
+module privé `_algorithms.py` (mises à jour pures, sans sklearn ni pandas), classe
+`OnlineAggregator(RegressorMixin, BaseEstimator)`. Le notebook des adapters garde la section, puisque
+l'agrégateur combine les prévisions des adapters.
+
+**Algorithmes** (paramètre `aggregation`) :
+- `"BOA"` — Bernstein Online Aggregation (Wintenberger, 2017) : poids exponentiels avec terme de
+  second ordre, taux d'apprentissage adaptatif par expert ; version par gradient de la perte
+  (`loss_gradient=True`, défaut d'opera) et version sur la perte elle-même ;
+- `"MLpol"` — agrégation polynomiale à taux multiples (Gaillard, Stoltz et van Erven, 2014), sans
+  paramètre à régler.
+`MLprod`, `FTRL` et `EWA` hors périmètre (ajout possible plus tard derrière la même interface).
+Les mises à jour sont des fonctions pures `(état, prévisions des experts, observation) -> état`, la
+perte et son gradient étant passés en paramètre (`"mse"`, `"mae"`, `"pinball"` avec un niveau de
+quantile, ou une fonction) : le même noyau servira à AgACI (Q12) sans changement.
+
+**Rôle et modes** :
 1. **méta-estimateur** (par défaut) : `experts=[("ridge", Ridge()), ("rf", RandomForestRegressor())]`
    (`_BaseComposition`). `fit` :
    1. produit des prévisions **hors échantillon** des experts sur l'entraînement, avec un splitter
       temporel interne (paramètre `cv`, splitter de `tsforecast` ; jamais de prévisions *in-sample*,
       qui biaiseraient les poids vers l'expert qui sur-apprend) ;
-   2. fait tourner la `Mixture` séquentiellement, lignes triées par date, sur ces prévisions ;
+   2. fait tourner l'agrégation séquentiellement, lignes triées par date, sur ces prévisions ;
    3. réajuste chaque expert sur tout l'entraînement (`experts_`).
    `predict` combine les prévisions des experts réajustés avec les **poids finaux** (`y` est inconnu
    au `predict` : aucune mise à jour).
 2. **`experts="passthrough"`** : les colonnes de `X` sont déjà des prévisions d'experts (produites
-   par d'autres adapters ou par `cross_val_predict`).
+   par d'autres adapters ou par `cross_validate(..., return_estimator=True, return_indices=True)`).
 
-- Paramètres opera : `aggregation` (`"BOA"`, `"MLpol"`, `"MLprod"`, `"FTRL"`), `loss_type`,
-  `loss_gradient`, `coefficients`, `parameters` ; validés au `fit`.
-- Panel : `pooling="global"` (une seule mixture, lignes ordonnées par date puis entité) ou
-  `"per_entity"` (une mixture par entité ; entité inconnue au `predict` → poids globaux si
-  disponibles, sinon erreur explicite).
-- Attributs : `weights_` (poids finaux, par entité en mode `per_entity`), `weights_history_`.
+- Paramètres : `aggregation`, `loss`, `loss_gradient`, `quantile` (perte pinball), `init_weights`
+  (`"uniform"` ou tableau) ; validés au `fit`.
+- Panel : `pooling="global"` (une seule agrégation, lignes ordonnées par date puis entité ; les
+  lignes d'une même date sont-elles agrégées ensemble ou l'une après l'autre : à trancher en plan
+  mode) ou `"per_entity"` (une agrégation par entité ; entité inconnue au `predict` → poids globaux
+  si disponibles, sinon erreur explicite).
+- Attributs : `weights_` (poids finaux, par entité en mode `per_entity`), `weights_history_`
+  (`DataFrame` indexé comme les lignes d'entraînement, une colonne par expert).
 - `partial_fit(X, y)` : poursuit la séquence (nouvelles lignes postérieures aux précédentes).
-- opera n'est pas sur PyPI : dépendance Git **figée sur un SHA** ; `scipy` déclaré explicitement.
-  Si opera est incompatible avec pandas 3 / Python 3.13, voir § 9.
+- Vérification : valeurs de référence calculées **une fois** avec opera (commit `9f82033`, installé
+  dans un environnement jetable hors du dépôt) sur de petits jeux déterministes et recopiées en
+  littéraux dans les tests ; aucun test n'importe opera. Propriétés théoriques testées aussi
+  (poids sur le simplexe, convergence vers le meilleur expert, regret borné sur un jeu adverse
+  simple).
 
 ### 5.5 Modèles de fondation (Hugging Face) : `FoundationModelAdapter`
 
@@ -581,16 +612,44 @@ tsforecast/adapters/foundation/
   (Apache-2.0) : à rappeler dans la docstring et le notebook.
 - Tests : backends factices sans réseau pour la logique de l'adapter ; tests réels marqués
   (`slow`, et un marqueur `network` à créer) avec les plus petits modèles (`chronos-bolt-tiny` ou
-  `chronos-2-small`, `Timestral-5M`), sautés si le paquet ou le réseau manquent.
+  `chronos-2-small`, `Timestral-5M`), sautés si le paquet ou le réseau manquent. Chaque backend réel
+  a aussi son test d'équivalence au paquet natif (règle 11 du § 7) : même contexte passé
+  directement au pipeline du paquet → mêmes quantiles que `predict_quantiles`, à la tolérance
+  numérique près (inférence déterministe sur CPU).
+
+### 5.6 `AutoGluonAdapter` (reporté)
+
+**Décision du 2026-11-26 (AD-19)** : adapter souhaité, mais **reporté** tant qu'AutoGluon plafonne
+`pandas<2.4` (1.6.3 et `master`, § 2.3) : il ne peut pas cohabiter avec `pandas>=3`. Déclencheur :
+publication d'une version d'AutoGluon acceptant pandas 3 (jalon « 2.0 Release », ticket #5730).
+Les sessions A1–A2 de `ADAPTERS_PROMPTS.md` ne commencent qu'alors ; elles revérifient d'abord
+l'API, qui peut avoir changé.
+
+Points de conception connus, à trancher en plan mode à ce moment (Q13) :
+- **Horizon fixé au constructeur** : `TimeSeriesPredictor(prediction_length=...)` entraîne ses
+  modèles pour un nombre de pas donné, alors qu'ici le nombre de pas est déduit des index au
+  `predict`. Pistes : `prediction_length` déduit au `fit` d'un paramètre de capacité
+  `max_steps` (une ligne plus lointaine → `ValueError` explicite, jamais de décalage), ou un mode
+  `'row'` sur `TabularPredictor` (régression ligne à ligne de `y` sur `X`, comme le mode `'row'` de
+  `DartsAdapter`), qui ne pose pas la question.
+- **Covariables** : `known_covariates_names` (connues sur l'horizon) contre covariables passées ;
+  les lignes du `gap`, absentes de `X`, ne peuvent pas servir de covariables connues.
+- **Coût et état disque** : AutoGluon entraîne de nombreux modèles (`presets`, `time_limit`) et les
+  écrit sous `path` ; `clone` et `GridSearchCV` (un répertoire par pli, nettoyage), `n_jobs`,
+  déterminisme (graines), durée d'une validation croisée.
+- Extra `adapters-autogluon` (`autogluon.timeseries` et / ou `autogluon.tabular`), job CI séparé
+  vu le poids des dépendances (torch).
 
 ---
 
 ## 6. Dépendances et packaging
 
 - Extras (`[project.optional-dependencies]`) : `adapters-sktime`, `adapters-darts`,
-  `adapters-hierarchical`, `adapters-opera`, `adapters-chronos`, `adapters-timestral`,
-  `adapters-t0`, et `adapters-all` (liste sans espace). Bornes `>=x,<y` comme le reste du
-  `pyproject.toml` ; dépendances Git figées sur un SHA (`allow-direct-references = true`).
+  `adapters-hierarchical`, `adapters-chronos`, `adapters-timestral`, `adapters-t0`, et
+  `adapters-all` (liste sans espace) ; `adapters-autogluon` plus tard (§ 5.6). Bornes `>=x,<y`
+  comme le reste du `pyproject.toml` ; dépendances Git figées sur un SHA
+  (`allow-direct-references = true`). L'extra `adapters-opera` disparaît avec l'agrégation native
+  (AD-18), qui n'a aucune dépendance hors du cœur.
 - Groupe `notebooks` (hors `default-groups`) : `xgboost`, `tslearn`, `statsforecast` /
   `mlforecast` si le notebook en a besoin, plus les extras d'adapters. `dev` et `docs` restent ceux
   de `main` (ne pas retirer `docs` de `default-groups`).
@@ -634,7 +693,17 @@ tsforecast/adapters/foundation/
   8. prédiction indépendante du `gap` quand le modèle est un pur régresseur ligne à ligne ;
   9. erreurs explicites (entité inconnue d'un modèle local, paquet manquant, paramètre invalide) ;
   10. conventions de dates de `main` (`with_datetime_resolution` × `datetime_units`) quand
-      l'adapter renvoie des dates.
+      l'adapter renvoie des dates ;
+  11. **équivalence au paquet natif** (AD-20) : sur des données que le paquet tiers sait traiter
+      seul (série régulière, panel équilibré, sans trou), le même modèle ajusté directement par
+      l'API du paquet (horizon relatif `fh = gap + 1, ...` pour sktime, `predict(n)` pour darts,
+      `aggregate` + `HierarchicalReconciliation.reconcile` pour hierarchicalforecast, pipeline du
+      paquet pour un modèle de fondation) donne les mêmes prévisions que l'adapter, à
+      `rtol` / `atol` près (modèles déterministes, graines fixées). Champ
+      `AdapterCase.native_reference` (fonction `(X_train, y_train, X_test) -> ndarray` qui appelle le
+      paquet sans passer par `tsforecast`) ; règle sautée quand il vaut `None`. Les situations
+      propres à l'adapter (panel déséquilibré, trous, mode `'row'` de darts, lignes in-sample) n'ont
+      pas d'équivalent natif : elles restent couvertes par des valeurs exactes calculées à la main.
 
   Session 4 : `AdapterCase.handles_training_holes` (un adapter qui refuse les trous
   d'entraînement doit lever `ValueError` dans le contrôle `XYPipeline`) ; le contrôle
@@ -684,7 +753,7 @@ tsforecast/adapters/foundation/
 | Q1 | Rattrapage de `main` : `merge` ou `rebase` ? | **Tranchée (AD-04)** : `git merge --no-commit --no-ff main` |
 | Q2 | Renommer le notebook selon la numérotation de `main` (`5 - Adapters.ipynb`) ? | Garder le nom actuel jusqu'à la fin, renommer en dernière session |
 | Q3 | Paquet tiers incompatible avec pandas 3 / Python 3.13 | **Tranchée (AD-05, AD-06)** : tous compatibles ; aucun plafond ajouté au cœur ; bug pandas 3.1 de darts documenté |
-| Q4 | opera incompatible ou abandonné | **Tranchée pour la session 1 (AD-07)** : SHA figé, fonctionne sous pandas 3 ; réimplémentation interne éventuelle à décider en session 9 |
+| Q4 | opera incompatible ou abandonné | **Tranchée (AD-07, puis AD-18)** : SHA figé en session 1 ; abandonné le 2026-11-26 au profit d'une agrégation native BOA / MLpol (§ 5.4), opera ne servant plus qu'à calculer une fois des valeurs de référence des tests |
 | Q5 | `HierarchicalForecastAdapter` : `reconciler` (singulier) seul, ou aussi `reconcilers` (liste) ? | **Tranchée (AD-13)** : `reconciler` seul ; `reconcile(X, reconcilers=None)` pour comparer |
 | Q6 | Étiquette des lignes d'agrégat (`""`, `"Total"`, `"__all__"`) | **Tranchée (AD-13)** : `"Total"` (paramètre `aggregate_label`) |
 | Q7 | Ancrage temporel des agrégats (début de période / période cible) | **Tranchée (AD-13)** : selon la position de la grille fine (`S` → début, `E` → fin) ; ancrage sur les origines documenté |
@@ -692,6 +761,8 @@ tsforecast/adapters/foundation/
 | Q9 | Sort des fichiers `ADAPTERS_*.md` avant fusion dans `main` | Les supprimer ; le contenu utile passe dans `docs/concepts/adapters.md` |
 | Q10 | Datation des agrégats temporels sur une grille sans position (`D`, `h`, `B`, `W-SUN`) | **Tranchée (AD-16)** : premier pas fin (`D`, `h`, `B`, `min`), sauf `W-<jour>` (semaine étiquetée par son dernier jour, convention de `get_labelled_period`) → dernier pas fin ; pas de paramètre |
 | Q11 | Utilitaire public d'agrégation des feuilles vers tous les nœuds (`y` sommé, exogènes agrégés comme `aggregate(exog_vars=...)`), pour construire les jeux des modèles de base de chaque niveau | Hors périmètre de la session 6 ; à décider avant la session 8 (notebook) |
+| Q12 | Compatibilité MAPIE (prédictions conformes) et AgACI | Hors chantier actuel. Vérifier en session dédiée : `SplitConformalRegressor` / `TimeSeriesRegressor` sur chaque adapter (MAPIE garde les DataFrames, donc les index) ; EnbPI tire des blocs avec remise, donc probablement des couples (entité, date) dupliqués que `TemporalLayout` refuse ; AgACI à construire sur l'ACI de MAPIE et le noyau d'agrégation native (perte pinball) |
+| Q13 | `AutoGluonAdapter` : horizon fixé au constructeur d'AutoGluon (`prediction_length`) contre nombre de pas déduit des index ; mode `TimeSeriesPredictor` ou `TabularPredictor` (`'row'`) | À trancher en session A1, quand AutoGluon acceptera pandas 3 (§ 5.6) |
 
 ---
 
@@ -716,4 +787,7 @@ tsforecast/adapters/foundation/
 | AD-15 | 2026-11-25 | 6 | Exclusions d'AD-10 levées (`conftest.py` racine : `tsforecast/adapters/hierarchicalforecast/adapter.py` collecté si hierarchicalforecast est installé ; `EXCLUDED_PREFIXES = ()` ; adapter exporté) ; champ `AdapterCase.make_splitter` ajouté à la batterie de contrat | Le module se parse et ses doctests passent ; une série hiérarchique a toujours un `MultiIndex`, que `TSOutOfSampleSplit` refuse |
 | AD-16 | 2026-11-26 | 7 | Modes temporel (`hierarchy=None`) et cross-temporel de `HierarchicalForecastAdapter` : niveau temporel dans l'index (`temporal_level`, défaut juste avant la date) ; `temporal_hierarchy` en pas fins, chaque valeur divisant la plus grande ; grille fine détectée sur les lignes du niveau fin (`temporal_freq_`) ; périodes calendaires = fréquence fine × `m` alignée sur l'époque Unix ou sur `temporal_origin` (nouveau paramètre) ; Q10 : agrégat daté par son premier pas fin, son dernier sur une grille étiquetée par la fin (`E`, `W-<jour>`) ; `S_te` d'une période fixée au fit, colonnes = (copie, période) ; périodes complètes exigées au predict seulement ; réconciliateurs et intervalles insample refusés (`ValueError`) ; fonction publique `period_splits` (plis de périodes complètes, gap en pas fins, agrégats chevauchant le gap exclus) ; pas d'`aggregation_type` ; cas de contrat temporels limités aux règles indépendantes de la fenêtre de test | Un réconciliateur non insample a un `P` bloc-diagonal par période : aucun `S` propre à l'horizon ; l'ancrage calendaire rend les périodes indépendantes de la fenêtre d'entraînement (fenêtres glissantes) et communes aux séries d'un panel déséquilibré ; `temporal_origin` couvre exercices fiscaux, semaines et lignes indexées par origine ; les splitters de `tsforecast` comptent des lignes par entité, incompatibles avec des niveaux temporels de grilles différentes |
 | AD-17 | 2026-11-26 | 7 | Cross-temporel en une passe sur `S_ct = S_cs ⊗ S_te` par copie (niveaux `'<cs>//<te>'`, bloc identité replacé en bas) ; `TopDown` / `MiddleOut` refusés (structure non stricte) | Aucune méthode native en 1.5.3 ; cohérence dans les deux dimensions par construction ; égale aux deux passes enchaînées pour `BottomUp`, `ols`, `wls_struct` (`P_ct = P_cs ⊗ P_te`, testé), seule cohérente pour `nonnegative=True` ; la composition du tutoriel (passe temporelle sur les prévisions de base) n'est pas cohérente en cross-section |
+| AD-18 | 2026-11-26 | planification | `OperaAdapter` et l'extra `adapters-opera` abandonnés ; agrégation d'experts en ligne native (BOA, MLpol) dans un sous-paquet hors `adapters` (proposition `tsforecast/ensemble/`, à confirmer), noyau de mises à jour pur à perte interchangeable ; valeurs de référence calculées une fois avec opera hors du dépôt | opera non publié sur PyPI et inactif depuis 2024 ; AgACI (non implémenté dans MAPIE 1.6.0) agrège des bornes d'ACI, pas des prévisions de modèles : il ne remplace pas l'agrégation de prévisions, mais pourra s'appuyer sur le même noyau |
+| AD-19 | 2026-11-26 | planification | `AutoGluonAdapter` ajouté au périmètre mais reporté (sessions A1–A2 hors séquence) jusqu'à une version d'AutoGluon acceptant pandas 3 | AutoGluon 1.6.3 et `master` déclarent `pandas>=2.0,<2.4` : non installable avec `pandas>=3` |
+| AD-20 | 2026-11-26 | planification | Règle 11 de la batterie de contrat (équivalence au paquet natif, champ `AdapterCase.native_reference`) ; session dédiée insérée juste après la session 8, avant l'agrégation native et les modèles de fondation | Seule preuve que l'adapter ne change pas le modèle (horizon, covariables, ordre) ; l'infrastructure existe ainsi avant que les adapters suivants ne s'y branchent, et un défaut trouvé sur sktime, darts ou hierarchicalforecast est corrigé avant les notebooks et la documentation suivants |
 |  |  |  |  |  |

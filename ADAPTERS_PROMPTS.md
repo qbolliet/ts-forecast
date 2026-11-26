@@ -15,7 +15,8 @@ questions ouvertes, journal des décisions).
    Une session ne commence que sur un arbre de travail propre.
 
 **Choix des modèles.** Opus pour les sessions de conception, d'audit et d'implémentation non
-triviale (rattrapage de `main`, contrat commun, hierarchicalforecast, opera, modèles de fondation) ;
+triviale (rattrapage de `main`, contrat commun, hierarchicalforecast, équivalence au paquet natif,
+agrégation d'experts native, modèles de fondation, AutoGluon) ;
 Sonnet pour les sessions qui appliquent un contrat déjà fixé (notebook, backends supplémentaires,
 documentation). Haiku n'est recommandé pour aucune session : toutes demandent du jugement sur des
 API tierces mouvantes ou sur des questions de fuite temporelle.
@@ -33,17 +34,25 @@ devez valider (audit, conception, résolution de conflits) ; désactivé quand l
 | 6 | `HierarchicalForecastAdapter` : conception et cross-section | Opus | xhigh | Oui |
 | 7 | `HierarchicalForecastAdapter` : temporel et cross-temporel | Opus | high | Oui |
 | 8 | Notebook : section hierarchicalforecast | Sonnet | high | Non |
-| 9 | `OperaAdapter` | Opus | high | Oui |
-| 10 | Notebook : section opera | Sonnet | medium | Non |
-| 11 | Modèles de fondation : adapter, protocole, backends Chronos et `callable` | Opus | xhigh | Oui |
-| 12 | Modèles de fondation : backends Timestral et t0 | Sonnet | high | Non |
-| 13 | Notebook : section modèles de fondation | Sonnet | medium | Non |
-| 14 | Documentation : page concept et tutoriel des adapters | Sonnet | high | Oui |
-| 15 | Documentation : pages API, navigation, CLAUDE.md, README | Sonnet | medium | Non |
-| 16 | Revue finale de la branche | Opus | high | Non |
+| 9 | Équivalence des adapters au paquet natif | Opus | high | Oui |
+| 10 | Agrégation d'experts en ligne native (BOA, MLpol) | Opus | high | Oui |
+| 11 | Notebook : section agrégation d'experts | Sonnet | medium | Non |
+| 12 | Modèles de fondation : adapter, protocole, backends Chronos et `callable` | Opus | xhigh | Oui |
+| 13 | Modèles de fondation : backends Timestral et t0 | Sonnet | high | Non |
+| 14 | Notebook : section modèles de fondation | Sonnet | medium | Non |
+| 15 | Documentation : page concept et tutoriel des adapters | Sonnet | high | Oui |
+| 16 | Documentation : pages API, navigation, CLAUDE.md, README | Sonnet | medium | Non |
+| 17 | Revue finale de la branche | Opus | high | Non |
+| A1 | `AutoGluonAdapter` (reportée : AutoGluon acceptant pandas 3) | Opus | high | Oui |
+| A2 | Notebook et documentation : AutoGluon (reportée) | Sonnet | medium | Non |
 
-Les sessions 3–4, 6–7, 9 et 11 sont indépendantes une fois la session 2 faite ; les sessions de
-notebook suivent celle de leur adapter. L'ordre ci-dessus minimise les conflits.
+Les sessions 3–4 et 6–7 sont indépendantes une fois la session 2 faite. La session 9 vient
+ensuite : elle crée la règle d'équivalence au paquet natif de la batterie de contrat, à laquelle
+les sessions 10, 12 et A1 se branchent, et un défaut qu'elle trouve se corrige avant les notebooks
+et la documentation suivants. Les sessions 10 et 12 sont indépendantes l'une de l'autre ; les
+sessions de notebook suivent celle de leur composant. A1–A2 sont hors séquence : elles
+n'attendent que la compatibilité d'AutoGluon avec pandas 3. L'ordre ci-dessus minimise les
+conflits.
 
 ---
 
@@ -438,48 +447,105 @@ docs(notebooks): illustrate hierarchical reconciliation with HierarchicalForecas
 
 ---
 
-## Session 9 — `OperaAdapter`
+## Session 9 — Équivalence des adapters au paquet natif
 
 **Modèle** : Opus · **Effort** : high · **Plan mode** : oui
 
 **Prompt**
 
 ```text
-Lis CLAUDE.md, ADAPTERS_ARCHITECTURE.md (§ 2.2, § 2.3, § 3, § 5.4, § 7, § 9 : Q4) et les règles
-communes du § 0 de ADAPTERS_PROMPTS.md (tu ne commites jamais). Lis le code source d'opera installé
-(opera/mixture.py) : constructeur, update, predict, attributs w / weights, contrôle des colonnes.
+Lis CLAUDE.md, ADAPTERS_ARCHITECTURE.md (§ 1, § 3, § 5.1 à § 5.3, § 7 : règle 11, § 10 : AD-20) et
+les règles communes du § 0 de ADAPTERS_PROMPTS.md (tu ne commites jamais). Lis
+tests/support/adapter_contract.py, tests/support/adapter_cases.py et les tests existants de
+SktimeAdapter, DartsAdapter et HierarchicalForecastAdapter.
 
-Objectif : reconstruire OperaAdapter, pour séries temporelles et panels, compatible
-cross_val_score et GridSearchCV.
+Objectif : prouver que chaque adapter donne les mêmes prévisions que le même modèle utilisé
+directement avec l'API de son paquet, sur des données que le paquet sait traiter seul.
 
-1. Plan : audit rapide de l'adapter actuel (scénarios exécutés), puis design selon le § 5.4 :
-   mode méta-estimateur (experts en _BaseComposition, prévisions hors échantillon des experts par
-   splitter interne, Mixture séquentielle triée par date, réajustement des experts) et mode
-   passthrough ; pooling global / per_entity et entité inconnue ; poids finaux au predict ;
-   partial_fit ; validation des paramètres opera ; coût (nombre d'ajustements d'experts) et
-   moyens de le borner. Vérifie la compatibilité d'opera avec pandas 3 et tranche Q4 avec moi.
-2. Implémente, docstrings Google avec doctests (mode passthrough, données minuscules).
-3. Tests : batterie de contrat (deux modes), poids qui convergent vers le meilleur expert sur un
-   jeu synthétique où un expert domine, aucune prévision in-sample utilisée pour les poids,
-   per_entity vs global, GridSearchCV sur aggregation et sur un paramètre imbriqué d'expert
-   (experts__ridge__alpha), cross_val_score panel.
-4. Mets à jour § 5.4 et le journal des décisions. Ne touche pas au notebook.
+1. Plan : pour chaque adapter, la liste des modèles comparés (au moins sktime : NaiveForecaster
+   drift, ExponentialSmoothing, ThetaForecaster, SARIMAX avec X sans gap ; darts :
+   ExponentialSmoothing, LinearRegressionModel avec lags de cible et de covariables passées /
+   futures, un modèle 'row' comparé au régresseur sklearn ; hierarchicalforecast : aggregate +
+   HierarchicalReconciliation.reconcile avec BottomUp, MinTrace ols et mint_shrink, en
+   cross-section, en temporel et en cross-temporel pour BottomUp / ols), l'appel natif de
+   référence (horizon relatif fh = gap + 1, ... ; predict(n) puis extraction des pas), les jeux
+   (série et panel équilibré, gap 0 et gap > 0, plusieurs lignes de test), les tolérances, et la
+   forme du champ AdapterCase.native_reference et de la fonction check_* de la règle 11. Signale
+   tout écart d'API du paquet qui empêcherait la comparaison. Attends ma validation.
+2. Implémente la règle 11 dans la batterie de contrat (validée sur les adapters de référence de
+   tests/support/estimators.py et sur un mutant qui décale l'horizon d'un pas) et les références
+   natives des cas existants ; ajoute les comparaisons qui ne passent pas par la batterie
+   (hierarchicalforecast temporel et cross-temporel) dans les fichiers de tests de chaque adapter.
+3. Un écart trouvé est un défaut à diagnostiquer : explique-le-moi (adapter ou paquet tiers ?)
+   avant de corriger l'adapter ; ne relâche jamais une tolérance pour faire passer un test.
+4. Mets à jour le § 7 (champ et cas couverts) et le journal des décisions.
 ```
 
 **Message de commit suggéré**
 
 ```text
-feat(adapters): rebuild OperaAdapter as an online expert-aggregation meta-estimator
+test(adapters): check every adapter against its package used natively
 
-- Experts fitted out of sample with a temporal splitter, mixture run in date order,
-  final weights used at predict; passthrough mode for precomputed expert forecasts
-- Global or per-entity pooling for panel data, partial_fit continuation
-- Nested expert parameters for GridSearchCV; contract and behaviour tests
+- Contract rule comparing adapter predictions with the same model fitted through
+  the third-party API (relative horizon, predict(n), aggregate + reconcile)
+- Native references for the sktime, darts and hierarchicalforecast cases, series and panels,
+  with and without gap
 ```
 
 ---
 
-## Session 10 — Notebook : section opera
+## Session 10 — Agrégation d'experts en ligne native (BOA, MLpol)
+
+**Modèle** : Opus · **Effort** : high · **Plan mode** : oui
+
+**Prompt**
+
+```text
+Lis CLAUDE.md, ADAPTERS_ARCHITECTURE.md (§ 2.3, § 3, § 5.4, § 7, § 9 : Q4 et Q12, § 10 : AD-18) et
+les règles communes du § 0 de ADAPTERS_PROMPTS.md (tu ne commites jamais). Lis les articles de
+référence des deux algorithmes (Wintenberger 2017 pour BOA ; Gaillard, Stoltz et van Erven 2014
+pour MLpol) et le code d'opera-python (opera/mixture.py et ses fonctions de mise à jour, commit
+9f8203363ba75206e9beb02002e3420037456200) comme référence d'implémentation.
+
+Objectif : agrégateur d'experts en ligne natif, sans dépendance à opera, pour séries temporelles et
+panels, compatible cross_val_score et GridSearchCV, en remplacement de OperaAdapter.
+
+1. Plan : emplacement et nom (proposition du § 5.4 : tsforecast/ensemble/, OnlineAggregator) ;
+   noyau pur des mises à jour BOA et MLpol (état, perte et gradient interchangeables : mse, mae,
+   pinball) ; mode méta-estimateur (experts en _BaseComposition, prévisions hors échantillon des
+   experts par splitter interne, agrégation séquentielle triée par date, réajustement des experts)
+   et mode passthrough ; pooling global / per_entity, lignes d'une même date, entité inconnue ;
+   poids finaux au predict ; partial_fit ; coût (nombre d'ajustements d'experts) et moyens de le
+   borner. Attends ma validation.
+2. Supprime tsforecast/adapters/opera.py, son export, l'extra adapters-opera (pyproject.toml,
+   adapters-all, uv.lock régénéré), son entrée du conftest.py racine et de
+   tests/unit/adapters/test_init.py.
+3. Implémente, docstrings Google avec doctests (mode passthrough, données minuscules).
+4. Tests : valeurs de référence calculées une fois avec opera dans un environnement jetable du
+   scratchpad (jamais dans .venv), recopiées en littéraux (BOA avec et sans gradient, MLpol, mse et
+   mae) ; poids sur le simplexe ; convergence vers le meilleur expert sur un jeu où un expert
+   domine ; aucune prévision in-sample utilisée pour les poids ; per_entity vs global ;
+   batterie de contrat (deux modes ; règle 11 sans référence native, les littéraux ci-dessus en
+   tenant lieu) ; GridSearchCV sur aggregation et sur un paramètre imbriqué d'expert
+   (experts__ridge__alpha) ; cross_val_score panel.
+5. CLAUDE.md : nouveau sous-paquet dans l'arborescence et sa description. Mets à jour § 5.4, § 6
+   et le journal des décisions. Ne touche pas au notebook.
+```
+
+**Message de commit suggéré**
+
+```text
+feat(ensemble): add a native online expert aggregator (BOA, MLpol)
+
+- Pure update kernel with pluggable losses (mse, mae, pinball); experts fitted out of
+  sample with a temporal splitter, aggregation run in date order, final weights at predict
+- Meta-estimator and passthrough modes, global or per-entity pooling, partial_fit
+- Remove OperaAdapter and the adapters-opera extra; reference values computed once with opera
+```
+
+---
+
+## Session 11 — Notebook : section agrégation d'experts
 
 **Modèle** : Sonnet · **Effort** : medium · **Plan mode** : non
 
@@ -487,20 +553,23 @@ feat(adapters): rebuild OperaAdapter as an online expert-aggregation meta-estima
 
 ```text
 Lis CLAUDE.md, ADAPTERS_ARCHITECTURE.md (§ 5.4, § 8) et les règles communes du § 0 de
-ADAPTERS_PROMPTS.md (tu ne commites jamais). Lis le code et les tests de tsforecast/adapters/opera.py.
+ADAPTERS_PROMPTS.md (tu ne commites jamais). Lis le code et les tests de l'agrégateur natif
+(emplacement fixé en session 10, journal des décisions).
 
-Objectif : réécrire la section 3.7 de notebooks/4 - QB - Adapters.ipynb selon le gabarit du § 8 :
-série temporelle et panel (pooling global et per_entity), mode méta-estimateur avec des experts
-hétérogènes (dont, si utile, un adapter d'une section précédente) et mode passthrough, évolution des
-poids (graphique), comparaison aux experts seuls et à leur moyenne, cross_val_score, GridSearchCV
-(algorithme d'agrégation, perte, paramètre d'expert imbriqué), partial_fit, limites. Exécute le
-notebook (nbclient) et sauvegarde-le avec ses sorties.
+Objectif : réécrire la section 3.7 de notebooks/4 - QB - Adapters.ipynb (ancienne section opera)
+selon le gabarit du § 8 : principe de l'agrégation en ligne (BOA, MLpol, différence avec une
+moyenne ou un stacking), série temporelle et panel (pooling global et per_entity), mode
+méta-estimateur avec des experts hétérogènes (dont, si utile, un adapter d'une section
+précédente) et mode passthrough, évolution des poids (graphique), comparaison aux experts seuls
+et à leur moyenne, cross_val_score, GridSearchCV (algorithme, perte, paramètre d'expert
+imbriqué), partial_fit, limites. Retire toute mention d'opera. Exécute le notebook (nbclient) et
+sauvegarde-le avec ses sorties.
 ```
 
 **Message de commit suggéré**
 
 ```text
-docs(notebooks): illustrate online expert aggregation with OperaAdapter
+docs(notebooks): illustrate native online expert aggregation
 
 - Series and panel examples (global and per-entity pooling), meta-estimator and passthrough modes
 - Weight trajectories, comparison with single experts, cross_val_score and GridSearchCV
@@ -508,7 +577,7 @@ docs(notebooks): illustrate online expert aggregation with OperaAdapter
 
 ---
 
-## Session 11 — Modèles de fondation : adapter, protocole, backends Chronos et `callable`
+## Session 12 — Modèles de fondation : adapter, protocole, backends Chronos et `callable`
 
 **Modèle** : Opus · **Effort** : xhigh · **Plan mode** : oui
 
@@ -537,7 +606,8 @@ cross_val_score et GridSearchCV.
    callable — le second permet de brancher n'importe quel modèle par une fonction).
 3. Tests : logique de l'adapter avec un backend factice sans réseau (batterie de contrat
    complète, alignement des pas avec gap > 0, panel déséquilibré, absence de fuite, covariables,
-   quantiles, cache) ; test réel Chronos avec le plus petit modèle, marqué slow et network.
+   quantiles, cache) ; test réel Chronos avec le plus petit modèle, marqué slow et network, dont
+   la règle 11 (même contexte passé directement à Chronos2Pipeline : mêmes quantiles).
 4. Mets à jour § 5.5, § 6 et le journal des décisions. Ne touche pas au notebook.
 ```
 
@@ -555,7 +625,7 @@ feat(adapters): add FoundationModelAdapter with pluggable forecasting backends
 
 ---
 
-## Session 12 — Modèles de fondation : backends Timestral et t0
+## Session 13 — Modèles de fondation : backends Timestral et t0
 
 **Modèle** : Sonnet · **Effort** : high · **Plan mode** : non
 
@@ -577,7 +647,9 @@ t0 (theforecastingcompany/t0-*, paquet PyPI tfc-t0[torch]).
    installe-les dans .venv (procédure de la mémoire du projet).
 3. Implémente les deux backends, déclare leurs capacités, enregistre leurs préfixes d'identifiants.
 4. Tests : tests hors ligne du mapping (paquet simulé) et tests réels avec Timestral-5M et t0-gamma
-   sur CPU, marqués slow et network. Rappelle les licences dans les docstrings.
+   sur CPU, marqués slow et network, dont la règle 11 (même contexte passé directement à
+   TimestralForecaster / T0Forecaster : mêmes quantiles). Rappelle les licences dans les
+   docstrings.
 5. Mets à jour § 2.3 / § 5.5 et le journal des décisions.
 ```
 
@@ -593,7 +665,7 @@ feat(adapters): add Timestral and t0 backends to FoundationModelAdapter
 
 ---
 
-## Session 13 — Notebook : section modèles de fondation
+## Session 14 — Notebook : section modèles de fondation
 
 **Modèle** : Sonnet · **Effort** : medium · **Plan mode** : non
 
@@ -624,7 +696,7 @@ docs(notebooks): illustrate zero-shot foundation models with FoundationModelAdap
 
 ---
 
-## Session 14 — Documentation : page concept et tutoriel des adapters
+## Session 15 — Documentation : page concept et tutoriel des adapters
 
 **Modèle** : Sonnet · **Effort** : high · **Plan mode** : oui
 
@@ -649,7 +721,8 @@ Objectif : créer docs/concepts/adapters.md et docs/tutorials/adapters.md, en fr
      contrat commun (paramètres, objet tiers jamais modifié, sortie dans l'ordre des lignes de X,
      séries temporelles et panels, erreurs explicites, dépendances optionnelles), puis une section
      par adapter (sktime, darts, hierarchicalforecast avec ses trois modes et le multi-modèle,
-     opera, modèles de fondation et leurs backends) : ce que fit et predict font, ce que
+     modèles de fondation et leurs backends ; une section sur l'agrégateur d'experts natif BOA /
+     MLpol, qui combine leurs prévisions) : ce que fit et predict font, ce que
      GridSearchCV peut régler, limites ; un tableau de choix « quel adapter pour quel besoin » ;
      « Pour aller plus loin » (tutoriel, pages API, notebook) ;
    - tutoriel : table des matières, données (série temporelle et panel construits entité par
@@ -688,7 +761,7 @@ docs(adapters): add concept and tutorial pages for the third-party adapters
 
 ---
 
-## Session 15 — Documentation : pages API, navigation, CLAUDE.md, README
+## Session 16 — Documentation : pages API, navigation, CLAUDE.md, README
 
 **Modèle** : Sonnet · **Effort** : medium · **Plan mode** : non
 
@@ -700,7 +773,8 @@ ADAPTERS_PROMPTS.md (tu ne commites jamais).
 
 Objectif : compléter la documentation de référence des adapters au standard de main.
 
-1. Pages API docs/api/adapters/*.md (mkdocstrings), une par classe publique et une pour le
+1. Pages API docs/api/adapters/*.md et de l'agrégateur d'experts natif (mkdocstrings), une par
+   classe publique et une pour le
    protocole et le registre des backends de modèles de fondation, sur le modèle des pages API
    existantes ; section « adapters » de la navigation de mkdocs.yml ; liens depuis
    docs/concepts/adapters.md et docs/tutorials/adapters.md.
@@ -724,7 +798,7 @@ docs(adapters): add API reference pages and document the adapters subpackage
 
 ---
 
-## Session 16 — Revue finale de la branche
+## Session 17 — Revue finale de la branche
 
 **Modèle** : Opus · **Effort** : high · **Plan mode** : non
 
@@ -737,7 +811,8 @@ ne commites jamais).
 Objectif : revue de qb-adapters par rapport à main avant la pull request.
 
 1. Lance /code-review high sur la branche (diff contre main) et lis le rapport.
-2. Vérifie toi-même le contrat commun sur chaque adapter (§ 3) et la batterie de tests (§ 7) :
+2. Vérifie toi-même le contrat commun sur chaque adapter (§ 3) et la batterie de tests (§ 7,
+   règle 11 d'équivalence au paquet natif comprise) :
    ce qui n'est pas couvert, ce qui est couvert mais faux.
 3. Lance la suite complète (slow inclus, en arrière-plan : elle dépasse 10 min), les tests
    network si le réseau est disponible, les doctests, check_conventions, mkdocs build --strict, et
@@ -752,4 +827,80 @@ Objectif : revue de qb-adapters par rapport à main avant la pull request.
 fix(adapters): address final review findings
 
 - <un point par correction>
+```
+
+---
+
+## Sessions reportées — AutoGluon (hors séquence)
+
+Ces deux sessions ne commencent **que lorsqu'une version publiée d'AutoGluon accepte `pandas>=3`**
+(AutoGluon 1.6.3 déclare `pandas<2.4` ; ticket #5730, jalon « 2.0 Release »). Elles peuvent se
+placer après n'importe quelle session ; si la branche a déjà été fusionnée, elles se font sur une
+nouvelle branche issue de `main`.
+
+## Session A1 — `AutoGluonAdapter`
+
+**Modèle** : Opus · **Effort** : high · **Plan mode** : oui
+
+**Prompt**
+
+```text
+Lis CLAUDE.md, ADAPTERS_ARCHITECTURE.md (§ 1, § 2.3, § 3, § 4, § 5.6, § 6, § 7, § 9 : Q13) et les
+règles communes du § 0 de ADAPTERS_PROMPTS.md (tu ne commites jamais). Vérifie d'abord sur PyPI et
+dans le pyproject / setup de la dernière version d'AutoGluon qu'elle accepte pandas 3, Python 3.13
+et scikit-learn 1.9 ; sinon arrête-toi et dis-le-moi. Consulte la documentation à jour de
+autogluon.timeseries (TimeSeriesPredictor, TimeSeriesDataFrame, known_covariates) et de
+autogluon.tabular (TabularPredictor).
+
+Objectif : AutoGluonAdapter pour séries temporelles et panels, compatible cross_val_score et
+GridSearchCV, sans décalage ni paramètre d'horizon utilisateur.
+
+1. Plan : tranche Q13 avec moi (horizon fixé au constructeur d'AutoGluon contre nombre de pas déduit
+   des index ; mode TimeSeriesPredictor et / ou mode 'row' sur TabularPredictor) ; mapping des
+   données (TimeSeriesDataFrame, item_id, timestamp, covariables connues et passées, lignes du gap
+   jamais inventées) ; répertoires de modèles (path) et clone / GridSearchCV / n_jobs ; coût
+   (presets, time_limit) et déterminisme ; extra adapters-autogluon et job CI. Attends ma
+   validation.
+2. Ajoute l'extra, régénère uv.lock, installe-le dans .venv (procédure de la mémoire du projet).
+3. Implémente, docstrings Google avec doctests (données minuscules, preset le plus rapide).
+4. Tests : batterie de contrat (règle 11 comprise : même prédicteur ajusté directement par
+   l'API d'AutoGluon), alignement des pas avec gap > 0, panel déséquilibré, covariables, absence de
+   fuite ; tests lents marqués slow.
+5. Mets à jour § 2.3, § 5.6, § 6, § 9 et le journal des décisions. Ne touche pas au notebook.
+```
+
+**Message de commit suggéré**
+
+```text
+feat(adapters): add AutoGluonAdapter
+
+- <mode(s) retenu(s) et traitement de l'horizon>
+- adapters-autogluon extra; contract tests including the native-equivalence rule
+```
+
+---
+
+## Session A2 — Notebook : section AutoGluon
+
+**Modèle** : Sonnet · **Effort** : medium · **Plan mode** : non
+
+**Prompt**
+
+```text
+Lis CLAUDE.md, ADAPTERS_ARCHITECTURE.md (§ 5.6, § 8) et les règles communes du § 0 de
+ADAPTERS_PROMPTS.md (tu ne commites jamais). Lis le code et les tests de
+tsforecast/adapters/autogluon.py.
+
+Objectif : ajouter une section AutoGluon à notebooks/4 - QB - Adapters.ipynb (ou au notebook
+renommé) selon le gabarit du § 8 : principe et mapping, série temporelle et panel, covariables,
+cross_val_score, GridSearchCV sur un paramètre peu coûteux, comparaison aux adapters précédents,
+coût et limites. Mets à jour les pages docs/concepts/adapters.md et docs/tutorials/adapters.md si
+elles existent déjà (tableau d'arguments doc-args, sorties exécutées). Exécute le notebook
+(nbclient) et sauvegarde-le avec ses sorties ; signale la durée d'exécution de la section.
+```
+
+**Message de commit suggéré**
+
+```text
+docs(adapters): illustrate AutoGluonAdapter in the notebook and the documentation
 ```
