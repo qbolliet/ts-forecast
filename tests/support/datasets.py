@@ -8,7 +8,9 @@ imported directly by tests and notebooks
 ``build_staggered_panel`` adds a hand-sized panel whose entities cover
 different date ranges, for the cross-validation tests.
 ``build_adapter_series`` and ``build_adapter_panel`` give the origin-indexed
-``(X, y)`` datasets of the adapter contract tests.
+``(X, y)`` datasets of the adapter contract tests; ``build_hierarchy_nodes`` and
+``build_hierarchy_levels`` give hierarchical data in long layout (coherent
+realised values, two incoherent base forecasts).
 """
 # Modules de base
 import zlib
@@ -708,3 +710,139 @@ def build_adapter_panel(balanced: bool = True, n_dates: int = 36, seed: int = 0)
     index = pd.MultiIndex.from_tuples(rows, names=['entity', 'date'])
     X = pd.DataFrame(rng.standard_normal((len(rows), 2)), index=index, columns=['x1', 'x2'])
     return X, _adapter_target(X, rng)
+
+
+# Hiérarchie de nœuds des jeux hiérarchiques : a = b + c, c = d + e
+HIERARCHY_TREE = {'a': ['b', 'c'], 'c': ['d', 'e']}
+# Feuilles sous chaque nœud de l'arbre, écrites à la main (indépendantes de l'adapter)
+_TREE_LEAVES = {'a': ('b', 'd', 'e'), 'b': ('b',), 'c': ('d', 'e'), 'd': ('d',), 'e': ('e',)}
+# Hiérarchie portée par des niveaux d'index : pays, puis régions ; agrégats étiquetés 'Total'
+HIERARCHY_LEVELS = [['country'], ['country', 'region']]
+HIERARCHY_AGGREGATE_LABEL = 'Total'
+_LEVEL_REGIONS = {'FR': ('north', 'south'), 'DE': ('center', 'east', 'west')}
+_LEVEL_LEAVES = {
+    **{
+        (country, HIERARCHY_AGGREGATE_LABEL): tuple((country, region) for region in regions)
+        for country, regions in _LEVEL_REGIONS.items()
+    },
+    **{(country, region): ((country, region),) for country, regions in _LEVEL_REGIONS.items() for region in regions},
+}
+# Écarts-types des erreurs des deux modèles de base : prévisions incohérentes entre nœuds
+_HIERARCHY_MODEL_NOISE = {'m1': 1.0, 'm2': 2.0}
+
+
+def _build_hierarchical(
+    node_leaves: dict, node_names: list, kind: str, n_dates: int, seed: int, copy_name: str
+) -> tuple:
+    """Build a coherent hierarchical dataset and two incoherent base forecasts.
+
+    Args:
+        node_leaves: Leaves below each node (the node itself for a leaf), in
+            the row order of the nodes; keys are labels or tuples of labels.
+        node_names: Names of the index levels carrying the node key.
+        kind: ``'series'`` (a single hierarchy), ``'panel'`` or
+            ``'unbalanced_panel'`` (copies ``A``, ``B``, ``C`` on the copy
+            level ``copy_name``; unbalanced, ``B`` and ``C`` start later).
+        n_dates: Number of month starts of the full calendar.
+        seed: Seed of the generator.
+        copy_name: Name of the copy level of the panels.
+
+    Returns:
+        ``(X, y)``: base forecasts ``m1`` and ``m2`` and realised values
+        ``target``, indexed by ``(copy, node..., date)``, sorted by copy, node
+        then date.
+    """
+    if kind not in ('series', 'panel', 'unbalanced_panel'):
+        raise ValueError(f'Unknown data kind {kind!r}')
+    rng = np.random.default_rng(seed)
+    calendar = pd.date_range('2020-01-01', periods=n_dates, freq='MS')
+    leaves = [node for node, below in node_leaves.items() if below == (node,)]
+    if kind == 'series':
+        copies = {None: 0}
+    elif kind == 'panel':
+        copies = dict.fromkeys(_ADAPTER_UNBALANCED_STARTS, 0)
+    else:
+        copies = _ADAPTER_UNBALANCED_STARTS
+
+    labels, dates, values = [], [], []
+    for copy, first in copies.items():
+        steps = np.arange(first, n_dates)
+        # Feuilles : niveau, tendance, saisonnalité annuelle et bruit propres
+        leaf_values = {
+            leaf: rng.uniform(10, 30)
+            + rng.uniform(-0.1, 0.2) * steps
+            + rng.uniform(1, 4) * np.sin(2 * np.pi * steps / 12)
+            + rng.normal(0, 0.5, len(steps))
+            for leaf in leaves
+        }
+        for node, below in node_leaves.items():
+            key = node if isinstance(node, tuple) else (node,)
+            labels.extend([([] if copy is None else [copy]) + list(key)] * len(steps))
+            dates.append(calendar[first:])
+            values.append(np.sum([leaf_values[leaf] for leaf in below], axis=0))
+
+    names = ([] if kind == 'series' else [copy_name]) + list(node_names)
+    levels = [pd.Index([row[level] for row in labels], dtype='str') for level in range(len(names))]
+    index = pd.MultiIndex.from_arrays(levels + [pd.DatetimeIndex(np.concatenate(dates))], names=names + ['date'])
+    y = pd.Series(np.concatenate(values), index=index, name='target')
+    X = pd.DataFrame(
+        {model: y.to_numpy() + rng.normal(0, noise, len(y)) for model, noise in _HIERARCHY_MODEL_NOISE.items()},
+        index=index,
+    )
+    return X, y
+
+
+def build_hierarchy_nodes(kind: str = 'series', n_dates: int = 36, seed: int = 0) -> tuple:
+    """Build hierarchical data whose nodes are the labels of one index level.
+
+    The hierarchy is :data:`HIERARCHY_TREE` (``a = b + c``, ``c = d + e``);
+    ``y`` is coherent on every date and the base forecasts ``m1`` and ``m2``
+    add independent noises (standard deviations 1 and 2) to it.
+
+    Args:
+        kind: ``'series'`` (index ``(node, date)``), ``'panel'`` or
+            ``'unbalanced_panel'`` (index ``(entity, node, date)``, copies
+            ``A``, ``B``, ``C``; unbalanced, ``B`` and ``C`` start later).
+        n_dates: Number of month starts from January 2020.
+        seed: Seed of the generator.
+
+    Returns:
+        ``(X, y)``: ``DataFrame`` with columns ``m1``, ``m2`` and ``Series``
+        ``target`` on the same index.
+
+    Examples:
+        >>> X, y = build_hierarchy_nodes(n_dates=2)
+        >>> list(X.index.names), len(X)
+        (['node', 'date'], 10)
+        >>> bool(abs(y.loc['a'] - y.loc['b'] - y.loc['c']).max() < 1e-9)
+        True
+    """
+    node_leaves = {node: _TREE_LEAVES[node] for node in ['a', 'b', 'c', 'd', 'e']}
+    return _build_hierarchical(node_leaves, ['node'], kind, n_dates, seed, 'entity')
+
+
+def build_hierarchy_levels(kind: str = 'series', n_dates: int = 36, seed: int = 0) -> tuple:
+    """Build hierarchical data whose index levels carry the hierarchy.
+
+    The hierarchy is :data:`HIERARCHY_LEVELS`: countries ``FR`` (regions
+    ``north``, ``south``) and ``DE`` (``center``, ``east``, ``west``); a
+    country row holds ``'Total'`` on the region level. ``y`` and the base
+    forecasts follow :func:`build_hierarchy_nodes`.
+
+    Args:
+        kind: ``'series'`` (index ``(country, region, date)``), ``'panel'`` or
+            ``'unbalanced_panel'`` (index ``(market, country, region, date)``,
+            copies ``A``, ``B``, ``C``).
+        n_dates: Number of month starts from January 2020.
+        seed: Seed of the generator.
+
+    Returns:
+        ``(X, y)``: ``DataFrame`` with columns ``m1``, ``m2`` and ``Series``
+        ``target`` on the same index.
+
+    Examples:
+        >>> X, y = build_hierarchy_levels(kind='panel', n_dates=2)
+        >>> list(X.index.names), len(X)
+        (['market', 'country', 'region', 'date'], 42)
+    """
+    return _build_hierarchical(_LEVEL_LEAVES, ['country', 'region'], kind, n_dates, seed, 'market')

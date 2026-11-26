@@ -287,14 +287,48 @@ Le paquet requiert `pandas>=3.0,<4` et `scikit-learn>=1.9,<2` (pas de support de
 ### Commentaires et Documentation
 
 #### Commentaires internes (FRANÇAIS)
-- Écrire en **français** pour faciliter la compréhension technique
-- Privilégier les formulations nominales :
+- Écrire en **français**, en formulations **nominales** :
   - ✅ `# Vérification des arguments`
   - ❌ `# Vérifier les arguments`
-- Commenter les implémentations abstraites ou techniques
-- Expliquer le "pourquoi" plutôt que le "quoi" quand le code est clair — un "pourquoi" qui
-  décrit une **contrainte technique ou sémantique permanente** du code actuel (voir
-  « Règles de rédaction du code » ci-dessous), jamais une justification historique
+- **Densité attendue** : les commentaires d'une fonction, lus seuls, racontent son déroulement.
+  Un code clair ne dispense pas de commentaire, et la docstring ne remplace pas les commentaires.
+- **Emplacements obligatoires**, pour tout code écrit ou modifié :
+  1. au-dessus de **chaque classe, fonction et méthode** (privées, propriétés, `__init__` et
+     fonctions internes comprises ; avant les décorateurs) : son rôle en une ligne
+     (`# Méthode auxiliaire de localisation des lignes`) ; les champs d'une dataclass sont
+     commentés un à un ;
+  2. à chaque **étape logique** d'un corps de fonction : un commentaire avant chaque bloc de
+     quelques lignes (vérification, extraction, calcul, construction, appel à un paquet tiers) ;
+  3. à chaque **variable intermédiaire**, en particulier dictionnaires, listes et tableaux : son
+     contenu, clé → valeur, forme, ordre ou alignement
+     (`# Dictionnaire enfant -> parent`, `# Code de la copie de chaque ligne`) ;
+  4. à chaque **boucle** (et compréhension non triviale) : ce qui est parcouru et ce que le
+     parcours produit ; les accumulateurs sont définis avant la boucle ;
+  5. à chaque **branche** (`if` / `elif` / `else`, `try` / `except`, retour anticipé) : le cas
+     traité (`# Cas d'une copie inconnue`).
+- Un commentaire peut couvrir deux ou trois lignes de même nature ; il dit l'intention dans le
+  vocabulaire du domaine, sans paraphraser la syntaxe (❌ `# Incrémentation de i`)
+- Ajouter le **pourquoi** quand une **contrainte technique ou sémantique permanente** du code actuel
+  le demande (voir « Règles de rédaction du code » ci-dessous), jamais une justification historique
+- Exemple de densité (modules de référence : `tsforecast/adapters/hierarchicalforecast/`) :
+  ```python
+  # Fonction de séparation des combinaisons de niveaux d'index en copies et nœuds
+  def _split_entities(layout, spec):
+      """..."""
+      # Dictionnaire clé de copie -> code (ordre de première apparition)
+      lookup = {}
+      # Code de copie et clé de nœud de chaque combinaison distincte de niveaux d'index
+      entity_copy, node_keys = [], []
+      # Une seule analyse par combinaison distincte, diffusée ensuite par les codes des lignes
+      for entity in layout.entities:
+          # Séparation des étiquettes de copie et de nœud
+          copy_key, node_key = spec.split_key(entity)
+          # Attribution d'un nouveau code à une copie jamais rencontrée
+          entity_copy.append(lookup.setdefault(copy_key, len(lookup)))
+          node_keys.append(node_key)
+      # Clés de copie dans l'ordre de leurs codes
+      return list(lookup), np.array(entity_copy, dtype=np.intp), node_keys
+  ```
 
 #### Règles de rédaction du code (commentaires, docstrings, en-têtes)
 

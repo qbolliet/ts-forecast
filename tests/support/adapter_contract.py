@@ -71,6 +71,21 @@ def default_data(kind: str) -> Tuple[pd.DataFrame, pd.Series]:
     raise ValueError(f'Unknown data kind {kind!r}; expected one of {DATA_KINDS}')
 
 
+def default_splitter(kind: str) -> Any:
+    """Return the out-of-sample splitter of a dataset kind, with a gap.
+
+    Args:
+        kind: ``'series'`` (``TSOutOfSampleSplit``) or a panel kind
+            (``PanelOutOfSampleSplit``).
+
+    Returns:
+        A splitter with the parameters :data:`CV_PARAMS`.
+    """
+    if kind == 'series':
+        return TSOutOfSampleSplit(**CV_PARAMS)
+    return PanelOutOfSampleSplit(**CV_PARAMS)
+
+
 @dataclass(frozen=True)
 class AdapterCase:
     """One adapter configuration checked by the contract battery.
@@ -95,6 +110,9 @@ class AdapterCase:
             leave grid dates of an entity uncovered (rows dropped by
             ``DropNaNTarget``); otherwise it must raise ``ValueError``.
         make_data: Builds ``(X, y)`` for a kind of :data:`DATA_KINDS`.
+        make_splitter: Builds the splitter of ``cross_val_score`` and
+            ``GridSearchCV`` for a kind of :data:`DATA_KINDS` (a panel splitter
+            for data whose time series kind still has a ``MultiIndex``).
         frame_method: Name of a method returning a pandas object with dates,
             whose units must be those of the input, or None.
         rtol: Relative tolerance of the comparisons of predictions.
@@ -112,6 +130,7 @@ class AdapterCase:
     invalid_params: Tuple[Mapping[str, Any], ...] = ()
     handles_training_holes: bool = True
     make_data: Callable[[str], Tuple[pd.DataFrame, Any]] = field(default=default_data)
+    make_splitter: Callable[[str], Any] = field(default=default_splitter)
     frame_method: Optional[str] = None
     rtol: float = 1e-7
     atol: float = 1e-9
@@ -356,17 +375,10 @@ def check_datetime_resolution(case: AdapterCase, kind: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _splitter(kind: str) -> Any:
-    """Out-of-sample splitter of a dataset kind, with a gap."""
-    if kind == 'series':
-        return TSOutOfSampleSplit(**CV_PARAMS)
-    return PanelOutOfSampleSplit(**CV_PARAMS)
-
-
 def check_cross_val_score(case: AdapterCase, kind: str) -> None:
     """``cross_val_score`` with a ``tsforecast`` splitter and a gap gives finite scores."""
     X, y = case.make_data(kind)
-    scores = cross_val_score(case.make_estimator(), X, y, cv=_splitter(kind), error_score='raise')
+    scores = cross_val_score(case.make_estimator(), X, y, cv=case.make_splitter(kind), error_score='raise')
     assert len(scores) == CV_PARAMS['n_splits'], f'{len(scores)} scores for {CV_PARAMS["n_splits"]} folds'
     assert np.isfinite(scores).all(), f'Non-finite scores: {scores}'
 
@@ -380,7 +392,7 @@ def check_grid_search(case: AdapterCase) -> None:
     X, y = case.make_data('series')
     X_train, y_train, X_test, _ = split_by_date(X, y)
     search = GridSearchCV(
-        case.make_estimator(), case.param_grid, cv=_splitter('series'), error_score='raise'
+        case.make_estimator(), case.param_grid, cv=case.make_splitter('series'), error_score='raise'
     ).fit(X_train, y_train)
     assert set(search.best_params_) == set(case.param_grid), f'best_params_ = {search.best_params_}'
     _assert_output_shape(search.predict(X_test), X_test, y)

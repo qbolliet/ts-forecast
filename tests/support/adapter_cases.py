@@ -3,14 +3,25 @@
 ``sktime_naive_case`` (``SktimeAdapter`` around ``NaiveForecaster``, a local time
 series model), ``sktime_yfromx_case`` (around ``YfromX(LinearRegression())``, a
 row-wise regressor) and the ``DartsAdapter`` cases (row-wise linear and random
-forest models, ``NaiveSeasonal`` local model, lagged global linear model) are shared
-by the unit and integration tests. A third-party package is imported only when an
-estimator is built.
+forest models, ``NaiveSeasonal`` local model, lagged global linear model) and the
+``HierarchicalForecastAdapter`` cases (``BottomUp``, ``MinTrace`` ``'ols'`` with the
+mean of two base models, ``MinTrace`` ``'mint_shrink'`` with one base model per
+level, on a node tree; ``MinTrace`` ``'ols'`` on a hierarchy of index levels) are
+shared by the unit and integration tests. A third-party package is imported only
+when an estimator or a parameter grid is built.
 """
+from functools import partial
+
 from sklearn.linear_model import LinearRegression
 
-from tests.support.adapter_contract import AdapterCase
-from tsforecast.adapters import DartsAdapter, SktimeAdapter
+from tests.support.adapter_contract import AdapterCase, default_splitter
+from tests.support.datasets import (
+    HIERARCHY_LEVELS,
+    HIERARCHY_TREE,
+    build_hierarchy_levels,
+    build_hierarchy_nodes,
+)
+from tsforecast.adapters import DartsAdapter, HierarchicalForecastAdapter, SktimeAdapter
 
 
 def _naive_adapter() -> SktimeAdapter:
@@ -162,4 +173,108 @@ def darts_lagged_case() -> AdapterCase:
         row_regressor=False,
         handles_training_holes=False,
         invalid_params=({'model__lags': 40},),
+    )
+
+
+# Modèle de base par niveau de l'arbre des jeux hiérarchiques
+HIERARCHY_MODEL_BY_LEVEL = {'depth_0': 'm1', 'depth_1': 'm2', 'depth_2': 'm1'}
+# Paramètres invalides d'un adapter hiérarchique (arbre)
+_HIERARCHY_INVALID_PARAMS = (
+    {'model_combination': 'median'},
+    {'hierarchy': {'a': ['b'], 'b': ['a']}},
+    {'hierarchy': {'a': ['b', 'c'], 'd': ['c', 'e']}},
+)
+
+
+def _hierarchy_splitter(kind: str):
+    """Panel splitter for every kind: hierarchical data always carry a node level."""
+    return default_splitter('panel')
+
+
+def _reconciler(name: str):
+    """Build a hierarchicalforecast reconciler: ``'bottomup'``, ``'ols'`` or ``'mint_shrink'``."""
+    from hierarchicalforecast.methods import BottomUp, MinTrace
+
+    return BottomUp() if name == 'bottomup' else MinTrace(method=name)
+
+
+def _hierarchy_adapter(reconciler: str, **params) -> HierarchicalForecastAdapter:
+    """``HierarchicalForecastAdapter`` around a new reconciler."""
+    params.setdefault('hierarchy', HIERARCHY_TREE)
+    return HierarchicalForecastAdapter(reconciler=_reconciler(reconciler), **params)
+
+
+def _hierarchy_case(make_estimator, make_data, invalid_params) -> AdapterCase:
+    """Contract case of a reconciliation: a row-wise, date-wise operation on every copy."""
+    from hierarchicalforecast.methods import BottomUp, MinTrace
+
+    return AdapterCase(
+        make_estimator=make_estimator,
+        wrapped_param='reconciler',
+        param_grid={'reconciler': [BottomUp(), MinTrace(method='ols')]},
+        package='hierarchicalforecast',
+        extra='adapters-hierarchical',
+        local_model=False,
+        row_regressor=True,
+        invalid_params=invalid_params,
+        make_data=make_data,
+        make_splitter=_hierarchy_splitter,
+        frame_method='reconcile',
+    )
+
+
+def hierarchical_bottomup_case() -> AdapterCase:
+    """Contract case of ``BottomUp`` on the node tree, base model ``m1``.
+
+    Returns:
+        Reconciliation summing the bottom forecasts, independent of the gap.
+    """
+    return _hierarchy_case(
+        partial(_hierarchy_adapter, 'bottomup', forecast_columns=['m1']),
+        build_hierarchy_nodes,
+        _HIERARCHY_INVALID_PARAMS,
+    )
+
+
+def hierarchical_ols_case() -> AdapterCase:
+    """Contract case of ``MinTrace(method='ols')`` on the node tree, mean of ``m1`` and ``m2``.
+
+    Returns:
+        Orthogonal projection on the coherent forecasts, independent of the gap.
+    """
+    return _hierarchy_case(
+        partial(_hierarchy_adapter, 'ols', model_combination='mean'),
+        build_hierarchy_nodes,
+        _HIERARCHY_INVALID_PARAMS,
+    )
+
+
+def hierarchical_mint_shrink_case() -> AdapterCase:
+    """Contract case of ``MinTrace(method='mint_shrink')`` on the node tree, one base model per level.
+
+    Returns:
+        Reconciliation weighted by the in-sample errors of each copy, fixed at
+        fit, independent of the gap.
+    """
+    return _hierarchy_case(
+        partial(_hierarchy_adapter, 'mint_shrink', model_combination=HIERARCHY_MODEL_BY_LEVEL),
+        build_hierarchy_nodes,
+        _HIERARCHY_INVALID_PARAMS,
+    )
+
+
+def hierarchical_levels_case() -> AdapterCase:
+    """Contract case of ``MinTrace(method='ols')`` on a hierarchy of index levels, base model ``m2``.
+
+    Returns:
+        Reconciliation of countries and regions, the copies being markets.
+    """
+    return _hierarchy_case(
+        partial(_hierarchy_adapter, 'ols', hierarchy=HIERARCHY_LEVELS, forecast_columns=['m2']),
+        build_hierarchy_levels,
+        (
+            {'node_level': 'region'},
+            {'hierarchy': [['region'], ['country']]},
+            {'hierarchy': [['country'], ['country', 'city']]},
+        ),
     )

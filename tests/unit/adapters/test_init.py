@@ -1,9 +1,9 @@
 """Tests of the ``tsforecast.adapters`` package import and exports.
 
-The exported adapters; in a fresh interpreter, importing the package loads no
-third-party forecasting package, and once every optional package is made
-unimportable each adapter can still be built while fitting raises an
-``ImportError`` naming its extra.
+The exported adapters and conversion functions; in a fresh interpreter, importing
+the package loads no third-party forecasting package, and once every optional
+package is made unimportable each adapter can still be built while fitting raises
+an ``ImportError`` naming its extra.
 """
 import subprocess
 import sys
@@ -48,7 +48,14 @@ def run_python(code: str) -> subprocess.CompletedProcess:
 
 
 def test_exported_names():
-    assert sorted(tsforecast.adapters.__all__) == ['DartsAdapter', 'OperaAdapter', 'SktimeAdapter']
+    assert sorted(tsforecast.adapters.__all__) == [
+        'DartsAdapter',
+        'HierarchicalForecastAdapter',
+        'OperaAdapter',
+        'SktimeAdapter',
+        'stack_nodes',
+        'unstack_nodes',
+    ]
     for name in tsforecast.adapters.__all__:
         assert getattr(tsforecast.adapters, name).__name__ == name
 
@@ -69,11 +76,18 @@ def test_import_without_loading_or_requiring_optional_packages():
         adapters.SktimeAdapter(forecaster=None)
         darts = adapters.DartsAdapter(model=None)
         opera = adapters.OperaAdapter()
+        hierarchical = adapters.HierarchicalForecastAdapter({'a': ['b']})
 
         dates = pd.date_range('2024-01-01', periods=3, freq='MS')
         X = pd.DataFrame({'x': [1.0, 2.0, 3.0]}, index=dates)
         y = pd.Series([1.0, 2.0, 3.0], index=dates)
-        for estimator, extra in [(darts, 'adapters-darts'), (opera, 'adapters-opera')]:
+        # Conversion large -> long : pandas seul
+        assert adapters.stack_nodes(X).index.names == ['node', None]
+        for estimator, extra in [
+            (darts, 'adapters-darts'),
+            (opera, 'adapters-opera'),
+            (hierarchical, 'adapters-hierarchical'),
+        ]:
             try:
                 estimator.fit(X, y)
             except ImportError as error:
@@ -83,8 +97,3 @@ def test_import_without_loading_or_requiring_optional_packages():
     ''')
     result = run_python(code)
     assert result.returncode == 0, result.stderr
-
-
-def test_hierarchical_adapter_is_not_exposed():
-    with pytest.raises(AttributeError):
-        tsforecast.adapters.HierarchicalForecastAdapter  # noqa: B018

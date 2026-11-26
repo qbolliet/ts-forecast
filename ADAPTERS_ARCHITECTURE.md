@@ -100,7 +100,7 @@ postérieure à la dernière ligne d'entraînement.
 `df_hierarchy`, `Set`), méthodes appelées comme des fonctions (`_extract_entity_date_names`,
 `_build_df_hierarchy`, `_build_unique_id_column`), docstring décrivant un paramètre `spec`
 inexistant, `S_df_` / `tags_` réécrits dans `predict`, sortie au format long de hierarchicalforecast
-non réalignée sur `X`.
+non réalignée sur `X`. **Réécrit en session 6** (sous-paquet, mode cross-section, AD-14).
 
 **`OperaAdapter`**
 - `mixture_` et `is_fitted_` posés dans `__init__` (violation sklearn : `clone`,
@@ -119,7 +119,7 @@ non réalignée sur `X`.
 
 | Paquet | Distribution | Remarques |
 |---|---|---|
-| hierarchicalforecast | PyPI | `aggregate(df, spec)` (spec : liste de listes de colonnes), `aggregate_temporal(df, spec)` (spec : `{nom: nb de pas}`), `get_cross_temporal_tags`, `HierarchicalReconciliation(reconcilers).reconcile(Y_hat_df, S_df, tags, Y_df=None, temporal=False, ...)`. Colonnes de sortie `<modèle>/<Réconciliateur>[_method-<m>]`. La réconciliation temporelle ne supporte pas les méthodes *insample* (`mint_shrink`, ...). Le tutoriel cross-temporel fait deux appels séparés (cross-section, puis temporel sur toutes les séries cross-section) et n'évalue qu'avec des *tags* cross-temporels. |
+| hierarchicalforecast | PyPI | `aggregate(df, spec)` (spec : liste de listes de colonnes), `aggregate_temporal(df, spec)` (spec : `{nom: nb de pas}`), `get_cross_temporal_tags`, `HierarchicalReconciliation(reconcilers).reconcile(Y_hat_df, S_df, tags, Y_df=None, temporal=False, ...)`. Colonnes de sortie `<modèle>/<Réconciliateur>[_method-<m>]`. La réconciliation temporelle ne supporte pas les méthodes *insample* (`mint_shrink`, ...). Le tutoriel cross-temporel fait deux appels séparés (cross-section, puis temporel sur toutes les séries cross-section) et n'évalue qu'avec des *tags* cross-temporels. **Vérifié en session 6 (1.5.3)** : `reconcile` mute les réconciliateurs (`fitted`, `P`, `W`, `y_hat`, `sampler`) et trie `level` en place ; `unique_id` et colonnes de `S_df` doivent être des chaînes ; sortie triée par ordre de `S` puis `ds` ; un modèle dont le nom contient `-lo`, `-hi` ou `-median` est écarté en silence ; `Y_df` à trous accepté (`is_balanced=False`, NaN gérés par `mint_shrink`), `Y_hat_df` rectangulaire exigé ; intervalles `normality` lus sur des colonnes `<modèle>-lo-<niveau>` / `-hi-` de `Y_hat_df`, `bootstrap` par blocs d'autant de dates insample consécutives que de dates à réconcilier ; `TopDown` / `MiddleOut` faux si les feuilles ne sont pas toutes au niveau le plus fin des *tags* ; **aucune réconciliation cross-temporelle native** (seulement `temporal=True`). |
 | opera (`Dralliag/opera-python`) | **pas sur PyPI** (`pip install git+...`) ; version `0.0.1` | `Mixture(y, experts: DataFrame, awake=None, model="BOA"|"MLpol"|"MLprod"|"FTRL", coefficients="uniform"|ndarray, loss_type="mse"|"mae"|"mape"|"msle"|"mspe"|callable, loss_gradient=True, parameters=None)`. Le constructeur consomme les données (appelle `update`). `update(new_experts, new_y)` séquentiel ligne à ligne ; `predict(new_experts)` sans mise à jour (poids courants `w`). Dépendances non figées, **scipy importé mais non déclaré**. Compatibilité pandas 3 inconnue. |
 | chronos-forecasting | PyPI | `Chronos2Pipeline.from_pretrained("amazon/chronos-2", device_map=...)` ; `predict_df(context_df, future_df=..., prediction_length, quantile_levels, id_column, timestamp_column, target)` ; covariables passées et futures en colonnes. Modèles : `amazon/chronos-2`, `autogluon/chronos-2-small`, `amazon/chronos-bolt-{tiny,mini,small,base}`, `amazon/chronos-t5-*`. `pandas>=2,<4`. |
 | timestral (Mistral AI) | **pas sur PyPI** (`pip install git+https://github.com/mistralai/timestral.git`) | `TimestralForecaster.from_pretrained("mistralai/Timestral-{5M,28M,123M,209M}", device=...)` ; `model.forecast(context, prediction_length)` → `.median`, `.quantile(q)` ; covariables passées et futures annoncées ; contexte ≤ 32 768 pas ; sortie ≤ 1 024 pas par passe. Licence « Modified MIT » avec clause d'usage. Pas d'API batch documentée sur la carte. |
@@ -308,58 +308,141 @@ de la configuration du modèle (`mode_`) ; pas de covariable statique.
 
 ### 5.3 `HierarchicalForecastAdapter`
 
+**Réalisé en session 6 (AD-13, AD-14)** pour la cross-section ; temporel et cross-temporel en
+session 7 (`temporal_hierarchy` non `None` → `NotImplementedError`).
+
 **Rôle** : réconciliateur. `X` contient les **prévisions de base** (une colonne par modèle de base)
-et, optionnellement, des covariables exogènes déclarées ; `y` les réalisations. `fit` construit la
-structure (`S`, *tags*) et mémorise ce dont les réconciliateurs *insample* ont besoin ; `predict`
-réconcilie les prévisions de base des lignes de `X`.
+et, éventuellement, des colonnes ignorées ; `y` les réalisations. `fit` construit la structure (`S`,
+*tags*) de chaque copie de la hiérarchie et mémorise les lignes d'entraînement ; `predict` réconcilie
+date par date les prévisions de base des lignes de `X` (prédiction indépendante du gap).
 
-**Format** : long côté sklearn. Chaque nœud de la hiérarchie est une ligne ; le nœud est porté par
-des niveaux d'index, la date reste le dernier niveau. `y` est donc une `Series` 1-D sur tous les
-nœuds (feuilles et agrégats) et `predict` renvoie une valeur par ligne de `X` : `cross_val_score`,
-`GridSearchCV` et les splitters panel (qui regroupent par date) fonctionnent sans adaptation.
+**Code** : sous-paquet `tsforecast/adapters/hierarchicalforecast/` — `adapter.py` (classe),
+`_structure.py` (`parse_hierarchy`, `HierarchySpec`, `Structure`, `tree_structure` ; numpy et pandas
+seuls), `reshape.py` (`stack_nodes`, `unstack_nodes`), `__init__.py` (réexports, repris par
+`tsforecast.adapters`).
 
-**Trois modes**, déduits des paramètres renseignés :
+**API**
 
-| Mode | Paramètres | Exemple |
-|---|---|---|
-| cross-section | `hierarchy` | entités `(Country, State, Region)` ou nœuds `value_a = value_b + value_c` |
-| temporel | `temporal_hierarchy={"year": 12, "quarter": 3, "month": 1}` | agrégats de fréquences inférieures |
-| cross-temporel | les deux | tutoriel *Australian Domestic Tourism — cross-temporal* |
+```python
+HierarchicalForecastAdapter(hierarchy=None, reconciler=None, *, node_level=None,
+                            aggregate_label="Total", model_combination=None,
+                            forecast_columns=None, temporal_hierarchy=None)
+fit(X, y) ; predict(X) -> ndarray (n,) ; score (R² de RegressorMixin)
+reconcile(X, reconcilers=None, *, level=None, intervals_method="normality", num_samples=-1, seed=0)
+diagnose(X, reconcilers=None, *, atol=1e-6) ; summing_matrix(copy=None)
+stack_nodes(data, node_level="node") ; unstack_nodes(data, node_level="node")
+```
 
-- `hierarchy` accepte deux formes : (a) une `spec` à la hierarchicalforecast (liste de listes de
-  niveaux d'index, du plus agrégé au plus fin), les lignes d'agrégat portant une étiquette réservée
-  (paramètre `aggregate_label`, par défaut `"Total"` ou chaîne vide : à trancher) dans les niveaux
-  absents ; (b) un dict `{parent: [enfants]}` sur les valeurs d'un niveau d'index nommé
-  (`node_level`). Un utilitaire public convertit un DataFrame « large » (une colonne par nœud,
-  comme `value_a..value_e` du notebook) vers ce format long et inversement.
-- Séries temporelles : la hiérarchie porte sur les nœuds seuls. Panel : soit les entités sont des
-  **copies indépendantes** de la même hiérarchie (l'entité préfixe `unique_id`), soit elles **sont**
-  la hiérarchie (forme (a)).
-- Temporel : un niveau d'index (`temporal_level`, nom paramétrable) porte la clé de
-  `temporal_hierarchy` ; une ligne d'agrégat est datée au **début** de sa période (à confirmer). Le
-  `predict` refuse une période d'agrégation incomplète dans `X` (erreur explicite) : en validation
-  croisée, le test doit couvrir des périodes complètes du niveau le plus agrégé
-  (`test_size` multiple de son nombre de pas). Les méthodes *insample* sont refusées en temporel.
-  Attention : avec des lignes indexées par origine, une agrégation calendaire porte sur les
-  origines, pas sur les périodes cibles ; le documenter (ou proposer un ancrage sur la période
-  cible).
-- Cross-temporel : composition de la réconciliation temporelle et cross-section (ordre et nombre
-  de passes à arrêter en session, en vérifiant d'abord si la version installée de
-  hierarchicalforecast propose une méthode cross-temporelle native) ; un test vérifie la cohérence
-  numérique dans les **deux** dimensions.
-- Multi-modèle : plusieurs colonnes de prévisions de base. Paramètre `model_combination` :
-  `None` (une seule colonne), `"mean"` (moyenne des colonnes, comme le tutoriel *multi-model*),
-  ou un dict niveau → colonne (un modèle par niveau). Les colonnes non choisies sont ignorées.
-- Sortie : `predict` renvoie la réconciliation d'**un** réconciliateur (paramètre `reconciler`,
-  singulier, pour que `GridSearchCV` compare les réconciliateurs par
-  `param_grid={"reconciler": [BottomUp(), MinTrace(method="ols"), ...]}`) ; `reconcile(X)` renvoie
-  toutes les colonnes `<modèle>/<réconciliateur>` pour l'inspection. La compatibilité avec un
-  paramètre `reconcilers` (liste) est une question ouverte (§ 9).
-- `fit` ne dépend que de la structure et des données d'entraînement ; `predict` ne réécrit aucun
-  attribut ajusté (les `S` / *tags* propres à l'horizon de test sont des variables locales).
-- Prévisions de base *insample* (pour `mint_shrink`, `wls_var`, ERM) : `X_train` doit contenir des
-  prévisions **hors échantillon** produites en amont (par exemple `cross_val_predict` avec un
-  splitter de `tsforecast`) ; le notebook le montre.
+Attributs ajustés : `reconciler_` (copie ; `BottomUp()` si `reconciler=None`), `hierarchy_levels_`
+(noms des niveaux, du plus agrégé au plus fin : clés d'un `model_combination` dict, valeurs possibles
+de `middle_level`), `copies_` (`((),)` sans copie), `forecast_columns_`, `n_features_in_`,
+`feature_names_in_` ; privés : `_spec`, `_copies` (structure, lignes d'entraînement au format
+hierarchicalforecast, nœuds sans ligne, équilibre), `_combination`, `_intervals`.
+
+**Format** : long côté sklearn. Une ligne par (copie, nœud, date) ; la date est le dernier niveau
+d'index ; `y` est une `Series` 1-D sur **tous** les nœuds (feuilles et agrégats) ; lignes dans
+n'importe quel ordre ; aucune grille régulière exigée (`check_adapter_input(..., detect_freq=False)`).
+
+**Deux formes de `hierarchy`**
+
+- (a) liste de listes de niveaux d'index, comme la `spec` de hierarchicalforecast
+  (`[['country'], ['country', 'region']]`), triée par longueur ; l'entrée la plus longue (niveau le
+  plus fin) contient tous les niveaux ; structures groupées acceptées. Une ligne d'agrégat porte
+  `aggregate_label` (défaut `"Total"`, Q6) sur les niveaux qu'elle agrège ; son niveau est l'entrée
+  formée de ses niveaux différents de l'étiquette (aucune entrée → `ValueError`). Nœuds **appris au
+  fit**, par copie : feuilles observées, agrégats impliqués par projection sur chaque entrée (une
+  ligne d'agrégat sans feuille → `ValueError`). Noms de niveaux : `"country"`, `"country/region"`.
+- (b) dict `{parent: [enfants]}` sur les valeurs du niveau `node_level` (nom ou position ; défaut :
+  le niveau juste avant la date) : arbre ou forêt, un parent par enfant, sans cycle, enfants uniques
+  et non vides. Niveaux par profondeur : `"depth_0"`, `"depth_1"`... Feuilles éventuellement à des
+  profondeurs différentes (`a = b + c`, `c = d + e`). Un nœud de `X` absent de l'arbre → `ValueError`.
+- Données larges (une colonne par nœud, `value_a..value_e`) : `stack_nodes` les met au format long
+  (niveau de nœuds inséré avant la date ; colonnes `(variable, nœud)` → une colonne par variable),
+  `unstack_nodes` revient au format large.
+
+**Séries temporelles et panels** : les niveaux non date hors hiérarchie sont des **niveaux de copie** ;
+chaque copie est une hiérarchie indépendante, réconciliée par un appel séparé avec ses propres
+statistiques insample (panels déséquilibrés naturels). Série temporelle hiérarchique = une copie `()`
+(index `(node, date)` ou `(country, region, date)`) ; « les entités forment la hiérarchie » = forme
+(a) sans niveau de copie ; copies indépendantes = niveau(x) d'entité en tête. Copie inconnue au
+`predict` : réconciliée si sa structure est connue sans données (forme (b)) et qu'aucune donnée
+insample n'est requise ; sinon `ValueError`. Nœud inconnu d'une copie connue → `ValueError`.
+
+**Structure** (`Structure`) : `S` dense `float64`, agrégats (plus agrégés d'abord) puis feuilles
+(bloc identité) ; `unique_id` chaînes `"0".."n-1"` ; ordre déterministe (étiquettes triées quand
+elles sont comparables), indépendant de l'ordre des lignes ; mapping ligne → nœud calculé une fois
+par combinaison distincte (`TemporalLayout.entities`) puis diffusé par `layout.codes`.
+`summing_matrix(copy)` l'expose, étiquetée par les nœuds.
+
+**Colonnes et multi-modèle**
+
+- `forecast_columns=None` : toutes les colonnes sauf les colonnes d'intervalle `<col>-lo-<niveau>` /
+  `<col>-hi-<niveau>` d'une autre colonne ; une liste : ces colonnes seules, les autres ignorées.
+- **Exogènes** : aucun rôle dans la réconciliation (l'agrégation `exog_vars` de hierarchicalforecast
+  sert à construire les jeux des modèles de base, en amont) ; pas de paramètre `exog_vars` (Q11).
+- `model_combination` : `None` (exactement une colonne), `"mean"` (moyenne ligne à ligne, comme le
+  tutoriel *multi-model*), dict `{niveau: colonne}` couvrant tous les `hierarchy_levels_` (un modèle
+  par niveau ; colonnes non choisies ignorées). La combinaison s'appelle `"combined"` dans
+  `reconcile()` / `diagnose()` (colonne de base de ce nom refusée) ; elle est aussi calculée sur
+  `X_train` pour l'insample.
+- Noms internes `model_<i>` / `model_combined` vers hierarchicalforecast, renommés en sortie.
+
+**Réconciliateurs insample** : `fit` mémorise par copie `(unique_id, ds, y, modèles)` des lignes à
+cible finie (ordre canonique) ; ces lignes ne sont passées à `reconcile` que si `reconciler.insample`
+ou pour des intervalles `bootstrap` / `permbu` / `conformal` ; tout nœud de la copie doit alors avoir
+une ligne (`ValueError` au `fit`). `X_train` doit contenir des prévisions **hors échantillon**
+produites pli par pli avec un splitter de `tsforecast` (`cross_validate(..., return_estimator=True,
+return_indices=True)` puis `predict` de chaque estimateur sur ses lignes de test) :
+`cross_val_predict` refuse les splitters temporels (ils ne partitionnent pas les lignes).
+
+**Sorties**
+
+- `predict` : moyenne réconciliée par `reconciler` (Q5 ; `GridSearchCV` :
+  `param_grid={'reconciler': [BottomUp(), MinTrace(method='ols')]}`) de la combinaison, ou de la
+  seule colonne.
+- `reconcile(X, reconcilers=None, ...)` : `DataFrame` indexé comme `X` (même ordre, dates dans
+  l'unité d'entrée), colonnes `<modèle>/<réconciliateur>` (nommage hierarchicalforecast) pour chaque
+  colonne de base et `combined`, × chaque réconciliateur ; avec `level` : `-lo-<niveau>` /
+  `-hi-<niveau>`, et `-sample-<i>` si `num_samples > 0`. `normality` exige les colonnes d'intervalle
+  du modèle (choisies niveau par niveau pour un dict ; refus pour `"mean"`) ; `bootstrap` exige plus
+  de dates d'entraînement que de dates à réconcilier (`ValueError` explicite).
+- `diagnose(X, reconcilers=None, atol=1e-6)` : diagnostics de hierarchicalforecast (`level`,
+  `metric`, une colonne par `<modèle>/<réconciliateur>`), niveaux de copie en tête sur un panel.
+- `level`, `intervals_method`, `num_samples`, `seed` et les diagnostics sont des arguments de ces
+  méthodes, pas des paramètres du constructeur ; `is_balanced` est calculé en interne.
+
+**Invariants** : `reconcile` de hierarchicalforecast est appelé par copie, sur un objet
+`HierarchicalReconciliation` local et des **copies profondes** des réconciliateurs (et une copie de
+`level`) : ni le réconciliateur du constructeur, ni `reconciler_`, ni aucun attribut ajusté ne sont
+modifiés par `predict`, `reconcile` ou `diagnose`. Sortie réalignée par clés `(unique_id, ds)`.
+
+**Erreurs explicites** : `fit` — `hierarchy` absente ou mal formée, niveau inconnu, `node_level`
+avec une liste, `aggregate_label` manquant, `y` non 1-D, colonnes de base invalides ou non
+numériques, `model_combination` invalide, `reconciler` non `HReconciler` (`TypeError`), réconciliateur
+strict (`TopDown`, `MiddleOut`) sur structure groupée ou feuilles hors du niveau le plus fin,
+`middle_level` inconnu, nœud sans ligne pour un réconciliateur insample. `predict` — nœud ou copie
+inconnus, date sans tous les nœuds de sa copie, prévision de base non finie, colonnes différentes du
+fit.
+
+**Emboîtement des modes temporel et cross-temporel (session 7)**
+
+- Paramètres : `temporal_hierarchy={'year': 12, 'quarter': 3, 'month': 1}` (format
+  hierarchicalforecast), `temporal_level` (défaut : niveau juste avant la date ; `node_level` prend
+  alors le niveau précédent).
+- Datation (Q7) selon la position de la grille fine (`parse_frequency(freq).position`) : `'S'`
+  (`MS`, `QS`) → un agrégat porte la date de la première ligne fine de sa période ; `'E'` (`ME`,
+  `QE`) → celle de la dernière ; grilles sans position (`D`, `h`, `B`, `W-SUN`) : Q10. Un agrégat de
+  `n_k` pas couvre `n_k` dates consécutives de la grille fine ; imbrication vérifiée ; `predict`
+  refuse une période incomplète (le test couvre des périodes complètes du niveau le plus agrégé) ;
+  insample refusés. Lignes indexées par origine : l'agrégation porte sur les origines (documenté ;
+  l'ancrage sur la période cible se fait en amont, en indexant par date cible).
+- Moteur commun : réconcilier une matrice (nœuds × colonnes) avec une structure `S`. Cross-section :
+  colonnes = dates. Temporel : `S` d'**une** période du niveau le plus agrégé (fixée au `fit` depuis
+  `temporal_hierarchy`), colonnes = (série × période) → aucun `S` propre à l'horizon, rien de réécrit
+  au `predict`. Cross-temporel : pas de méthode native en 1.5.3 ; une passe avec `S_cs ⊗ S_te`
+  (feuilles replacées en bas), cohérente dans les deux dimensions par construction ; *tags* croisés
+  `cs//te` comme `get_cross_temporal_tags`. À confronter en session 7 à la composition en deux
+  passes du tutoriel (cohérente dans les deux dimensions seulement pour `BottomUp`).
 
 ### 5.4 `OperaAdapter`
 
@@ -498,6 +581,11 @@ tsforecast/adapters/foundation/
   Session 4 : `AdapterCase.handles_training_holes` (un adapter qui refuse les trous
   d'entraînement doit lever `ValueError` dans le contrôle `XYPipeline`) ; le contrôle
   `GridSearchCV` cherche sur les dates d'entraînement et prédit les dates de test postérieures.
+  Session 6 : `AdapterCase.make_splitter` (défaut `default_splitter` : `TSOutOfSampleSplit` pour une
+  série) ; les cas hiérarchiques prennent `PanelOutOfSampleSplit` pour tous les jeux (une série
+  hiérarchique a un niveau de nœuds). Jeux `build_hierarchy_nodes` / `build_hierarchy_levels`
+  (`tests/support/datasets.py`, `y` cohérent, `m1` / `m2` bruités) ; cas
+  `hierarchical_{bottomup,ols,mint_shrink,levels}_case` (`tests/support/adapter_cases.py`).
 - Commande locale : `.venv/Scripts/python.exe -m pytest tests/unit/adapters -q -p no:cacheprovider`.
 
 ---
@@ -532,11 +620,13 @@ tsforecast/adapters/foundation/
 | Q2 | Renommer le notebook selon la numérotation de `main` (`5 - Adapters.ipynb`) ? | Garder le nom actuel jusqu'à la fin, renommer en dernière session |
 | Q3 | Paquet tiers incompatible avec pandas 3 / Python 3.13 | **Tranchée (AD-05, AD-06)** : tous compatibles ; aucun plafond ajouté au cœur ; bug pandas 3.1 de darts documenté |
 | Q4 | opera incompatible ou abandonné | **Tranchée pour la session 1 (AD-07)** : SHA figé, fonctionne sous pandas 3 ; réimplémentation interne éventuelle à décider en session 9 |
-| Q5 | `HierarchicalForecastAdapter` : `reconciler` (singulier) seul, ou aussi `reconcilers` (liste) ? | `reconciler` pour `predict` / `GridSearchCV`, `reconcile()` pour comparer plusieurs réconciliateurs |
-| Q6 | Étiquette des lignes d'agrégat (`""`, `"Total"`, `"__all__"`) | `"Total"` (paramètre `aggregate_label`) |
-| Q7 | Ancrage temporel des agrégats (début de période / période cible) | Début de période, ancrage sur les origines documenté |
+| Q5 | `HierarchicalForecastAdapter` : `reconciler` (singulier) seul, ou aussi `reconcilers` (liste) ? | **Tranchée (AD-13)** : `reconciler` seul ; `reconcile(X, reconcilers=None)` pour comparer |
+| Q6 | Étiquette des lignes d'agrégat (`""`, `"Total"`, `"__all__"`) | **Tranchée (AD-13)** : `"Total"` (paramètre `aggregate_label`) |
+| Q7 | Ancrage temporel des agrégats (début de période / période cible) | **Tranchée (AD-13)** : selon la position de la grille fine (`S` → début, `E` → fin) ; ancrage sur les origines documenté |
 | Q8 | Backends de fondation à livrer en premier | Chronos-2 + `callable`, puis Timestral et t0 |
 | Q9 | Sort des fichiers `ADAPTERS_*.md` avant fusion dans `main` | Les supprimer ; le contenu utile passe dans `docs/concepts/adapters.md` |
+| Q10 | Datation des agrégats temporels sur une grille sans position (`D`, `h`, `B`, `W-SUN`) | Session 7 : début de période, sauf `W-<jour>` (semaine étiquetée par son dernier jour) → fin ; ou paramètre explicite |
+| Q11 | Utilitaire public d'agrégation des feuilles vers tous les nœuds (`y` sommé, exogènes agrégés comme `aggregate(exog_vars=...)`), pour construire les jeux des modèles de base de chaque niveau | Hors périmètre de la session 6 ; à décider avant la session 8 (notebook) |
 
 ---
 
@@ -556,4 +646,7 @@ tsforecast/adapters/foundation/
 | AD-10 | 2026-11-25 | 2 | `conftest.py` racine : doctests d'un adapter ignorés si son paquet manque ; exclusions **transitoires** des doctests de `hierarchicalforecast.py` (ne se parse pas, session 6) et de `sktime.py` (exemple faux, session 3) ; `hierarchicalforecast.py` dans `EXCLUDED_PREFIXES` de `scripts/check_conventions.py` et non exporté par `tsforecast.adapters` (session 6 : retirer ces trois exclusions) | `check_conventions --rule all` vert sans toucher aux modules réécrits plus tard |
 | AD-11 | 2026-11-25 | 3 | `SktimeAdapter` : paramètre `fh` supprimé (horizon absolu tiré des dates de `X`) ; ajustement par la vectorisation de sktime (`pd-multiindex` / hiérarchique) ; prévision hybride (un appel sktime si `X` est ignoré ou complet sur toutes les entités et dates, sinon un appel par entité par `forecasters_`, sinon `ValueError` pour un forecaster à panel natif) ; capacités lues sur les tags sktime (`capability:exogenous`, `capability:non_contiguous_X`, `capability:missing_values`, `requires-fh-in-fit`) ; exclusion transitoire des doctests de `sktime.py` (AD-10) levée ; contrôle d'aller-retour `set_params(**get_params())` de la batterie comparant les valeurs des paramètres (objets imbriqués réduits à leur classe) | sktime n'a qu'un horizon commun à toutes les entités : un forecaster qui lit `X` échoue sur un test incomplet (panel déséquilibré) ; le `set_params` de sktime remplit un cache privé qui change l'empreinte `joblib` sans changer les paramètres |
 | AD-12 | 2026-11-25 | 4 | `DartsAdapter` : plus de paramètres forcés (`lags=None`, `lags_future_covariates=[0]`...) ; mode déduit de `extreme_lags` : `'row'` (régression ligne à ligne, série factice `NaN` d'un pas par suite contiguë de lignes, segments contigus à l'entraînement), `'global'` et `'local'` (extrapolation de l'historique, `ValueError` si `X` manque sur le gap) ; pas d'option de covariables statiques ; batterie : `handles_training_holes`, `GridSearchCV` ajusté sur l'entraînement | Forcer la régression réduit darts à une régression sklearn sur `X` ; l'extrapolation ouvre les modèles locaux et autorégressifs de darts ; darts n'accepte que des covariables statiques numériques (l'utilisateur ajoute ses indicatrices dans `X`) ; un modèle qui extrapole ne prédit pas les lignes d'entraînement |
+| AD-13 | 2026-11-25 | 6 | Q5 : `reconciler` singulier (`None` → `BottomUp()`) pour `predict` et `GridSearchCV`, `reconcile(X, reconcilers=None)` pour comparer ; Q6 : `aggregate_label="Total"` ; Q7 : datation des agrégats temporels selon la position de la grille fine (`S` → première date de la période, `E` → dernière ; grille sans position : Q10) ; `level`, `intervals_method`, `num_samples`, `seed` arguments de `reconcile()`, diagnostics par `diagnose(X, reconcilers, atol)`, `is_balanced` interne | Le constructeur ne porte que ce qui change `predict` ; un seul réconciliateur par estimateur garde `GridSearchCV` naturel ; une grille `QE` étiquette ses périodes par leur fin, une grille `QS` par leur début |
+| AD-14 | 2026-11-25 | 6 | `HierarchicalForecastAdapter` en sous-paquet (`adapter.py`, `_structure.py`, `reshape.py`) ; format long ; `hierarchy` en liste de niveaux d'index (nœuds appris au fit, par copie) ou dict `{parent: [enfants]}` sur `node_level` (niveaux `depth_<d>`) ; niveaux non date restants = copies indépendantes réconciliées séparément (copie inconnue acceptée pour un arbre sans besoin insample) ; `S` construit par l'adapter (identifiants chaînes, feuilles en bas) ; `reconcile` public de hierarchicalforecast appelé par copie sur des copies profondes des réconciliateurs et de `level` ; `forecast_columns` (pas d'`exog_vars`) ; `model_combination` `None` / `"mean"` / `{niveau: colonne}`, nommée `combined` ; insample mémorisé au fit, prévisions de base hors échantillon produites pli par pli (`cross_validate(return_estimator=True, return_indices=True)` : `cross_val_predict` refuse les splitters temporels) ; `TopDown` / `MiddleOut` refusés sur structure groupée ou feuilles hors du niveau le plus fin ; `stack_nodes` / `unstack_nodes` exportés par `tsforecast.adapters` | `reconcile` mute réconciliateurs et `level` ; chaque date se réconcilie seule (`P` ne dépend que de `S` et de l'insample) ; des copies indépendantes ne partagent pas leurs covariances d'erreurs ; les réconciliateurs stricts de hierarchicalforecast lisent le niveau le plus fin des *tags* comme le bas ; les données larges de l'auteur (`value_a..value_e`) passent par `stack_nodes` |
+| AD-15 | 2026-11-25 | 6 | Exclusions d'AD-10 levées (`conftest.py` racine : `tsforecast/adapters/hierarchicalforecast/adapter.py` collecté si hierarchicalforecast est installé ; `EXCLUDED_PREFIXES = ()` ; adapter exporté) ; champ `AdapterCase.make_splitter` ajouté à la batterie de contrat | Le module se parse et ses doctests passent ; une série hiérarchique a toujours un `MultiIndex`, que `TSOutOfSampleSplit` refuse |
 |  |  |  |  |  |
