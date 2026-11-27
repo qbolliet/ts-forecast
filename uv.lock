@@ -3069,6 +3069,7 @@ adapters-all = [
     { name = "chronos-forecasting" },
     { name = "darts" },
     { name = "hierarchicalforecast" },
+    { name = "pandas" },
     { name = "sktime" },
     { name = "tfc-t0", extra = ["torch"] },
     { name = "timestral" },
@@ -3079,6 +3080,7 @@ adapters-chronos = [
 ]
 adapters-darts = [
     { name = "darts" },
+    { name = "pandas" },
 ]
 adapters-hierarchical = [
     { name = "hierarchicalforecast" },
@@ -3087,6 +3089,7 @@ adapters-hierarchical = [
 adapters-light = [
     { name = "darts" },
     { name = "hierarchicalforecast" },
+    { name = "pandas" },
     { name = "sktime" },
     { name = "utilsforecast" },
 ]
@@ -3133,6 +3136,7 @@ requires-dist = [
     { name = "joblib", specifier = ">=1.5.1,<2" },
     { name = "numpy", specifier = ">=2.3.1,<3" },
     { name = "pandas", specifier = ">=3.0,<4" },
+    { name = "pandas", marker = "extra == 'adapters-darts'", specifier = ">=3.0,<3.1" },
     { name = "pyarrow", marker = "extra == 'pyarrow'", specifier = ">=13.0.0,<27" },
     { name = "scikit-learn", specifier = ">=1.9,<2" },
     { name = "sktime", marker = "extra == 'adapters-sktime'", specifier = ">=1.3.0,<2" },
