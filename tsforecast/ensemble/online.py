@@ -891,6 +891,7 @@ class OnlineAggregator(RegressorMixin, MetaEstimatorMixin, BaseEstimator):
             >>> model.entity_weights_.round(2).to_dict('index')
             {'A': {'p': 1.0, 'q': 0.0}, 'B': {'p': 0.0, 'q': 1.0}}
         """
+        # Vérification que l'estimateur est entrainé
         check_is_fitted(self, "state_")
         # Validation des entrées : colonnes vues au fit, analyse de l'index
         X, _, layout = check_adapter_input(self, X, reset=False, detect_freq=False)
