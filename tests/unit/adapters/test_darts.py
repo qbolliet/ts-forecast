@@ -2,7 +2,9 @@
 
 Runs the unit rules of the adapter contract on row-wise models
 (``LinearRegressionModel``, ``RandomForestModel``) and extrapolating models
-(``NaiveSeasonal``, lagged ``LinearRegressionModel``), then targeted scenarios:
+(``NaiveSeasonal``, lagged ``LinearRegressionModel``), compares exponential
+smoothing and a model on target lags and past and future covariates with darts
+used natively, then targeted scenarios:
 wrapped model never modified, mode deduced from the model configuration and
 refused objects, row-wise predictions equal to a pooled scikit-learn regression
 (panels without cross-entity covariates, integer and two-level entities, training
@@ -37,9 +39,15 @@ from tests.support.adapter_cases import (  # noqa: E402
     darts_forest_case,
     darts_lagged_case,
     darts_linear_case,
+    darts_native_cases,
     darts_seasonal_case,
 )
-from tests.support.adapter_contract import AdapterContractTests, split_by_date  # noqa: E402
+from tests.support.adapter_contract import (  # noqa: E402
+    NATIVE_GAPS,
+    AdapterContractTests,
+    check_native_equivalence,
+    split_by_date,
+)
 from tests.support.datasets import build_adapter_panel  # noqa: E402
 from tsforecast.adapters import DartsAdapter  # noqa: E402
 
@@ -66,6 +74,20 @@ class TestDartsLaggedContract(AdapterContractTests):
     """Unit contract of a global ``LinearRegressionModel`` on target lags."""
 
     case = darts_lagged_case()
+
+
+class TestNativeEquivalence:
+    """Exponential smoothing and a lagged model with covariates predict like darts used natively."""
+
+    @pytest.mark.parametrize('gap', NATIVE_GAPS)
+    @pytest.mark.parametrize('kind', ['series', 'panel'])
+    @pytest.mark.parametrize('name', ['exponential_smoothing', 'lagged_covariates'])
+    def test_same_forecasts_as_darts(self, name, kind, gap):
+        """``predict(n=gap + n_test)`` of a darts fit on the training series, test steps extracted."""
+        case = darts_native_cases()[name]
+        if gap not in case.native_gaps:
+            pytest.skip(f'{name} needs the covariates on the gap')
+        check_native_equivalence(case, kind, gap)
 
 
 # ---------------------------------------------------------------------------

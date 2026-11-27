@@ -8,14 +8,19 @@ forest models, ``NaiveSeasonal`` local model, lagged global linear model) and th
 mean of two base models, ``MinTrace`` ``'mint_shrink'`` with one base model per
 level, on a node tree; ``MinTrace`` ``'ols'`` on a hierarchy of index levels; the
 temporal and cross-temporal cases on years, quarters and months) are shared by the
-unit and integration tests. A third-party package is imported only
-when an estimator or a parameter grid is built.
+unit and integration tests. Every case on data that its package handles alone
+carries the native reference of its model; ``sktime_native_cases`` and
+``darts_native_cases`` add models checked only against their package used
+natively. A third-party package is imported only when an estimator, a parameter
+grid or a native reference is built.
 """
 from functools import partial
+from typing import Callable, Dict
 
 from sklearn.linear_model import LinearRegression
 
-from tests.support.adapter_contract import AdapterCase, default_splitter
+from tests.support import native_references as native
+from tests.support.adapter_contract import AdapterCase, NativeReference, default_splitter
 from tests.support.datasets import (
     HIERARCHY_LEVELS,
     HIERARCHY_TREE,
@@ -26,6 +31,17 @@ from tests.support.datasets import (
     build_temporal_hierarchy,
 )
 from tsforecast.adapters import DartsAdapter, HierarchicalForecastAdapter, SktimeAdapter
+
+
+# Fabrique d'une référence native construite à son premier appel
+def _lazy(build: Callable[[], NativeReference]) -> NativeReference:
+    """Native reference returned by ``build()`` at call time, the third-party package imported then."""
+
+    # Référence construite à l'appel : le paquet tiers n'est importé que par le test
+    def reference(X_train, y_train, X_test, fh):
+        return build()(X_train, y_train, X_test, fh)
+
+    return reference
 
 
 def _naive_adapter() -> SktimeAdapter:
@@ -57,6 +73,7 @@ def sktime_naive_case() -> AdapterCase:
         local_model=True,
         row_regressor=False,
         invalid_params=({'forecaster__strategy': 'unknown'},),
+        native_reference=_lazy(lambda: native.sktime_reference(_naive_adapter().forecaster)),
     )
 
 
@@ -75,6 +92,7 @@ def sktime_yfromx_case() -> AdapterCase:
         local_model=True,
         row_regressor=True,
         invalid_params=({'forecaster__estimator__fit_intercept': 'yes'},),
+        native_reference=_lazy(lambda: native.sktime_reference(_yfromx_adapter().forecaster, uses_X=True)),
     )
 
 
@@ -106,6 +124,14 @@ def _darts_lagged_adapter() -> DartsAdapter:
     return DartsAdapter(LinearRegressionModel(lags=3))
 
 
+# Référence native de la forêt aléatoire ligne à ligne : forêt scikit-learn de mêmes paramètres
+def _forest_reference() -> NativeReference:
+    """Pooled ``RandomForestRegressor`` with the parameters of the darts forest of the case."""
+    from sklearn.ensemble import RandomForestRegressor
+
+    return native.pooled_sklearn_reference(RandomForestRegressor(n_estimators=10, random_state=0))
+
+
 def darts_linear_case() -> AdapterCase:
     """Contract case of a darts linear model predicting each row from its features.
 
@@ -121,6 +147,7 @@ def darts_linear_case() -> AdapterCase:
         local_model=False,
         row_regressor=True,
         invalid_params=({'model__add_encoders': {'position': {'future': ['relative']}}},),
+        native_reference=native.pooled_sklearn_reference(LinearRegression()),
     )
 
 
@@ -139,6 +166,7 @@ def darts_forest_case() -> AdapterCase:
         local_model=False,
         row_regressor=True,
         invalid_params=({'model__n_estimators': 0},),
+        native_reference=_lazy(_forest_reference),
     )
 
 
@@ -157,6 +185,7 @@ def darts_seasonal_case() -> AdapterCase:
         local_model=True,
         row_regressor=False,
         handles_training_holes=False,
+        native_reference=_lazy(lambda: native.darts_local_reference(_darts_seasonal_adapter().model)),
     )
 
 
@@ -177,6 +206,7 @@ def darts_lagged_case() -> AdapterCase:
         row_regressor=False,
         handles_training_holes=False,
         invalid_params=({'model__lags': 40},),
+        native_reference=_lazy(lambda: native.darts_global_reference(_darts_lagged_adapter().model)),
     )
 
 
@@ -208,7 +238,7 @@ def _hierarchy_adapter(reconciler: str, **params) -> HierarchicalForecastAdapter
     return HierarchicalForecastAdapter(reconciler=_reconciler(reconciler), **params)
 
 
-def _hierarchy_case(make_estimator, make_data, invalid_params) -> AdapterCase:
+def _hierarchy_case(make_estimator, make_data, invalid_params, native_reference=None) -> AdapterCase:
     """Contract case of a reconciliation: a row-wise, date-wise operation on every copy."""
     from hierarchicalforecast.methods import BottomUp, MinTrace
 
@@ -224,6 +254,7 @@ def _hierarchy_case(make_estimator, make_data, invalid_params) -> AdapterCase:
         make_data=make_data,
         make_splitter=_hierarchy_splitter,
         frame_method='reconcile',
+        native_reference=native_reference,
     )
 
 
@@ -237,6 +268,7 @@ def hierarchical_bottomup_case() -> AdapterCase:
         partial(_hierarchy_adapter, 'bottomup', forecast_columns=['m1']),
         build_hierarchy_nodes,
         _HIERARCHY_INVALID_PARAMS,
+        _lazy(lambda: native.reconcile_reference(_reconciler('bottomup'), native.TREE, 'm1')),
     )
 
 
@@ -250,6 +282,7 @@ def hierarchical_ols_case() -> AdapterCase:
         partial(_hierarchy_adapter, 'ols', model_combination='mean'),
         build_hierarchy_nodes,
         _HIERARCHY_INVALID_PARAMS,
+        _lazy(lambda: native.reconcile_reference(_reconciler('ols'), native.TREE, 'mean')),
     )
 
 
@@ -264,6 +297,9 @@ def hierarchical_mint_shrink_case() -> AdapterCase:
         partial(_hierarchy_adapter, 'mint_shrink', model_combination=HIERARCHY_MODEL_BY_LEVEL),
         build_hierarchy_nodes,
         _HIERARCHY_INVALID_PARAMS,
+        _lazy(
+            lambda: native.reconcile_reference(_reconciler('mint_shrink'), native.TREE, HIERARCHY_MODEL_BY_LEVEL)
+        ),
     )
 
 
@@ -281,6 +317,7 @@ def hierarchical_levels_case() -> AdapterCase:
             {'hierarchy': [['region'], ['country']]},
             {'hierarchy': [['country'], ['country', 'city']]},
         ),
+        _lazy(lambda: native.reconcile_reference(_reconciler('ols'), native.LEVELS, 'm2')),
     )
 
 
@@ -322,3 +359,94 @@ def hierarchical_cross_temporal_case() -> AdapterCase:
         build_cross_temporal_hierarchy,
         _TEMPORAL_INVALID_PARAMS + ({'hierarchy': {'a': ['b'], 'b': ['a']}},),
     )
+
+
+# ---------------------------------------------------------------------------
+# Modèles comparés au seul paquet natif
+# ---------------------------------------------------------------------------
+
+
+# Cas d'un modèle soumis à la seule règle d'équivalence au paquet natif
+def _native_case(make_estimator, wrapped_param: str, package: str, extra: str, reference, gaps) -> AdapterCase:
+    """Case of a model checked only against its package used natively."""
+    return AdapterCase(
+        make_estimator=make_estimator,
+        wrapped_param=wrapped_param,
+        param_grid={},
+        package=package,
+        extra=extra,
+        local_model=True,
+        row_regressor=False,
+        native_reference=reference,
+        native_gaps=gaps,
+    )
+
+
+def sktime_native_cases() -> Dict[str, AdapterCase]:
+    """sktime forecasters checked against sktime used natively, beyond the contract cases.
+
+    Returns:
+        Dictionary name -> case: drift, additive-trend exponential smoothing
+        and Theta (without deseasonalization: the target of the adapter
+        datasets takes negative values, which a multiplicative decomposition
+        refuses) through any gap; ``SARIMAX`` reading ``X`` without gap only,
+        sktime needing ``X`` on every date up to the forecast.
+    """
+    from sktime.forecasting.exp_smoothing import ExponentialSmoothing
+    from sktime.forecasting.naive import NaiveForecaster
+    from sktime.forecasting.sarimax import SARIMAX
+    from sktime.forecasting.theta import ThetaForecaster
+
+    # Dictionnaire nom -> (forecaster, lecture de X, gaps traités nativement)
+    forecasters = {
+        'drift': (NaiveForecaster(strategy='drift'), False, (0, 2)),
+        'exponential_smoothing': (ExponentialSmoothing(trend='add'), False, (0, 2)),
+        'theta': (ThetaForecaster(deseasonalize=False), False, (0, 2)),
+        'sarimax': (SARIMAX(order=(1, 0, 0)), True, (0,)),
+    }
+    # Un cas par forecaster, l'adapter et la référence partageant le forecaster non ajusté
+    return {
+        name: _native_case(
+            partial(SktimeAdapter, forecaster),
+            'forecaster',
+            'sktime',
+            'adapters-sktime',
+            native.sktime_reference(forecaster, uses_X=uses_X),
+            gaps,
+        )
+        for name, (forecaster, uses_X, gaps) in forecasters.items()
+    }
+
+
+def darts_native_cases() -> Dict[str, AdapterCase]:
+    """darts models checked against darts used natively, beyond the contract cases.
+
+    Returns:
+        Dictionary name -> case: local ``ExponentialSmoothing`` through any
+        gap; global ``LinearRegressionModel`` on target lags, past and future
+        covariates without gap only, darts needing the covariates on every
+        date up to the forecast.
+    """
+    from darts.models import ExponentialSmoothing, LinearRegressionModel
+
+    # Modèles non ajustés, partagés par l'adapter et la référence
+    smoothing = ExponentialSmoothing()
+    lagged = LinearRegressionModel(lags=3, lags_past_covariates=2, lags_future_covariates=[0])
+    return {
+        'exponential_smoothing': _native_case(
+            partial(DartsAdapter, smoothing),
+            'model',
+            'darts',
+            'adapters-darts',
+            native.darts_local_reference(smoothing),
+            (0, 2),
+        ),
+        'lagged_covariates': _native_case(
+            partial(DartsAdapter, lagged),
+            'model',
+            'darts',
+            'adapters-darts',
+            native.darts_global_reference(lagged, past=True, future=True),
+            (0,),
+        ),
+    }

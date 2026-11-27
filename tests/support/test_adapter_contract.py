@@ -5,11 +5,13 @@ The whole battery passes on the reference adapters ``RowRegressorAdapter``
 ``check_*`` function fails on a mutant adapter that breaks its rule: modified
 wrapped object, sorted output, state kept across fits, gap-dependent or
 unit-dependent predictions, silent unknown entity, accepted invalid parameter,
-package imported without an installation hint.
+package imported without an installation hint, horizon shifted by one step
+against the native reference.
 """
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 from sklearn.linear_model import LinearRegression
 
@@ -21,6 +23,7 @@ from tests.support.adapter_contract import (
     check_gap_independence,
     check_invalid_params,
     check_missing_package,
+    check_native_equivalence,
     check_no_leakage,
     check_predict_row_order,
     check_unknown_entity,
@@ -32,21 +35,44 @@ from tests.support.adapter_contract import (
 from tests.support.estimators import LastValueAdapter, RowRegressorAdapter
 from tsforecast.adapters._base import check_adapter_input, steps_between
 
+# Incrément par pas de grille de l'adapter de référence local
+DRIFT = 0.5
+
+
+# Référence native de l'adapter local : dernière cible de chaque entité, plus le drift par pas
+def last_value_reference(X_train, y_train, X_test, fh) -> np.ndarray:
+    """Last training target of each entity plus ``DRIFT`` per step of the relative horizon ``fh``."""
+    # Dernière cible de chaque entité (cible d'une série : une seule entité)
+    if isinstance(y_train.index, pd.MultiIndex):
+        last = y_train.sort_index().groupby(level=0).last()
+        values = last.reindex(X_test.index.get_level_values(0)).to_numpy()
+    else:
+        values = np.repeat(y_train.sort_index().iloc[-1], len(X_test))
+    # Pas de l'horizon de chaque ligne de test : rang de sa date parmi les dates de test
+    test_dates = X_test.index.get_level_values(-1)
+    steps = np.asarray(fh)[test_dates.unique().sort_values().get_indexer(test_dates)]
+    return values + DRIFT * steps
+
+
 ROW_REGRESSOR_CASE = AdapterCase(
     make_estimator=lambda: RowRegressorAdapter(LinearRegression()),
     wrapped_param='regressor',
     param_grid={'regressor__fit_intercept': [True, False]},
     package='sklearn.linear_model',
     extra='adapters-reference',
+    native_reference=lambda X_train, y_train, X_test, fh: (
+        LinearRegression().fit(X_train.to_numpy(), y_train.to_numpy()).predict(X_test.to_numpy())
+    ),
 )
 
 LAST_VALUE_CASE = AdapterCase(
-    make_estimator=lambda: LastValueAdapter(drift=0.5),
+    make_estimator=lambda: LastValueAdapter(drift=DRIFT),
     wrapped_param='drift',
-    param_grid={'drift': [0.0, 0.5]},
+    param_grid={'drift': [0.0, DRIFT]},
     local_model=True,
     row_regressor=False,
     invalid_params=({'drift': 'up'},),
+    native_reference=last_value_reference,
 )
 
 
@@ -137,6 +163,13 @@ class PermissiveLastValueAdapter(LastValueAdapter):
             self.drift = drift
 
 
+class ShiftedHorizonAdapter(LastValueAdapter):
+    """Counts one grid step more than there is between the training data and each row."""
+
+    def predict(self, X):
+        return super().predict(X) + self.drift
+
+
 class HintlessAdapter(RowRegressorAdapter):
     """Imports its package directly, without an installation hint."""
 
@@ -150,7 +183,7 @@ def _mutant_case(estimator_class, base: AdapterCase = ROW_REGRESSOR_CASE) -> Ada
     if base is ROW_REGRESSOR_CASE:
         make = lambda: estimator_class(LinearRegression())  # noqa: E731
     else:
-        make = lambda: estimator_class(drift=0.5)  # noqa: E731
+        make = lambda: estimator_class(drift=DRIFT)  # noqa: E731
     return AdapterCase(**{**base.__dict__, 'make_estimator': make})
 
 
@@ -185,6 +218,11 @@ class TestMutantsAreCaught:
     def test_accepted_invalid_parameter(self):
         with pytest.raises(AssertionError, match='invalid parameters'):
             check_invalid_params(_mutant_case(PermissiveLastValueAdapter, LAST_VALUE_CASE))
+
+    @pytest.mark.parametrize('kind', ['series', 'panel'])
+    def test_horizon_shifted_by_one_step(self, kind):
+        with pytest.raises(AssertionError, match='package used natively'):
+            check_native_equivalence(_mutant_case(ShiftedHorizonAdapter, LAST_VALUE_CASE), kind, gap=2)
 
     def test_missing_installation_hint(self, monkeypatch):
         with pytest.raises(AssertionError, match='does not name the extra'):

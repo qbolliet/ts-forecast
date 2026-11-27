@@ -1,7 +1,8 @@
 """Unit tests of ``tsforecast.adapters.sktime.SktimeAdapter``.
 
 Runs the unit rules of the adapter contract on ``NaiveForecaster`` and
-``YfromX(LinearRegression())``, then targeted scenarios: absolute horizon read
+``YfromX(LinearRegression())``, compares drift, exponential smoothing, Theta and
+``SARIMAX`` with sktime used natively, then targeted scenarios: absolute horizon read
 from the dates of ``X`` (gap, several test dates, panels), wrapped forecaster
 never fitted, sklearn parameters and tags, output shape and row order, unknown
 entities, incomplete panel test rows (vectorized and native panel forecasters),
@@ -20,8 +21,17 @@ from sktime.forecasting.base import BaseForecaster  # noqa: E402
 from sktime.forecasting.compose import DirectReductionForecaster, YfromX  # noqa: E402
 from sktime.forecasting.naive import NaiveForecaster  # noqa: E402
 
-from tests.support.adapter_cases import sktime_naive_case, sktime_yfromx_case  # noqa: E402
-from tests.support.adapter_contract import AdapterContractTests, split_by_date  # noqa: E402
+from tests.support.adapter_cases import (  # noqa: E402
+    sktime_naive_case,
+    sktime_native_cases,
+    sktime_yfromx_case,
+)
+from tests.support.adapter_contract import (  # noqa: E402
+    NATIVE_GAPS,
+    AdapterContractTests,
+    check_native_equivalence,
+    split_by_date,
+)
 from tests.support.datasets import build_adapter_panel, build_adapter_series  # noqa: E402
 from tests.support.perturbations import shuffle_rows  # noqa: E402
 from tsforecast.adapters import SktimeAdapter  # noqa: E402
@@ -105,6 +115,21 @@ class TestSktimeYfromXContract(AdapterContractTests):
     """Contract of ``SktimeAdapter(YfromX(LinearRegression()))``."""
 
     case = sktime_yfromx_case()
+
+
+class TestNativeEquivalence:
+    """Drift, exponential smoothing, Theta and ``SARIMAX`` predict like sktime used natively."""
+
+    @pytest.mark.parametrize('gap', NATIVE_GAPS)
+    @pytest.mark.parametrize('kind', ['series', 'panel'])
+    @pytest.mark.parametrize('name', ['drift', 'exponential_smoothing', 'theta', 'sarimax'])
+    def test_same_forecasts_as_sktime(self, name, kind, gap):
+        """Relative horizon ``fh = gap + 1, ...`` of a sktime fit on the training rows."""
+        pytest.importorskip('statsmodels')
+        case = sktime_native_cases()[name]
+        if gap not in case.native_gaps:
+            pytest.skip(f'{name} needs X on the gap')
+        check_native_equivalence(case, kind, gap)
 
 
 # =============================================================================

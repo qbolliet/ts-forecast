@@ -700,10 +700,46 @@ Points de conception connus, à trancher en plan mode à ce moment (Q13) :
       `aggregate` + `HierarchicalReconciliation.reconcile` pour hierarchicalforecast, pipeline du
       paquet pour un modèle de fondation) donne les mêmes prévisions que l'adapter, à
       `rtol` / `atol` près (modèles déterministes, graines fixées). Champ
-      `AdapterCase.native_reference` (fonction `(X_train, y_train, X_test) -> ndarray` qui appelle le
-      paquet sans passer par `tsforecast`) ; règle sautée quand il vaut `None`. Les situations
-      propres à l'adapter (panel déséquilibré, trous, mode `'row'` de darts, lignes in-sample) n'ont
-      pas d'équivalent natif : elles restent couvertes par des valeurs exactes calculées à la main.
+      `AdapterCase.native_reference` (fonction `(X_train, y_train, X_test, fh) -> ndarray` qui appelle
+      le paquet sans passer par `tsforecast`, sortie dans l'ordre des lignes de `X_test` ; `fh` =
+      horizon relatif `(gap + 1, ..., gap + n_test)` des dates de test, fourni par le découpage de la
+      batterie pour que la référence ne le déduise pas des dates comme l'adapter, AD-21) et champ
+      `AdapterCase.native_gaps` (défaut `(0, 2)` ; `(0,)` pour un modèle qui lit `X` sur toutes les
+      dates jusqu'à la prévision) ; règle sautée quand `native_reference` vaut `None`. Les situations
+      propres à l'adapter (panel déséquilibré, trous, mode `'row'` de darts à travers un gap, lignes
+      in-sample) n'ont pas d'équivalent natif : elles restent couvertes par des valeurs exactes
+      calculées à la main.
+
+  Session 9 (règle 11) : `check_native_equivalence(case, kind, gap)` (série et panel équilibré,
+  gaps de `native_gaps`, 3 dates de test, tolérances du cas `rtol=1e-7` / `atol=1e-9`), test
+  `test_native_equivalence` d'`AdapterContractTests` ; références dans
+  `tests/support/native_references.py` (aucun import de `tsforecast`). Validée sur
+  `RowRegressorAdapter` (régression sklearn) et `LastValueAdapter` (dernière valeur + drift × `fh`),
+  mutant `ShiftedHorizonAdapter` (un pas de trop) détecté. Cas couverts :
+  - batterie — sktime `NaiveForecaster()`, `YfromX(LinearRegression())` ; darts `'row'`
+    `LinearRegressionModel` et `RandomForestModel` (régresseur sklearn mutualisé, lignes triées entité
+    puis date, ordre des échantillons de darts), `NaiveSeasonal(K=1)` (local), `LinearRegressionModel(lags=3)`
+    (global) ; hierarchicalforecast `BottomUp`, `ols` (moyenne), `mint_shrink` (un modèle par niveau,
+    insample) sur l'arbre, `ols` sur les niveaux pays / régions — un `reconcile` par copie ;
+  - `TestNativeEquivalence` de `test_sktime.py` — drift, `ExponentialSmoothing(trend='add')`,
+    `ThetaForecaster(deseasonalize=False)`, `SARIMAX(order=(1, 0, 0))` avec `X` (gap 0) ; de
+    `test_darts.py` — `ExponentialSmoothing()`, `LinearRegressionModel(lags=3, lags_past_covariates=2,
+    lags_future_covariates=[0])` (gap 0) (`sktime_native_cases` / `darts_native_cases` de
+    `adapter_cases.py`) ;
+  - `TestNativeEquivalence` de `hierarchicalforecast/test_temporal.py` — temporel `BottomUp` / `ols`
+    (`aggregate_temporal` + `reconcile(temporal=True)`), cross-temporel `BottomUp` / `ols` (arbre et
+    niveaux, deux passes natives), série et panel, deux années de test ; `mint_shrink` refusé des deux
+    côtés.
+
+  Écarts d'API rencontrés (aucun n'empêche la comparaison) : `aggregate` ne construit pas un arbre à
+  feuilles de profondeurs différentes sans dupliquer la feuille (`S_df` de l'arbre écrit à la main) ;
+  `aggregate_temporal` date un agrégat par son dernier pas fin et compte les périodes depuis la
+  première date de chaque série (comparaison par `(unique_id, temporal_id)`, fenêtre ouverte sur un
+  début d'année) ; pas de cross-temporel natif (deux passes : cross-section par niveau temporel, les
+  `ds` des niveaux coïncidant, puis temporel par nœud ; égales à la passe unique pour `BottomUp` /
+  `ols`) ; `ThetaForecaster()` désaisonnalise en multiplicatif, refusé par statsmodels sur une cible
+  non positive ; un modèle lisant `X` exige nativement `X` sur le gap. Aucun écart de prévision
+  trouvé (≤ 6e-16 en relatif).
 
   Session 4 : `AdapterCase.handles_training_holes` (un adapter qui refuse les trous
   d'entraînement doit lever `ValueError` dans le contrôle `XYPipeline`) ; le contrôle
@@ -790,4 +826,5 @@ Points de conception connus, à trancher en plan mode à ce moment (Q13) :
 | AD-18 | 2026-11-26 | planification | `OperaAdapter` et l'extra `adapters-opera` abandonnés ; agrégation d'experts en ligne native (BOA, MLpol) dans un sous-paquet hors `adapters` (proposition `tsforecast/ensemble/`, à confirmer), noyau de mises à jour pur à perte interchangeable ; valeurs de référence calculées une fois avec opera hors du dépôt | opera non publié sur PyPI et inactif depuis 2024 ; AgACI (non implémenté dans MAPIE 1.6.0) agrège des bornes d'ACI, pas des prévisions de modèles : il ne remplace pas l'agrégation de prévisions, mais pourra s'appuyer sur le même noyau |
 | AD-19 | 2026-11-26 | planification | `AutoGluonAdapter` ajouté au périmètre mais reporté (sessions A1–A2 hors séquence) jusqu'à une version d'AutoGluon acceptant pandas 3 | AutoGluon 1.6.3 et `master` déclarent `pandas>=2.0,<2.4` : non installable avec `pandas>=3` |
 | AD-20 | 2026-11-26 | planification | Règle 11 de la batterie de contrat (équivalence au paquet natif, champ `AdapterCase.native_reference`) ; session dédiée insérée juste après la session 8, avant l'agrégation native et les modèles de fondation | Seule preuve que l'adapter ne change pas le modèle (horizon, covariables, ordre) ; l'infrastructure existe ainsi avant que les adapters suivants ne s'y branchent, et un défaut trouvé sur sktime, darts ou hierarchicalforecast est corrigé avant les notebooks et la documentation suivants |
+| AD-21 | 2026-11-26 | 9 | Règle 11 : `native_reference(X_train, y_train, X_test, fh)` (horizon relatif fourni par la batterie, écart à la signature `(X_train, y_train, X_test)` prévue) et `native_gaps` ; série et panel équilibré, gaps 0 et 2, 3 dates de test, tolérances inchangées des cas ; modèles hors batterie dans des classes `TestNativeEquivalence` ; références hiérarchiques par copie, `S_df` de l'arbre écrit à la main, cross-temporel natif = deux passes enchaînées | Une référence qui déduirait l'horizon des dates refait le calcul de l'adapter au lieu de le contrôler ; SARIMAX et les modèles darts à covariables ne passent pas les règles à gap (X absent du gap), d'où une comparaison seule ; `aggregate` ne sait pas construire l'arbre des jeux ; hierarchicalforecast n'a pas de réconciliation cross-temporelle ; aucun écart trouvé, aucun adapter corrigé |
 |  |  |  |  |  |

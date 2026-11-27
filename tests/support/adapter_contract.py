@@ -4,8 +4,8 @@
 assert one rule of the common contract each (wrapped object never modified,
 predictions in the row order of ``X``, series and panels, no leakage, gap
 independence of row-wise regressors, explicit errors, datetime resolution,
-``cross_val_score``, ``GridSearchCV``, pipelines) and raise ``AssertionError``
-on a violation. ``AdapterContractTests`` and ``AdapterWorkflowContractTests``
+equivalence to the third-party package used natively, ``cross_val_score``,
+``GridSearchCV``, pipelines) and raise ``AssertionError`` on a violation. ``AdapterContractTests`` and ``AdapterWorkflowContractTests``
 turn them into tests for a subclass that sets the ``case`` attribute.
 """
 from __future__ import annotations
@@ -48,6 +48,11 @@ CV_PARAMS: Mapping[str, int] = {'n_splits': 3, 'test_size': 2, 'gap': 2}
 GAP_SHIFT_STEPS = 5
 # Altération de la cible future du contrôle de fuite
 LEAK_OFFSET = 1000.0
+# Écarts entre entraînement et test du contrôle d'équivalence au paquet natif
+NATIVE_GAPS: Tuple[int, ...] = (0, GAP_DATES)
+
+# Signature d'une référence native : (X_train, y_train, X_test, horizon relatif des dates de test)
+NativeReference = Callable[[pd.DataFrame, Any, pd.DataFrame, Tuple[int, ...]], np.ndarray]
 
 
 def default_data(kind: str) -> Tuple[pd.DataFrame, pd.Series]:
@@ -115,6 +120,15 @@ class AdapterCase:
             for data whose time series kind still has a ``MultiIndex``).
         frame_method: Name of a method returning a pandas object with dates,
             whose units must be those of the input, or None.
+        native_reference: The same model fitted and predicted through the
+            third-party API alone, without ``tsforecast``:
+            ``(X_train, y_train, X_test, fh) -> ndarray`` in the row order of
+            ``X_test``, ``fh`` being the relative horizon of the test dates
+            (``(gap + 1, ..., gap + n_test)``, common to every entity of a
+            balanced panel); None when the case has no native equivalent.
+        native_gaps: Gaps between training and test that the third-party API
+            handles natively (``(0,)`` for a model reading ``X`` on every date
+            up to the forecast).
         rtol: Relative tolerance of the comparisons of predictions.
         atol: Absolute tolerance of the comparisons of predictions.
     """
@@ -132,6 +146,8 @@ class AdapterCase:
     make_data: Callable[[str], Tuple[pd.DataFrame, Any]] = field(default=default_data)
     make_splitter: Callable[[str], Any] = field(default=default_splitter)
     frame_method: Optional[str] = None
+    native_reference: Optional[NativeReference] = None
+    native_gaps: Tuple[int, ...] = NATIVE_GAPS
     rtol: float = 1e-7
     atol: float = 1e-9
 
@@ -370,6 +386,25 @@ def check_datetime_resolution(case: AdapterCase, kind: str) -> None:
             assert units and set(units.values()) == {unit}, f'Dates returned in {units}, input in {unit!r}'
 
 
+def check_native_equivalence(case: AdapterCase, kind: str, gap: int) -> None:
+    """The adapter predicts like the same model used through its package alone.
+
+    On a series or a balanced panel, with ``gap`` dates left out before the
+    :data:`N_TEST_DATES` test dates, the predictions of the adapter equal those
+    of ``case.native_reference``, which receives the relative horizon of the
+    test dates from the split itself.
+    """
+    X, y = case.make_data(kind)
+    X_train, y_train, X_test, _ = split_by_date(X, y, n_test=N_TEST_DATES, gap=gap)
+    # Horizon relatif des dates de test, compté depuis la dernière date d'entraînement
+    fh = tuple(range(gap + 1, gap + N_TEST_DATES + 1))
+    expected = np.asarray(case.native_reference(X_train, y_train, X_test, fh), dtype=float)
+    predictions = case.make_estimator().fit(X_train, y_train).predict(X_test)
+    _assert_predictions(
+        predictions, expected, case, f'The predictions differ from the package used natively (kind={kind!r}, gap={gap})'
+    )
+
+
 # ---------------------------------------------------------------------------
 # Contrôles d'intégration du contrat
 # ---------------------------------------------------------------------------
@@ -500,6 +535,17 @@ class AdapterContractTests(_DataKindFixture):
     def test_datetime_resolution(self, data_kind: str) -> None:
         """The unit of the dates changes nothing."""
         check_datetime_resolution(self.case, data_kind)
+
+    @pytest.mark.parametrize('gap', NATIVE_GAPS)
+    def test_native_equivalence(self, data_kind: str, gap: int) -> None:
+        """The adapter predicts like its package used natively."""
+        if self.case.native_reference is None:
+            pytest.skip('The case has no native reference')
+        if data_kind == 'unbalanced_panel':
+            pytest.skip('An unbalanced panel has no common native horizon')
+        if gap not in self.case.native_gaps:
+            pytest.skip(f'The package cannot forecast through a gap of {gap} dates natively')
+        check_native_equivalence(self.case, data_kind, gap)
 
 
 class AdapterWorkflowContractTests(_DataKindFixture):

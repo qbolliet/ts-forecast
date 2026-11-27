@@ -6,7 +6,10 @@ temporal levels, for ``BottomUp``, ``MinTrace`` ``'ols'`` / ``'wls_struct'`` and
 ``TopDown``; golden values (bottom-up sums, ``'ols'`` projection of each period).
 Cross-temporal coherence in both dimensions (node tree and index levels), the
 single Kronecker pass equal to two chained passes for ``'ols'``, strict
-reconcilers refused. Then complete periods required at predict, misdated
+reconcilers refused. Temporal and cross-temporal forecasts equal to
+hierarchicalforecast used natively (``aggregate_temporal`` and
+``reconcile(temporal=True)``, two chained native passes for the cross-temporal
+case), in-sample reconcilers refused by both. Then complete periods required at predict, misdated
 aggregates, in-sample reconcilers and intervals refused, unknown copies and
 nodes, row order, date resolution, immutability, ``temporal_level``,
 ``reconcile`` / ``diagnose`` / ``summing_matrix`` outputs, and the contract rules
@@ -22,6 +25,7 @@ pytest.importorskip('hierarchicalforecast')
 from hierarchicalforecast.methods import BottomUp, MinTrace, TopDown  # noqa: E402
 from sklearn.base import clone  # noqa: E402
 
+from tests.support import native_references as native  # noqa: E402
 from tests.support.adapter_cases import hierarchical_cross_temporal_case, hierarchical_temporal_case  # noqa: E402
 from tests.support.adapter_contract import (  # noqa: E402
     check_invalid_params,
@@ -460,6 +464,56 @@ class TestOutputs:
         adapter = _temporal(BottomUp(), temporal_level='level', temporal_origin='2019-01-01')
         params = clone(adapter).get_params()
         assert params['temporal_level'] == 'level' and params['temporal_origin'] == '2019-01-01'
+
+
+# Fonction auxiliaire de découpage : deux dernières années civiles en test
+def _last_two_years(X, y):
+    """``(X_train, y_train, X_test)``: the last two calendar years for test."""
+    train, test = period_splits(X, TEMPORAL_HIERARCHY, n_splits=1, test_periods=2)[0]
+    return X.iloc[train], y.iloc[train], X.iloc[test]
+
+
+class TestNativeEquivalence:
+    """Same forecasts as hierarchicalforecast used natively, on two test years."""
+
+    @pytest.mark.parametrize('kind', ['series', 'panel'])
+    @pytest.mark.parametrize('reconciler', ['bottomup', 'ols'])
+    def test_temporal_equals_aggregate_temporal_and_reconcile(self, kind, reconciler):
+        """``aggregate_temporal`` then ``reconcile(temporal=True)`` on every series."""
+        X_train, y_train, X_test = _last_two_years(*build_temporal_hierarchy(kind, n_years=4))
+        predictions = _temporal(RECONCILERS[reconciler]()).fit(X_train, y_train).predict(X_test)
+        expected = native.temporal_reference(X_test, RECONCILERS[reconciler](), 'm1')
+        np.testing.assert_allclose(predictions, expected, rtol=1e-7, atol=1e-9)
+
+    @pytest.mark.parametrize('kind', ['series', 'panel'])
+    @pytest.mark.parametrize('reconciler', ['bottomup', 'ols'])
+    @pytest.mark.parametrize('levels', [False, True], ids=['tree', 'levels'])
+    def test_cross_temporal_equals_two_native_passes(self, kind, reconciler, levels):
+        """Cross-sectional ``reconcile`` of each temporal level, then temporal ``reconcile`` of each node."""
+        X_train, y_train, X_test = _last_two_years(*build_cross_temporal_hierarchy(kind, n_years=4, levels=levels))
+        hierarchy, structure = (HIERARCHY_LEVELS, native.LEVELS) if levels else (HIERARCHY_TREE, native.TREE)
+        adapter = HierarchicalForecastAdapter(
+            hierarchy, RECONCILERS[reconciler](), forecast_columns=['m1'], temporal_hierarchy=TEMPORAL_HIERARCHY
+        )
+        predictions = adapter.fit(X_train, y_train).predict(X_test)
+        expected = native.cross_temporal_reference(X_test, RECONCILERS[reconciler](), 'm1', structure)
+        np.testing.assert_allclose(predictions, expected, rtol=1e-7, atol=1e-9)
+
+    def test_insample_reconciler_refused_by_both(self):
+        """hierarchicalforecast refuses an in-sample reconciler in temporal mode, as the adapter does."""
+        from hierarchicalforecast.core import HierarchicalReconciliation
+        from hierarchicalforecast.utils import aggregate_temporal
+
+        X, y = build_temporal_hierarchy(n_years=2)
+        with pytest.raises(ValueError, match='in-sample|insample'):
+            _temporal(MinTrace(method='mint_shrink')).fit(X, y)
+        months = X.xs('month', level='level').index
+        Y_df, S_df, tags = aggregate_temporal(pd.DataFrame({'unique_id': 'series', 'ds': months, 'y': 0.0}), TEMPORAL_HIERARCHY)
+        # Sans données insample, seules admises en temporel : refus du réconciliateur insample
+        with pytest.raises(NotImplementedError, match='not supported for `MinTrace_method-mint_shrink`'):
+            HierarchicalReconciliation([MinTrace(method='mint_shrink')]).reconcile(
+                Y_df.assign(model=1.0).drop(columns='y'), tags, S_df=S_df, temporal=True
+            )
 
 
 @pytest.mark.parametrize('make_case', [hierarchical_temporal_case, hierarchical_cross_temporal_case])
