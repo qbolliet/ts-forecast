@@ -1,9 +1,10 @@
 # Continuous integration: tests on pull requests to main; coverage (uploaded to Codecov)
 # and slow tests on pushes to main. Manual runs execute the slow tests too. The fast tests
 # also run with the optional pyarrow extra, under the pyarrow storage of the string dtype.
-# The adapter tests and doctests run in a job that installs every third-party adapter extra
-# (fast tests only, no download). A separate job builds the documentation with mkdocs in
-# strict mode (no warning allowed). Tests marked network never run in CI.
+# The adapter tests and doctests run in a job that installs the third-party adapter extras without
+# foundation models (adapters-light: no torch; fast tests only, no download). A separate job
+# builds the documentation with mkdocs in strict mode (no warning allowed). Tests marked network
+# never run in CI.
 name: tests
 
 on:
@@ -60,7 +61,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
-      - run: uv sync --group dev --extra adapters-all
+      - run: uv sync --group dev --extra adapters-light
       - name: Run fast adapter tests
         run: >
           uv run pytest tests/unit/adapters tests/integration/adapters tests/support

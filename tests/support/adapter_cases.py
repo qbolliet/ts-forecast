@@ -14,7 +14,9 @@ carries the native reference of its model; ``sktime_native_cases`` and
 natively. A third-party package is imported only when an estimator, a parameter
 grid or a native reference is built. ``ensemble_meta_case`` and
 ``ensemble_passthrough_case`` check ``tsforecast.ensemble.OnlineAggregator`` with the
-same battery (no third-party package, no native reference).
+same battery (no third-party package, no native reference); ``foundation_drift_case``
+(fake backend, offline) and ``foundation_chronos_case`` (``autogluon/chronos-2-small``)
+check ``FoundationModelAdapter``.
 """
 from functools import partial
 from typing import Callable, Dict, Tuple
@@ -35,7 +37,8 @@ from tests.support.datasets import (
     build_hierarchy_nodes,
     build_temporal_hierarchy,
 )
-from tsforecast.adapters import DartsAdapter, HierarchicalForecastAdapter, SktimeAdapter
+from tests.support.forecast_backends import DriftBackend
+from tsforecast.adapters import DartsAdapter, FoundationModelAdapter, HierarchicalForecastAdapter, SktimeAdapter
 from tsforecast.ensemble import OnlineAggregator
 
 
@@ -527,4 +530,73 @@ def ensemble_passthrough_case() -> AdapterCase:
         param_grid={'aggregation': ['BOA', 'MLpol'], 'loss': ['mse', 'mae']},
         invalid_params=_AGGREGATOR_INVALID_PARAMS,
         make_data=expert_forecast_data,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Modèles de fondation (FoundationModelAdapter)
+# ---------------------------------------------------------------------------
+
+# Paramètres du backend factice des cas de contrat : dérive et poids des covariables connues
+DRIFT, DRIFT_COEF = 0.5, 0.25
+# Plus petit modèle Chronos-2 et plus petit modèle Chronos-Bolt
+CHRONOS_2_SMALL = 'autogluon/chronos-2-small'
+CHRONOS_BOLT_TINY = 'amazon/chronos-bolt-tiny'
+# Paramètres refusés au fit, quel que soit le backend
+_FOUNDATION_INVALID_PARAMS = (
+    {'quantile': 1.5},
+    {'context_length': 0},
+    {'covariates': 'future'},
+    {'batch_size': 0},
+)
+
+
+# Fabrique de l'adapter du backend factice
+def _drift_adapter() -> FoundationModelAdapter:
+    """Adapter around ``DriftBackend`` reading the known covariates."""
+    return FoundationModelAdapter(backend=DriftBackend(drift=DRIFT, coef=DRIFT_COEF))
+
+
+# Cas de contrat du backend factice
+def foundation_drift_case() -> AdapterCase:
+    """``FoundationModelAdapter`` around the fake ``DriftBackend``, with known covariates.
+
+    Returns:
+        Local per-entity model whose prediction depends on the gap; native
+        reference computed by hand.
+    """
+    return AdapterCase(
+        make_estimator=_drift_adapter,
+        wrapped_param='backend',
+        param_grid={'backend__drift': [0.0, DRIFT], 'context_length': [6, None]},
+        local_model=True,
+        row_regressor=False,
+        invalid_params=_FOUNDATION_INVALID_PARAMS + ({'backend__max_context': 0},),
+        frame_method='predict_quantiles',
+        native_reference=native.drift_reference(DRIFT, DRIFT_COEF),
+    )
+
+
+# Cas de contrat de Chronos-2 (téléchargement du modèle)
+def foundation_chronos_case() -> AdapterCase:
+    """``FoundationModelAdapter`` around ``autogluon/chronos-2-small``, with known covariates.
+
+    Returns:
+        Case of the real model; native reference calling ``Chronos2Pipeline``
+        directly; float32 tolerances.
+    """
+    return AdapterCase(
+        make_estimator=lambda: FoundationModelAdapter(CHRONOS_2_SMALL),
+        wrapped_param='model_id',
+        param_grid={'context_length': [12, None]},
+        package='chronos',
+        extra='adapters-chronos',
+        local_model=True,
+        row_regressor=False,
+        invalid_params=_FOUNDATION_INVALID_PARAMS
+        + ({'quantile': 0.001}, {'model_id': 'amazon/chronos-t5-tiny'}),
+        frame_method='predict_quantiles',
+        native_reference=native.chronos_reference(CHRONOS_2_SMALL),
+        rtol=1e-5,
+        atol=1e-6,
     )

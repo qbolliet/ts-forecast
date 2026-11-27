@@ -8,11 +8,14 @@ regression for the row-wise darts models, ``reconcile`` per copy for
 hierarchicalforecast. ``temporal_reference`` and ``cross_temporal_reference``
 reconcile complete calendar years with ``aggregate_temporal`` and
 ``reconcile(temporal=True)``, the cross-temporal one in two chained passes.
+``drift_reference`` computes the fake foundation backend by hand and
+``chronos_reference`` calls ``predict_quantiles`` of a Chronos pipeline directly,
+one ``k``-step forecast per test row.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -508,3 +511,165 @@ def cross_temporal_reference(
         # Passe temporelle sur toutes les séries cross-section de la copie
         result[rows] = _temporal_pass(reconciler, ids, levels[rows], dates[rows], cross, temporal_hierarchy)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Modèles de fondation
+# ---------------------------------------------------------------------------
+
+
+# Fonction auxiliaire de parcours des pas de test d'une entité
+def _test_steps(X_test: pd.DataFrame, rows: np.ndarray, fh: Tuple[int, ...]) -> Tuple[np.ndarray, np.ndarray]:
+    """Row positions of one entity of ``X_test`` in date order and their steps after training.
+
+    The ``i``-th date of the test window is ``fh[i]`` steps after the last
+    training date (every entity of a balanced panel shares the window).
+
+    Args:
+        X_test: Test features.
+        rows: Positions of the rows of the entity, sorted by date.
+        fh: Relative horizon of the test dates.
+
+    Returns:
+        ``(rows, steps)``.
+    """
+    calendar = pd.DatetimeIndex(X_test.index.get_level_values(-1)).unique().sort_values()
+    dates = pd.DatetimeIndex(X_test.index.get_level_values(-1))[rows]
+    steps = np.asarray(fh)[calendar.get_indexer(dates)]
+    return rows, steps
+
+
+# Fabrique de la référence du backend factice DriftBackend
+def drift_reference(drift: float, coef: float = 0.0, quantile: float = 0.5, spread: float = 1.0) -> NativeReference:
+    """Reference of ``DriftBackend`` computed by hand from the training and test frames.
+
+    A test row ``k`` steps after training is ``last + drift·k + coef·S +
+    spread·(quantile − 0.5)``, where ``last`` is the last training target of its
+    entity and ``S`` the sum of the features of the test rows of its entity at
+    most ``k`` steps after training (known covariates of a forecast of ``k``
+    steps; the gap has no row).
+
+    Args:
+        drift: Increment per step.
+        coef: Weight of the known covariates.
+        quantile: Level returned.
+        spread: Distance between the levels.
+
+    Returns:
+        Native reference.
+    """
+
+    # Référence du modèle factice
+    def reference(X_train, y_train, X_test, fh):
+        result = np.full(len(X_test), np.nan)
+        train_rows = _entity_rows(y_train)
+        # Parcours des entités du test
+        for key, rows in _entity_rows(X_test).items():
+            last = y_train.to_numpy()[train_rows[key][-1]]
+            rows, steps = _test_steps(X_test, rows, fh)
+            # Somme des covariables des lignes de test jusqu'au pas de chaque ligne
+            sums = np.cumsum(X_test.to_numpy()[rows].sum(axis=1))
+            result[rows] = last + drift * steps + coef * sums + spread * (quantile - 0.5)
+        return result
+
+    return reference
+
+
+# Chargement mis en cache d'un pipeline Chronos, sans passer par tsforecast
+_CHRONOS_PIPELINES: Dict[str, Any] = {}
+
+
+def chronos_pipeline(model_id: str) -> Any:
+    """Load a Chronos pipeline on CPU with chronos-forecasting alone, once per model id."""
+    if model_id not in _CHRONOS_PIPELINES:
+        from chronos import BaseChronosPipeline
+
+        _CHRONOS_PIPELINES[model_id] = BaseChronosPipeline.from_pretrained(model_id, device_map='cpu')
+    return _CHRONOS_PIPELINES[model_id]
+
+
+# Prévision native des quantiles d'une ligne par Chronos
+def chronos_row_quantiles(
+    pipeline: Any,
+    y_context: np.ndarray,
+    X_context: Optional[np.ndarray],
+    X_future: Optional[Dict[int, np.ndarray]],
+    k: int,
+    levels: Sequence[float],
+    columns: Sequence[str] = (),
+) -> np.ndarray:
+    """Quantiles of the step ``k`` of a ``k``-step Chronos forecast of one series.
+
+    Args:
+        pipeline: ``Chronos2Pipeline`` or ``ChronosBoltPipeline``.
+        y_context: Training target, oldest first.
+        X_context: Training features ``(n_steps, n_columns)`` (Chronos-2 with
+            covariates), or None.
+        X_future: Step (1-based) -> features of the test row at that step,
+            for the steps at most ``k``; the other steps are unknown (``NaN``).
+        k: Number of steps of the forecast.
+        levels: Quantile levels.
+        columns: Names of the feature columns.
+
+    Returns:
+        The quantiles of the last step, one per level.
+    """
+    import torch
+    from chronos import Chronos2Pipeline
+
+    # Chronos-Bolt : un tenseur par série
+    if not isinstance(pipeline, Chronos2Pipeline):
+        quantiles, _ = pipeline.predict_quantiles(
+            [torch.tensor(y_context, dtype=torch.float32)], prediction_length=k, quantile_levels=list(levels)
+        )
+        return np.asarray(quantiles[0, k - 1, :], dtype=float)
+    item: Dict[str, Any] = {'target': y_context}
+    # Covariables connues : passé, puis lignes de test des pas 1..k (NaN ailleurs)
+    if X_context is not None:
+        future = np.full((k, X_context.shape[1]), np.nan)
+        for step, values in X_future.items():
+            if step <= k:
+                future[step - 1] = values
+        item['past_covariates'] = {name: X_context[:, j] for j, name in enumerate(columns)}
+        item['future_covariates'] = {name: future[:, j] for j, name in enumerate(columns)}
+    quantiles, _ = pipeline.predict_quantiles([item], prediction_length=k, quantile_levels=list(levels))
+    return quantiles[0][0, k - 1, :].numpy().astype(float)
+
+
+# Fabrique de la référence d'un modèle Chronos appelé directement
+def chronos_reference(model_id: str, quantile: float = 0.5, covariates: bool = True) -> NativeReference:
+    """Reference of a Chronos model: one ``predict_quantiles`` call per test row and entity.
+
+    A test row ``k`` steps after training is the last step of a ``k``-step
+    forecast of its entity's training target, with, for Chronos-2 and
+    ``covariates``, the features of the training rows as past values and those
+    of the test rows of its entity at most ``k`` steps after training as known
+    future values.
+
+    Args:
+        model_id: Hugging Face id of the model.
+        quantile: Level returned.
+        covariates: Whether the features are passed (Chronos-2 only).
+
+    Returns:
+        Native reference.
+    """
+
+    # Référence du modèle Chronos
+    def reference(X_train, y_train, X_test, fh):
+        pipeline = chronos_pipeline(model_id)
+        result = np.full(len(X_test), np.nan)
+        train_rows = _entity_rows(y_train)
+        columns = [str(column) for column in X_train.columns]
+        # Parcours des entités du test
+        for key, rows in _entity_rows(X_test).items():
+            y_context = y_train.to_numpy()[train_rows[key]]
+            X_context = X_train.to_numpy()[train_rows[key]] if covariates else None
+            rows, steps = _test_steps(X_test, rows, fh)
+            X_future = dict(zip(steps.tolist(), X_test.to_numpy()[rows])) if covariates else None
+            # Une prévision de k pas par ligne de test
+            for row, k in zip(rows, steps.tolist()):
+                result[row] = chronos_row_quantiles(pipeline, y_context, X_context, X_future, k, [quantile], columns)[0]
+        return result
+
+    return reference

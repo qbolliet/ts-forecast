@@ -1,6 +1,7 @@
 """Tests of the ``tsforecast.adapters`` package import and exports.
 
-The exported adapters and conversion functions; in a fresh interpreter, importing
+The exported adapters, conversion functions and foundation-model registry
+functions; in a fresh interpreter, importing
 the package loads no third-party forecasting package, and once every optional
 package is made unimportable each adapter can still be built while fitting raises
 an ``ImportError`` naming its extra.
@@ -17,7 +18,7 @@ import tsforecast.adapters
 # Racine du dépôt, pour importer tsforecast depuis un interpréteur neuf
 REPO_ROOT = Path(__file__).resolve().parents[3]
 # Paquets tiers optionnels des adapters
-OPTIONAL_PACKAGES = ('sktime', 'darts', 'hierarchicalforecast', 'utilsforecast')
+OPTIONAL_PACKAGES = ('sktime', 'darts', 'hierarchicalforecast', 'utilsforecast', 'chronos', 'torch', 'transformers')
 
 # Chercheur d'imports rendant les paquets optionnels introuvables, comme s'ils n'étaient pas installés
 BLOCKER = textwrap.dedent(f'''
@@ -49,10 +50,14 @@ def run_python(code: str) -> subprocess.CompletedProcess:
 
 def test_exported_names():
     assert sorted(tsforecast.adapters.__all__) == [
+        'CallableBackend',
         'DartsAdapter',
+        'FoundationModelAdapter',
         'HierarchicalForecastAdapter',
         'SktimeAdapter',
+        'clear_model_cache',
         'period_splits',
+        'register_backend',
         'stack_nodes',
         'unstack_nodes',
     ]
@@ -76,6 +81,7 @@ def test_import_without_loading_or_requiring_optional_packages():
         adapters.SktimeAdapter(forecaster=None)
         darts = adapters.DartsAdapter(model=None)
         hierarchical = adapters.HierarchicalForecastAdapter({'a': ['b']})
+        foundation = adapters.FoundationModelAdapter('amazon/chronos-2')
 
         dates = pd.date_range('2024-01-01', periods=3, freq='MS')
         X = pd.DataFrame({'x': [1.0, 2.0, 3.0]}, index=dates)
@@ -85,6 +91,7 @@ def test_import_without_loading_or_requiring_optional_packages():
         for estimator, extra in [
             (darts, 'adapters-darts'),
             (hierarchical, 'adapters-hierarchical'),
+            (foundation, 'adapters-chronos'),
         ]:
             try:
                 estimator.fit(X, y)

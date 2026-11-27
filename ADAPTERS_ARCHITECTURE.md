@@ -125,9 +125,9 @@ non réalignée sur `X`. **Réécrit en session 6** (sous-paquet, mode cross-sec
 |---|---|---|
 | hierarchicalforecast | PyPI | `aggregate(df, spec)` (spec : liste de listes de colonnes), `aggregate_temporal(df, spec)` (spec : `{nom: nb de pas}`), `get_cross_temporal_tags`, `HierarchicalReconciliation(reconcilers).reconcile(Y_hat_df, S_df, tags, Y_df=None, temporal=False, ...)`. Colonnes de sortie `<modèle>/<Réconciliateur>[_method-<m>]`. La réconciliation temporelle ne supporte pas les méthodes *insample* (`mint_shrink`, ...). Le tutoriel cross-temporel fait deux appels séparés (cross-section, puis temporel sur toutes les séries cross-section) et n'évalue qu'avec des *tags* cross-temporels. **Vérifié en session 6 (1.5.3)** : `reconcile` mute les réconciliateurs (`fitted`, `P`, `W`, `y_hat`, `sampler`) et trie `level` en place ; `unique_id` et colonnes de `S_df` doivent être des chaînes ; sortie triée par ordre de `S` puis `ds` ; un modèle dont le nom contient `-lo`, `-hi` ou `-median` est écarté en silence ; `Y_df` à trous accepté (`is_balanced=False`, NaN gérés par `mint_shrink`), `Y_hat_df` rectangulaire exigé ; intervalles `normality` lus sur des colonnes `<modèle>-lo-<niveau>` / `-hi-` de `Y_hat_df`, `bootstrap` par blocs d'autant de dates insample consécutives que de dates à réconcilier ; `TopDown` / `MiddleOut` faux si les feuilles ne sont pas toutes au niveau le plus fin des *tags* ; **aucune réconciliation cross-temporelle native** (seulement `temporal=True`). |
 | opera (`Dralliag/opera-python`) — **abandonné (AD-18)**, référence des tests de l'agrégation native seulement | **pas sur PyPI** (`pip install git+...`) ; version `0.0.1` | `Mixture(y, experts: DataFrame, awake=None, model="BOA"|"MLpol"|"MLprod"|"FTRL", coefficients="uniform"|ndarray, loss_type="mse"|"mae"|"mape"|"msle"|"mspe"|callable, loss_gradient=True, parameters=None)`. Le constructeur consomme les données (appelle `update`). `update(new_experts, new_y)` séquentiel ligne à ligne ; `predict(new_experts)` sans mise à jour (poids courants `w`). Dépendances non figées, **scipy importé mais non déclaré**. Compatibilité pandas 3 inconnue. |
-| chronos-forecasting | PyPI | `Chronos2Pipeline.from_pretrained("amazon/chronos-2", device_map=...)` ; `predict_df(context_df, future_df=..., prediction_length, quantile_levels, id_column, timestamp_column, target)` ; covariables passées et futures en colonnes. Modèles : `amazon/chronos-2`, `autogluon/chronos-2-small`, `amazon/chronos-bolt-{tiny,mini,small,base}`, `amazon/chronos-t5-*`. `pandas>=2,<4`. |
-| timestral (Mistral AI) | **pas sur PyPI** (`pip install git+https://github.com/mistralai/timestral.git`) | `TimestralForecaster.from_pretrained("mistralai/Timestral-{5M,28M,123M,209M}", device=...)` ; `model.forecast(context, prediction_length)` → `.median`, `.quantile(q)` ; covariables passées et futures annoncées ; contexte ≤ 32 768 pas ; sortie ≤ 1 024 pas par passe. Licence « Modified MIT » avec clause d'usage. Pas d'API batch documentée sur la carte. |
-| t0 (The Forecasting Company) | PyPI `tfc-t0[torch]>=0.6.1` | `T0Forecaster.from_pretrained("theforecastingcompany/t0-gamma")` ; `predict(context, horizon, quantile_levels, mask=, group_ids=, future_covariates=)` sur tenseurs `(B, T)` / `(B, V, T)` ; `batch_series([...])` ; Apache-2.0 ; ~256 M paramètres. |
+| chronos-forecasting — **vérifié le 2026-11-27 (2.3.2, 2026-09-08)** | PyPI | `torch>=2.2,<3`, `transformers>=4.41,<6`, `accelerate>=1.1,<2`, `einops`, `pandas>=2,<4`, `numpy<3`, Python ≥ 3.10 ; Apache-2.0. `BaseChronosPipeline.from_pretrained(id, device_map=, dtype=, revision=)` choisit la classe selon `chronos_pipeline_class` de la configuration. **Chronos-2** (`Chronos2Pipeline`) : `predict_quantiles(inputs, prediction_length, quantile_levels, batch_size=256, context_length=, cross_learning=False, limit_prediction_length=False)` ; `inputs` = liste de dicts `{target: (T,) ou (V, T), past_covariates: {nom: (T,)}, future_covariates: {nom: (H,)}}` de longueurs libres (remplissage à gauche par NaN), clés futures ⊂ passées, longueur future exactement `H`, NaN = inconnu ; sortie : liste de `(V, H, Q)` ; NaN acceptés ; contexte tronqué à `model_context_length` (8 192) ; `H` > 1 024 déroulé avec avertissement ; niveaux appris `pipeline.quantiles` (21 pour `amazon/chronos-2`, 13 de 0,01 à 0,99 pour `autogluon/chronos-2-small`), interpolés entre eux, **bornés hors plage** (journal seulement) ; `batch_size` compte les lignes cible + covariables ; `cross_learning=True` partage l'information entre les séries du lot. **Bolt** (`ChronosBoltPipeline`) : liste de tenseurs 1-D, sans covariable, contexte 2 048, 64 pas par passe (déroulé au-delà), 9 niveaux. **T5** (`ChronosPipeline`) : trajectoires tirées au hasard. Inférence de Chronos-2 et Bolt sans aléa. Modèles : `amazon/chronos-2` (120 M), `autogluon/chronos-2-small` (28 M), `amazon/chronos-bolt-{tiny,mini,small,base}` (9 M à 205 M), `amazon/chronos-t5-*`. |
+| timestral (Mistral AI) — **vérifié le 2026-11-27 (1.0.0)** | **pas sur PyPI** (`pip install git+https://github.com/mistralai/timestral.git`) ; dépendances `torch>=2.4`, `numpy`, `safetensors`, `huggingface_hub` | `TimestralForecaster.from_pretrained("mistralai/Timestral-{5M,28M,123M,209M}", device="cpu", max_context=None, per_shot_horizon_patches=32, revision=...)` ; `forecast(context (T,)/(B,T)/(B,V,T), prediction_length, observation_mask=, past_covariates=(B,C,T), known_covariates=(B,C,T+H), categorical_*=, symmetric_averaging=True, clip_nonnegative=True)` → `Forecast.quantiles (B,V,H,Q)`, `.median`, `.quantile(q)` (niveau natif exact seulement) ; 21 niveaux fixes (0,01 ; 0,05 ; 0,1 … 0,95 ; 0,99) ; NaN = manquant ; **un seul tableau par appel** (même `T` pour toutes les séries) ; contexte ≤ 32 768 (les plus récents gardés) ; blocs de 1 024 pas déroulés au-delà. Code Apache-2.0, poids « Modified MIT » avec clause d'usage. |
+| t0 (The Forecasting Company) — **vérifié le 2026-11-27 (0.6.1, 2026-11-09)** | PyPI `tfc-t0[torch]>=0.6.1` ; Python ≥ 3.11, `torch>=2.4`, `huggingface-hub>=1` | `T0Forecaster.from_pretrained("theforecastingcompany/t0-gamma")` ; `predict(context (B,T)/(B,V,T), horizon, quantile_levels, mask=, group_ids=, future_covariates=(B,F,T+H))` → `.quantiles (B,H,Q)`, `.median` ; tout niveau de ]0, 1[ (interpolation entre les 21 niveaux appris, queues exponentielles) ; covariables passées = variables supplémentaires du contexte ; `group_ids` incompatible avec `future_covariates` ; `batch_series([...])` → contexte aligné à droite, masque `PAD`, `group_ids` ; NaN = manquant ; 1 024 pas par passe, déroulé au-delà ; Apache-2.0 ; ~256 M paramètres. |
 | autogluon (`autogluon.timeseries`, `autogluon.tabular`) — **vérifié le 2026-11-26** | PyPI, 1.6.3 (2026-09-18) | `autogluon.common` déclare `pandas>=2.0,<2.4`, `numpy<2.6`, `scikit-learn<1.10`, Python `<3.14` ; même plafond pandas sur `master` ; support de pandas 3 suivi par le ticket #5730 (jalon « 2.0 Release », ouvert). **Non installable avec `pandas>=3`** : adapter reporté (§ 5.6). `TimeSeriesPredictor(prediction_length, target, known_covariates_names, eval_metric, quantile_levels, path, ...)` fixe l'horizon **au constructeur** ; `fit(TimeSeriesDataFrame, presets, time_limit, ...)` ; `predict(data, known_covariates=...)` ; données longues (`item_id`, `timestamp`) ; modèles écrits sur disque (`path`). |
 | mapie — **vérifié le 2026-11-26** | PyPI, 1.6.0 (2026-10-19) | `numpy>=1.24.1`, `scikit-learn>=1.4`, `scipy>=1.10`, pandas optionnel. `TimeSeriesRegressor` : `method` ∈ {`"enbpi"`, `"aci"`} seulement (γ d'ACI fixé à la main) ; **pas d'AgACI** (vérifié dans le code installé). Garde les DataFrames (`_safe_indexing`) et convertit les prédictions en `ndarray`. AgACI (Zaffran et al., 2022) agrège les bornes de plusieurs ACI de γ différents par agrégation d'experts en ligne (BOA, perte pinball) : réalisable plus tard sur l'agrégation native (Q12). |
 
@@ -586,61 +586,188 @@ qui réexporte `OnlineAggregator` et `Loss`.
 
 ### 5.5 Modèles de fondation (Hugging Face) : `FoundationModelAdapter`
 
-**Faisabilité et intérêt.** Un adapter générique est faisable et souhaitable **à condition de ne
-pas viser une implémentation unique** : il n'existe pas d'API commune (§ 2.3). L'architecture
-retenue sépare :
+**Réalisé en session 12 (AD-23)** : adapter, protocole, registre, backends `chronos` (Chronos-2 et
+Chronos-Bolt) et `callable`. Timestral et t0 viendront en session 13, sans changement du
+protocole.
 
-- un **adapter** unique, `FoundationModelAdapter`, qui porte toute la logique sklearn et
-  `tsforecast` (index, panel, calcul des pas, alignement, quantiles, lots) ;
-- des **backends** minces (~50–150 lignes), un par famille, qui ne font que convertir des tableaux
-  en appel au paquet tiers. Le churn de l'écosystème est confiné aux backends.
+Il n'existe pas d'API commune (§ 2.3). D'un côté, un **adapter** unique porte toute la logique
+sklearn et `tsforecast` : index, panels, calcul des pas, absence de fuite, quantiles et lots. De
+l'autre, des **backends** minces traduisent une requête en appel au paquet tiers ; le churn de
+l'écosystème leur est confiné.
 
 ```
 tsforecast/adapters/foundation/
-├── __init__.py          # FoundationModelAdapter, register_backend, ForecastBackend
-├── adapter.py           # FoundationModelAdapter (sklearn, tsforecast)
-├── protocol.py          # ForecastBackend (Protocol), ForecastRequest, ForecastResult
-├── registry.py          # registre nom -> backend, résolution par préfixe d'identifiant HF
+├── __init__.py          # réexports (repris par tsforecast.adapters pour l'adapter et le registre)
+├── adapter.py           # FoundationModelAdapter
+├── protocol.py          # BackendCapabilities, ForecastRequest, ForecastResult, ForecastBackend, same_level
+├── registry.py          # register_backend, available_backends, resolve_backend, load_backend, clear_model_cache
+├── _series.py           # grilles par entité, fenêtres futures, rang des entités, niveaux de quantiles (numpy, pandas)
 └── backends/
-    ├── chronos.py       # chronos-forecasting (Chronos-2, Bolt, T5)
-    ├── timestral.py     # mistralai/Timestral-*
-    ├── t0.py            # theforecastingcompany/t0-*
-    └── callable.py      # backend construit depuis une fonction utilisateur
+    ├── callable.py      # CallableBackend : tout modèle branché par une fonction
+    ├── chronos.py       # ChronosBackend, load_chronos (Chronos-2, Bolt ; T5 refusé)
+    ├── timestral.py     # session 13
+    └── t0.py            # session 13
 ```
 
-- Protocole de backend (indicatif) : `load(model_id, device, **kwargs)` puis
-  `predict(request) -> ForecastResult`, où `ForecastRequest` contient, par série, le contexte de
-  cible (`ndarray`), les covariables passées et futures alignées (optionnelles), le nombre de pas
-  et les niveaux de quantiles ; `ForecastResult` renvoie un tableau `(n_series, horizon, n_quantiles)`.
-  Chaque backend déclare ses **capacités** (covariables passées / futures, multivarié, contexte et
-  horizon maximaux, quantiles natifs) ; l'adapter dégrade proprement (avertissement unique) quand
-  une capacité manque.
-- Sémantique dans le paradigme `tsforecast` : un modèle de fondation **n'apprend pas** `y` depuis
-  `X` ; il extrapole l'historique de `y`. Donc :
-  - `fit(X, y)` mémorise, par entité, les `context_length` dernières lignes de `y` (et de `X` comme
-    covariables passées si le backend les accepte) ; aucun entraînement (le *fine-tuning* est hors
-    périmètre) ;
-  - `predict(X)` calcule pour chaque entité le nombre de pas entre sa dernière ligne d'entraînement
-    et chacune de ses lignes de test (`steps_between`), prévoit `max(pas)` pas en un appel par lot,
-    puis extrait les pas demandés ; `X` de test sert de covariables futures si le backend les
-    accepte (les lignes du `gap`, absentes, sont déclarées manquantes au backend, jamais inventées) ;
-  - `GridSearchCV` ne règle que des paramètres d'inférence (`model_id`, `context_length`,
-    `quantile`, `use_covariates`, ...).
-- Paramètres indicatifs : `model_id`, `backend=None` (déduit du préfixe de `model_id`),
-  `context_length`, `quantile=0.5` (valeur renvoyée par `predict`), `quantile_levels` (pour
-  `predict_quantiles`), `use_covariates`, `device="cpu"`, `batch_size`, `backend_kwargs`.
-- Chargement des poids : paresseux, mis en cache **au niveau du processus** (clé : backend,
-  `model_id`, `device`) pour ne pas recharger le modèle à chaque pli ni à chaque `clone` ; le
-  modèle chargé n'est jamais un paramètre (sinon `clone` le copierait).
-- `n_jobs` de sklearn : déconseillé avec ces modèles (copie des poids par processus) ; le documenter.
-- Licences : Timestral (« Modified MIT » avec clause d'usage), t0 (Apache-2.0), Chronos
-  (Apache-2.0) : à rappeler dans la docstring et le notebook.
-- Tests : backends factices sans réseau pour la logique de l'adapter ; tests réels marqués
-  (`slow`, et un marqueur `network` à créer) avec les plus petits modèles (`chronos-bolt-tiny` ou
-  `chronos-2-small`, `Timestral-5M`), sautés si le paquet ou le réseau manquent. Chaque backend réel
-  a aussi son test d'équivalence au paquet natif (règle 11 du § 7) : même contexte passé
-  directement au pipeline du paquet → mêmes quantiles que `predict_quantiles`, à la tolérance
-  numérique près (inférence déterministe sur CPU).
+**Protocole** (`protocol.py`)
+- `BackendCapabilities` (figée) :
+  - `past_covariates`, `known_covariates` ;
+  - `missing_values` : NaN acceptés dans le contexte et les covariables ;
+  - `multivariate` : sinon, une série par cible ;
+  - `max_context` : tronqué par l'adapter ;
+  - `max_prediction_length` : au-delà, `ValueError` ;
+  - `quantile_levels` : niveaux appris, ou `None` pour tout niveau de ]0, 1[ ;
+  - `interpolates_quantiles` : si `False`, l'adapter demande les niveaux appris qui encadrent la
+    demande et interpole linéairement.
+- `ForecastRequest` (figée) : une requête = une longueur de prévision commune.
+  - `context` : un tableau `(n_cibles, T_i)` par série, longueurs libres, plus ancien d'abord,
+    NaN = manquant ; la dernière colonne est la dernière date d'entraînement ;
+  - `prediction_length`, `quantile_levels` (croissants) ;
+  - `past_covariates` : un tableau `(C_p, T_i)` par série ;
+  - `known_covariates` : un tableau `(C_k, T_i + H)` par série, NaN = inconnu ;
+  - noms des covariables, `freq`, `options` (les `predict_kwargs`, figés) ;
+  - les tableaux sont des **vues en lecture seule** : un backend ne peut pas altérer les contextes
+    mémorisés.
+- `ForecastResult(quantiles)` : forme `(n_séries, n_cibles, H, n_niveaux)`, contrôlée par l'adapter
+  (forme et valeurs finies, sinon `ValueError` qui nomme le backend).
+- `ForecastBackend` (`Protocol`, `runtime_checkable`) : un attribut `capabilities` et une méthode
+  `predict(request)`, sans état entre deux appels.
+- Couverture des familles :
+  - Chronos-2 : dicts ; le passé des covariables connues va dans `past_covariates`, leurs pas
+    prévus dans `future_covariates` ;
+  - Bolt : tenseurs 1-D ;
+  - Timestral : un tableau `(B, V, T)` par appel, donc le backend remplit ou groupe par longueur ;
+    `known_covariates (B, C, T+H)` telles quelles ;
+  - t0 : `batch_series`, covariables connues telles quelles, covariables passées en variables du
+    contexte.
+
+**Registre et cache** (`registry.py`)
+- `register_backend(name, load, *, prefixes, package, extra, replace=False)`. `load` a la forme
+  `(model_id, *, device, **backend_kwargs)`.
+- `chronos` est enregistré à l'import du module, sans importer chronos : préfixes
+  `amazon/chronos`, `autogluon/chronos`, paquet `chronos`, extra `adapters-chronos`.
+- Résolution :
+  - `backend` est un nom enregistré (cas d'un chemin local) ;
+  - sinon, le préfixe de `model_id` le plus long gagne, sans tenir compte de la casse ;
+  - inconnu : `ValueError` qui liste les préfixes.
+- `backend` peut aussi être un **objet** backend : il est utilisé tel quel, sans cache, et
+  `model_id` doit valoir `None`.
+- Cache du processus :
+  - clé `(nom, model_id, device, backend_kwargs figés)`, verrou de chargement ;
+  - valeur non hachable dans `backend_kwargs` : `ValueError` ;
+  - `clear_model_cache()` libère les modèles ;
+  - le paquet est contrôlé par `import_optional` **avant** le cache, donc un paquet manquant est
+    signalé même si le modèle est déjà chargé.
+- Interaction avec sklearn :
+  - le modèle chargé n'est ni un paramètre ni un attribut ajusté. Le `fit` mémorise les arguments
+    de chargement, et le `predict` relit le cache, ou recharge dans un processus neuf ;
+  - `clone`, `pickle` et `return_estimator=True` ne copient donc jamais les poids (testé) ;
+  - un `set_params` après le `fit` ne change pas le modèle utilisé par `predict` ;
+  - avec `n_jobs=1`, un chargement sert à tous les plis et candidats de même clé (testé à travers
+    `cross_val_score` et `GridSearchCV`) ;
+  - avec `n_jobs>1`, une copie par processus, et les threads de torch se concurrencent :
+    déconseillé (docstring).
+
+**API**
+
+```python
+FoundationModelAdapter(model_id=None, *, backend=None, context_length=None, quantile=0.5,
+                       covariates="auto", device="cpu", batch_size=None,
+                       backend_kwargs=None, predict_kwargs=None)
+fit(X, y) ; predict(X) -> ndarray ; predict_quantiles(X, quantile_levels=(0.1, 0.5, 0.9)) -> DataFrame
+```
+
+Attributs ajustés : `backend_name_`, `capabilities_`, `covariates_` (`'known'`, `'past'` ou
+`None`), `context_length_`, `context_` (un tableau `(n_cibles, T_e)` en lecture seule par entité),
+`context_covariates_`, `layout_`, `target_names_`, `n_features_in_`, `feature_names_in_`.
+
+**Sémantique**
+- `fit` : aucun entraînement.
+  - Le modèle est chargé par le cache et ses capacités sont lues.
+  - Grille de chaque entité, de sa première à sa dernière date d'entraînement ; trous et cibles NaN
+    en NaN ; seuls les `min(context_length, max_context)` derniers pas sont gardés.
+  - `ValueError` dans ces cas : grille irrégulière, entité sans valeur observée dans son contexte,
+    NaN pour un modèle qui les refuse, valeurs infinies, covariables non numériques, `quantile` hors
+    de la plage apprise.
+  - `covariates='auto'` donne `'known'` si le modèle l'accepte, sinon `'past'`, sinon `None`, sans
+    avertissement. Une valeur explicite non prise en charge lève une `ValueError`.
+- `predict` : **un appel par pas**.
+  - Une ligne à `k` pas (`steps_between` depuis la dernière date d'entraînement de son entité)
+    reçoit le dernier pas d'une prévision de longueur `k`.
+  - En mode `'known'`, cette prévision reçoit les covariables du contexte, puis les lignes de X de
+    l'entité aux pas 1..k. Le gap est NaN, jamais une valeur inventée. Si le modèle refuse les NaN :
+    `ValueError`.
+  - Une ligne lit donc X de son origine et des lignes antérieures de son entité, **jamais d'une
+    origine postérieure**.
+  - Sans covariables connues, la prévision d'une ligne ne dépend pas des autres lignes de X (testé
+    sur Chronos-2 : ligne seule = lot à 1e-5 près).
+  - Mise en lots : groupes par `k`, entités dans l'ordre de leurs étiquettes (indépendant de l'ordre
+    des lignes), lots d'au plus `batch_size` séries ; nombre d'appels `Σ_k ⌈n_k / batch_size⌉`.
+  - `ValueError` dans ces cas : entité inconnue, ligne non postérieure à l'entraînement, `k >
+    max_prediction_length`.
+  - Plusieurs cibles : jointes si `multivariate`, sinon une série par (ligne, cible).
+- Quantiles :
+  - `predict` renvoie le niveau `quantile` (médiane par défaut ; aucune famille n'a de vraie
+    moyenne) ;
+  - `predict_quantiles(X, quantile_levels)` renvoie un `DataFrame` indexé comme X, une colonne
+    `float64` par niveau (nom `quantile`), ou des colonnes `(target, quantile)` pour plusieurs
+    cibles. Les niveaux sont un argument de méthode, pas du constructeur (principe d'AD-13) ;
+  - niveaux uniques dans ]0, 1[ et dans la plage apprise, sinon `ValueError` (au lieu du bornage
+    silencieux de Chronos) ;
+  - croisements non corrigés.
+- `GridSearchCV` ne règle que l'inférence : `model_id`, `context_length`, `quantile`, `covariates`,
+  `device`, `backend__<param>` d'un objet backend qui expose `get_params` (`CallableBackend` :
+  `backend__function`, capacités).
+
+**Mesures sur `autogluon/chronos-2-small`, CPU, session 12**
+- Premier chargement : 54 s, téléchargement compris. `predict` de 9 lignes (3 entités, pas 3 à 5,
+  covariables connues) : 0,11 s.
+- **Un appel unique lit le futur** : X modifié au pas 5 d'une prévision de 5 pas change le pas 3 de
+  0,14. D'où l'appel par pas.
+- **La longueur de prévision change les prévisions** au-delà d'un patch de sortie (16 pas) : le
+  pas 3 vaut −0,502 avec `H = 3` et −0,543 avec `H = 20`.
+- En mode `'known'`, prédire une ligne seule ou avec ses lignes antérieures diffère, jusqu'à 3,0 sur
+  le jeu de la batterie (`y = 2·x1 − x2`, apprentissage en contexte) : c'est l'information
+  disponible à l'origine de la ligne.
+- Règle 11 : quantiles égaux au pipeline appelé directement, à `rtol = 1e-5` (Chronos-2 avec et
+  sans covariables, Bolt).
+
+**Limites et coût** (ce qu'il vaut mieux ne pas promettre)
+- Le `fit` n'apprend rien. La validation croisée mesure un modèle figé ; régler `context_length` sur
+  peu de plis sur-apprend les plis.
+- Le modèle extrapole la série des lignes indexées par origine sans en voir les dates : le calendrier
+  n'entre que par X. La stratégie directe (un estimateur par `h`) refait l'extrapolation de la même
+  série décalée.
+- En pseudo-temps réel, le contexte s'arrête `gap` pas avant l'origine ; X est l'information
+  récente. Mais les lignes du gap, absentes de X, sont déclarées inconnues alors que leurs
+  covariables seraient connues en temps réel.
+- Pas de prédiction in-sample, ni d'entité sans historique. Les grilles irrégulières sont refusées.
+- Coût d'une validation croisée : `n_plis × n_candidats × Σ_k ⌈n_k/batch⌉` passes avant, `fit`
+  quasi gratuit, un chargement par processus et par clé. Un test long multiplie les appels (365
+  lignes journalières → 365 appels).
+- Pas d'égalité bit à bit entre périphériques, versions ou révisions de poids (`revision=` dans
+  `backend_kwargs` les fige). Pas d'intervalles calibrés, pas de gain garanti par les covariables.
+- Non couverts : GPU (non testé), *fine-tuning* (hors périmètre), Chronos-T5 (refusé, inférence par
+  tirages), covariables catégorielles (X numérique seulement).
+- Licences : Chronos Apache-2.0 (docstrings) ; Timestral (poids « Modified MIT » avec clause
+  d'usage) et t0 (Apache-2.0) en session 13.
+
+**Tests** :
+- support :
+  - `tests/support/forecast_backends.py` : `DriftBackend`, factice et déterministe ; ses capacités
+    sont des paramètres, et il somme **toutes** les covariables connues reçues après le contexte,
+    comme un modèle qui lirait le futur. Aussi `RecordingBackend` et `counting_loader` ;
+  - cas `foundation_drift_case` et `foundation_chronos_case` (`adapter_cases.py`) ;
+  - références `drift_reference` (calculée à la main) et `chronos_reference` (un `predict_quantiles`
+    par ligne), dans `native_references.py` ;
+- `tests/unit/adapters/foundation/` : `test_adapter.py` (batterie complète et scénarios à valeurs
+  exactes), `test_registry.py`, `test_protocol.py`, `test__series.py`, `backends/test_callable.py`,
+  `backends/test_chronos.py` ;
+- `test_chronos.py` contient la correspondance hors ligne (paquets `chronos` et `torch` simulés) et
+  le réel, marqué `slow` et `network` : batterie, règle 11 sur tous les niveaux, Bolt-tiny, X
+  postérieur jamais lu, ligne seule = lot ;
+- `tests/integration/adapters/test_foundation.py` : batterie de workflow, factice et Chronos réel ;
+- couverture des modules `foundation/` : 100 %.
 
 ### 5.6 `AutoGluonAdapter` (reporté)
 
@@ -669,19 +796,34 @@ Points de conception connus, à trancher en plan mode à ce moment (Q13) :
 
 ## 6. Dépendances et packaging
 
-- Extras (`[project.optional-dependencies]`) : `adapters-sktime`, `adapters-darts`,
-  `adapters-hierarchical`, `adapters-chronos`, `adapters-timestral`, `adapters-t0`, et
-  `adapters-all` (liste sans espace) ; `adapters-autogluon` plus tard (§ 5.6). Bornes `>=x,<y`
-  comme le reste du `pyproject.toml` ; dépendances Git figées sur un SHA
-  (`allow-direct-references = true`, retiré en session 10 avec la seule dépendance Git, à remettre
-  pour timestral). L'extra `adapters-opera` est supprimé (session 10) : l'agrégation native
-  (AD-18, AD-22) n'a aucune dépendance hors du cœur ; `uv.lock` régénéré sans opera.
+- Extras (`[project.optional-dependencies]`) :
+  - un par paquet : `adapters-sktime`, `adapters-darts`, `adapters-hierarchical`,
+    `adapters-chronos` (session 12 : `chronos-forecasting>=2.3.2,<3`, qui tire torch, transformers
+    et accelerate), puis `adapters-timestral` et `adapters-t0` (session 13) ;
+  - deux agrégats (AD-23) : `adapters-light` regroupe sktime, darts et hierarchical, sans modèle de
+    fondation ni torch ; `adapters-all` = `adapters-light` + `adapters-chronos`, auquel s'ajouteront
+    timestral et t0 ;
+  - `adapters-autogluon` plus tard (§ 5.6) ;
+  - bornes `>=x,<y` comme le reste du `pyproject.toml` ;
+  - dépendances Git figées sur un SHA. `allow-direct-references = true` a été retiré en session 10
+    avec la seule dépendance Git et sera à remettre pour timestral. **Point à relire** : PyPI refuse
+    un paquet dont une dépendance est une référence directe, ce qui bloque une publication de
+    ts-forecast tant que timestral n'est pas sur PyPI ;
+  - l'extra `adapters-opera` est supprimé (session 10) : l'agrégation native (AD-18, AD-22) n'a
+    aucune dépendance hors du cœur ; `uv.lock` régénéré sans opera.
+- `uv.lock` régénéré en session 12 :
+  - ajouts : chronos-forecasting 2.3.2, torch 2.15.0, transformers 5.24.1, accelerate 1.16.0,
+    huggingface-hub 2.5.0, et les bibliothèques CUDA de Linux (marqueurs de plateforme) ;
+  - mises à jour imposées : click 8.2.1 → 8.5.1, idna 3.10 → 3.20, nvidia-nccl-cu13 aligné sur
+    torch ;
+  - aucune version de `main` changée pour pandas, numpy ou scikit-learn.
 - Groupe `notebooks` (hors `default-groups`) : `xgboost`, `tslearn`, `statsforecast` /
   `mlforecast` si le notebook en a besoin, plus les extras d'adapters. `dev` et `docs` restent ceux
   de `main` (ne pas retirer `docs` de `default-groups`).
-- CI : job `tests-adapters` séparé (`uv sync --group dev --extra adapters-...` sans les modèles de
-  fondation lourds, ou avec CPU seulement), tests rapides uniquement ; les tests `network` ne
-  tournent pas en CI.
+- CI : job `tests-adapters` séparé, `uv sync --group dev --extra adapters-light` depuis la
+  session 12 : pas de torch ni de bibliothèques CUDA. Tests rapides uniquement : les tests de
+  l'adapter de fondation passent par le backend factice et des paquets `chronos` / `torch` simulés,
+  et les tests `network` ne tournent pas en CI.
 - Installation locale : suivre les notes de la mémoire du projet (pas de `pip` dans `.venv`,
   attribut ReadOnly des dossiers sous OneDrive, `uv sync --no-install-project --inexact`).
 
@@ -782,7 +924,17 @@ Points de conception connus, à trancher en plan mode à ce moment (Q13) :
   qu'un adapter temporel refuse (périodes incomplètes) ; elles sont couvertes par
   `tests/unit/adapters/hierarchicalforecast/test_temporal.py` et
   `tests/integration/adapters/test_hierarchicalforecast_temporal.py` (`period_splits`).
+  Session 12 :
+  - cas `foundation_drift_case` (backend factice `DriftBackend`, hors ligne) : batterie complète,
+    règle 11 contre une référence calculée à la main ;
+  - cas `foundation_chronos_case` (`autogluon/chronos-2-small`, marqué `slow` et `network`) :
+    batterie complète, règle 11 contre `Chronos2Pipeline.predict_quantiles` appelé pas par pas,
+    `rtol=1e-5` ;
+  - le paquet manquant est contrôlé même modèle en cache.
 - Commande locale : `.venv/Scripts/python.exe -m pytest tests/unit/adapters -q -p no:cacheprovider`.
+  Tests réels des modèles de fondation : `-m "slow or network"`. Le premier lancement télécharge
+  `autogluon/chronos-2-small` (environ 110 Mo) et `amazon/chronos-bolt-tiny` (environ 36 Mo) dans
+  le cache Hugging Face.
 
 ---
 
@@ -819,7 +971,7 @@ Points de conception connus, à trancher en plan mode à ce moment (Q13) :
 | Q5 | `HierarchicalForecastAdapter` : `reconciler` (singulier) seul, ou aussi `reconcilers` (liste) ? | **Tranchée (AD-13)** : `reconciler` seul ; `reconcile(X, reconcilers=None)` pour comparer |
 | Q6 | Étiquette des lignes d'agrégat (`""`, `"Total"`, `"__all__"`) | **Tranchée (AD-13)** : `"Total"` (paramètre `aggregate_label`) |
 | Q7 | Ancrage temporel des agrégats (début de période / période cible) | **Tranchée (AD-13)** : selon la position de la grille fine (`S` → début, `E` → fin) ; ancrage sur les origines documenté |
-| Q8 | Backends de fondation à livrer en premier | Chronos-2 + `callable`, puis Timestral et t0 |
+| Q8 | Backends de fondation à livrer en premier | **Tranchée (AD-23)** : Chronos (Chronos-2 et Chronos-Bolt ; T5 refusé) + `callable` en session 12, Timestral et t0 en session 13 |
 | Q9 | Sort des fichiers `ADAPTERS_*.md` avant fusion dans `main` | Les supprimer ; le contenu utile passe dans `docs/concepts/adapters.md` |
 | Q10 | Datation des agrégats temporels sur une grille sans position (`D`, `h`, `B`, `W-SUN`) | **Tranchée (AD-16)** : premier pas fin (`D`, `h`, `B`, `min`), sauf `W-<jour>` (semaine étiquetée par son dernier jour, convention de `get_labelled_period`) → dernier pas fin ; pas de paramètre |
 | Q11 | Utilitaire public d'agrégation des feuilles vers tous les nœuds (`y` sommé, exogènes agrégés comme `aggregate(exog_vars=...)`), pour construire les jeux des modèles de base de chaque niveau | Hors périmètre de la session 6 ; à décider avant la session 8 (notebook) |
@@ -854,4 +1006,5 @@ Points de conception connus, à trancher en plan mode à ce moment (Q13) :
 | AD-20 | 2026-11-26 | planification | Règle 11 de la batterie de contrat (équivalence au paquet natif, champ `AdapterCase.native_reference`) ; session dédiée insérée juste après la session 8, avant l'agrégation native et les modèles de fondation | Seule preuve que l'adapter ne change pas le modèle (horizon, covariables, ordre) ; l'infrastructure existe ainsi avant que les adapters suivants ne s'y branchent, et un défaut trouvé sur sktime, darts ou hierarchicalforecast est corrigé avant les notebooks et la documentation suivants |
 | AD-21 | 2026-11-26 | 9 | Règle 11 : `native_reference(X_train, y_train, X_test, fh)` (horizon relatif fourni par la batterie, écart à la signature `(X_train, y_train, X_test)` prévue) et `native_gaps` ; série et panel équilibré, gaps 0 et 2, 3 dates de test, tolérances inchangées des cas ; modèles hors batterie dans des classes `TestNativeEquivalence` ; références hiérarchiques par copie, `S_df` de l'arbre écrit à la main, cross-temporel natif = deux passes enchaînées | Une référence qui déduirait l'horizon des dates refait le calcul de l'adapter au lieu de le contrôler ; SARIMAX et les modèles darts à covariables ne passent pas les règles à gap (X absent du gap), d'où une comparaison seule ; `aggregate` ne sait pas construire l'arbre des jeux ; hierarchicalforecast n'a pas de réconciliation cross-temporelle ; aucun écart trouvé, aucun adapter corrigé |
 | AD-22 | 2026-11-27 | 10 | Sous-paquet `tsforecast/ensemble/` (`_algorithms.py` noyau numpy pur, `online.py`), `OnlineAggregator` et `Loss` exportés ; algorithmes **fidèles aux articles** (BOA : figure de la procédure adaptative de Wintenberger, a priori `π_0`, `c = 20` ; MLpol : taux d'opera R parti de `1/η = 0`) et non à opera-python ; tours par date en `global` (excès de perte moyen) ; `per_entity` tient aussi l'agrégation globale (entité inconnue) ; `weights_` (`Series` globale) et `entity_weights_` (`DataFrame`) séparés ; `init_weights` = a priori de BOA, poids de repli de MLpol ; `cv` entier = blocs de dates communs ; paramètres imbriqués `experts__<nom>__<param>` par `get_params` / `set_params` surchargés (`MetaEstimatorMixin` au lieu de `_BaseComposition`) ; `partial_fit` exige des lignes postérieures à toutes les lignes agrégées ; littéraux de référence d'opera (MLpol tel quel, BOA corrigé) avec injection de l'état initial d'opera | opera-python s'écarte de la figure de BOA sur trois lignes et rend MLpol dépendant de l'échelle (`1/η_0 = 2^20`) ; traiter séparément les entités d'une même date lirait des cibles inconnues en temps réel ; un attribut dont le type dépend d'un paramètre gêne l'utilisateur ; `_BaseComposition` nomme `<nom>__<param>`, le prompt exige `experts__ridge__alpha` ; un splitter de panel compte `test_size` en lignes par entité, ses plis se chevauchent sur des données trouées (`DropNaNTarget`) ; une règle globale de postériorité garde l'agrégation globale chronologique |
+| AD-23 | 2026-11-27 | 12 | `FoundationModelAdapter` en sous-paquet `tsforecast/adapters/foundation/` ; protocole `BackendCapabilities` / `ForecastRequest` (contextes `(n_cibles, T_i)` de longueurs libres, covariables passées `(C, T_i)` et connues `(C, T_i + H)`, vues en lecture seule) / `ForecastResult` `(n, V, H, Q)` / `ForecastBackend` structurel ; registre à préfixes (le plus long gagne, sans casse), objet backend accepté tel quel ; cache du processus par (backend, `model_id`, `device`, `backend_kwargs`), modèle jamais paramètre ni attribut, paquet contrôlé avant le cache ; **un appel par pas** (ligne à `k` pas = dernier pas d'une prévision de longueur `k`, covariables connues des pas 1..k seulement) au lieu d'un appel de `max(pas)` par entité ; `covariates='auto'` (connues, sinon passées, sinon aucune) **sans avertissement**, valeur explicite non prise en charge → `ValueError`, au lieu d'une dégradation avertie ; `quantile_levels` argument de `predict_quantiles` et non du constructeur ; niveau hors de la plage apprise → `ValueError` ; interpolation linéaire par l'adapter pour un modèle qui n'interpole pas ; entités d'une requête dans l'ordre de leurs étiquettes ; backends `chronos` (Chronos-2, Bolt ; **T5 refusé**) et `callable` (`CallableBackend`, capacités en paramètres à plat) ; Q8 tranchée ; extras `adapters-chronos`, `adapters-light` (sans torch), `adapters-all` = léger + chronos ; job CI `tests-adapters` sur `adapters-light` | Mesuré sur `chronos-2-small` : un appel unique fait lire à un pas les covariables des pas suivants (X du pas 5 → +0,14 au pas 3), donc une ligne lirait une origine postérieure ; au-delà d'un patch de sortie, la longueur de prévision change les premiers pas (−0,502 contre −0,543). Un avertissement serait répété à chaque pli, et une demande explicite ne doit jamais être dégradée en silence. Le constructeur ne porte que ce qui change `predict` (principe d'AD-13). Chronos borne en silence les niveaux hors plage, et seul Timestral n'interpole pas. Ordonner les entités par étiquette rend les lots indépendants de l'ordre des lignes. T5 tire des trajectoires au hasard, donc ses prévisions ne sont pas reproductibles. torch de PyPI entraîne les bibliothèques CUDA sous Linux : l'utilisateur des adapters classiques et la CI n'en ont pas besoin |
 |  |  |  |  |  |
