@@ -7,7 +7,8 @@ from the dates of ``X`` (gap, several test dates, panels), wrapped forecaster
 never fitted, sklearn parameters and tags, output shape and row order, unknown
 entities, incomplete panel test rows (vectorized and native panel forecasters),
 forecasters needing ``X`` on the gap or the horizon at fit, training rows with
-holes, irregular grids, hierarchical indexes and several targets.
+holes, panel entities with too few training dates for sktime, irregular grids,
+hierarchical indexes and several targets.
 """
 import numpy as np
 import pandas as pd
@@ -64,6 +65,55 @@ class PooledMeanForecaster(BaseForecaster):
     def _predict(self, fh, X):
         values = self.mean_ + self.scale * X.iloc[:, 0].to_numpy()
         return pd.DataFrame(values, index=X.index, columns=self.columns_)
+
+
+class ShortHistoryForecaster(BaseForecaster):
+    """Local test forecaster repeating the last target, failing on a history of fewer than three dates."""
+
+    _tags = {
+        'y_inner_mtype': 'pd.DataFrame',
+        'X_inner_mtype': 'pd.DataFrame',
+        'capability:exogenous': True,
+        'capability:non_contiguous_X': True,
+        'requires-fh-in-fit': False,
+    }
+
+    def __init__(self, fail_at: str = 'predict'):
+        self.fail_at = fail_at
+        super().__init__()
+
+    def _fit(self, y, X, fh):
+        self.n_dates_ = len(y)
+        self.last_ = y.iloc[-1:]
+        if self.n_dates_ < 3 and self.fail_at == 'fit':
+            raise NotImplementedError('history too short')
+        return self
+
+    def _predict(self, fh, X):
+        if self.n_dates_ < 3:
+            raise TypeError('history too short')
+        index = fh.to_absolute_index(self.cutoff)
+        return pd.DataFrame(
+            np.repeat(self.last_.to_numpy(), len(index), axis=0), index=index, columns=self.last_.columns
+        )
+
+
+def short_entity_panel(histories: dict, n_test: int = 2) -> tuple:
+    """``(X_train, y_train, X_test)``: entity ``k`` keeps the last ``histories[k]`` of twelve training months.
+
+    ``x1`` is the month position and ``y = 1 + x1`` for every entity.
+    """
+    dates = pd.date_range('2021-01-01', periods=12 + n_test, freq='MS')
+    train = pd.MultiIndex.from_tuples(
+        [(entity, date) for entity, n_dates in histories.items() for date in dates[12 - n_dates:12]],
+        names=['entity', 'date'],
+    )
+    test = pd.MultiIndex.from_product([list(histories), dates[12:]], names=['entity', 'date'])
+    X_train, X_test = (
+        pd.DataFrame({'x1': dates.get_indexer(index.get_level_values('date')).astype(float)}, index=index)
+        for index in (train, test)
+    )
+    return X_train, (1.0 + X_train['x1']).rename('target'), X_test
 
 
 def linear_series(n_dates: int = 12, slope: float = 2.0) -> tuple:
@@ -424,3 +474,69 @@ class TestTrainingHoles:
         X_train, y_train, _ = self.holed_split(X, y)
         with pytest.raises(ValueError, match="entities .*do not cover every date of the 'MS' grid"):
             SktimeAdapter(SARIMAX()).fit(X_train, y_train)
+
+
+# =============================================================================
+# Entités trop courtes pour la lecture de leur fréquence
+# =============================================================================
+
+
+SHORT_MESSAGE = r"failed on a panel where the entities \('A',\) have fewer than 3 training dates"
+
+
+class TestShortEntities:
+    """Panel entities with fewer than three training dates, the number sktime needs to read a frequency."""
+
+    @pytest.mark.parametrize('n_dates', [1, 2])
+    def test_naive_forecaster_failure_is_explicit(self, n_dates):
+        """The sktime error is raised as a ``ValueError`` naming the entity, and kept as its cause."""
+        X_train, y_train, X_test = short_entity_panel({'A': n_dates, 'B': 12})
+        with pytest.raises(ValueError, match=SHORT_MESSAGE) as error:
+            SktimeAdapter(NaiveForecaster()).fit(X_train, y_train).predict(X_test)
+        assert 'infer frequency' in str(error.value.__cause__)
+
+    @pytest.mark.parametrize('fail_at', ['fit', 'predict'])
+    def test_failure_at_fit_or_predict(self, fail_at):
+        """Whatever the call that fails, the entity is named."""
+        X_train, y_train, X_test = short_entity_panel({'A': 2, 'B': 12})
+        with pytest.raises(ValueError, match=SHORT_MESSAGE) as error:
+            SktimeAdapter(ShortHistoryForecaster(fail_at)).fit(X_train, y_train).predict(X_test)
+        assert 'history too short' in str(error.value.__cause__)
+
+    def test_failure_on_incomplete_test_rows(self):
+        """Entity by entity, only the failure of a short entity is rewritten."""
+        X_train, y_train, X_test = short_entity_panel({'A': 2, 'B': 12})
+        model = SktimeAdapter(ShortHistoryForecaster()).fit(X_train, y_train)
+        with pytest.raises(ValueError, match=SHORT_MESSAGE):
+            model.predict(X_test.iloc[1:])
+        # Lignes de la seule entité longue : prévision de sa dernière cible
+        np.testing.assert_allclose(model.predict(X_test.loc[['B']].iloc[1:]), [12.0])
+
+    def test_forecaster_not_needing_the_frequency(self):
+        """``YfromX`` predicts an entity with a single training date."""
+        X_train, y_train, X_test = short_entity_panel({'A': 1, 'B': 12})
+        predictions = SktimeAdapter(YfromX(LinearRegression())).fit(X_train, y_train).predict(X_test)
+        # Une observation pour A : régression constante ; droite exacte pour B
+        np.testing.assert_allclose(predictions, [12.0, 12.0, 13.0, 14.0])
+
+    def test_short_entity_that_sktime_handles(self):
+        """No row is refused when sktime reads the frequency from the other entities."""
+        X_train, y_train, X_test = short_entity_panel({'A': 12, 'B': 2})
+        predictions = SktimeAdapter(NaiveForecaster()).fit(X_train, y_train).predict(X_test)
+        np.testing.assert_allclose(predictions, np.repeat(12.0, 4))
+
+    def test_holes_declared_missing_count_as_dates(self):
+        """Two rows spanning more grid dates, passed as missing values, do not make an entity short."""
+        X_train, y_train, X_test = short_entity_panel({'A': 12, 'B': 12})
+        kept = ~(entity_mask(X_train, 'A') & ~np.isin(X_train['x1'], [6.0, 11.0]))
+        with pytest.raises(ValueError, match='unknown strategy|strategy') as error:
+            SktimeAdapter(NaiveForecaster(strategy='median')).fit(X_train[kept], y_train[kept])
+        assert 'training dates' not in str(error.value)
+
+    def test_other_errors_are_not_rewritten(self):
+        """Without a short entity, the error of sktime propagates unchanged."""
+        X_train, y_train, _ = short_entity_panel({'A': 12, 'B': 12})
+        with pytest.raises(ValueError) as error:
+            SktimeAdapter(NaiveForecaster(strategy='median')).fit(X_train, y_train)
+        assert 'training dates' not in str(error.value) and error.value.__cause__ is None
+

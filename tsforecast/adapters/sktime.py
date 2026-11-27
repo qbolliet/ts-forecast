@@ -8,7 +8,8 @@ order of ``X``.
 """
 # Importation des modules
 # Modules de base
-from typing import Any, List, Tuple, Union
+from contextlib import contextmanager
+from typing import Any, Iterator, List, Tuple, Union
 
 # Modules de manipulation de données
 import numpy as np
@@ -31,6 +32,8 @@ from tsforecast.utils.frequency import to_pandas_freq
 _EXTRA = "adapters-sktime"
 # Nom de la colonne de cible transmise à sktime quand la cible n'a pas de nom
 _DEFAULT_TARGET_NAME = "target"
+# Nombre de dates d'entraînement dont sktime a besoin pour lire la fréquence d'une entité de panel
+_MIN_DATES_PER_ENTITY = 3
 
 
 # Fonction auxiliaire de lecture d'un tag sktime
@@ -128,6 +131,44 @@ def _with_freq(obj: Union[pd.Series, pd.DataFrame], freq: str) -> Union[pd.Serie
     return obj.set_axis(pd.DatetimeIndex(dates, freq=to_pandas_freq(freq)), axis=0)
 
 
+# Gestionnaire de contexte d'explication d'un échec de sktime sur un panel à entités trop courtes
+@contextmanager
+def _explain_short_entities(forecaster: Any, short_entities: List[tuple]) -> Iterator[None]:
+    """Turn a failure of sktime into an explicit ``ValueError`` when panel entities are too short.
+
+    Whether sktime reads the frequency of a short entity depends on the
+    forecaster and on the other entities: the calls are attempted, and only
+    their failure is rewritten.
+
+    Args:
+        forecaster: Forecaster called inside the block.
+        short_entities: Keys of the panel entities involved in the call that
+            have too few training dates (empty for a time series).
+
+    Yields:
+        None: the block calls sktime.
+
+    Raises:
+        ValueError: If the block raises a ``TypeError``, a ``ValueError`` or a
+            ``NotImplementedError`` while ``short_entities`` is not empty; the
+            error of sktime is its cause. Without short entities, that error
+            propagates unchanged.
+    """
+    try:
+        yield
+    except (TypeError, ValueError, NotImplementedError) as error:
+        # Aucune entité trop courte : erreur sans rapport, remontée telle quelle
+        if not short_entities:
+            raise
+        raise ValueError(
+            f"{type(forecaster).__name__} failed on a panel where the entities {_preview(short_entities)} have "
+            f"fewer than {_MIN_DATES_PER_ENTITY} training dates: sktime reads the frequency of each entity from "
+            f"its training dates, which takes {_MIN_DATES_PER_ENTITY} of them. Give every entity at least "
+            f"{_MIN_DATES_PER_ENTITY} training dates, or leave these entities out. sktime raised "
+            f"{type(error).__name__}: {error}"
+        ) from error
+
+
 # Wrapper des forecasters sktime dans un régresseur sklearn
 class SktimeAdapter(RegressorMixin, BaseEstimator):
     """Sklearn regressor predicting the rows of ``X`` with a sktime forecaster.
@@ -159,11 +200,12 @@ class SktimeAdapter(RegressorMixin, BaseEstimator):
       the holes as missing target values on the complete grid;
     - a forecaster that needs ``X`` on every date between the training data
       and the forecast (``capability:non_contiguous_X`` false, e.g.
-      ``SARIMAX``) cannot skip a gap absent from ``X``: no value is invented.
-
-    On a panel, sktime infers the frequency of each entity from its training
-    dates: a forecaster that needs it (``NaiveForecaster``) requires at least
-    three training dates per entity.
+      ``SARIMAX``) cannot skip a gap absent from ``X``: no value is invented;
+    - on a panel, sktime reads the frequency of each entity from its training
+      dates, which takes three of them: when the forecaster fails while an
+      entity has fewer (``NaiveForecaster``, ``ThetaForecaster``...), ``fit``
+      or ``predict`` raises a ``ValueError`` naming the entities. A forecaster
+      that does without it (``YfromX``) predicts such entities.
 
     Args:
         forecaster: Unfitted sktime forecaster.
@@ -212,8 +254,9 @@ class SktimeAdapter(RegressorMixin, BaseEstimator):
             TypeError: If ``X`` is not a ``DataFrame``, if its dates are not
                 ``datetime64``, or if ``forecaster`` is not a sktime forecaster.
             ValueError: If the dates are not on a regular grid, if the
-                forecaster needs the horizon at fit, or if the training rows
-                have holes that the forecaster cannot handle.
+                forecaster needs the horizon at fit, if the training rows have
+                holes that the forecaster cannot handle, or if the forecaster
+                fails while a panel entity has fewer than three training dates.
         """
         # Importation de sktime
         base = import_optional("sktime.forecasting.base", _EXTRA)
@@ -251,7 +294,8 @@ class SktimeAdapter(RegressorMixin, BaseEstimator):
 
         # Trous dans la grille d'une entité : dates manquantes
         first, last, n_rows = _entity_bounds(layout)
-        holes = steps_between(first, last, layout.freq) + 1 > n_rows
+        first_to_last = steps_between(first, last, layout.freq) + 1
+        holes = first_to_last > n_rows
         if holes.any():
             if not _tag(forecaster, "capability:missing_values", False):
                 entities = [layout.entities[code] for code in np.flatnonzero(holes)]
@@ -268,13 +312,24 @@ class SktimeAdapter(RegressorMixin, BaseEstimator):
         if not layout.is_panel:
             y_fit = _with_freq(y_fit, layout.freq)
             X_fit = None if X_fit is None else _with_freq(X_fit, layout.freq)
-        forecaster.fit(y=y_fit, X=X_fit)
+        # Nombre de dates de chaque entité vues par sktime : la grille complète quand les trous sont
+        # déclarés manquants, les lignes d'entraînement sinon
+        seen = first_to_last if holes.any() and not uses_X else n_rows
+        # Entités de panel trop courtes pour la lecture de leur fréquence
+        short_entities = (
+            [layout.entities[code] for code in np.flatnonzero(seen < _MIN_DATES_PER_ENTITY)]
+            if layout.is_panel
+            else []
+        )
+        with _explain_short_entities(forecaster, short_entities):
+            forecaster.fit(y=y_fit, X=X_fit)
 
         # Attributs ajustés, posés une fois l'ajustement réussi
         self.forecaster_ = forecaster
         self.layout_ = layout
         self.target_names_ = list(y.columns)
         self._target_ndim = target_ndim
+        self._short_entities = short_entities
         return self
 
     # Contrôle des dates de X exigées par un forecaster à X contigu
@@ -352,7 +407,8 @@ class SktimeAdapter(RegressorMixin, BaseEstimator):
             entity = self.layout_.entities[codes[rows[0]]]
             cells = table.loc[entity[0] if len(entity) == 1 else entity]
             # Concaténation des prédictions
-            forecasts = pd.concat([cell.predict(fh=fh, X=X_entity) for cell in cells], axis=1)
+            with _explain_short_entities(self.forecaster_, [entity] if entity in self._short_entities else []):
+                forecasts = pd.concat([cell.predict(fh=fh, X=X_entity) for cell in cells], axis=1)
             result[rows] = restore_row_order(forecasts[columns].to_numpy(), forecasts.index, dates)
         return result
 
@@ -372,8 +428,9 @@ class SktimeAdapter(RegressorMixin, BaseEstimator):
             ImportError: If sktime is not installed.
             NotFittedError: If the adapter is not fitted.
             ValueError: If an entity is unknown at fit, if the columns differ
-                from those seen at fit, or if the forecaster needs ``X`` on
-                dates absent from ``X``.
+                from those seen at fit, if the forecaster needs ``X`` on dates
+                absent from ``X``, or if it fails while a panel entity has fewer
+                than three training dates.
         """
         # Vérification que l'estimateur est entraîné
         check_is_fitted(self)
@@ -413,7 +470,8 @@ class SktimeAdapter(RegressorMixin, BaseEstimator):
             # Construction de l'horizon de prédiction
             fh = ForecastingHorizon(dates, is_relative=False, freq=self.layout_.freq)
             # Le predict de sktime mémorise l'horizon dans le forecaster, sans effet sur ses prévisions
-            forecasts = self.forecaster_.predict(fh=fh, X=X_sk)
+            with _explain_short_entities(self.forecaster_, self._short_entities):
+                forecasts = self.forecaster_.predict(fh=fh, X=X_sk)
             values = restore_row_order(forecasts[columns].to_numpy(), forecasts.index, X.index)
         # Forecaster vectorisé par sktime : un forecaster ajusté par entité, chacune à ses dates
         elif hasattr(self.forecaster_, "forecasters_"):
